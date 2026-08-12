@@ -12,6 +12,7 @@ import { serializeRuntimeSchema } from "../../drivers/schema-wire.js";
 import type {
   BatchId,
   InsertResult,
+  MutationErrorEvent,
   MutationResult,
   OpenBatchId,
   PermissionAdvice,
@@ -198,6 +199,7 @@ type NativeDb = {
       | ((urgency: "immediate" | "deferred") => void)
       | ((error: Error | null, urgency: string) => void),
   ): void;
+  onMutationError(callback: (event: MutationErrorEvent) => void): void;
   connectUpstream(): Transport;
   connectUpstreamWithSession?(
     protocolVersion: number,
@@ -228,9 +230,8 @@ type Subscription = {
 type Write = {
   readonly batchId: string;
   payload: Uint8Array;
-  wait(tier: string): void;
+  wait(tier: string): Promise<void>;
   writeState(): unknown;
-  nextWriteStateChange(): Promise<void>;
   close?(): boolean;
 };
 
@@ -399,7 +400,6 @@ export class NativeRuntimeAdapter implements Runtime {
   private readonly writes: Map<string, Write>;
   private readonly ownerRuntime: NativeRuntimeAdapter;
   private readonly readAuthorizationHost: ReadAuthorizationHost;
-  private readonly serverPumpObservedWrites = new WeakSet<Write>();
   private readonly subscriptions = new Map<number, SubscriptionState>();
   private authFailureCallback: ((reason: string) => void) | null = null;
   private serverTransport: Transport | null = null;
@@ -811,55 +811,35 @@ export class NativeRuntimeAdapter implements Runtime {
     this.pendingTxs.delete(openBatchId);
     this.completedTxs.set(openBatchId, { kind: pending.kind, state: "committed" });
     this.pumpSubscriptions();
-    this.observeWriteForBoundaryEffects(write);
+    this.scheduleServerPump();
     return Promise.resolve(recordWrite(write, this.writes));
   }
 
   async waitForTransaction(batchId: BatchId | Promise<BatchId>, tier: string): Promise<void> {
-    if (this !== this.ownerRuntime) return this.ownerRuntime.waitForTransaction(batchId, tier);
+    if (this !== this.ownerRuntime) {
+      return this.ownerRuntime.waitForTransaction(batchId, tier);
+    }
     batchId = await batchId;
     const write = this.writes.get(batchId);
     if (!write) {
       throw new Error(`Wait for batch failed: unknown batch ${batchId}`);
     }
-    for (;;) {
-      this.throwServerTransportErrorForTier(tier);
-      try {
-        this.pumpServerTransport();
-        this.throwServerTransportErrorForTier(tier);
-        write.wait(tier);
-        this.pumpSubscriptions();
-        return;
-      } catch (error) {
-        const rejected = rejectedWaitError(batchId, error);
-        if (rejected) throw rejected;
-        if (!isPendingWaitError(error)) throw error;
-        this.pumpSubscriptions();
-        const change = write.nextWriteStateChange();
-        const observedServerWorkEpoch = this.serverTransportWorkEpoch;
-        try {
-          this.pumpServerTransport();
-          this.throwServerTransportErrorForTier(tier);
-          write.wait(tier);
-          this.pumpSubscriptions();
-          return;
-        } catch (secondError) {
-          const secondRejected = rejectedWaitError(batchId, secondError);
-          if (secondRejected) throw secondRejected;
-          if (!isPendingWaitError(secondError)) throw secondError;
-        }
-        const transportError = this.waitForServerTransportError(tier);
-        const transportWork = this.waitForServerTransportWork(tier, observedServerWorkEpoch);
-        try {
-          const wakes: Promise<unknown>[] = [change];
-          if (transportError) wakes.push(transportError.promise);
-          if (transportWork) wakes.push(transportWork.promise);
-          await Promise.race(wakes);
-        } finally {
-          transportError?.cancel();
-          transportWork?.cancel();
-        }
+    this.throwServerTransportErrorForTier(tier);
+    this.pumpServerTransport();
+    this.throwServerTransportErrorForTier(tier);
+    const settlement = write.wait(tier);
+    const transportError = this.waitForServerTransportError(tier);
+    try {
+      await (transportError ? Promise.race([settlement, transportError.promise]) : settlement);
+      this.pumpSubscriptions();
+    } catch (error) {
+      const rejected = rejectedWaitError(batchId, error);
+      if (rejected) {
+        throw rejected;
       }
+      throw error;
+    } finally {
+      transportError?.cancel();
     }
   }
 
@@ -1154,6 +1134,11 @@ export class NativeRuntimeAdapter implements Runtime {
     this.authFailureCallback = callback;
   }
 
+  onMutationError(callback: (event: MutationErrorEvent) => void): void {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.onMutationError(callback);
+    this.db.onMutationError(callback);
+  }
+
   private finishInsert(
     table: string,
     rowId: Uint8Array,
@@ -1162,7 +1147,7 @@ export class NativeRuntimeAdapter implements Runtime {
   ): InsertResult {
     const batchId = recordWrite(write, this.writes);
     this.pumpSubscriptions();
-    this.observeWriteForBoundaryEffects(write);
+    this.scheduleServerPump();
     const row = this.rowStateFromValues(table, rowId, values);
     return { id: row.id, values: row.values, kind: "committed", batchId };
   }
@@ -1170,62 +1155,8 @@ export class NativeRuntimeAdapter implements Runtime {
   private finishMutation(write: Write): MutationResult {
     const batchId = recordWrite(write, this.writes);
     this.pumpSubscriptions();
-    this.observeWriteForBoundaryEffects(write);
-    return { kind: "committed", batchId };
-  }
-
-  private observeWriteForBoundaryEffects(write: Write): void {
-    if (this.serverPumpObservedWrites.has(write)) return;
-    this.serverPumpObservedWrites.add(write);
     this.scheduleServerPump();
-
-    const pumpUntilLocalVisible = async () => {
-      for (;;) {
-        if (this.closed) return;
-        try {
-          write.wait("local");
-          this.pumpSubscriptions();
-          return;
-        } catch (error) {
-          if (!isPendingWaitError(error)) return;
-        }
-
-        try {
-          await write.nextWriteStateChange();
-        } catch {
-          return;
-        }
-      }
-    };
-
-    const pumpUntilSettled = async () => {
-      for (;;) {
-        if (this.closed) return;
-        try {
-          write.wait("edge");
-          this.pumpSubscriptions();
-          this.scheduleServerPump();
-          return;
-        } catch (error) {
-          if (!isPendingWaitError(error)) return;
-        }
-
-        try {
-          await write.nextWriteStateChange();
-        } catch {
-          return;
-        }
-        // Write-state progression can make local maintained subscriptions
-        // observe inserts/updates/deletes even when the app fire-and-forgets
-        // the write handle. Keep subscription pumping paired with the server
-        // pump here so write acks are not the only path that drains changes.
-        this.pumpSubscriptions();
-        this.scheduleServerPump();
-      }
-    };
-
-    void pumpUntilLocalVisible();
-    void pumpUntilSettled();
+    return { kind: "committed", batchId };
   }
 
   private resultForRow(
@@ -2610,15 +2541,6 @@ function addNestedOuterColumnsToSubqueries(subqueries: unknown): void {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function isPendingWaitError(error: unknown): boolean {
-  const message = errorMessage(error);
-  return (
-    message.includes("NotObserved") ||
-    message.includes("has not been accepted at requested tier") ||
-    message.includes("has not reached requested tier")
-  );
 }
 
 function isPendingCoverageError(error: unknown): boolean {

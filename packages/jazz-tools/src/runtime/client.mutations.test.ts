@@ -102,6 +102,7 @@ function makeClient(runtimeOverrides: Partial<TransactionalRuntime> = {}) {
     disconnect: async () => {},
     updateAuth: () => {},
     onAuthFailure: () => {},
+    onMutationError: () => {},
     createSubscription: () => 0,
     executeSubscription: () => {},
     unsubscribe: () => {},

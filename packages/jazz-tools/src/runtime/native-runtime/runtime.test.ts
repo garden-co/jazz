@@ -38,7 +38,13 @@ import { definePermissions } from "../../permissions/index.js";
 import { mergePermissionsIntoWasmSchema } from "../../schema-permissions.js";
 import { setNamedRowValuesEnumerable } from "./row-values-transport.js";
 import { encodeNativeNullValue, storageColumnValueType } from "./native-row-codec.js";
-import { createOpenBatchId, type BatchId, type OpenBatchId, type WriteReceipt } from "../client.js";
+import {
+  createOpenBatchId,
+  type BatchId,
+  type MutationErrorEvent,
+  type OpenBatchId,
+  type WriteReceipt,
+} from "../client.js";
 
 function beginTestBatch(runtime: NativeRuntimeAdapter, userId?: string): OpenBatchId {
   const id = createOpenBatchId();
@@ -1112,7 +1118,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     const calls: unknown[] = [];
     const write = {
       payload: new Uint8Array(),
-      wait: () => undefined,
+      wait: async () => undefined,
       writeState: () => ({}),
     };
     const runtime = new NativeRuntimeAdapter(
@@ -1164,7 +1170,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     const insertedRowIds: Uint8Array[] = [];
     const write = {
       payload: new Uint8Array(),
-      wait: () => undefined,
+      wait: async () => undefined,
       writeState: () => ({}),
     };
     const runtime = new NativeRuntimeAdapter(
@@ -1787,6 +1793,128 @@ describe("NativeRuntimeAdapter server transport", () => {
     await expect(reopened.waitForTransaction(committed, "local")).rejects.toThrow(
       `Wait for batch failed: unknown batch ${committed}`,
     );
+  });
+
+  it("emits an onMutationError event for an unawaited rejected write", async () => {
+    const batchId = "00000000000070008000000000000042" as BatchId;
+    let mutationErrorCallback: ((event: MutationErrorEvent) => void) | undefined;
+    const write = {
+      batchId,
+      payload: new Uint8Array(),
+      wait: async () => undefined,
+      writeState: () => ({}),
+    };
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            insertWithIdEncoded: () => write,
+            onMutationError: (callback: (event: MutationErrorEvent) => void) => {
+              mutationErrorCallback = callback;
+            },
+          }),
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+    const listener = vi.fn();
+    runtime.onMutationError(listener);
+
+    runtime.insert(
+      "todos",
+      { title: { type: "Text", value: "rejected" } },
+      null,
+      "00000000-0000-0000-0000-000000000042",
+    );
+    mutationErrorCallback?.({
+      code: "permission_denied",
+      reason: "Write rejected by server authorization",
+      transaction: {
+        batchId,
+        kind: "mergeable",
+        sealed: true,
+        latestSettlement: {
+          kind: "rejected",
+          batchId,
+          code: "permission_denied",
+          reason: "Write rejected by server authorization",
+        },
+      },
+    });
+
+    await vi.waitFor(() => expect(listener).toHaveBeenCalledTimes(1));
+    expect(listener).toHaveBeenCalledWith({
+      code: "permission_denied",
+      reason: "Write rejected by server authorization",
+      transaction: {
+        batchId,
+        kind: "mergeable",
+        sealed: true,
+        latestSettlement: {
+          kind: "rejected",
+          batchId,
+          code: "permission_denied",
+          reason: "Write rejected by server authorization",
+        },
+      },
+    });
+  });
+
+  it("does not emit onMutationError when an active wait handles the rejection", async () => {
+    const batchId = "00000000000070008000000000000043" as BatchId;
+    let rejected = false;
+    const stateChangeWaiters: Array<() => void> = [];
+    const nextWriteStateChange = () =>
+      new Promise<void>((resolve) => {
+        stateChangeWaiters.push(resolve);
+      });
+    const write = {
+      batchId,
+      payload: new Uint8Array(),
+      wait: async () => {
+        await nextWriteStateChange();
+        if (rejected) throw new Error("WriteRejected: AuthorizationDenied");
+      },
+      writeState: () => ({}),
+    };
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            insertWithIdEncoded: () => write,
+            onMutationError: () => undefined,
+          }),
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+    const listener = vi.fn();
+    runtime.onMutationError(listener);
+
+    runtime.insert(
+      "todos",
+      { title: { type: "Text", value: "rejected" } },
+      null,
+      "00000000-0000-0000-0000-000000000043",
+    );
+    const wait = runtime.waitForTransaction(batchId, "edge");
+    await Promise.resolve();
+    rejected = true;
+    stateChangeWaiters.splice(0).forEach((resolve) => resolve());
+
+    await expect(wait).rejects.toMatchObject({
+      kind: "rejected",
+      batchId,
+      code: "permission_denied",
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(listener).not.toHaveBeenCalled();
   });
 
   it("passes caller-supplied updatedAt into staged mergeable transaction writes", () => {
@@ -7615,6 +7743,7 @@ function fakeDb<T extends object>(
   };
   return {
     setTickScheduler: () => undefined,
+    onMutationError: () => undefined,
     beginTransaction: (openBatchId: string, kind: FakeOpenBatch["kind"], author?: Uint8Array) => {
       openBatches.set(openBatchId, { kind, author });
     },
@@ -7653,9 +7782,8 @@ function fakeWrite() {
   return {
     batchId: "00000000000070008000000000000001",
     payload: new Uint8Array(0),
-    wait: () => undefined,
+    wait: async () => undefined,
     writeState: () => ({}),
-    nextWriteStateChange: async () => undefined,
   };
 }
 

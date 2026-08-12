@@ -87,6 +87,7 @@ export interface Runtime {
     objectId: string,
     session?: Session,
   ): Promise<PermissionAdvice>;
+  onMutationError(callback: (event: MutationErrorEvent) => void): void;
   waitForTransaction(batchId: BatchId | Promise<BatchId>, tier: string): Promise<void>;
   query(
     query_json: string,
@@ -280,6 +281,18 @@ export interface LocalTransactionRecord {
   sealed: boolean;
   latestSettlement: TransactionFate | null;
   encodedRecord?: Uint8Array;
+}
+
+/**
+ * A rejected write emitted by {@link JazzClient.onMutationError}.
+ *
+ * The event is a fallback for writes whose rejection was not handled by an
+ * active {@link WriteHandle.wait} call.
+ */
+export interface MutationErrorEvent {
+  code: string;
+  reason: string;
+  transaction: LocalTransactionRecord;
 }
 
 export interface CreateOptions extends TimestampOverrideOptions {
@@ -647,6 +660,10 @@ export class JazzClient {
         handler(mapAuthReason(reason));
       });
     }
+
+    this.runtime.onMutationError((event) => {
+      console.error("Unhandled Jazz mutation error", event);
+    });
   }
 
   /**
@@ -674,6 +691,10 @@ export class JazzClient {
       id,
       this.encodeWriteContext(effectiveSession, attribution),
     );
+  }
+
+  onMutationError(listener: (event: MutationErrorEvent) => void): void {
+    this.runtime.onMutationError(listener);
   }
 
   commitTransaction(id: OpenBatchId): Promise<WriteHandle> {

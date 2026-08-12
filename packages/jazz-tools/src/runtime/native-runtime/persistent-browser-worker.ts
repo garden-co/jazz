@@ -7,6 +7,7 @@ import {
   isNativeRowDelta,
   type PersistentBrowserOpfsOwnerRequest,
   type PersistentBrowserSubscriptionFrame,
+  type PersistentBrowserWorkerError,
 } from "./persistent-browser-protocol.js";
 import { setNamedRowValuesEnumerable } from "./row-values-transport.js";
 
@@ -248,14 +249,17 @@ async function openRuntime(message: OpenMessage): Promise<void> {
   const db = await wasmModule.WasmDb.openBrowser(
     dbName,
     encodeSchema(schema as never),
-    openConfig(node, author, 1, true, initialSyncFlushEvery),
+    openConfig(node, author, 1, false, initialSyncFlushEvery),
   );
 
-  runtime = NativeRuntimeAdapter.fromDb(db as never, schema as never, node, author, 1, true);
+  runtime = NativeRuntimeAdapter.fromDb(db as never, schema as never, node, author, 1, false);
   runtimeViews.clear();
   nextRuntimeViewId = 1;
   runtime.onAuthFailure((reason: string) => {
     workerScope.postMessage({ event: "authFailure", reason });
+  });
+  runtime.onMutationError((payload) => {
+    workerScope.postMessage({ event: "mutationError", payload });
   });
 }
 
@@ -294,11 +298,29 @@ function postError(id: number, error: unknown): void {
   workerScope.postMessage({
     id,
     ok: false,
-    error:
-      error instanceof Error
-        ? { name: error.name, message: error.message, stack: error.stack }
-        : { message: String(error) },
+    error: serializeError(error),
   });
+}
+
+function serializeError(error: unknown): PersistentBrowserWorkerError {
+  if (isRejectedWrite(error)) return error;
+  if (error instanceof Error) {
+    return { name: error.name, message: error.message, stack: error.stack };
+  }
+  return { message: String(error) };
+}
+
+function isRejectedWrite(
+  error: unknown,
+): error is Extract<PersistentBrowserWorkerError, { kind: "rejected" }> {
+  if (!error || typeof error !== "object") return false;
+  const candidate = error as Record<string, unknown>;
+  return (
+    candidate.kind === "rejected" &&
+    typeof candidate.batchId === "string" &&
+    typeof candidate.code === "string" &&
+    typeof candidate.reason === "string"
+  );
 }
 
 function subscriptionFrameFromDelta(delta: unknown): PersistentBrowserSubscriptionFrame {

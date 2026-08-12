@@ -71,7 +71,7 @@ pub use crate::result_tree::{ResultNode, ResultRelation, ResultTree, ResultTreeR
 use crate::schema::{JazzSchema, TableSchema};
 use crate::time::GlobalSeq;
 use crate::tools::OpenBatchId;
-use crate::tools::{ObjectId, OutputOccurrenceId, ResultKey};
+use crate::tools::{BatchId, ObjectId, OutputOccurrenceId, ResultKey};
 use crate::tx::{DeletionEvent, DurabilityTier, Fate, RejectionReason, TxId, TxKind};
 use crate::wire::{TransportError, WireAuthorityEndpoint, WireFeatures, encode_sync_message};
 
@@ -97,6 +97,71 @@ pub trait TickScheduler {
     /// Schedule a future [`Db::tick`] for pending peer-connection work.
     fn schedule_tick(&self, urgency: TickUrgency);
 }
+
+/// A locally-originated transaction rejection that was not consumed by an
+/// active write waiter.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MutationErrorEvent {
+    /// Stable machine-readable rejection code.
+    pub code: String,
+    /// Human-readable rejection reason.
+    pub reason: String,
+    /// The rejected local transaction.
+    pub transaction: LocalTransactionRecord,
+}
+
+/// Binding-facing record for one locally committed transaction.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalTransactionRecord {
+    /// Stable public identity derived from the core transaction id.
+    pub batch_id: BatchId,
+    /// Transaction semantics used by the commit.
+    pub kind: TransactionKind,
+    /// Committed transaction records are immutable.
+    pub sealed: bool,
+    /// Latest authority settlement observed for the transaction.
+    pub latest_settlement: TransactionFate,
+}
+
+/// Binding-facing transaction kind.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TransactionKind {
+    /// CRDT-style mergeable transaction.
+    Mergeable,
+    /// Authority-validated exclusive transaction.
+    Exclusive,
+}
+
+impl From<TxKind> for TransactionKind {
+    fn from(kind: TxKind) -> Self {
+        match kind {
+            TxKind::Mergeable => Self::Mergeable,
+            TxKind::Exclusive => Self::Exclusive,
+        }
+    }
+}
+
+/// Binding-facing authority fate for a rejected transaction.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum TransactionFate {
+    /// The authority rejected the transaction.
+    Rejected {
+        /// Stable public identity derived from the core transaction id.
+        #[serde(rename = "batchId")]
+        batch_id: BatchId,
+        /// Stable machine-readable rejection code.
+        code: String,
+        /// Human-readable rejection reason.
+        reason: String,
+    },
+}
+
+/// Thread-affine callback used by bindings to surface unhandled rejections.
+pub type MutationErrorCallback = Rc<dyn Fn(&MutationErrorEvent) + 'static>;
 
 #[cfg(feature = "sync-autopsy")]
 /// Debug-build sync trace buffer used by integration-test timeout autopsies.
@@ -256,6 +321,7 @@ fn prune_edge_fate_routes(
         !pending.is_empty()
     });
 }
+type SharedMutationErrors = Rc<RefCell<MutationErrorState>>;
 type ShapeRegistrationKey = (ShapeId, ReadViewKey);
 
 /// Per-subscriber state for a shape/read-view registration.
@@ -410,6 +476,12 @@ struct WriteStateWaiter {
 enum WriteStateWaiterNotify {
     Future(oneshot::Sender<()>),
     Callback(Box<dyn FnOnce()>),
+}
+
+#[derive(Default)]
+struct MutationErrorState {
+    callback: Option<MutationErrorCallback>,
+    pending: BTreeMap<TxId, MutationErrorEvent>,
 }
 
 #[derive(Clone)]
@@ -1042,6 +1114,42 @@ where
         Ok(WriteState { fate, durability })
     }
 
+    /// Wait until `tx_id` reaches `tier` or is rejected.
+    ///
+    /// An explicit wait consumes a rejection, preventing the same failure from
+    /// subsequently being delivered through [`Db::on_mutation_error`]. The
+    /// check/register/recheck sequence keeps that ownership decision inside
+    /// the database and closes the race with an already-observed rejection.
+    pub async fn wait_for_transaction(
+        &self,
+        tx_id: TxId,
+        tier: DurabilityTier,
+    ) -> Result<TxId, Error> {
+        loop {
+            if let Some(outcome) = self.node.transaction_wait_outcome(tx_id, tier) {
+                return outcome;
+            }
+            let state_change = self.node.register_write_state_waiter(tx_id);
+            if let Some(outcome) = self.node.transaction_wait_outcome(tx_id, tier) {
+                drop(state_change);
+                return outcome;
+            }
+            state_change.await;
+        }
+    }
+
+    /// Callback form of [`Db::wait_for_transaction`] for bindings that cannot
+    /// drive a thread-affine Rust future directly.
+    pub fn wait_for_transaction_with(
+        &self,
+        tx_id: TxId,
+        tier: DurabilityTier,
+        callback: impl FnOnce(Result<TxId, Error>) + 'static,
+    ) {
+        self.node
+            .wait_for_transaction_with(tx_id, tier, Box::new(callback));
+    }
+
     /// Wait until this database observes another state transition for `tx_id`.
     ///
     /// Callers should always check [`Db::write_state`] before and after
@@ -1050,15 +1158,15 @@ where
         self.node.register_write_state_waiter(tx_id)
     }
 
-    /// Register a one-shot same-thread callback for the next state transition of
-    /// `tx_id`.
-    ///
-    /// This is the callback equivalent of [`Db::next_write_state_change`].
-    /// Callers should still read [`Db::write_state`] before and after
-    /// registration to avoid lost wakeups.
-    pub fn on_next_write_state_change(&self, tx_id: TxId, callback: impl FnOnce() + 'static) {
-        self.node
-            .register_write_state_callback(tx_id, Box::new(callback));
+    /// Register the binding callback for rejected local transactions that no
+    /// active application waiter consumed.
+    pub fn on_mutation_error(&self, callback: MutationErrorCallback) {
+        self.node.set_mutation_error_callback(Some(callback));
+    }
+
+    /// Remove the current mutation-error callback.
+    pub fn clear_mutation_error_callback(&self) {
+        self.node.set_mutation_error_callback(None);
     }
 
     /// Start a query rooted at `table`.
@@ -4660,6 +4768,7 @@ where
     edge_fate_routes: EdgeFateRoutes,
     admitted_upstream_authorities: AdmittedUpstreamAuthorities,
     admitted_upstream_authority: Rc<RefCell<Option<AuthorityContext>>>,
+    mutation_errors: SharedMutationErrors,
     next_write_state_waiter_id: Cell<u64>,
     next_subscription_nonce: Cell<u64>,
     subscriber_dirty_epoch: Rc<Cell<u64>>,
@@ -4672,6 +4781,14 @@ where
 {
     /// Wrap a node for serving subscriber links.
     pub fn new(node: NodeState<S>) -> Self {
+        let pending_mutation_errors = node
+            .rejected_transactions()
+            .into_iter()
+            .filter_map(|tx_id| {
+                node.rejected_transaction(tx_id)
+                    .map(|rejected| (tx_id, mutation_error_event(rejected)))
+            })
+            .collect();
         Self {
             node: Rc::new(RefCell::new(node)),
             subscriptions: Rc::new(RefCell::new(Vec::new())),
@@ -4684,6 +4801,10 @@ where
             connections: RefCell::new(Vec::new()),
             scheduler: Rc::new(RefCell::new(None)),
             write_state_waiters: Rc::new(RefCell::new(BTreeMap::new())),
+            mutation_errors: Rc::new(RefCell::new(MutationErrorState {
+                callback: None,
+                pending: pending_mutation_errors,
+            })),
             next_write_state_waiter_id: Cell::new(1),
             next_subscription_nonce: Cell::new(1),
             permission_advice_waiters: Rc::new(RefCell::new(BTreeMap::new())),
@@ -4800,6 +4921,82 @@ where
 
     fn schedule_tick(&self, urgency: TickUrgency) {
         schedule_tick_in(&self.scheduler, urgency);
+    }
+
+    fn set_mutation_error_callback(&self, callback: Option<MutationErrorCallback>) {
+        let should_schedule = {
+            let mut state = self.mutation_errors.borrow_mut();
+            state.callback = callback;
+            state.callback.is_some() && !state.pending.is_empty()
+        };
+        if should_schedule {
+            self.schedule_tick(TickUrgency::Immediate);
+        }
+    }
+
+    fn consume_mutation_error(&self, tx_id: TxId) -> Result<bool, Error> {
+        let pending = self.mutation_errors.borrow_mut().pending.remove(&tx_id);
+        let retained = self.node.borrow().rejected_transaction(tx_id).is_some();
+        if retained {
+            self.node.borrow_mut().discard_rejection(tx_id)?;
+        }
+        Ok(pending.is_some() || retained)
+    }
+
+    fn transaction_wait_outcome(
+        &self,
+        tx_id: TxId,
+        tier: DurabilityTier,
+    ) -> Option<Result<TxId, Error>> {
+        if tier <= DurabilityTier::Local {
+            return Some(Ok(tx_id));
+        }
+        let Some((fate, _, durability)) = self.node.borrow_mut().transaction_state(tx_id) else {
+            return Some(Err(Error::new(
+                ErrorCode::NotObserved,
+                "transaction is not known locally",
+            )));
+        };
+        match fate {
+            Fate::Rejected(reason) => {
+                if let Err(error) = self.consume_mutation_error(tx_id) {
+                    tracing::warn!(?tx_id, %error, "failed to consume waited mutation error");
+                }
+                Some(Err(write_rejected(reason)))
+            }
+            Fate::Pending | Fate::Accepted if durability >= tier => Some(Ok(tx_id)),
+            Fate::Pending | Fate::Accepted => None,
+        }
+    }
+
+    fn wait_for_transaction_with(
+        self: &Rc<Self>,
+        tx_id: TxId,
+        tier: DurabilityTier,
+        callback: Box<dyn FnOnce(Result<TxId, Error>)>,
+    ) {
+        if let Some(outcome) = self.transaction_wait_outcome(tx_id, tier) {
+            callback(outcome);
+            return;
+        }
+        let node = Rc::clone(self);
+        self.register_write_state_callback(
+            tx_id,
+            Box::new(move || node.wait_for_transaction_with(tx_id, tier, callback)),
+        );
+    }
+
+    fn deliver_pending_mutation_errors(&self) {
+        let Some((callback, events)) = take_pending_mutation_error_delivery(&self.mutation_errors)
+        else {
+            return;
+        };
+        for (tx_id, event) in events {
+            if let Err(error) = self.node.borrow_mut().discard_rejection(tx_id) {
+                tracing::warn!(?tx_id, %error, "failed to acknowledge delivered mutation error");
+            }
+            callback(&event);
+        }
     }
 
     fn queue_content_extent_fetch(&self, extent: crate::node::content_store::Extent) {
@@ -5010,6 +5207,7 @@ where
             admitted_upstream_authorities: Rc::clone(&self.admitted_upstream_authorities),
             admitted_upstream_authority: Rc::clone(&self.admitted_upstream_authority),
             downstream_fates: Rc::new(RefCell::new(Vec::new())),
+            mutation_errors: Rc::clone(&self.mutation_errors),
             subscriber_dirty_epoch: Rc::clone(&self.subscriber_dirty_epoch),
             observed_subscriber_dirty_epoch: Cell::new(self.subscriber_dirty_epoch.get()),
             observed_session_claim_revision: Cell::new(0),
@@ -5178,6 +5376,7 @@ where
             admitted_upstream_authorities: Rc::clone(&self.admitted_upstream_authorities),
             admitted_upstream_authority: Rc::clone(&self.admitted_upstream_authority),
             downstream_fates: Rc::new(RefCell::new(Vec::new())),
+            mutation_errors: Rc::clone(&self.mutation_errors),
             subscriber_dirty_epoch: Rc::clone(&self.subscriber_dirty_epoch),
             observed_subscriber_dirty_epoch: Cell::new(self.subscriber_dirty_epoch.get()),
             observed_session_claim_revision: Cell::new(session_claim_revision),
@@ -5296,6 +5495,7 @@ where
 
     /// Service every accepted subscriber connection once.
     pub fn tick(&self) -> Result<DbTickStats, Error> {
+        self.deliver_pending_mutation_errors();
         let mut stats = DbTickStats::default();
         let mut remote_sync_applied = false;
         for connection in self.connections.borrow().iter() {
@@ -6256,6 +6456,7 @@ where
     admitted_upstream_authorities: AdmittedUpstreamAuthorities,
     admitted_upstream_authority: Rc<RefCell<Option<AuthorityContext>>>,
     downstream_fates: PendingDownstreamFates,
+    mutation_errors: SharedMutationErrors,
     subscriber_dirty_epoch: Rc<Cell<u64>>,
     observed_subscriber_dirty_epoch: Cell<u64>,
     observed_session_claim_revision: Cell<u64>,
@@ -7456,30 +7657,35 @@ where
                             if let Some((tx_id, fate)) = routed_fate {
                                 let authority = *expected_scope_authority;
                                 let mut routes = self.edge_fate_routes.borrow_mut();
-                                let Some(pending) = routes.get_mut(&tx_id) else {
-                                    continue;
-                                };
-                                let mut remaining = Vec::new();
-                                for route in std::mem::take(pending) {
-                                    if Some(route.authority) == authority {
-                                        if let Some(queue) = route.queue.upgrade() {
-                                            queue.borrow_mut().push(fate.clone());
+                                if let Some(pending) = routes.get_mut(&tx_id) {
+                                    let mut remaining = Vec::new();
+                                    for route in std::mem::take(pending) {
+                                        if Some(route.authority) == authority {
+                                            if let Some(queue) = route.queue.upgrade() {
+                                                queue.borrow_mut().push(fate.clone());
+                                            }
+                                        } else {
+                                            remaining.push(route);
                                         }
-                                    } else {
-                                        remaining.push(route);
                                     }
-                                }
-                                if remaining.is_empty() {
-                                    routes.remove(&tx_id);
-                                } else {
-                                    *routes.get_mut(&tx_id).expect("route remains present") =
-                                        remaining;
+                                    if remaining.is_empty() {
+                                        routes.remove(&tx_id);
+                                    } else {
+                                        *routes.get_mut(&tx_id).expect("route remains present") =
+                                            remaining;
+                                    }
                                 }
                             }
                         }
                     }
                     if let Some(tx_id) = write_state_tx_id {
-                        notify_write_state_waiters(&self.write_state_waiters, tx_id);
+                        handle_write_state_update(
+                            &self.node,
+                            &self.write_state_waiters,
+                            &self.mutation_errors,
+                            &self.scheduler,
+                            tx_id,
+                        );
                     }
                     applied = true;
                 }
@@ -8434,7 +8640,13 @@ where
                                     )?,
                             };
                             if let Some(tx_id) = write_state_tx_id {
-                                notify_write_state_waiters(&self.write_state_waiters, tx_id);
+                                handle_write_state_update(
+                                    &self.node,
+                                    &self.write_state_waiters,
+                                    &self.mutation_errors,
+                                    &self.scheduler,
+                                    tx_id,
+                                );
                             }
                             for response in responses {
                                 send_with_content_extents(
@@ -9515,17 +9727,120 @@ fn write_state_update_tx_id(message: &SyncMessage) -> Option<TxId> {
     }
 }
 
-fn notify_write_state_waiters(waiters: &WriteStateWaiters, tx_id: TxId) {
+fn notify_write_state_waiters(waiters: &WriteStateWaiters, tx_id: TxId) -> bool {
     let Some(waiters) = waiters.borrow_mut().remove(&tx_id) else {
-        return;
+        return false;
     };
+    let mut handled_mutation_error = false;
     for waiter in waiters {
         match waiter.notify {
             WriteStateWaiterNotify::Future(sender) => {
-                let _ = sender.send(());
+                if sender.send(()).is_ok() {
+                    handled_mutation_error = true;
+                }
             }
-            WriteStateWaiterNotify::Callback(callback) => callback(),
+            WriteStateWaiterNotify::Callback(callback) => {
+                callback();
+                handled_mutation_error = true;
+            }
         }
+    }
+    handled_mutation_error
+}
+
+fn handle_write_state_update<S>(
+    node: &Rc<RefCell<NodeState<S>>>,
+    waiters: &WriteStateWaiters,
+    mutation_errors: &SharedMutationErrors,
+    scheduler: &SharedTickScheduler,
+    tx_id: TxId,
+) where
+    S: OrderedKvStorage + ReopenableStorage + 'static,
+{
+    let handled_by_waiter = notify_write_state_waiters(waiters, tx_id);
+    let rejected = node.borrow().rejected_transaction(tx_id);
+    let Some(rejected) = rejected else {
+        return;
+    };
+
+    if handled_by_waiter {
+        mutation_errors.borrow_mut().pending.remove(&tx_id);
+        if let Err(error) = node.borrow_mut().discard_rejection(tx_id) {
+            tracing::warn!(?tx_id, %error, "failed to acknowledge waited mutation error");
+        }
+        return;
+    }
+
+    let should_schedule = {
+        let mut state = mutation_errors.borrow_mut();
+        state
+            .pending
+            .entry(tx_id)
+            .or_insert_with(|| mutation_error_event(rejected));
+        state.callback.is_some()
+    };
+    if should_schedule {
+        schedule_tick_in(scheduler, TickUrgency::Immediate);
+    }
+}
+
+fn take_pending_mutation_error_delivery(
+    mutation_errors: &SharedMutationErrors,
+) -> Option<(MutationErrorCallback, BTreeMap<TxId, MutationErrorEvent>)> {
+    let mut state = mutation_errors.borrow_mut();
+    let callback = state.callback.clone()?;
+    if state.pending.is_empty() {
+        return None;
+    }
+    Some((callback, std::mem::take(&mut state.pending)))
+}
+
+fn mutation_error_event(rejected: crate::tx::RejectedTransaction) -> MutationErrorEvent {
+    let tx_id = rejected.tx_id();
+    let batch_id = BatchId::from_committed_tx(tx_id);
+    let (code, reason) = mutation_error_details(&rejected.reason());
+    MutationErrorEvent {
+        code: code.clone(),
+        reason: reason.clone(),
+        transaction: LocalTransactionRecord {
+            batch_id,
+            kind: rejected.kind().into(),
+            sealed: true,
+            latest_settlement: TransactionFate::Rejected {
+                batch_id,
+                code,
+                reason,
+            },
+        },
+    }
+}
+
+fn mutation_error_details(reason: &RejectionReason) -> (String, String) {
+    match reason {
+        RejectionReason::ClientClockTooFarAhead => (
+            "client_clock_too_far_ahead".to_owned(),
+            "Client clock is too far ahead".to_owned(),
+        ),
+        RejectionReason::AuthorizationDenied => (
+            "permission_denied".to_owned(),
+            "Write rejected by server authorization".to_owned(),
+        ),
+        RejectionReason::ExclusiveConflict => (
+            "exclusive_conflict".to_owned(),
+            "Exclusive transaction conflicted with another write".to_owned(),
+        ),
+        RejectionReason::CausalityViolation => (
+            "causality_violation".to_owned(),
+            "Transaction violated causal ordering".to_owned(),
+        ),
+        RejectionReason::Cascade { root } => (
+            "cascade_rejected".to_owned(),
+            format!("Transaction was rejected because ancestor {root:?} was rejected"),
+        ),
+        RejectionReason::MalformedCommit(reason) => (
+            "write_rejected".to_owned(),
+            format!("Malformed transaction: {reason}"),
+        ),
     }
 }
 

@@ -28,8 +28,7 @@ declare module "jazz-wasm" {
     readonly batchId: string;
     readonly payload: Uint8Array;
     writeState(): unknown;
-    nextWriteStateChange(): Promise<void>;
-    wait(tier: string): void;
+    wait(tier: string): Promise<void>;
     close(): boolean;
   }
 
@@ -153,6 +152,7 @@ declare module "jazz-wasm" {
       author: Uint8Array,
     ): WasmWrite;
     setTickScheduler(callback: (urgency: "immediate" | "deferred") => void): void;
+    onMutationError(callback: (event: any) => void): void;
     tick(): void;
     close(): boolean;
     connectUpstream(): WasmTransport;

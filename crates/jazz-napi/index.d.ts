@@ -30,6 +30,7 @@ export declare class NapiDb {
   /** Roll back an owner-wide open batch by id. */
   rollbackTransaction(openBatchId: string): void
   setTickScheduler(callback: ((err: Error | null, arg: string) => void)): void
+  onMutationError(callback: (event: any) => void): void
   prepareQuery(query: Uint8Array): PreparedQuery
   all(query: PreparedQuery, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array
   setIdentityClaims(author: Uint8Array, claims?: Record<string, unknown> | undefined | null): void
@@ -107,9 +108,8 @@ export declare class Tx {
 export declare class Write {
   get batchId(): string
   get payload(): Uint8Array
-  wait(tier: string): void
+  wait(tier: string): Promise<undefined>
   writeState(): any
-  nextWriteStateChange(): Promise<undefined>
   close(): boolean
 }
 

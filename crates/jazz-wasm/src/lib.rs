@@ -8,9 +8,10 @@ use base64::Engine;
 use futures_util::{Stream, StreamExt};
 use jazz::db::{
     block_on, ConnectionSessionContext, Db, DbConfig, DbIdentity, ExclusiveTxOps,
-    InitialSyncFlushCadence, LocalUpdates, MergeableTxOps, PeerConnection, PermissionAdvice,
-    PreparedQuery, Propagation, QueryAttachment, ReadOpts, RowCells, SeededRowIdSource,
-    SubscriptionEvent, TickScheduler, TickUrgency, WireTransportAdapter, WriteHandle,
+    InitialSyncFlushCadence, LocalUpdates, MergeableTxOps, MutationErrorCallback, PeerConnection,
+    PermissionAdvice, PreparedQuery, Propagation, QueryAttachment, ReadOpts, RowCells,
+    SeededRowIdSource, SubscriptionEvent, TickScheduler, TickUrgency, WireTransportAdapter,
+    WriteHandle,
 };
 use jazz::groove::records::{BorrowedRecord, RecordDescriptor, Value};
 #[cfg(target_arch = "wasm32")]
@@ -278,40 +279,15 @@ impl WasmWrite {
     }
 
     #[wasm_bindgen(js_name = wait)]
-    pub fn wait(&self, tier: String) -> Result<(), JsValue> {
+    pub fn wait(&self, tier: String) -> Result<js_sys::Promise, JsValue> {
         let tier = durability_tier_from_str(&tier)?;
         match &self.inner {
             Some(WasmWriteInner::MemoryTx { db, tx_id }) => {
-                wait_for_tx(db, *tx_id, tier)?;
+                Ok(wait_promise(db.as_ref(), *tx_id, tier))
             }
             #[cfg(target_arch = "wasm32")]
             Some(WasmWriteInner::BrowserTx { db, tx_id }) => {
-                wait_for_tx(db, *tx_id, tier)?;
-            }
-            None => return Err(JsValue::from_str("write wait is unavailable")),
-        }
-        Ok(())
-    }
-
-    #[wasm_bindgen(js_name = nextWriteStateChange)]
-    pub fn next_write_state_change(&self) -> Result<js_sys::Promise, JsValue> {
-        match &self.inner {
-            Some(WasmWriteInner::MemoryTx { db, tx_id }) => {
-                let db = Rc::clone(db);
-                let tx_id = *tx_id;
-                Ok(future_to_promise(async move {
-                    db.next_write_state_change(tx_id).await;
-                    Ok(JsValue::UNDEFINED)
-                }))
-            }
-            #[cfg(target_arch = "wasm32")]
-            Some(WasmWriteInner::BrowserTx { db, tx_id }) => {
-                let db = Rc::clone(db);
-                let tx_id = *tx_id;
-                Ok(future_to_promise(async move {
-                    db.next_write_state_change(tx_id).await;
-                    Ok(JsValue::UNDEFINED)
-                }))
+                Ok(wait_promise(db.as_ref(), *tx_id, tier))
             }
             None => Err(JsValue::from_str("write state is unavailable")),
         }
@@ -1662,6 +1638,23 @@ impl WasmDb {
         self.inner.set_tick_scheduler(callback);
     }
 
+    /// Register a callback for rejected writes that no active wait consumed.
+    #[wasm_bindgen(js_name = onMutationError)]
+    pub fn on_mutation_error(&self, callback: js_sys::Function) {
+        let callback: MutationErrorCallback = Rc::new(move |event| {
+            let Ok(value) = serde_wasm_bindgen::to_value(event) else {
+                return;
+            };
+            let _ = callback.call1(&JsValue::UNDEFINED, &value);
+        });
+        match &self.inner {
+            WasmDbInner::Memory(db) => db.on_mutation_error(Rc::clone(&callback)),
+            #[cfg(target_arch = "wasm32")]
+            WasmDbInner::Browser(db) => db.on_mutation_error(Rc::clone(&callback)),
+            WasmDbInner::Closed => {}
+        }
+    }
+
     #[wasm_bindgen(js_name = insertEncoded)]
     pub fn insert_encoded(&self, table: String, cells: Vec<u8>) -> Result<WasmWrite, JsValue> {
         let cells = decode_cells(&cells)?;
@@ -2433,20 +2426,20 @@ where
     Ok(stats.subscription_events as u32)
 }
 
-fn wait_for_tx<S>(db: &Db<S>, tx_id: TxId, tier: DurabilityTier) -> Result<(), JsValue>
+fn wait_promise<S>(db: &Db<S>, tx_id: TxId, tier: DurabilityTier) -> js_sys::Promise
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
-    if tier <= DurabilityTier::Local {
-        return Ok(());
-    }
-    let state = db.write_state(tx_id).map_err(to_js_error)?;
-    if state.durability >= tier {
-        return Ok(());
-    }
-    Err(JsValue::from_str(&format!(
-        "transaction has not reached requested tier {tier:?}"
-    )))
+    js_sys::Promise::new(&mut |resolve, reject| {
+        db.wait_for_transaction_with(tx_id, tier, move |result| match result {
+            Ok(_) => {
+                let _ = resolve.call0(&JsValue::UNDEFINED);
+            }
+            Err(error) => {
+                let _ = reject.call1(&JsValue::UNDEFINED, &to_js_error(error));
+            }
+        });
+    })
 }
 
 fn row_uuid_from_bytes(bytes: &[u8]) -> Result<RowUuid, JsValue> {

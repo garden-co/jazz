@@ -1,8 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { NativeRowDelta, WasmSchema } from "../../drivers/types.js";
-import { createOpenBatchId, type BatchId } from "../client.js";
+import { createOpenBatchId, type BatchId, type MutationErrorEvent } from "../client.js";
 import type { InsertResult, MutationResult } from "../client.js";
-import type { PersistentBrowserSubscriptionMessage } from "./persistent-browser-protocol.js";
+import type {
+  PersistentBrowserSubscriptionMessage,
+  PersistentBrowserWorkerError,
+} from "./persistent-browser-protocol.js";
 import {
   PersistentBrowserOpfsRuntime,
   type PersistentBrowserOpfsOwnerRequest,
@@ -51,9 +54,11 @@ class FakeWorker {
     });
   }
 
-  reject(id: number, message: string): void {
+  reject(id: number, error: string | PersistentBrowserWorkerError): void {
     queueMicrotask(() => {
-      this.onmessage?.({ data: { id, ok: false, error: { message } } } as MessageEvent);
+      this.onmessage?.({
+        data: { id, ok: false, error: typeof error === "string" ? { message: error } : error },
+      } as MessageEvent);
     });
   }
 
@@ -96,6 +101,12 @@ class FakeWorker {
       this.onmessage?.({
         data,
       } as MessageEvent);
+    });
+  }
+
+  emitMutationError(payload: MutationErrorEvent): void {
+    queueMicrotask(() => {
+      this.onmessage?.({ data: { event: "mutationError", payload } } as MessageEvent);
     });
   }
 }
@@ -148,6 +159,113 @@ describe("PersistentBrowserOpfsRuntime", () => {
     worker.respond(waitMessage!.id, undefined);
 
     await expect(wait).resolves.toBeUndefined();
+    await runtime.close();
+  });
+
+  it("preserves structured transaction rejections from the worker", async () => {
+    vi.stubGlobal("Worker", FakeWorker);
+
+    const runtime = new PersistentBrowserOpfsRuntime(
+      undefined,
+      schema,
+      "persistent-browser-runtime-rejected-wait-test",
+      new Uint8Array(16),
+      new Uint8Array(16),
+    );
+    const worker = FakeWorker.instances[0];
+    const batchId = "00000000000070008000000000000046" as BatchId;
+
+    const wait = runtime.waitForTransaction(batchId, "edge");
+    await vi.waitFor(() => {
+      expect(worker.messages.some((message) => message.method === "waitForTransaction")).toBe(true);
+    });
+    const waitMessage = worker.messages.find((message) => message.method === "waitForTransaction");
+    worker.reject(waitMessage!.id, {
+      kind: "rejected",
+      batchId,
+      code: "permission_denied",
+      reason: "Write rejected by server authorization",
+    });
+
+    await expect(wait).rejects.toEqual({
+      kind: "rejected",
+      batchId,
+      code: "permission_denied",
+      reason: "Write rejected by server authorization",
+    });
+    await runtime.close();
+  });
+
+  it("forwards worker mutation errors to the registered runtime callback", async () => {
+    vi.stubGlobal("Worker", FakeWorker);
+
+    const runtime = new PersistentBrowserOpfsRuntime(
+      undefined,
+      schema,
+      "persistent-browser-runtime-mutation-error-test",
+      new Uint8Array(16),
+      new Uint8Array(16),
+    );
+    const worker = FakeWorker.instances[0];
+    const batchId = "00000000000070008000000000000044" as BatchId;
+    const event: MutationErrorEvent = {
+      code: "permission_denied",
+      reason: "write rejected by policy",
+      transaction: {
+        batchId,
+        kind: "mergeable",
+        sealed: true,
+        latestSettlement: {
+          kind: "rejected",
+          batchId,
+          code: "permission_denied",
+          reason: "write rejected by policy",
+        },
+      },
+    };
+    const listener = vi.fn();
+    runtime.onMutationError(listener);
+
+    worker.emitMutationError(event);
+
+    await vi.waitFor(() => expect(listener).toHaveBeenCalledWith(event));
+    await runtime.close();
+  });
+
+  it("buffers worker mutation errors until the runtime callback is registered", async () => {
+    vi.stubGlobal("Worker", FakeWorker);
+
+    const runtime = new PersistentBrowserOpfsRuntime(
+      undefined,
+      schema,
+      "persistent-browser-runtime-buffered-mutation-error-test",
+      new Uint8Array(16),
+      new Uint8Array(16),
+    );
+    const worker = FakeWorker.instances[0];
+    const batchId = "00000000000070008000000000000045" as BatchId;
+    const event: MutationErrorEvent = {
+      code: "permission_denied",
+      reason: "write rejected by policy",
+      transaction: {
+        batchId,
+        kind: "mergeable",
+        sealed: true,
+        latestSettlement: {
+          kind: "rejected",
+          batchId,
+          code: "permission_denied",
+          reason: "write rejected by policy",
+        },
+      },
+    };
+
+    worker.emitMutationError(event);
+    await Promise.resolve();
+    const listener = vi.fn();
+    runtime.onMutationError(listener);
+
+    expect(listener).toHaveBeenCalledWith(event);
     await runtime.close();
   });
 
