@@ -41,9 +41,6 @@ jobs:
           rust-targets: wasm32-unknown-unknown
           sccache: "true"
 
-      - name: Install Rust prerequisites
-        run: pnpm run ensure:rust-toolchain
-
       - run: cargo check --workspace --all-targets
 
   lint:
@@ -58,12 +55,8 @@ jobs:
           rust-components: clippy,rustfmt
           sccache: "true"
 
-      - name: Install Rust prerequisites
-        run: pnpm run ensure:rust-toolchain
-
       - run: pnpm format:check
       - run: pnpm lint
-      - run: cargo clippy --workspace -- -D warnings
 
   test-rust:
     runs-on: blacksmith-4vcpu-ubuntu-2404
@@ -77,11 +70,12 @@ jobs:
           rust-components: clippy,rustfmt
           sccache: "true"
 
-      - name: Install Rust prerequisites
-        run: pnpm run ensure:rust-toolchain
-
       - name: Install bounded Rust test runner
-        run: cargo install cargo-nextest --locked
+        uses: taiki-e/install-action@3235f8901fd37ffed0052b276cec25a362fb82e9 # v2
+        with:
+          # Download the release asset rather than compiling the runner in
+          # every job. Keep this explicit so test selection is reproducible.
+          tool: cargo-nextest@0.9.143
       - name: Workspace Rust tests (bounded, sharded, receipted)
         run: node dev/gates/run-rust-tests.mjs --timeout-seconds 780 -- --workspace --lib --bins --tests --features test
       - name: Verify Nextest partition coverage
@@ -120,8 +114,12 @@ jobs:
           rust-components: clippy,rustfmt
           sccache: "true"
 
-      - name: Install Rust prerequisites
-        run: pnpm run ensure:rust-toolchain
+      - name: Install WASM packager
+        # Only this job builds jazz-wasm. Other Rust jobs receive their target
+        # through setup-build but do not pay to install the packager.
+        uses: taiki-e/install-action@3235f8901fd37ffed0052b276cec25a362fb82e9 # v2
+        with:
+          tool: wasm-pack@0.13.1
 
       - name: Mount Turbo sticky disk
         uses: useblacksmith/stickydisk@13af8883542ca949a717e70fef89d15edbb29d88 # v1

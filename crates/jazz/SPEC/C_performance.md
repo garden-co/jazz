@@ -171,6 +171,18 @@ The near-term implementation plan is:
 - preserve fast PR diagnosis and a complete merge gate rather than silently
   skipping coverage.
 
+**Implemented first step (2026-08-11).** `test-rust` installs the pinned
+prebuilt `cargo-nextest` release instead of compiling it from source; repeated
+#1348 GitHub runs measured that source build at **115–169 seconds**. In the
+main CI workflow, the `wasm-pack` installer now runs only in `test-ts`, the
+sole job which invokes the WASM packager (the previous source install there was
+about **20 seconds**), and the lint job relies on the one workspace Clippy
+invocation already contained in `pnpm lint` rather than running it again. These
+changes retain the same test selection and lint command; expected savings are
+roughly **two minutes** from the Rust test job plus one complete duplicate
+workspace-Clippy pass and the unneeded installer work in the Rust-only jobs.
+Follow-up receipts must replace these estimates with before/after step timings.
+
 Cache correctness precedes cache scale. Turbo task inputs should describe each
 artifact's actual dependency closure rather than all `crates/**/*.rs`; native
 artifacts remain content-addressed and provenance-checked. CI reports Turbo and
