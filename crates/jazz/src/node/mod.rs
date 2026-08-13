@@ -7,7 +7,6 @@
 //! `Db` facade and groove storage/IVM.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(feature = "testing")]
@@ -374,6 +373,7 @@ mod branches;
 mod codec;
 pub mod content_store;
 mod currency;
+mod database_slot;
 mod eviction;
 mod global_state;
 mod ingest;
@@ -399,6 +399,7 @@ type ResultRowMembershipKey = crate::tools::OutputOccurrenceId;
 use branches::BranchRecord;
 use codec::*;
 use content_store::ContentStore;
+use database_slot::DatabaseSlot;
 use open_tx::*;
 use physical::*;
 use text_oplog::{Content as TextContent, Op as TextOp};
@@ -6693,51 +6694,6 @@ enum CatalogueActivationFailpoint {
     AfterStaged,
     AfterRegistration,
     BeforeSnapshotActivationCommit,
-}
-
-struct DatabaseSlot<S> {
-    database: Option<Database<S>>,
-}
-
-impl<S> DatabaseSlot<S> {
-    fn new(database: Database<S>) -> Self {
-        Self {
-            database: Some(database),
-        }
-    }
-
-    fn take(&mut self) -> Database<S> {
-        self.database
-            .take()
-            .expect("node database slot must be populated outside rebuild")
-    }
-
-    fn replace(&mut self, database: Database<S>) {
-        debug_assert!(self.database.is_none());
-        self.database = Some(database);
-    }
-
-    fn into_inner(mut self) -> Database<S> {
-        self.take()
-    }
-}
-
-impl<S> Deref for DatabaseSlot<S> {
-    type Target = Database<S>;
-
-    fn deref(&self) -> &Self::Target {
-        self.database
-            .as_ref()
-            .expect("node database slot must be populated")
-    }
-}
-
-impl<S> DerefMut for DatabaseSlot<S> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        self.database
-            .as_mut()
-            .expect("node database slot must be populated")
-    }
 }
 
 #[derive(Clone, Debug)]
