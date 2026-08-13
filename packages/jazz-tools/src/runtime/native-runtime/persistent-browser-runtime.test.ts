@@ -6,6 +6,7 @@ import type {
   PersistentBrowserSubscriptionMessage,
   PersistentBrowserWorkerError,
 } from "./persistent-browser-protocol.js";
+import { serializePersistentBrowserWorkerError } from "./persistent-browser-error.js";
 import {
   PersistentBrowserOpfsRuntime,
   type PersistentBrowserOpfsOwnerRequest,
@@ -194,6 +195,26 @@ describe("PersistentBrowserOpfsRuntime", () => {
       reason: "Write rejected by server authorization",
     });
     await runtime.close();
+  });
+
+  it("keeps direct rejection diagnostics out of the worker transport payload", () => {
+    const batchId = "00000000000070008000000000000047" as BatchId;
+    const rejection = {
+      kind: "rejected" as const,
+      batchId,
+      code: "permission_denied",
+      reason: "Write rejected by server authorization",
+      message: "WriteRejected: AuthorizationDenied",
+    };
+    Object.defineProperty(rejection, "message", { enumerable: false });
+
+    expect(Object.getOwnPropertyDescriptor(rejection, "message")?.enumerable).toBe(false);
+    expect(serializePersistentBrowserWorkerError(rejection)).toEqual({
+      kind: "rejected",
+      batchId,
+      code: "permission_denied",
+      reason: "Write rejected by server authorization",
+    });
   });
 
   it("forwards worker mutation errors to the registered runtime callback", async () => {

@@ -1201,12 +1201,25 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       runtime.query(JSON.stringify({ table: "todos" }), aliceSession, "local"),
     ).resolves.toHaveLength(2);
 
-    await expect(
-      runtime.waitForTransaction(await committedBatchId(aliceTodo), "edge"),
-    ).rejects.toThrow("AuthorizationDenied");
-    await expect(
-      runtime.waitForTransaction(await committedBatchId(bobTodo), "edge"),
-    ).rejects.toThrow("AuthorizationDenied");
+    const aliceDenied = runtime.waitForTransaction(await committedBatchId(aliceTodo), "edge");
+    await expect(aliceDenied).rejects.toMatchObject({
+      kind: "rejected",
+      code: "permission_denied",
+      reason: "Write rejected by server authorization",
+    });
+    const aliceRejection = await aliceDenied.catch((error) => error);
+    expect(Object.getOwnPropertyDescriptor(aliceRejection, "message")).toMatchObject({
+      enumerable: false,
+      value: expect.stringContaining("AuthorizationDenied"),
+    });
+    await expect(aliceDenied).rejects.toThrow("AuthorizationDenied");
+    const bobDenied = runtime.waitForTransaction(await committedBatchId(bobTodo), "edge");
+    await expect(bobDenied).rejects.toMatchObject({
+      kind: "rejected",
+      code: "permission_denied",
+      reason: "Write rejected by server authorization",
+    });
+    await expect(bobDenied).rejects.toThrow("AuthorizationDenied");
   }, 15_000);
 
   it("keeps persistent client-local session writes optimistic until the authority rejects them", async () => {
