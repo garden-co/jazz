@@ -11,6 +11,7 @@ import {
   WIRE_PROTOCOL_VERSION,
 } from "./websocket.js";
 import { NativeRuntimeAdapter, type Transport } from "./native-runtime-adapter.js";
+import { type BatchId, type WriteReceipt } from "../client.js";
 
 const previousWebSocket = globalThis.WebSocket;
 
@@ -22,8 +23,7 @@ async function waitForFakeWebSocketNegotiation(): Promise<void> {
   for (let turn = 0; turn < 6; turn += 1) await Promise.resolve();
 }
 
-async function committedBatchId(receiptPromise: Promise<unknown>): Promise<string> {
-  const receipt = (await receiptPromise) as { kind: string; batchId: Promise<string> };
+async function committedBatchId(receipt: WriteReceipt): Promise<BatchId> {
   if (receipt.kind !== "committed") throw new Error("expected committed write receipt");
   return await receipt.batchId;
 }

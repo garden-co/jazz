@@ -395,10 +395,10 @@ fn browser_client_hydrates_local_subscription_from_worker_relay() {
         .expect("prepare todos query");
     let mut subscription =
         block_on(main_thread.subscribe(&todos, ReadOpts::default())).expect("subscribe to todos");
-    let Some(SubscriptionEvent::Delta { added, .. }) = subscription.try_next_event() else {
-        panic!("fresh subscription must emit an initial delta");
-    };
-    assert!(added.is_empty());
+    assert!(
+        subscription.try_next_event().is_none(),
+        "fresh remote coverage must withhold its provisional local snapshot"
+    );
 
     main_thread.tick().expect("request Local worker view");
     worker.tick().expect("serve Local worker view");
@@ -465,9 +465,10 @@ fn browser_client_local_only_subscription_stops_at_worker() {
         },
     ))
     .expect("subscribe locally through the worker");
-    let _initial = subscription
-        .try_next_event()
-        .expect("subscription starts with the main Db's empty snapshot");
+    assert!(
+        subscription.try_next_event().is_none(),
+        "worker-backed local-only coverage must withhold its provisional main-thread snapshot"
+    );
 
     main_thread.tick().expect("register worker-local coverage");
     for _ in 0..4 {
@@ -549,12 +550,10 @@ fn browser_relay_does_not_publish_a_premature_settled_snapshot() {
         },
     ))
     .expect("subscribe globally through worker relay");
-    let Some(SubscriptionEvent::Delta { added, settled, .. }) = subscription.try_next_event()
-    else {
-        panic!("fresh subscription must emit an initial local delta");
-    };
-    assert!(added.is_empty());
-    assert!(!settled);
+    assert!(
+        subscription.try_next_event().is_none(),
+        "fresh remote coverage must withhold its provisional local snapshot"
+    );
 
     main_thread.tick().expect("register global worker view");
     worker
@@ -625,9 +624,10 @@ fn browser_relay_publishes_an_explicit_settled_empty_handoff() {
         },
     ))
     .expect("subscribe at Edge through worker relay");
-    let _initial = subscription
-        .try_next_event()
-        .expect("subscription starts with an unsettled local snapshot");
+    assert!(
+        subscription.try_next_event().is_none(),
+        "fresh remote coverage must withhold its provisional local snapshot"
+    );
 
     main_thread.tick().expect("register Edge worker view");
     worker

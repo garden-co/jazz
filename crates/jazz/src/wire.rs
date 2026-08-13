@@ -24,7 +24,7 @@ use crate::protocol_limits::{validate_logical_message_len, validate_wire_frame_l
 /// inside `SyncMessage::ViewUpdate`.  This is a semantic payload-layout change:
 /// older peers cannot safely decode maintained terminal rows, so negotiation
 /// deliberately rejects them rather than guessing a layout.
-pub const WIRE_PROTOCOL_VERSION: u16 = 8;
+pub const WIRE_PROTOCOL_VERSION: u16 = 9;
 
 /// No optional features.
 pub const FEATURE_NONE: WireFeatures = 0;

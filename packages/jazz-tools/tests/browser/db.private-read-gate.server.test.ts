@@ -294,15 +294,14 @@ describe("raw websocket private read gate", () => {
     );
     await sleep(500);
 
+    const write = client.db.insert(createdByApp.todos, {
+      title: "Alice-created async channel row",
+      done: false,
+    });
     const inserted = await withTimeout(
-      client.db
-        .insert(createdByApp.todos, {
-          title: "Alice-created async channel row",
-          done: false,
-        })
-        .wait({ tier: "global" }),
+      write.wait({ tier: "global" }),
       15_000,
-      "async-channel $createdBy insert global wait",
+      "$createdBy insert global wait",
     );
 
     await waitForCondition(
