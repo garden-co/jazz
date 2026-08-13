@@ -37,9 +37,9 @@ jobs:
           source_file="${RUNNER_TEMP}/sccache-probe.rs"
           printf 'pub fn runner_pool_probe() -> u64 { 42 }\n' > "${source_file}"
           sccache rustc --crate-name runner_pool_probe --crate-type lib \
-            "${source_file}" -o "${cargo_target}/lib_runner_pool_probe.rlib"
+            --emit=link --out-dir "${cargo_target}" "${source_file}"
           sccache rustc --crate-name runner_pool_probe --crate-type lib \
-            "${source_file}" -o "${cargo_target}/lib_runner_pool_probe_second.rlib"
+            --emit=link --out-dir "${cargo_target}" "${source_file}"
 
           printf '%s\n' \
             "runner=${RUNNER_NAME}" \
