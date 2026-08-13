@@ -3,11 +3,11 @@ import type { MutationResult } from "../client.js";
 import { openConfig } from "./native-codec.js";
 import { encodeSchema } from "./schema-codec.js";
 import { NativeRuntimeAdapter } from "./native-runtime-adapter.js";
+import { serializePersistentBrowserWorkerError } from "./persistent-browser-error.js";
 import {
   isNativeRowDelta,
   type PersistentBrowserOpfsOwnerRequest,
   type PersistentBrowserSubscriptionFrame,
-  type PersistentBrowserWorkerError,
 } from "./persistent-browser-protocol.js";
 import { setNamedRowValuesEnumerable } from "./row-values-transport.js";
 
@@ -298,29 +298,8 @@ function postError(id: number, error: unknown): void {
   workerScope.postMessage({
     id,
     ok: false,
-    error: serializeError(error),
+    error: serializePersistentBrowserWorkerError(error),
   });
-}
-
-function serializeError(error: unknown): PersistentBrowserWorkerError {
-  if (isRejectedWrite(error)) return error;
-  if (error instanceof Error) {
-    return { name: error.name, message: error.message, stack: error.stack };
-  }
-  return { message: String(error) };
-}
-
-function isRejectedWrite(
-  error: unknown,
-): error is Extract<PersistentBrowserWorkerError, { kind: "rejected" }> {
-  if (!error || typeof error !== "object") return false;
-  const candidate = error as Record<string, unknown>;
-  return (
-    candidate.kind === "rejected" &&
-    typeof candidate.batchId === "string" &&
-    typeof candidate.code === "string" &&
-    typeof candidate.reason === "string"
-  );
 }
 
 function subscriptionFrameFromDelta(delta: unknown): PersistentBrowserSubscriptionFrame {

@@ -2571,15 +2571,34 @@ function isPendingCoverageError(error: unknown): boolean {
 function rejectedWaitError(
   batchId: BatchId,
   error: unknown,
-): { kind: "rejected"; batchId: BatchId; code: string; reason: string } | null {
+): {
+  kind: "rejected";
+  batchId: BatchId;
+  code: string;
+  reason: string;
+  /** An Error-compatible diagnostic for direct native callers. */
+  message: string;
+} | null {
   const message = errorMessage(error);
   if (!message.includes("WriteRejected")) return null;
-  return {
+  const rejection: {
+    kind: "rejected";
+    batchId: BatchId;
+    code: string;
+    reason: string;
+    message: string;
+  } = {
     kind: "rejected",
     batchId,
     code: rejectionCode(message),
     reason: rejectionReason(message),
+    message,
   };
+  // Worker transport intentionally carries only the enumerable structured
+  // fields. Native callers also inspect rejected promises like Errors, so
+  // retain Rust's diagnostic without widening that transport payload.
+  Object.defineProperty(rejection, "message", { enumerable: false });
+  return rejection;
 }
 
 function writeOrNormalizeRejection<T>(
