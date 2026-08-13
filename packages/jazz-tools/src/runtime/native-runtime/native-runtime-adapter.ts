@@ -826,22 +826,34 @@ export class NativeRuntimeAdapter implements Runtime {
     if (!write) {
       throw new Error(`Wait for batch failed: unknown batch ${batchId}`);
     }
-    this.throwServerTransportErrorForTier(tier);
-    this.pumpServerTransport();
-    this.throwServerTransportErrorForTier(tier);
-    const settlement = write.wait(tier);
-    const transportError = this.waitForServerTransportError(tier);
-    try {
-      await (transportError ? Promise.race([settlement, transportError.promise]) : settlement);
-      this.pumpSubscriptions();
-    } catch (error) {
-      const rejected = rejectedWaitError(batchId, error);
-      if (rejected) {
-        throw rejected;
+    for (;;) {
+      this.throwServerTransportErrorForTier(tier);
+      const observedServerWorkEpoch = this.serverTransportWorkEpoch;
+      this.pumpServerTransport();
+      this.throwServerTransportErrorForTier(tier);
+      const settlement = write.wait(tier);
+      const transportError = this.waitForServerTransportError(tier);
+      const transportWork = this.waitForServerTransportWork(tier, observedServerWorkEpoch);
+      try {
+        const wakes: Array<Promise<"settled" | "work"> | Promise<never>> = [
+          settlement.then(() => "settled" as const),
+        ];
+        if (transportError) wakes.push(transportError.promise);
+        if (transportWork) wakes.push(transportWork.promise.then(() => "work" as const));
+        if ((await Promise.race(wakes)) === "settled") {
+          this.pumpSubscriptions();
+          return;
+        }
+      } catch (error) {
+        const rejected = rejectedWaitError(batchId, error);
+        if (rejected) {
+          throw rejected;
+        }
+        throw error;
+      } finally {
+        transportError?.cancel();
+        transportWork?.cancel();
       }
-      throw error;
-    } finally {
-      transportError?.cancel();
     }
   }
 
