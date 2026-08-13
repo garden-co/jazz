@@ -3609,7 +3609,12 @@ mod tests {
                 .map(|(name, value_type)| (name.unwrap(), value_type)),
         );
         let record = BorrowedRecord::new(&payload.record, &descriptor);
-        record.get("count").unwrap().clone()
+        // Aggregate aliases are logical app names, but maintained-program
+        // payload descriptors use the dedicated physical aggregate namespace
+        // so they cannot collide with grouped source columns. Decode the
+        // protocol boundary instead of treating `count` as a record field.
+        let count_field = crate::node::query_engine::aggregate_output_field("count");
+        record.get(&count_field).unwrap().clone()
     }
 
     fn aggregate_cells(row: &crate::node::CurrentRow) -> BTreeMap<String, Value> {
