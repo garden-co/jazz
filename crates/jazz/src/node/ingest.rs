@@ -1,10 +1,11 @@
-//! Commit, fate, catalogue, and sync-message ingestion for a storage-backed
+//! Commit, fate, and sync-message ingestion for a storage-backed
 //! node. This module owns mutation paths that validate incoming transactions,
 //! apply authority fates, park/unpark causally blocked units, and write node
 //! state into groove; read-only global derivations live in [`super::global_state`],
 //! policy evaluation in [`super::policy`], and byte-level record construction in
 //! [`super::codec`]. It is the node layer's write side below the `Db` facade and
-//! protocol sync loop.
+//! protocol sync loop. Trusted catalogue snapshot activation lives in the
+//! sibling [`super::catalogue_ingest`] module.
 
 use super::*;
 use crate::merge_strategy::{MergeSide, MergeStrategyInput, materialize_strategy_output};
@@ -23,9 +24,9 @@ use crate::text_merge::{
 use crate::time::TxTimeSortKey;
 use groove::records::ValueType;
 
-const MAX_SCHEMA_LINEAGE_DECLARATIONS: usize = 4096;
-const MAX_SCHEMA_LINEAGE_NAME_BYTES: usize = 1024;
-const MAX_SCHEMA_LINEAGE_OPS: usize = 16_384;
+pub(super) const MAX_SCHEMA_LINEAGE_DECLARATIONS: usize = 4096;
+pub(super) const MAX_SCHEMA_LINEAGE_NAME_BYTES: usize = 1024;
+pub(super) const MAX_SCHEMA_LINEAGE_OPS: usize = 16_384;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct CommitUnitParkMode {
@@ -47,391 +48,10 @@ struct LargeValueMergeCell {
     strategy: RecordedMergeStrategy,
 }
 
-struct PlannedCatalogueSnapshot {
-    catalogue: SchemaCatalogue,
-    activated_lineages: Vec<StagedSchemaLineage>,
-}
-
-fn next_schema_version_alias_in_catalogue(
-    catalogue: &SchemaCatalogue,
-) -> Result<SchemaVersionAlias, Error> {
-    Ok(SchemaVersionAlias(
-        catalogue
-            .schema_version_aliases
-            .values()
-            .map(|alias| alias.0)
-            .max()
-            .unwrap_or(0)
-            .checked_add(1)
-            .ok_or(Error::InvalidStoredValue("schema version alias exhausted"))?,
-    ))
-}
-
 impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
-    pub(crate) fn apply_trusted_catalogue_snapshot(
-        &mut self,
-        snapshot: crate::protocol::CatalogueSnapshot,
-    ) -> Result<(), Error>
-    where
-        S: ReopenableStorage,
-    {
-        let plan = self.plan_trusted_catalogue_snapshot(snapshot)?;
-        let runtime_semantics_changed = self.catalogue.schema != plan.catalogue.schema
-            || self.catalogue.catalogue_schemas != plan.catalogue.catalogue_schemas
-            || self.catalogue.catalogue_lenses != plan.catalogue.catalogue_lenses
-            || self.catalogue.physical_mappings != plan.catalogue.physical_mappings
-            || self.catalogue.current_write_schema != plan.catalogue.current_write_schema;
-        let previous_catalogue = std::mem::replace(&mut self.catalogue, plan.catalogue.clone());
-        if self.synchronize_physical_version_tables().is_err() {
-            self.catalogue = previous_catalogue;
-            self.catalogue_activation_failed = true;
-            return Err(Error::CatalogueActivationFailed);
-        }
-
-        #[cfg(test)]
-        if self.catalogue_activation_failpoint
-            == Some(CatalogueActivationFailpoint::BeforeSnapshotActivationCommit)
-        {
-            self.catalogue_activation_failpoint = None;
-            self.catalogue = previous_catalogue;
-            self.catalogue_activation_failed = true;
-            return Err(Error::CatalogueActivationFailed);
-        }
-
-        let mut batch = self.database.open_batch();
-        for schema in plan.catalogue.catalogue_schemas.values() {
-            batch.update(
-                "jazz_catalogue",
-                vec![
-                    Value::Bytes(b"schema".to_vec()),
-                    Value::Uuid(schema.id.0),
-                    Value::Bytes(serde_json::to_vec(schema)?),
-                ],
-            );
-        }
-        for staged in &plan.activated_lineages {
-            Self::write_active_schema_lineage_to_batch(&mut batch, staged)?;
-        }
-        for (schema_version, mapping) in &plan.catalogue.physical_mappings {
-            let alias = plan.catalogue.schema_version_aliases[schema_version];
-            Self::write_schema_version_mapping_to_batch(
-                &mut batch,
-                alias,
-                *schema_version,
-                mapping,
-            )?;
-        }
-        if plan.catalogue.current_write_schema != previous_catalogue.current_write_schema {
-            batch.update(
-                "jazz_catalogue_pointer",
-                vec![
-                    Value::U64(plan.catalogue.current_write_schema.revision),
-                    Value::Uuid(plan.catalogue.current_write_schema.schema.0),
-                ],
-            );
-        }
-        if self.database.commit_batch(batch).is_err() {
-            self.catalogue = previous_catalogue;
-            self.catalogue_activation_failed = true;
-            return Err(Error::CatalogueActivationFailed);
-        }
-
-        self.catalogue.staged_lineages.clear();
-        self.catalogue.pending_lineages.clear();
-        self.catalogue.pending_write_pointers.clear();
-        self.catalogue.lens_path_cache.clear();
-        self.catalogue.compiled_lens_cache.clear();
-        self.query.version_storage_sources_cache.clear();
-        self.query.query_shape_cache.clear();
-        self.query.read_policy_authorization_request_cache.clear();
-        self.query.policy_authorization_graph_cache.clear();
-        if runtime_semantics_changed {
-            self.groove_runtime_token = next_groove_runtime_token();
-        }
-        self.drain_parked_commit_units()?;
-        self.drain_parked_relay_commit_units()?;
-        self.drain_parked_shape_registrations()?;
-        Ok(())
-    }
-
-    fn plan_trusted_catalogue_snapshot(
-        &self,
-        snapshot: crate::protocol::CatalogueSnapshot,
-    ) -> Result<PlannedCatalogueSnapshot, Error> {
-        if !self.catalogue.pending_lineages.is_empty()
-            || !self.catalogue.staged_lineages.is_empty()
-            || !self.catalogue.pending_write_pointers.is_empty()
-        {
-            return Err(Error::InvalidCatalogueUpdate(
-                "trusted catalogue snapshot conflicts with pending catalogue work",
-            ));
-        }
-
-        let mut schemas = BTreeMap::new();
-        for schema in snapshot.schemas {
-            if schema.id != schema.schema.version_id() {
-                return Err(Error::InvalidCatalogueUpdate(
-                    "trusted catalogue snapshot schema id mismatch",
-                ));
-            }
-            if schemas.insert(schema.id, schema).is_some() {
-                return Err(Error::InvalidCatalogueUpdate(
-                    "trusted catalogue snapshot repeats a schema id",
-                ));
-            }
-        }
-
-        let mut lineages = snapshot.lineages;
-        lineages.sort_by_key(|(catalogue_seq, _)| *catalogue_seq);
-        let lineage_targets = lineages
-            .iter()
-            .map(|(_, publication)| publication.schema.id)
-            .collect::<BTreeSet<_>>();
-        let local_schema_storage_anchor = self
-            .catalogue
-            .schema_version_aliases
-            .get(&self.catalogue.current_schema_version_id)
-            .copied()
-            .zip(
-                self.catalogue
-                    .physical_mappings
-                    .get(&self.catalogue.current_schema_version_id)
-                    .cloned(),
-            );
-
-        let mut planned = self.catalogue.clone();
-        let mut activated_lineages = Vec::new();
-        for schema in schemas.values() {
-            if lineage_targets.contains(&schema.id)
-                || planned.catalogue_schemas.contains_key(&schema.id)
-            {
-                continue;
-            }
-            let mapping = allocate_provisional_physical_mapping(
-                &schema.schema,
-                &mut planned.next_physical_table_id,
-                &mut planned.next_physical_column_id,
-            )?;
-            let alias = next_schema_version_alias_in_catalogue(&planned)?;
-            planned.catalogue_schemas.insert(schema.id, schema.clone());
-            planned.physical_mappings.insert(schema.id, mapping);
-            planned.schema_version_aliases.insert(schema.id, alias);
-        }
-
-        for (catalogue_seq, publication) in lineages {
-            self.validate_schema_lineage_publication_bounds(&publication)?;
-            if publication.id != publication.content_id()
-                || publication.schema.id != publication.schema.schema.version_id()
-                || publication.lens.id != publication.lens.content_id()
-                || publication.lens.target != publication.schema.id
-            {
-                return Err(Error::InvalidCatalogueUpdate(
-                    "trusted catalogue snapshot contains invalid lineage identity",
-                ));
-            }
-            if let Some(existing) = planned
-                .active_lineages_by_target
-                .get(&publication.schema.id)
-            {
-                if existing.catalogue_seq != catalogue_seq || existing.publication != publication {
-                    return Err(Error::InvalidCatalogueUpdate(
-                        "trusted catalogue snapshot lineage conflicts with catalogue",
-                    ));
-                }
-                continue;
-            }
-            if catalogue_seq != planned.active_catalogue_seq.saturating_add(1) {
-                return Err(Error::InvalidCatalogueUpdate(
-                    "trusted catalogue snapshot lineage sequence is not contiguous",
-                ));
-            }
-            let source = planned
-                .catalogue_schemas
-                .get(&publication.lens.source)
-                .ok_or(Error::InvalidCatalogueUpdate(
-                    "trusted catalogue snapshot lineage source is missing",
-                ))?;
-            self.validate_migration_lens_between(&publication.lens, source, &publication.schema)?;
-            self.validate_lineage_table_partition(
-                &source.schema,
-                &publication.schema.schema,
-                &publication.lens,
-                &publication.new_tables,
-                &publication.dropped_tables,
-            )?;
-            let fresh = allocate_provisional_physical_mapping(
-                &publication.schema.schema,
-                &mut planned.next_physical_table_id,
-                &mut planned.next_physical_column_id,
-            )?;
-            let mapping = Self::reconcile_physical_mapping_for_lens_payload_in_catalogue(
-                &planned,
-                &publication.lens,
-                &publication.schema,
-                &fresh,
-            )?;
-            let staged = StagedSchemaLineage {
-                catalogue_seq,
-                publication: publication.clone(),
-                alias: next_schema_version_alias_in_catalogue(&planned)?,
-                mapping,
-            };
-            planned
-                .catalogue_schemas
-                .insert(publication.schema.id, publication.schema.clone());
-            planned
-                .catalogue_lenses
-                .insert(publication.lens.id, publication.lens.clone());
-            planned
-                .schema_version_aliases
-                .insert(publication.schema.id, staged.alias);
-            planned
-                .physical_mappings
-                .insert(publication.schema.id, staged.mapping.clone());
-            planned
-                .active_lineages_by_target
-                .insert(publication.schema.id, staged.clone());
-            planned.active_catalogue_seq = catalogue_seq;
-            activated_lineages.push(staged);
-        }
-
-        // Schema identity deliberately excludes policy and physical-index
-        // declarations. Apply the sender's final payloads after lineage so
-        // agreeing same-id metadata updates use the ordinary trusted path.
-        for schema in schemas.into_values() {
-            if !planned.catalogue_schemas.contains_key(&schema.id) {
-                return Err(Error::InvalidCatalogueUpdate(
-                    "trusted catalogue snapshot schema has no lineage",
-                ));
-            }
-            planned.catalogue_schemas.insert(schema.id, schema);
-        }
-
-        // Schema aliases and physical ids are node-local. A client may have
-        // authored durable work under its opening schema before the authority
-        // snapshot arrives, so keep that schema's local storage identity and
-        // reconcile the received lineage around it rather than orphaning the
-        // pending rows by adopting a newly allocated alias/mapping.
-        if let Some((local_alias, local_mapping)) = local_schema_storage_anchor {
-            let anchor = planned.current_schema_version_id;
-            planned.schema_version_aliases.insert(anchor, local_alias);
-            planned.physical_mappings.insert(anchor, local_mapping);
-
-            let mut cursor = anchor;
-            let mut visited = BTreeSet::new();
-            while visited.insert(cursor) {
-                let Some(lineage) = planned.active_lineages_by_target.get(&cursor).cloned() else {
-                    break;
-                };
-                let source_schema = planned
-                    .catalogue_schemas
-                    .get(&lineage.publication.lens.source)
-                    .ok_or(Error::InvalidStoredValue(
-                        "snapshot source schema missing during local mapping reconciliation",
-                    ))?;
-                let target_schema = planned
-                    .catalogue_schemas
-                    .get(&lineage.publication.lens.target)
-                    .ok_or(Error::InvalidStoredValue(
-                        "snapshot target schema missing during local mapping reconciliation",
-                    ))?;
-                let provisional_source = planned
-                    .physical_mappings
-                    .get(&lineage.publication.lens.source)
-                    .ok_or(Error::InvalidStoredValue(
-                        "snapshot source mapping missing during local mapping reconciliation",
-                    ))?;
-                let target_mapping =
-                    planned
-                        .physical_mappings
-                        .get(&cursor)
-                        .ok_or(Error::InvalidStoredValue(
-                            "snapshot target mapping missing during local mapping reconciliation",
-                        ))?;
-                let source_mapping = Self::reconcile_source_physical_mapping_for_lens_payload(
-                    &lineage.publication.lens,
-                    source_schema,
-                    target_schema,
-                    provisional_source,
-                    target_mapping,
-                )?;
-                planned
-                    .physical_mappings
-                    .insert(lineage.publication.lens.source, source_mapping);
-                cursor = lineage.publication.lens.source;
-            }
-
-            let mut ordered_lineages = planned
-                .active_lineages_by_target
-                .values()
-                .cloned()
-                .collect::<Vec<_>>();
-            ordered_lineages.sort_by_key(|lineage| lineage.catalogue_seq);
-            for lineage in ordered_lineages {
-                let provisional_target = planned
-                    .physical_mappings
-                    .get(&lineage.publication.schema.id)
-                    .ok_or(Error::InvalidStoredValue(
-                        "snapshot target mapping missing during forward reconciliation",
-                    ))?
-                    .clone();
-                let mapping = Self::reconcile_physical_mapping_for_lens_payload_in_catalogue(
-                    &planned,
-                    &lineage.publication.lens,
-                    &lineage.publication.schema,
-                    &provisional_target,
-                )?;
-                planned
-                    .physical_mappings
-                    .insert(lineage.publication.schema.id, mapping);
-            }
-            for lineage in planned.active_lineages_by_target.values_mut() {
-                lineage.alias = planned.schema_version_aliases[&lineage.publication.schema.id];
-                lineage.mapping = planned.physical_mappings[&lineage.publication.schema.id].clone();
-            }
-            for lineage in &mut activated_lineages {
-                lineage.alias = planned.schema_version_aliases[&lineage.publication.schema.id];
-                lineage.mapping = planned.physical_mappings[&lineage.publication.schema.id].clone();
-            }
-        }
-
-        if snapshot.current_write_schema.revision < planned.current_write_schema.revision
-            || (snapshot.current_write_schema.revision == planned.current_write_schema.revision
-                && snapshot.current_write_schema != planned.current_write_schema)
-            || !planned
-                .catalogue_schemas
-                .contains_key(&snapshot.current_write_schema.schema)
-        {
-            return Err(Error::InvalidCatalogueUpdate(
-                "trusted catalogue snapshot conflicts at write-schema revision",
-            ));
-        }
-        planned.current_write_schema = snapshot.current_write_schema;
-        // `schema` is the active read-schema payload supplied when this node
-        // was opened. Its policy metadata is intentionally outside the
-        // structural schema id and may therefore be refreshed by a snapshot
-        // even while the current write pointer names another schema.
-        planned.schema = planned
-            .catalogue_schemas
-            .get(&planned.current_schema_version_id)
-            .ok_or(Error::InvalidCatalogueUpdate(
-                "trusted catalogue snapshot omits the active read schema",
-            ))?
-            .schema
-            .clone();
-        planned.current_schema_version_alias = planned
-            .schema_version_aliases
-            .get(&planned.current_schema_version_id)
-            .copied();
-        Ok(PlannedCatalogueSnapshot {
-            catalogue: planned,
-            activated_lineages,
-        })
-    }
-
     /// Apply bulk-lane content extent payloads and drain any parked units whose
     /// text-op refs are now locally readable.
     pub fn apply_content_extents(
@@ -1191,7 +811,7 @@ where
         self.validate_migration_lens_between(lens, source, target)
     }
 
-    fn validate_migration_lens_between(
+    pub(super) fn validate_migration_lens_between(
         &self,
         lens: &MigrationLens,
         source: &SchemaVersion,
@@ -1327,7 +947,7 @@ where
         Ok(())
     }
 
-    fn validate_lineage_table_partition(
+    pub(super) fn validate_lineage_table_partition(
         &self,
         source: &JazzSchema,
         target: &JazzSchema,
@@ -1377,7 +997,7 @@ where
         Ok(())
     }
 
-    fn validate_schema_lineage_publication_bounds(
+    pub(super) fn validate_schema_lineage_publication_bounds(
         &self,
         publication: &SchemaLineagePublication,
     ) -> Result<(), Error> {
