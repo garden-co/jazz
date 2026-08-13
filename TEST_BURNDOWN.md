@@ -76,10 +76,6 @@ A future fix must remove both the matching visible skip marker and this entry, t
 | `groove::db::tests::indexed_batch_commit_timing_receipt_20k_and_single_row`                      | `crates/groove/src/db/tests.rs`               | timing receipt             |
 | `jazz::node::tests::harness::policy_graph_perf_dropdown_entry_reset_ingest_timing_receipt`       | `crates/jazz/src/node/tests/sync.rs`          | timing receipt             |
 
-## Active TypeScript/browser quarantine (1)
+## Active TypeScript/browser quarantine (0)
 
-Measured on CI run `31669333671` at `30dc070e1`: 8 Node test failures and 2 Chromium failures. The two unrelated load flakes observed in the same run (the artifact-lock timing test and the Rust teardown abort) are deliberately not quarantined here.
-
-| Test                                                                                                                 | Definition                                                              | Status | Category               | Failure signature / theory                                                                                    | Owner  |
-| -------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- | ------ | ---------------------- | ------------------------------------------------------------------------------------------------------------- | ------ |
-| `chromium > raw websocket private read gate > converts a private chat invite code into normal membership visibility` | `packages/jazz-tools/tests/browser/db.private-read-gate.server.test.ts` | FAIL   | Browser private invite | `Bob should subscribe to private seed messages through normal membership` times out after 15s; `lastRows=[]`. | Anselm |
+None. The private-invite Chromium regression is active again and has a focused green receipt.

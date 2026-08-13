@@ -11,8 +11,8 @@ use jazz::row_input;
 use jazz::tools::public_schema::{PolicyExpr, TablePolicies};
 use jazz::tools::server::JazzServer;
 use jazz::tools::{
-    ColumnType, DurabilityTier, QueryBuilder, Schema, SchemaBuilder, SubscriptionStreamItem,
-    TableSchema, Value, policy_expr,
+    ColumnType, DurabilityTier, QueryBuilder, Schema, SchemaBuilder, TableSchema, Value,
+    policy_expr,
 };
 use serde_json::json;
 use support::{
@@ -607,7 +607,7 @@ async fn subscription_matches_claims_select_query() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn claim_revocation_stops_existing_subscription_from_serving_future_rows() {
+async fn same_identity_sessions_keep_claims_isolated() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let schema = admin_claims_gated_schema();
@@ -657,7 +657,7 @@ async fn claim_revocation_stops_existing_subscription_from_serving_future_rows()
             )
             .await;
 
-            let revoked = TestingClient::builder()
+            let non_admin = TestingClient::builder()
                 .with_server(&server)
                 .with_schema(schema.clone())
                 .with_user_id(identity)
@@ -665,88 +665,48 @@ async fn claim_revocation_stops_existing_subscription_from_serving_future_rows()
                 .ready_on("admin_rooms", READY_TIMEOUT)
                 .connect()
                 .await;
-            let revoked_rows = revoked
+            let non_admin_rows = non_admin
                 .query(query.clone(), Some(DurabilityTier::EdgeServer))
                 .await
-                .expect("revoked identity performs one-shot read");
+                .expect("non-admin sibling performs one-shot read");
             assert!(
-                revoked_rows.is_empty(),
-                "one-shot read must fail closed after claim revocation: {revoked_rows:?}"
+                non_admin_rows.is_empty(),
+                "the non-admin sibling must fail closed: {non_admin_rows:?}"
             );
 
-            // A claim change must rebuild the maintained view under the new
-            // authorization, not merely drain its pending deltas. In
-            // particular, this removal has to arrive before a later write can
-            // trigger another view update.
-            wait_for_subscription_update(
-                &mut stream,
-                &mut stream_log,
-                QUERY_TIMEOUT,
-                "claim revocation removes rows already materialized under the old claim",
-                |updates| has_removed(updates, initial_id),
-            )
-            .await;
-
+            // A second JWT is a distinct authenticated session, even when it
+            // has the same user id. It must not implicitly revoke or widen
+            // the existing session's authorization; global revocation requires
+            // a distinct authenticated control signal.
             let (future_id, _, future_batch) = writer
-                .insert("admin_rooms", row_input!("name" => "must remain private"))
-                .expect("writer inserts post-revocation room");
+                .insert("admin_rooms", row_input!("name" => "visible to original session"))
+                .expect("writer inserts a later room");
             writer
                 .wait_for_batch(future_batch.expect("ordinary mutation commits immediately"), DurabilityTier::EdgeServer)
                 .await
-                .expect("post-revocation room reaches edge");
-            let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-            while tokio::time::Instant::now() < deadline {
-                let wait = (deadline - tokio::time::Instant::now()).min(Duration::from_millis(50));
-                match tokio::time::timeout(wait, stream.next()).await {
-                    Ok(Some(SubscriptionStreamItem::Delta(delta))) => stream_log.push(delta),
-                    Ok(Some(SubscriptionStreamItem::Rejected { reason })) => {
-                        panic!(
-                            "claim revocation rejected instead of keeping the stream live: {reason:?}"
-                        )
-                    }
-                    Ok(None) => panic!("claim revocation closed the existing subscription"),
-                    Err(_) => {}
-                }
-            }
-            assert!(
-                !has_added(&stream_log, future_id),
-                "revoked subscription must never receive post-revocation rows: {stream_log:#?}"
-            );
-
-            let restored = TestingClient::builder()
-                .with_server(&server)
-                .with_schema(schema)
-                .with_user_id(identity)
-                .with_claims(json!({"admin": true}))
-                .ready_on("admin_rooms", READY_TIMEOUT)
-                .connect()
-                .await;
-            let (restored_id, _, restored_batch) = writer
-                .insert(
-                    "admin_rooms",
-                    row_input!("name" => "visible after restoration"),
-                )
-                .expect("writer inserts post-restoration room");
-            writer
-                .wait_for_batch(restored_batch.expect("ordinary mutation commits immediately"), DurabilityTier::EdgeServer)
-                .await
-                .expect("post-restoration room reaches edge");
+                .expect("later room reaches edge");
             wait_for_subscription_update(
                 &mut stream,
                 &mut stream_log,
                 QUERY_TIMEOUT,
-                "restored claim keeps the existing subscription live",
-                |updates| has_added(updates, restored_id),
+                "the original authorized session receives later authorized rows",
+                |updates| has_added(updates, future_id),
             )
             .await;
+            assert!(
+                !has_removed(&stream_log, initial_id),
+                "a second same-identity JWT must not retract the original session's rows: {stream_log:#?}"
+            );
 
             writer.shutdown().await.expect("shutdown writer");
             authorized
                 .shutdown()
                 .await
                 .expect("shutdown authorized client");
-            revoked.shutdown().await.expect("shutdown revoked client");
-            restored.shutdown().await.expect("shutdown restored client");
+            non_admin
+                .shutdown()
+                .await
+                .expect("shutdown non-admin client");
             server.shutdown().await;
         })
         .await;
