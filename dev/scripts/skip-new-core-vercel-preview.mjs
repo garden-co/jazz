@@ -1,7 +1,6 @@
 import { pathToFileURL } from "node:url";
 
 const NEW_CORE_BASE_REF = "codex/jazz-core-engine-swap";
-const TOKEN_ENV = "VERCEL_GITHUB_READ_TOKEN";
 const GITHUB_LOOKUP_TIMEOUT_MS = 5_000;
 
 function isNonEmptyString(value) {
@@ -33,14 +32,7 @@ export async function shouldSkipNewCorePreview({
   createAbortSignal = (timeoutMs) => AbortSignal.timeout(timeoutMs),
 } = {}) {
   const url = pullRequestUrl(env);
-  const token = env[TOKEN_ENV];
-
-  if (
-    env.VERCEL_ENV !== "preview" ||
-    !url ||
-    !isNonEmptyString(token) ||
-    typeof fetchImpl !== "function"
-  ) {
+  if (env.VERCEL_ENV !== "preview" || !url || typeof fetchImpl !== "function") {
     return false;
   }
 
@@ -50,7 +42,6 @@ export async function shouldSkipNewCorePreview({
       signal,
       headers: {
         Accept: "application/vnd.github+json",
-        Authorization: `Bearer ${token}`,
         "X-GitHub-Api-Version": "2022-11-28",
       },
     });
