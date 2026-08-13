@@ -1369,23 +1369,14 @@ where
         request: &SourceRequest,
         table: &TableSchema,
     ) -> BTreeSet<String> {
-        // The public query may select a subset of columns, but a maintained
-        // version witness feeds `VersionRecord` serialization. A row version
-        // is a complete replicated commit unit, so its source must retain all
-        // logical user columns before the terminal applies app projection
-        // (INV-DATA-18 and INV-SYNC-16). Policy and relation facts have their
-        // own typed terminals; they never express omitted VersionRecord cells.
-        if request
-            .requirements
-            .metadata
-            .contains(&SourceMetadataRequirement::VersionWitnesses)
-        {
-            return table
-                .columns
-                .iter()
-                .map(|column| column.name.clone())
-                .collect();
-        }
+        // A maintained version witness identifies the immutable stored version
+        // and is normalized back to that canonical history record before it is
+        // serialized. It therefore must not widen this *current-query* source
+        // to every user column: doing so turns an otherwise unselected enum
+        // case into a source-level incompatibility and drops the whole row.
+        // The app/query requirement remains the compatibility boundary here;
+        // `canonical_history_version_for_maintained_witness` supplies the
+        // complete authored record at the wire boundary.
         match &request.requirements.app_fields {
             // `All` still goes through the query-local boundary. The durable
             // all-fields projection predates compatibility-sensitive reads and
