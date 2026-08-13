@@ -103,42 +103,6 @@ impl From<CoreOpenDbIdentity> for CoreDbIdentity {
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
-struct CoreRowBatch<'a> {
-    table: &'a str,
-    descriptor: RecordDescriptor,
-    rows: Vec<CoreRow<'a>>,
-}
-
-#[derive(Clone, Debug, serde::Serialize)]
-struct CoreRow<'a> {
-    row_id: CoreRowUuid,
-    deleted: bool,
-    raw: &'a [u8],
-}
-
-#[derive(Clone, Debug, serde::Serialize)]
-struct CoreRelationSnapshot<'a> {
-    root_count: u64,
-    rows: Vec<CoreRowBatch<'a>>,
-}
-
-#[derive(Clone, Debug, serde::Serialize)]
-struct CoreSubscriptionDelta<'a> {
-    added: Vec<CoreRowBatch<'a>>,
-    updated: Vec<CoreRowBatch<'a>>,
-    removed: Vec<CoreRemovedRow>,
-    added_occurrence_keys: Vec<jazz::tools::ResultKey>,
-    updated_occurrence_keys: Vec<jazz::tools::ResultKey>,
-    removed_occurrence_keys: Vec<jazz::tools::ResultKey>,
-}
-
-#[derive(Clone, Debug, serde::Serialize)]
-struct CoreRemovedRow {
-    table: String,
-    row_id: CoreRowUuid,
-}
-
-#[derive(Clone, Debug, serde::Serialize)]
 struct WriteResult {
     row_id: CoreRowUuid,
     tx_id: TxId,
@@ -2439,16 +2403,13 @@ fn optional_json_bool_prop(value: &JsonValue, name: &str) -> napi::Result<Option
 fn encode_core_rows(
     rows: &[jazz::node::CurrentRow],
 ) -> std::result::Result<Vec<u8>, postcard::Error> {
-    postcard::to_allocvec(&core_row_batches(rows))
+    jazz::binding_codec::encode_rows(rows)
 }
 
 fn encode_core_relation_snapshot(
     snapshot: &jazz::node::RelationSnapshot,
 ) -> std::result::Result<Vec<u8>, postcard::Error> {
-    postcard::to_allocvec(&CoreRelationSnapshot {
-        root_count: snapshot.root_count as u64,
-        rows: core_row_batches(&snapshot.rows),
-    })
+    jazz::binding_codec::encode_relation_snapshot(snapshot)
 }
 
 fn encode_core_subscription_delta<'a>(
@@ -2456,60 +2417,7 @@ fn encode_core_subscription_delta<'a>(
     updated: &'a [jazz::db::SubscriptionOutputRow],
     removed: &[jazz::db::RemovedRow],
 ) -> std::result::Result<Vec<u8>, postcard::Error> {
-    let added_rows = added.iter().map(|row| row.row.clone()).collect::<Vec<_>>();
-    let updated_rows = updated
-        .iter()
-        .map(|row| row.row.clone())
-        .collect::<Vec<_>>();
-    postcard::to_allocvec(&CoreSubscriptionDelta {
-        added: core_row_batches(&added_rows),
-        updated: core_row_batches(&updated_rows),
-        removed: removed
-            .iter()
-            .map(|row| CoreRemovedRow {
-                table: row.table.clone(),
-                row_id: row.row_uuid,
-            })
-            .collect(),
-        added_occurrence_keys: added
-            .iter()
-            .map(|row| jazz::tools::ResultKey::from_occurrence(row.occurrence_id.clone()))
-            .collect(),
-        updated_occurrence_keys: updated
-            .iter()
-            .map(|row| jazz::tools::ResultKey::from_occurrence(row.occurrence_id.clone()))
-            .collect(),
-        removed_occurrence_keys: removed
-            .iter()
-            .map(|row| jazz::tools::ResultKey::from_occurrence(row.occurrence_id.clone()))
-            .collect(),
-    })
-}
-
-fn core_row_batches(rows: &[jazz::node::CurrentRow]) -> Vec<CoreRowBatch<'_>> {
-    let mut batches: Vec<CoreRowBatch<'_>> = Vec::new();
-    for row in rows {
-        let (descriptor, raw) = row.encoded_record();
-        match batches.last_mut() {
-            Some(batch) if batch.table == row.table() && batch.descriptor == *descriptor => {
-                batch.rows.push(core_row(row, raw));
-            }
-            _ => batches.push(CoreRowBatch {
-                table: row.table(),
-                descriptor: *descriptor,
-                rows: vec![core_row(row, raw)],
-            }),
-        }
-    }
-    batches
-}
-
-fn core_row<'a>(row: &jazz::node::CurrentRow, raw: &'a [u8]) -> CoreRow<'a> {
-    CoreRow {
-        row_id: row.row_uuid(),
-        deleted: row.is_deleted(),
-        raw,
-    }
+    jazz::binding_codec::encode_subscription_delta(added, updated, removed)
 }
 
 fn core_subscription_event_to_napi(
