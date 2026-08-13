@@ -21,21 +21,24 @@ use crate::ivm::{
     TickMetrics, plan_prepared_shape, plan_query,
 };
 use crate::queries::Query;
-use crate::records::{self, BorrowedRecord, OwnedRecord, Record, RecordDescriptor, Value};
+use crate::records::{
+    self, BorrowedRecord, OwnedRecord, Record, RecordDescriptor, Value, VersionedRecord,
+    encode_versioned_record, split_versioned_record,
+};
 use crate::schema::{
     ColumnType, DatabaseSchema, DirectRecordStoreSchema, IndexSchema, IntegerKeyType, PrimaryKey,
-    PrimaryKeyColumn, PrimaryKeyType, TableSchema,
+    PrimaryKeyColumn, PrimaryKeyType, TableSchema, TableSchemaVersion,
 };
 use crate::storage::{
     LayoutStorage, OrderedKvStorage, OwnedWriteOperation, RecordStore, StagedWriteOverlay,
-    StagedWriteState, StorageLayout, WindowConsolidation, WriteOperation,
-    is_windowed_history_table,
+    StagedWriteState, StorageLayout, WriteOperation,
 };
 use thiserror::Error;
 
 pub use crate::ivm::{
     CollectByField, GraphBuilder, IvmRuntimeError, MultisinkDeltas, MultisinkSubscription,
-    PredicateExpr, PreparedShapeId, RoutedMultisinkTerminal, Subscription, SubscriptionId,
+    PredicateExpr, PreparedShapeId, ProjectField, RoutedMultisinkTerminal, Subscription,
+    SubscriptionId,
 };
 
 /// Schema-aware database facade over storage and IVM subscriptions.
@@ -46,7 +49,6 @@ pub struct Database<S> {
     last_commit_metrics: Option<CommitMetrics>,
     last_tick_metrics: Option<TickMetrics>,
     storage_read_metrics: RefCell<StorageReadMetrics>,
-    converged_history_window_stores: RefCell<HashSet<String>>,
     poisoned: bool,
 }
 
@@ -58,6 +60,59 @@ fn validate_durable_key_schema(schema: &DatabaseSchema) -> Result<(), Error> {
             .any(|(_, value_type)| value_type.contains_record())
         {
             return Err(Error::InvalidDirectRecordStoreKey(store.name.clone()));
+        }
+    }
+    for table in &schema.tables {
+        validate_table_schema_variants(table)?;
+    }
+    Ok(())
+}
+
+fn validate_table_schema_variants(table: &TableSchema) -> Result<(), Error> {
+    if !table.has_schema_variants() {
+        return Ok(());
+    }
+    if !table.foreign_keys.is_empty() {
+        return Err(Error::UnsupportedSchemaVariantTableFeature(
+            table.name.clone(),
+        ));
+    }
+
+    let primary_key = table
+        .primary_key
+        .as_ref()
+        .ok_or_else(|| Error::MissingPrimaryKey(table.name.clone()))?;
+    let mut versions = HashSet::new();
+    for schema_version in &table.schema_versions {
+        if schema_version.version == 0 {
+            return Err(Error::ReservedTableSchemaVersion(table.name.clone()));
+        }
+        if !versions.insert(schema_version.version) {
+            return Err(Error::DuplicateTableSchemaVersion {
+                table: table.name.clone(),
+                version: schema_version.version,
+            });
+        }
+        let mut fields = HashSet::new();
+        for field in &schema_version.fields {
+            if !fields.insert(field.as_str())
+                || !table.columns.iter().any(|column| column.name == *field)
+            {
+                return Err(Error::InvalidTableSchemaVersionField {
+                    table: table.name.clone(),
+                    version: schema_version.version,
+                    field: field.clone(),
+                });
+            }
+        }
+        for column in &primary_key.columns {
+            if !fields.contains(column.column.as_str()) {
+                return Err(Error::SchemaVersionMissingPrimaryKey {
+                    table: table.name.clone(),
+                    version: schema_version.version,
+                    column: column.column.clone(),
+                });
+            }
         }
     }
     Ok(())
@@ -115,7 +170,6 @@ where
             last_commit_metrics: None,
             last_tick_metrics: None,
             storage_read_metrics: RefCell::new(StorageReadMetrics::default()),
-            converged_history_window_stores: RefCell::new(HashSet::new()),
             poisoned: false,
         })
     }
@@ -147,6 +201,198 @@ where
 
     pub fn set_auto_direct_family_enabled(&mut self, enabled: bool) {
         self.ivm_runtime.set_auto_direct_family_enabled(enabled);
+    }
+
+    /// Return the live schema for a table.
+    pub fn table_schema(&self, table: &str) -> Result<&TableSchema, Error> {
+        self.table(table)
+    }
+
+    /// Append a new table to the live runtime schema.
+    ///
+    /// The backing storage layout must already be able to route the table's
+    /// logical family (for example through a shared class family).
+    pub fn register_table(&mut self, table: TableSchema) -> Result<(), Error> {
+        self.ensure_not_poisoned()?;
+        if self.ivm_runtime.table(&table.name).is_some() {
+            return Err(Error::TableAlreadyExists(table.name));
+        }
+        let mut updated = self.ivm_runtime.schema().clone();
+        updated.tables.push(table.clone());
+        validate_durable_key_schema(&updated)?;
+        self.ivm_runtime
+            .register_table(table)
+            .map_err(Error::IvmRuntime)
+    }
+
+    /// Append one row layout to an already schema-variant table.
+    ///
+    /// Registration is process-local schema metadata. Callers must restore all
+    /// durable variants before opening reads after restart, and must register
+    /// every required projection case before writing the first row of a newly
+    /// registered version.
+    pub fn register_table_schema_version(
+        &mut self,
+        table: &str,
+        schema_version: TableSchemaVersion,
+    ) -> Result<(), Error> {
+        self.register_table_schema_version_with_columns(table, [], schema_version)
+    }
+
+    /// Append stable catalogue fields and one row layout to a live variant table.
+    ///
+    /// Existing fields and layouts remain immutable. This is the live-schema
+    /// path for stores whose variant registry grows before the first row of a
+    /// newly registered version is written.
+    pub fn register_table_schema_version_with_columns(
+        &mut self,
+        table: &str,
+        columns: impl IntoIterator<Item = crate::schema::ColumnSchema>,
+        schema_version: TableSchemaVersion,
+    ) -> Result<(), Error> {
+        self.ensure_not_poisoned()?;
+        let mut updated = self.table(table)?.clone();
+        if !updated.has_schema_variants() {
+            return Err(Error::CannotPromoteLiveTableToSchemaVariants(
+                table.to_owned(),
+            ));
+        }
+        let mut added_columns = Vec::new();
+        for column in columns {
+            match updated
+                .columns
+                .iter()
+                .find(|existing| existing.name == column.name)
+            {
+                Some(existing) if existing == &column => {}
+                Some(_) => {
+                    return Err(Error::TableFieldDefinitionMismatch {
+                        table: table.to_owned(),
+                        field: column.name,
+                    });
+                }
+                None => {
+                    updated.columns.push(column.clone());
+                    added_columns.push(column);
+                }
+            }
+        }
+        updated.schema_versions.push(schema_version.clone());
+        validate_table_schema_variants(&updated)?;
+        self.ivm_runtime
+            .register_table_schema_version_with_columns(table, added_columns, schema_version)
+            .map_err(Error::IvmRuntime)
+    }
+
+    /// Append and backfill one durable secondary index on a live table.
+    ///
+    /// Existing rows are indexed before this method returns. Schema-variant
+    /// tables use their registered layouts: variants missing any indexed field
+    /// are ignored, while later variants automatically register their own case.
+    /// Re-registering the same definition is idempotent; changing an existing
+    /// index definition is rejected. The storage supplied when opening the
+    /// database must already provide the shared `indices` column family.
+    pub fn register_table_index(&mut self, table: &str, index: IndexSchema) -> Result<(), Error> {
+        self.ensure_not_poisoned()?;
+        let existing = self.table(table)?.clone();
+        if let Some(registered) = existing
+            .indices
+            .iter()
+            .find(|registered| registered.name == index.name)
+        {
+            return if registered == &index {
+                Ok(())
+            } else {
+                Err(Error::TableIndexDefinitionMismatch {
+                    table: table.to_owned(),
+                    index: index.name,
+                })
+            };
+        }
+        for column in &index.columns {
+            if existing
+                .columns
+                .iter()
+                .all(|candidate| candidate.name != *column)
+            {
+                return Err(Error::TableIndexFieldNotFound {
+                    table: table.to_owned(),
+                    index: index.name,
+                    field: column.clone(),
+                });
+            }
+        }
+        if let Err(error) = self
+            .ivm_runtime
+            .register_table_index(table, index, &self.storage)
+        {
+            self.poisoned = true;
+            return Err(Error::IvmRuntime(error));
+        }
+        Ok(())
+    }
+
+    /// Define one fixed-output projection family for a heterogeneous table.
+    ///
+    /// The family identity and output descriptor are immutable. Source-version
+    /// cases may be appended later without replacing active graph nodes.
+    pub fn define_variant_projection(
+        &mut self,
+        table: &str,
+        target: &str,
+        output: RecordDescriptor,
+    ) -> Result<(), Error> {
+        self.ensure_not_poisoned()?;
+        self.ivm_runtime
+            .define_variant_projection(table, target, output)
+            .map_err(Error::IvmRuntime)
+    }
+
+    /// Append one source-version case to a fixed-output variant projection.
+    pub fn register_variant_projection_case(
+        &mut self,
+        table: &str,
+        target: &str,
+        schema_version: u64,
+        fields: impl IntoIterator<Item = ProjectField>,
+    ) -> Result<(), Error> {
+        self.ensure_not_poisoned()?;
+        let fields = fields.into_iter().collect::<Vec<_>>();
+        self.ivm_runtime
+            .register_variant_projection_case(table, target, schema_version, &fields)
+            .map_err(Error::IvmRuntime)
+    }
+
+    /// Mark one source version as intentionally absent from a fixed-output
+    /// projection.
+    ///
+    /// An `Ignore` case emits no rows. This remains distinct from an
+    /// unregistered case, which is an error when that source version is read or
+    /// written.
+    pub fn register_variant_projection_ignore_case(
+        &mut self,
+        table: &str,
+        target: &str,
+        schema_version: u64,
+    ) -> Result<(), Error> {
+        self.ensure_not_poisoned()?;
+        self.ivm_runtime
+            .register_variant_projection_ignore_case(table, target, schema_version)
+            .map_err(Error::IvmRuntime)
+    }
+
+    /// Apply one registered fixed-output projection to an already decoded
+    /// heterogeneous row. `Ignore` returns `None`.
+    pub fn project_variant_record(
+        &self,
+        table: &str,
+        target: &str,
+        record: &VersionedRecord,
+    ) -> Result<Option<OwnedRecord>, Error> {
+        self.ensure_not_poisoned()?;
+        self.ivm_runtime
+            .project_variant_record(table, target, record)
+            .map_err(Error::IvmRuntime)
     }
 
     /// Include arrangement and recursive-state size walks in future tick metrics.
@@ -543,7 +789,7 @@ where
     /// # ]).with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
     /// #   .with_index(IndexSchema::new("albums_by_year", ["year"]))]);
     /// # let mut database = Database::new(schema, MemoryStorage::new(&["albums", "indices"]))?;
-    /// let binding_descriptor = RecordDescriptor::new([("year", ColumnType::U64.value_type())]);
+    /// let binding_descriptor = RecordDescriptor::new([("year", ColumnType::U64.clone())]);
     /// let shape = database.prepare_one_sink(
     ///     GraphBuilder::join(
     ///         GraphBuilder::binding_source("year_params", binding_descriptor),
@@ -705,7 +951,7 @@ where
         table: &str,
         index_name: &str,
         key: &[Value],
-    ) -> Result<Vec<Record<'_>>, Error> {
+    ) -> Result<Vec<VersionedRecord>, Error> {
         let index = self.index(table, index_name)?;
         if key.len() != index.columns.len() {
             return Err(Error::IndexKeyArity {
@@ -750,7 +996,7 @@ where
         table: &str,
         index_name: &str,
         prefix: &[Value],
-    ) -> Result<Vec<Record<'_>>, Error> {
+    ) -> Result<Vec<VersionedRecord>, Error> {
         let index = self.index(table, index_name)?;
         if prefix.len() > index.columns.len() {
             return Err(Error::IndexKeyArity {
@@ -810,7 +1056,7 @@ where
         index_name: &str,
         start: &[Value],
         end: &[Value],
-    ) -> Result<Vec<Record<'_>>, Error> {
+    ) -> Result<Vec<VersionedRecord>, Error> {
         let index = self.index(table, index_name)?;
         if start.len() > index.columns.len() {
             return Err(Error::IndexKeyArity {
@@ -835,15 +1081,12 @@ where
         table: &str,
         index_name: &str,
         raw_entries: Vec<EncodedKeyValue<'_>>,
-    ) -> Result<Vec<Record<'_>>, Error> {
-        let descriptor = self
-            .ivm_runtime
-            .table_descriptor(table)
-            .ok_or_else(|| Error::TableNotFound(table.to_owned()))?;
+    ) -> Result<Vec<VersionedRecord>, Error> {
+        self.table(table)?;
         let _ = index_name;
         Ok(raw_entries
             .into_iter()
-            .map(|entry| descriptor.bind_owned(entry.into_parts().1))
+            .map(|entry| entry.into_versioned_parts().1)
             .collect())
     }
 
@@ -856,28 +1099,24 @@ where
         &self,
         table: &str,
         prefix: &[Value],
-    ) -> Result<Vec<Record<'_>>, Error> {
+    ) -> Result<Vec<VersionedRecord>, Error> {
         let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
         self.primary_key_scan_with_storage(&storage, table, prefix)
     }
 
-    fn primary_key_scan_with_storage<'a, T>(
-        &'a self,
+    fn primary_key_scan_with_storage<T>(
+        &self,
         storage: &T,
         table: &str,
         prefix: &[Value],
-    ) -> Result<Vec<Record<'a>>, Error>
+    ) -> Result<Vec<VersionedRecord>, Error>
     where
         T: OrderedKvStorage,
     {
         let raw = self.primary_key_scan_raw_with_storage(storage, table, prefix)?;
-        let descriptor = self
-            .ivm_runtime
-            .table_descriptor(table)
-            .ok_or_else(|| Error::TableNotFound(table.to_owned()))?;
         Ok(raw
             .into_iter()
-            .map(|entry| descriptor.bind_owned(entry.into_parts().1))
+            .map(|entry| entry.into_versioned_parts().1)
             .collect())
     }
 
@@ -923,6 +1162,17 @@ where
         self.primary_key_get_raw_with_storage(&storage, table, key)
     }
 
+    /// Return one schema-bound record by its complete primary key.
+    pub fn primary_key_get(
+        &self,
+        table: &str,
+        key: &[Value],
+    ) -> Result<Option<VersionedRecord>, Error> {
+        Ok(self
+            .primary_key_get_raw(table, key)?
+            .map(|entry| entry.into_versioned_parts().1))
+    }
+
     /// Return one encoded primary-key record while also observing writes
     /// already staged in `batch`.
     pub fn primary_key_get_raw_in_batch(
@@ -944,10 +1194,7 @@ where
                 actual: key.len(),
             });
         }
-        let descriptor = self
-            .ivm_runtime
-            .table_descriptor(table)
-            .ok_or_else(|| Error::TableNotFound(table.to_owned()))?;
+        let descriptor = table_schema.record_schema();
         let mut encoded_key = Vec::new();
         for (value, column) in key.iter().zip(&primary_key.columns) {
             ensure_primary_key_value_type(table_schema, column, value)?;
@@ -960,19 +1207,21 @@ where
         if !staged_contains_key {
             let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
             let key_descriptor = primary_key_descriptor(primary_key);
-            let store = record_store_for_table(&storage, table, Some(key_descriptor), descriptor);
-            return Ok(store
+            let store = record_store_for_table(&storage, table, Some(key_descriptor), &descriptor);
+            return store
                 .get_raw(&encoded_key)?
-                .map(|value| EncodedKeyValue::new(encoded_key, value, descriptor)));
+                .map(|value| decode_stored_key_value(table_schema, encoded_key, value))
+                .transpose();
         }
 
         let overlay = StagedWriteOverlay::new(&self.storage, &batch.txn_operations);
         let storage = MeteredStorage::new(&overlay, &self.storage_read_metrics);
         let key_descriptor = primary_key_descriptor(primary_key);
-        let store = record_store_for_table(&storage, table, Some(key_descriptor), descriptor);
-        Ok(store
+        let store = record_store_for_table(&storage, table, Some(key_descriptor), &descriptor);
+        store
             .get_raw(&encoded_key)?
-            .map(|value| EncodedKeyValue::new(encoded_key, value, descriptor)))
+            .map(|value| decode_stored_key_value(table_schema, encoded_key, value))
+            .transpose()
     }
 
     fn primary_key_get_raw_with_storage<'a, T>(
@@ -996,20 +1245,18 @@ where
                 actual: key.len(),
             });
         }
-        let descriptor = self
-            .ivm_runtime
-            .table_descriptor(table)
-            .ok_or_else(|| Error::TableNotFound(table.to_owned()))?;
+        let descriptor = table_schema.record_schema();
         let mut encoded_key = Vec::new();
         for (value, column) in key.iter().zip(&primary_key.columns) {
             ensure_primary_key_value_type(table_schema, column, value)?;
             encode_primary_key_part(&mut encoded_key, value)?;
         }
         let key_descriptor = primary_key_descriptor(primary_key);
-        let store = record_store_for_table(storage, table, Some(key_descriptor), descriptor);
-        Ok(store
+        let store = record_store_for_table(storage, table, Some(key_descriptor), &descriptor);
+        store
             .get_raw(&encoded_key)?
-            .map(|value| EncodedKeyValue::new(encoded_key, value, descriptor)))
+            .map(|value| decode_stored_key_value(table_schema, encoded_key, value))
+            .transpose()
     }
 
     fn primary_key_scan_raw_with_storage<'a, T>(
@@ -1033,22 +1280,19 @@ where
                 actual: prefix.len(),
             });
         }
-        let descriptor = self
-            .ivm_runtime
-            .table_descriptor(table)
-            .ok_or_else(|| Error::TableNotFound(table.to_owned()))?;
+        let descriptor = table_schema.record_schema();
         let mut key_prefix = Vec::new();
         for (value, column) in prefix.iter().zip(&primary_key.columns) {
             ensure_primary_key_value_type(table_schema, column, value)?;
             encode_primary_key_part(&mut key_prefix, value)?;
         }
         let key_descriptor = primary_key_descriptor(primary_key);
-        let store = record_store_for_table(storage, table, Some(key_descriptor), descriptor);
-        Ok(store
+        let store = record_store_for_table(storage, table, Some(key_descriptor), &descriptor);
+        store
             .prefix(&key_prefix)?
             .into_iter()
-            .map(|(key, value)| EncodedKeyValue::new(key, value, descriptor))
-            .collect())
+            .map(|(key, value)| decode_stored_key_value(table_schema, key, value))
+            .collect()
     }
 
     fn primary_key_last_raw_with_storage<'a, T>(
@@ -1072,20 +1316,18 @@ where
                 actual: prefix.len(),
             });
         }
-        let descriptor = self
-            .ivm_runtime
-            .table_descriptor(table)
-            .ok_or_else(|| Error::TableNotFound(table.to_owned()))?;
+        let descriptor = table_schema.record_schema();
         let mut key_prefix = Vec::new();
         for (value, column) in prefix.iter().zip(&primary_key.columns) {
             ensure_primary_key_value_type(table_schema, column, value)?;
             encode_primary_key_part(&mut key_prefix, value)?;
         }
         let key_descriptor = primary_key_descriptor(primary_key);
-        let store = record_store_for_table(storage, table, Some(key_descriptor), descriptor);
-        Ok(store
+        let store = record_store_for_table(storage, table, Some(key_descriptor), &descriptor);
+        store
             .last_with_prefix(&key_prefix)?
-            .map(|(key, value)| EncodedKeyValue::new(key, value, descriptor)))
+            .map(|(key, value)| decode_stored_key_value(table_schema, key, value))
+            .transpose()
     }
 
     /// Return encoded records for an explicit primary-key logical range.
@@ -1117,10 +1359,7 @@ where
                 actual: end.len(),
             });
         }
-        let descriptor = self
-            .ivm_runtime
-            .table_descriptor(table)
-            .ok_or_else(|| Error::TableNotFound(table.to_owned()))?;
+        let descriptor = table_schema.record_schema();
         let mut start_key = Vec::new();
         for (value, column) in start.iter().zip(&primary_key.columns) {
             ensure_primary_key_value_type(table_schema, column, value)?;
@@ -1133,12 +1372,12 @@ where
         }
         let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
         let key_descriptor = primary_key_descriptor(primary_key);
-        let store = record_store_for_table(&storage, table, Some(key_descriptor), descriptor);
-        Ok(store
+        let store = record_store_for_table(&storage, table, Some(key_descriptor), &descriptor);
+        store
             .range(&start_key, &end_key)?
             .into_iter()
-            .map(|(key, value)| EncodedKeyValue::new(key, value, descriptor))
-            .collect())
+            .map(|(key, value)| decode_stored_key_value(table_schema, key, value))
+            .collect()
     }
 
     /// Return the last encoded record whose primary key starts with the
@@ -1200,10 +1439,7 @@ where
                 actual: upper.len(),
             });
         }
-        let descriptor = self
-            .ivm_runtime
-            .table_descriptor(table)
-            .ok_or_else(|| Error::TableNotFound(table.to_owned()))?;
+        let descriptor = table_schema.record_schema();
         let mut key_prefix = Vec::new();
         for (value, column) in prefix.iter().zip(&primary_key.columns) {
             ensure_primary_key_value_type(table_schema, column, value)?;
@@ -1219,162 +1455,11 @@ where
         }
         let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
         let key_descriptor = primary_key_descriptor(primary_key);
-        let store = record_store_for_table(&storage, table, Some(key_descriptor), descriptor);
-        Ok(store
+        let store = record_store_for_table(&storage, table, Some(key_descriptor), &descriptor);
+        store
             .last_with_prefix_before_or_at(&key_prefix, &upper_key)?
-            .map(|(key, value)| EncodedKeyValue::new(key, value, descriptor)))
-    }
-
-    /// Consolidate plain records for an opted-in physical record store into
-    /// bounded codec windows.
-    ///
-    /// This is deliberately explicit for now: hot writes still land as plain
-    /// records, and future flush/checkpoint plumbing can call this at a safe
-    /// consolidation boundary.
-    pub fn consolidate_table_windows(
-        &self,
-        table: &str,
-        max_records: usize,
-    ) -> Result<WindowConsolidation, Error> {
-        let table_schema = self.table(table)?;
-        let Some(primary_key) = table_schema.primary_key.as_ref() else {
-            return Err(Error::MissingPrimaryKey(table.to_owned()));
-        };
-        let descriptor = self
-            .ivm_runtime
-            .table_descriptor(table)
-            .ok_or_else(|| Error::TableNotFound(table.to_owned()))?;
-        let key_descriptor = primary_key_descriptor(primary_key);
-        let store = record_store_for_table(&self.storage, table, Some(key_descriptor), descriptor);
-        store.consolidate_windows(max_records).map_err(Error::from)
-    }
-
-    /// Consolidate at most `max_windows` codec windows across opted-in history
-    /// tables in this schema.
-    ///
-    /// This is intended for caller-owned post-tick maintenance: the write path
-    /// remains plain-record first, and this bounded pass rewrites old runs in
-    /// atomic storage batches between runtime ticks.
-    pub fn consolidate_history_windows(
-        &self,
-        max_records_per_window: usize,
-        max_windows: usize,
-    ) -> Result<WindowConsolidation, Error> {
-        let mut remaining_windows = max_windows;
-        let mut total = WindowConsolidation::default();
-        if max_records_per_window == 0 || max_windows == 0 {
-            return Ok(total);
-        }
-        if self.all_history_window_stores_converged() {
-            return Ok(total);
-        }
-        for table in &self.ivm_runtime.schema().tables {
-            if remaining_windows == 0 {
-                break;
-            }
-            if !is_windowed_history_table(&table.name) {
-                continue;
-            }
-            if self.history_window_store_converged(&table.name) {
-                continue;
-            }
-            let Some(primary_key) = table.primary_key.as_ref() else {
-                continue;
-            };
-            let Some(descriptor) = self.ivm_runtime.table_descriptor(&table.name) else {
-                continue;
-            };
-            let key_descriptor = primary_key_descriptor(primary_key);
-            let store = record_store_for_table(
-                &self.storage,
-                &table.name,
-                Some(key_descriptor),
-                descriptor,
-            );
-            let next = store
-                .consolidate_full_windows_bounded(max_records_per_window, remaining_windows)
-                .map_err(Error::from)?;
-            if next.windows == 0 {
-                self.mark_history_window_store_converged(&table.name);
-            }
-            remaining_windows = remaining_windows.saturating_sub(next.windows);
-            total.windows += next.windows;
-            total.records += next.records;
-        }
-        for store in &self.ivm_runtime.schema().direct_record_stores {
-            if remaining_windows == 0 {
-                break;
-            }
-            if !is_windowed_history_table(&store.name) {
-                continue;
-            }
-            if self.history_window_store_converged(&store.name) {
-                continue;
-            }
-            let key_descriptor = RecordDescriptor::new(store.key.clone());
-            let descriptor = RecordDescriptor::new(store.value.clone());
-            let record_store = record_store_for_table(
-                &self.storage,
-                &store.name,
-                Some(key_descriptor),
-                &descriptor,
-            );
-            let next = record_store
-                .consolidate_full_windows_bounded(max_records_per_window, remaining_windows)
-                .map_err(Error::from)?;
-            if next.windows == 0 {
-                self.mark_history_window_store_converged(&store.name);
-            }
-            remaining_windows = remaining_windows.saturating_sub(next.windows);
-            total.windows += next.windows;
-            total.records += next.records;
-        }
-        Ok(total)
-    }
-
-    fn all_history_window_stores_converged(&self) -> bool {
-        let converged_stores = self.converged_history_window_stores.borrow();
-        let mut saw_history_store = false;
-
-        for table in &self.ivm_runtime.schema().tables {
-            if !is_windowed_history_table(&table.name) {
-                continue;
-            }
-            saw_history_store = true;
-            if !converged_stores.contains(&table.name) {
-                return false;
-            }
-        }
-
-        for store in &self.ivm_runtime.schema().direct_record_stores {
-            if !is_windowed_history_table(&store.name) {
-                continue;
-            }
-            saw_history_store = true;
-            if !converged_stores.contains(&store.name) {
-                return false;
-            }
-        }
-
-        saw_history_store
-    }
-
-    fn history_window_store_converged(&self, store: &str) -> bool {
-        self.converged_history_window_stores
-            .borrow()
-            .contains(store)
-    }
-
-    fn mark_history_window_store_converged(&self, store: &str) {
-        self.converged_history_window_stores
-            .borrow_mut()
-            .insert(store.to_owned());
-    }
-
-    fn mark_history_window_store_dirty(&self, store: &str) {
-        self.converged_history_window_stores
-            .borrow_mut()
-            .remove(store);
+            .map(|(key, value)| decode_stored_key_value(table_schema, key, value))
+            .transpose()
     }
 
     /// Return encoded records whose explicit schema index exactly matches the
@@ -1533,15 +1618,12 @@ where
         T: OrderedKvStorage,
     {
         let table_schema = self.table(table)?;
-        let descriptor = self
-            .ivm_runtime
-            .table_descriptor(table)
-            .ok_or_else(|| Error::TableNotFound(table.to_owned()))?;
+        let storage_descriptor = table_schema.record_schema();
         let key_descriptor = table_schema
             .primary_key
             .as_ref()
             .map(primary_key_descriptor);
-        let store = record_store_for_table(storage, table, key_descriptor, descriptor);
+        let store = record_store_for_table(storage, table, key_descriptor, &storage_descriptor);
         let index_descriptor = index_record_descriptor();
         let mut records = Vec::new();
         for (storage_key, persisted_record) in raw_entries {
@@ -1554,7 +1636,7 @@ where
                 &index_record.get("value")?,
             )?;
             if let Some(record) = store.get_raw(&primary_key)? {
-                records.push(EncodedKeyValue::new(primary_key, record, descriptor));
+                records.push(decode_stored_key_value(table_schema, primary_key, record)?);
             } else if table_schema.primary_key.is_some() {
                 return Err(Error::InvalidPersistedIndex(index_name.to_owned()));
             }
@@ -1659,15 +1741,14 @@ where
         &mut self,
         table: &str,
         key: PrimaryKeyValue,
-        record: Vec<u8>,
+        record: impl Into<RawRecordInput>,
     ) -> Result<(), Error> {
-        self.table(table)?;
-        self.commit_pending_writes(vec![PendingTableWrite::Set {
-            mode: WriteMode::Update,
+        let pending = self.pending_write_from_operation(&BatchOperation::UpdateRaw {
             table: table.to_owned(),
-            key: key.into_bytes(),
-            record,
-        }])
+            key,
+            record: record.into(),
+        })?;
+        self.commit_pending_writes(vec![pending])
     }
 
     fn commit_pending_writes(
@@ -1676,8 +1757,8 @@ where
     ) -> Result<(), Error> {
         let descriptors = pending_writes
             .iter()
-            .map(|write| self.table_descriptor(write.table()))
-            .collect::<Result<Vec<_>, _>>()?;
+            .map(PendingTableWrite::descriptor)
+            .collect::<Vec<_>>();
         let stores = pending_writes
             .iter()
             .zip(&descriptors)
@@ -1689,18 +1770,21 @@ where
                 record_store_for_table(&self.storage, write.table(), key_descriptor, descriptor)
             })
             .collect::<Vec<_>>();
-        let table_deltas = compute_table_deltas(&pending_writes, &stores)?;
-        let base_operations = pending_writes
+        let table_deltas =
+            compute_table_deltas(&pending_writes, &stores, self.ivm_runtime.schema())?;
+        let mut staged_operations = pending_writes
             .iter()
-            .zip(&stores)
-            .map(|(write, store)| match write {
-                PendingTableWrite::Set { key, record, .. } => store.set(key, record),
-                PendingTableWrite::Delete { key, .. } => store.delete(key),
+            .map(|write| match write {
+                PendingTableWrite::Set { key, .. } => OwnedWriteOperation::Set {
+                    cf: write.table().to_owned(),
+                    key: key.clone(),
+                    value: write.stored_record().expect("set has a stored record"),
+                },
+                PendingTableWrite::Delete { key, .. } => OwnedWriteOperation::Delete {
+                    cf: write.table().to_owned(),
+                    key: key.clone(),
+                },
             })
-            .collect::<Vec<_>>();
-        let mut staged_operations = base_operations
-            .iter()
-            .map(|operation| owned_write_operation(operation))
             .collect::<Vec<_>>();
         let tick_start = Instant::now();
         let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
@@ -1726,12 +1810,6 @@ where
             // failure rather than serve possibly torn in-memory state.
             self.poisoned = true;
             return Err(Error::from(error));
-        }
-        for write in &pending_writes {
-            let table = write.table();
-            if is_windowed_history_table(table) {
-                self.mark_history_window_store_dirty(table);
-            }
         }
         let storage_write_time = storage_start.elapsed();
         self.last_tick_metrics = Some(tick.clone());
@@ -1784,10 +1862,10 @@ where
         pending: &PendingTableWrite,
     ) -> Result<OwnedWriteOperation, Error> {
         Ok(match pending {
-            PendingTableWrite::Set { key, record, .. } => OwnedWriteOperation::Set {
+            PendingTableWrite::Set { key, .. } => OwnedWriteOperation::Set {
                 cf: pending.table().to_owned(),
                 key: key.clone(),
-                value: record.clone(),
+                value: pending.stored_record().expect("set has a stored record"),
             },
             PendingTableWrite::Delete { key, .. } => OwnedWriteOperation::Delete {
                 cf: pending.table().to_owned(),
@@ -1801,62 +1879,79 @@ where
         operation: &BatchOperation,
     ) -> Result<PendingTableWrite, Error> {
         match operation {
-            BatchOperation::Insert { table, values } => {
+            BatchOperation::Insert { table, record } => {
                 let table_schema = self.table(table)?;
-                let descriptor = self.table_descriptor(table)?;
-                let record = encode_record(table_schema, descriptor, values)?;
+                let (schema_version, descriptor, record) =
+                    resolve_record_input(table_schema, record)?;
                 let key = primary_key_bytes(table_schema, descriptor, &record)?;
                 Ok(PendingTableWrite::Set {
                     mode: WriteMode::Insert,
                     table: table.clone(),
                     key,
+                    schema_version,
+                    descriptor,
                     record,
                 })
             }
             BatchOperation::InsertRaw { table, key, record } => {
-                self.table(table)?;
+                let table_schema = self.table(table)?;
+                let (schema_version, descriptor, record) =
+                    resolve_raw_record_input(table_schema, record)?;
                 Ok(PendingTableWrite::Set {
                     mode: WriteMode::Insert,
                     table: table.clone(),
                     key: key.clone().into_bytes(),
+                    schema_version,
+                    descriptor,
                     record: record.clone(),
                 })
             }
             BatchOperation::InsertRawFresh { table, key, record } => {
-                self.table(table)?;
+                let table_schema = self.table(table)?;
+                let (schema_version, descriptor, record) =
+                    resolve_raw_record_input(table_schema, record)?;
                 Ok(PendingTableWrite::Set {
                     mode: WriteMode::InsertFresh,
                     table: table.clone(),
                     key: key.clone().into_bytes(),
+                    schema_version,
+                    descriptor,
                     record: record.clone(),
                 })
             }
-            BatchOperation::Update { table, values } => {
+            BatchOperation::Update { table, record } => {
                 let table_schema = self.table(table)?;
-                let descriptor = self.table_descriptor(table)?;
-                let record = encode_record(table_schema, descriptor, values)?;
+                let (schema_version, descriptor, record) =
+                    resolve_record_input(table_schema, record)?;
                 let key = primary_key_bytes(table_schema, descriptor, &record)?;
                 Ok(PendingTableWrite::Set {
                     mode: WriteMode::Update,
                     table: table.clone(),
                     key,
+                    schema_version,
+                    descriptor,
                     record,
                 })
             }
             BatchOperation::UpdateRaw { table, key, record } => {
-                self.table(table)?;
+                let table_schema = self.table(table)?;
+                let (schema_version, descriptor, record) =
+                    resolve_raw_record_input(table_schema, record)?;
                 Ok(PendingTableWrite::Set {
                     mode: WriteMode::Update,
                     table: table.clone(),
                     key: key.clone().into_bytes(),
+                    schema_version,
+                    descriptor,
                     record: record.clone(),
                 })
             }
             BatchOperation::Delete { table, key } => {
-                self.table(table)?;
+                let table_schema = self.table(table)?;
                 Ok(PendingTableWrite::Delete {
                     table: table.clone(),
                     key: key.clone().into_bytes(),
+                    descriptor: table_schema.record_schema(),
                 })
             }
         }
@@ -1866,14 +1961,6 @@ where
         self.ensure_not_poisoned()?;
         self.ivm_runtime
             .table(table)
-            .ok_or_else(|| Error::TableNotFound(table.to_owned()))
-    }
-
-    fn table_descriptor(&self, table: &str) -> Result<RecordDescriptor, Error> {
-        self.ensure_not_poisoned()?;
-        self.ivm_runtime
-            .table_descriptor(table)
-            .copied()
             .ok_or_else(|| Error::TableNotFound(table.to_owned()))
     }
 
@@ -2129,11 +2216,7 @@ where
     }
 
     fn record_store(&self) -> RecordStore<'_, LayoutStorage<S>> {
-        if is_windowed_history_table(&self.name) {
-            RecordStore::new_windowed(self.storage, &self.name, self.key, &self.value)
-        } else {
-            RecordStore::new(self.storage, &self.name, &self.value)
-        }
+        RecordStore::new(self.storage, &self.name, &self.value)
     }
 
     fn decode_key(&self, key: &[u8]) -> Result<Vec<Value>, Error> {
@@ -2458,16 +2541,24 @@ where
 #[derive(Clone, Debug)]
 pub struct EncodedKeyValue<'a> {
     key: Vec<u8>,
-    value: Vec<u8>,
-    descriptor: &'a RecordDescriptor,
+    record: VersionedRecord,
+    marker: std::marker::PhantomData<&'a ()>,
 }
 
 impl<'a> EncodedKeyValue<'a> {
     pub fn new(key: Vec<u8>, value: Vec<u8>, descriptor: &'a RecordDescriptor) -> Self {
         Self {
             key,
-            value,
-            descriptor,
+            record: VersionedRecord::new(0, OwnedRecord::new(value, *descriptor)),
+            marker: std::marker::PhantomData,
+        }
+    }
+
+    fn from_versioned(key: Vec<u8>, record: VersionedRecord) -> Self {
+        Self {
+            key,
+            record,
+            marker: std::marker::PhantomData,
         }
     }
 
@@ -2476,19 +2567,31 @@ impl<'a> EncodedKeyValue<'a> {
     }
 
     pub fn raw(&self) -> &[u8] {
-        &self.value
+        self.record.record().raw()
+    }
+
+    pub fn schema_version(&self) -> u64 {
+        self.record.schema_version()
+    }
+
+    pub fn versioned_record(&self) -> &VersionedRecord {
+        &self.record
     }
 
     pub fn into_parts(self) -> (Vec<u8>, Vec<u8>) {
-        (self.key, self.value)
+        (self.key, self.record.into_record().into_raw())
+    }
+
+    pub fn into_versioned_parts(self) -> (Vec<u8>, VersionedRecord) {
+        (self.key, self.record)
     }
 
     pub fn record(&self) -> BorrowedRecord<'_> {
-        BorrowedRecord::new(&self.value, self.descriptor)
+        self.record.record().borrowed()
     }
 
     pub fn owned_record(self) -> OwnedRecord {
-        OwnedRecord::new(self.value, *self.descriptor)
+        self.record.into_record()
     }
 }
 
@@ -2580,7 +2683,7 @@ fn storage_index_write_destination(key: &[u8]) -> StorageWriteDestination {
     } else if table.starts_with("jazz_")
         && table.ends_with("_global_current")
         && !table.contains("_register_global_current")
-        && index.starts_with("by_user_")
+        && (index.starts_with("by_user_") || index.starts_with("by_physical_user_"))
     {
         StorageWriteDestination::GlobalCurrentIndexes
     } else if table.starts_with("jazz_") && table.ends_with("_history") && index == "by_tx" {
@@ -2634,25 +2737,6 @@ fn durable_index_table_and_name(key: &[u8]) -> Option<(&str, &str)> {
     Some((table, index))
 }
 
-fn owned_write_operation(operation: &crate::storage::WriteOperation<'_>) -> OwnedWriteOperation {
-    match operation {
-        crate::storage::WriteOperation::Set { cf, key, value } => OwnedWriteOperation::Set {
-            cf: (*cf).to_owned(),
-            key: (*key).to_vec(),
-            value: (*value).to_vec(),
-        },
-        crate::storage::WriteOperation::Delete { cf, key } => OwnedWriteOperation::Delete {
-            cf: (*cf).to_owned(),
-            key: (*key).to_vec(),
-        },
-        crate::storage::WriteOperation::Delta { cf, key, delta } => OwnedWriteOperation::Delta {
-            cf: (*cf).to_owned(),
-            key: (*key).to_vec(),
-            delta: (*delta).clone(),
-        },
-    }
-}
-
 enum PendingTableWrite {
     /// Insert and update share the same storage operation after validation.
     /// Delta computation decides whether an old record must be retracted first.
@@ -2660,11 +2744,14 @@ enum PendingTableWrite {
         mode: WriteMode,
         table: String,
         key: Vec<u8>,
+        schema_version: u64,
+        descriptor: RecordDescriptor,
         record: Vec<u8>,
     },
     Delete {
         table: String,
         key: Vec<u8>,
+        descriptor: RecordDescriptor,
     },
 }
 
@@ -2688,39 +2775,20 @@ impl PendingTableWrite {
         }
     }
 
-    fn delta_from_current(
-        &self,
-        descriptor: RecordDescriptor,
-        current: Option<Vec<u8>>,
-    ) -> TableDelta {
-        let deltas = match self {
-            Self::Set { record, .. } => {
-                let mut deltas = current
-                    .into_iter()
-                    .map(|record| RecordDelta {
-                        record: record.into(),
-                        weight: -1,
-                    })
-                    .collect::<Vec<_>>();
-                deltas.push(RecordDelta {
-                    record: record.clone().into(),
-                    weight: 1,
-                });
-                deltas
-            }
-            Self::Delete { .. } => current
-                .into_iter()
-                .map(|record| RecordDelta {
-                    record: record.into(),
-                    weight: -1,
-                })
-                .collect(),
-        };
+    fn descriptor(&self) -> RecordDescriptor {
+        match self {
+            Self::Set { descriptor, .. } | Self::Delete { descriptor, .. } => *descriptor,
+        }
+    }
 
-        TableDelta {
-            table: self.table().to_owned(),
-            descriptor,
-            deltas,
+    fn stored_record(&self) -> Option<Vec<u8>> {
+        match self {
+            Self::Set {
+                schema_version,
+                record,
+                ..
+            } => Some(encode_versioned_record(*schema_version, record)),
+            Self::Delete { .. } => None,
         }
     }
 }
@@ -2728,6 +2796,7 @@ impl PendingTableWrite {
 fn compute_table_deltas<S>(
     pending_writes: &[PendingTableWrite],
     stores: &[RecordStore<'_, S>],
+    schema: &DatabaseSchema,
 ) -> Result<Vec<TableDelta>, Error>
 where
     S: OrderedKvStorage,
@@ -2766,15 +2835,57 @@ where
                 key: write.key().to_vec(),
             });
         }
-        table_deltas.push(write.delta_from_current(*store.descriptor(), current.clone()));
-        let next = match write {
-            PendingTableWrite::Set { record, .. } => Some(record.clone()),
-            PendingTableWrite::Delete { .. } => None,
-        };
+        let table_schema = schema
+            .table(write.table())
+            .ok_or_else(|| Error::TableNotFound(write.table().to_owned()))?;
+        if let Some(current) = current.as_deref() {
+            table_deltas.push(table_delta_from_stored(table_schema, current, -1)?);
+        }
+        if let PendingTableWrite::Set {
+            schema_version,
+            descriptor,
+            record,
+            ..
+        } = write
+        {
+            table_deltas.push(TableDelta {
+                table: write.table().to_owned(),
+                schema_version: *schema_version,
+                descriptor: *descriptor,
+                deltas: vec![RecordDelta {
+                    record: record.clone().into(),
+                    weight: 1,
+                }],
+            });
+        }
+        let next = write.stored_record();
         overlay.insert(overlay_key, next);
     }
 
     Ok(consolidate_table_deltas(table_deltas))
+}
+
+fn table_delta_from_stored(
+    table: &TableSchema,
+    stored: &[u8],
+    weight: i64,
+) -> Result<TableDelta, Error> {
+    let (schema_version, payload) = split_versioned_record(stored)?;
+    let descriptor = table
+        .record_schema_for_version(schema_version)
+        .ok_or_else(|| Error::UnknownTableSchemaVersion {
+            table: table.name.clone(),
+            version: schema_version,
+        })?;
+    Ok(TableDelta {
+        table: table.name.clone(),
+        schema_version,
+        descriptor,
+        deltas: vec![RecordDelta {
+            record: bytes::Bytes::copy_from_slice(payload),
+            weight,
+        }],
+    })
 }
 
 fn record_store_for_table<'a, S>(
@@ -2786,37 +2897,37 @@ fn record_store_for_table<'a, S>(
 where
     S: OrderedKvStorage,
 {
-    if is_windowed_history_table(table)
-        && let Some(key_descriptor) = key_descriptor
-    {
-        RecordStore::new_windowed(storage, table, key_descriptor, descriptor)
-    } else {
-        RecordStore::new(storage, table, descriptor)
-    }
+    let _ = key_descriptor;
+    RecordStore::new(storage, table, descriptor)
 }
 
 fn primary_key_descriptor(primary_key: &PrimaryKey) -> RecordDescriptor {
-    RecordDescriptor::new(primary_key.columns.iter().map(|column| {
-        (
-            column.column.clone(),
-            column.key_type.column_type().value_type(),
-        )
-    }))
+    RecordDescriptor::new(
+        primary_key
+            .columns
+            .iter()
+            .map(|column| (column.column.clone(), column.key_type.column_type().clone())),
+    )
 }
 
 fn consolidate_table_deltas(table_deltas: Vec<TableDelta>) -> Vec<TableDelta> {
-    let mut by_table = HashMap::<String, (RecordDescriptor, HashMap<bytes::Bytes, i64>)>::new();
+    let mut by_table =
+        HashMap::<(String, u64, RecordDescriptor), HashMap<bytes::Bytes, i64>>::new();
     for table_delta in table_deltas {
-        let (_, records) = by_table
-            .entry(table_delta.table)
-            .or_insert_with(|| (table_delta.descriptor, HashMap::new()));
+        let records = by_table
+            .entry((
+                table_delta.table,
+                table_delta.schema_version,
+                table_delta.descriptor,
+            ))
+            .or_default();
         for delta in table_delta.deltas {
             *records.entry(delta.record).or_default() += delta.weight;
         }
     }
     by_table
         .into_iter()
-        .filter_map(|(table, (descriptor, records))| {
+        .filter_map(|((table, schema_version, descriptor), records)| {
             let deltas = records
                 .into_iter()
                 .filter_map(|(record, weight)| {
@@ -2825,6 +2936,7 @@ fn consolidate_table_deltas(table_deltas: Vec<TableDelta>) -> Vec<TableDelta> {
                 .collect::<Vec<_>>();
             (!deltas.is_empty()).then_some(TableDelta {
                 table,
+                schema_version,
                 descriptor,
                 deltas,
             })
@@ -2851,19 +2963,29 @@ where
         self.batch.reserve(additional);
     }
 
-    pub fn insert(&mut self, table: impl Into<String>, values: Vec<Value>) {
-        self.batch.insert(table, values);
+    pub fn insert(&mut self, table: impl Into<String>, record: impl Into<RecordInput>) {
+        self.batch.insert(table, record);
     }
 
-    pub fn insert_raw(&mut self, table: impl Into<String>, key: PrimaryKeyValue, record: Vec<u8>) {
+    pub fn insert_raw(
+        &mut self,
+        table: impl Into<String>,
+        key: PrimaryKeyValue,
+        record: impl Into<RawRecordInput>,
+    ) {
         self.batch.insert_raw(table, key, record);
     }
 
-    pub fn update(&mut self, table: impl Into<String>, values: Vec<Value>) {
-        self.batch.update(table, values);
+    pub fn update(&mut self, table: impl Into<String>, record: impl Into<RecordInput>) {
+        self.batch.update(table, record);
     }
 
-    pub fn update_raw(&mut self, table: impl Into<String>, key: PrimaryKeyValue, record: Vec<u8>) {
+    pub fn update_raw(
+        &mut self,
+        table: impl Into<String>,
+        key: PrimaryKeyValue,
+        record: impl Into<RawRecordInput>,
+    ) {
         self.batch.update_raw(table, key, record);
     }
 
@@ -2879,7 +3001,7 @@ where
         &self,
         table: &str,
         prefix: &[Value],
-    ) -> Result<Vec<Record<'_>>, Error> {
+    ) -> Result<Vec<VersionedRecord>, Error> {
         self.database.ensure_batch_storage_txn(&self.batch)?;
         let overlay = StagedWriteOverlay::new(&self.database.storage, &self.batch.txn_operations);
         let storage = MeteredStorage::new(&overlay, &self.database.storage_read_metrics);
@@ -2935,18 +3057,23 @@ impl DatabaseBatch {
         self.operations.reserve(additional);
     }
 
-    pub fn insert(&mut self, table: impl Into<String>, values: Vec<Value>) {
+    pub fn insert(&mut self, table: impl Into<String>, record: impl Into<RecordInput>) {
         self.push_operation(BatchOperation::Insert {
             table: table.into(),
-            values,
+            record: record.into(),
         });
     }
 
-    pub fn insert_raw(&mut self, table: impl Into<String>, key: PrimaryKeyValue, record: Vec<u8>) {
+    pub fn insert_raw(
+        &mut self,
+        table: impl Into<String>,
+        key: PrimaryKeyValue,
+        record: impl Into<RawRecordInput>,
+    ) {
         self.push_operation(BatchOperation::InsertRaw {
             table: table.into(),
             key,
-            record,
+            record: record.into(),
         });
     }
 
@@ -2959,27 +3086,32 @@ impl DatabaseBatch {
         &mut self,
         table: impl Into<String>,
         key: PrimaryKeyValue,
-        record: Vec<u8>,
+        record: impl Into<RawRecordInput>,
     ) {
         self.push_operation(BatchOperation::InsertRawFresh {
             table: table.into(),
             key,
-            record,
+            record: record.into(),
         });
     }
 
-    pub fn update(&mut self, table: impl Into<String>, values: Vec<Value>) {
+    pub fn update(&mut self, table: impl Into<String>, record: impl Into<RecordInput>) {
         self.push_operation(BatchOperation::Update {
             table: table.into(),
-            values,
+            record: record.into(),
         });
     }
 
-    pub fn update_raw(&mut self, table: impl Into<String>, key: PrimaryKeyValue, record: Vec<u8>) {
+    pub fn update_raw(
+        &mut self,
+        table: impl Into<String>,
+        key: PrimaryKeyValue,
+        record: impl Into<RawRecordInput>,
+    ) {
         self.push_operation(BatchOperation::UpdateRaw {
             table: table.into(),
             key,
-            record,
+            record: record.into(),
         });
     }
 
@@ -2999,30 +3131,72 @@ impl DatabaseBatch {
     }
 }
 
+/// Logical or already-encoded row supplied to an ordinary table write.
+///
+/// `Vec<Value>` converts to the reserved single-layout schema version `0`.
+/// Callers that need another discriminator bind an [`OwnedRecord`] to it once
+/// and pass the resulting [`VersionedRecord`] through the same write API.
+#[derive(Clone, Debug, PartialEq)]
+pub enum RecordInput {
+    Values(Vec<Value>),
+    Record(VersionedRecord),
+}
+
+impl From<Vec<Value>> for RecordInput {
+    fn from(values: Vec<Value>) -> Self {
+        Self::Values(values)
+    }
+}
+
+impl From<VersionedRecord> for RecordInput {
+    fn from(record: VersionedRecord) -> Self {
+        Self::Record(record)
+    }
+}
+
+/// Encoded row supplied with an explicit primary key.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RawRecordInput {
+    Payload(Vec<u8>),
+    Record(VersionedRecord),
+}
+
+impl From<Vec<u8>> for RawRecordInput {
+    fn from(payload: Vec<u8>) -> Self {
+        Self::Payload(payload)
+    }
+}
+
+impl From<VersionedRecord> for RawRecordInput {
+    fn from(record: VersionedRecord) -> Self {
+        Self::Record(record)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum BatchOperation {
     Insert {
         table: String,
-        values: Vec<Value>,
+        record: RecordInput,
     },
     InsertRaw {
         table: String,
         key: PrimaryKeyValue,
-        record: Vec<u8>,
+        record: RawRecordInput,
     },
     InsertRawFresh {
         table: String,
         key: PrimaryKeyValue,
-        record: Vec<u8>,
+        record: RawRecordInput,
     },
     Update {
         table: String,
-        values: Vec<Value>,
+        record: RecordInput,
     },
     UpdateRaw {
         table: String,
         key: PrimaryKeyValue,
-        record: Vec<u8>,
+        record: RawRecordInput,
     },
     Delete {
         table: String,
@@ -3071,6 +3245,66 @@ impl PrimaryKeyValue {
         }
         bytes
     }
+}
+
+fn resolve_record_input(
+    table: &TableSchema,
+    input: &RecordInput,
+) -> Result<(u64, RecordDescriptor, Vec<u8>), Error> {
+    match input {
+        RecordInput::Values(values) => {
+            let schema_version = 0;
+            let descriptor = table
+                .record_schema_for_version(schema_version)
+                .ok_or_else(|| Error::UnknownTableSchemaVersion {
+                    table: table.name.clone(),
+                    version: schema_version,
+                })?;
+            let record = encode_record(table, descriptor, values)?;
+            Ok((schema_version, descriptor, record))
+        }
+        RecordInput::Record(record) => resolve_versioned_record(table, record),
+    }
+}
+
+fn resolve_raw_record_input(
+    table: &TableSchema,
+    input: &RawRecordInput,
+) -> Result<(u64, RecordDescriptor, Vec<u8>), Error> {
+    match input {
+        RawRecordInput::Payload(payload) => {
+            let schema_version = 0;
+            let descriptor = table
+                .record_schema_for_version(schema_version)
+                .ok_or_else(|| Error::UnknownTableSchemaVersion {
+                    table: table.name.clone(),
+                    version: schema_version,
+                })?;
+            Ok((schema_version, descriptor, payload.clone()))
+        }
+        RawRecordInput::Record(record) => resolve_versioned_record(table, record),
+    }
+}
+
+fn resolve_versioned_record(
+    table: &TableSchema,
+    record: &VersionedRecord,
+) -> Result<(u64, RecordDescriptor, Vec<u8>), Error> {
+    let schema_version = record.schema_version();
+    let descriptor = table
+        .record_schema_for_version(schema_version)
+        .ok_or_else(|| Error::UnknownTableSchemaVersion {
+            table: table.name.clone(),
+            version: schema_version,
+        })?;
+    if record.record().descriptor() != &descriptor {
+        return Err(Error::SchemaVersionDescriptorMismatch {
+            table: table.name.clone(),
+            version: schema_version,
+        });
+    }
+    record.record().to_values()?;
+    Ok((schema_version, descriptor, record.record().raw().to_vec()))
 }
 
 fn encode_record(
@@ -3129,6 +3363,32 @@ fn primary_key_bytes(
         encode_primary_key_part(&mut bytes, &value)?;
     }
     Ok(bytes)
+}
+
+fn decode_stored_table_record(
+    table: &TableSchema,
+    stored: Vec<u8>,
+) -> Result<VersionedRecord, Error> {
+    let (schema_version, payload) = split_versioned_record(&stored)?;
+    let descriptor = table
+        .record_schema_for_version(schema_version)
+        .ok_or_else(|| Error::UnknownTableSchemaVersion {
+            table: table.name.clone(),
+            version: schema_version,
+        })?;
+    let record = OwnedRecord::new(payload.to_vec(), descriptor);
+    Ok(VersionedRecord::new(schema_version, record))
+}
+
+fn decode_stored_key_value<'a>(
+    table: &TableSchema,
+    key: Vec<u8>,
+    stored: Vec<u8>,
+) -> Result<EncodedKeyValue<'a>, Error> {
+    Ok(EncodedKeyValue::from_versioned(
+        key,
+        decode_stored_table_record(table, stored)?,
+    ))
 }
 
 fn persisted_index_primary_key(
@@ -3260,7 +3520,7 @@ fn validate_primary_key_bytes(
         .ok_or_else(|| Error::MissingPrimaryKey(table.name.clone()))?;
     let mut remaining = primary_key;
     for column in &table_primary_key.columns {
-        decode_primary_key_part(&mut remaining, &column.key_type.column_type().value_type())
+        decode_primary_key_part(&mut remaining, &column.key_type.column_type().clone())
             .map_err(|_| Error::InvalidPersistedIndex(index_name.to_owned()))?;
     }
     if !remaining.is_empty() {
@@ -3592,7 +3852,9 @@ fn decode_index_key_part(
                 _ => Err(Error::InvalidPersistedIndex(index_name.to_owned())),
             }
         }
-        ColumnType::Array(_) => Err(Error::InvalidPersistedIndex(index_name.to_owned())),
+        ColumnType::Array(_) | ColumnType::Record(_) => {
+            Err(Error::InvalidPersistedIndex(index_name.to_owned()))
+        }
     }
 }
 
@@ -3723,6 +3985,8 @@ pub enum Error {
     DatabasePoisoned,
     #[error("duplicate primary key for table {table}: {key:?}")]
     DuplicatePrimaryKey { table: String, key: Vec<u8> },
+    #[error("duplicate schema version {version} for table {table}")]
+    DuplicateTableSchemaVersion { table: String, version: u64 },
     #[error("duplicate query parameter binding: {0}")]
     DuplicateParameter(String),
     #[error(transparent)]
@@ -3741,6 +4005,12 @@ pub enum Error {
     MissingParameter(String),
     #[error("table has no primary key: {0}")]
     MissingPrimaryKey(String),
+    #[error("invalid field {field} in schema version {version} for table {table}")]
+    InvalidTableSchemaVersionField {
+        table: String,
+        version: u64,
+        field: String,
+    },
     #[error("primary key arity mismatch for {table}: expected at most {expected}, got {actual}")]
     PrimaryKeyArity {
         table: String,
@@ -3761,6 +4031,34 @@ pub enum Error {
     Storage(Box<crate::storage::Error>),
     #[error("table not found: {0}")]
     TableNotFound(String),
+    #[error("table already exists: {0}")]
+    TableAlreadyExists(String),
+    #[error("field definition does not match the live catalogue: {table}.{field}")]
+    TableFieldDefinitionMismatch { table: String, field: String },
+    #[error("index definition does not match the live catalogue: {table}.{index}")]
+    TableIndexDefinitionMismatch { table: String, index: String },
+    #[error("index {table}.{index} references unknown field {field}")]
+    TableIndexFieldNotFound {
+        table: String,
+        index: String,
+        field: String,
+    },
+    #[error("schema version {version} for table {table} omits primary-key column {column}")]
+    SchemaVersionMissingPrimaryKey {
+        table: String,
+        version: u64,
+        column: String,
+    },
+    #[error("schema-variant table uses foreign keys, which are not supported yet: {0}")]
+    UnsupportedSchemaVariantTableFeature(String),
+    #[error("record descriptor does not match schema version {version} for table {table}")]
+    SchemaVersionDescriptorMismatch { table: String, version: u64 },
+    #[error("schema version 0 is reserved for Groove's implicit table layout: {0}")]
+    ReservedTableSchemaVersion(String),
+    #[error("cannot add the first explicit schema version to a live homogeneous table: {0}")]
+    CannotPromoteLiveTableToSchemaVariants(String),
+    #[error("unknown schema version {version} for table {table}")]
+    UnknownTableSchemaVersion { table: String, version: u64 },
     #[error("unknown query parameter binding: {0}")]
     UnknownParameter(String),
 }

@@ -27,5 +27,6 @@ pnpm --dir packages/jazz-tools exec tsc --project tsconfig.tests.json
 pnpm --dir packages/jazz-tools exec vitest run \
   --config vitest.config.ts \
   src/runtime/native-runtime/native-row-codec.test.ts \
+  src/runtime/native-runtime/native-query-codec.test.ts \
   src/runtime/native-runtime/runtime.test.ts \
   src/runtime/native-runtime/websocket.test.ts

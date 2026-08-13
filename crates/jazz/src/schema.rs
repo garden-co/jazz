@@ -16,7 +16,7 @@ use groove::schema::{
 };
 use groove::storage::StorageLayout;
 
-use crate::ids::{BranchId, SchemaVersionId};
+use crate::ids::SchemaVersionId;
 use crate::merge_strategy::ColumnSpecHash;
 use crate::query::{Query, claim, col, eq};
 
@@ -113,6 +113,14 @@ impl JazzSchema {
                             column.name
                         );
                     }
+                    MergeStrategy::GSet => {
+                        assert!(
+                            is_gset_column_type(&column.column_type),
+                            "g-set merge strategy requires a non-nullable array column: {}.{}",
+                            table.name,
+                            column.name
+                        );
+                    }
                 }
             }
             for column in &table.columns {
@@ -168,65 +176,6 @@ impl JazzSchema {
         self.with_jazz_direct_record_stores(GrooveDatabaseSchema::new(self.storage_tables()))
     }
 
-    /// Lower the schema plus registered schema-version partitions.
-    pub fn lower_to_groove_with_partitions(
-        &self,
-        catalogue_schemas: &BTreeMap<SchemaVersionId, crate::protocol::SchemaVersion>,
-        partitions: &std::collections::BTreeSet<(String, SchemaVersionId)>,
-        branch_partitions: &std::collections::BTreeSet<(String, SchemaVersionId, BranchId)>,
-    ) -> GrooveDatabaseSchema {
-        let mut tables = self.storage_tables();
-        let base_id = self.version_id();
-        for (logical_table, schema_version) in partitions {
-            if *schema_version == base_id {
-                continue;
-            }
-            let Some(schema) = catalogue_schemas.get(schema_version) else {
-                continue;
-            };
-            let Some(table) = schema
-                .schema
-                .tables
-                .iter()
-                .find(|table| table.name == *logical_table)
-            else {
-                continue;
-            };
-            tables.push(table.rejected_versions_storage_table());
-            tables.push(table.history_storage_table());
-            tables.push(table.register_storage_table());
-            tables.push(table.history_partition_storage_table(*schema_version));
-            tables.push(table.register_partition_storage_table(*schema_version));
-            if self
-                .tables
-                .iter()
-                .any(|base_table| base_table.name == *logical_table)
-            {
-                tables.extend(table.global_current_partition_storage_tables(*schema_version));
-                tables.extend(table.ahead_current_partition_storage_tables(*schema_version));
-            } else {
-                tables.extend(table.global_current_storage_tables());
-                tables.extend(table.ahead_current_storage_tables());
-            }
-        }
-        for (logical_table, schema_version, branch_id) in branch_partitions {
-            let Some(schema) = catalogue_schemas.get(schema_version) else {
-                continue;
-            };
-            let Some(table) = schema
-                .schema
-                .tables
-                .iter()
-                .find(|table| table.name == *logical_table)
-            else {
-                continue;
-            };
-            tables.push(table.branch_history_partition_storage_table(*schema_version, *branch_id));
-            tables.push(table.branch_register_partition_storage_table(*schema_version, *branch_id));
-        }
-        self.with_jazz_direct_record_stores(GrooveDatabaseSchema::new(tables))
-    }
-
     /// Lower only the fixed metadata tables needed for the first open stage.
     pub fn lower_catalogue_meta_to_groove(&self) -> GrooveDatabaseSchema {
         self.with_jazz_direct_record_stores(GrooveDatabaseSchema::new(
@@ -241,7 +190,14 @@ impl JazzSchema {
             lowered
                 .column_families()
                 .into_iter()
-                .chain(std::iter::once("indices")),
+                .chain(std::iter::once("indices"))
+                // A schema-independent runtime may open before its first typed
+                // application view is registered. Keep the shared physical
+                // row classes available even for the empty bootstrap schema.
+                .chain(std::iter::once("jazz_physical_history"))
+                .chain(std::iter::once("jazz_physical_register"))
+                .chain(std::iter::once("jazz_physical_global_current"))
+                .chain(std::iter::once("jazz_physical_ahead_current")),
         )
     }
 
@@ -257,7 +213,6 @@ impl JazzSchema {
             schema_versions_table(),
             catalogue_table(),
             catalogue_pointer_table(),
-            partitions_table(),
             branch_partitions_table(),
             branches_table(),
             transactions_table(),
@@ -265,35 +220,17 @@ impl JazzSchema {
             pending_edges_table(),
             merge_heads_table(),
         ];
-        tables.extend(
-            self.tables
-                .iter()
-                .map(TableSchema::rejected_versions_storage_table),
-        );
-        tables.extend(self.tables.iter().map(TableSchema::history_storage_table));
-        tables.extend(self.tables.iter().map(TableSchema::register_storage_table));
-        tables.extend(
-            self.tables
-                .iter()
-                .flat_map(TableSchema::global_current_storage_tables),
-        );
-        tables.extend(
-            self.tables
-                .iter()
-                .flat_map(TableSchema::ahead_current_storage_tables),
-        );
         tables.push(global_changes_table());
         tables
     }
 
-    /// Return the version-independent metadata tables available before partitions are known.
+    /// Return the version-independent metadata tables used by staged catalogue open.
     pub fn catalogue_meta_storage_tables(&self) -> Vec<GrooveTableSchema> {
         vec![
             nodes_table(),
             schema_versions_table(),
             catalogue_table(),
             catalogue_pointer_table(),
-            partitions_table(),
             branch_partitions_table(),
             branches_table(),
         ]
@@ -317,6 +254,8 @@ impl JazzSchema {
             .with_direct_record_store(DirectRecordStoreSchema::new(
                 CONTENT_EXTENTS_STORE,
                 RecordDescriptor::new([
+                    ("schema", ValueType::Uuid),
+                    ("table", ValueType::String),
                     ("writer", ValueType::Uuid),
                     ("row", ValueType::Uuid),
                     ("column", ValueType::String),
@@ -327,6 +266,8 @@ impl JazzSchema {
             .with_direct_record_store(DirectRecordStoreSchema::new(
                 CONTENT_META_STORE,
                 RecordDescriptor::new([
+                    ("schema", ValueType::Uuid),
+                    ("table", ValueType::String),
                     ("writer", ValueType::Uuid),
                     ("row", ValueType::Uuid),
                     ("column", ValueType::String),
@@ -336,6 +277,7 @@ impl JazzSchema {
             .with_direct_record_store(DirectRecordStoreSchema::new(
                 CONTENT_CHECKPOINTS_STORE,
                 RecordDescriptor::new([
+                    ("schema", ValueType::Uuid),
                     ("table", ValueType::String),
                     ("row", ValueType::Uuid),
                     ("column", ValueType::String),
@@ -398,6 +340,7 @@ pub(crate) fn branch_metadata_table_schema() -> TableSchema {
         "jazz_branches",
         [
             ColumnSchema::new("branch_id", GrooveColumnType::Uuid),
+            ColumnSchema::new("created_by", GrooveColumnType::Uuid),
             ColumnSchema::new("parent", GrooveColumnType::Uuid.nullable()),
             ColumnSchema::new("base_global", GrooveColumnType::U64.nullable()),
             ColumnSchema::new("state", GrooveColumnType::String),
@@ -417,6 +360,8 @@ pub enum MergeStrategy {
     Lww,
     /// Concurrent integer deltas from observed bases are summed.
     Counter,
+    /// Array elements grow monotonically by union over the version DAG.
+    GSet,
 }
 
 fn is_counter_column_type(column_type: &GrooveColumnType) -> bool {
@@ -429,6 +374,10 @@ fn is_counter_column_type(column_type: &GrooveColumnType) -> bool {
             | GrooveColumnType::I32
             | GrooveColumnType::I64
     )
+}
+
+fn is_gset_column_type(column_type: &GrooveColumnType) -> bool {
+    matches!(column_type, GrooveColumnType::Array(_))
 }
 
 /// Jazz-level large-value column kind.
@@ -752,7 +701,6 @@ impl TableSchema {
                 user_column.column_type.clone().nullable(),
             )
         }));
-
         GrooveTableSchema::new(format!("jazz_{}_rejected_versions", self.name), columns)
             .with_primary_key(PrimaryKey::composite([
                 PrimaryKeyColumn::integer("tx_time", IntegerKeyType::U64),
@@ -765,27 +713,6 @@ impl TableSchema {
     /// Return the storage history table for this application table.
     pub fn history_storage_table(&self) -> GrooveTableSchema {
         self.history_storage_table_named(format!("jazz_{}_history", self.name))
-    }
-
-    /// Return a partitioned storage history table with an explicit physical name.
-    pub fn history_partition_storage_table(
-        &self,
-        schema_version: SchemaVersionId,
-    ) -> GrooveTableSchema {
-        self.history_storage_table_named(partition_history_table_name(&self.name, schema_version))
-    }
-
-    /// Return a branch-overlay partitioned storage history table.
-    pub fn branch_history_partition_storage_table(
-        &self,
-        schema_version: SchemaVersionId,
-        branch_id: BranchId,
-    ) -> GrooveTableSchema {
-        self.history_storage_table_named(branch_partition_history_table_name(
-            &self.name,
-            schema_version,
-            branch_id,
-        ))
     }
 
     fn history_storage_table_named(&self, name: String) -> GrooveTableSchema {
@@ -806,6 +733,12 @@ impl TableSchema {
                 user_column.column_type.clone().nullable(),
             )
         }));
+        // Absent on legacy records. When present, this is a serialized set of
+        // user columns explicitly authored by this version.
+        columns.push(column(
+            "authored_columns",
+            GrooveColumnType::Bytes.nullable(),
+        ));
 
         GrooveTableSchema::new(name, columns)
             .with_primary_key(PrimaryKey::composite([
@@ -822,27 +755,6 @@ impl TableSchema {
     /// Return the storage table for deletion-register versions.
     pub fn register_storage_table(&self) -> GrooveTableSchema {
         self.register_storage_table_named(format!("jazz_{}_register", self.name))
-    }
-
-    /// Return a partitioned deletion-register table with an explicit physical name.
-    pub fn register_partition_storage_table(
-        &self,
-        schema_version: SchemaVersionId,
-    ) -> GrooveTableSchema {
-        self.register_storage_table_named(partition_register_table_name(&self.name, schema_version))
-    }
-
-    /// Return a branch-overlay partitioned deletion-register table.
-    pub fn branch_register_partition_storage_table(
-        &self,
-        schema_version: SchemaVersionId,
-        branch_id: BranchId,
-    ) -> GrooveTableSchema {
-        self.register_storage_table_named(branch_partition_register_table_name(
-            &self.name,
-            schema_version,
-            branch_id,
-        ))
     }
 
     fn register_storage_table_named(&self, name: String) -> GrooveTableSchema {
@@ -898,6 +810,10 @@ impl TableSchema {
                 user_column.column_type.clone().nullable(),
             )
         }));
+        content_columns.push(column(
+            "authored_columns",
+            GrooveColumnType::Bytes.nullable(),
+        ));
         let mut content_table = GrooveTableSchema::new(
             format!("jazz_{}_global_current", self.name),
             content_columns,
@@ -931,16 +847,6 @@ impl TableSchema {
         ]
     }
 
-    pub(crate) fn global_current_partition_storage_tables(
-        &self,
-        schema_version: SchemaVersionId,
-    ) -> Vec<GrooveTableSchema> {
-        let mut tables = self.global_current_storage_tables();
-        tables[0].name = partition_global_current_table_name(&self.name, schema_version);
-        tables[1].name = partition_register_global_current_table_name(&self.name, schema_version);
-        tables
-    }
-
     /// Return per-layer ahead-of-global candidate tables.
     pub fn ahead_current_storage_tables(&self) -> Vec<GrooveTableSchema> {
         let mut content_columns = vec![
@@ -961,6 +867,10 @@ impl TableSchema {
                 user_column.column_type.clone().nullable(),
             )
         }));
+        content_columns.push(column(
+            "authored_columns",
+            GrooveColumnType::Bytes.nullable(),
+        ));
         vec![
             GrooveTableSchema::new(format!("jazz_{}_ahead_current", self.name), content_columns)
                 .with_primary_key(PrimaryKey::composite([
@@ -1000,16 +910,6 @@ impl TableSchema {
         ]
     }
 
-    pub(crate) fn ahead_current_partition_storage_tables(
-        &self,
-        schema_version: SchemaVersionId,
-    ) -> Vec<GrooveTableSchema> {
-        let mut tables = self.ahead_current_storage_tables();
-        tables[0].name = partition_ahead_current_table_name(&self.name, schema_version);
-        tables[1].name = partition_register_ahead_current_table_name(&self.name, schema_version);
-        tables
-    }
-
     /// Columns available for constrained global-current reads.
     pub fn global_current_indexed_columns(&self) -> BTreeSet<String> {
         self.references
@@ -1032,7 +932,7 @@ impl TableSchema {
                 ("row_uuid".to_owned(), ValueType::Uuid),
                 (
                     "parents".to_owned(),
-                    ValueType::Array(Box::new(tx_id_column().value_type())),
+                    ValueType::Array(Box::new(tx_id_column().clone())),
                 ),
                 ("created_by".to_owned(), ValueType::Uuid),
                 ("created_at".to_owned(), ValueType::U64),
@@ -1040,87 +940,18 @@ impl TableSchema {
                 ("updated_at".to_owned(), ValueType::U64),
                 (
                     "_deletion".to_owned(),
-                    ValueType::Nullable(Box::new(deletion_column().value_type())),
+                    ValueType::Nullable(Box::new(deletion_column().clone())),
                 ),
             ]
             .into_iter()
             .chain(self.columns.iter().map(|column| {
                 (
                     format!("user_{}", column.name),
-                    ValueType::Nullable(Box::new(column.column_type.clone().value_type())),
+                    ValueType::Nullable(Box::new(column.column_type.clone())),
                 )
             })),
         )
     }
-}
-
-pub(crate) fn partition_history_table_name(table: &str, schema_version: SchemaVersionId) -> String {
-    format!("jazz_{table}_{}_history", schema_version.0.simple())
-}
-
-pub(crate) fn partition_register_table_name(
-    table: &str,
-    schema_version: SchemaVersionId,
-) -> String {
-    format!("jazz_{table}_{}_register", schema_version.0.simple())
-}
-
-pub(crate) fn partition_global_current_table_name(
-    table: &str,
-    schema_version: SchemaVersionId,
-) -> String {
-    format!("jazz_{table}_{}_global_current", schema_version.0.simple())
-}
-
-pub(crate) fn partition_register_global_current_table_name(
-    table: &str,
-    schema_version: SchemaVersionId,
-) -> String {
-    format!(
-        "jazz_{table}_{}_register_global_current",
-        schema_version.0.simple()
-    )
-}
-
-pub(crate) fn partition_ahead_current_table_name(
-    table: &str,
-    schema_version: SchemaVersionId,
-) -> String {
-    format!("jazz_{table}_{}_ahead_current", schema_version.0.simple())
-}
-
-pub(crate) fn partition_register_ahead_current_table_name(
-    table: &str,
-    schema_version: SchemaVersionId,
-) -> String {
-    format!(
-        "jazz_{table}_{}_register_ahead_current",
-        schema_version.0.simple()
-    )
-}
-
-pub(crate) fn branch_partition_history_table_name(
-    table: &str,
-    schema_version: SchemaVersionId,
-    branch_id: BranchId,
-) -> String {
-    format!(
-        "jazz_{table}_branch_{}_{}_history",
-        branch_id.0.simple(),
-        schema_version.0.simple()
-    )
-}
-
-pub(crate) fn branch_partition_register_table_name(
-    table: &str,
-    schema_version: SchemaVersionId,
-    branch_id: BranchId,
-) -> String {
-    format!(
-        "jazz_{table}_branch_{}_{}_register",
-        branch_id.0.simple(),
-        schema_version.0.simple()
-    )
 }
 
 fn schema_versions_table() -> GrooveTableSchema {
@@ -1130,6 +961,20 @@ fn schema_versions_table() -> GrooveTableSchema {
             // node-local-derived: allocated by schema-version alias interning.
             column("id", GrooveColumnType::U64),
             column("uuid", GrooveColumnType::Uuid),
+            // node-local: mapping from a schema version's logical table & column names to stable
+            // physical storage identities. Stored as serialized JSON bytes containing `SchemaPhysicalMapping`:
+            // {
+            //   tables: {
+            //     "todos": {
+            //       table_id: 7,
+            //       columns: {
+            //         "title": 12,
+            //         "body": 19
+            //       }
+            //     }
+            //   }
+            // }
+            column("physical_mapping", GrooveColumnType::Bytes),
         ],
     )
     .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
@@ -1161,32 +1006,16 @@ fn catalogue_pointer_table() -> GrooveTableSchema {
     .with_primary_key(PrimaryKey::new("revision", IntegerKeyType::U64).user_supplied())
 }
 
-fn partitions_table() -> GrooveTableSchema {
-    GrooveTableSchema::new(
-        "jazz_partitions",
-        [
-            column("table_name", GrooveColumnType::Bytes),
-            column("schema_version", GrooveColumnType::Uuid),
-        ],
-    )
-    .with_primary_key(PrimaryKey::composite([
-        PrimaryKeyColumn::bytes("table_name"),
-        PrimaryKeyColumn::uuid("schema_version"),
-    ]))
-}
-
 fn branch_partitions_table() -> GrooveTableSchema {
     GrooveTableSchema::new(
         "jazz_branch_partitions",
         [
-            column("table_name", GrooveColumnType::Bytes),
-            column("schema_version", GrooveColumnType::Uuid),
+            column("physical_table_id", GrooveColumnType::U64),
             column("branch_id", GrooveColumnType::Uuid),
         ],
     )
     .with_primary_key(PrimaryKey::composite([
-        PrimaryKeyColumn::bytes("table_name"),
-        PrimaryKeyColumn::uuid("schema_version"),
+        PrimaryKeyColumn::integer("physical_table_id", IntegerKeyType::U64),
         PrimaryKeyColumn::uuid("branch_id"),
     ]))
 }
@@ -1196,12 +1025,14 @@ fn branches_table() -> GrooveTableSchema {
         "jazz_branches",
         [
             column("branch_id", GrooveColumnType::Uuid),
+            column("created_by", GrooveColumnType::Uuid),
             column("parent", GrooveColumnType::Uuid.nullable()),
-            column("base_global", GrooveColumnType::U64.nullable()),
+            column("base_snapshot", GrooveColumnType::Bytes.nullable()),
             column(
                 "state",
                 storage_enum("jazz_branch_state", &["open", "merged", "discarded"]),
             ),
+            column("metadata_pending", GrooveColumnType::Bool),
         ],
     )
     .with_primary_key(PrimaryKey::composite([PrimaryKeyColumn::uuid("branch_id")]))
@@ -1211,7 +1042,7 @@ fn global_changes_table() -> GrooveTableSchema {
     GrooveTableSchema::new(
         "jazz_global_changes",
         [
-            column("table_name", GrooveColumnType::Bytes),
+            column("physical_table_id", GrooveColumnType::U64),
             column("row_uuid", GrooveColumnType::Uuid),
             column("layer", GrooveColumnType::Bytes),
             column("global_seq", GrooveColumnType::U64),
@@ -1221,18 +1052,18 @@ fn global_changes_table() -> GrooveTableSchema {
         ],
     )
     .with_primary_key(PrimaryKey::composite([
-        PrimaryKeyColumn::bytes("table_name"),
+        PrimaryKeyColumn::integer("physical_table_id", IntegerKeyType::U64),
         PrimaryKeyColumn::uuid("row_uuid"),
         PrimaryKeyColumn::bytes("layer"),
         PrimaryKeyColumn::integer("global_seq", IntegerKeyType::U64),
     ]))
     .with_index(GrooveIndexSchema::new(
         "by_global_seq",
-        ["global_seq", "table_name", "row_uuid", "layer"],
+        ["global_seq", "physical_table_id", "row_uuid", "layer"],
     ))
     .with_index(GrooveIndexSchema::new(
         "by_table_global_seq",
-        ["table_name", "global_seq", "row_uuid", "layer"],
+        ["physical_table_id", "global_seq", "row_uuid", "layer"],
     ))
 }
 
@@ -1240,13 +1071,13 @@ fn merge_heads_table() -> GrooveTableSchema {
     GrooveTableSchema::new(
         MERGE_HEADS_TABLE,
         [
-            column("table_name", GrooveColumnType::Bytes),
+            column("physical_table_id", GrooveColumnType::U64),
             column("row_uuid", GrooveColumnType::Uuid),
             column("heads", GrooveColumnType::Bytes),
         ],
     )
     .with_primary_key(PrimaryKey::composite([
-        PrimaryKeyColumn::bytes("table_name"),
+        PrimaryKeyColumn::integer("physical_table_id", IntegerKeyType::U64),
         PrimaryKeyColumn::uuid("row_uuid"),
     ]))
 }
@@ -1363,7 +1194,8 @@ fn transactions_table() -> GrooveTableSchema {
             column("absent_read_set", GrooveColumnType::Bytes.nullable()),
             column("predicate_read_set", GrooveColumnType::Bytes.nullable()),
             column("user_metadata", GrooveColumnType::String.nullable()),
-            column("source_branch", GrooveColumnType::Uuid.nullable()),
+            column("target_lineage", GrooveColumnType::Bytes),
+            column("branch_merge", GrooveColumnType::Bytes.nullable()),
             column("permission_subject", GrooveColumnType::Uuid.nullable()),
             column("merge_strategy", GrooveColumnType::String.nullable()),
             // upstream-decided: written only by fate/state application.
@@ -1420,6 +1252,7 @@ fn put_merge_strategy(bytes: &mut Vec<u8>, strategy: MergeStrategy) {
     bytes.push(match strategy {
         MergeStrategy::Lww => 0,
         MergeStrategy::Counter => 1,
+        MergeStrategy::GSet => 2,
     });
 }
 
@@ -1440,19 +1273,19 @@ fn put_text_merge_spec(bytes: &mut Vec<u8>, spec: &TextMergeSpec) {
 
 fn put_column_type(bytes: &mut Vec<u8>, column_type: &GrooveColumnType) {
     match column_type {
-        GrooveColumnType::U8 => bytes.push(1),
-        GrooveColumnType::U16 => bytes.push(2),
-        GrooveColumnType::U32 => bytes.push(3),
-        GrooveColumnType::U64 => bytes.push(4),
-        GrooveColumnType::I64 => bytes.push(14),
-        GrooveColumnType::I32 => bytes.push(15),
-        GrooveColumnType::F64 => bytes.push(5),
-        GrooveColumnType::Bool => bytes.push(6),
-        GrooveColumnType::String => bytes.push(7),
-        GrooveColumnType::Bytes => bytes.push(8),
-        GrooveColumnType::Uuid => bytes.push(9),
+        GrooveColumnType::U8 => bytes.push(0),
+        GrooveColumnType::U16 => bytes.push(1),
+        GrooveColumnType::U32 => bytes.push(2),
+        GrooveColumnType::U64 => bytes.push(3),
+        GrooveColumnType::I32 => bytes.push(4),
+        GrooveColumnType::I64 => bytes.push(5),
+        GrooveColumnType::F64 => bytes.push(6),
+        GrooveColumnType::Bool => bytes.push(7),
+        GrooveColumnType::String => bytes.push(8),
+        GrooveColumnType::Bytes => bytes.push(9),
+        GrooveColumnType::Uuid => bytes.push(10),
         GrooveColumnType::Enum(schema) => {
-            bytes.push(10);
+            bytes.push(11);
             put_str(bytes, &schema.name);
             put_u64(bytes, schema.variants.len() as u64);
             for variant in &schema.variants {
@@ -1460,19 +1293,33 @@ fn put_column_type(bytes: &mut Vec<u8>, column_type: &GrooveColumnType) {
             }
         }
         GrooveColumnType::Tuple(members) => {
-            bytes.push(11);
+            bytes.push(12);
             put_u64(bytes, members.len() as u64);
             for member in members {
                 put_column_type(bytes, member);
             }
         }
         GrooveColumnType::Array(member) => {
-            bytes.push(12);
+            bytes.push(13);
             put_column_type(bytes, member);
         }
         GrooveColumnType::Nullable(member) => {
-            bytes.push(13);
+            bytes.push(14);
             put_column_type(bytes, member);
+        }
+        GrooveColumnType::Record(descriptor) => {
+            bytes.push(15);
+            put_u64(bytes, descriptor.fields().len() as u64);
+            for field in descriptor.fields() {
+                match &field.name {
+                    Some(name) => {
+                        bytes.push(1);
+                        put_str(bytes, name);
+                    }
+                    None => bytes.push(0),
+                }
+                put_column_type(bytes, &field.value_type);
+            }
         }
     }
 }
@@ -1516,7 +1363,7 @@ mod tests {
     use groove::schema::ColumnType;
 
     #[test]
-    fn lowers_history_tables_with_composite_primary_keys() {
+    fn logical_history_descriptor_has_composite_primary_key() {
         let schema = JazzSchema::new([TableSchema::new(
             "todos",
             [ColumnSchema::new("title", ColumnType::String)],
@@ -1526,7 +1373,8 @@ mod tests {
         assert!(groove.table("jazz_nodes").is_some());
         assert!(groove.table("jazz_schema_versions").is_some());
         assert!(groove.table("jazz_transactions").is_some());
-        let table = groove.table("jazz_todos_history").unwrap();
+        assert!(groove.table("jazz_todos_history").is_none());
+        let table = schema.tables[0].history_storage_table();
         let primary_key = table.primary_key.as_ref().unwrap();
 
         assert_eq!(primary_key.columns.len(), 3);
@@ -1621,8 +1469,7 @@ mod tests {
             "notes",
             [ColumnSchema::text("body"), ColumnSchema::blob("attachment")],
         )]);
-        let groove = schema.lower_to_groove();
-        let history = groove.table("jazz_notes_history").unwrap();
+        let history = schema.tables[0].history_storage_table();
 
         assert_eq!(
             history
@@ -1748,7 +1595,7 @@ mod tests {
                 .iter()
                 .map(|column| column.column.as_str())
                 .collect::<Vec<_>>(),
-            vec!["table_name", "row_uuid", "layer", "global_seq"]
+            vec!["physical_table_id", "row_uuid", "layer", "global_seq"]
         );
 
         let index = table
@@ -1758,7 +1605,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             index.columns,
-            vec!["global_seq", "table_name", "row_uuid", "layer"]
+            vec!["global_seq", "physical_table_id", "row_uuid", "layer"]
         );
         let table_index = table
             .indices
@@ -1767,7 +1614,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             table_index.columns,
-            vec!["table_name", "global_seq", "row_uuid", "layer"]
+            vec!["physical_table_id", "global_seq", "row_uuid", "layer"]
         );
     }
 
@@ -1782,22 +1629,23 @@ mod tests {
             .iter()
             .find(|table| table.name == "jazz_transactions")
             .unwrap();
-        let history = tables
-            .iter()
-            .find(|table| table.name == "jazz_todos_history")
-            .unwrap();
-        let register = tables
-            .iter()
-            .find(|table| table.name == "jazz_todos_register")
-            .unwrap();
-        let global_current = tables
-            .iter()
-            .find(|table| table.name == "jazz_todos_global_current")
-            .unwrap();
-        let register_global_current = tables
-            .iter()
-            .find(|table| table.name == "jazz_todos_register_global_current")
-            .unwrap();
+        assert!(
+            tables
+                .iter()
+                .all(|table| table.name != "jazz_todos_history"
+                    && table.name != "jazz_todos_register")
+        );
+        let history = schema.tables[0].history_storage_table();
+        let register = schema.tables[0].register_storage_table();
+        assert!(tables.iter().all(|table| {
+            table.name != "jazz_todos_global_current"
+                && table.name != "jazz_todos_register_global_current"
+                && table.name != "jazz_todos_ahead_current"
+                && table.name != "jazz_todos_register_ahead_current"
+        }));
+        let current_tables = schema.tables[0].global_current_storage_tables();
+        let global_current = &current_tables[0];
+        let register_global_current = &current_tables[1];
 
         assert!(
             transactions

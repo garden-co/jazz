@@ -1,6 +1,7 @@
 import type { InsertValues, Value, WasmSchema } from "../../drivers/types.js";
-import type { RuntimeSourcesConfig } from "../context.js";
+import type { RuntimeSourcesConfig, Session } from "../context.js";
 import type { NativeRowDelta } from "../../drivers/types.js";
+import type { BatchId, OpenBatchId } from "../client.js";
 
 type OpenRequest = {
   id: number;
@@ -65,8 +66,9 @@ export type PersistentBrowserWriteRequest =
       args: [table: string, objectId: string, writeContext: string | null | undefined];
     };
 
-export type PersistentBrowserOpfsOwnerRequest =
+type PersistentBrowserRequest =
   | OpenRequest
+  | { id: number; method: "registerSchema"; args: [schema: WasmSchema] }
   | {
       id: number;
       method: "destroyBrowserStorage";
@@ -76,22 +78,42 @@ export type PersistentBrowserOpfsOwnerRequest =
   | {
       id: number;
       method: "waitForTransaction";
-      args: [transactionId: string, tier: string];
+      args: [batchId: BatchId, tier: string];
+    }
+  | {
+      id: number;
+      method: "requestInsertPermissionAdvice";
+      args: [table: string, values: InsertValues, session?: Session];
+    }
+  | {
+      id: number;
+      method: "requestReadPermissionAdvice";
+      args: [table: string, objectId: string, session?: Session];
+    }
+  | {
+      id: number;
+      method: "requestUpdatePermissionAdvice";
+      args: [table: string, objectId: string, values: Record<string, Value>, session?: Session];
+    }
+  | {
+      id: number;
+      method: "requestDeletePermissionAdvice";
+      args: [table: string, objectId: string, session?: Session];
     }
   | {
       id: number;
       method: "beginTransaction";
-      args: [kind: "mergeable" | "exclusive"];
+      args: [kind: "mergeable" | "exclusive", id: OpenBatchId, sessionJson?: string | null];
     }
   | {
       id: number;
       method: "commitTransaction";
-      args: [transactionId: string];
+      args: [id: OpenBatchId];
     }
   | {
       id: number;
       method: "rollbackTransaction";
-      args: [transactionId: string];
+      args: [id: OpenBatchId];
     }
   | {
       id: number;
@@ -119,9 +141,22 @@ export type PersistentBrowserOpfsOwnerRequest =
   | { id: number; method: "unsubscribe"; args: [handle: number] }
   | { id: number; method: "close"; args: [] }
   | { id: number; method: "closeForStorageClear"; args: [] }
-  | { id: number; method: "connect"; args: [url: string, authJson: string] }
-  | { id: number; method: "disconnect"; args: [] }
+  | {
+      id: number;
+      method: "connect";
+      args: [url: string, authJson: string];
+      control?: "reconnect";
+    }
+  | {
+      id: number;
+      method: "disconnect";
+      args: [options: { rejectWaiters?: boolean } | undefined];
+    }
   | { id: number; method: "updateAuth"; args: [authJson: string] };
+
+export type PersistentBrowserOpfsOwnerRequest = PersistentBrowserRequest & {
+  viewId?: number;
+};
 
 export type PersistentBrowserWorkerMethod = PersistentBrowserOpfsOwnerRequest["method"];
 type RequestForMethod<Method extends PersistentBrowserWorkerMethod> = Extract<
@@ -140,6 +175,7 @@ export type PersistentBrowserSubscriptionFrame = {
   addedCount: number;
   removedCount: number;
   updatedCount: number;
+  terminalOperations?: NativeRowDelta["terminalOperations"];
 };
 
 export type PersistentBrowserSubscriptionMessage = {

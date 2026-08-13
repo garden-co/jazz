@@ -105,7 +105,7 @@ describe("TS Insert API", () => {
     const tx = db.beginTransaction();
     const project = tx.insert(app.projects, { name: "Backfilled Project" }, { updatedAt });
 
-    await tx.commit().wait({ tier: "local" });
+    await (await tx.commit()).wait({ tier: "local" });
 
     const projected = await db.one(
       app.projects.select("name", "$updatedAt").where({ id: { eq: project.id } }),
@@ -190,7 +190,7 @@ describe("TS Insert API", () => {
     expect(() => db.insert(app.projects, {})).toThrow("missing required column name");
   });
 
-  it("fails synchronously if a permission rejects the insert", () => {
+  it("stages locally even when the serving policy will reject the insert", () => {
     const project = insertProject(db);
     const owner = insertUser(db);
     expect(() =>
@@ -198,10 +198,10 @@ describe("TS Insert API", () => {
         title: "Test Todo",
         projectId: project.id,
         ownerId: owner.id,
-        // Rows can only be inserted with `done: false`
+        // Client-local runtimes do not evaluate serving permissions.
         done: true,
       }),
-    ).toThrow('Insert failed: WriteError("policy denied INSERT on table todos")');
+    ).not.toThrow();
   });
 
   it("stores explicit values for defaulted columns instead of replacing them", async () => {

@@ -3,10 +3,11 @@
 //! This intentionally exercises `jazz::db::Db<MemoryStorage>` directly, without
 //! the legacy `RuntimeCore`, `SchemaManager`, or `SyncManager` stack.
 
+#![recursion_limit = "256"]
 #![allow(clippy::single_element_loop, dead_code)]
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 #[cfg(feature = "rocksdb")]
 use std::env;
 #[cfg(all(feature = "rocksdb", target_os = "linux"))]
@@ -16,7 +17,6 @@ use std::os::fd::AsRawFd;
 #[cfg(feature = "rocksdb")]
 use std::path::Path;
 use std::rc::Rc;
-#[cfg(feature = "rocksdb")]
 use std::time::{Duration, Instant};
 
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
@@ -46,6 +46,8 @@ type RocksBenchDb = Db<RocksDbStorage>;
 
 const AUTHOR: AuthorId = AuthorId(uuid::uuid!("00000000-0000-0000-0000-0000000000a1"));
 const READER_AUTHOR: AuthorId = AuthorId(uuid::uuid!("00000000-0000-0000-0000-0000000000b2"));
+#[cfg(feature = "rocksdb")]
+const R3_REOPEN_SEED: u64 = 31;
 
 #[derive(Debug, Clone, Copy)]
 struct SmallProfile {
@@ -237,6 +239,17 @@ fn recursive_permissions_schema() -> JazzSchema {
         .with_read_policy(Policy::public())
         .with_write_policy(Policy::public()),
     ])
+}
+
+fn claim_resume_schema() -> JazzSchema {
+    JazzSchema::new([TableSchema::new(
+        "claim_docs",
+        [ColumnSchema::new("title", ColumnType::String)],
+    )
+    .with_read_policy(Policy::shape(
+        Query::from("claim_docs").filter(eq(claim("access"), lit("allowed"))),
+    ))
+    .with_write_policy(Policy::public())])
 }
 
 fn open_db(seed: u64) -> BenchDb {
@@ -758,6 +771,8 @@ const RESUME_ACCESS_GRANTED: RowUuid = RowUuid(uuid::uuid!("13000000-0000-0000-0
 const RESUME_ACCESS_NEVER: RowUuid = RowUuid(uuid::uuid!("13000000-0000-0000-0000-000000000104"));
 const RESUME_EDGE_READER_PARENT: RowUuid =
     RowUuid(uuid::uuid!("13000000-0000-0000-0000-000000000201"));
+const CLAIM_RESUME_DOC_A: RowUuid = RowUuid(uuid::uuid!("13000000-0000-0000-0000-000000000301"));
+const CLAIM_RESUME_DOC_B: RowUuid = RowUuid(uuid::uuid!("13000000-0000-0000-0000-000000000302"));
 
 fn recursive_doc_cells(title: &str, kind: &str) -> BTreeMap<String, Value> {
     BTreeMap::from([
@@ -804,6 +819,10 @@ fn open_recursive_permissions_db_with_author(
         history_complete,
         recursive_permissions_schema(),
     )
+}
+
+fn open_claim_resume_db(seed: u64, author: AuthorId, history_complete: bool) -> BenchDb {
+    open_db_with_schema(seed, author, history_complete, claim_resume_schema())
 }
 
 fn seed_recursive_permissions_fixture(db: &BenchDb) {
@@ -944,25 +963,94 @@ fn assert_permission_resume_docs(rows: &[jazz::node::CurrentRow], visible: &[Row
     assert_eq!(rows.len(), visible.len());
 }
 
-fn drain_permission_resume_delta(event: Option<SubscriptionEvent>) -> (usize, usize, usize) {
-    match event {
+#[derive(Clone, Copy, Debug)]
+enum PermissionResumeChurn {
+    Unchanged,
+    Grant,
+    Revoke,
+    GrantAndRevoke,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ClaimResumeChurn {
+    Revoke,
+    Restore,
+}
+
+impl ClaimResumeChurn {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Revoke => "claim_revoke",
+            Self::Restore => "claim_restore",
+        }
+    }
+
+    fn initial_access(self) -> &'static str {
+        match self {
+            Self::Revoke => "allowed",
+            Self::Restore => "denied",
+        }
+    }
+
+    fn resumed_access(self) -> &'static str {
+        match self {
+            Self::Revoke => "denied",
+            Self::Restore => "allowed",
+        }
+    }
+}
+
+impl PermissionResumeChurn {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Unchanged => "unchanged",
+            Self::Grant => "grant_only",
+            Self::Revoke => "revoke_only",
+            Self::GrantAndRevoke => "grant_and_revoke",
+        }
+    }
+
+    fn grants(self) -> bool {
+        matches!(self, Self::Grant | Self::GrantAndRevoke)
+    }
+
+    fn revokes(self) -> bool {
+        matches!(self, Self::Revoke | Self::GrantAndRevoke)
+    }
+}
+
+fn assert_resume_delta(
+    event: Option<SubscriptionEvent>,
+    expected_added: &[RowUuid],
+    expected_removed: &[RowUuid],
+) -> (usize, usize, usize) {
+    let (added, updated, removed) = match event {
         Some(SubscriptionEvent::Delta {
             added,
             updated,
             removed,
             ..
-        }) => {
-            for row in added.iter().chain(updated.iter()) {
-                assert_ne!(row.row_uuid(), RESUME_DOC_REVOKED);
-                assert_ne!(row.row_uuid(), RESUME_DOC_NEVER);
-            }
-            assert!(removed.iter().any(|row| row.row_uuid == RESUME_DOC_REVOKED));
-            assert!(!removed.iter().any(|row| row.row_uuid == RESUME_DOC_NEVER));
-            (added.len(), updated.len(), removed.len())
+        }) => (added, updated, removed),
+        None if expected_added.is_empty() && expected_removed.is_empty() => {
+            return (0, 0, 0);
         }
         None => panic!("permission-filtered resume emitted no delta event"),
         other => panic!("expected permission-filtered resume delta event, got {other:?}"),
-    }
+    };
+    let actual_added = added
+        .iter()
+        .chain(updated.iter())
+        .map(|row| row.row_uuid())
+        .collect::<BTreeSet<_>>();
+    let actual_removed = removed
+        .iter()
+        .map(|row| row.row_uuid)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(actual_added, expected_added.iter().copied().collect());
+    assert_eq!(actual_removed, expected_removed.iter().copied().collect());
+    assert_eq!(added.len() + updated.len(), expected_added.len());
+    assert_eq!(removed.len(), expected_removed.len());
+    (added.len(), updated.len(), removed.len())
 }
 
 fn drain_optional_permission_rows(event: Option<SubscriptionEvent>) -> usize {
@@ -1112,6 +1200,7 @@ fn r3_profiles() -> Vec<R3Profile> {
 struct R3PhaseSample {
     storage_open: Duration,
     jazz_open: Duration,
+    open_breakdown: Option<R3OpenBreakdown>,
     prepare: Duration,
     first_read: Duration,
     first_read_resolve_view: Duration,
@@ -1126,10 +1215,65 @@ struct R3PhaseSample {
 }
 
 #[cfg(feature = "rocksdb")]
+#[derive(Debug)]
+struct R3OpenBreakdown {
+    catalogue_open: Duration,
+    database_open: Duration,
+    state_init: Duration,
+    recover_storage: Duration,
+    recover_catalogue_state: Duration,
+    validate_current_rows: Duration,
+    recover_global_sequences: Duration,
+    recover_pending_and_rejected: Duration,
+    recover_unclean_close: Duration,
+    recover_known_state: Duration,
+    rebuild_ahead_current: Duration,
+    finalize_catalogue: Duration,
+    validated_current_rows: usize,
+    accepted_global_sequences: usize,
+    global_sequence_records_scanned: usize,
+    ahead_current_entries: usize,
+}
+
+#[cfg(feature = "rocksdb")]
 #[derive(Clone, Copy)]
 enum R3CacheMode {
     Warm,
     Evicted,
+}
+
+#[cfg(feature = "rocksdb")]
+#[derive(Clone, Copy)]
+enum R3CloseMode {
+    Clean,
+    Unclean,
+}
+
+#[cfg(feature = "rocksdb")]
+impl R3CloseMode {
+    fn id(self) -> &'static str {
+        match self {
+            Self::Clean => "db_close",
+            Self::Unclean => "drop_without_close",
+        }
+    }
+}
+
+#[cfg(feature = "rocksdb")]
+fn r3_close_modes() -> Vec<R3CloseMode> {
+    let requested = env::var("JAZZ_R3_CLOSE_MODES").unwrap_or_else(|_| "unclean".to_owned());
+    requested
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| match value {
+            "clean" => R3CloseMode::Clean,
+            "unclean" => R3CloseMode::Unclean,
+            other => panic!(
+                "unknown JAZZ_R3_CLOSE_MODES entry {other:?}; expected a comma-separated subset of clean,unclean"
+            ),
+        })
+        .collect()
 }
 
 #[cfg(feature = "rocksdb")]
@@ -1204,9 +1348,8 @@ fn evict_path_from_linux_page_cache(_path: &Path) {
 fn open_rocks_db_with_phases(
     seed: u64,
     author: AuthorId,
-    history_complete: bool,
     path: &Path,
-) -> (RocksBenchDb, Duration, Duration) {
+) -> (RocksBenchDb, Duration, Duration, Option<R3OpenBreakdown>) {
     let schema = schema();
     let column_families = schema.column_families();
     let refs = column_families
@@ -1230,15 +1373,40 @@ fn open_rocks_db_with_phases(
     .with_id_source(SeededRowIdSource::new(seed));
 
     let jazz_started = Instant::now();
-    let opened = if history_complete {
-        block_on(Db::open_history_complete(config))
-    } else {
-        block_on(Db::open(config))
+    #[cfg(feature = "r3-open-attribution")]
+    let (db, open_breakdown) = {
+        let (db, receipt) = block_on(Db::open_with_receipt_for_test(config))
+            .expect("open attributed core realistic RocksDB phase receipt db");
+        (
+            db,
+            Some(R3OpenBreakdown {
+                catalogue_open: receipt.catalogue_open,
+                database_open: receipt.database_open,
+                state_init: receipt.state_init,
+                recover_storage: receipt.recover_storage,
+                recover_catalogue_state: receipt.recover_catalogue_state,
+                validate_current_rows: receipt.validate_current_rows,
+                recover_global_sequences: receipt.recover_global_sequences,
+                recover_pending_and_rejected: receipt.recover_pending_and_rejected,
+                recover_unclean_close: receipt.recover_unclean_close,
+                recover_known_state: receipt.recover_known_state,
+                rebuild_ahead_current: receipt.rebuild_ahead_current,
+                finalize_catalogue: receipt.finalize_catalogue,
+                validated_current_rows: receipt.validated_current_rows,
+                accepted_global_sequences: receipt.accepted_global_sequences,
+                global_sequence_records_scanned: receipt.global_sequence_records_scanned,
+                ahead_current_entries: receipt.ahead_current_entries,
+            }),
+        )
     };
-    let db = opened.expect("open core realistic RocksDB phase receipt db");
+    #[cfg(not(feature = "r3-open-attribution"))]
+    let (db, open_breakdown) = (
+        block_on(Db::open(config)).expect("open core realistic RocksDB phase receipt db"),
+        None,
+    );
     let jazz_open = jazz_started.elapsed();
 
-    (db, storage_open, jazz_open)
+    (db, storage_open, jazz_open, open_breakdown)
 }
 
 #[cfg(feature = "rocksdb")]
@@ -1246,14 +1414,15 @@ fn measure_r3_phase_sample(
     path: &Path,
     project: RowUuid,
     expected_rows: usize,
-    sample: usize,
+    _sample: usize,
     cache_mode: R3CacheMode,
+    close_mode: R3CloseMode,
 ) -> R3PhaseSample {
     if matches!(cache_mode, R3CacheMode::Evicted) {
         evict_path_from_linux_page_cache(path);
     }
-    let (db, storage_open, jazz_open) =
-        open_rocks_db_with_phases(31 + sample as u64, AUTHOR, false, path);
+    let (db, storage_open, jazz_open, open_breakdown) =
+        open_rocks_db_with_phases(R3_REOPEN_SEED, AUTHOR, path);
 
     let prepare_started = Instant::now();
     let query = project_board_query(&db, project);
@@ -1269,10 +1438,15 @@ fn measure_r3_phase_sample(
         expected_rows,
         "R3 project-board result count changed"
     );
+    if matches!(close_mode, R3CloseMode::Clean) {
+        db.close()
+            .expect("close R3 phase receipt db after measured read");
+    }
 
     R3PhaseSample {
         storage_open,
         jazz_open,
+        open_breakdown,
         prepare,
         first_read,
         first_read_resolve_view: read_profile.resolve_view,
@@ -1285,6 +1459,32 @@ fn measure_r3_phase_sample(
         first_read_unattributed: first_read.saturating_sub(read_profile.total),
         rows: rows.len(),
     }
+}
+
+#[cfg(feature = "rocksdb")]
+fn establish_r3_close_mode(path: &Path, close_mode: R3CloseMode) {
+    let db = open_rocks_db_with_author(R3_REOPEN_SEED, AUTHOR, false, path);
+    if matches!(close_mode, R3CloseMode::Clean) {
+        db.close()
+            .expect("establish clean-close marker before R3 phase samples");
+    }
+}
+
+#[cfg(feature = "rocksdb")]
+fn median_open_us(
+    samples: &[R3PhaseSample],
+    phase: impl Fn(&R3OpenBreakdown) -> Duration,
+) -> Option<u64> {
+    let mut values = samples
+        .iter()
+        .filter_map(|sample| sample.open_breakdown.as_ref())
+        .map(|receipt| phase(receipt).as_micros().min(u64::MAX as u128) as u64)
+        .collect::<Vec<_>>();
+    if values.is_empty() {
+        return None;
+    }
+    values.sort_unstable();
+    Some(values[values.len() / 2])
 }
 
 #[cfg(feature = "rocksdb")]
@@ -1305,45 +1505,110 @@ fn emit_r3_phase_receipts(path: &Path, project: RowUuid, selected: R3Profile) {
         .unwrap_or(3)
         .max(1);
     let expected_rows = selected.profile.tasks.div_ceil(selected.profile.projects);
-    for cache_mode in r3_cache_modes() {
-        let samples = (0..sample_count)
-            .map(|sample| measure_r3_phase_sample(path, project, expected_rows, sample, cache_mode))
-            .collect::<Vec<_>>();
+    for close_mode in r3_close_modes() {
+        establish_r3_close_mode(path, close_mode);
+        for cache_mode in r3_cache_modes() {
+            let samples = (0..sample_count)
+                .map(|sample| {
+                    measure_r3_phase_sample(
+                        path,
+                        project,
+                        expected_rows,
+                        sample,
+                        cache_mode,
+                        close_mode,
+                    )
+                })
+                .collect::<Vec<_>>();
 
-        println!(
-            "{}",
-            serde_json::json!({
-                "scenario": "r3_rocksdb_cold_load",
-                "phase": cache_mode.phase(),
-                "cache_mode": cache_mode.id(),
-                "profile": selected.id,
-                "users": selected.profile.users,
-                "organizations": selected.profile.organizations,
-                "tasks": selected.profile.tasks,
-                "projects": selected.profile.projects,
-                "comments": selected.profile.comments,
-                "watchers_per_task": selected.profile.watchers_per_task,
-                "activity_events": selected.profile.activity_events,
-                "result_rows": samples[0].rows,
-                "samples": sample_count,
-                "durability": "wal_no_sync",
-                "total_p50_us": median_us(&samples, |sample| {
-                    sample.storage_open + sample.jazz_open + sample.prepare + sample.first_read
-                }),
-                "storage_open_p50_us": median_us(&samples, |sample| sample.storage_open),
-                "jazz_open_p50_us": median_us(&samples, |sample| sample.jazz_open),
-                "prepare_p50_us": median_us(&samples, |sample| sample.prepare),
-                "first_read_p50_us": median_us(&samples, |sample| sample.first_read),
-                "first_read_resolve_view_p50_us": median_us(&samples, |sample| sample.first_read_resolve_view),
-                "first_read_compile_program_p50_us": median_us(&samples, |sample| sample.first_read_compile_program),
-                "first_read_select_plan_p50_us": median_us(&samples, |sample| sample.first_read_select_plan),
-                "first_read_execute_plan_p50_us": median_us(&samples, |sample| sample.first_read_execute_plan),
-                "first_read_decode_materialize_p50_us": median_us(&samples, |sample| sample.first_read_decode_materialize),
-                "first_read_finish_rows_p50_us": median_us(&samples, |sample| sample.first_read_finish_rows),
-                "first_read_apply_projection_p50_us": median_us(&samples, |sample| sample.first_read_apply_projection),
-                "first_read_unattributed_p50_us": median_us(&samples, |sample| sample.first_read_unattributed),
-            })
-        );
+            println!(
+                "{}",
+                serde_json::json!({
+                    "scenario": "r3_rocksdb_cold_load",
+                    "phase": cache_mode.phase(),
+                    "cache_mode": cache_mode.id(),
+                    "close_mode": close_mode.id(),
+                    "profile": selected.id,
+                    "users": selected.profile.users,
+                    "organizations": selected.profile.organizations,
+                    "tasks": selected.profile.tasks,
+                    "projects": selected.profile.projects,
+                    "comments": selected.profile.comments,
+                    "watchers_per_task": selected.profile.watchers_per_task,
+                    "activity_events": selected.profile.activity_events,
+                    "result_rows": samples[0].rows,
+                    "samples": sample_count,
+                    "durability": "wal_no_sync",
+                    "total_p50_us": median_us(&samples, |sample| {
+                        sample.storage_open + sample.jazz_open + sample.prepare + sample.first_read
+                    }),
+                    "storage_open_p50_us": median_us(&samples, |sample| sample.storage_open),
+                    "jazz_open_p50_us": median_us(&samples, |sample| sample.jazz_open),
+                    "catalogue_open_p50_us": median_open_us(&samples, |receipt| receipt.catalogue_open),
+                    "database_open_p50_us": median_open_us(&samples, |receipt| receipt.database_open),
+                    "state_init_p50_us": median_open_us(&samples, |receipt| receipt.state_init),
+                    "recover_storage_p50_us": median_open_us(&samples, |receipt| receipt.recover_storage),
+                    "recover_catalogue_state_p50_us": median_open_us(
+                        &samples,
+                        |receipt| receipt.recover_catalogue_state,
+                    ),
+                    "validate_current_rows_p50_us": median_open_us(
+                        &samples,
+                        |receipt| receipt.validate_current_rows,
+                    ),
+                    "recover_global_sequences_p50_us": median_open_us(
+                        &samples,
+                        |receipt| receipt.recover_global_sequences,
+                    ),
+                    "recover_pending_and_rejected_p50_us": median_open_us(
+                        &samples,
+                        |receipt| receipt.recover_pending_and_rejected,
+                    ),
+                    "recover_unclean_close_p50_us": median_open_us(
+                        &samples,
+                        |receipt| receipt.recover_unclean_close,
+                    ),
+                    "recover_known_state_p50_us": median_open_us(
+                        &samples,
+                        |receipt| receipt.recover_known_state,
+                    ),
+                    "rebuild_ahead_current_p50_us": median_open_us(
+                        &samples,
+                        |receipt| receipt.rebuild_ahead_current,
+                    ),
+                    "finalize_catalogue_p50_us": median_open_us(
+                        &samples,
+                        |receipt| receipt.finalize_catalogue,
+                    ),
+                    "validated_current_rows": samples[0]
+                        .open_breakdown
+                        .as_ref()
+                        .map(|receipt| receipt.validated_current_rows),
+                    "accepted_global_sequences": samples[0]
+                        .open_breakdown
+                        .as_ref()
+                        .map(|receipt| receipt.accepted_global_sequences),
+                    "global_sequence_records_scanned": samples[0]
+                        .open_breakdown
+                        .as_ref()
+                        .map(|receipt| receipt.global_sequence_records_scanned),
+                    "ahead_current_entries": samples[0]
+                        .open_breakdown
+                        .as_ref()
+                        .map(|receipt| receipt.ahead_current_entries),
+                    "prepare_p50_us": median_us(&samples, |sample| sample.prepare),
+                    "first_read_p50_us": median_us(&samples, |sample| sample.first_read),
+                    "first_read_resolve_view_p50_us": median_us(&samples, |sample| sample.first_read_resolve_view),
+                    "first_read_compile_program_p50_us": median_us(&samples, |sample| sample.first_read_compile_program),
+                    "first_read_select_plan_p50_us": median_us(&samples, |sample| sample.first_read_select_plan),
+                    "first_read_execute_plan_p50_us": median_us(&samples, |sample| sample.first_read_execute_plan),
+                    "first_read_decode_materialize_p50_us": median_us(&samples, |sample| sample.first_read_decode_materialize),
+                    "first_read_finish_rows_p50_us": median_us(&samples, |sample| sample.first_read_finish_rows),
+                    "first_read_apply_projection_p50_us": median_us(&samples, |sample| sample.first_read_apply_projection),
+                    "first_read_unattributed_p50_us": median_us(&samples, |sample| sample.first_read_unattributed),
+                })
+            );
+        }
     }
 }
 
@@ -1804,154 +2069,368 @@ fn r12_recursive_permissions(c: &mut Criterion) {
     group.finish();
 }
 
+fn run_permission_filtered_resume(
+    churn: PermissionResumeChurn,
+) -> (Duration, usize, usize, usize, usize, usize) {
+    let writer = open_recursive_permissions_db_with_author(130, AuthorId::SYSTEM, false);
+    let server = open_recursive_permissions_db_with_author(131, AuthorId::SYSTEM, true);
+    let client = open_recursive_permissions_db_with_author(132, READER_AUTHOR, false);
+    seed_permission_resume_fixture(&writer);
+    let prepared = client
+        .prepare_query(&Query::from("docs"))
+        .expect("prepare permission-filtered docs query");
+
+    let (writer_transport, server_writer_transport) =
+        byte_duplex_with_session(AuthorId::SYSTEM, 13_001);
+    let writer_upstream = writer.connect_upstream(writer_transport);
+    let writer_subscriber = server.accept_subscriber(server_writer_transport, AuthorId::SYSTEM);
+    writer.tick().expect("ship permission seed rows");
+    server.tick().expect("ingest permission seed rows");
+    assert!(writer.detach_connection(&writer_upstream));
+    assert!(server.detach_connection(&writer_subscriber));
+
+    let (client_transport, server_transport) = byte_duplex_with_session(READER_AUTHOR, 13_002);
+    let upstream = client.connect_upstream(client_transport);
+    let subscriber = server.accept_subscriber(server_transport, READER_AUTHOR);
+    let mut subscription = block_on(client.subscribe(&prepared, global_subscribe_opts()))
+        .expect("subscribe permission-filtered docs");
+    assert_eq!(
+        drain_opened(block_on(subscription.next_event()), "permission docs"),
+        0
+    );
+
+    client
+        .tick()
+        .expect("announce permission docs subscription");
+    server.tick().expect("serve full permission docs snapshot");
+    let full_bytes = subscriber
+        .borrow()
+        .last_resume_bytes()
+        .expect("full permission current-row bytes");
+    client.tick().expect("apply full permission docs snapshot");
+    client
+        .tick()
+        .expect("materialize full permission docs snapshot event");
+    let seeded = drain_optional_permission_rows(subscription.try_next_event());
+    assert!(full_bytes > 0);
+    let rows = client
+        .read(&prepared)
+        .expect("read initial permission-filtered docs");
+    assert_permission_resume_docs(&rows, &[RESUME_DOC_DIRECT, RESUME_DOC_REVOKED]);
+    if seeded > 0 {
+        assert_eq!(seeded, rows.len());
+    }
+
+    server.tick().expect("refresh permission docs cursor");
+    client.tick().expect("apply permission docs cursor state");
+    let cursor = subscriber
+        .borrow_mut()
+        .take_resume_cursor()
+        .expect("take permission subscriber resume cursor");
+    assert!(client.detach_connection(&upstream));
+    assert!(server.detach_connection(&subscriber));
+
+    if churn.revokes() {
+        wait_local(
+            writer
+                .update(
+                    "doc_access",
+                    RESUME_ACCESS_REVOKED,
+                    recursive_doc_access_cells(RESUME_DOC_REVOKED, RECURSIVE_HIDDEN_TEAM),
+                )
+                .expect("hide disconnected doc access before revoke"),
+        );
+        wait_local(
+            writer
+                .delete("doc_access", RESUME_ACCESS_REVOKED)
+                .expect("revoke disconnected doc access"),
+        );
+    }
+    if churn.grants() {
+        wait_local(
+            writer
+                .insert_with_id(
+                    "doc_access",
+                    RESUME_ACCESS_GRANTED,
+                    recursive_doc_access_cells(RESUME_DOC_GRANTED, RECURSIVE_PARENT_TEAM),
+                )
+                .expect("grant disconnected doc access"),
+        );
+    }
+
+    if churn.grants() || churn.revokes() {
+        let (writer_transport, server_writer_transport) =
+            byte_duplex_with_session(AuthorId::SYSTEM, 13_003);
+        let writer_upstream = writer.connect_upstream(writer_transport);
+        let writer_subscriber = server.accept_subscriber(server_writer_transport, AuthorId::SYSTEM);
+        writer.tick().expect("ship disconnected permission changes");
+        server
+            .tick()
+            .expect("ingest disconnected permission changes");
+        writer
+            .tick()
+            .expect("ship settled disconnected permission changes");
+        server
+            .tick()
+            .expect("ingest settled disconnected permission changes");
+        assert!(writer.detach_connection(&writer_upstream));
+        assert!(server.detach_connection(&writer_subscriber));
+    }
+
+    let server_query = recursive_docs_query(&server);
+    let server_rows =
+        block_on(server.all_for_identity(&server_query, ReadOpts::default(), READER_AUTHOR))
+            .expect("read disconnected permission state on server");
+    let mut expected_server_rows = vec![RESUME_DOC_DIRECT];
+    if !churn.revokes() {
+        expected_server_rows.push(RESUME_DOC_REVOKED);
+    }
+    if churn.grants() {
+        expected_server_rows.push(RESUME_DOC_GRANTED);
+    }
+    assert_permission_resume_docs(&server_rows, &expected_server_rows);
+
+    let (client_transport, server_transport) = byte_duplex_with_session(READER_AUTHOR, 13_004);
+    let _resumed_upstream = client.connect_upstream(client_transport);
+    let resumed = server.accept_subscriber_with_resume(server_transport, READER_AUTHOR, cursor);
+
+    let resume_started = Instant::now();
+    client
+        .tick()
+        .expect("announce resumed permission docs subscription");
+    server.tick().expect("serve permission resume catch-up");
+    client.tick().expect("apply permission resume catch-up");
+    client.tick().expect("materialize permission resume event");
+    server
+        .tick()
+        .expect("serve settled permission resume state");
+    client
+        .tick()
+        .expect("apply settled permission resume state");
+    client
+        .tick()
+        .expect("materialize settled permission resume state");
+    let resume_elapsed = resume_started.elapsed();
+
+    let resume_bytes = resumed
+        .borrow()
+        .last_resume_bytes()
+        .expect("permission resume catch-up bytes");
+    assert!(resume_bytes > 0);
+
+    let unchanged_members = [RESUME_DOC_DIRECT, RESUME_DOC_REVOKED];
+    let granted_member = [RESUME_DOC_GRANTED];
+    let expected_added = match churn {
+        PermissionResumeChurn::Unchanged => unchanged_members.as_slice(),
+        PermissionResumeChurn::Grant | PermissionResumeChurn::GrantAndRevoke => {
+            granted_member.as_slice()
+        }
+        PermissionResumeChurn::Revoke => &[],
+    };
+    let expected_removed = churn.revokes().then_some(RESUME_DOC_REVOKED);
+    let (added, updated, removed) = assert_resume_delta(
+        subscription.try_next_event(),
+        expected_added,
+        expected_removed.as_slice(),
+    );
+    assert!(subscription.try_next_event().is_none());
+    // `Db::read` is intentionally a local-preview read; it may still
+    // see retained row bodies after upstream membership is revoked.
+    // The authoritative reconnect contract is the subscription delta
+    // asserted above.
+
+    (
+        resume_elapsed,
+        resume_bytes,
+        full_bytes,
+        added,
+        updated,
+        removed,
+    )
+}
+
+fn run_claim_filtered_resume(
+    churn: ClaimResumeChurn,
+) -> (Duration, usize, usize, usize, usize, usize) {
+    let writer = open_claim_resume_db(133, AuthorId::SYSTEM, false);
+    let server = open_claim_resume_db(134, AuthorId::SYSTEM, true);
+    let client = open_claim_resume_db(135, READER_AUTHOR, false);
+    for (row, title) in [
+        (CLAIM_RESUME_DOC_A, "claim-a"),
+        (CLAIM_RESUME_DOC_B, "claim-b"),
+    ] {
+        wait_local(
+            writer
+                .insert_with_id(
+                    "claim_docs",
+                    row,
+                    BTreeMap::from([("title".to_owned(), Value::String(title.to_owned()))]),
+                )
+                .expect("seed claim-resume doc"),
+        );
+    }
+    let prepared = client
+        .prepare_query(&Query::from("claim_docs"))
+        .expect("prepare claim-filtered docs query");
+
+    let (writer_transport, server_writer_transport) =
+        byte_duplex_with_session(AuthorId::SYSTEM, 13_101);
+    let writer_upstream = writer.connect_upstream(writer_transport);
+    let writer_subscriber = server.accept_subscriber(server_writer_transport, AuthorId::SYSTEM);
+    writer.tick().expect("ship claim-resume seed rows");
+    server.tick().expect("ingest claim-resume seed rows");
+    assert!(writer.detach_connection(&writer_upstream));
+    assert!(server.detach_connection(&writer_subscriber));
+
+    server.set_identity_claims(
+        READER_AUTHOR,
+        BTreeMap::from([(
+            "access".to_owned(),
+            Value::String(churn.initial_access().to_owned()),
+        )]),
+    );
+    let (client_transport, server_transport) = byte_duplex_with_session(READER_AUTHOR, 13_102);
+    let upstream = client.connect_upstream(client_transport);
+    let subscriber = server.accept_subscriber(server_transport, READER_AUTHOR);
+    let mut subscription = block_on(client.subscribe(&prepared, global_subscribe_opts()))
+        .expect("subscribe claim-filtered docs");
+    assert_eq!(
+        drain_opened(block_on(subscription.next_event()), "claim-filtered docs"),
+        0
+    );
+    client.tick().expect("announce claim-filtered subscription");
+    server.tick().expect("serve full claim-filtered snapshot");
+    let full_bytes = subscriber
+        .borrow()
+        .last_resume_bytes()
+        .expect("full claim-filtered snapshot bytes");
+    client.tick().expect("apply claim-filtered snapshot");
+    client.tick().expect("materialize claim-filtered snapshot");
+    let visible_claim_docs = [CLAIM_RESUME_DOC_A, CLAIM_RESUME_DOC_B];
+    let expected_initial = match churn {
+        ClaimResumeChurn::Revoke => visible_claim_docs.as_slice(),
+        ClaimResumeChurn::Restore => &[],
+    };
+    assert_resume_delta(subscription.try_next_event(), expected_initial, &[]);
+
+    server.tick().expect("refresh claim-filtered cursor");
+    client.tick().expect("apply claim-filtered cursor state");
+    let cursor = subscriber
+        .borrow_mut()
+        .take_resume_cursor()
+        .expect("take claim-filtered resume cursor");
+    assert!(client.detach_connection(&upstream));
+    assert!(server.detach_connection(&subscriber));
+
+    server.set_identity_claims(
+        READER_AUTHOR,
+        BTreeMap::from([(
+            "access".to_owned(),
+            Value::String(churn.resumed_access().to_owned()),
+        )]),
+    );
+    let (client_transport, server_transport) = byte_duplex_with_session(READER_AUTHOR, 13_103);
+    let _resumed_upstream = client.connect_upstream(client_transport);
+    let resumed = server.accept_subscriber_with_resume(server_transport, READER_AUTHOR, cursor);
+
+    let resume_started = Instant::now();
+    client.tick().expect("announce resumed claim subscription");
+    server.tick().expect("serve claim resume catch-up");
+    client.tick().expect("apply claim resume catch-up");
+    client.tick().expect("materialize claim resume event");
+    server.tick().expect("serve settled claim resume state");
+    client.tick().expect("apply settled claim resume state");
+    client
+        .tick()
+        .expect("materialize settled claim resume state");
+    let resume_elapsed = resume_started.elapsed();
+    let resume_bytes = resumed
+        .borrow()
+        .last_resume_bytes()
+        .expect("claim resume catch-up bytes");
+    assert!(resume_bytes > 0);
+
+    let (expected_added, expected_removed) = match churn {
+        ClaimResumeChurn::Revoke => (&[][..], visible_claim_docs.as_slice()),
+        ClaimResumeChurn::Restore => (visible_claim_docs.as_slice(), &[][..]),
+    };
+    let (added, updated, removed) = assert_resume_delta(
+        subscription.try_next_event(),
+        expected_added,
+        expected_removed,
+    );
+    assert!(subscription.try_next_event().is_none());
+    (
+        resume_elapsed,
+        resume_bytes,
+        full_bytes,
+        added,
+        updated,
+        removed,
+    )
+}
+
 fn r13_permission_filtered_resume(c: &mut Criterion) {
     let mut group = c.benchmark_group("realistic_phase1/r13_permission_filtered_resume");
     group.throughput(Throughput::Elements(1));
 
-    group.bench_function("docs_recursive_resume_s", |b| {
-        b.iter(|| {
-            let writer = open_recursive_permissions_db_with_author(130, AuthorId::SYSTEM, false);
-            let server = open_recursive_permissions_db_with_author(131, AuthorId::SYSTEM, true);
-            let client = open_recursive_permissions_db_with_author(132, READER_AUTHOR, false);
-            seed_permission_resume_fixture(&writer);
-            let prepared = client
-                .prepare_query(&Query::from("docs"))
-                .expect("prepare permission-filtered docs query");
-
-            let (writer_transport, server_writer_transport) =
-                byte_duplex_with_session(AuthorId::SYSTEM, 13_001);
-            let writer_upstream = writer.connect_upstream(writer_transport);
-            let writer_subscriber =
-                server.accept_subscriber(server_writer_transport, AuthorId::SYSTEM);
-            writer.tick().expect("ship permission seed rows");
-            server.tick().expect("ingest permission seed rows");
-            assert!(writer.detach_connection(&writer_upstream));
-            assert!(server.detach_connection(&writer_subscriber));
-
-            let (client_transport, server_transport) =
-                byte_duplex_with_session(READER_AUTHOR, 13_002);
-            let upstream = client.connect_upstream(client_transport);
-            let subscriber = server.accept_subscriber(server_transport, READER_AUTHOR);
-            let mut subscription = block_on(client.subscribe(&prepared, global_subscribe_opts()))
-                .expect("subscribe permission-filtered docs");
-            assert_eq!(
-                drain_opened(block_on(subscription.next_event()), "permission docs"),
-                0
-            );
-
-            client
-                .tick()
-                .expect("announce permission docs subscription");
-            server.tick().expect("serve full permission docs snapshot");
-            let full_bytes = subscriber
-                .borrow()
-                .last_resume_bytes()
-                .expect("full permission current-row bytes");
-            client.tick().expect("apply full permission docs snapshot");
-            client
-                .tick()
-                .expect("materialize full permission docs snapshot event");
-            let seeded = drain_optional_permission_rows(subscription.try_next_event());
-            assert!(full_bytes > 0);
-            let rows = client
-                .read(&prepared)
-                .expect("read initial permission-filtered docs");
-            assert_permission_resume_docs(&rows, &[RESUME_DOC_DIRECT, RESUME_DOC_REVOKED]);
-            if seeded > 0 {
-                assert_eq!(seeded, rows.len());
-            }
-
-            server.tick().expect("refresh permission docs cursor");
-            client.tick().expect("apply permission docs cursor state");
-            let cursor = subscriber
-                .borrow_mut()
-                .take_resume_cursor()
-                .expect("take permission subscriber resume cursor");
-            assert!(client.detach_connection(&upstream));
-            assert!(server.detach_connection(&subscriber));
-
-            wait_local(
-                writer
-                    .update(
-                        "doc_access",
-                        RESUME_ACCESS_REVOKED,
-                        recursive_doc_access_cells(RESUME_DOC_REVOKED, RECURSIVE_HIDDEN_TEAM),
-                    )
-                    .expect("hide disconnected doc access before revoke"),
-            );
-            wait_local(
-                writer
-                    .delete("doc_access", RESUME_ACCESS_REVOKED)
-                    .expect("revoke disconnected doc access"),
-            );
-            wait_local(
-                writer
-                    .insert_with_id(
-                        "doc_access",
-                        RESUME_ACCESS_GRANTED,
-                        recursive_doc_access_cells(RESUME_DOC_GRANTED, RECURSIVE_PARENT_TEAM),
-                    )
-                    .expect("grant disconnected doc access"),
-            );
-
-            let (writer_transport, server_writer_transport) =
-                byte_duplex_with_session(AuthorId::SYSTEM, 13_003);
-            let writer_upstream = writer.connect_upstream(writer_transport);
-            let writer_subscriber =
-                server.accept_subscriber(server_writer_transport, AuthorId::SYSTEM);
-            writer.tick().expect("ship disconnected permission changes");
-            server
-                .tick()
-                .expect("ingest disconnected permission changes");
-            writer
-                .tick()
-                .expect("ship settled disconnected permission changes");
-            server
-                .tick()
-                .expect("ingest settled disconnected permission changes");
-            assert!(writer.detach_connection(&writer_upstream));
-            assert!(server.detach_connection(&writer_subscriber));
-
-            let (client_transport, server_transport) =
-                byte_duplex_with_session(READER_AUTHOR, 13_004);
-            let _resumed_upstream = client.connect_upstream(client_transport);
-            let resumed =
-                server.accept_subscriber_with_resume(server_transport, READER_AUTHOR, cursor);
-
-            client
-                .tick()
-                .expect("announce resumed permission docs subscription");
-            server.tick().expect("serve permission resume catch-up");
-            client.tick().expect("apply permission resume catch-up");
-            client.tick().expect("materialize permission resume event");
-            server
-                .tick()
-                .expect("serve settled permission resume state");
-            client
-                .tick()
-                .expect("apply settled permission resume state");
-            client
-                .tick()
-                .expect("materialize settled permission resume state");
-
-            let resume_bytes = resumed
-                .borrow()
-                .last_resume_bytes()
-                .expect("permission resume catch-up bytes");
-            assert!(resume_bytes > 0);
-
-            let (added, updated, removed) =
-                drain_permission_resume_delta(subscription.try_next_event());
-            assert_eq!(added + updated, 1);
-            assert_eq!(removed, 1);
-            // `Db::read` is intentionally a local-preview read; it may still
-            // see retained row bodies after upstream membership is revoked.
-            // The authoritative reconnect contract is the subscription delta
-            // asserted above.
-
-            black_box((resume_bytes, full_bytes, added, updated, removed))
+    for churn in [
+        PermissionResumeChurn::Unchanged,
+        PermissionResumeChurn::Grant,
+        PermissionResumeChurn::Revoke,
+        PermissionResumeChurn::GrantAndRevoke,
+    ] {
+        let (elapsed, resume_bytes, full_bytes, added, updated, removed) =
+            run_permission_filtered_resume(churn);
+        eprintln!(
+            "{{\"scenario\":\"r13_permission_filtered_resume\",\"case\":\"{}\",\"resume_us\":{},\"resume_bytes\":{},\"full_bytes\":{},\"added\":{},\"updated\":{},\"removed\":{}}}",
+            churn.name(),
+            elapsed.as_micros(),
+            resume_bytes,
+            full_bytes,
+            added,
+            updated,
+            removed,
+        );
+        group.bench_function(churn.name(), |b| {
+            b.iter_custom(|iterations| {
+                let mut elapsed = Duration::ZERO;
+                for _ in 0..iterations {
+                    let (resume_elapsed, resume_bytes, full_bytes, added, updated, removed) =
+                        run_permission_filtered_resume(churn);
+                    black_box((resume_bytes, full_bytes, added, updated, removed));
+                    elapsed += resume_elapsed;
+                }
+                elapsed
+            });
         });
-    });
+    }
+    for churn in [ClaimResumeChurn::Revoke, ClaimResumeChurn::Restore] {
+        let (elapsed, resume_bytes, full_bytes, added, updated, removed) =
+            run_claim_filtered_resume(churn);
+        eprintln!(
+            "{{\"scenario\":\"r13_permission_filtered_resume\",\"case\":\"{}\",\"resume_us\":{},\"resume_bytes\":{},\"full_bytes\":{},\"added\":{},\"updated\":{},\"removed\":{}}}",
+            churn.name(),
+            elapsed.as_micros(),
+            resume_bytes,
+            full_bytes,
+            added,
+            updated,
+            removed,
+        );
+        group.bench_function(churn.name(), |b| {
+            b.iter_custom(|iterations| {
+                let mut elapsed = Duration::ZERO;
+                for _ in 0..iterations {
+                    let (resume_elapsed, resume_bytes, full_bytes, added, updated, removed) =
+                        run_claim_filtered_resume(churn);
+                    black_box((resume_bytes, full_bytes, added, updated, removed));
+                    elapsed += resume_elapsed;
+                }
+                elapsed
+            });
+        });
+    }
 
     group.finish();
 }

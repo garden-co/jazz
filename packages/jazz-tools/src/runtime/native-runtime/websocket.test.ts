@@ -111,6 +111,173 @@ describe("websocket frame carrier", () => {
     expect(reader.u64()).toBe(MAX_WIRE_PROTOCOL_VERSION);
     expect(reader.u64()).toBe(CLIENT_WIRE_FEATURES);
     expect(reader.u64()).toBe(0);
+    expect(reader.option((authority) => authority.bytes(false))).toBeUndefined();
+  });
+
+  it("sends an authority-unbound hello first on every reconnect", async () => {
+    const sockets: RecordingWebSocket[] = [];
+    const peerIdentity = Uint8Array.from({ length: 16 }, (_, index) => index + 1);
+    const WebSocket = class extends RecordingWebSocket {
+      constructor(url: string) {
+        super(url, (socket) => sockets.push(socket));
+      }
+    };
+
+    const first = new WebSocketCarrier({
+      endpointUrl: "ws://127.0.0.1:4200/apps/app-a/ws",
+      peerIdentity,
+      onFrame: () => {},
+      WebSocket,
+    });
+    await first.ready();
+    first.close();
+    const second = new WebSocketCarrier({
+      endpointUrl: "ws://127.0.0.1:4200/apps/app-a/ws",
+      peerIdentity,
+      onFrame: () => {},
+      WebSocket,
+    });
+    await second.ready();
+
+    const hello = (socket: RecordingWebSocket) => {
+      expect(socket.sent[0]).toEqual(encodeWebSocketPrelude("{}", peerIdentity));
+      const frame = decodeWebSocketFrameBatch(socket.sent[1] as Uint8Array)[0]!;
+      const reader = new PostcardReader(frame);
+      expect(reader.u64()).toBe(0);
+      reader.u64();
+      reader.u64();
+      reader.u64();
+      reader.u64();
+      return reader.option((authority) => authority.bytes(false));
+    };
+    expect(hello(sockets[0]!)).toBeUndefined();
+    expect(hello(sockets[1]!)).toBeUndefined();
+    const firstNegotiation = await first.ready();
+    const secondNegotiation = await second.ready();
+    expect(firstNegotiation.authority?.node).toEqual(Uint8Array.from({ length: 16 }, () => 0x5e));
+    expect(secondNegotiation.authority?.epoch).toBeGreaterThan(
+      firstNegotiation.authority?.epoch ?? 0n,
+    );
+  });
+
+  it("preserves full u64 server authority epochs across stale/current hellos", async () => {
+    const staleEpoch = 9_007_199_254_740_993n;
+    const currentEpoch = staleEpoch + 1n;
+    const sockets: MessageWebSocket[] = [];
+    const WebSocket = class extends MessageWebSocket {
+      constructor(url: string) {
+        super(url);
+        sockets.push(this);
+      }
+    };
+    const stale = new WebSocketCarrier({
+      endpointUrl: "ws://127.0.0.1:4200/apps/app-a/ws",
+      peerIdentity: new Uint8Array(16),
+      onFrame: () => {},
+      WebSocket,
+    });
+    sockets[0]!.emitMessage(encodeWebSocketFrameBatch([encodeServerHello(staleEpoch)]));
+    const current = new WebSocketCarrier({
+      endpointUrl: "ws://127.0.0.1:4200/apps/app-a/ws",
+      peerIdentity: new Uint8Array(16),
+      onFrame: () => {},
+      WebSocket,
+    });
+    sockets[1]!.emitMessage(encodeWebSocketFrameBatch([encodeServerHello(currentEpoch)]));
+
+    const staleNegotiation = await stale.ready();
+    const currentNegotiation = await current.ready();
+
+    expect(staleNegotiation.authority?.epoch).toBe(staleEpoch);
+    expect(currentNegotiation.authority?.epoch).toBe(currentEpoch);
+    expect(currentNegotiation.authority!.epoch > staleNegotiation.authority!.epoch).toBe(true);
+
+    const writer = new PostcardWriter();
+    writer.u64(staleEpoch);
+    const encodedEpoch = writer.finish();
+    expect(new PostcardReader(encodedEpoch).u64BigInt()).toBe(staleEpoch);
+    expect(BigInt(new PostcardReader(encodedEpoch).u64())).not.toBe(staleEpoch);
+  });
+
+  it("does not send or deliver semantic frames before the server hello", async () => {
+    let socket: MessageWebSocket | undefined;
+    const delivered: Uint8Array[] = [];
+    const carrier = new WebSocketCarrier({
+      endpointUrl: "ws://127.0.0.1:4200/apps/app-a/ws",
+      peerIdentity: new Uint8Array(16),
+      onFrame: (frame) => delivered.push(frame),
+      WebSocket: class extends MessageWebSocket {
+        constructor(url: string) {
+          super(url, (created) => {
+            socket = created;
+          });
+        }
+      },
+    });
+
+    socket!.emitMessage(encodeWebSocketFrameBatch([Uint8Array.of(1, 6, 0, 0)]));
+    await expect(carrier.ready()).rejects.toThrow("before server hello");
+    await expect(carrier.send(Uint8Array.of(1))).rejects.toThrow("before server hello");
+    expect(delivered).toEqual([]);
+    expect(socket!.closed).toBe(true);
+  });
+
+  it("surfaces an authentication failure before server hello without negotiating", async () => {
+    let socket: MessageWebSocket | undefined;
+    const frames: Uint8Array[] = [];
+    const errors: unknown[] = [];
+    const carrier = new WebSocketCarrier({
+      endpointUrl: "ws://127.0.0.1:4200/apps/app-a/ws",
+      peerIdentity: new Uint8Array(16),
+      onFrame: (frame) => frames.push(frame),
+      onError: (error) => errors.push(error),
+      WebSocket: class extends MessageWebSocket {
+        constructor(url: string) {
+          super(url, (created) => {
+            socket = created;
+          });
+        }
+      },
+    });
+
+    socket!.emitMessage(encodeWebSocketFrameBatch([encodeWireError(3, 1, "invalid token")]));
+
+    await expect(carrier.ready()).rejects.toThrow("authentication failed before server hello");
+    socket!.emitMessage(encodeWebSocketFrameBatch([encodeServerHello(1n)]));
+    socket!.emitMessage(encodeWebSocketFrameBatch([Uint8Array.of(1, 6, 0, 0)]));
+    await Promise.resolve();
+
+    expect(errors).toEqual([
+      { code: "auth_failed", retry: "after_auth", message: "invalid token" },
+    ]);
+    expect(frames).toEqual([]);
+    expect(socket!.closed).toBe(true);
+  });
+
+  it("rejects non-authentication errors before server hello", async () => {
+    let socket: MessageWebSocket | undefined;
+    const errors: unknown[] = [];
+    const carrier = new WebSocketCarrier({
+      endpointUrl: "ws://127.0.0.1:4200/apps/app-a/ws",
+      peerIdentity: new Uint8Array(16),
+      onFrame: () => {},
+      onError: (error) => errors.push(error),
+      WebSocket: class extends MessageWebSocket {
+        constructor(url: string) {
+          super(url, (created) => {
+            socket = created;
+          });
+        }
+      },
+    });
+
+    socket!.emitMessage(
+      encodeWebSocketFrameBatch([encodeWireError(5, 3, "conflicting commit unit")]),
+    );
+
+    await expect(carrier.ready()).rejects.toThrow("semantic frame before server hello");
+    expect(errors).toEqual([]);
+    expect(socket!.closed).toBe(true);
   });
 
   it("decodes structured wire error frames", () => {
@@ -132,13 +299,16 @@ describe("websocket frame carrier", () => {
       onError: (error) => errors.push(error),
       WebSocket: class extends MessageWebSocket {
         constructor(url: string) {
-          super(url);
-          socket = this;
+          super(url, (created) => {
+            socket = created;
+          });
         }
       },
     });
 
-    socket!.emitMessage(encodeWebSocketFrameBatch([encodeWireError(3, 1, "expired")]));
+    socket!.emitMessage(
+      encodeWebSocketFrameBatch([encodeServerHello(1n), encodeWireError(3, 1, "expired")]),
+    );
     await Promise.resolve();
 
     expect(frames).toEqual([]);
@@ -167,7 +337,7 @@ describe("websocket frame carrier", () => {
     expect(reader.u64()).toBe(FEATURE_SYNC_MESSAGE_PAYLOAD);
     expect(reader.option(() => "session")).toBeUndefined();
     const payload = reader.bytes();
-    expect(payload[0]).toBe(11);
+    expect(payload[0]).toBe(14);
   });
 });
 
@@ -207,16 +377,42 @@ function encodeWireError(code: number, retry: number, message: string): Uint8Arr
   return writer.finish();
 }
 
+function encodeServerHello(epoch: bigint): Uint8Array {
+  const writer = new PostcardWriter();
+  writer.u64(0); // WireFrame::Hello
+  writer.u64(WIRE_PROTOCOL_VERSION);
+  writer.u64(WIRE_PROTOCOL_VERSION);
+  writer.u64(CLIENT_WIRE_FEATURES);
+  writer.u64(1); // WirePeerRole::Core
+  writer.some((authority) => {
+    authority.bytes(
+      Uint8Array.from({ length: 16 }, () => 0x5e),
+      false,
+    );
+    authority.u64(epoch);
+  });
+  return writer.finish();
+}
+
 class MessageWebSocket {
   binaryType: "arraybuffer" | "blob" = "arraybuffer";
   readonly readyState = 1;
   private readonly messageListeners: Array<(event: { data: unknown }) => void> = [];
 
-  constructor(readonly url: string) {}
+  constructor(
+    readonly url: string,
+    onCreate?: (socket: MessageWebSocket) => void,
+  ) {
+    onCreate?.(this);
+  }
 
   send(_data: Uint8Array | string): void {}
 
-  close(): void {}
+  closed = false;
+
+  close(): void {
+    this.closed = true;
+  }
 
   addEventListener(type: "open", listener: () => void): void;
   addEventListener(type: "message", listener: (event: { data: unknown }) => void): void;
@@ -246,5 +442,10 @@ class RecordingWebSocket extends MessageWebSocket {
 
   override send(data: Uint8Array | string): void {
     this.sent.push(data);
+    if (data instanceof Uint8Array && isWireHello(decodeWebSocketFrameBatch(data)[0]!)) {
+      this.emitMessage(encodeWebSocketFrameBatch([encodeServerHello(RecordingWebSocket.epoch++)]));
+    }
   }
+
+  private static epoch = 1n;
 }

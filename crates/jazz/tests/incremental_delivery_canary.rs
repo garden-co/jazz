@@ -213,9 +213,7 @@ fn row(seed: u64) -> RowUuid {
 
 fn relation_query() -> Query {
     Query::from("parents").array_subquery(
-        ArraySubquery::new("children", "children", "parent_id", "id")
-            .select(["label", "ordinal"])
-            .unbounded(),
+        ArraySubquery::new("children", "children", "parent_id", "id").select(["label", "ordinal"]),
     )
 }
 
@@ -287,32 +285,39 @@ fn drain_until_idle(server: &Db<MemoryStorage>, client: &Db<MemoryStorage>) {
         let server_stats = server.tick_stats().expect("drain server");
         let client_after = client.tick_stats().expect("drain client after server");
         if client_before.remote_sync_applied == 0
-            && client_before.consolidated_windows == 0
             && server_stats.remote_sync_applied == 0
-            && server_stats.consolidated_windows == 0
             && client_after.remote_sync_applied == 0
-            && client_after.consolidated_windows == 0
         {
             return;
         }
     }
-    panic!("timed out draining reset-batch sync and consolidation work");
+    panic!("timed out draining reset-batch sync work");
 }
 
 fn expect_parent_snapshot(event: SubscriptionEvent, parent: RowUuid, label: &str) {
     match event {
         SubscriptionEvent::Delta {
-            added,
-            added_related,
-            added_edges,
             reset,
+            added,
+            updated,
+            terminal_operations,
             ..
         } => {
+            if label == "measured update" {
+                assert!(!reset, "{label}: structured update must remain incremental");
+            }
+            let patched_parent = terminal_operations.iter().any(|operation| {
+                operation.root_key.as_slice()
+                    == [10]
+                        .into_iter()
+                        .chain(parent.0.as_bytes().iter().copied())
+                        .collect::<Vec<_>>()
+            });
             assert!(
                 added.iter().any(|row| row.row_uuid() == parent)
-                    || added_related.iter().any(|row| row.row_uuid() == parent)
-                    || (!reset && !added_edges.is_empty()),
-                "{label}: relation delta did not include parent state or edge additions"
+                    || updated.iter().any(|row| row.row_uuid() == parent)
+                    || patched_parent,
+                "{label}: terminal delta did not address parent state: {terminal_operations:?}"
             );
         }
         other => panic!("{label}: expected relation event, got {other:?}"),

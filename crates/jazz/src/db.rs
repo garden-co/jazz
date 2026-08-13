@@ -5,7 +5,7 @@
 //! [`crate::peer`]. In the layer map this is the top `Db` facade over the node.
 
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::num::NonZeroUsize;
 use std::pin::{Pin, pin};
@@ -20,64 +20,71 @@ use std::task::{Context, Poll, Waker};
 use futures_channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use futures_channel::oneshot;
 use futures_core::Stream;
-use groove::records::Value;
+use groove::records::{OwnedRecord, RecordDescriptor, Value};
 use groove::schema::ColumnType as GrooveColumnType;
 use groove::storage::{OrderedKvStorage, ReopenableStorage};
 use thiserror::Error;
+#[cfg(feature = "cold-settle-attribution")]
 use web_time::Instant;
 
-/// Maximum history-codec windows built during one outer `Db::tick` post-tick
-/// maintenance pass.
-///
-/// The pass runs after connection work and cache eviction, between runtime
-/// ticks. Keeping this small bounds foreground tick work while allowing old
-/// plain history runs to compact incrementally.
-const POST_TICK_HISTORY_WINDOW_BUDGET: usize = 4;
-
+use crate::authorization_scope::{
+    AuthorityContext, AuthorityScopeAggregate, AuthorizationScopeAcquisition,
+    AuthorizationScopeInstall, AuthorizationScopeLease, AuthorizationScopeOwnerToken,
+    AuthorizationScopeReadiness, AuthorizationScopeRegistry, MAX_AUTHORIZATION_SCOPES,
+};
 use crate::ids::{AuthorId, NodeUuid, RowUuid, SchemaVersionId};
 pub use crate::node::CommitUnitTrust;
+#[cfg(feature = "testing")]
+pub use crate::node::NodeOpenReceipt as DbOpenReceipt;
+use crate::node::query_engine::QueryAuthorizationMode;
 use crate::node::{
     CommitUnitIngestContext, CurrentRow, EdgeCacheBudget, LargeValueEditCommit, LargeValueEditOp,
     LocalMaintainedViewSubscription, LocalMaintainedViewSubscriptionUpdate, MergeableCommit,
-    NodeState, OpenTxId, PreparedQueryPlanHandle, QueryReadProfile, RelationEdge, RelationSnapshot,
+    NodeState, PreparedQueryPlanHandle, QueryReadProfile, RelationEdge, RelationSnapshot,
     RowProvenance, ViewUpdateParts,
 };
 use crate::peer::{PeerRole, PeerState};
+pub use crate::protocol::PermissionAdvice;
+#[cfg(feature = "sync-autopsy")]
+use crate::protocol::expand_version_carriers;
 use crate::protocol::{
-    BindingViewKey, ContentExtent, CoverageKey, CurrentWriteSchema, LargeValueOwnerRef,
-    MigrationLens, PeerPayloadInventory, ProgramFactEntry, ReadViewKey, ReadViewSourceSpec,
-    ReadViewSpec, RegisterShapeOptions, ResultMemberEntry, RowVersionRef, SchemaVersion, ShapeAst,
-    Subscribe, SubscribeRejectReason, SubscribeServerFailureCode, SubscriptionKey, SyncMessage,
-    VersionBundle, build_version_carriers_from_singletons, expand_version_carriers,
+    AuthorizationScopeReceipt, BindingViewKey, ContentExtent, CoverageKey, CurrentWriteSchema,
+    LargeValueOwnerRef, LensOp, MigrationLens, PermissionAdviceAction, PermissionAdviceRequestId,
+    ReadViewKey, ReadViewSourceSpec, ReadViewSpec, RegisterShapeOptions, SchemaLineagePublication,
+    SchemaVersion, ShapeAst, Subscribe, SubscribeRejectReason, SubscribeServerFailureCode,
+    SubscriptionKey, SyncMessage, TableLens,
 };
 use crate::protocol_limits::{
-    MAX_WIRE_FRAME_BYTES, validate_content_extents, validate_fetch_row_versions,
-    validate_known_state_declaration, validate_shape_ast_size, validate_sync_message_len,
+    MAX_FETCH_BRANCH_METADATA, MAX_INFLIGHT_LOGICAL_MESSAGE_BYTES, MAX_INFLIGHT_LOGICAL_MESSAGES,
+    validate_content_extents, validate_fetch_branch_metadata, validate_fetch_row_versions,
+    validate_known_state_declaration, validate_logical_message_len, validate_shape_ast_size,
     validate_wire_frame_len,
 };
 use crate::query::{
-    Binding, BindingId, Query, QueryError, RelationQuery, ShapeId, ValidatedQuery,
-    relation_query_to_query,
+    Binding, BindingId, Operand, Predicate, Query, QueryError, RelationQuery, ShapeId,
+    ValidatedQuery, relation_query_to_query,
 };
 #[cfg(test)]
 use crate::query::{
     RelationCmpOp, RelationColumnRef, RelationExpr, RelationJoinKind, RelationPredicate,
     RelationProjectExpr, RelationRowIdRef, RelationValueRef,
 };
-pub use crate::result_tree::{
-    MAX_RESULT_TREE_PARENT_BYTES, ParentTooLargeError, ResultNode, ResultRelation, ResultTree,
-    ResultTreeReplacement,
-};
+pub use crate::result_tree::{ResultNode, ResultRelation, ResultTree, ResultTreeReplacement};
 use crate::schema::{JazzSchema, TableSchema};
 use crate::time::GlobalSeq;
-use crate::tools::{ObjectId, OutputOccurrenceId};
+use crate::tools::OpenBatchId;
+use crate::tools::{ObjectId, OutputOccurrenceId, ResultKey};
 use crate::tx::{DeletionEvent, DurabilityTier, Fate, RejectionReason, TxId, TxKind};
 use crate::wire::{
-    FEATURE_STRUCTURED_ERRORS, FEATURE_SYNC_MESSAGE_PAYLOAD, TransportError, WIRE_PROTOCOL_VERSION,
-    WireEnvelope, WireError, WireErrorCode, WireFeatures, WireFrame, WireRetry, WireSession,
-    WireStreamDecoder, WireStreamEncoder, WireTransport, current_wire_features, decode_frame,
-    decode_sync_message_for_receive, encode_frame, encode_sync_message,
+    FEATURE_MESSAGE_FRAGMENTATION, TransportError, WIRE_PROTOCOL_VERSION, WireAuthorityEndpoint,
+    WireEnvelope, WireError, WireErrorCode, WireFeatures, WireFrame, WireMessageFragment,
+    WireRetry, WireSession, WireStreamDecoder, WireStreamEncoder, WireTransport,
+    current_wire_features, decode_frame, decode_sync_message_for_features, encode_frame,
+    encode_sync_message, encode_sync_message_for_features,
 };
+
+const WIRE_FRAGMENT_PAYLOAD_BYTES: usize = 512 * 1024;
+const RECENT_COMPLETED_LOGICAL_MESSAGES: usize = 64;
 
 /// How urgently a runtime should service pending peer-connection work.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -189,10 +196,31 @@ where
 {
     schema: JazzSchema,
     schema_version_id: SchemaVersionId,
+    schema_view_is_fixed: bool,
+    schema_views: Rc<RefCell<BTreeMap<SchemaViewId, JazzSchema>>>,
     identity: DbIdentity,
-    node: Node<S>,
-    row_id_source: RefCell<Box<dyn RowIdSource>>,
-    next_now_ms: Cell<u64>,
+    node: Rc<Node<S>>,
+    row_id_source: Rc<RefCell<Box<dyn RowIdSource>>>,
+    next_now_ms: Rc<Cell<u64>>,
+}
+
+/// Process-local, content-addressed identity for an exact typed schema view.
+///
+/// Unlike [`SchemaVersionId`], which identifies structural migration lineage,
+/// this includes defaults and policy metadata used by a typed client facade.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SchemaViewId([u8; 32]);
+
+impl SchemaViewId {
+    /// Stable bytes suitable for binding-level map keys.
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
+    fn for_schema(schema: &JazzSchema) -> Self {
+        let bytes = postcard::to_allocvec(schema).expect("JazzSchema always serializes");
+        Self(blake3::derive_key("jazz typed schema view id v1", &bytes))
+    }
 }
 
 /// Shared list of live subscriptions. Held by both the `Node` and any
@@ -202,10 +230,38 @@ type SubscriptionList = Rc<RefCell<Vec<Weak<RefCell<SubscriptionState>>>>>;
 type PendingUpstreamCommands = Rc<RefCell<Vec<PendingUpstreamCommand>>>;
 type LatestCoverageSubscriptions = Rc<RefCell<BTreeMap<CoverageKey, SubscriptionKey>>>;
 type UpstreamCoverageRefCounts = Rc<RefCell<BTreeMap<CoverageKey, usize>>>;
+type CoverageRefreshGenerations = Rc<RefCell<BTreeMap<CoverageKey, u64>>>;
 type UpstreamSubscriptionOwners =
     Rc<RefCell<BTreeMap<SubscriptionKey, Vec<Weak<RefCell<SubscriptionState>>>>>>;
 type SharedTickScheduler = Rc<RefCell<Option<Rc<dyn TickScheduler>>>>;
 type WriteStateWaiters = Rc<RefCell<BTreeMap<TxId, Vec<WriteStateWaiter>>>>;
+type PermissionAdviceWaiters =
+    Rc<RefCell<BTreeMap<PermissionAdviceRequestId, oneshot::Sender<PermissionAdvice>>>>;
+type PendingDownstreamFates = Rc<RefCell<Vec<SyncMessage>>>;
+type AdmittedUpstreamAuthorities = Rc<RefCell<Vec<AuthorityContext>>>;
+const MAX_EDGE_FATE_ROUTES: usize = 1024;
+const MAX_EDGE_FATE_ROUTES_PER_TX: usize = 8;
+
+struct EdgeFateRoute {
+    authority: AuthorityContext,
+    queue: Weak<RefCell<Vec<SyncMessage>>>,
+}
+type EdgeFateRoutes = Rc<RefCell<BTreeMap<TxId, Vec<EdgeFateRoute>>>>;
+
+/// A parked fate belongs to one admitted upstream epoch.  Drop routes for
+/// departed/replaced sessions (and dead subscriber queues) eagerly: retaining
+/// a weak queue alone would let arbitrary uploads grow this registry forever.
+fn prune_edge_fate_routes(
+    routes: &mut BTreeMap<TxId, Vec<EdgeFateRoute>>,
+    admitted: Option<AuthorityContext>,
+) {
+    routes.retain(|_, pending| {
+        pending.retain(|route| {
+            route.queue.upgrade().is_some() && admitted.is_some_and(|ctx| ctx == route.authority)
+        });
+        !pending.is_empty()
+    });
+}
 type ShapeRegistrationKey = (ShapeId, ReadViewKey);
 
 /// Per-subscriber state for a shape/read-view registration.
@@ -231,6 +287,127 @@ fn default_cell_for_column_type(column_type: &GrooveColumnType, default: &Value)
     }
 }
 
+fn schema_view_column_default(column: &crate::schema::ColumnSchema) -> Result<Value, Error> {
+    if let Some(default) = &column.default {
+        return Ok(default.clone());
+    }
+    if matches!(column.column_type, GrooveColumnType::Nullable(_)) {
+        return Ok(Value::Nullable(None));
+    }
+    Err(Error::new(
+        ErrorCode::Schema,
+        format!(
+            "schema view column {} requires a migration default",
+            column.name
+        ),
+    ))
+}
+
+fn direct_schema_view_lens(
+    source: &JazzSchema,
+    target: &JazzSchema,
+) -> Result<(MigrationLens, Vec<String>, Vec<String>), Error> {
+    let source_id = source.version_id();
+    let target_id = target.version_id();
+    let mut table_lenses = Vec::new();
+    for source_table in &source.tables {
+        let Some(target_table) = target
+            .tables
+            .iter()
+            .find(|table| table.name == source_table.name)
+        else {
+            continue;
+        };
+        if source_table.references != target_table.references {
+            return Err(Error::new(
+                ErrorCode::Schema,
+                format!(
+                    "schema view changes references on {} without an explicit lens",
+                    target_table.name
+                ),
+            ));
+        }
+        if source_table.merge_strategies != target_table.merge_strategies {
+            return Err(Error::new(
+                ErrorCode::Schema,
+                format!(
+                    "schema view changes merge strategies on {} without an explicit lens",
+                    target_table.name
+                ),
+            ));
+        }
+        if source_table.indexed_columns != target_table.indexed_columns {
+            return Err(Error::new(
+                ErrorCode::Schema,
+                format!(
+                    "schema view changes indices on {} without explicit index admission",
+                    target_table.name
+                ),
+            ));
+        }
+        let mut ops = Vec::new();
+        for target_column in &target_table.columns {
+            match source_table
+                .columns
+                .iter()
+                .find(|column| column.name == target_column.name)
+            {
+                Some(source_column)
+                    if source_column.column_type == target_column.column_type
+                        && source_column.large_value == target_column.large_value
+                        && source_column.text_merge_spec == target_column.text_merge_spec => {}
+                Some(_) => {
+                    return Err(Error::new(
+                        ErrorCode::Schema,
+                        format!(
+                            "schema view changes type of {}.{} without an explicit lens",
+                            target_table.name, target_column.name
+                        ),
+                    ));
+                }
+                None => ops.push(LensOp::AddColumn {
+                    column: target_column.name.clone(),
+                    default: schema_view_column_default(target_column)?,
+                }),
+            }
+        }
+        for source_column in &source_table.columns {
+            if target_table
+                .columns
+                .iter()
+                .all(|column| column.name != source_column.name)
+            {
+                ops.push(LensOp::DropColumn {
+                    column: source_column.name.clone(),
+                    backwards_default: schema_view_column_default(source_column)?,
+                });
+            }
+        }
+        table_lenses.push(TableLens {
+            source_table: source_table.name.clone(),
+            target_table: target_table.name.clone(),
+            ops,
+        });
+    }
+    let new_tables = target
+        .tables
+        .iter()
+        .filter(|table| source.tables.iter().all(|source| source.name != table.name))
+        .map(|table| table.name.clone())
+        .collect::<Vec<_>>();
+    let dropped_tables = source
+        .tables
+        .iter()
+        .filter(|table| target.tables.iter().all(|target| target.name != table.name))
+        .map(|table| table.name.clone())
+        .collect::<Vec<_>>();
+    Ok((
+        MigrationLens::new(source_id, target_id, table_lenses),
+        new_tables,
+        dropped_tables,
+    ))
+}
+
 struct WriteStateWaiter {
     id: u64,
     notify: WriteStateWaiterNotify,
@@ -248,6 +425,10 @@ enum PendingUpstreamCommand {
     FetchContentExtent {
         owner: LargeValueOwnerRef,
         extent: crate::node::content_store::Extent,
+    },
+    AuthorizationScopeIntent {
+        request_id: PermissionAdviceRequestId,
+        action: PermissionAdviceAction,
     },
 }
 
@@ -270,6 +451,64 @@ struct CoverageGroup {
     shape: ValidatedQuery,
     binding: Binding,
     subscribers: BTreeSet<SubscriptionKey>,
+}
+
+/// Authority-derived scope identity retained for a support subscription.
+/// Never constructed from the caller's wire payload.
+#[derive(Clone, Debug, PartialEq)]
+struct AuthorizedScopePurpose {
+    key: crate::protocol::AuthorizationSupportScopeKey,
+    operation: crate::protocol::AuthorizationOperationKey,
+    action: PermissionAdviceAction,
+    expected_support: BTreeSet<(ShapeId, BindingId)>,
+}
+
+// Compatibility spelling retained for module-local tests while the actual
+// implementation is the shared authority proof primitive.
+#[cfg(test)]
+type ScopeAggregate = AuthorityScopeAggregate;
+
+/// One receipt-bound authorization operation owned by one admitted upstream.
+///
+/// This state deliberately lives on `ConnectionLink::Upstream`: a receipt is
+/// only meaningful for the authenticated authority epoch that delivered it.
+/// The manager additionally records every support subscription, since an
+/// aggregate receipt names only the final completing subscription.
+struct AuthorizationScopeLeaseRequest {
+    action: PermissionAdviceAction,
+    /// Every local caller sharing this authority hydration.  The first id is
+    /// the wire correlation id; later ids never cause another support view.
+    waiters: BTreeSet<PermissionAdviceRequestId>,
+    key: Option<crate::protocol::AuthorizationSupportScopeKey>,
+    lease: Option<AuthorizationScopeLease>,
+    owner: Option<AuthorizationScopeOwnerToken>,
+    clause_count: Option<u16>,
+    applied_clauses: BTreeMap<u16, (SubscriptionKey, crate::time::GlobalSeq, u64)>,
+}
+
+/// Per-upstream admission manager for scope receipts and their retained leases.
+#[derive(Default)]
+struct AuthorizationScopeLeaseManager {
+    registry: AuthorizationScopeRegistry,
+    requests: BTreeMap<PermissionAdviceRequestId, AuthorizationScopeLeaseRequest>,
+}
+
+/// One authority-compiled support hydration retained only while every
+/// authority revision and global cut it represents remains current.  It is
+/// keyed by the support scope rather than the candidate operation, so distinct
+/// rows/patches can reuse hydration but still evaluate their own action.
+#[derive(Clone)]
+struct ServedAuthorizationScopeHydration {
+    clauses: Vec<ServedAuthorizationScopeClause>,
+    receipt: AuthorizationScopeReceipt,
+}
+
+#[derive(Clone)]
+struct ServedAuthorizationScopeClause {
+    subscription: SubscriptionKey,
+    register: SyncMessage,
+    subscribe: SyncMessage,
+    view: SyncMessage,
 }
 
 /// Locally-authored transactions awaiting upload, oldest first. Shared with
@@ -321,6 +560,9 @@ impl InitialSyncFlushCadence {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct QueryAttachment {
     subscriptions: Vec<SubscriptionKey>,
+    owned_subscriptions: Vec<SubscriptionKey>,
+    required_after: Vec<(BindingViewKey, u64)>,
+    refreshes: Vec<(CoverageKey, u64)>,
 }
 
 impl QueryAttachment {
@@ -367,6 +609,38 @@ impl Drop for WriteStateChange {
     }
 }
 
+/// Cancel-safe future for one authoritative permission preflight.
+pub struct PermissionAdviceFuture {
+    waiters: PermissionAdviceWaiters,
+    request_id: PermissionAdviceRequestId,
+    receiver: oneshot::Receiver<PermissionAdvice>,
+}
+
+impl Future for PermissionAdviceFuture {
+    type Output = PermissionAdvice;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        match Pin::new(&mut self.receiver).poll(cx) {
+            Poll::Ready(Ok(advice)) => Poll::Ready(advice),
+            Poll::Ready(Err(_)) => Poll::Ready(PermissionAdvice::Unknown),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+impl PermissionAdviceFuture {
+    /// Opaque id used to cancel only this request.
+    pub fn request_id(&self) -> PermissionAdviceRequestId {
+        self.request_id
+    }
+}
+
+impl Drop for PermissionAdviceFuture {
+    fn drop(&mut self) {
+        self.waiters.borrow_mut().remove(&self.request_id);
+    }
+}
+
 impl<S> Db<S>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
@@ -399,6 +673,10 @@ where
     /// ```
     pub async fn open(config: DbConfig<S>) -> Result<Self, Error> {
         let schema_version_id = config.schema.version_id();
+        let schema_views = Rc::new(RefCell::new(BTreeMap::from([(
+            SchemaViewId::for_schema(&config.schema),
+            config.schema.clone(),
+        )])));
         let node = NodeState::new_with_large_value_checkpoint_op_interval(
             config.identity.node,
             config.schema.clone(),
@@ -411,15 +689,51 @@ where
         Ok(Self {
             schema: config.schema,
             schema_version_id,
+            schema_view_is_fixed: false,
+            schema_views,
             identity: config.identity,
-            node,
-            row_id_source: RefCell::new(
+            node: Rc::new(node),
+            row_id_source: Rc::new(RefCell::new(
                 config
                     .id_source
                     .unwrap_or_else(|| Box::new(ProductionRowIdSource)),
-            ),
-            next_now_ms: Cell::new(1),
+            )),
+            next_now_ms: Rc::new(Cell::new(1)),
         })
+    }
+
+    #[cfg(feature = "testing")]
+    /// Open a database and return internal node-open phase timings for benchmarks.
+    pub async fn open_with_receipt_for_test(
+        config: DbConfig<S>,
+    ) -> Result<(Self, DbOpenReceipt), Error> {
+        let schema_version_id = config.schema.version_id();
+        let schema_views = Rc::new(RefCell::new(BTreeMap::from([(
+            SchemaViewId::for_schema(&config.schema),
+            config.schema.clone(),
+        )])));
+        let (node, receipt) = NodeState::new_with_open_receipt_for_test(
+            config.identity.node,
+            config.schema.clone(),
+            config.storage,
+            false,
+            config.large_value_checkpoint_op_interval,
+        )?;
+        let db = Self {
+            schema: config.schema,
+            schema_version_id,
+            schema_view_is_fixed: false,
+            schema_views,
+            identity: config.identity,
+            node: Rc::new(Node::new(node)),
+            row_id_source: Rc::new(RefCell::new(
+                config
+                    .id_source
+                    .unwrap_or_else(|| Box::new(ProductionRowIdSource)),
+            )),
+            next_now_ms: Rc::new(Cell::new(1)),
+        };
+        Ok((db, receipt))
     }
 
     /// Open a database as a history-complete serving core.
@@ -428,6 +742,10 @@ where
     /// in-memory history rather than a partial client replica.
     pub async fn open_history_complete(config: DbConfig<S>) -> Result<Self, Error> {
         let schema_version_id = config.schema.version_id();
+        let schema_views = Rc::new(RefCell::new(BTreeMap::from([(
+            SchemaViewId::for_schema(&config.schema),
+            config.schema.clone(),
+        )])));
         let node = NodeState::new_history_complete(
             config.identity.node,
             config.schema.clone(),
@@ -436,20 +754,150 @@ where
         Ok(Self {
             schema: config.schema,
             schema_version_id,
+            schema_view_is_fixed: false,
+            schema_views,
             identity: config.identity,
-            node: Node::new(node),
-            row_id_source: RefCell::new(
+            node: Rc::new(Node::new(node)),
+            row_id_source: Rc::new(RefCell::new(
                 config
                     .id_source
                     .unwrap_or_else(|| Box::new(ProductionRowIdSource)),
-            ),
-            next_now_ms: Cell::new(1),
+            )),
+            next_now_ms: Rc::new(Cell::new(1)),
         })
+    }
+
+    /// Register a typed schema view on this database owner.
+    ///
+    /// Registration is process-local and idempotent by the exact typed schema
+    /// content. It does not publish a catalogue entry or select the current
+    /// write schema. The returned handle shares the owner's node, open batches,
+    /// connections, row-id source, and logical clock while validating typed
+    /// operations against this exact schema view.
+    pub fn register_schema_view(&self, schema: JazzSchema) -> Result<Self, Error> {
+        let schema_version_id = schema.version_id();
+        let schema_view_id = SchemaViewId::for_schema(&schema);
+        self.admit_local_schema_view_if_needed(&schema)?;
+        {
+            let node = self.node.node.borrow();
+            let admitted = node
+                .catalogue_schemas()
+                .get(&schema_version_id)
+                .ok_or_else(|| Error::new(ErrorCode::Schema, "registered schema is missing"))?;
+            if !schema_policy_metadata_matches(&admitted.schema, &schema) {
+                return Err(Error::new(
+                    ErrorCode::Schema,
+                    "schema view policy metadata conflicts with its admitted structural schema",
+                ));
+            }
+            if !schema_index_metadata_matches(&admitted.schema, &schema) {
+                return Err(Error::new(
+                    ErrorCode::Schema,
+                    "schema view index metadata conflicts with its admitted structural schema",
+                ));
+            }
+        }
+        let mut views = self.schema_views.borrow_mut();
+        if let Some(existing) = views.get(&schema_view_id) {
+            if existing != &schema {
+                return Err(Error::new(
+                    ErrorCode::Schema,
+                    format!("schema view id collision for {schema_view_id:?}"),
+                ));
+            }
+        } else {
+            views.insert(schema_view_id, schema.clone());
+        }
+        drop(views);
+        Ok(Self {
+            schema,
+            schema_version_id,
+            schema_view_is_fixed: true,
+            schema_views: Rc::clone(&self.schema_views),
+            identity: self.identity,
+            node: Rc::clone(&self.node),
+            row_id_source: Rc::clone(&self.row_id_source),
+            next_now_ms: Rc::clone(&self.next_now_ms),
+        })
+    }
+
+    /// Attach an already-registered typed schema view to this owner.
+    pub fn schema_view(&self, schema_view_id: SchemaViewId) -> Result<Self, Error> {
+        let schema = self
+            .schema_views
+            .borrow()
+            .get(&schema_view_id)
+            .cloned()
+            .ok_or_else(|| {
+                Error::new(
+                    ErrorCode::Schema,
+                    format!("schema view {schema_view_id:?} is not registered"),
+                )
+            })?;
+        self.register_schema_view(schema)
+    }
+
+    /// Canonical id of this handle's typed schema view.
+    pub fn schema_view_id(&self) -> SchemaViewId {
+        SchemaViewId::for_schema(&self.schema)
+    }
+
+    /// Admit the first application schema into an owner deliberately opened
+    /// with the empty schema. This is the local-first bootstrap equivalent of
+    /// having opened the runtime with that schema originally; later schemas
+    /// still arrive through ordinary catalogue lineage publication.
+    fn admit_local_schema_view_if_needed(&self, schema: &JazzSchema) -> Result<(), Error> {
+        let empty_schema = JazzSchema::new([]);
+        let empty_id = empty_schema.version_id();
+        let target_id = schema.version_id();
+        let (source, catalogue_seq, bootstrap_current) = {
+            let node = self.node.node.borrow();
+            if node.catalogue_schemas().contains_key(&target_id) {
+                return Ok(());
+            }
+            let current = node.current_write_schema();
+            let source = node
+                .catalogue_schemas()
+                .get(&current.schema)
+                .map(|version| version.schema.clone())
+                .ok_or_else(|| Error::new(ErrorCode::Schema, "current schema view is missing"))?;
+            (
+                source,
+                node.active_catalogue_seq().saturating_add(1),
+                current.schema == empty_id && node.catalogue_schemas().len() == 1,
+            )
+        };
+        let (lens, new_tables, dropped_tables) = direct_schema_view_lens(&source, schema)?;
+        let publication = SchemaLineagePublication::new(
+            SchemaVersion::new(schema.clone()),
+            lens,
+            new_tables,
+            dropped_tables,
+        );
+        let mut node = self.node.node.borrow_mut();
+        node.apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
+            author: AuthorId::SYSTEM,
+            catalogue_seq,
+            publication: Box::new(publication),
+        })?;
+        if bootstrap_current {
+            node.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+                author: AuthorId::SYSTEM,
+                pointer: CurrentWriteSchema {
+                    revision: 1,
+                    schema: target_id,
+                },
+            })?;
+        }
+        Ok(())
     }
 
     /// Flush node-local maintenance state, write a clean-close marker, and
     /// close the underlying storage.
     pub fn close(&self) -> Result<(), Error> {
+        if self.schema_view_is_fixed {
+            return Ok(());
+        }
         Ok(self.node.node.borrow_mut().close()?)
     }
 
@@ -466,6 +914,50 @@ where
             .node
             .borrow_mut()
             .set_initial_sync_flush_cadence(cadence.writes())?)
+    }
+
+    /// Create a snapshot-base branch immediately in local durable storage.
+    ///
+    /// Branch creation is local-first: no serving node round trip is required.
+    /// The authenticated database identity is recorded as the immutable creator.
+    pub fn create_branch(&self) -> Result<crate::ids::BranchId, Error> {
+        let branch = crate::ids::BranchId(uuid::Uuid::now_v7());
+        self.create_branch_with_id(branch)?;
+        Ok(branch)
+    }
+
+    /// Create a local snapshot-base branch with a caller-supplied stable id.
+    pub fn create_branch_with_id(&self, branch: crate::ids::BranchId) -> Result<(), Error> {
+        self.node
+            .node
+            .borrow_mut()
+            .create_branch_as(branch, self.identity.author)?;
+        Ok(())
+    }
+
+    /// Insert a row into a locally-created branch and queue it for ordinary sync.
+    pub fn insert_on_branch(
+        &self,
+        branch: crate::ids::BranchId,
+        table: &str,
+        cells: RowCells,
+    ) -> Result<WriteHandle<S>, Error> {
+        let row = self.row_id_source.borrow_mut().next_row_id();
+        let cells = self.apply_insert_defaults(table, cells)?;
+        let tx_id = self.node.node.borrow_mut().commit_mergeable_on_branch(
+            branch,
+            MergeableCommit::new(table, row, self.next_now_ms())
+                .made_by(self.identity.author)
+                .cells(cells),
+        )?;
+        let local_tier = self.finalize_local_commit(tx_id)?;
+        self.refresh_subscriptions()?;
+        Ok(WriteHandle {
+            node: Rc::downgrade(&self.node.node),
+            row_uuid: row,
+            tx_id,
+            local_tier,
+        })
     }
 
     /// Seed a settled mergeable row for server bootstrap/import flows.
@@ -491,6 +983,37 @@ where
             .node
             .borrow_mut()
             .finalize_local_mergeable_commit(tx_id)?;
+        self.refresh_subscriptions()?;
+        self.node.mark_subscriber_connections_dirty();
+        Ok(tx_id)
+    }
+
+    /// Seed a branch-local mergeable row for history-complete server bootstrap
+    /// or import flows.
+    ///
+    /// The resulting row is evaluated through the ordinary branch read-view
+    /// lowering path; this does not provide an application-facing branch write
+    /// facade.
+    pub fn seed_branch_mergeable_for_bootstrap(
+        &self,
+        branch: crate::ids::BranchId,
+        table: &str,
+        row: RowUuid,
+        made_by: AuthorId,
+        cells: RowCells,
+    ) -> Result<TxId, Error> {
+        let cells = self.apply_insert_defaults(table, cells)?;
+        let mut node = self.node.node.borrow_mut();
+        if node.branch_record(branch).is_none() {
+            node.create_branch(branch)?;
+        }
+        let tx_id = node.commit_mergeable_on_branch(
+            branch,
+            MergeableCommit::new(table, row, self.next_now_ms())
+                .made_by(made_by)
+                .cells(cells),
+        )?;
+        drop(node);
         self.refresh_subscriptions()?;
         self.node.mark_subscriber_connections_dirty();
         Ok(tx_id)
@@ -588,14 +1111,37 @@ where
         params: BTreeMap<String, Value>,
     ) -> Result<PreparedQuery, Error> {
         let (schema, schema_version) = self.current_write_schema_for_query()?;
-        let shape = query.validate_with_schema_version(&schema, schema_version)?;
+        self.prepare_query_bound_for_schema(query, params, &schema, schema_version)
+    }
+
+    /// Prepare a query against the schema this database handle was opened with.
+    ///
+    /// Typed client facades are pinned to that schema even when a catalogue
+    /// snapshot advances or rolls back the separate current-write pointer.
+    #[cfg(feature = "client")]
+    pub(crate) fn prepare_query_for_open_schema(
+        &self,
+        query: &Query,
+    ) -> Result<PreparedQuery, Error> {
+        self.prepare_query_bound_for_schema(
+            query,
+            BTreeMap::new(),
+            &self.schema,
+            self.schema_version_id,
+        )
+    }
+
+    fn prepare_query_bound_for_schema(
+        &self,
+        query: &Query,
+        params: BTreeMap<String, Value>,
+        schema: &JazzSchema,
+        schema_version: SchemaVersionId,
+    ) -> Result<PreparedQuery, Error> {
+        let shape = query.validate_with_schema_version(schema, schema_version)?;
         let binding = shape.bind(params)?;
         let (local_plan, global_plan) = if should_install_prepared_plan(&shape)
-            && !self
-                .node
-                .node
-                .borrow()
-                .uses_partitioned_or_schema_projected_read(&shape)
+            && !self.node.node.borrow().uses_schema_projected_read(&shape)
         {
             let mut node = self.node.node.borrow_mut();
             (
@@ -615,11 +1161,13 @@ where
         } else {
             (None, None)
         };
+        let groove_runtime_token = self.node.node.borrow().groove_runtime_token();
         Ok(PreparedQuery {
             shape,
             binding,
             local_plan,
             global_plan,
+            groove_runtime_token,
         })
     }
 
@@ -629,15 +1177,24 @@ where
     /// coverage is tracked separately by query attachments and durability-aware
     /// subscription reads.
     pub fn read(&self, prepared: &PreparedQuery) -> Result<Vec<CurrentRow>, Error> {
+        let mut node = self.node.node.borrow_mut();
+        let groove_runtime_token = node.groove_runtime_token();
+        node.query_rows_local_preview(
+            &prepared.shape,
+            &prepared.binding,
+            prepared.plan_for_tier(DurabilityTier::Local, groove_runtime_token),
+        )
+        .map_err(Into::into)
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    /// Test-only count of live Groove maintained subscriptions.
+    pub fn active_groove_subscriptions_for_test(&self) -> usize {
         self.node
             .node
-            .borrow_mut()
-            .query_rows_local_preview(
-                &prepared.shape,
-                &prepared.binding,
-                prepared.plan_for_tier(DurabilityTier::Local),
-            )
-            .map_err(Into::into)
+            .borrow()
+            .runtime_stats_for_test()
+            .active_subscriptions
     }
 
     /// Synchronously read rows and attribute work inside the node query path.
@@ -649,15 +1206,14 @@ where
         &self,
         prepared: &PreparedQuery,
     ) -> Result<(Vec<CurrentRow>, QueryReadProfile), Error> {
-        self.node
-            .node
-            .borrow_mut()
-            .query_rows_local_preview_profiled(
-                &prepared.shape,
-                &prepared.binding,
-                prepared.plan_for_tier(DurabilityTier::Local),
-            )
-            .map_err(Into::into)
+        let mut node = self.node.node.borrow_mut();
+        let groove_runtime_token = node.groove_runtime_token();
+        node.query_rows_local_preview_profiled(
+            &prepared.shape,
+            &prepared.binding,
+            prepared.plan_for_tier(DurabilityTier::Local, groove_runtime_token),
+        )
+        .map_err(Into::into)
     }
 
     /// Synchronously read exactly one local row if present.
@@ -779,49 +1335,90 @@ where
         prepared: &PreparedQuery,
         opts: ReadOpts,
     ) -> Result<Vec<CurrentRow>, Error> {
-        self.all_for_identity(prepared, opts, self.identity.author)
-            .await
+        self.all_for_identity_in_authorization_mode(
+            prepared,
+            opts,
+            self.identity.author,
+            QueryAuthorizationMode::ClientLocal,
+        )
+        .await
     }
 
-    /// Tier-gated one-shot read evaluated as `author`.
+    /// Tier-gated one-shot read evaluated by a trusted host as `author`.
+    ///
+    /// Ordinary client reads use [`Db::all`] and never re-run read policy over
+    /// locally received data. This explicit identity entry point is reserved
+    /// for serving/request hosts that own policy enforcement before emission.
     pub async fn all_for_identity(
         &self,
         prepared: &PreparedQuery,
         opts: ReadOpts,
         author: AuthorId,
     ) -> Result<Vec<CurrentRow>, Error> {
+        self.all_for_identity_in_authorization_mode(
+            prepared,
+            opts,
+            author,
+            QueryAuthorizationMode::TrustedServing,
+        )
+        .await
+    }
+
+    async fn all_for_identity_in_authorization_mode(
+        &self,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+        author: AuthorId,
+        authorization_mode: QueryAuthorizationMode,
+    ) -> Result<Vec<CurrentRow>, Error> {
         let tier = effective_read_tier(&opts);
         let mut node = self.node.node.borrow_mut();
         match &opts.read_view.source {
             ReadViewSourceSpec::Current => {}
             ReadViewSourceSpec::Branch { branch } if !opts.include_deleted => {
-                return node
-                    .query_rows_on_branch_for_link(
-                        crate::ids::BranchId(*branch),
-                        &prepared.shape,
-                        &prepared.binding,
-                        author,
-                    )
-                    .map_err(Into::into);
+                return match authorization_mode {
+                    QueryAuthorizationMode::TrustedServing => node
+                        .query_rows_on_branch_for_link(
+                            crate::ids::BranchId(*branch),
+                            &prepared.shape,
+                            &prepared.binding,
+                            author,
+                        )
+                        .map_err(Into::into),
+                    QueryAuthorizationMode::ClientLocal => node
+                        .query_rows_on_branch_for_client(
+                            crate::ids::BranchId(*branch),
+                            &prepared.shape,
+                            &prepared.binding,
+                            author,
+                        )
+                        .map_err(Into::into),
+                };
             }
             _ => ensure_default_read_view(&opts)?,
         }
-        if opts.include_deleted {
-            node.query_rows_for_link_including_deleted(
+        match (opts.include_deleted, authorization_mode) {
+            (true, mode) => node.query_rows_including_deleted_in_authorization_mode(
                 &prepared.shape,
                 &prepared.binding,
                 tier,
+                None,
                 author,
-            )
-        } else {
-            let (shape, binding, _plan) = node
-                .prepare_query_binding_for_link_with_shared_claim_fragments(
+                mode,
+            ),
+            (false, QueryAuthorizationMode::TrustedServing) => node
+                .query_rows_with_prepared_plan_for_identity(
                     &prepared.shape,
                     &prepared.binding,
                     tier,
+                    None,
                     author,
-                )?;
-            node.query_rows_for_link_with_prepared_plan(&shape, &binding, tier, author, None)
+                ),
+            (false, QueryAuthorizationMode::ClientLocal) => {
+                // A client consumes identity-scoped rows emitted by its
+                // trusted upstream; local reads must not apply policy again.
+                node.query_rows_for_client(&prepared.shape, &prepared.binding, tier, author)
+            }
         }
         .map_err(Into::into)
     }
@@ -832,8 +1429,25 @@ where
         prepared: &PreparedQuery,
         opts: ReadOpts,
     ) -> Result<RelationSnapshot, Error> {
-        self.all_relation_snapshot_for_identity(prepared, opts, self.identity.author)
-            .await
+        ensure_supported_read_view(&opts)?;
+        if opts.include_deleted {
+            return Err(Error::new(
+                ErrorCode::Query,
+                "relation snapshots do not support include_deleted yet",
+            ));
+        }
+        let tier = effective_read_tier(&opts);
+        self.node
+            .node
+            .borrow_mut()
+            .query_relation_snapshot_for_client(
+                &prepared.shape,
+                &prepared.binding,
+                tier,
+                self.identity.author,
+                &opts.read_view,
+            )
+            .map_err(Into::into)
     }
 
     /// Tier-gated one-shot relation read evaluated as `author`.
@@ -854,7 +1468,7 @@ where
         self.node
             .node
             .borrow_mut()
-            .query_relation_snapshot_for_link_in_read_view(
+            .query_relation_snapshot_for_serving_in_read_view(
                 &prepared.shape,
                 &prepared.binding,
                 tier,
@@ -884,8 +1498,19 @@ where
         query: &RelationQuery,
         opts: ReadOpts,
     ) -> Result<RelationSnapshot, Error> {
-        self.all_relation_query_for_identity(query, opts, self.identity.author)
-            .await
+        ensure_default_read_view(&opts)?;
+        let query = relation_query_to_query(query)?;
+        let prepared = self.prepare_query(&query)?;
+        // Output-changing relation queries currently normalize to a single
+        // root row set. They have no array payload edges, so request ordinary
+        // app rows instead of the relation-snapshot fact output (which is
+        // reserved for correlated array/path materialization).
+        let rows = self.all(&prepared, opts).await?;
+        Ok(RelationSnapshot {
+            root_count: rows.len(),
+            rows,
+            edges: Vec::new(),
+        })
     }
 
     /// Tier-gated one-shot output-changing relation read evaluated as `author`.
@@ -950,8 +1575,13 @@ where
         prepared: &PreparedQuery,
         opts: ReadOpts,
     ) -> Result<SubscriptionStream, Error> {
-        self.subscribe_for_identity(prepared, opts, self.identity.author)
-            .await
+        self.open_subscription(
+            prepared,
+            opts,
+            self.identity.author,
+            QueryAuthorizationMode::ClientLocal,
+        )
+        .await
     }
 
     /// Subscribe to a query evaluated as `author`.
@@ -961,7 +1591,13 @@ where
         opts: ReadOpts,
         author: AuthorId,
     ) -> Result<SubscriptionStream, Error> {
-        self.open_subscription(prepared, opts, author).await
+        self.open_subscription(
+            prepared,
+            opts,
+            author,
+            QueryAuthorizationMode::TrustedServing,
+        )
+        .await
     }
 
     /// Subscribe to an output-changing relation query.
@@ -970,8 +1606,13 @@ where
         query: &RelationQuery,
         opts: ReadOpts,
     ) -> Result<SubscriptionStream, Error> {
-        self.subscribe_relation_query_for_identity(query, opts, self.identity.author)
-            .await
+        self.open_relation_subscription(
+            query,
+            opts,
+            self.identity.author,
+            QueryAuthorizationMode::ClientLocal,
+        )
+        .await
     }
 
     /// Subscribe to an output-changing relation query evaluated as `author`.
@@ -981,7 +1622,8 @@ where
         opts: ReadOpts,
         author: AuthorId,
     ) -> Result<SubscriptionStream, Error> {
-        self.open_relation_subscription(query, opts, author).await
+        self.open_relation_subscription(query, opts, author, QueryAuthorizationMode::TrustedServing)
+            .await
     }
 
     /// Attach a one-shot usage-site query coverage request.
@@ -997,14 +1639,12 @@ where
         ensure_supported_read_view(&opts)?;
         let upstream_opts =
             upstream_register_shape_options(effective_read_tier(&opts), opts.read_view.clone());
-        Ok(QueryAttachment {
-            subscriptions: vec![self.attach_query_shape_binding_with_opts(
-                &prepared.shape,
-                &prepared.binding,
-                upstream_opts,
-                self.identity.author,
-            )?],
-        })
+        self.attach_or_refresh_query_coverage(
+            &prepared.shape,
+            &prepared.binding,
+            upstream_opts,
+            self.identity.author,
+        )
     }
 
     /// Attach a one-shot usage-site query coverage request evaluated as `author`.
@@ -1023,13 +1663,67 @@ where
             upstream_opts.tier,
             author,
         )?;
+        self.attach_or_refresh_query_coverage(&shape, &binding, upstream_opts, author)
+    }
+
+    fn attach_or_refresh_query_coverage(
+        &self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        upstream_opts: RegisterShapeOptions,
+        identity: AuthorId,
+    ) -> Result<QueryAttachment, Error> {
+        let binding_view = BindingViewKey::new(
+            shape.shape_id(),
+            binding.binding_id(),
+            upstream_opts.read_view_key(),
+        );
+        let required_after = self
+            .node
+            .node
+            .borrow()
+            .applied_view_update_generation(binding_view);
+        let coverage = coverage_key(shape, binding, upstream_opts.clone());
+        if self
+            .node
+            .upstream_coverage_refcounts
+            .borrow()
+            .contains_key(&coverage)
+            && let Some(subscription) = self
+                .node
+                .latest_coverage_subscriptions
+                .borrow()
+                .get(&coverage)
+                .copied()
+        {
+            let mut refreshes = self.node.coverage_refresh_generations.borrow_mut();
+            if refreshes.get(&coverage).copied() != Some(required_after) {
+                refreshes.insert(coverage.clone(), required_after);
+                self.node.upstream_subscriptions.borrow_mut().push(
+                    PendingUpstreamCommand::Subscribe(PendingUpstreamSubscription {
+                        subscription,
+                        shape: shape.clone(),
+                        binding: binding.clone(),
+                        opts: upstream_opts,
+                        identity,
+                    }),
+                );
+                self.node.schedule_tick(TickUrgency::Immediate);
+            }
+            return Ok(QueryAttachment {
+                subscriptions: vec![subscription],
+                owned_subscriptions: Vec::new(),
+                required_after: vec![(binding_view, required_after)],
+                refreshes: vec![(coverage, required_after)],
+            });
+        }
+        let subscription =
+            self.attach_query_shape_binding_with_opts(shape, binding, upstream_opts, identity)?;
         Ok(QueryAttachment {
-            subscriptions: vec![self.attach_query_shape_binding_with_opts(
-                &shape,
-                &binding,
-                upstream_opts,
-                author,
-            )?],
+            subscriptions: vec![subscription],
+            owned_subscriptions: vec![subscription],
+            required_after: vec![(binding_view, required_after)],
+            refreshes: Vec::new(),
         })
     }
 
@@ -1066,18 +1760,31 @@ where
         self.attach_query_with_opts(prepared, ReadOpts::default())
     }
 
-    /// Return whether a query attachment has received at least one upstream view update.
+    /// Return whether each usage-site attachment has observed a newer logical
+    /// server receipt than the one it captured during registration.
     pub fn query_attachment_is_covered(&self, attachment: &QueryAttachment) -> bool {
         let node = self.node.node.borrow();
-        attachment.subscriptions.iter().all(|subscription| {
-            node.binding_view_key_for_subscription(*subscription)
-                .is_ok_and(|binding_view_key| node.has_settled_result_set(binding_view_key))
-        })
+        let covered = attachment
+            .required_after
+            .iter()
+            .all(|(binding_view, required_after)| {
+                node.applied_view_update_generation(*binding_view) > *required_after
+            });
+        drop(node);
+        if covered {
+            let mut refreshes = self.node.coverage_refresh_generations.borrow_mut();
+            for (coverage, generation) in &attachment.refreshes {
+                if refreshes.get(coverage).copied() == Some(*generation) {
+                    refreshes.remove(coverage);
+                }
+            }
+        }
+        covered
     }
 
     /// Detach a one-shot query coverage request.
     pub fn detach_query(&self, attachment: QueryAttachment) {
-        for subscription in attachment.subscriptions {
+        for subscription in attachment.owned_subscriptions {
             self.node.node.borrow_mut().apply_unsubscribe(subscription);
             self.node
                 .latest_coverage_subscriptions
@@ -1096,6 +1803,7 @@ where
         prepared: &PreparedQuery,
         opts: ReadOpts,
         author: AuthorId,
+        authorization_mode: QueryAuthorizationMode,
     ) -> Result<SubscriptionStream, Error> {
         ensure_supported_subscription_read_opts(&opts)?;
         self.validate_prepared_shape_for_registration(prepared)?;
@@ -1109,44 +1817,51 @@ where
                 read_tier,
                 author,
                 &opts.read_view,
+                authorization_mode,
             )?;
         let (local_shape, local_binding, _local_plan) = self
             .node
             .node
             .borrow_mut()
-            .prepare_query_binding_for_link_with_shared_claim_fragments(
+            .prepare_query_binding_for_link_in_authorization_mode(
                 &prepared.shape,
                 &prepared.binding,
                 read_tier,
                 author,
+                authorization_mode,
             )?;
         let (subscription, snapshot) = self
             .node
             .node
             .borrow_mut()
-            .open_local_maintained_view_subscription(
+            .open_maintained_view_subscription_in_authorization_mode(
                 &local_shape,
                 &local_binding,
                 author,
                 read_tier,
                 &opts.read_view,
                 Some(_local_plan),
+                authorization_mode,
             )?;
+        let root_occurrence_ids = subscription.root_occurrence_ids().to_vec();
         let local_subscription_id = subscription.subscription_id();
         let local_node = Rc::clone(&self.node.node);
+        let local_runtime_token = local_node.borrow().groove_runtime_token();
+        let local_subscription_cleanup = Rc::new(Cell::new(Some((
+            local_runtime_token,
+            local_subscription_id,
+        ))));
+        let local_cleanup_handle = Rc::clone(&local_subscription_cleanup);
         let mut local_cleanup = CleanupGuard::new(Box::new(move || {
-            local_node
-                .borrow_mut()
-                .unsubscribe_groove_subscription(local_subscription_id);
+            let mut node = local_node.borrow_mut();
+            if let Some((runtime_token, subscription_id)) = local_cleanup_handle.get()
+                && node.groove_runtime_token() == runtime_token
+            {
+                node.unsubscribe_groove_subscription(subscription_id);
+            }
         }));
-        // Array output is admitted only as a complete terminal-rendered parent.
-        // Validate the reset before retaining subscription state or publishing
-        // its reset event, so an over-budget parent cannot become a partial
-        // replacement through the maintained path.
-        if !prepared.shape.query().array_subqueries.is_empty() {
-            materialize_result_tree(prepared.shape.query(), snapshot.clone())?;
-        }
-        let maintained_subscription = Some(subscription);
+        let mut maintained_subscription = Some(subscription);
+        let terminal_rows = !local_shape.query().array_subqueries.is_empty();
         let mut state_shape = local_shape;
         let mut state_binding = local_binding;
         let mut remote_read_tier = None;
@@ -1162,22 +1877,50 @@ where
                     .node
                     .node
                     .borrow_mut()
-                    .prepare_query_binding_for_link_with_shared_claim_fragments(
+                    .prepare_query_binding_for_link_in_authorization_mode(
                         &prepared.shape,
                         &prepared.binding,
                         upstream_opts.tier,
                         author,
+                        authorization_mode,
                     )?;
                 (shape, binding)
             };
             state_shape = shape.clone();
             state_binding = binding.clone();
             remote_read_tier = Some(upstream_opts.tier);
-            let upstream_subscriptions =
-                self.open_subscription_upstream_coverage(&shape, &binding, upstream_opts, author)?;
-            upstream_subscription_handles = upstream_subscriptions;
+            upstream_subscription_handles = self.open_subscription_upstream_coverage(
+                &shape,
+                &binding,
+                upstream_opts,
+                author,
+                authorization_mode,
+            )?;
         }
         let settled_tier = remote_read_tier.unwrap_or(read_tier);
+        if authorization_mode == QueryAuthorizationMode::ClientLocal
+            && remote_read_tier.is_some()
+            && state_shape.query().aggregate.is_none()
+        {
+            let binding_view_key = BindingViewKey {
+                shape_id: state_shape.shape_id(),
+                binding_id: state_binding.binding_id(),
+                read_view: RegisterShapeOptions {
+                    tier: settled_tier,
+                    read_view: opts.read_view.clone(),
+                }
+                .read_view_key(),
+            };
+            if let Some(maintained) = maintained_subscription.as_mut() {
+                self.node
+                    .node
+                    .borrow()
+                    .seed_local_maintained_authoritative_result_membership(
+                        maintained,
+                        binding_view_key,
+                    );
+            }
+        }
         let settled = subscription_is_settled(
             &self.node.node.borrow(),
             &state_shape,
@@ -1186,17 +1929,28 @@ where
             opts.read_view.clone(),
         );
         let (sender, receiver) = unbounded();
+        let initial_outputs =
+            subscription_outputs_with_occurrence_sidecar(&snapshot, &root_occurrence_ids)?;
         let state_snapshot = relation_snapshot_with_delta_slack(&snapshot);
-        let snapshot_index = RelationSnapshotIndex::from_snapshot(&state_snapshot);
+        let mut snapshot_index = RelationSnapshotIndex::from_snapshot(&state_snapshot);
+        snapshot_index.roots = root_occurrence_ids
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(index, occurrence)| (occurrence, index))
+            .collect();
         let state = Rc::new(RefCell::new(SubscriptionState {
+            terminal_rows,
             kind: SubscriptionKind::Prepared {
                 shape: state_shape,
                 binding: state_binding,
                 maintained_subscription,
             },
             groove_runtime_token: self.node.node.borrow().groove_runtime_token(),
+            local_subscription_cleanup,
             propagates_upstream,
             author,
+            authorization_mode,
             read_tier,
             remote_read_tier,
             read_view: opts.read_view.clone(),
@@ -1209,7 +1963,15 @@ where
         state
             .borrow()
             .sender
-            .unbounded_send(subscription_reset_event(read_tier, settled, snapshot))
+            .unbounded_send(SubscriptionEvent::Delta {
+                reset: true,
+                added: initial_outputs,
+                updated: Vec::new(),
+                removed: Vec::new(),
+                terminal_operations: Vec::new(),
+                settled,
+                tier: read_tier,
+            })
             .map_err(|_| Error::new(ErrorCode::Protocol, "subscription receiver closed"))?;
         self.node
             .subscriptions
@@ -1256,11 +2018,13 @@ where
         query: &RelationQuery,
         opts: ReadOpts,
         author: AuthorId,
+        authorization_mode: QueryAuthorizationMode,
     ) -> Result<SubscriptionStream, Error> {
         ensure_supported_subscription_read_opts(&opts)?;
         let query = relation_query_to_query(query)?;
         let prepared = self.prepare_query(&query)?;
-        self.open_subscription(&prepared, opts, author).await
+        self.open_subscription(&prepared, opts, author, authorization_mode)
+            .await
     }
 
     fn open_subscription_upstream_coverage(
@@ -1269,6 +2033,7 @@ where
         binding: &Binding,
         opts: RegisterShapeOptions,
         identity: AuthorId,
+        authorization_mode: QueryAuthorizationMode,
     ) -> Result<Vec<UpstreamCoverageHandle>, Error> {
         self.node
             .node
@@ -1279,6 +2044,7 @@ where
                 opts.tier,
                 identity,
                 &opts.read_view,
+                authorization_mode,
             )?;
         let coverage = coverage_key(shape, binding, opts.clone());
         if self
@@ -1488,23 +2254,8 @@ where
     ) -> Result<WriteHandle<S>, Error> {
         self.ensure_row_absent(table, row, identity)?;
         let cells = self.apply_insert_defaults(table, cells)?;
-        let allowed = self
-            .node
-            .node
-            .borrow_mut()
-            .dry_run_insert_allows(
-                MergeableCommit::new(table, row, self.next_now_ms())
-                    .made_by(identity)
-                    .permission_subject(identity)
-                    .cells(cells.clone()),
-            )
-            .map_err(Error::from)?;
-        if !allowed {
-            return Err(Error::new(
-                ErrorCode::WriteRejected,
-                format!("policy denied INSERT on table {table}"),
-            ));
-        }
+        // Client writes are admitted structurally and staged optimistically.
+        // A trusted serving authority evaluates policy and returns the fate.
         self.write_mergeable(
             identity,
             Some(identity),
@@ -1527,23 +2278,8 @@ where
     ) -> Result<WriteHandle<S>, Error> {
         self.ensure_row_absent(table, row, identity)?;
         let cells = self.apply_insert_defaults(table, cells)?;
-        let allowed = self
-            .node
-            .node
-            .borrow_mut()
-            .dry_run_insert_allows(
-                MergeableCommit::new(table, row, now_ms)
-                    .made_by(identity)
-                    .permission_subject(identity)
-                    .cells(cells.clone()),
-            )
-            .map_err(Error::from)?;
-        if !allowed {
-            return Err(Error::new(
-                ErrorCode::WriteRejected,
-                format!("policy denied INSERT on table {table}"),
-            ));
-        }
+        // See `insert_with_id_for_identity`: policy fate belongs to the
+        // trusted serving authority, not this local client admission path.
         self.write_mergeable_at_ms(
             identity,
             Some(identity),
@@ -1556,35 +2292,42 @@ where
         )
     }
 
-    /// Return whether an insert with these cells would pass write policy.
+    /// Advise whether an insert may be allowed.
     ///
-    /// This is a dry-run over the current local preview: it builds the
-    /// hypothetical version used by the write path, evaluates policy as this
-    /// Db's authenticated author, and does not store a version or advance time.
-    pub fn can_insert(&self, table: &str, cells: RowCells) -> Result<bool, Error> {
-        self.can_insert_for_identity(table, cells, self.identity.author)
+    /// A `Db` is ordinarily a client-local replica, whose policy evidence may
+    /// be incomplete. It therefore never turns a local policy evaluation into
+    /// an allow/deny result. Use an explicitly trusted serving authority for a
+    /// final decision.
+    pub fn can_insert(&self, _table: &str, _cells: RowCells) -> Result<PermissionAdvice, Error> {
+        Ok(PermissionAdvice::Unknown)
     }
 
-    /// Return whether an insert with these cells would pass write policy for `identity`.
-    ///
-    /// This trusted serving-node dry-run mirrors `insert_with_id_for_identity`
-    /// without storing a version or advancing time.
-    pub fn can_insert_for_identity(
+    /// Evaluate an insert for a test-only serving-path probe without writing.
+    #[cfg(test)]
+    pub(crate) fn authorize_insert_for_identity(
         &self,
         table: &str,
         cells: RowCells,
         identity: AuthorId,
-    ) -> Result<bool, Error> {
+    ) -> Result<PermissionAdvice, Error> {
         let cells = self.apply_insert_defaults(table, cells)?;
         self.node
             .node
             .borrow_mut()
-            .dry_run_insert_allows(
+            .dry_run_mergeable_write_allows_for_view(
+                &self.schema,
                 MergeableCommit::new(table, RowUuid::from_bytes([0; 16]), 0)
                     .made_by(identity)
                     .permission_subject(identity)
                     .cells(cells),
             )
+            .map(|allowed| {
+                if allowed {
+                    PermissionAdvice::Allowed
+                } else {
+                    PermissionAdvice::Denied
+                }
+            })
             .map_err(Into::into)
     }
 
@@ -1614,8 +2357,11 @@ where
         row: RowUuid,
         patch: RowCells,
     ) -> Result<WriteHandle<S>, Error> {
-        let (cells, parent) = self.merge_existing_cells(table, row, patch)?;
-        self.write_mergeable(
+        if patch.is_empty() {
+            return self.no_op_update_handle_for_client(table, row, self.identity.author);
+        }
+        let (cells, parent, authored_columns) = self.merge_existing_cells(table, row, patch)?;
+        self.write_mergeable_with_authored_columns(
             self.identity.author,
             None,
             table,
@@ -1623,6 +2369,7 @@ where
             cells,
             parent.into_iter().collect(),
             None,
+            authored_columns,
         )
     }
 
@@ -1634,8 +2381,11 @@ where
         patch: RowCells,
         now_ms: u64,
     ) -> Result<WriteHandle<S>, Error> {
-        let (cells, parent) = self.merge_existing_cells(table, row, patch)?;
-        self.write_mergeable_at_ms(
+        if patch.is_empty() {
+            return self.no_op_update_handle_for_client(table, row, self.identity.author);
+        }
+        let (cells, parent, authored_columns) = self.merge_existing_cells(table, row, patch)?;
+        self.write_mergeable_at_ms_with_authorship(
             self.identity.author,
             None,
             table,
@@ -1643,6 +2393,7 @@ where
             cells,
             parent.into_iter().collect(),
             None,
+            Some(authored_columns),
             now_ms,
         )
     }
@@ -1657,14 +2408,19 @@ where
         row: RowUuid,
         patch: RowCells,
     ) -> Result<WriteHandle<S>, Error> {
-        let (cells, parent) = self.merge_existing_cells(table, row, patch)?;
-        self.write_mergeable_as_session_subject(
+        self.check_attribution_allowed(made_by)?;
+        if patch.is_empty() {
+            return self.no_op_update_handle_for_client(table, row, self.identity.author);
+        }
+        let (cells, parent, authored_columns) = self.merge_existing_cells(table, row, patch)?;
+        self.write_mergeable_as_session_subject_with_authored_columns(
             made_by,
             table,
             row,
             cells,
             parent.into_iter().collect(),
             None,
+            authored_columns,
         )
     }
 
@@ -1676,27 +2432,22 @@ where
         row: RowUuid,
         patch: RowCells,
     ) -> Result<WriteHandle<S>, Error> {
-        let (cells, parent) =
+        if patch.is_empty() {
+            return self.no_op_update_handle_for_identity(table, row, identity);
+        }
+        let (cells, parent, authored_columns) =
             self.merge_existing_cells_for_identity(table, row, patch, identity)?;
         let parents = parent.into_iter().collect::<Vec<_>>();
-        let dry_run = MergeableCommit::new(table, row, self.next_now_ms())
-            .made_by(identity)
-            .permission_subject(identity)
-            .cells(cells.clone())
-            .parents(parents.clone());
-        let allowed = self
-            .node
-            .node
-            .borrow_mut()
-            .dry_run_mergeable_write_allows(dry_run)
-            .map_err(Error::from)?;
-        if !allowed {
-            return Err(Error::new(
-                ErrorCode::WriteRejected,
-                format!("policy denied UPDATE on table {table}"),
-            ));
-        }
-        self.write_mergeable(identity, Some(identity), table, row, cells, parents, None)
+        self.write_mergeable_with_authored_columns(
+            identity,
+            Some(identity),
+            table,
+            row,
+            cells,
+            parents,
+            None,
+            authored_columns,
+        )
     }
 
     /// Update a row for `identity` with an explicit millisecond provenance time.
@@ -1708,27 +2459,13 @@ where
         patch: RowCells,
         now_ms: u64,
     ) -> Result<WriteHandle<S>, Error> {
-        let (cells, parent) =
+        if patch.is_empty() {
+            return self.no_op_update_handle_for_identity(table, row, identity);
+        }
+        let (cells, parent, authored_columns) =
             self.merge_existing_cells_for_identity(table, row, patch, identity)?;
         let parents = parent.into_iter().collect::<Vec<_>>();
-        let dry_run = MergeableCommit::new(table, row, now_ms)
-            .made_by(identity)
-            .permission_subject(identity)
-            .cells(cells.clone())
-            .parents(parents.clone());
-        let allowed = self
-            .node
-            .node
-            .borrow_mut()
-            .dry_run_mergeable_write_allows(dry_run)
-            .map_err(Error::from)?;
-        if !allowed {
-            return Err(Error::new(
-                ErrorCode::WriteRejected,
-                format!("policy denied UPDATE on table {table}"),
-            ));
-        }
-        self.write_mergeable_at_ms(
+        self.write_mergeable_at_ms_with_authorship(
             identity,
             Some(identity),
             table,
@@ -1736,6 +2473,7 @@ where
             cells,
             parents,
             None,
+            Some(authored_columns),
             now_ms,
         )
     }
@@ -1798,16 +2536,26 @@ where
         cells: RowCells,
     ) -> Result<WriteHandle<S>, Error> {
         self.ensure_row_not_deleted(table, row)?;
-        let (cells, parents) = if self
-            .upsert_target_for_identity(table, row, self.identity.author)?
+        let (cells, parents, authored_columns) = if self
+            .upsert_target_for_client_identity(table, row, self.identity.author)?
             .is_some()
         {
-            let (cells, parent) = self.merge_existing_cells(table, row, cells)?;
-            (cells, parent.into_iter().collect())
+            let (cells, parent, authored_columns) = self.merge_existing_cells(table, row, cells)?;
+            (cells, parent.into_iter().collect(), Some(authored_columns))
         } else {
-            (cells, Vec::new())
+            (cells, Vec::new(), None)
         };
-        self.write_mergeable(self.identity.author, None, table, row, cells, parents, None)
+        self.write_mergeable_at_ms_with_authorship(
+            self.identity.author,
+            None,
+            table,
+            row,
+            cells,
+            parents,
+            None,
+            authored_columns,
+            self.next_now_ms(),
+        )
     }
 
     /// Upsert a row with an explicit millisecond provenance time.
@@ -1819,16 +2567,16 @@ where
         now_ms: u64,
     ) -> Result<WriteHandle<S>, Error> {
         self.ensure_row_not_deleted(table, row)?;
-        let (cells, parents) = if self
-            .upsert_target_for_identity(table, row, self.identity.author)?
+        let (cells, parents, authored_columns) = if self
+            .upsert_target_for_client_identity(table, row, self.identity.author)?
             .is_some()
         {
-            let (cells, parent) = self.merge_existing_cells(table, row, cells)?;
-            (cells, parent.into_iter().collect())
+            let (cells, parent, authored_columns) = self.merge_existing_cells(table, row, cells)?;
+            (cells, parent.into_iter().collect(), Some(authored_columns))
         } else {
-            (cells, Vec::new())
+            (cells, Vec::new(), None)
         };
-        self.write_mergeable_at_ms(
+        self.write_mergeable_at_ms_with_authorship(
             self.identity.author,
             None,
             table,
@@ -1836,6 +2584,7 @@ where
             cells,
             parents,
             None,
+            authored_columns,
             now_ms,
         )
     }
@@ -1849,17 +2598,27 @@ where
         cells: RowCells,
     ) -> Result<WriteHandle<S>, Error> {
         self.ensure_row_not_deleted(table, row)?;
-        let (cells, parents) = if self
-            .upsert_target_for_identity(table, row, identity)?
+        let (cells, parents, authored_columns) = if self
+            .upsert_target_for_trusted_identity(table, row, identity)?
             .is_some()
         {
-            let (cells, parent) =
+            let (cells, parent, authored_columns) =
                 self.merge_existing_cells_for_identity(table, row, cells, identity)?;
-            (cells, parent.into_iter().collect())
+            (cells, parent.into_iter().collect(), Some(authored_columns))
         } else {
-            (cells, Vec::new())
+            (cells, Vec::new(), None)
         };
-        self.write_mergeable(identity, Some(identity), table, row, cells, parents, None)
+        self.write_mergeable_at_ms_with_authorship(
+            identity,
+            Some(identity),
+            table,
+            row,
+            cells,
+            parents,
+            None,
+            authored_columns,
+            self.next_now_ms(),
+        )
     }
 
     /// Upsert a row for `identity` with an explicit millisecond provenance time.
@@ -1872,17 +2631,17 @@ where
         now_ms: u64,
     ) -> Result<WriteHandle<S>, Error> {
         self.ensure_row_not_deleted(table, row)?;
-        let (cells, parents) = if self
-            .upsert_target_for_identity(table, row, identity)?
+        let (cells, parents, authored_columns) = if self
+            .upsert_target_for_trusted_identity(table, row, identity)?
             .is_some()
         {
-            let (cells, parent) =
+            let (cells, parent, authored_columns) =
                 self.merge_existing_cells_for_identity(table, row, cells, identity)?;
-            (cells, parent.into_iter().collect())
+            (cells, parent.into_iter().collect(), Some(authored_columns))
         } else {
-            (cells, Vec::new())
+            (cells, Vec::new(), None)
         };
-        self.write_mergeable_at_ms(
+        self.write_mergeable_at_ms_with_authorship(
             identity,
             Some(identity),
             table,
@@ -1890,6 +2649,7 @@ where
             cells,
             parents,
             None,
+            authored_columns,
             now_ms,
         )
     }
@@ -2003,12 +2763,6 @@ where
         now_ms: Option<u64>,
     ) -> Result<WriteHandle<S>, Error> {
         self.ensure_row_not_deleted(table, row)?;
-        if !self.can_delete_for_identity(table, row, identity)? {
-            return Err(Error::new(
-                ErrorCode::WriteRejected,
-                format!("policy denied DELETE on table {table}"),
-            ));
-        }
         let (parents, _) = self.row_layer_parents(table, row)?;
         match now_ms {
             Some(now_ms) => self.write_mergeable_at_ms(
@@ -2033,44 +2787,38 @@ where
         }
     }
 
-    /// Return whether this Db's author can read the current local row.
-    pub fn can_read(&self, table: &str, row: RowUuid) -> Result<bool, Error> {
-        self.can_read_for_identity(table, row, self.identity.author)
+    /// Advise whether a read may be allowed. Client-local replicas return
+    /// `Unknown` rather than using locally available rows as policy evidence.
+    pub fn can_read(&self, _table: &str, _row: RowUuid) -> Result<PermissionAdvice, Error> {
+        Ok(PermissionAdvice::Unknown)
     }
 
-    /// Return whether `author` can read the current local row.
-    pub fn can_read_for_identity(
+    /// Evaluate a read for the serving path without disclosing data.
+    pub(crate) fn authorize_read_for_identity(
         &self,
         table: &str,
         row: RowUuid,
         author: AuthorId,
-    ) -> Result<bool, Error> {
+    ) -> Result<PermissionAdvice, Error> {
         self.table_schema(table)?;
         self.node
             .node
             .borrow_mut()
             .dry_run_read_current_allows(table, row, author)
+            .map(|allowed| {
+                if allowed {
+                    PermissionAdvice::Allowed
+                } else {
+                    PermissionAdvice::Denied
+                }
+            })
             .map_err(Into::into)
     }
 
-    /// Return whether this Db's author can update the current local row.
-    pub fn can_update(&self, table: &str, row: RowUuid) -> Result<bool, Error> {
-        self.can_update_for_identity(table, row, self.identity.author)
-    }
-
-    /// Return whether `author` can update the current local row.
-    pub fn can_update_for_identity(
-        &self,
-        table: &str,
-        row: RowUuid,
-        author: AuthorId,
-    ) -> Result<bool, Error> {
-        self.table_schema(table)?;
-        self.node
-            .node
-            .borrow_mut()
-            .dry_run_write_current_allows(table, row, author)
-            .map_err(Into::into)
+    /// Advise whether an update may be allowed. Client-local replicas return
+    /// `Unknown` rather than using locally available rows as policy evidence.
+    pub fn can_update(&self, _table: &str, _row: RowUuid) -> Result<PermissionAdvice, Error> {
+        Ok(PermissionAdvice::Unknown)
     }
 
     /// Attach process-local auth claims for `identity`.
@@ -2086,31 +2834,42 @@ where
         }
     }
 
-    /// Return whether this Db's author can delete the current local row.
-    pub fn can_delete(&self, table: &str, row: RowUuid) -> Result<bool, Error> {
-        self.can_delete_for_identity(table, row, self.identity.author)
+    /// Advise whether a delete may be allowed. Client-local replicas return
+    /// `Unknown` rather than using locally available rows as policy evidence.
+    pub fn can_delete(&self, _table: &str, _row: RowUuid) -> Result<PermissionAdvice, Error> {
+        Ok(PermissionAdvice::Unknown)
     }
 
-    /// Return whether `author` can delete the current local row.
-    pub fn can_delete_for_identity(
+    /// Evaluate a delete for a test-only serving-path probe without writing.
+    #[cfg(test)]
+    pub(crate) fn authorize_delete_for_identity(
         &self,
         table: &str,
         row: RowUuid,
         author: AuthorId,
-    ) -> Result<bool, Error> {
+    ) -> Result<PermissionAdvice, Error> {
         self.table_schema(table)?;
         self.node
             .node
             .borrow_mut()
             .dry_run_delete_current_allows(table, row, author)
+            .map(|allowed| {
+                if allowed {
+                    PermissionAdvice::Allowed
+                } else {
+                    PermissionAdvice::Denied
+                }
+            })
             .map_err(Into::into)
     }
 
     /// Build a mergeable transaction that commits multiple writes under one id.
     pub fn mergeable_tx(&self) -> Result<MergeableTx<'_, S>, Error> {
+        let tx_id = OpenBatchId::new();
+        self.begin_mergeable(tx_id)?;
         Ok(MergeableTx {
             db: self,
-            tx_id: self.begin_mergeable()?,
+            tx_id,
             committed: false,
         })
     }
@@ -2131,9 +2890,11 @@ where
 
     /// Build a mergeable transaction authored and permission-checked as `author`.
     pub fn mergeable_tx_for_identity(&self, author: AuthorId) -> Result<MergeableTx<'_, S>, Error> {
+        let tx_id = OpenBatchId::new();
+        self.begin_mergeable_for_identity(tx_id, author)?;
         Ok(MergeableTx {
             db: self,
-            tx_id: self.begin_mergeable_for_identity(author)?,
+            tx_id,
             committed: false,
         })
     }
@@ -2158,9 +2919,27 @@ where
         self.node
             .node
             .borrow_mut()
-            .apply_sync_message(SyncMessage::PublishSchema {
+            .apply_trusted_catalogue_message(SyncMessage::PublishSchema {
                 author: self.identity.author,
                 schema: Box::new(schema),
+            })
+            .map_err(Into::into)
+    }
+
+    /// Atomically publish a non-genesis schema and its lineage-defining lens.
+    pub fn publish_schema_with_lens(
+        &self,
+        catalogue_seq: u64,
+        publication: SchemaLineagePublication,
+    ) -> Result<Vec<SyncMessage>, Error> {
+        self.check_catalogue_admin()?;
+        self.node
+            .node
+            .borrow_mut()
+            .apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
+                author: self.identity.author,
+                catalogue_seq,
+                publication: Box::new(publication),
             })
             .map_err(Into::into)
     }
@@ -2171,7 +2950,7 @@ where
         self.node
             .node
             .borrow_mut()
-            .apply_sync_message(SyncMessage::PublishLens {
+            .apply_trusted_catalogue_message(SyncMessage::PublishLens {
                 author: self.identity.author,
                 lens,
             })
@@ -2187,7 +2966,7 @@ where
         self.node
             .node
             .borrow_mut()
-            .apply_sync_message(SyncMessage::SetCurrentWriteSchema {
+            .apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
                 author: self.identity.author,
                 pointer,
             })
@@ -2215,6 +2994,21 @@ where
             .map(|schema| schema.schema.clone())
     }
 
+    /// Highest contiguously activated authoritative catalogue position.
+    pub fn active_catalogue_seq(&self) -> u64 {
+        self.node.node.borrow().active_catalogue_seq()
+    }
+
+    /// Return a published migration lens known to this database.
+    pub fn catalogue_lens(&self, lens: crate::ids::MigrationLensId) -> Option<MigrationLens> {
+        self.node
+            .node
+            .borrow()
+            .catalogue_lenses()
+            .get(&lens)
+            .cloned()
+    }
+
     /// Open a mergeable transaction and return its id.
     ///
     /// The caller owns this transaction's lifetime and must commit it with
@@ -2223,22 +3017,26 @@ where
     /// [`MergeableTxRef`], which can be reconstructed from this id for each
     /// foreign-function call. Rust callers that want RAII should use
     /// [`Db::mergeable_tx`] instead.
-    pub fn begin_mergeable(&self) -> Result<OpenTxId, Error> {
+    pub fn begin_mergeable(&self, id: OpenBatchId) -> Result<(), Error> {
         self.node
             .node
             .borrow_mut()
-            .open_mergeable(self.identity.author, None)
+            .open_mergeable(id, self.identity.author, None)
             .map_err(Into::into)
     }
 
     /// Open a mergeable transaction authored and permission-checked as `author`.
     ///
     /// See [`Db::begin_mergeable`] for ownership and operation-handle guidance.
-    pub fn begin_mergeable_for_identity(&self, author: AuthorId) -> Result<OpenTxId, Error> {
+    pub fn begin_mergeable_for_identity(
+        &self,
+        id: OpenBatchId,
+        author: AuthorId,
+    ) -> Result<(), Error> {
         self.node
             .node
             .borrow_mut()
-            .open_mergeable(author, Some(author))
+            .open_mergeable(id, author, Some(author))
             .map_err(Into::into)
     }
 
@@ -2248,53 +3046,67 @@ where
     /// for a single call in a binding that retains `tx_id` between calls. Its
     /// CRUD API is defined by [`MergeableTxOps`] and is shared with the owning
     /// [`MergeableTx`] handle.
-    pub fn mergeable_tx_ref(&self, tx_id: OpenTxId) -> MergeableTxRef<'_, S> {
+    pub fn mergeable_tx_ref(&self, tx_id: OpenBatchId) -> MergeableTxRef<'_, S> {
         MergeableTxRef { db: self, tx_id }
     }
 
     fn stage_mergeable_insert(
         &self,
-        tx_id: OpenTxId,
+        tx_id: OpenBatchId,
         table: &str,
         row: RowUuid,
         cells: RowCells,
         now_ms: Option<u64>,
     ) -> Result<(), Error> {
+        let now_ms = Some(now_ms.unwrap_or_else(|| self.next_now_ms()));
         let cells = self.apply_insert_defaults(table, cells)?;
         self.node
             .node
             .borrow_mut()
-            .tx_write_mergeable(tx_id, table, row, cells, None, Vec::new(), now_ms, false)
+            .tx_write_mergeable_in_schema(
+                tx_id,
+                self.schema_version_id,
+                table,
+                row,
+                cells,
+                None,
+                Vec::new(),
+                now_ms,
+                false,
+            )
             .map_err(Into::into)
     }
 
     fn stage_mergeable_update(
         &self,
-        tx_id: OpenTxId,
+        tx_id: OpenBatchId,
         table: &str,
         row: RowUuid,
         patch: RowCells,
         now_ms: Option<u64>,
     ) -> Result<(), Error> {
+        let now_ms = Some(now_ms.unwrap_or_else(|| self.next_now_ms()));
         self.node
             .node
             .borrow_mut()
-            .tx_patch_mergeable(tx_id, table, row, patch, now_ms)
+            .tx_patch_mergeable_in_schema(tx_id, self.schema_version_id, table, row, patch, now_ms)
             .map_err(Into::into)
     }
 
     fn stage_mergeable_delete(
         &self,
-        tx_id: OpenTxId,
+        tx_id: OpenBatchId,
         table: &str,
         row: RowUuid,
         now_ms: Option<u64>,
     ) -> Result<(), Error> {
+        let now_ms = Some(now_ms.unwrap_or_else(|| self.next_now_ms()));
         self.node
             .node
             .borrow_mut()
-            .tx_write_mergeable(
+            .tx_write_mergeable_in_schema(
                 tx_id,
+                self.schema_version_id,
                 table,
                 row,
                 BTreeMap::new(),
@@ -2308,12 +3120,13 @@ where
 
     fn stage_mergeable_restore(
         &self,
-        tx_id: OpenTxId,
+        tx_id: OpenBatchId,
         table: &str,
         row: RowUuid,
         cells: RowCells,
         now_ms: Option<u64>,
     ) -> Result<(), Error> {
+        let now_ms = Some(now_ms.unwrap_or_else(|| self.next_now_ms()));
         let cells = self.apply_insert_defaults(table, cells)?;
         let mut node = self.node.node.borrow_mut();
         let content_parents = node
@@ -2324,8 +3137,9 @@ where
             .local_deletion_winner_tx_id(table, row)?
             .into_iter()
             .collect();
-        node.tx_write_mergeable(
+        node.tx_write_mergeable_in_schema(
             tx_id,
+            self.schema_version_id,
             table,
             row,
             cells,
@@ -2334,8 +3148,9 @@ where
             now_ms,
             true,
         )?;
-        node.tx_write_mergeable(
+        node.tx_write_mergeable_in_schema(
             tx_id,
+            self.schema_version_id,
             table,
             row,
             BTreeMap::new(),
@@ -2348,7 +3163,7 @@ where
     }
 
     /// Commit an owned mergeable transaction handle.
-    pub fn commit_mergeable_handle(&self, open_tx_id: OpenTxId) -> Result<TxId, Error> {
+    pub fn commit_mergeable_handle(&self, open_tx_id: OpenBatchId) -> Result<TxId, Error> {
         let tx_id = self
             .node
             .node
@@ -2360,7 +3175,7 @@ where
     }
 
     /// Abandon an owned open transaction handle.
-    pub fn abandon_transaction_handle(&self, open_tx_id: OpenTxId) -> Result<(), Error> {
+    pub fn abandon_transaction_handle(&self, open_tx_id: OpenBatchId) -> Result<(), Error> {
         self.node
             .node
             .borrow_mut()
@@ -2372,9 +3187,10 @@ where
     ///
     /// This is the owning, RAII flavour. It abandons an uncommitted transaction
     /// on drop. Use [`Db::exclusive_tx_ref`] only when another layer retains the
-    /// `OpenTxId` and owns that lifetime explicitly.
+    /// `OpenBatchId` and owns that lifetime explicitly.
     pub fn exclusive_tx(&self) -> Result<ExclusiveTx<'_, S>, Error> {
-        let tx_id = self.open_exclusive_handle()?;
+        let tx_id = OpenBatchId::new();
+        self.open_exclusive_handle(tx_id)?;
         Ok(ExclusiveTx {
             db: self,
             tx_id,
@@ -2389,8 +3205,8 @@ where
     /// [`Db::abandon_exclusive_handle`]. Perform its operations through an
     /// [`ExclusiveTxRef`]. Rust callers that want RAII should use
     /// [`Db::exclusive_tx`] instead.
-    pub fn begin_exclusive(&self) -> Result<OpenTxId, Error> {
-        self.open_exclusive_handle()
+    pub fn begin_exclusive(&self, id: OpenBatchId) -> Result<(), Error> {
+        self.open_exclusive_handle(id)
     }
 
     /// Return a non-owning operations handle for an already-open exclusive transaction.
@@ -2399,104 +3215,168 @@ where
     /// for a single call in a binding that retains `tx_id` between calls. Its
     /// CRUD API is defined by [`ExclusiveTxOps`] and is shared with the owning
     /// [`ExclusiveTx`] handle.
-    pub fn exclusive_tx_ref(&self, tx_id: OpenTxId) -> ExclusiveTxRef<'_, S> {
+    pub fn exclusive_tx_ref(&self, tx_id: OpenBatchId) -> ExclusiveTxRef<'_, S> {
         ExclusiveTxRef { db: self, tx_id }
     }
 
     fn exclusive_read(
         &self,
-        tx_id: OpenTxId,
+        tx_id: OpenBatchId,
         table: &str,
         row: RowUuid,
     ) -> Result<Option<RowCells>, Error> {
         self.node
             .node
             .borrow_mut()
-            .tx_read(tx_id, table, row)
+            .tx_read_in_schema(tx_id, self.schema_version_id, table, row)
             .map_err(Into::into)
     }
 
-    fn exclusive_all(
+    fn transaction_all(
         &self,
-        tx_id: OpenTxId,
+        tx_id: OpenBatchId,
         prepared: &PreparedQuery,
+        opts: ReadOpts,
     ) -> Result<Vec<CurrentRow>, Error> {
-        self.exclusive_all_for_identity(tx_id, prepared, self.identity.author)
+        self.transaction_all_in_authorization_mode(
+            tx_id,
+            prepared,
+            self.identity.author,
+            opts,
+            QueryAuthorizationMode::ClientLocal,
+        )
     }
 
-    fn exclusive_all_for_identity(
+    pub(crate) fn transaction_all_for_identity(
         &self,
-        tx_id: OpenTxId,
+        tx_id: OpenBatchId,
         prepared: &PreparedQuery,
         author: AuthorId,
+        opts: ReadOpts,
     ) -> Result<Vec<CurrentRow>, Error> {
-        self.node
-            .node
-            .borrow_mut()
-            .tx_query_for_identity(tx_id, &prepared.shape, &prepared.binding, author)
-            .map_err(Into::into)
+        self.transaction_all_in_authorization_mode(
+            tx_id,
+            prepared,
+            author,
+            opts,
+            QueryAuthorizationMode::TrustedServing,
+        )
+    }
+
+    fn transaction_all_in_authorization_mode(
+        &self,
+        tx_id: OpenBatchId,
+        prepared: &PreparedQuery,
+        author: AuthorId,
+        opts: ReadOpts,
+        authorization_mode: QueryAuthorizationMode,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        ensure_default_read_view(&opts)?;
+        let mut node = self.node.node.borrow_mut();
+        match authorization_mode {
+            QueryAuthorizationMode::ClientLocal => node
+                .tx_query_with_options(
+                    tx_id,
+                    &prepared.shape,
+                    &prepared.binding,
+                    opts.include_deleted,
+                )
+                .map_err(Into::into),
+            QueryAuthorizationMode::TrustedServing => node
+                .tx_query_for_identity_with_options(
+                    tx_id,
+                    &prepared.shape,
+                    &prepared.binding,
+                    author,
+                    opts.include_deleted,
+                )
+                .map_err(Into::into),
+        }
     }
 
     fn stage_exclusive_insert(
         &self,
-        tx_id: OpenTxId,
+        tx_id: OpenBatchId,
         table: &str,
         row: RowUuid,
         cells: RowCells,
     ) -> Result<(), Error> {
+        let now_ms = self.next_now_ms();
         let cells = self.apply_insert_defaults(table, cells)?;
         self.node
             .node
             .borrow_mut()
-            .tx_write(tx_id, table, row, cells, None)
+            .tx_write_in_schema_at_ms(
+                tx_id,
+                self.schema_version_id,
+                table,
+                row,
+                cells,
+                None,
+                Some(now_ms),
+            )
             .map_err(Into::into)
     }
 
     fn stage_exclusive_delete(
         &self,
-        tx_id: OpenTxId,
+        tx_id: OpenBatchId,
         table: &str,
         row: RowUuid,
     ) -> Result<(), Error> {
+        let now_ms = self.next_now_ms();
         self.node
             .node
             .borrow_mut()
-            .tx_write(
+            .tx_write_in_schema_at_ms(
                 tx_id,
+                self.schema_version_id,
                 table,
                 row,
                 BTreeMap::<String, Value>::new(),
                 Some(DeletionEvent::Deleted),
+                Some(now_ms),
             )
             .map_err(Into::into)
     }
 
     fn stage_exclusive_restore(
         &self,
-        tx_id: OpenTxId,
+        tx_id: OpenBatchId,
         table: &str,
         row: RowUuid,
         cells: RowCells,
     ) -> Result<(), Error> {
+        let now_ms = self.next_now_ms();
         let cells = self.apply_insert_defaults(table, cells)?;
         let mut node = self.node.node.borrow_mut();
         // Restore needs one content version and one deletion-register version:
         // `tx_write` rejects a version carrying both. The layers have separate
         // winners and parent chains; see `restore`'s `local_*_winner_tx_id` pair.
         // Keep this staged form aligned with the committed restore path.
-        node.tx_write(tx_id, table, row, cells, None)?;
-        node.tx_write(
+        node.tx_write_in_schema_at_ms(
             tx_id,
+            self.schema_version_id,
+            table,
+            row,
+            cells,
+            None,
+            Some(now_ms),
+        )?;
+        node.tx_write_in_schema_at_ms(
+            tx_id,
+            self.schema_version_id,
             table,
             row,
             BTreeMap::<String, Value>::new(),
             Some(DeletionEvent::Restored),
+            Some(now_ms),
         )?;
         Ok(())
     }
 
     /// Commit an owned exclusive transaction handle.
-    pub fn commit_exclusive_handle(&self, open_tx_id: OpenTxId) -> Result<TxId, Error> {
+    pub fn commit_exclusive_handle(&self, open_tx_id: OpenBatchId) -> Result<TxId, Error> {
         let (tx_id, unit) = self.node.node.borrow_mut().commit_exclusive(
             open_tx_id,
             self.identity.author,
@@ -2508,15 +3388,15 @@ where
     }
 
     /// Abandon an owned exclusive transaction handle.
-    pub fn abandon_exclusive_handle(&self, open_tx_id: OpenTxId) -> Result<(), Error> {
+    pub fn abandon_exclusive_handle(&self, open_tx_id: OpenBatchId) -> Result<(), Error> {
         self.abandon_transaction_handle(open_tx_id)
     }
 
-    pub(crate) fn open_exclusive_handle(&self) -> Result<OpenTxId, Error> {
+    pub(crate) fn open_exclusive_handle(&self, id: OpenBatchId) -> Result<(), Error> {
         self.node
             .node
             .borrow_mut()
-            .open_exclusive()
+            .open_exclusive_for_identity(id, self.identity.author)
             .map_err(Into::into)
     }
 
@@ -2642,6 +3522,29 @@ where
         )
     }
 
+    fn write_mergeable_as_session_subject_with_authored_columns(
+        &self,
+        made_by: AuthorId,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+        parents: Vec<TxId>,
+        deletion: Option<DeletionEvent>,
+        authored_columns: BTreeSet<String>,
+    ) -> Result<WriteHandle<S>, Error> {
+        self.check_attribution_allowed(made_by)?;
+        self.write_mergeable_with_authored_columns(
+            made_by,
+            Some(self.identity.author),
+            table,
+            row,
+            cells,
+            parents,
+            deletion,
+            authored_columns,
+        )
+    }
+
     /// Restore a row with an explicit millisecond provenance time.
     pub fn restore_at_ms(
         &self,
@@ -2742,6 +3645,55 @@ where
         deletion: Option<DeletionEvent>,
         now_ms: u64,
     ) -> Result<WriteHandle<S>, Error> {
+        self.write_mergeable_at_ms_with_authorship(
+            made_by,
+            permission_subject,
+            table,
+            row,
+            cells,
+            parents,
+            deletion,
+            None,
+            now_ms,
+        )
+    }
+
+    fn write_mergeable_with_authored_columns(
+        &self,
+        made_by: AuthorId,
+        permission_subject: Option<AuthorId>,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+        parents: Vec<TxId>,
+        deletion: Option<DeletionEvent>,
+        authored_columns: BTreeSet<String>,
+    ) -> Result<WriteHandle<S>, Error> {
+        self.write_mergeable_at_ms_with_authorship(
+            made_by,
+            permission_subject,
+            table,
+            row,
+            cells,
+            parents,
+            deletion,
+            Some(authored_columns),
+            self.next_now_ms(),
+        )
+    }
+
+    fn write_mergeable_at_ms_with_authorship(
+        &self,
+        made_by: AuthorId,
+        permission_subject: Option<AuthorId>,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+        parents: Vec<TxId>,
+        deletion: Option<DeletionEvent>,
+        authored_columns: Option<BTreeSet<String>>,
+        now_ms: u64,
+    ) -> Result<WriteHandle<S>, Error> {
         let operation = if deletion == Some(DeletionEvent::Deleted) {
             "DELETE"
         } else if parents.is_empty() {
@@ -2758,24 +3710,17 @@ where
             .made_by(made_by)
             .parents(parents)
             .cells(cells);
+        if let Some(authored_columns) = authored_columns {
+            commit = commit.authored_columns(authored_columns);
+        }
         if let Some(subject) = permission_subject {
             commit = commit.permission_subject(subject);
         }
         if let Some(deletion) = deletion {
             commit = commit.deletion(deletion);
         }
-        let allowed = self
-            .node
-            .node
-            .borrow_mut()
-            .dry_run_mergeable_write_allows(commit.clone())
-            .map_err(Error::from)?;
-        if !allowed {
-            return Err(Error::new(
-                ErrorCode::WriteRejected,
-                format!("policy denied {operation} on table {table}"),
-            ));
-        }
+        // Db is an untrusted client: structurally valid writes are staged and
+        // sent optimistically. A serving authority assigns the policy fate.
         let tx_id = self.node.node.borrow_mut().commit_mergeable(commit)?;
         let local_tier = self.finalize_local_commit(tx_id)?;
         self.refresh_subscriptions()?;
@@ -2827,7 +3772,16 @@ where
         Ok(DurabilityTier::Local)
     }
 
+    fn next_now_ms(&self) -> u64 {
+        let next = self.next_now_ms.get();
+        self.next_now_ms.set(next + 1);
+        next
+    }
+
     fn current_write_schema_for_query(&self) -> Result<(JazzSchema, SchemaVersionId), Error> {
+        if self.schema_view_is_fixed {
+            return Ok((self.schema.clone(), self.schema_version_id));
+        }
         let node = self.node.node.borrow();
         let current = node.current_write_schema();
         if current.schema == self.schema_version_id {
@@ -2845,12 +3799,6 @@ where
                     ),
                 )
             })
-    }
-
-    fn next_now_ms(&self) -> u64 {
-        let next = self.next_now_ms.get();
-        self.next_now_ms.set(next + 1);
-        next
     }
 
     fn table_schema(&self, table: &str) -> Result<&TableSchema, Error> {
@@ -2876,18 +3824,48 @@ where
         Ok(cells)
     }
 
-    fn upsert_target_for_identity(
+    fn upsert_target_for_client_identity(
         &self,
         table: &str,
         row: RowUuid,
         identity: AuthorId,
     ) -> Result<Option<CurrentRow>, Error> {
-        let target = self.local_row_for_identity(table, row, identity)?;
-        if target.is_some()
-            || identity == AuthorId::SYSTEM
-            || self.table_schema(table)?.read_policy.is_none()
-        {
+        let target = self.local_row_for_client_identity(table, row, identity)?;
+        if target.is_some() {
             return Ok(target);
+        }
+        // A policy-filtered point read cannot by itself distinguish an absent
+        // row from an existing row hidden from this identity. Upsert needs
+        // exactly that distinction: a genuinely absent target follows INSERT
+        // policy and does not require read permission, while merging into an
+        // existing target must not expose or copy hidden cells.
+        if self.local_current_row(table, row)?.is_none() {
+            return Ok(None);
+        }
+        if identity == AuthorId::SYSTEM || self.table_schema(table)?.read_policy.is_none() {
+            return Ok(None);
+        }
+        Err(read_for_write_denied("UPSERT", table))
+    }
+
+    fn upsert_target_for_trusted_identity(
+        &self,
+        table: &str,
+        row: RowUuid,
+        identity: AuthorId,
+    ) -> Result<Option<CurrentRow>, Error> {
+        let target = self.local_row_for_trusted_identity(table, row, identity)?;
+        if target.is_some() {
+            return Ok(target);
+        }
+        // Trusted serving evaluates the identity's real read policy before
+        // merging an existing row. A hidden existing row must not be treated
+        // as an insert target.
+        if self.local_current_row(table, row)?.is_none() {
+            return Ok(None);
+        }
+        if identity == AuthorId::SYSTEM || self.table_schema(table)?.read_policy.is_none() {
+            return Ok(None);
         }
         Err(read_for_write_denied("UPSERT", table))
     }
@@ -2986,7 +3964,7 @@ where
         Ok((content_parents, deletion_parents))
     }
 
-    fn local_row_for_identity(
+    fn local_row_for_client_identity(
         &self,
         table: &str,
         row: RowUuid,
@@ -2997,15 +3975,86 @@ where
             .node
             .node
             .borrow_mut()
-            .query_rows_for_link_with_prepared_plan(
+            .query_rows_for_client(
                 &query.shape,
                 &query.binding,
                 DurabilityTier::Local,
                 identity,
-                query.plan_for_tier(DurabilityTier::Local),
             )?
             .into_iter()
             .find(|candidate| candidate.row_uuid() == row))
+    }
+
+    fn local_row_for_trusted_identity(
+        &self,
+        table: &str,
+        row: RowUuid,
+        identity: AuthorId,
+    ) -> Result<Option<CurrentRow>, Error> {
+        let query = self.prepare_query(&Query::from(table))?;
+        Ok(self
+            .node
+            .node
+            .borrow_mut()
+            .query_rows_with_prepared_plan_for_identity(
+                &query.shape,
+                &query.binding,
+                DurabilityTier::Local,
+                None,
+                identity,
+            )?
+            .into_iter()
+            .find(|candidate| candidate.row_uuid() == row))
+    }
+
+    fn no_op_update_handle_for_client(
+        &self,
+        table: &str,
+        row: RowUuid,
+        identity: AuthorId,
+    ) -> Result<WriteHandle<S>, Error> {
+        self.ensure_row_not_deleted(table, row)?;
+        let existing = self
+            .local_row_for_client_identity(table, row, identity)?
+            .ok_or_else(|| read_for_write_denied("partial UPDATE", table))?;
+        let tx_id = self
+            .node
+            .node
+            .borrow_mut()
+            .current_row_tx_id(&existing)
+            .ok_or_else(|| Error::new(ErrorCode::NotObserved, "current row has no transaction"))?;
+        let local_tier = self.write_state(tx_id)?.durability;
+        Ok(WriteHandle {
+            node: Rc::downgrade(&self.node.node),
+            row_uuid: row,
+            tx_id,
+            local_tier,
+        })
+    }
+
+    fn no_op_update_handle_for_identity(
+        &self,
+        table: &str,
+        row: RowUuid,
+        identity: AuthorId,
+    ) -> Result<WriteHandle<S>, Error> {
+        self.ensure_row_not_deleted(table, row)?;
+        let existing = self
+            .local_row_for_trusted_identity(table, row, identity)?
+            .ok_or_else(|| read_for_write_denied("partial UPDATE", table))?;
+        let tx_id = self
+            .node
+            .node
+            .borrow_mut()
+            .current_row_tx_id(&existing)
+            .ok_or_else(|| Error::new(ErrorCode::NotObserved, "current row has no transaction"))?;
+        let local_tier = self.write_state(tx_id)?.durability;
+        Ok(WriteHandle {
+            node: Rc::downgrade(&self.node.node),
+            row_uuid: row,
+            tx_id,
+            local_tier,
+        })
     }
 
     fn merge_existing_cells(
@@ -3013,17 +4062,17 @@ where
         table: &str,
         row: RowUuid,
         patch: RowCells,
-    ) -> Result<(RowCells, Option<TxId>), Error> {
-        self.merge_existing_cells_for_identity(table, row, patch, self.identity.author)
+    ) -> Result<(RowCells, Option<TxId>, BTreeSet<String>), Error> {
+        self.merge_existing_cells_for_client_identity(table, row, patch, self.identity.author)
     }
 
-    fn merge_existing_cells_for_identity(
+    fn merge_existing_cells_for_client_identity(
         &self,
         table: &str,
         row: RowUuid,
         patch: RowCells,
         identity: AuthorId,
-    ) -> Result<(RowCells, Option<TxId>), Error> {
+    ) -> Result<(RowCells, Option<TxId>, BTreeSet<String>), Error> {
         let table_schema = self.table_schema(table)?;
         self.ensure_row_not_deleted(table, row)?;
         if table_schema
@@ -3038,26 +4087,73 @@ where
                 .local_current_row(table, row)?
                 .as_ref()
                 .and_then(|existing| self.node.node.borrow_mut().current_row_tx_id(existing));
-            return Ok((patch, parent));
-        }
-        if !self.can_read_for_identity(table, row, identity)? {
-            return Err(read_for_write_denied("partial UPDATE", table));
+            let authored_columns = patch.keys().cloned().collect();
+            return Ok((patch, parent, authored_columns));
         }
         let mut cells = BTreeMap::new();
         let existing = self
-            .local_row_for_identity(table, row, identity)?
+            .local_row_for_client_identity(table, row, identity)?
             .ok_or_else(|| read_for_write_denied("partial UPDATE", table))?;
         for column in &table_schema.columns {
             if column.large_value.is_some() {
                 continue;
             }
             if let Some(value) = existing.cell(table_schema, &column.name) {
-                cells.insert(column.name.clone(), value);
+                cells.insert(
+                    column.name.clone(),
+                    default_cell_for_column_type(&column.column_type, &value),
+                );
             }
         }
         let parent = self.node.node.borrow_mut().current_row_tx_id(&existing);
+        let authored_columns = patch.keys().cloned().collect();
         cells.extend(patch);
-        Ok((cells, parent))
+        Ok((cells, parent, authored_columns))
+    }
+
+    fn merge_existing_cells_for_identity(
+        &self,
+        table: &str,
+        row: RowUuid,
+        patch: RowCells,
+        identity: AuthorId,
+    ) -> Result<(RowCells, Option<TxId>, BTreeSet<String>), Error> {
+        let table_schema = self.table_schema(table)?;
+        self.ensure_row_not_deleted(table, row)?;
+        if table_schema
+            .columns
+            .iter()
+            .all(|column| patch.contains_key(&column.name))
+        {
+            let parent = self
+                .local_current_row(table, row)?
+                .as_ref()
+                .and_then(|existing| self.node.node.borrow_mut().current_row_tx_id(existing));
+            let authored_columns = patch.keys().cloned().collect();
+            return Ok((patch, parent, authored_columns));
+        }
+        if self.authorize_read_for_identity(table, row, identity)? != PermissionAdvice::Allowed {
+            return Err(read_for_write_denied("partial UPDATE", table));
+        }
+        let mut cells = BTreeMap::new();
+        let existing = self
+            .local_row_for_trusted_identity(table, row, identity)?
+            .ok_or_else(|| read_for_write_denied("partial UPDATE", table))?;
+        for column in &table_schema.columns {
+            if column.large_value.is_some() {
+                continue;
+            }
+            if let Some(value) = existing.cell(table_schema, &column.name) {
+                cells.insert(
+                    column.name.clone(),
+                    default_cell_for_column_type(&column.column_type, &value),
+                );
+            }
+        }
+        let parent = self.node.node.borrow_mut().current_row_tx_id(&existing);
+        let authored_columns = patch.keys().cloned().collect();
+        cells.extend(patch);
+        Ok((cells, parent, authored_columns))
     }
 
     /// Attach this `Db` to an upstream peer over a binding-supplied transport.
@@ -3091,6 +4187,22 @@ where
     /// Ask the installed scheduler to service pending peer-connection work.
     pub fn schedule_tick(&self, urgency: TickUrgency) {
         self.node.schedule_tick(urgency);
+    }
+
+    /// Request a one-shot permission decision from the authenticated upstream
+    /// serving authority. Dropping the returned future cancels local delivery;
+    /// late or replayed responses are ignored by request id.
+    pub fn request_permission_advice(
+        &self,
+        action: PermissionAdviceAction,
+    ) -> PermissionAdviceFuture {
+        self.node.request_permission_advice(action)
+    }
+
+    /// Resolve outstanding permission preflights as `Unknown` and suppress
+    /// requests that have not reached the transport yet.
+    pub fn cancel_permission_advice_request(&self, request_id: PermissionAdviceRequestId) {
+        self.node.cancel_permission_advice_request(request_id);
     }
 
     /// Accept a subscriber connection served under `identity`.
@@ -3282,6 +4394,29 @@ where
     }
 }
 
+fn schema_policy_metadata_matches(left: &JazzSchema, right: &JazzSchema) -> bool {
+    left.branch_read_policy == right.branch_read_policy
+        && left.branch_write_policy == right.branch_write_policy
+        && left.tables.len() == right.tables.len()
+        && left.tables.iter().all(|left_table| {
+            right.tables.iter().any(|right_table| {
+                left_table.name == right_table.name
+                    && left_table.read_policy == right_table.read_policy
+                    && left_table.write_policies == right_table.write_policies
+            })
+        })
+}
+
+fn schema_index_metadata_matches(left: &JazzSchema, right: &JazzSchema) -> bool {
+    left.tables.len() == right.tables.len()
+        && left.tables.iter().all(|left_table| {
+            right.tables.iter().any(|right_table| {
+                left_table.name == right_table.name
+                    && left_table.indexed_columns == right_table.indexed_columns
+            })
+        })
+}
+
 #[cfg(feature = "testing")]
 #[derive(Clone, Debug, PartialEq, Eq)]
 /// Test/bench-only sizing receipt for one active maintained subscription.
@@ -3382,10 +4517,8 @@ impl DbMaintainedSubscriptionFootprint {
 #[cfg(feature = "testing")]
 #[derive(serde::Serialize)]
 struct SizeRelationSnapshot<'a> {
-    cursor: u64,
     root_count: u64,
     rows: Vec<SizeRowBatch<'a>>,
-    edges: Vec<SizeRelationEdge>,
 }
 
 #[cfg(feature = "testing")]
@@ -3420,24 +4553,12 @@ struct SizeRemovedRow {
 }
 
 #[cfg(feature = "testing")]
-#[derive(serde::Serialize)]
-struct SizeRelationEdge {
-    source_table: String,
-    source_row_id: RowUuid,
-    relation: String,
-    target_table: String,
-    target_row_id: RowUuid,
-}
-
-#[cfg(feature = "testing")]
 fn encode_relation_snapshot_for_size(
     snapshot: &RelationSnapshot,
 ) -> Result<Vec<u8>, postcard::Error> {
     postcard::to_allocvec(&SizeRelationSnapshot {
-        cursor: 0,
         root_count: snapshot.root_count as u64,
         rows: size_row_batches(&snapshot.rows),
-        edges: snapshot.edges.iter().map(size_relation_edge).collect(),
     })
 }
 
@@ -3483,17 +4604,6 @@ fn size_row<'a>(row: &CurrentRow, raw: &'a [u8]) -> SizeRow<'a> {
 }
 
 #[cfg(feature = "testing")]
-fn size_relation_edge(edge: &RelationEdge) -> SizeRelationEdge {
-    SizeRelationEdge {
-        source_table: edge.source_table.clone(),
-        source_row_id: edge.source_row,
-        relation: edge.relation.clone(),
-        target_table: edge.target_table.clone(),
-        target_row_id: edge.target_row,
-    }
-}
-
-#[cfg(feature = "testing")]
 fn validation_tuple_estimate_bytes(
     shape: &ValidatedQuery,
     binding: &Binding,
@@ -3534,12 +4644,6 @@ pub struct DbTickStats {
     pub subscription_events: usize,
     /// Number of connection ticks that applied remote sync state locally.
     pub remote_sync_applied: usize,
-    /// Number of history codec windows built by post-tick maintenance.
-    pub consolidated_windows: usize,
-    /// Number of plain history records folded into codec windows.
-    pub consolidated_window_records: usize,
-    /// Foreground time spent in post-tick history window consolidation.
-    pub history_window_consolidation_us: u128,
 }
 
 /// Node-owned participant surface for upstream and subscriber connections.
@@ -3553,10 +4657,15 @@ where
     upstream_subscriptions: PendingUpstreamCommands,
     latest_coverage_subscriptions: LatestCoverageSubscriptions,
     upstream_coverage_refcounts: UpstreamCoverageRefCounts,
+    coverage_refresh_generations: CoverageRefreshGenerations,
     upstream_subscription_owners: UpstreamSubscriptionOwners,
     connections: RefCell<Vec<Rc<RefCell<PeerConnection<S>>>>>,
     scheduler: SharedTickScheduler,
     write_state_waiters: WriteStateWaiters,
+    permission_advice_waiters: PermissionAdviceWaiters,
+    edge_fate_routes: EdgeFateRoutes,
+    admitted_upstream_authorities: AdmittedUpstreamAuthorities,
+    admitted_upstream_authority: Rc<RefCell<Option<AuthorityContext>>>,
     next_write_state_waiter_id: Cell<u64>,
     next_subscription_nonce: Cell<u64>,
     subscriber_dirty_epoch: Rc<Cell<u64>>,
@@ -3576,12 +4685,17 @@ where
             upstream_subscriptions: Rc::new(RefCell::new(Vec::new())),
             latest_coverage_subscriptions: Rc::new(RefCell::new(BTreeMap::new())),
             upstream_coverage_refcounts: Rc::new(RefCell::new(BTreeMap::new())),
+            coverage_refresh_generations: Rc::new(RefCell::new(BTreeMap::new())),
             upstream_subscription_owners: Rc::new(RefCell::new(BTreeMap::new())),
             connections: RefCell::new(Vec::new()),
             scheduler: Rc::new(RefCell::new(None)),
             write_state_waiters: Rc::new(RefCell::new(BTreeMap::new())),
             next_write_state_waiter_id: Cell::new(1),
             next_subscription_nonce: Cell::new(1),
+            permission_advice_waiters: Rc::new(RefCell::new(BTreeMap::new())),
+            edge_fate_routes: Rc::new(RefCell::new(BTreeMap::new())),
+            admitted_upstream_authorities: Rc::new(RefCell::new(Vec::new())),
+            admitted_upstream_authority: Rc::new(RefCell::new(None)),
             subscriber_dirty_epoch: Rc::new(Cell::new(0)),
             edge_cache_budget: Cell::new(None),
         }
@@ -3704,6 +4818,49 @@ where
         self.schedule_tick(TickUrgency::Immediate);
     }
 
+    fn request_permission_advice(&self, action: PermissionAdviceAction) -> PermissionAdviceFuture {
+        let request_id = PermissionAdviceRequestId(*uuid::Uuid::new_v4().as_bytes());
+        let (sender, receiver) = oneshot::channel();
+        self.permission_advice_waiters
+            .borrow_mut()
+            .insert(request_id, sender);
+        self.upstream_subscriptions
+            .borrow_mut()
+            .push(PendingUpstreamCommand::AuthorizationScopeIntent { request_id, action });
+        self.schedule_tick(TickUrgency::Immediate);
+        PermissionAdviceFuture {
+            waiters: Rc::clone(&self.permission_advice_waiters),
+            request_id,
+            receiver,
+        }
+    }
+
+    fn cancel_permission_advice_request(&self, request_id: PermissionAdviceRequestId) {
+        self.permission_advice_waiters
+            .borrow_mut()
+            .remove(&request_id);
+        for connection in self.connections.borrow().iter() {
+            let mut connection = connection.borrow_mut();
+            if let ConnectionLink::Upstream {
+                scope_lease_manager,
+                ..
+            } = &mut connection.link
+            {
+                let mut empty = false;
+                for request in scope_lease_manager.requests.values_mut() {
+                    if request.waiters.remove(&request_id) {
+                        empty |= request.waiters.is_empty();
+                    }
+                }
+                if empty {
+                    scope_lease_manager
+                        .requests
+                        .retain(|_, request| !request.waiters.is_empty());
+                }
+            }
+        }
+    }
+
     fn register_write_state_waiter(&self, tx_id: TxId) -> WriteStateChange {
         let waiter_id = self.next_write_state_waiter_id.get();
         self.next_write_state_waiter_id
@@ -3748,6 +4905,58 @@ where
         &self,
         transport: Box<dyn Transport>,
     ) -> Rc<RefCell<PeerConnection<S>>> {
+        let session_context = transport.connection_session_context();
+        let connection_epoch = session_context
+            .map(|context| context.local.epoch)
+            .unwrap_or_else(|| uuid::Uuid::new_v4().as_u128() as u64);
+        let expected_scope_authority = session_context
+            .filter(|context| {
+                context.negotiated_features & crate::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS != 0
+            })
+            .map(|context| AuthorityContext {
+                authority: *context.remote.node.as_bytes(),
+                link: *context.link_identity.as_bytes(),
+                connection_id: connection_epoch,
+                connection_epoch: context.remote.epoch,
+                claims_revision: 0,
+                policy_epoch: 0,
+                authorization_progress: 0,
+                settled_through: 0,
+            });
+        // Keep every admitted link eligible, but bind each downstream route
+        // to one stable selected owner. A newly connected parallel upstream
+        // must not silently replace the owner (or settle its parked writes).
+        if let Some(context) = expected_scope_authority {
+            let mut eligible = self.admitted_upstream_authorities.borrow_mut();
+            if !eligible.contains(&context) {
+                eligible.push(context);
+            }
+            if self.admitted_upstream_authority.borrow().is_none() {
+                *self.admitted_upstream_authority.borrow_mut() = Some(context);
+                // Routes parked while no authority was connected retain their
+                // downstream obligation. Bind them to this first successor
+                // and restore each commit to the shared outbox: the former
+                // authority may already have suppressed its upload, while
+                // this newly connected successor has not seen it.
+                let mut routes = self.edge_fate_routes.borrow_mut();
+                let routed_txs = routes.keys().copied().collect::<Vec<_>>();
+                for pending in routes.values_mut() {
+                    for route in pending.iter_mut() {
+                        route.authority = context;
+                    }
+                }
+                drop(routes);
+                let mut outbox = self.outbox.borrow_mut();
+                for tx_id in routed_txs {
+                    if !outbox.iter().any(|pending| pending.tx_id == tx_id) {
+                        outbox.push(PendingUpload {
+                            tx_id,
+                            unit: self.node.borrow_mut().commit_unit_for(tx_id).ok(),
+                        });
+                    }
+                }
+            }
+        }
         // Carry queued and already-registered subscriptions upstream immediately.
         let mut pending = self
             .upstream_subscriptions
@@ -3802,10 +5011,15 @@ where
             upstream_subscription_owners: Rc::clone(&self.upstream_subscription_owners),
             scheduler: Rc::clone(&self.scheduler),
             write_state_waiters: Rc::clone(&self.write_state_waiters),
+            permission_advice_waiters: Rc::clone(&self.permission_advice_waiters),
+            edge_fate_routes: Rc::clone(&self.edge_fate_routes),
+            admitted_upstream_authorities: Rc::clone(&self.admitted_upstream_authorities),
+            admitted_upstream_authority: Rc::clone(&self.admitted_upstream_authority),
+            downstream_fates: Rc::new(RefCell::new(Vec::new())),
             subscriber_dirty_epoch: Rc::clone(&self.subscriber_dirty_epoch),
             observed_subscriber_dirty_epoch: Cell::new(self.subscriber_dirty_epoch.get()),
             observed_session_claim_revision: Cell::new(0),
-            next_now_ms: Cell::new(1),
+            connection_epoch,
             link: ConnectionLink::Upstream {
                 pending,
                 upstream_subscriptions: Rc::clone(&self.upstream_subscriptions),
@@ -3814,7 +5028,14 @@ where
                 outbox: Rc::clone(&self.outbox),
                 uploaded: BTreeSet::new(),
                 pending_row_version_repairs: VecDeque::new(),
-                pending_view_update_chunks: BTreeMap::new(),
+                branch_views: BTreeMap::new(),
+                pending_branch_view_updates: BTreeMap::new(),
+                pending_branch_metadata_repairs: BTreeMap::new(),
+                branch_metadata_repair_cursor: None,
+                scope_view_cuts: BTreeMap::new(),
+                scope_receipts: BTreeMap::new(),
+                expected_scope_authority,
+                scope_lease_manager: AuthorizationScopeLeaseManager::default(),
             },
             last_resume_bytes: None,
         }));
@@ -3947,6 +5168,10 @@ where
     ) -> Rc<RefCell<PeerConnection<S>>> {
         let peer = cursor.map(|cursor| cursor.peer).unwrap_or(peer);
         let session_claim_revision = self.node.borrow().session_claim_revision(identity);
+        let connection_epoch = transport
+            .connection_session_context()
+            .map(|context| context.local.epoch)
+            .unwrap_or_else(|| uuid::Uuid::new_v4().as_u128() as u64);
         let connection = Rc::new(RefCell::new(PeerConnection {
             transport,
             node: Rc::clone(&self.node),
@@ -3954,10 +5179,15 @@ where
             upstream_subscription_owners: Rc::clone(&self.upstream_subscription_owners),
             scheduler: Rc::clone(&self.scheduler),
             write_state_waiters: Rc::clone(&self.write_state_waiters),
+            permission_advice_waiters: Rc::clone(&self.permission_advice_waiters),
+            edge_fate_routes: Rc::clone(&self.edge_fate_routes),
+            admitted_upstream_authorities: Rc::clone(&self.admitted_upstream_authorities),
+            admitted_upstream_authority: Rc::clone(&self.admitted_upstream_authority),
+            downstream_fates: Rc::new(RefCell::new(Vec::new())),
             subscriber_dirty_epoch: Rc::clone(&self.subscriber_dirty_epoch),
             observed_subscriber_dirty_epoch: Cell::new(self.subscriber_dirty_epoch.get()),
             observed_session_claim_revision: Cell::new(session_claim_revision),
-            next_now_ms: Cell::new(1),
+            connection_epoch,
             link: ConnectionLink::Subscriber {
                 peer,
                 ingest_context: CommitUnitIngestContext {
@@ -3972,6 +5202,13 @@ where
                 shape_registrations: BTreeMap::new(),
                 deferred_subscribe_rejections: VecDeque::new(),
                 served_current_rows: BTreeMap::new(),
+                pending_branch_metadata_repairs: BTreeMap::new(),
+                pending_session_branch_metadata: BTreeMap::new(),
+                branch_metadata_repair_cursor: None,
+                scope_purposes: BTreeMap::new(),
+                scope_aggregates: BTreeMap::new(),
+                authority_scope_hydrations: BTreeMap::new(),
+                authority_scope_hydration_count: 0,
                 serve_dirty: true,
             },
             last_resume_bytes: None,
@@ -3983,10 +5220,84 @@ where
 
     /// Detach a previously attached peer connection from this node.
     pub fn detach_connection(&self, connection: &Rc<RefCell<PeerConnection<S>>>) -> bool {
+        let authority = match &connection.borrow().link {
+            ConnectionLink::Upstream {
+                expected_scope_authority,
+                ..
+            } => *expected_scope_authority,
+            ConnectionLink::Subscriber { .. } => None,
+        };
         let mut connections = self.connections.borrow_mut();
         let before = connections.len();
         connections.retain(|candidate| !Rc::ptr_eq(candidate, connection));
-        connections.len() != before
+        let detached = connections.len() != before;
+        drop(connections);
+        if detached && let Some(authority) = authority {
+            let mut eligible = self.admitted_upstream_authorities.borrow_mut();
+            eligible.retain(|candidate| *candidate != authority);
+            if *self.admitted_upstream_authority.borrow() == Some(authority) {
+                // Old routes cannot migrate to a replacement authority: they
+                // must be rebound explicitly to the deterministic handoff
+                // owner. Both upstreams share the upload outbox, so B may
+                // already have the unit; clearing this route would strand an
+                // Edge-Accepted caller forever.
+                let handoff = eligible.first().copied();
+                *self.admitted_upstream_authority.borrow_mut() = handoff;
+                let mut routes = self.edge_fate_routes.borrow_mut();
+                if let Some(handoff) = handoff {
+                    routes.retain(|_, pending| {
+                        pending.retain(|route| route.queue.upgrade().is_some());
+                        for route in pending.iter_mut() {
+                            if route.authority == authority {
+                                route.authority = handoff;
+                            }
+                        }
+                        !pending.is_empty()
+                    });
+                    let routed_txs = routes.keys().copied().collect::<Vec<_>>();
+                    drop(routes);
+                    // Re-drive through the successor even when it had sent
+                    // the unit before becoming owner. Its per-link uploaded
+                    // set is an optimization, never a fate authority token.
+                    for candidate in self.connections.borrow().iter() {
+                        let mut candidate = candidate.borrow_mut();
+                        let ConnectionLink::Upstream {
+                            expected_scope_authority,
+                            uploaded,
+                            outbox,
+                            ..
+                        } = &mut candidate.link
+                        else {
+                            continue;
+                        };
+                        if *expected_scope_authority != Some(handoff) {
+                            continue;
+                        }
+                        for tx_id in &routed_txs {
+                            uploaded.remove(tx_id);
+                            let mut outbox = outbox.borrow_mut();
+                            if !outbox.iter().any(|pending| pending.tx_id == *tx_id) {
+                                outbox.push(PendingUpload {
+                                    tx_id: *tx_id,
+                                    unit: self.node.borrow_mut().commit_unit_for(*tx_id).ok(),
+                                });
+                            }
+                        }
+                    }
+                    self.schedule_tick(TickUrgency::Immediate);
+                } else {
+                    // No successor yet: preserve bounded live downstream
+                    // routes for a later admitted authority.  Clearing them
+                    // after an Edge acceptance would strand the caller.
+                    routes.retain(|_, pending| {
+                        pending.retain(|route| route.queue.upgrade().is_some());
+                        !pending.is_empty()
+                    });
+                    self.schedule_tick(TickUrgency::Immediate);
+                }
+            }
+        }
+        detached
     }
 
     /// Service every accepted subscriber connection once.
@@ -4018,17 +5329,6 @@ where
                 .enforce_edge_cache_budget(&pins, budget)?;
         }
         self.prune_settled_outbox_uploads();
-        let consolidation_start = Instant::now();
-        let consolidation = self
-            .node
-            .borrow_mut()
-            .post_tick_consolidate_history_windows(POST_TICK_HISTORY_WINDOW_BUDGET)?;
-        let consolidation_us = consolidation_start.elapsed().as_micros();
-        stats.consolidated_windows += consolidation.windows;
-        stats.consolidated_window_records += consolidation.records;
-        if consolidation.windows > 0 {
-            stats.history_window_consolidation_us += consolidation_us;
-        }
         Ok(stats)
     }
 
@@ -4063,12 +5363,22 @@ where
     let pending_authoritative_resets = node
         .borrow_mut()
         .take_pending_authoritative_reset_binding_views();
+    let mut consumed_authoritative_resets = BTreeSet::new();
     node.borrow_mut().flush_query_runtime()?;
     for weak in subscriptions.borrow().iter() {
         let Some(state) = weak.upgrade() else {
             continue;
         };
-        let (read_tier, remote_read_tier, read_view, previous_source, previous_settled, author) = {
+        let (
+            read_tier,
+            remote_read_tier,
+            read_view,
+            previous_source,
+            previous_settled,
+            author,
+            authorization_mode,
+            terminal_rows,
+        ) = {
             let state = state.borrow();
             (
                 state.read_tier,
@@ -4077,6 +5387,8 @@ where
                 state.snapshot_source,
                 state.settled,
                 state.author,
+                state.authorization_mode,
+                state.terminal_rows,
             )
         };
         let groove_runtime_token = node.borrow().groove_runtime_token();
@@ -4089,11 +5401,122 @@ where
                     }
                 }
             };
-            let (maintained, snapshot) =
-                node.borrow_mut().open_local_maintained_view_subscription(
-                    &shape, &binding, author, read_tier, &read_view, None,
+            let (maintained, mut snapshot) = node
+                .borrow_mut()
+                .open_maintained_view_subscription_in_authorization_mode(
+                    &shape,
+                    &binding,
+                    author,
+                    read_tier,
+                    &read_view,
+                    None,
+                    authorization_mode,
                 )?;
+            let delivered_binding_view = BindingViewKey {
+                shape_id: shape.shape_id(),
+                binding_id: binding.binding_id(),
+                read_view: RegisterShapeOptions {
+                    tier: read_tier,
+                    read_view: read_view.clone(),
+                }
+                .read_view_key(),
+            };
+            // From this point, cleanup must target the replacement runtime
+            // subscription even if a later fallible refresh step aborts.
+            {
+                let mut state_ref = state.borrow_mut();
+                let subscription_id = maintained.subscription_id();
+                match &mut state_ref.kind {
+                    SubscriptionKind::Prepared {
+                        maintained_subscription,
+                        ..
+                    } => *maintained_subscription = Some(maintained),
+                }
+                state_ref
+                    .local_subscription_cleanup
+                    .set(Some((groove_runtime_token, subscription_id)));
+            }
             let settled_tier = remote_read_tier.unwrap_or(read_tier);
+            let settled_binding_view = BindingViewKey {
+                shape_id: shape.shape_id(),
+                binding_id: binding.binding_id(),
+                read_view: RegisterShapeOptions {
+                    tier: settled_tier,
+                    read_view: read_view.clone(),
+                }
+                .read_view_key(),
+            };
+            if authorization_mode == QueryAuthorizationMode::ClientLocal
+                && remote_read_tier.is_some()
+                && shape.query().aggregate.is_none()
+            {
+                let mut state_ref = state.borrow_mut();
+                let SubscriptionKind::Prepared {
+                    maintained_subscription,
+                    ..
+                } = &mut state_ref.kind;
+                if let Some(maintained) = maintained_subscription.as_mut() {
+                    node.borrow()
+                        .seed_local_maintained_authoritative_result_membership(
+                            maintained,
+                            settled_binding_view,
+                        );
+                }
+            }
+            let pending_binding_view = pending_authoritative_resets
+                .contains(&delivered_binding_view)
+                .then_some(delivered_binding_view)
+                .or_else(|| {
+                    pending_authoritative_resets
+                        .contains(&settled_binding_view)
+                        .then_some(settled_binding_view)
+                });
+            if let Some(binding_view) = pending_binding_view {
+                let authoritative = node
+                    .borrow_mut()
+                    .authoritative_reset_snapshot_for_binding_view(&shape, binding_view)?;
+                if let Some(authoritative) = authoritative {
+                    let mut state_ref = state.borrow_mut();
+                    let SubscriptionKind::Prepared {
+                        maintained_subscription,
+                        ..
+                    } = &mut state_ref.kind;
+                    let maintained = maintained_subscription
+                        .as_mut()
+                        .expect("replacement maintained subscription installed");
+                    node.borrow_mut()
+                        .reset_local_maintained_view_subscription_from_binding_view(
+                            maintained,
+                            binding_view,
+                        )?;
+                    snapshot = authoritative;
+                    consumed_authoritative_resets.insert(binding_view);
+                }
+            }
+            let root_occurrence_ids = if shape.query().aggregate.is_some() {
+                snapshot
+                    .rows
+                    .iter()
+                    .map(|row| {
+                        crate::tools::OutputOccurrenceId::single_source(
+                            crate::tools::ObjectId::from_uuid(row.row_uuid().0),
+                        )
+                    })
+                    .collect()
+            } else {
+                let state_ref = state.borrow();
+                let SubscriptionKind::Prepared {
+                    maintained_subscription,
+                    ..
+                } = &state_ref.kind;
+                maintained_subscription
+                    .as_ref()
+                    .expect("replacement maintained subscription installed")
+                    .root_occurrence_ids()
+                    .to_vec()
+            };
+            let reset_outputs =
+                subscription_outputs_with_occurrence_sidecar(&snapshot, &root_occurrence_ids)?;
             let settled = subscription_is_settled(
                 &node.borrow(),
                 &shape,
@@ -4102,22 +5525,28 @@ where
                 read_view.clone(),
             );
             let mut state_ref = state.borrow_mut();
-            match &mut state_ref.kind {
-                SubscriptionKind::Prepared {
-                    maintained_subscription,
-                    ..
-                } => *maintained_subscription = Some(maintained),
-            }
-            let event = subscription_delta_event_with_reset(
-                read_tier,
-                settled,
+            let removed = reset_removed_roots(
                 &state_ref.snapshot,
-                &snapshot,
-                true,
+                &state_ref.snapshot_index,
+                &root_occurrence_ids,
             );
+            let event = SubscriptionEvent::Delta {
+                reset: true,
+                added: reset_outputs,
+                updated: Vec::new(),
+                removed,
+                terminal_operations: Vec::new(),
+                settled,
+                tier: read_tier,
+            };
             state_ref.groove_runtime_token = groove_runtime_token;
             state_ref.snapshot = relation_snapshot_with_delta_slack(&snapshot);
             state_ref.snapshot_index = RelationSnapshotIndex::from_snapshot(&state_ref.snapshot);
+            state_ref.snapshot_index.roots = root_occurrence_ids
+                .into_iter()
+                .enumerate()
+                .map(|(index, occurrence)| (occurrence, index))
+                .collect();
             state_ref.snapshot_source = SubscriptionSnapshotSource::LocalMaintained;
             state_ref.settled = settled;
             if state_ref.sender.unbounded_send(event).is_ok() {
@@ -4176,6 +5605,9 @@ where
                         };
                     let authoritative_reset_pending =
                         pending_authoritative_resets.contains(&authoritative_reset_binding_view);
+                    if authoritative_reset_pending {
+                        consumed_authoritative_resets.insert(authoritative_reset_binding_view);
+                    }
                     if node
                         .borrow()
                         .publication_deferred_for_binding_view(settled_binding_view)
@@ -4192,9 +5624,50 @@ where
                         retained.push(Rc::downgrade(&state));
                         continue;
                     }
+                    let peer_terminal_operations = node
+                        .borrow_mut()
+                        .take_pending_terminal_operations(delivered_binding_view);
                     let snapshot_tier = remote_settled_tier.unwrap_or(read_tier);
                     let authoritative_reset = authoritative_reset_pending;
-                    if authoritative_reset {
+                    if authoritative_reset && terminal_rows {
+                        let Some(maintained) = maintained_subscription.as_mut() else {
+                            return Err(Error::new(
+                                ErrorCode::Protocol,
+                                "structured subscription lost its Groove terminal",
+                            ));
+                        };
+                        // A structural-patch stream deliberately does not keep
+                        // facade-level replacement rows current. Re-open the
+                        // Groove terminal at an authoritative boundary so the
+                        // reset is a fresh complete value and subsequent FIFO
+                        // patches are relative to exactly that value.
+                        let (replacement, snapshot) = node
+                            .borrow_mut()
+                            .open_maintained_view_subscription_in_authorization_mode(
+                                &shape,
+                                &binding,
+                                author,
+                                read_tier,
+                                &read_view,
+                                None,
+                                authorization_mode,
+                            )?;
+                        *maintained = replacement;
+                        let settled = subscription_is_settled(
+                            &node.borrow(),
+                            &shape,
+                            &binding,
+                            settled_tier,
+                            read_view,
+                        );
+                        (
+                            snapshot,
+                            SubscriptionSnapshotSource::LocalMaintained,
+                            settled,
+                            snapshot_tier,
+                            true,
+                        )
+                    } else if authoritative_reset {
                         let authoritative_snapshot = {
                             let mut node_ref = node.borrow_mut();
                             match node_ref.authoritative_reset_snapshot_for_binding_view(
@@ -4218,21 +5691,22 @@ where
                         {
                             let mut node_ref = node.borrow_mut();
                             if authoritative_snapshot_available {
-                                match node_ref
-                                    .drain_local_maintained_view_subscription_state(maintained)
-                                {
+                                match node_ref.drain_local_maintained_view_subscription_state(
+                                    maintained, None,
+                                ) {
                                     Ok(_) => {
                                         node_ref
                                             .reset_local_maintained_view_subscription_from_binding_view(
                                                 maintained,
                                                 authoritative_reset_binding_view,
-                                            );
+                                            )?;
                                         None
                                     }
                                     Err(error) => return Err(error.into()),
                                 }
                             } else {
-                                match node_ref.drain_local_maintained_view_subscription(maintained)
+                                match node_ref
+                                    .drain_local_maintained_view_subscription(maintained, None)
                                 {
                                     Ok(update) => update,
                                     Err(crate::node::Error::MissingTransaction(_)) => {
@@ -4256,11 +5730,13 @@ where
                             } else {
                                 let fallback = {
                                     let mut node_ref = node.borrow_mut();
-                                    match node_ref.subscription_snapshot_for_link(
+                                    match node_ref.subscription_snapshot_in_authorization_mode(
                                         &shape,
                                         &binding,
                                         snapshot_tier,
                                         author,
+                                        &read_view,
+                                        authorization_mode,
                                     ) {
                                         Ok(snapshot) => snapshot,
                                         Err(crate::node::Error::MissingTransaction(_)) => {
@@ -4286,6 +5762,7 @@ where
                                 update,
                                 snapshot_tier,
                                 previous_settled,
+                                terminal_rows,
                             );
                         }
                         let settled = subscription_is_settled(
@@ -4303,11 +5780,54 @@ where
                             force_reset_event,
                         )
                     } else {
+                        if terminal_rows && !peer_terminal_operations.is_empty() {
+                            if let Some(maintained) = maintained_subscription.as_mut() {
+                                // The serving terminal is authoritative for
+                                // structural publication. Advance the local
+                                // Groove mirror for future resets without
+                                // publishing its redundant reconstruction.
+                                node.borrow_mut()
+                                    .drain_local_maintained_view_subscription_state(
+                                        maintained, None,
+                                    )?;
+                            }
+                            let settled = subscription_is_settled(
+                                &node.borrow(),
+                                &shape,
+                                &binding,
+                                settled_tier,
+                                read_view.clone(),
+                            );
+                            let state_ref = &mut *state_ref;
+                            let event = SubscriptionEvent::Delta {
+                                reset: false,
+                                added: Vec::new(),
+                                updated: Vec::new(),
+                                removed: Vec::new(),
+                                terminal_operations: peer_terminal_operations,
+                                settled,
+                                tier: snapshot_tier,
+                            };
+                            state_ref.settled = settled;
+                            retained.push(Rc::downgrade(&state));
+                            if state_ref.sender.unbounded_send(event).is_ok() {
+                                changed += 1;
+                            }
+                            continue;
+                        }
                         let maintained_update = if let Some(maintained) =
                             maintained_subscription.as_mut()
                         {
                             let mut node_ref = node.borrow_mut();
-                            match node_ref.drain_local_maintained_view_subscription(maintained) {
+                            let authoritative_binding_view = (authorization_mode
+                                == QueryAuthorizationMode::ClientLocal
+                                && remote_read_tier.is_some()
+                                && shape.query().aggregate.is_none())
+                            .then_some(settled_binding_view);
+                            match node_ref.drain_local_maintained_view_subscription(
+                                maintained,
+                                authoritative_binding_view,
+                            ) {
                                 Ok(update) => update,
                                 Err(crate::node::Error::MissingTransaction(_)) => {
                                     node_ref.record_authoritative_reset_missing_payload_fallback();
@@ -4323,37 +5843,106 @@ where
                             None
                         };
                         if let Some(update) = maintained_update {
-                            let state_ref = &mut *state_ref;
-                            let mut event = apply_maintained_update_to_snapshot(
-                                &mut state_ref.snapshot,
-                                &mut state_ref.snapshot_index,
-                                update,
-                                snapshot_tier,
-                                previous_settled,
-                            );
-                            state_ref.snapshot_source = SubscriptionSnapshotSource::LocalMaintained;
-                            let settled = subscription_is_settled(
-                                &node.borrow(),
-                                &shape,
-                                &binding,
-                                settled_tier,
-                                read_view,
-                            );
-                            state_ref.settled = settled;
-                            retained.push(Rc::downgrade(&state));
-                            if let SubscriptionEvent::Delta {
-                                settled: event_settled,
-                                ..
-                            } = &mut event
-                            {
-                                *event_settled = settled;
+                            if terminal_rows {
+                                if !update.terminal_operations.is_empty() {
+                                    let settled = subscription_is_settled(
+                                        &node.borrow(),
+                                        &shape,
+                                        &binding,
+                                        settled_tier,
+                                        read_view,
+                                    );
+                                    let state_ref = &mut *state_ref;
+                                    let event = SubscriptionEvent::Delta {
+                                        reset: false,
+                                        added: Vec::new(),
+                                        updated: Vec::new(),
+                                        removed: Vec::new(),
+                                        terminal_operations: update.terminal_operations,
+                                        settled,
+                                        tier: snapshot_tier,
+                                    };
+                                    state_ref.settled = settled;
+                                    retained.push(Rc::downgrade(&state));
+                                    if state_ref.sender.unbounded_send(event).is_ok() {
+                                        changed += 1;
+                                    }
+                                    continue;
+                                }
+                                let Some(maintained) = maintained_subscription.as_ref() else {
+                                    return Err(Error::new(
+                                        ErrorCode::Protocol,
+                                        "structured subscription lost its Groove terminal",
+                                    ));
+                                };
+                                let snapshot = node
+                                    .borrow_mut()
+                                    .materialize_local_maintained_relation_snapshot(maintained)?;
+                                let settled = subscription_is_settled(
+                                    &node.borrow(),
+                                    &shape,
+                                    &binding,
+                                    settled_tier,
+                                    read_view,
+                                );
+                                let state_ref = &mut *state_ref;
+                                let event = subscription_terminal_delta_event(
+                                    snapshot_tier,
+                                    settled,
+                                    &state_ref.snapshot,
+                                    &snapshot,
+                                );
+                                state_ref.snapshot = relation_snapshot_with_delta_slack(&snapshot);
+                                state_ref.snapshot_index =
+                                    RelationSnapshotIndex::from_snapshot(&state_ref.snapshot);
+                                state_ref.snapshot_source =
+                                    SubscriptionSnapshotSource::LocalMaintained;
+                                state_ref.settled = settled;
+                                retained.push(Rc::downgrade(&state));
+                                if state_ref.sender.unbounded_send(event).is_ok() {
+                                    changed += 1;
+                                }
+                                continue;
+                            } else {
+                                let state_ref = &mut *state_ref;
+                                let mut event = apply_maintained_update_to_snapshot(
+                                    &mut state_ref.snapshot,
+                                    &mut state_ref.snapshot_index,
+                                    update,
+                                    snapshot_tier,
+                                    previous_settled,
+                                    terminal_rows,
+                                );
+                                state_ref.snapshot_source =
+                                    SubscriptionSnapshotSource::LocalMaintained;
+                                let settled = subscription_is_settled(
+                                    &node.borrow(),
+                                    &shape,
+                                    &binding,
+                                    settled_tier,
+                                    read_view,
+                                );
+                                state_ref.settled = settled;
+                                retained.push(Rc::downgrade(&state));
+                                if let SubscriptionEvent::Delta {
+                                    settled: event_settled,
+                                    ..
+                                } = &mut event
+                                {
+                                    *event_settled = settled;
+                                }
+                                if state_ref.sender.unbounded_send(event).is_ok() {
+                                    changed += 1;
+                                }
+                                continue;
                             }
-                            if state_ref.sender.unbounded_send(event).is_ok() {
-                                changed += 1;
-                            }
-                            continue;
                         }
-                        let (snapshot, snapshot_source) = if remote_settled_tier.is_some() {
+                        let (snapshot, snapshot_source) = if terminal_rows {
+                            (
+                                state_ref.snapshot.clone(),
+                                SubscriptionSnapshotSource::LocalMaintained,
+                            )
+                        } else if remote_settled_tier.is_some() {
                             let previous = state_ref.snapshot.clone();
                             if previous.root_count == 0
                                 && previous.edges.is_empty()
@@ -4384,11 +5973,13 @@ where
                                 } else {
                                     let fallback = {
                                         let mut node_ref = node.borrow_mut();
-                                        match node_ref.subscription_snapshot_for_link(
+                                        match node_ref.subscription_snapshot_in_authorization_mode(
                                             &shape,
                                             &binding,
                                             snapshot_tier,
                                             author,
+                                            &read_view,
+                                            authorization_mode,
                                         ) {
                                             Ok(snapshot) => snapshot,
                                             Err(crate::node::Error::MissingTransaction(_)) => {
@@ -4409,11 +6000,13 @@ where
                             } else {
                                 let remote_snapshot = {
                                     let mut node_ref = node.borrow_mut();
-                                    match node_ref.subscription_snapshot_for_link(
+                                    match node_ref.subscription_snapshot_in_authorization_mode(
                                         &shape,
                                         &binding,
                                         snapshot_tier,
                                         author,
+                                        &read_view,
+                                        authorization_mode,
                                     ) {
                                         Ok(snapshot) => snapshot,
                                         Err(crate::node::Error::MissingTransaction(_)) => {
@@ -4444,9 +6037,15 @@ where
                             (previous.clone(), previous_source)
                         } else {
                             (
-                                node.borrow_mut().subscription_snapshot_for_link(
-                                    &shape, &binding, read_tier, author,
-                                )?,
+                                node.borrow_mut()
+                                    .subscription_snapshot_in_authorization_mode(
+                                        &shape,
+                                        &binding,
+                                        read_tier,
+                                        author,
+                                        &read_view,
+                                        authorization_mode,
+                                    )?,
                                 SubscriptionSnapshotSource::LinkSnapshot,
                             )
                         };
@@ -4472,9 +6071,16 @@ where
                     &previous,
                     &snapshot,
                     true,
+                    terminal_rows,
                 )
             } else {
-                subscription_delta_event(snapshot_tier, settled, &previous, &snapshot)
+                subscription_delta_event(
+                    snapshot_tier,
+                    settled,
+                    &previous,
+                    &snapshot,
+                    terminal_rows,
+                )
             };
             state.snapshot = relation_snapshot_with_delta_slack(&snapshot);
             state.snapshot_index = RelationSnapshotIndex::from_snapshot(&state.snapshot);
@@ -4485,6 +6091,10 @@ where
             }
         }
         retained.push(Rc::downgrade(&state));
+    }
+    for pending in pending_authoritative_resets.difference(&consumed_authoritative_resets) {
+        node.borrow_mut()
+            .defer_authoritative_reset_for_binding_view(*pending);
     }
     *subscriptions.borrow_mut() = retained;
     Ok(changed)
@@ -4582,42 +6192,191 @@ pub trait Transport {
     fn send(&mut self, message: SyncMessage) -> Result<(), TransportError>;
     /// Pull the next inbound message the binding has staged, if any.
     fn try_recv(&mut self) -> Option<SyncMessage>;
-    /// Pull the next inbound message with transport-local metadata when available.
-    fn try_recv_received(&mut self) -> Option<ReceivedSyncMessage> {
-        self.try_recv().map(ReceivedSyncMessage::without_metadata)
+
+    /// Immutable endpoint facts accepted by authenticated session admission.
+    /// Semantic messages never self-assert this context.
+    fn connection_session_context(&self) -> Option<ConnectionSessionContext> {
+        None
     }
 }
 
-/// Sync message plus metadata known by the transport before semantic ingest.
-pub struct ReceivedSyncMessage {
-    message: SyncMessage,
-    encoded_len: Option<usize>,
-}
-
-impl ReceivedSyncMessage {
-    fn without_metadata(message: SyncMessage) -> Self {
-        Self {
-            message,
-            encoded_len: None,
-        }
-    }
-
-    fn with_encoded_len(message: SyncMessage, encoded_len: usize) -> Self {
-        Self {
-            message,
-            encoded_len: Some(encoded_len),
-        }
-    }
+/// Handshake/session facts for one accepted connection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ConnectionSessionContext {
+    /// This endpoint's authority identity and fresh epoch.
+    pub local: WireAuthorityEndpoint,
+    /// Authenticated remote authority identity and fresh epoch.
+    pub remote: WireAuthorityEndpoint,
+    /// Authenticated session identity terminated by this link.
+    pub link_identity: AuthorId,
+    /// Features accepted for this connection.
+    pub negotiated_features: WireFeatures,
 }
 
 /// Adapter from postcard wire frames to the internal sync-message transport.
+struct IncompleteLogicalMessage {
+    protocol_version: u16,
+    features: WireFeatures,
+    session: Option<WireSession>,
+    message_digest: [u8; 32],
+    total_len: usize,
+    received_len: usize,
+    extents: BTreeMap<usize, Vec<u8>>,
+}
+
+#[derive(Default)]
+struct LogicalMessageReassembler {
+    incomplete: HashMap<u64, IncompleteLogicalMessage>,
+    staged_bytes: usize,
+    recently_completed: VecDeque<(u64, [u8; 32])>,
+    highest_completed_message_id: Option<u64>,
+}
+
+impl LogicalMessageReassembler {
+    fn discard(&mut self, message_id: u64) {
+        if let Some(state) = self.incomplete.remove(&message_id) {
+            self.staged_bytes = self.staged_bytes.saturating_sub(state.received_len);
+        }
+    }
+
+    fn push(&mut self, fragment: WireMessageFragment) -> Result<Option<WireEnvelope>, String> {
+        if let Some((_, digest)) = self
+            .recently_completed
+            .iter()
+            .find(|(message_id, _)| *message_id == fragment.message_id)
+        {
+            return if digest == &fragment.message_digest {
+                Ok(None)
+            } else {
+                Err("completed logical message id was reused with another digest".to_owned())
+            };
+        }
+        if self
+            .highest_completed_message_id
+            .is_some_and(|completed| fragment.message_id <= completed)
+        {
+            return Ok(None);
+        }
+        let total_len = usize::try_from(fragment.total_len)
+            .map_err(|_| "logical message length does not fit this receiver".to_owned())?;
+        validate_logical_message_len(total_len)?;
+        let offset = usize::try_from(fragment.offset)
+            .map_err(|_| "logical message fragment offset does not fit this receiver".to_owned())?;
+        let end = offset
+            .checked_add(fragment.payload.len())
+            .ok_or_else(|| "logical message fragment range overflow".to_owned())?;
+        if fragment.payload.is_empty() || end > total_len {
+            return Err("logical message fragment has an empty or out-of-range extent".to_owned());
+        }
+        if !self.incomplete.contains_key(&fragment.message_id) {
+            if self.incomplete.len() >= MAX_INFLIGHT_LOGICAL_MESSAGES {
+                return Err("too many incomplete logical messages for peer".to_owned());
+            }
+            self.incomplete.insert(
+                fragment.message_id,
+                IncompleteLogicalMessage {
+                    protocol_version: fragment.protocol_version,
+                    features: fragment.features,
+                    session: fragment.session.clone(),
+                    message_digest: fragment.message_digest,
+                    total_len,
+                    received_len: 0,
+                    extents: BTreeMap::new(),
+                },
+            );
+        }
+        let state = self
+            .incomplete
+            .get_mut(&fragment.message_id)
+            .expect("logical message state inserted");
+        if state.total_len != total_len
+            || state.protocol_version != fragment.protocol_version
+            || state.features != fragment.features
+            || state.session != fragment.session
+            || state.message_digest != fragment.message_digest
+        {
+            return Err("logical message fragments disagree on metadata".to_owned());
+        }
+        if let Some(existing) = state.extents.get(&offset) {
+            return if existing == &fragment.payload {
+                Ok(None)
+            } else {
+                Err("conflicting duplicate logical message fragment".to_owned())
+            };
+        }
+        if state
+            .extents
+            .range(..=offset)
+            .next_back()
+            .is_some_and(|(start, bytes)| *start + bytes.len() > offset)
+            || state
+                .extents
+                .range(offset..)
+                .next()
+                .is_some_and(|(start, _)| *start < end)
+        {
+            return Err("overlapping logical message fragments".to_owned());
+        }
+        let next_staged = self
+            .staged_bytes
+            .checked_add(fragment.payload.len())
+            .ok_or_else(|| "logical message staging byte count overflow".to_owned())?;
+        if next_staged > MAX_INFLIGHT_LOGICAL_MESSAGE_BYTES {
+            return Err("incomplete logical messages exceed peer staging budget".to_owned());
+        }
+        self.staged_bytes = next_staged;
+        state.received_len += fragment.payload.len();
+        state.extents.insert(offset, fragment.payload);
+        if state.received_len != state.total_len {
+            return Ok(None);
+        }
+
+        let state = self
+            .incomplete
+            .remove(&fragment.message_id)
+            .expect("completed logical message state exists");
+        self.staged_bytes -= state.received_len;
+        let mut cursor = 0;
+        let mut payload = Vec::with_capacity(state.total_len);
+        for (offset, extent) in state.extents {
+            if offset != cursor {
+                return Err(
+                    "logical message fragments do not provide contiguous coverage".to_owned(),
+                );
+            }
+            cursor += extent.len();
+            payload.extend_from_slice(&extent);
+        }
+        if cursor != state.total_len || *blake3::hash(&payload).as_bytes() != state.message_digest {
+            return Err("logical message digest mismatch".to_owned());
+        }
+        self.recently_completed
+            .push_back((fragment.message_id, state.message_digest));
+        self.highest_completed_message_id = Some(fragment.message_id);
+        if self.recently_completed.len() > RECENT_COMPLETED_LOGICAL_MESSAGES {
+            self.recently_completed.pop_front();
+        }
+        Ok(Some(WireEnvelope {
+            protocol_version: state.protocol_version,
+            features: state.features,
+            session: state.session,
+            payload,
+        }))
+    }
+}
+
+/// Converts logical sync messages to negotiated bounded wire frames and back.
 pub struct WireTransportAdapter<T> {
     inner: T,
     protocol_version: u16,
     features: WireFeatures,
     session: Option<WireSession>,
+    session_context: Option<ConnectionSessionContext>,
     outbound_stream: WireStreamEncoder,
     inbound_stream: WireStreamDecoder,
+    reassembler: LogicalMessageReassembler,
+    pending_outbound_frames: VecDeque<Vec<u8>>,
+    next_outbound_message_id: u64,
 }
 
 impl<T> WireTransportAdapter<T>
@@ -4636,6 +6395,18 @@ where
         features: WireFeatures,
         session: Option<WireSession>,
     ) -> Self {
+        Self::new_with_session_context(inner, protocol_version, features, session, None)
+    }
+
+    /// Wrap a transport after authenticated hello/session admission supplied
+    /// immutable endpoint identities and epochs.
+    pub fn new_with_session_context(
+        inner: T,
+        protocol_version: u16,
+        features: WireFeatures,
+        session: Option<WireSession>,
+        session_context: Option<ConnectionSessionContext>,
+    ) -> Self {
         let outbound_stream = WireStreamEncoder::new(features)
             .expect("negotiated wire compression must be compiled into this binary");
         let inbound_stream = WireStreamDecoder::new(features)
@@ -4645,8 +6416,12 @@ where
             protocol_version,
             features,
             session,
+            session_context,
             outbound_stream,
             inbound_stream,
+            reassembler: LogicalMessageReassembler::default(),
+            pending_outbound_frames: VecDeque::new(),
+            next_outbound_message_id: 0,
         }
     }
 
@@ -4659,6 +6434,34 @@ where
         if let Ok(frame) = encode_frame(&WireFrame::Error(error)) {
             let _ = self.inner.send_frame(frame);
         }
+    }
+
+    fn flush_pending_outbound(&mut self) -> Result<(), TransportError> {
+        while let Some(frame) = self.pending_outbound_frames.pop_front() {
+            if let Err(error) = self.inner.send_frame(frame.clone()) {
+                self.pending_outbound_frames.push_front(frame);
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+
+    fn send_encoded_frames(&mut self, frames: Vec<Vec<u8>>) -> Result<(), TransportError> {
+        for (index, frame) in frames.iter().enumerate() {
+            match self.inner.send_frame(frame.clone()) {
+                Ok(()) => {}
+                Err(TransportError::Backpressure) => {
+                    // Encoding may have advanced a connection-stream compressor. Accept the
+                    // logical message once encoded and retain every unaccepted frame so the
+                    // semantic caller must never retry it against advanced codec state.
+                    self.pending_outbound_frames
+                        .extend(frames[index..].iter().cloned());
+                    return Ok(());
+                }
+                Err(error @ TransportError::Failed(_)) => return Err(error),
+            }
+        }
+        Ok(())
     }
 
     fn validate_inbound_session(&self, envelope: &WireEnvelope) -> Result<(), WireError> {
@@ -4702,6 +6505,59 @@ where
         }
         Ok(())
     }
+
+    fn validate_inbound_metadata(&self, envelope: &WireEnvelope) -> Result<(), WireError> {
+        if envelope.protocol_version != self.protocol_version {
+            return Err(WireError::new(
+                WireErrorCode::UnsupportedProtocolVersion,
+                WireRetry::AfterResume,
+                format!(
+                    "wire message protocol version {} does not match negotiated {}",
+                    envelope.protocol_version, self.protocol_version
+                ),
+            ));
+        }
+        let unnegotiated = envelope.features & !self.features;
+        if unnegotiated != 0 {
+            return Err(WireError::new(
+                WireErrorCode::UnsupportedFeature,
+                WireRetry::AfterResume,
+                format!("wire message declares unnegotiated features {unnegotiated:#x}"),
+            ));
+        }
+        Ok(())
+    }
+
+    fn decode_inbound_envelope(
+        &mut self,
+        envelope: WireEnvelope,
+    ) -> Result<SyncMessage, WireError> {
+        self.validate_inbound_metadata(&envelope)?;
+        self.validate_inbound_session(&envelope)?;
+        let payload = self
+            .inbound_stream
+            .decode_message(&envelope.payload, envelope.features)
+            .map_err(|message| {
+                WireError::new(WireErrorCode::MalformedFrame, WireRetry::Never, message)
+            })?;
+        validate_logical_message_len(payload.len()).map_err(|message| {
+            WireError::new(WireErrorCode::MalformedFrame, WireRetry::Never, message)
+        })?;
+        let message =
+            decode_sync_message_for_features(&payload, self.features).map_err(|error| {
+                WireError::new(
+                    error.code,
+                    error.retry,
+                    format!(
+                        "{}; payload_bytes={}; payload_hex={}",
+                        error.message,
+                        payload.len(),
+                        hex_diagnostic(&payload)
+                    ),
+                )
+            })?;
+        Ok(message)
+    }
 }
 
 impl<T> Transport for WireTransportAdapter<T>
@@ -4709,18 +6565,15 @@ where
     T: WireTransport,
 {
     fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
-        let payload = match encode_sync_message(&message) {
+        self.flush_pending_outbound()?;
+        let payload = match encode_sync_message_for_features(&message, self.features) {
             Ok(payload) => payload,
-            Err(err) => {
-                self.send_wire_error(WireError::new(
-                    WireErrorCode::Internal,
-                    WireRetry::Never,
-                    format!("failed to encode sync message: {err}"),
-                ));
+            Err(error) => {
+                self.send_wire_error(error);
                 return Ok(());
             }
         };
-        if let Err(message) = validate_sync_message_len(payload.len()) {
+        if let Err(message) = validate_logical_message_len(payload.len()) {
             return Err(TransportError::Failed(message));
         }
         let payload = match self.outbound_stream.encode_message(&payload) {
@@ -4734,12 +6587,55 @@ where
         if let Some(session) = self.session.clone() {
             envelope = envelope.with_session(session);
         }
-        match encode_frame(&WireFrame::Message(envelope)) {
-            Ok(frame) => {
-                if let Err(message) = validate_wire_frame_len(frame.len()) {
-                    return Err(TransportError::Failed(message));
+        match encode_frame(&WireFrame::Message(envelope.clone())) {
+            Ok(frame) if frame.len() <= WIRE_FRAGMENT_PAYLOAD_BYTES => {
+                self.send_encoded_frames(vec![frame])
+            }
+            Ok(_) if self.features & FEATURE_MESSAGE_FRAGMENTATION == 0 => {
+                Err(TransportError::Failed(
+                    "peer did not negotiate logical-message fragmentation".to_owned(),
+                ))
+            }
+            Ok(_) => {
+                let message_digest = *blake3::hash(&envelope.payload).as_bytes();
+                let message_id = self.next_outbound_message_id;
+                self.next_outbound_message_id = self
+                    .next_outbound_message_id
+                    .checked_add(1)
+                    .ok_or_else(|| {
+                        TransportError::Failed("logical message id space exhausted".to_owned())
+                    })?;
+                let total_len = u64::try_from(envelope.payload.len()).map_err(|_| {
+                    TransportError::Failed("logical message is too large".to_owned())
+                })?;
+                let mut frames = Vec::new();
+                for (index, payload) in envelope
+                    .payload
+                    .chunks(WIRE_FRAGMENT_PAYLOAD_BYTES)
+                    .enumerate()
+                {
+                    let offset = u64::try_from(index * WIRE_FRAGMENT_PAYLOAD_BYTES)
+                        .expect("fragment offset is bounded by logical message size");
+                    let fragment = WireMessageFragment {
+                        protocol_version: envelope.protocol_version,
+                        features: envelope.features,
+                        session: envelope.session.clone(),
+                        message_id,
+                        message_digest,
+                        total_len,
+                        offset,
+                        payload: payload.to_vec(),
+                    };
+                    let frame =
+                        encode_frame(&WireFrame::MessageFragment(fragment)).map_err(|error| {
+                            TransportError::Failed(format!(
+                                "failed to encode logical message fragment: {error}"
+                            ))
+                        })?;
+                    validate_wire_frame_len(frame.len()).map_err(TransportError::Failed)?;
+                    frames.push(frame);
                 }
-                self.inner.send_frame(frame)
+                self.send_encoded_frames(frames)
             }
             Err(err) => {
                 self.send_wire_error(WireError::new(
@@ -4753,10 +6649,7 @@ where
     }
 
     fn try_recv(&mut self) -> Option<SyncMessage> {
-        self.try_recv_received().map(|received| received.message)
-    }
-
-    fn try_recv_received(&mut self) -> Option<ReceivedSyncMessage> {
+        let _ = self.flush_pending_outbound();
         while let Some(bytes) = self.inner.try_recv_frame() {
             if let Err(message) = validate_wire_frame_len(bytes.len()) {
                 self.send_wire_error(WireError::new(
@@ -4778,52 +6671,50 @@ where
                 }
             };
             match frame {
-                WireFrame::Message(envelope) => {
-                    if let Err(error) = self.validate_inbound_session(&envelope) {
+                WireFrame::Message(envelope) => match self.decode_inbound_envelope(envelope) {
+                    Ok(message) => return Some(message),
+                    Err(error) => self.send_wire_error(error),
+                },
+                WireFrame::MessageFragment(fragment) => {
+                    let fragment_message_id = fragment.message_id;
+                    let metadata = WireEnvelope {
+                        protocol_version: fragment.protocol_version,
+                        features: fragment.features,
+                        session: fragment.session.clone(),
+                        payload: Vec::new(),
+                    };
+                    if let Err(error) = self.validate_inbound_metadata(&metadata) {
                         self.send_wire_error(error);
                         continue;
                     }
-                    let payload = match self
-                        .inbound_stream
-                        .decode_message(&envelope.payload, envelope.features)
+                    if let Err(error) = self.validate_inbound_session(&metadata) {
+                        self.send_wire_error(error);
+                        continue;
+                    }
+                    if self.features & FEATURE_MESSAGE_FRAGMENTATION == 0
+                        || fragment.features & FEATURE_MESSAGE_FRAGMENTATION == 0
                     {
-                        Ok(payload) => payload,
-                        Err(message) => {
-                            self.send_wire_error(WireError::new(
-                                WireErrorCode::MalformedFrame,
-                                WireRetry::Never,
-                                message,
-                            ));
-                            continue;
-                        }
-                    };
-                    if let Err(message) = validate_sync_message_len(payload.len()) {
                         self.send_wire_error(WireError::new(
-                            WireErrorCode::MalformedFrame,
+                            WireErrorCode::UnsupportedFeature,
                             WireRetry::Never,
-                            message,
+                            "fragment does not declare logical-message fragmentation",
                         ));
                         continue;
                     }
-                    let payload_len = payload.len();
-                    match decode_sync_message_for_receive(&payload) {
-                        Ok(message) => {
-                            return Some(ReceivedSyncMessage::with_encoded_len(
+                    match self.reassembler.push(fragment) {
+                        Ok(Some(envelope)) => match self.decode_inbound_envelope(envelope) {
+                            Ok(message) => return Some(message),
+                            Err(error) => self.send_wire_error(error),
+                        },
+                        Ok(None) => {}
+                        Err(message) => {
+                            self.reassembler.discard(fragment_message_id);
+                            self.send_wire_error(WireError::new(
+                                WireErrorCode::MalformedFrame,
+                                WireRetry::AfterResume,
                                 message,
-                                payload_len,
                             ));
                         }
-                        Err(err) => self.send_wire_error(WireError::new(
-                            WireErrorCode::MalformedFrame,
-                            WireRetry::Never,
-                            format!(
-                                "failed to decode sync message payload: {err}; frame_bytes={}; payload_bytes={}; frame_hex={}; payload_hex={}",
-                                bytes.len(),
-                                payload.len(),
-                                hex_diagnostic(&bytes),
-                                hex_diagnostic(&payload),
-                            ),
-                        )),
                     }
                 }
                 WireFrame::Hello(_) => self.send_wire_error(WireError::new(
@@ -4835,6 +6726,10 @@ where
             }
         }
         None
+    }
+
+    fn connection_session_context(&self) -> Option<ConnectionSessionContext> {
+        self.session_context
     }
 }
 
@@ -4870,10 +6765,16 @@ where
     upstream_subscription_owners: UpstreamSubscriptionOwners,
     scheduler: SharedTickScheduler,
     write_state_waiters: WriteStateWaiters,
+    permission_advice_waiters: PermissionAdviceWaiters,
+    edge_fate_routes: EdgeFateRoutes,
+    admitted_upstream_authorities: AdmittedUpstreamAuthorities,
+    admitted_upstream_authority: Rc<RefCell<Option<AuthorityContext>>>,
+    downstream_fates: PendingDownstreamFates,
     subscriber_dirty_epoch: Rc<Cell<u64>>,
     observed_subscriber_dirty_epoch: Cell<u64>,
     observed_session_claim_revision: Cell<u64>,
-    next_now_ms: Cell<u64>,
+    /// Fresh non-resumable epoch binding authorization receipts to this link.
+    connection_epoch: u64,
     link: ConnectionLink,
     last_resume_bytes: Option<usize>,
 }
@@ -4898,10 +6799,26 @@ enum ConnectionLink {
         uploaded: BTreeSet<TxId>,
         /// Declared known-state ViewUpdates parked until missing row bodies arrive.
         pending_row_version_repairs: VecDeque<PendingRowVersionRepair>,
-        /// Oversized ViewUpdates arrive as FIFO chunk sequences. Partial
-        /// sequences stay here across transport ticks so the receiver stages
-        /// each logical ViewUpdate once, at the final chunk boundary.
-        pending_view_update_chunks: BTreeMap<SubscriptionKey, ViewUpdateParts>,
+        /// Branch selected by each upstream usage-site subscription.
+        branch_views: BTreeMap<SubscriptionKey, crate::ids::BranchId>,
+        /// View updates held until their branch routing record arrives.
+        pending_branch_view_updates: BTreeMap<crate::ids::BranchId, Vec<SyncMessage>>,
+        /// Deduplicated outstanding metadata repairs on this link.
+        pending_branch_metadata_repairs: BTreeMap<crate::ids::BranchId, ()>,
+        /// Round-robin cursor so a saturated repair set cannot starve later ids.
+        branch_metadata_repair_cursor: Option<crate::ids::BranchId>,
+        /// Latest support-view cut seen on this link. Receipts are accepted
+        /// only after their matching `ViewUpdate` has entered the apply batch.
+        scope_view_cuts: BTreeMap<SubscriptionKey, crate::time::GlobalSeq>,
+        /// Proofs tied to support views applied on this connection. They are
+        /// connection-local, so reconnects invalidate them by construction.
+        scope_receipts: BTreeMap<SubscriptionKey, AuthorizationScopeReceipt>,
+        /// Authenticated remote authority identity established by the binding
+        /// handshake. Receipts are rejected until this is present.
+        expected_scope_authority: Option<AuthorityContext>,
+        /// Receipt-backed operations and their support cuts for this exact
+        /// authenticated upstream session.
+        scope_lease_manager: AuthorizationScopeLeaseManager,
     },
     /// Serving one subscriber: apply their subscribe requests, ship view
     /// updates under their identity.
@@ -4924,6 +6841,27 @@ enum ConnectionLink {
         deferred_subscribe_rejections: VecDeque<(SubscriptionKey, String)>,
         /// Whole-table current-row views explicitly served through the facade.
         served_current_rows: BTreeMap<SubscriptionKey, String>,
+        /// Deduplicated branch-routing repairs for data-first commit relays.
+        pending_branch_metadata_repairs: BTreeMap<crate::ids::BranchId, ()>,
+        /// Authenticated session metadata waiting for its parent/base dependency.
+        pending_session_branch_metadata:
+            BTreeMap<crate::ids::BranchId, crate::protocol::BranchMetadata>,
+        /// Round-robin cursor so a saturated repair set cannot starve later ids.
+        branch_metadata_repair_cursor: Option<crate::ids::BranchId>,
+        /// Authorization-support purposes keyed by their ordinary support view.
+        scope_purposes: BTreeMap<SubscriptionKey, AuthorizedScopePurpose>,
+        /// Per-scope aggregation state. A full-scope receipt is withheld until
+        /// every compiled support clause has a corresponding applied view.
+        scope_aggregates:
+            BTreeMap<crate::protocol::AuthorizationSupportScopeKey, AuthorityScopeAggregate>,
+        /// Bounded authority-owned hydration cache. Entries are reused only at
+        /// the exact claims/policy/global cut that produced them.
+        authority_scope_hydrations: BTreeMap<
+            crate::protocol::AuthorizationSupportScopeKey,
+            ServedAuthorizationScopeHydration,
+        >,
+        /// Number of cache-miss support hydratations on this authority link.
+        authority_scope_hydration_count: u64,
         /// True when this subscriber's maintained views may have queued deltas
         /// to serve. Idle transport ticks must not poll every view.
         serve_dirty: bool,
@@ -4933,6 +6871,28 @@ enum ConnectionLink {
 struct PendingRowVersionRepair {
     requests: Vec<crate::protocol::RowVersionRef>,
     update: SyncMessage,
+}
+
+/// Return one fair bounded repair page, advancing the cursor after the page.
+fn next_branch_metadata_repairs(
+    repairs: &BTreeMap<crate::ids::BranchId, ()>,
+    cursor: &mut Option<crate::ids::BranchId>,
+) -> Vec<crate::ids::BranchId> {
+    let mut page = repairs
+        .keys()
+        .copied()
+        .filter(|branch| cursor.is_none_or(|after| *branch > after))
+        .take(MAX_FETCH_BRANCH_METADATA)
+        .collect::<Vec<_>>();
+    if page.is_empty() && !repairs.is_empty() {
+        page = repairs
+            .keys()
+            .copied()
+            .take(MAX_FETCH_BRANCH_METADATA)
+            .collect();
+    }
+    *cursor = page.last().copied();
+    page
 }
 
 /// Per-connection resume state for a served subscriber.
@@ -4954,6 +6914,7 @@ where
     /// changed. Policy claim values are bound when a maintained view opens, so
     /// retaining the old view after a claim change would retain its authority.
     fn rebind_subscriber_views_after_claim_change(&mut self) -> Result<bool, Error> {
+        let connection_epoch = self.connection_epoch;
         let identity = match &self.link {
             ConnectionLink::Subscriber { ingest_context, .. } => ingest_context.identity,
             ConnectionLink::Upstream { .. } => return Ok(false),
@@ -4967,6 +6928,8 @@ where
             peer,
             coverage_groups,
             served_current_rows,
+            scope_purposes,
+            scope_aggregates,
             ..
         } = &mut self.link
         else {
@@ -4985,6 +6948,19 @@ where
             })
             .collect::<Vec<_>>();
         for (coverage, shape, binding, subscribers) in groups {
+            let branch_metadata = match coverage.opts.read_view.source {
+                ReadViewSourceSpec::Branch { branch } => {
+                    let branch = crate::ids::BranchId(branch);
+                    let mut node = self.node.borrow_mut();
+                    node.branch_metadata_visible_to(branch, identity)?
+                        .then(|| {
+                            node.branch_record(branch)
+                                .map(crate::protocol::BranchMetadata::from)
+                        })
+                        .flatten()
+                }
+                _ => None,
+            };
             let maintained_subscription = SubscriptionKey {
                 shape_id: coverage.shape_id,
                 binding_id: coverage.binding_id,
@@ -5000,13 +6976,58 @@ where
                     coverage.opts,
                 )?
             };
+            // Route metadata is an explicit prerequisite for branch-target
+            // bundles. Send it before the first view update so a receiver can
+            // create the partition instead of parking the payload forever.
+            if let Some(metadata) = branch_metadata {
+                self.transport
+                    .send(SyncMessage::BranchMetadata(metadata))
+                    .map_err(transport_error)?;
+            }
             for subscription in subscribers {
-                send_with_content_extents(
-                    &self.node,
-                    peer,
-                    self.transport.as_mut(),
-                    retarget_view_update(update.clone(), subscription),
-                )?;
+                let update = retarget_view_update(update.clone(), subscription);
+                let prior_scope = scope_purposes.get(&subscription).cloned();
+                let refreshed_scope = prior_scope.as_ref().and_then(|prior| {
+                    refresh_authorized_scope_purpose(
+                        &self.node.borrow(),
+                        identity,
+                        subscription,
+                        &shape,
+                        &binding,
+                        &prior,
+                    )
+                });
+                if let Some(refreshed) = &refreshed_scope {
+                    move_scope_aggregate_member(
+                        scope_aggregates,
+                        prior_scope.as_ref(),
+                        refreshed,
+                        subscription,
+                    );
+                    scope_purposes.insert(subscription, refreshed.clone());
+                } else if let Some(prior) = scope_purposes.remove(&subscription) {
+                    remove_scope_aggregate_member(scope_aggregates, &prior.key, subscription);
+                }
+                let receipt = refreshed_scope.as_ref().and_then(|purpose| {
+                    aggregate_authorization_scope_receipt_for_view(
+                        scope_aggregates,
+                        &self.node.borrow(),
+                        peer,
+                        identity,
+                        connection_epoch,
+                        purpose,
+                        &update,
+                    )
+                });
+                send_with_content_extents(&self.node, peer, self.transport.as_mut(), update)?;
+                if let Some((subscription, receipt)) = receipt {
+                    self.transport
+                        .send(SyncMessage::AuthorizationScopeReceipt {
+                            subscription,
+                            receipt,
+                        })
+                        .map_err(transport_error)?;
+                }
             }
         }
         for table in served_current_rows.values() {
@@ -5055,6 +7076,19 @@ where
         self.last_resume_bytes
     }
 
+    /// Return a receipt only after this connection applied its matching
+    /// authorization-support view. A reconnect creates a new connection and
+    /// therefore has no receipt to reuse.
+    pub fn authorization_scope_receipt(
+        &self,
+        subscription: SubscriptionKey,
+    ) -> Option<&AuthorizationScopeReceipt> {
+        let ConnectionLink::Upstream { scope_receipts, .. } = &self.link else {
+            return None;
+        };
+        scope_receipts.get(&subscription)
+    }
+
     /// Extract this subscriber connection's resume cursor for a reconnect.
     pub fn take_resume_cursor(&mut self) -> Option<ResumeCursor> {
         let ConnectionLink::Subscriber { peer, .. } = &mut self.link else {
@@ -5071,9 +7105,13 @@ where
     /// tighter one: the client keeps the same subscription, but its visible
     /// membership must be recalculated immediately.
     fn rehydrate_subscriber_views(&mut self) -> Result<(), Error> {
+        let connection_epoch = self.connection_epoch;
         let ConnectionLink::Subscriber {
             peer,
             coverage_groups,
+            ingest_context,
+            scope_purposes,
+            scope_aggregates,
             serve_dirty,
             ..
         } = &mut self.link
@@ -5111,7 +7149,48 @@ where
             for subscription in subscribers {
                 let update = retarget_view_update(update.clone(), subscription);
                 self.last_resume_bytes = Some(serialized_sync_message_len(&update));
+                let prior_scope = scope_purposes.get(&subscription).cloned();
+                let refreshed_scope = prior_scope.as_ref().and_then(|prior| {
+                    refresh_authorized_scope_purpose(
+                        &self.node.borrow(),
+                        ingest_context.identity,
+                        subscription,
+                        &shape,
+                        &binding,
+                        &prior,
+                    )
+                });
+                if let Some(refreshed) = &refreshed_scope {
+                    move_scope_aggregate_member(
+                        scope_aggregates,
+                        prior_scope.as_ref(),
+                        refreshed,
+                        subscription,
+                    );
+                    scope_purposes.insert(subscription, refreshed.clone());
+                } else if let Some(prior) = scope_purposes.remove(&subscription) {
+                    remove_scope_aggregate_member(scope_aggregates, &prior.key, subscription);
+                }
+                let receipt = refreshed_scope.as_ref().and_then(|purpose| {
+                    aggregate_authorization_scope_receipt_for_view(
+                        scope_aggregates,
+                        &self.node.borrow(),
+                        peer,
+                        ingest_context.identity,
+                        connection_epoch,
+                        purpose,
+                        &update,
+                    )
+                });
                 send_with_content_extents(&self.node, peer, self.transport.as_mut(), update)?;
+                if let Some((subscription, receipt)) = receipt {
+                    self.transport
+                        .send(SyncMessage::AuthorizationScopeReceipt {
+                            subscription,
+                            receipt,
+                        })
+                        .map_err(transport_error)?;
+                }
             }
         }
         *serve_dirty = true;
@@ -5122,7 +7201,7 @@ where
     /// flush pending outbound. Non-blocking; the binding calls it in its loop.
     pub fn tick(&mut self) -> Result<DbTickStats, Error> {
         let mut stats = DbTickStats::default();
-        let tick_now_ms = self.next_now_ms();
+        let connection_epoch = self.connection_epoch;
         self.observe_shared_subscriber_dirty_epoch();
         self.rebind_subscriber_views_after_claim_change()?;
         match &mut self.link {
@@ -5134,8 +7213,32 @@ where
                 outbox,
                 uploaded,
                 pending_row_version_repairs,
-                pending_view_update_chunks,
+                branch_views,
+                pending_branch_view_updates,
+                pending_branch_metadata_repairs,
+                branch_metadata_repair_cursor,
+                scope_view_cuts,
+                scope_receipts,
+                expected_scope_authority,
+                scope_lease_manager,
             } => {
+                // Repair is deliberately retried on each non-blocked tick. The
+                // request set is bounded and deduplicated; a dropped request or
+                // response therefore cannot permanently strand a parked unit.
+                let repairs = next_branch_metadata_repairs(
+                    pending_branch_metadata_repairs,
+                    branch_metadata_repair_cursor,
+                );
+                if !repairs.is_empty() {
+                    self.transport
+                        .send(SyncMessage::FetchBranchMetadata { branches: repairs })
+                        .map_err(transport_error)?;
+                }
+                for metadata in self.node.borrow().pending_branch_metadata_uploads() {
+                    self.transport
+                        .send(SyncMessage::BranchMetadata(metadata))
+                        .map_err(transport_error)?;
+                }
                 pending.extend(upstream_subscriptions.borrow_mut().drain(..));
                 let claims = self.node.borrow().session_claims_with_revisions();
                 for (identity, claims, revision) in claims {
@@ -5207,6 +7310,14 @@ where
                                 values,
                                 known_state,
                             };
+                            if let ReadViewSourceSpec::Branch { branch } =
+                                &pending_subscription.opts.read_view.source
+                            {
+                                branch_views.insert(
+                                    pending_subscription.subscription,
+                                    crate::ids::BranchId(*branch),
+                                );
+                            }
                             #[cfg(feature = "sync-autopsy")]
                             sync_autopsy::record(format!(
                                 "upstream send subscribe {}",
@@ -5260,6 +7371,56 @@ where
                                 return Err(transport_error(error));
                             }
                         }
+                        PendingUpstreamCommand::AuthorizationScopeIntent { request_id, action } => {
+                            // An old or unauthenticated upstream must never receive a
+                            // downgraded preflight.  Resolve conservatively instead.
+                            if expected_scope_authority.is_none() {
+                                self.permission_advice_waiters
+                                    .borrow_mut()
+                                    .remove(request_id);
+                                scope_lease_manager.requests.remove(request_id);
+                            } else if self
+                                .permission_advice_waiters
+                                .borrow()
+                                .contains_key(request_id)
+                            {
+                                if let Some(existing) = scope_lease_manager
+                                    .requests
+                                    .values_mut()
+                                    .find(|request| request.action == *action)
+                                {
+                                    existing.waiters.insert(*request_id);
+                                } else {
+                                    scope_lease_manager.requests.insert(
+                                        *request_id,
+                                        AuthorizationScopeLeaseRequest {
+                                            action: action.clone(),
+                                            waiters: BTreeSet::from([*request_id]),
+                                            key: None,
+                                            lease: None,
+                                            owner: None,
+                                            clause_count: None,
+                                            applied_clauses: BTreeMap::new(),
+                                        },
+                                    );
+                                    if let Err(error) =
+                                        self.transport.send(SyncMessage::AuthorizationScopeIntent {
+                                            request_id: *request_id,
+                                            action: action.clone(),
+                                        })
+                                    {
+                                        if handle_transport_backpressure(
+                                            &self.node,
+                                            &self.scheduler,
+                                            &error,
+                                        ) {
+                                            return Ok(stats);
+                                        }
+                                        return Err(transport_error(error));
+                                    }
+                                }
+                            }
+                        }
                     }
                     pending.remove(pending_index);
                 }
@@ -5278,6 +7439,14 @@ where
                         .and_then(|pending| pending.unit.clone())
                         .map(Ok)
                         .unwrap_or_else(|| self.node.borrow_mut().commit_unit_for(tx_id))?;
+                    if let SyncMessage::CommitUnit { tx, .. } = &unit
+                        && let crate::tx::BranchLineage::Branch(branch) = tx.target_lineage
+                        && let Some(metadata) = self.node.borrow().branch_record(branch).cloned()
+                    {
+                        self.transport
+                            .send(SyncMessage::BranchMetadata((&metadata).into()))
+                            .map_err(transport_error)?;
+                    }
                     if let Err(error) =
                         send_with_local_content_extents(&self.node, self.transport.as_mut(), unit)
                     {
@@ -5290,15 +7459,24 @@ where
                 }
                 let mut applied = false;
                 let mut pending_view_updates = Vec::<ViewUpdateParts>::new();
-                while let Some(received) = self.transport.try_recv_received() {
-                    let write_state_tx_id = write_state_update_tx_id(&received.message);
+                while let Some(message) = self.transport.try_recv() {
+                    let write_state_tx_id = write_state_update_tx_id(&message);
                     #[cfg(feature = "sync-autopsy")]
                     sync_autopsy::record(format!(
-                        "upstream recv {} encoded_len={:?}",
-                        summarize_sync_message(&received.message),
-                        received.encoded_len
+                        "upstream recv {}",
+                        summarize_sync_message(&message)
                     ));
-                    match received.message {
+                    match message {
+                        SyncMessage::CatalogueSnapshot(snapshot) => {
+                            if !pending_view_updates.is_empty() {
+                                self.node.borrow_mut().apply_view_updates_in_batch(
+                                    std::mem::take(&mut pending_view_updates),
+                                )?;
+                            }
+                            self.node
+                                .borrow_mut()
+                                .apply_trusted_catalogue_snapshot(*snapshot)?;
+                        }
                         SyncMessage::RowVersionPayloads { version_bundles } => {
                             if !pending_view_updates.is_empty() {
                                 self.node.borrow_mut().apply_view_updates_in_batch(
@@ -5316,14 +7494,45 @@ where
                                     version_bundles,
                                 )?;
                             }
+                            let (subscription, settled_through) = match &repair.update {
+                                SyncMessage::ViewUpdate {
+                                    subscription,
+                                    settled_through,
+                                    ..
+                                } => (*subscription, *settled_through),
+                                _ => unreachable!("row-version repair must retain a view update"),
+                            };
                             push_view_update_message_for_receiver(
-                                pending_view_update_chunks,
                                 &mut pending_view_updates,
                                 repair.update,
                             )?;
+                            scope_view_cuts.insert(subscription, settled_through);
                         }
-                        message @ (SyncMessage::ViewUpdate { subscription, .. }
-                        | SyncMessage::ViewUpdateChunk { subscription, .. }) => {
+                        message @ SyncMessage::ViewUpdate {
+                            subscription,
+                            settled_through,
+                            ..
+                        } => {
+                            scope_receipts.remove(&subscription);
+                            if let Some(branch) = branch_views.get(&subscription).copied()
+                                && self.node.borrow().branch_record(branch).is_none()
+                            {
+                                pending_branch_view_updates
+                                    .entry(branch)
+                                    .or_default()
+                                    .push(message);
+                                if let std::collections::btree_map::Entry::Vacant(entry) =
+                                    pending_branch_metadata_repairs.entry(branch)
+                                {
+                                    entry.insert(());
+                                    self.transport
+                                        .send(SyncMessage::FetchBranchMetadata {
+                                            branches: vec![branch],
+                                        })
+                                        .map_err(transport_error)?;
+                                }
+                                continue;
+                            }
                             #[cfg(not(feature = "sync-autopsy"))]
                             let _ = subscription;
                             let missing = {
@@ -5332,10 +7541,10 @@ where
                             };
                             if missing.is_empty() {
                                 push_view_update_message_for_receiver(
-                                    pending_view_update_chunks,
                                     &mut pending_view_updates,
                                     message,
                                 )?;
+                                scope_view_cuts.insert(subscription, settled_through);
                                 #[cfg(feature = "sync-autopsy")]
                                 sync_autopsy::record(format!(
                                     "upstream applied view update {}",
@@ -5370,7 +7579,386 @@ where
                                 reason,
                             );
                         }
+                        SyncMessage::PermissionAdviceResponse { request_id, advice } => {
+                            // Direct answers were the pre-Phase-3 protocol.
+                            // They have no receipt-bound evidence and must
+                            // never influence a modern client.
+                            let _ = (request_id, advice);
+                            drop_peer_request(&self.node);
+                        }
+                        SyncMessage::AuthorizationScopeView {
+                            request_id,
+                            key,
+                            clause_index,
+                            clause_count,
+                            view,
+                        } => {
+                            let Some(expected) = expected_scope_authority else {
+                                drop_peer_request(&self.node);
+                                continue;
+                            };
+                            let SyncMessage::ViewUpdate {
+                                subscription,
+                                settled_through,
+                                peer_payload_inventory,
+                                ..
+                            } = view.as_ref()
+                            else {
+                                drop_peer_request(&self.node);
+                                continue;
+                            };
+                            let subscription = *subscription;
+                            let settled_through = *settled_through;
+                            let authorization_progress = peer_payload_inventory
+                                .authorization_progress
+                                .unwrap_or_default();
+                            if clause_count == 0
+                                || clause_index >= clause_count
+                                || key.subject.as_bytes() != &expected.link
+                            {
+                                drop_peer_request(&self.node);
+                                continue;
+                            }
+                            let Some(prior) = scope_lease_manager.requests.get(&request_id) else {
+                                // A cancelled intent cannot be revived by a
+                                // late/replayed authority view.
+                                continue;
+                            };
+                            if prior.key.as_ref().is_some_and(|known| known != &key)
+                                || prior
+                                    .clause_count
+                                    .is_some_and(|known| known != clause_count)
+                            {
+                                drop_peer_request(&self.node);
+                                continue;
+                            }
+                            // The first authenticated view reveals the
+                            // server-selected scope key.  Acquire here, before
+                            // the aggregate receipt, so concurrent actions
+                            // that compile to this same support scope share
+                            // one registry lifecycle rather than racing after
+                            // hydration has already completed.
+                            let acquired = if prior.lease.is_none() {
+                                scope_lease_manager.registry.acquire(key.clone())
+                            } else {
+                                None
+                            };
+                            let Some(request) = scope_lease_manager.requests.get_mut(&request_id)
+                            else {
+                                continue;
+                            };
+                            request.key = Some(key);
+                            request.clause_count = Some(clause_count);
+                            if request.lease.is_none() {
+                                let Some((lease, acquisition)) = acquired else {
+                                    self.permission_advice_waiters
+                                        .borrow_mut()
+                                        .remove(&request_id);
+                                    scope_lease_manager.requests.remove(&request_id);
+                                    continue;
+                                };
+                                request.owner = match acquisition {
+                                    AuthorizationScopeAcquisition::Owner(owner) => Some(owner),
+                                    AuthorizationScopeAcquisition::Waiting
+                                    | AuthorizationScopeAcquisition::Proven => None,
+                                };
+                                request.lease = Some(lease);
+                            }
+                            let duplicate = request
+                                .applied_clauses
+                                .get(&clause_index)
+                                .is_some_and(|(prior, _, _)| *prior != subscription);
+                            if duplicate {
+                                drop_peer_request(&self.node);
+                                continue;
+                            }
+                            // The envelope remains a normal ViewUpdate; retain
+                            // existing batching/settlement semantics before a
+                            // receipt can be accepted.
+                            push_view_update_message_for_receiver(
+                                &mut pending_view_updates,
+                                *view,
+                            )?;
+                            scope_view_cuts.insert(subscription, settled_through);
+                            request.applied_clauses.insert(
+                                clause_index,
+                                (subscription, settled_through, authorization_progress),
+                            );
+                        }
+                        SyncMessage::AuthorizationScopeAggregateReceipt {
+                            request_id,
+                            receipt,
+                        } => {
+                            // The authority's FIFO ordering says this receipt
+                            // follows the views, but apply the queued views now
+                            // so receipt admission is never merely queued.
+                            if !pending_view_updates.is_empty() {
+                                self.node.borrow_mut().apply_view_updates_in_batch(
+                                    std::mem::take(&mut pending_view_updates),
+                                )?;
+                            }
+                            let Some(expected) = expected_scope_authority.as_mut() else {
+                                drop_peer_request(&self.node);
+                                continue;
+                            };
+                            let Some(request) = scope_lease_manager.requests.get_mut(&request_id)
+                            else {
+                                continue;
+                            };
+                            // An empty compiled support set is a valid public
+                            // policy proof.  It has no views by construction;
+                            // the authority receipt itself supplies the
+                            // server-chosen key and current context.
+                            let clause_count = request.clause_count.unwrap_or(0);
+                            let all_current = request.applied_clauses.len()
+                                == usize::from(clause_count)
+                                && request.applied_clauses.iter().all(|(index, (_, cut, _))| {
+                                    *index < clause_count && *cut >= receipt.settled_through
+                                });
+                            let applied_cut = if clause_count == 0 {
+                                Some(receipt.settled_through)
+                            } else {
+                                request
+                                    .applied_clauses
+                                    .values()
+                                    .map(|(_, cut, _)| *cut)
+                                    .min()
+                            };
+                            let observed = self.node.borrow();
+                            let observed_claims = observed
+                                .session_claim_revision(AuthorId::from_bytes(expected.link));
+                            let observed_policy = observed.active_catalogue_seq();
+                            drop(observed);
+                            // Context components are monotonic per admitted
+                            // connection. A receipt may advance an otherwise
+                            // opaque authority revision, but it can never
+                            // decrease a component already admitted.
+                            let applied_progress = request
+                                .applied_clauses
+                                .values()
+                                .map(|(_, _, progress)| *progress)
+                                .min()
+                                .unwrap_or_default();
+                            let receipt_decreased = receipt.claims_revision
+                                < expected.claims_revision
+                                || receipt.policy_epoch < expected.policy_epoch
+                                || receipt.authorization_progress < expected.authorization_progress
+                                || receipt.settled_through.0 < expected.settled_through;
+                            if observed_claims > expected.claims_revision {
+                                expected.claims_revision = observed_claims;
+                            } else if observed_claims == 0 {
+                                expected.claims_revision = receipt.claims_revision;
+                            }
+                            if observed_policy > expected.policy_epoch {
+                                expected.policy_epoch = observed_policy;
+                            } else if observed_policy == 0 {
+                                expected.policy_epoch = receipt.policy_epoch;
+                            }
+                            expected.authorization_progress =
+                                expected.authorization_progress.max(applied_progress);
+                            expected.settled_through =
+                                expected.settled_through.max(receipt.settled_through.0);
+                            let receipt_current =
+                                request.key.as_ref().is_some_and(|key| key == &receipt.key)
+                                    && all_current
+                                    && !receipt_decreased
+                                    && authorization_scope_receipt_matches_transport_context(
+                                        &receipt,
+                                        *expected,
+                                        applied_cut,
+                                    );
+                            if !receipt_current {
+                                // A claim/catalogue/progress transition can
+                                // race a just-completed hydration.  Retire its
+                                // lease and allocate a new opaque wire id so
+                                // old views/receipts cannot revive the
+                                // operation; retain the caller waiters and
+                                // reacquire under the observed context.
+                                let retry_id =
+                                    PermissionAdviceRequestId(*uuid::Uuid::new_v4().as_bytes());
+                                let action = request.action.clone();
+                                let waiters = request.waiters.clone();
+                                scope_lease_manager.requests.remove(&request_id);
+                                scope_lease_manager.requests.insert(
+                                    retry_id,
+                                    AuthorizationScopeLeaseRequest {
+                                        action: action.clone(),
+                                        waiters,
+                                        key: None,
+                                        lease: None,
+                                        owner: None,
+                                        clause_count: None,
+                                        applied_clauses: BTreeMap::new(),
+                                    },
+                                );
+                                pending.push(PendingUpstreamCommand::AuthorizationScopeIntent {
+                                    request_id: retry_id,
+                                    action,
+                                });
+                                drop_peer_request(&self.node);
+                                continue;
+                            }
+                            let admitted = match (request.lease.as_ref(), request.owner.take()) {
+                                (Some(lease), Some(owner)) => matches!(
+                                    scope_lease_manager.registry.install(
+                                        lease,
+                                        owner,
+                                        *expected,
+                                        receipt.clone(),
+                                    ),
+                                    AuthorizationScopeInstall::Installed
+                                ),
+                                (Some(lease), None) => matches!(
+                                    scope_lease_manager.registry.receipt(
+                                        lease,
+                                        *expected,
+                                        receipt.authorization_progress,
+                                        receipt.settled_through.0,
+                                    ),
+                                    AuthorizationScopeReadiness::Proven(_)
+                                ),
+                                (None, _) => false,
+                            };
+                            if !admitted {
+                                continue;
+                            }
+                            let action = request.action.clone();
+                            let waiter_ids = request.waiters.clone();
+                            scope_lease_manager.requests.remove(&request_id);
+                            let advice = evaluate_authoritative_permission_advice(
+                                &mut self.node.borrow_mut(),
+                                receipt.key.subject,
+                                action,
+                            );
+                            for waiter_id in waiter_ids {
+                                if let Some(waiter) = self
+                                    .permission_advice_waiters
+                                    .borrow_mut()
+                                    .remove(&waiter_id)
+                                {
+                                    let _ = waiter.send(advice);
+                                }
+                            }
+                        }
+                        SyncMessage::AuthorizationScopeUnavailable { request_id } => {
+                            if let Some(request) = scope_lease_manager.requests.remove(&request_id)
+                            {
+                                for waiter_id in request.waiters {
+                                    if let Some(waiter) = self
+                                        .permission_advice_waiters
+                                        .borrow_mut()
+                                        .remove(&waiter_id)
+                                    {
+                                        let _ = waiter.send(PermissionAdvice::Unknown);
+                                    }
+                                }
+                            }
+                        }
+                        SyncMessage::AuthorizationScopeDecision { request_id, advice } => {
+                            if expected_scope_authority.is_none() {
+                                drop_peer_request(&self.node);
+                                continue;
+                            }
+                            if let Some(request) = scope_lease_manager.requests.remove(&request_id)
+                            {
+                                for waiter_id in request.waiters {
+                                    if let Some(waiter) = self
+                                        .permission_advice_waiters
+                                        .borrow_mut()
+                                        .remove(&waiter_id)
+                                    {
+                                        let _ = waiter.send(advice);
+                                    }
+                                }
+                            }
+                        }
+                        SyncMessage::AuthorizationScopeReceipt {
+                            subscription,
+                            receipt,
+                        } => {
+                            let Some(expected) = expected_scope_authority else {
+                                drop_peer_request(&self.node);
+                                continue;
+                            };
+                            if !authorization_scope_receipt_matches_transport_context(
+                                &receipt,
+                                *expected,
+                                scope_view_cuts.get(&subscription).copied(),
+                            ) {
+                                drop_peer_request(&self.node);
+                                continue;
+                            }
+                            scope_receipts.insert(subscription, receipt);
+                        }
+                        SyncMessage::BranchMetadata(metadata) => {
+                            let branch = metadata.branch_id;
+                            self.node
+                                .borrow_mut()
+                                .acknowledge_branch_metadata(&metadata)?;
+                            self.node
+                                .borrow_mut()
+                                .apply_sync_message(SyncMessage::BranchMetadata(metadata))?;
+                            pending_branch_metadata_repairs.remove(&branch);
+                            if let Some(updates) = pending_branch_view_updates.remove(&branch) {
+                                for update in updates {
+                                    let (subscription, settled_through) = match &update {
+                                        SyncMessage::ViewUpdate {
+                                            subscription,
+                                            settled_through,
+                                            ..
+                                        } => (*subscription, *settled_through),
+                                        _ => {
+                                            unreachable!("branch parking retains only view updates")
+                                        }
+                                    };
+                                    push_view_update_message_for_receiver(
+                                        &mut pending_view_updates,
+                                        update,
+                                    )?;
+                                    scope_view_cuts.insert(subscription, settled_through);
+                                }
+                            }
+                        }
                         message => {
+                            if let SyncMessage::FateUpdate { tx_id, .. } = &message {
+                                let admitted = *self.admitted_upstream_authority.borrow();
+                                // Gate fate before any NodeState mutation. A
+                                // parallel, stale, or featureless upstream is
+                                // not merely forbidden from forwarding an
+                                // edge route; it must not settle the routed
+                                // transaction's local state. Ordinary Core
+                                // client links have no edge route and retain
+                                // their normal fate transport.
+                                let routed = self.edge_fate_routes.borrow().contains_key(tx_id);
+                                if routed
+                                    && (expected_scope_authority.is_none()
+                                        || admitted != *expected_scope_authority)
+                                {
+                                    drop_peer_request(&self.node);
+                                    continue;
+                                }
+                            }
+                            let routed_fate = match &message {
+                                SyncMessage::FateUpdate { tx_id, .. } => {
+                                    Some((*tx_id, message.clone()))
+                                }
+                                _ => None,
+                            };
+                            if let SyncMessage::CommitUnit { tx, .. } = &message
+                                && let crate::tx::BranchLineage::Branch(branch) = tx.target_lineage
+                                && self.node.borrow().branch_record(branch).is_none()
+                            {
+                                if let std::collections::btree_map::Entry::Vacant(entry) =
+                                    pending_branch_metadata_repairs.entry(branch)
+                                {
+                                    entry.insert(());
+                                    self.transport
+                                        .send(SyncMessage::FetchBranchMetadata {
+                                            branches: vec![branch],
+                                        })
+                                        .map_err(transport_error)?;
+                                }
+                            }
                             if !pending_view_updates.is_empty() {
                                 self.node.borrow_mut().apply_view_updates_in_batch(
                                     std::mem::take(&mut pending_view_updates),
@@ -5378,11 +7966,30 @@ where
                             }
                             self.node
                                 .borrow_mut()
-                                .apply_sync_message_with_ingest_context_and_encoded_len(
-                                    message,
-                                    None,
-                                    received.encoded_len,
-                                )?;
+                                .apply_sync_message_with_ingest_context(message, None)?;
+                            if let Some((tx_id, fate)) = routed_fate {
+                                let authority = *expected_scope_authority;
+                                let mut routes = self.edge_fate_routes.borrow_mut();
+                                let Some(pending) = routes.get_mut(&tx_id) else {
+                                    continue;
+                                };
+                                let mut remaining = Vec::new();
+                                for route in std::mem::take(pending) {
+                                    if Some(route.authority) == authority {
+                                        if let Some(queue) = route.queue.upgrade() {
+                                            queue.borrow_mut().push(fate.clone());
+                                        }
+                                    } else {
+                                        remaining.push(route);
+                                    }
+                                }
+                                if remaining.is_empty() {
+                                    routes.remove(&tx_id);
+                                } else {
+                                    *routes.get_mut(&tx_id).expect("route remains present") =
+                                        remaining;
+                                }
+                            }
                         }
                     }
                     if let Some(tx_id) = write_state_tx_id {
@@ -5414,20 +8021,117 @@ where
                 shape_registrations,
                 deferred_subscribe_rejections,
                 served_current_rows,
+                pending_branch_metadata_repairs,
+                pending_session_branch_metadata,
+                branch_metadata_repair_cursor,
+                scope_purposes,
+                scope_aggregates,
+                authority_scope_hydrations,
+                authority_scope_hydration_count,
                 serve_dirty,
             } => {
+                let repairs = next_branch_metadata_repairs(
+                    pending_branch_metadata_repairs,
+                    branch_metadata_repair_cursor,
+                );
+                if !repairs.is_empty() {
+                    self.transport
+                        .send(SyncMessage::FetchBranchMetadata { branches: repairs })
+                        .map_err(transport_error)?;
+                }
+                if ingest_context.trust == CommitUnitTrust::Session {
+                    let pending_ids = pending_session_branch_metadata
+                        .keys()
+                        .copied()
+                        .collect::<Vec<_>>();
+                    for branch in pending_ids {
+                        let metadata = pending_session_branch_metadata
+                            .get(&branch)
+                            .cloned()
+                            .expect("pending branch metadata id remains present");
+                        if self.node.borrow_mut().admit_session_branch_metadata(
+                            metadata.clone(),
+                            ingest_context.identity,
+                        )? {
+                            pending_session_branch_metadata.remove(&branch);
+                            let responses = self.node.borrow_mut().apply_sync_message(
+                                SyncMessage::BranchMetadata(metadata.clone()),
+                            )?;
+                            for response in responses {
+                                send_with_content_extents(
+                                    &self.node,
+                                    peer,
+                                    self.transport.as_mut(),
+                                    response,
+                                )?;
+                            }
+                            self.transport
+                                .send(SyncMessage::BranchMetadata(metadata))
+                                .map_err(transport_error)?;
+                        }
+                    }
+                }
                 let mut applied_inbound = false;
                 let mut scheduled_immediate = false;
                 let mut sent_view_update = false;
-                while let Some(received) = self.transport.try_recv_received() {
+                for fate in std::mem::take(&mut *self.downstream_fates.borrow_mut()) {
+                    send_with_content_extents(&self.node, peer, self.transport.as_mut(), fate)?;
+                }
+                while let Some(message) = self.transport.try_recv() {
+                    // Authorization support is authority-owned in Phase 3.
+                    // A subscriber must never be able to smuggle a support
+                    // purpose alongside its own shape/binding subscription.
+                    let scope_purpose: Option<crate::protocol::AuthorizationScopePurpose> = None;
                     applied_inbound = true;
+                    let admitted_metadata = match &message {
+                        SyncMessage::BranchMetadata(metadata) => Some(metadata.branch_id),
+                        _ => None,
+                    };
                     #[cfg(feature = "sync-autopsy")]
                     sync_autopsy::record(format!(
-                        "subscriber recv {} encoded_len={:?}",
-                        summarize_sync_message(&received.message),
-                        received.encoded_len
+                        "subscriber recv {}",
+                        summarize_sync_message(&message)
                     ));
-                    match received.message {
+                    match message {
+                        SyncMessage::AuthorizationScopeIntent { request_id, action } => {
+                            let admitted = self.transport.connection_session_context().is_some_and(
+                                |context| {
+                                    context.negotiated_features
+                                        & crate::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS
+                                        != 0
+                                },
+                            );
+                            if !admitted {
+                                drop_peer_request(&self.node);
+                                continue;
+                            }
+                            serve_authorization_scope_intent(
+                                &self.node,
+                                peer,
+                                self.transport.as_mut(),
+                                ingest_context.identity,
+                                connection_epoch,
+                                request_id,
+                                action,
+                                ingest_context.trust,
+                                authority_scope_hydrations,
+                                authority_scope_hydration_count,
+                            )?;
+                            continue;
+                        }
+                        // Legacy direct answers and caller-authored support
+                        // subscriptions are deliberately fail-closed.
+                        SyncMessage::PermissionAdviceRequest { .. }
+                        | SyncMessage::PermissionAdviceResponse { .. }
+                        | SyncMessage::AuthorizationScopeSubscribe { .. }
+                        | SyncMessage::AuthorizationScopeReceipt { .. }
+                        | SyncMessage::AuthorizationScopeView { .. }
+                        | SyncMessage::AuthorizationScopeAggregateReceipt { .. }
+                        | SyncMessage::AuthorizationScopeUnavailable { .. }
+                        | SyncMessage::AuthorizationScopeDecision { .. } => {
+                            drop_peer_request(&self.node);
+                            continue;
+                        }
                         SyncMessage::RegisterShape {
                             shape_id,
                             opts,
@@ -5511,8 +8215,9 @@ where
                                             shape,
                                             &binding,
                                             opts.tier,
-                                            ingest_context.identity,
+                                            subscriber_permission_subject(*ingest_context),
                                             &opts.read_view,
+                                            QueryAuthorizationMode::TrustedServing,
                                         );
                                     if let Err(crate::node::Error::QueryCapability(detail)) =
                                         supported
@@ -5678,6 +8383,59 @@ where
                                 drop_peer_request(&self.node);
                                 continue;
                             }
+                            let scope_purpose = if let Some(purpose) = scope_purpose {
+                                let expected_result =
+                                    self.node.borrow().authorization_support_scope(
+                                        ingest_context.identity,
+                                        &purpose.action,
+                                    );
+                                let expected = match expected_result {
+                                    Ok(expected) => expected,
+                                    Err(_) => {
+                                        drop_peer_request(&self.node);
+                                        continue;
+                                    }
+                                };
+                                let exact_support = subscription.shape_id == shape.shape_id()
+                                    && subscription.binding_id == binding.binding_id()
+                                    && authorization_scope_support_options_match(
+                                        &expected.options,
+                                        &opts,
+                                        subscription,
+                                    )
+                                    && expected.subscriptions.iter().any(
+                                        |(expected_shape, expected_binding)| {
+                                            expected_shape.shape_id() == shape.shape_id()
+                                                && expected_binding.binding_id()
+                                                    == binding.binding_id()
+                                        },
+                                    );
+                                if !exact_support {
+                                    drop_peer_request(&self.node);
+                                    continue;
+                                }
+                                Some(AuthorizedScopePurpose {
+                                    key: expected.key,
+                                    operation: expected.operation,
+                                    action: purpose.action,
+                                    expected_support: expected
+                                        .subscriptions
+                                        .iter()
+                                        .map(|(shape, binding)| {
+                                            (shape.shape_id(), binding.binding_id())
+                                        })
+                                        .collect(),
+                                })
+                            } else {
+                                None
+                            };
+                            if let Some(purpose) = &scope_purpose
+                                && let Some(existing) = scope_purposes.get(&subscription)
+                                && existing != purpose
+                            {
+                                drop_peer_request(&self.node);
+                                continue;
+                            }
                             let supported = self
                                 .node
                                 .borrow_mut()
@@ -5685,8 +8443,9 @@ where
                                     &shape,
                                     &binding,
                                     opts.tier,
-                                    ingest_context.identity,
+                                    subscriber_permission_subject(*ingest_context),
                                     &opts.read_view,
+                                    QueryAuthorizationMode::TrustedServing,
                                 );
                             if let Err(crate::node::Error::QueryCapability(detail)) = supported {
                                 send_unsupported_shape_capability_rejection(
@@ -5714,7 +8473,10 @@ where
                             let first_subscriber = coverage_groups
                                 .get(&coverage)
                                 .is_none_or(|group| group.subscribers.is_empty());
-                            let permissions_ready = self.node.borrow().permissions_ready();
+                            let permissions_ready = subscriber_permissions_ready(
+                                self.node.borrow().permissions_ready(),
+                                ingest_context.trust,
+                            );
                             let update = if !permissions_ready {
                                 None
                             } else if first_subscriber {
@@ -5791,6 +8553,25 @@ where
                             self.node
                                 .borrow_mut()
                                 .apply_sync_message(SyncMessage::Subscribe(subscribe))?;
+                            if let Some(purpose) = scope_purpose {
+                                let aggregate = scope_aggregates
+                                    .entry(purpose.key.clone())
+                                    .or_insert_with(|| {
+                                        AuthorityScopeAggregate::new(
+                                            purpose.expected_support.clone(),
+                                        )
+                                    });
+                                if aggregate.expected_support() != &purpose.expected_support
+                                    || !aggregate.register(
+                                        subscription,
+                                        (shape.shape_id(), binding.binding_id()),
+                                    )
+                                {
+                                    drop_peer_request(&self.node);
+                                    continue;
+                                }
+                                scope_purposes.insert(subscription, purpose);
+                            }
                             let group =
                                 coverage_groups.entry(coverage.clone()).or_insert_with(|| {
                                     CoverageGroup {
@@ -5808,12 +8589,52 @@ where
                                     summarize_sync_message(&update)
                                 ));
                                 self.last_resume_bytes = Some(serialized_sync_message_len(&update));
+                                if let ReadViewSourceSpec::Branch { branch } =
+                                    &opts.read_view.source
+                                {
+                                    let metadata =
+                                        self.node.borrow_mut().branch_metadata_visible_to(
+                                            crate::ids::BranchId(*branch),
+                                            peer.link_identity(),
+                                        )?;
+                                    if metadata {
+                                        let metadata = self
+                                            .node
+                                            .borrow()
+                                            .branch_record(crate::ids::BranchId(*branch))
+                                            .cloned()
+                                            .expect("visible branch metadata remains present");
+                                        self.transport
+                                            .send(SyncMessage::BranchMetadata((&metadata).into()))
+                                            .map_err(transport_error)?;
+                                    }
+                                }
+                                let receipt =
+                                    scope_purposes.get(&subscription).and_then(|purpose| {
+                                        aggregate_authorization_scope_receipt_for_view(
+                                            scope_aggregates,
+                                            &self.node.borrow(),
+                                            peer,
+                                            ingest_context.identity,
+                                            connection_epoch,
+                                            purpose,
+                                            &update,
+                                        )
+                                    });
                                 send_with_content_extents(
                                     &self.node,
                                     peer,
                                     self.transport.as_mut(),
                                     update,
                                 )?;
+                                if let Some((subscription, receipt)) = receipt {
+                                    self.transport
+                                        .send(SyncMessage::AuthorizationScopeReceipt {
+                                            subscription,
+                                            receipt,
+                                        })
+                                        .map_err(transport_error)?;
+                                }
                                 sent_view_update = true;
                             }
                             if first_subscriber {
@@ -5834,6 +8655,13 @@ where
                         }
                         SyncMessage::Unsubscribe { subscription } => {
                             self.node.borrow_mut().apply_unsubscribe(subscription);
+                            if let Some(purpose) = scope_purposes.remove(&subscription) {
+                                remove_scope_aggregate_member(
+                                    scope_aggregates,
+                                    &purpose.key,
+                                    subscription,
+                                );
+                            }
                             if let Some(coverage) = served.remove(&subscription) {
                                 if let Some(group) = coverage_groups.get_mut(&coverage) {
                                     group.subscribers.remove(&subscription);
@@ -5871,6 +8699,39 @@ where
                                 )?;
                             }
                         }
+                        SyncMessage::FetchBranchMetadata { branches } => {
+                            if let Err(message) = validate_fetch_branch_metadata(&branches) {
+                                let _ = message;
+                                drop_peer_request(&self.node);
+                                continue;
+                            }
+                            // A repair request is not a branch-discovery API.  Only
+                            // serve a branch this authenticated link has already
+                            // been admitted to read through one of its views.
+                            for branch in branches {
+                                let admitted = served.values().any(|coverage| {
+                                    matches!(
+                                        coverage.opts.read_view.source,
+                                        ReadViewSourceSpec::Branch { branch: view_branch }
+                                            if crate::ids::BranchId(view_branch) == branch
+                                    )
+                                });
+                                let visible = admitted
+                                    && self
+                                        .node
+                                        .borrow_mut()
+                                        .branch_metadata_visible_to(branch, peer.link_identity())?;
+                                if visible {
+                                    let metadata =
+                                        self.node.borrow().branch_record(branch).cloned();
+                                    if let Some(metadata) = metadata {
+                                        self.transport
+                                            .send(SyncMessage::BranchMetadata((&metadata).into()))
+                                            .map_err(transport_error)?;
+                                    }
+                                }
+                            }
+                        }
                         SyncMessage::FetchContentExtent { owner, extent } => {
                             let response = {
                                 let mut node = self.node.borrow_mut();
@@ -5878,7 +8739,49 @@ where
                             };
                             self.transport.send(response).map_err(transport_error)?;
                         }
+                        // Branch routing records select persistent partitions.
+                        // Sessions may introduce their own locally-authored
+                        // record only when its creator matches the authenticated
+                        // link and its declared dependencies are available.
                         other => {
+                            if let SyncMessage::BranchMetadata(metadata) = &other
+                                && ingest_context.trust == CommitUnitTrust::Session
+                            {
+                                let admitted =
+                                    self.node.borrow_mut().admit_session_branch_metadata(
+                                        metadata.clone(),
+                                        ingest_context.identity,
+                                    )?;
+                                if !admitted {
+                                    if let Some(existing) =
+                                        pending_session_branch_metadata.get(&metadata.branch_id)
+                                        && existing != metadata
+                                    {
+                                        return Err(Error::new(
+                                            ErrorCode::Protocol,
+                                            "conflicting pending branch metadata",
+                                        ));
+                                    }
+                                    pending_session_branch_metadata
+                                        .insert(metadata.branch_id, metadata.clone());
+                                    continue;
+                                }
+                            }
+                            if let SyncMessage::CommitUnit { tx, .. } = &other
+                                && let crate::tx::BranchLineage::Branch(branch) = tx.target_lineage
+                                && self.node.borrow().branch_record(branch).is_none()
+                            {
+                                if let std::collections::btree_map::Entry::Vacant(entry) =
+                                    pending_branch_metadata_repairs.entry(branch)
+                                {
+                                    entry.insert(());
+                                    self.transport
+                                        .send(SyncMessage::FetchBranchMetadata {
+                                            branches: vec![branch],
+                                        })
+                                        .map_err(transport_error)?;
+                                }
+                            }
                             if let SyncMessage::ContentExtents { extents } = &other
                                 && let Err(message) = validate_content_extents(extents)
                             {
@@ -5893,7 +8796,10 @@ where
                                 _ => None,
                             };
                             if let Some((tx_id, _)) = &relay_upload
-                                && !self.node.borrow().permissions_ready()
+                                && !subscriber_permissions_ready(
+                                    self.node.borrow().permissions_ready(),
+                                    ingest_context.trust,
+                                )
                             {
                                 let response = SyncMessage::FateUpdate {
                                     tx_id: *tx_id,
@@ -5923,12 +8829,86 @@ where
                                         && matches!(peer.role(), PeerRole::ClientLink { .. }) =>
                                 {
                                     if tx.kind == TxKind::Mergeable {
-                                        peer.ingest_edge_mergeable_commit_unit(
-                                            &mut self.node.borrow_mut(),
-                                            tx,
-                                            versions,
-                                            tick_now_ms,
-                                        )?
+                                        // The serving layer enters this arm
+                                        // only for NodeRole::Edge.  An edge
+                                        // never becomes terminal merely
+                                        // because a connection disappeared.
+                                        let tx_id = tx.tx_id;
+                                        let route_registered = if let Some(authority) =
+                                            *self.admitted_upstream_authority.borrow()
+                                        {
+                                            let mut routes = self.edge_fate_routes.borrow_mut();
+                                            prune_edge_fate_routes(&mut routes, Some(authority));
+                                            let route_count =
+                                                routes.values().map(Vec::len).sum::<usize>();
+                                            let pending = routes.get(&tx_id);
+                                            let already_routed = pending.is_some_and(|pending| {
+                                                pending.iter().any(|route| {
+                                                    route.authority == authority
+                                                        && route.queue.upgrade().is_some_and(
+                                                            |queue| {
+                                                                Rc::ptr_eq(
+                                                                    &queue,
+                                                                    &self.downstream_fates,
+                                                                )
+                                                            },
+                                                        )
+                                                })
+                                            });
+                                            if already_routed {
+                                                true
+                                            } else if route_count < MAX_EDGE_FATE_ROUTES {
+                                                let pending = routes.entry(tx_id).or_default();
+                                                if pending.len() < MAX_EDGE_FATE_ROUTES_PER_TX {
+                                                    pending.push(EdgeFateRoute {
+                                                        authority,
+                                                        queue: Rc::downgrade(
+                                                            &self.downstream_fates,
+                                                        ),
+                                                    });
+                                                    true
+                                                } else {
+                                                    false
+                                                }
+                                            } else {
+                                                false
+                                            }
+                                        } else {
+                                            false
+                                        };
+                                        let legacy_park = !route_registered
+                                            && self
+                                                .admitted_upstream_authorities
+                                                .borrow()
+                                                .is_empty();
+                                        if !route_registered && !legacy_park {
+                                            // Do not claim Edge durability for
+                                            // a write that lacks exactly one
+                                            // authority route; otherwise its
+                                            // caller could wait forever.
+                                            vec![SyncMessage::FateUpdate {
+                                                tx_id,
+                                                fate: Fate::Rejected(
+                                                    RejectionReason::MalformedCommit(
+                                                        "no admitted authority route".to_owned(),
+                                                    ),
+                                                ),
+                                                global_seq: None,
+                                                durability: None,
+                                            }]
+                                        } else {
+                                            self.node
+                                                .borrow_mut()
+                                                .ingest_relay_commit_unit(tx, versions)?;
+                                            // Edge persistence is observable, but
+                                            // final policy fate stays parked.
+                                            vec![SyncMessage::FateUpdate {
+                                                tx_id,
+                                                fate: Fate::Accepted,
+                                                global_seq: None,
+                                                durability: Some(DurabilityTier::Edge),
+                                            }]
+                                        }
                                     } else {
                                         self.node
                                             .borrow_mut()
@@ -5936,13 +8916,35 @@ where
                                         Vec::new()
                                     }
                                 }
+                                SyncMessage::CommitUnit { tx, versions }
+                                    if tx.kind == TxKind::Mergeable
+                                        && matches!(peer.role(), PeerRole::ClientLink { .. }) =>
+                                {
+                                    // This is the terminal Core/hybrid path.
+                                    // Prove the actual wire-version actions
+                                    // through the shared authority aggregate
+                                    // before NodeState assigns its policy fate.
+                                    {
+                                        let mut node = self.node.borrow_mut();
+                                        peer.prove_terminal_commit_authorization(
+                                            &mut node,
+                                            ingest_context.identity,
+                                            &versions,
+                                        )?;
+                                    }
+                                    self.node
+                                        .borrow_mut()
+                                        .apply_sync_message_with_ingest_context(
+                                            SyncMessage::CommitUnit { tx, versions },
+                                            Some(*ingest_context),
+                                        )?
+                                }
                                 other => self
                                     .node
                                     .borrow_mut()
-                                    .apply_sync_message_with_ingest_context_and_encoded_len(
+                                    .apply_sync_message_with_ingest_context(
                                         other,
                                         Some(*ingest_context),
-                                        received.encoded_len,
                                     )?,
                             };
                             if let Some(tx_id) = write_state_tx_id {
@@ -5955,6 +8957,21 @@ where
                                     self.transport.as_mut(),
                                     response,
                                 )?;
+                            }
+                            if let Some(branch) = admitted_metadata {
+                                pending_branch_metadata_repairs.remove(&branch);
+                                let metadata = self
+                                    .node
+                                    .borrow()
+                                    .branch_record(branch)
+                                    .map(Into::into)
+                                    .expect("admitted branch metadata remains present");
+                                // This exact echo acknowledges only the
+                                // downstream hop. Session admission may have
+                                // independently persisted an upstream relay.
+                                self.transport
+                                    .send(SyncMessage::BranchMetadata(metadata))
+                                    .map_err(transport_error)?;
                             }
                             if let Some((tx_id, unit)) = relay_upload {
                                 let mut outbox = outbox.borrow_mut();
@@ -5978,7 +8995,12 @@ where
                     self.observed_subscriber_dirty_epoch.set(next);
                     *serve_dirty = true;
                 }
-                if *serve_dirty && self.node.borrow().permissions_ready() {
+                if *serve_dirty
+                    && subscriber_permissions_ready(
+                        self.node.borrow().permissions_ready(),
+                        ingest_context.trust,
+                    )
+                {
                     // A coverage-group refresh drains every maintained view below.
                     // Tick the shared runtime once before that drain rather than once
                     // per group.
@@ -6024,6 +9046,18 @@ where
                             ));
                             for subscription in group.subscribers.iter().copied() {
                                 let update = retarget_view_update(update.clone(), subscription);
+                                let receipt =
+                                    scope_purposes.get(&subscription).and_then(|purpose| {
+                                        aggregate_authorization_scope_receipt_for_view(
+                                            scope_aggregates,
+                                            &self.node.borrow(),
+                                            peer,
+                                            ingest_context.identity,
+                                            connection_epoch,
+                                            purpose,
+                                            &update,
+                                        )
+                                    });
                                 #[cfg(feature = "sync-autopsy")]
                                 sync_autopsy::record(format!(
                                     "subscriber send group delta {}",
@@ -6035,6 +9069,14 @@ where
                                     self.transport.as_mut(),
                                     update,
                                 )?;
+                                if let Some((subscription, receipt)) = receipt {
+                                    self.transport
+                                        .send(SyncMessage::AuthorizationScopeReceipt {
+                                            subscription,
+                                            receipt,
+                                        })
+                                        .map_err(transport_error)?;
+                                }
                                 sent_view_update = true;
                             }
                         }
@@ -6068,13 +9110,6 @@ where
                         .map_err(transport_error)?;
                     }
                 }
-                let fate_updates = {
-                    let mut node = self.node.borrow_mut();
-                    peer.drain_deferred_edge_fates(&mut node, tick_now_ms)?
-                };
-                for update in fate_updates {
-                    send_with_content_extents(&self.node, peer, self.transport.as_mut(), update)?;
-                }
             }
         }
         Ok(stats)
@@ -6107,12 +9142,6 @@ where
         }
     }
 
-    fn next_now_ms(&self) -> u64 {
-        let next = self.next_now_ms.get();
-        self.next_now_ms.set(next + 1);
-        next
-    }
-
     fn eviction_pins(&self) -> crate::peer::PeerEvictionPins {
         match &self.link {
             ConnectionLink::Subscriber { peer, .. } => peer.eviction_pins(),
@@ -6139,34 +9168,6 @@ fn serialized_sync_message_len(message: &SyncMessage) -> usize {
     encoded.map_or(0, |bytes| bytes.len())
 }
 
-fn serialized_uncompressed_wire_message_len(message: &SyncMessage) -> usize {
-    #[cfg(feature = "cold-settle-attribution")]
-    let payload_started = Instant::now();
-    let payload = encode_sync_message(message);
-    #[cfg(feature = "cold-settle-attribution")]
-    crate::cold_settle_attribution::record_preflight_payload(
-        payload_started.elapsed().as_nanos() as u64,
-        payload.as_ref().map_or(0, Vec::len),
-    );
-    let Ok(payload) = payload else {
-        return usize::MAX;
-    };
-    let envelope = WireEnvelope::new(
-        WIRE_PROTOCOL_VERSION,
-        FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS,
-        payload,
-    );
-    #[cfg(feature = "cold-settle-attribution")]
-    let frame_started = Instant::now();
-    let frame = encode_frame(&WireFrame::Message(envelope));
-    #[cfg(feature = "cold-settle-attribution")]
-    crate::cold_settle_attribution::record_preflight_frame(
-        frame_started.elapsed().as_nanos() as u64,
-        frame.as_ref().map_or(0, Vec::len),
-    );
-    frame.map_or(usize::MAX, |bytes| bytes.len())
-}
-
 fn view_update_parts_from_message(message: SyncMessage) -> ViewUpdateParts {
     match message {
         SyncMessage::ViewUpdate {
@@ -6178,6 +9179,7 @@ fn view_update_parts_from_message(message: SyncMessage) -> ViewUpdateParts {
             peer_payload_inventory,
             result_member_adds,
             result_member_removes,
+            terminal_operations,
             program_fact_adds,
             program_fact_removes,
         } => ViewUpdateParts {
@@ -6191,32 +9193,7 @@ fn view_update_parts_from_message(message: SyncMessage) -> ViewUpdateParts {
             authorization_progress: peer_payload_inventory.authorization_progress,
             result_member_adds,
             result_member_removes,
-            program_fact_adds,
-            program_fact_removes,
-        },
-        SyncMessage::ViewUpdateChunk {
-            subscription,
-            settled_through,
-            reset_result_set,
-            final_chunk,
-            version_carriers,
-            version_bundles,
-            peer_payload_inventory,
-            result_member_adds,
-            result_member_removes,
-            program_fact_adds,
-            program_fact_removes,
-        } => ViewUpdateParts {
-            subscription,
-            settled_through,
-            defer_settlement: !final_chunk,
-            reset_result_set,
-            version_carriers,
-            version_bundles,
-            peer_complete_tx_payload_refs: peer_payload_inventory.complete_tx_payloads,
-            authorization_progress: peer_payload_inventory.authorization_progress,
-            result_member_adds,
-            result_member_removes,
+            terminal_operations,
             program_fact_adds,
             program_fact_removes,
         },
@@ -6225,78 +9202,10 @@ fn view_update_parts_from_message(message: SyncMessage) -> ViewUpdateParts {
 }
 
 fn push_view_update_message_for_receiver(
-    pending_chunks: &mut BTreeMap<SubscriptionKey, ViewUpdateParts>,
     ready: &mut Vec<ViewUpdateParts>,
     message: SyncMessage,
 ) -> Result<(), Error> {
-    let (subscription, final_chunk) = match &message {
-        SyncMessage::ViewUpdateChunk {
-            subscription,
-            final_chunk,
-            ..
-        } => (*subscription, *final_chunk),
-        SyncMessage::ViewUpdate { .. } => {
-            ready.push(view_update_parts_from_message(message));
-            return Ok(());
-        }
-        _ => unreachable!("expected view update message"),
-    };
-
-    let parts = view_update_parts_from_message(message);
-    if let Some(accumulated) = pending_chunks.get_mut(&subscription) {
-        merge_view_update_chunk_parts(accumulated, parts)?;
-        if final_chunk {
-            let mut complete = pending_chunks.remove(&subscription).ok_or_else(|| {
-                Error::new(ErrorCode::Protocol, "completed chunk sequence disappeared")
-            })?;
-            complete.defer_settlement = false;
-            ready.push(complete);
-        }
-        return Ok(());
-    }
-
-    if final_chunk {
-        ready.push(parts);
-    } else {
-        pending_chunks.insert(subscription, parts);
-    }
-    Ok(())
-}
-
-fn merge_view_update_chunk_parts(
-    accumulated: &mut ViewUpdateParts,
-    mut next: ViewUpdateParts,
-) -> Result<(), Error> {
-    if accumulated.subscription != next.subscription {
-        return Err(Error::new(
-            ErrorCode::Protocol,
-            "view update chunks changed subscription mid-sequence",
-        ));
-    }
-    accumulated.settled_through = accumulated.settled_through.max(next.settled_through);
-    accumulated.defer_settlement = next.defer_settlement;
-    accumulated.reset_result_set |= next.reset_result_set;
-    accumulated
-        .version_carriers
-        .append(&mut next.version_carriers);
-    accumulated
-        .version_bundles
-        .append(&mut next.version_bundles);
-    accumulated
-        .peer_complete_tx_payload_refs
-        .append(&mut next.peer_complete_tx_payload_refs);
-    accumulated
-        .result_member_adds
-        .append(&mut next.result_member_adds);
-    accumulated
-        .result_member_removes
-        .append(&mut next.result_member_removes);
-    accumulated
-        .program_fact_adds
-        .append(&mut next.program_fact_adds);
-    accumulated
-        .program_fact_removes
-        .append(&mut next.program_fact_removes);
+    ready.push(view_update_parts_from_message(message));
     Ok(())
 }
 
@@ -6307,6 +9216,556 @@ fn transport_error(error: TransportError) -> Error {
         }
         TransportError::Failed(message) => Error::new(ErrorCode::Protocol, message),
     }
+}
+
+fn evaluate_authoritative_permission_advice<S>(
+    node: &mut NodeState<S>,
+    identity: AuthorId,
+    action: PermissionAdviceAction,
+) -> PermissionAdvice
+where
+    S: OrderedKvStorage,
+{
+    let result = match action {
+        PermissionAdviceAction::Insert { table, cells } => {
+            let id_dependent = node.table(&table).map(|schema| {
+                schema
+                    .write_policies
+                    .insert_check
+                    .as_ref()
+                    .is_some_and(query_root_filters_reference_id)
+            });
+            match id_dependent {
+                Ok(true) => return PermissionAdvice::Unknown,
+                Err(_) => return PermissionAdvice::Unknown,
+                Ok(false) => node.dry_run_insert_allows(
+                    MergeableCommit::new(table, RowUuid::from_bytes([0; 16]), 0)
+                        .made_by(identity)
+                        .permission_subject(identity)
+                        .cells(cells),
+                ),
+            }
+        }
+        PermissionAdviceAction::Read { table, row } => {
+            node.dry_run_read_current_allows(&table, row, identity)
+        }
+        PermissionAdviceAction::Update { table, row, patch } => {
+            match node.current_rows(&table, DurabilityTier::Local) {
+                Ok(rows) if rows.iter().any(|current| current.row_uuid() == row) => node
+                    .dry_run_insert_allows(
+                        MergeableCommit::new(table, row, 0)
+                            .made_by(identity)
+                            .permission_subject(identity)
+                            .cells(patch),
+                    ),
+                Ok(_) => Ok(false),
+                Err(error) => Err(error),
+            }
+        }
+        PermissionAdviceAction::Delete { table, row } => {
+            node.dry_run_delete_current_allows(&table, row, identity)
+        }
+    };
+    match result {
+        Ok(true) => PermissionAdvice::Allowed,
+        Ok(false) => PermissionAdvice::Denied,
+        Err(_) => PermissionAdvice::Unknown,
+    }
+}
+
+/// Compile and serve an authorization scope entirely at the serving authority.
+///
+/// This intentionally does not reuse the subscriber's shape registry or any
+/// caller-provided subscription.  The authority allocates opaque usage-site
+/// keys, registers canonical shapes in the receiver, and only then sends the
+/// ordinary view updates in authority-scope envelopes.
+fn serve_authorization_scope_intent<S>(
+    node: &Rc<RefCell<NodeState<S>>>,
+    peer: &mut PeerState,
+    transport: &mut dyn Transport,
+    identity: AuthorId,
+    connection_epoch: u64,
+    request_id: PermissionAdviceRequestId,
+    action: PermissionAdviceAction,
+    trust: CommitUnitTrust,
+    hydrations: &mut BTreeMap<
+        crate::protocol::AuthorizationSupportScopeKey,
+        ServedAuthorizationScopeHydration,
+    >,
+    hydration_count: &mut u64,
+) -> Result<(), Error>
+where
+    S: OrderedKvStorage,
+{
+    if !node.borrow().is_history_complete()
+        || !subscriber_permissions_ready(node.borrow().permissions_ready(), trust)
+    {
+        transport
+            .send(SyncMessage::AuthorizationScopeUnavailable { request_id })
+            .map_err(transport_error)?;
+        return Ok(());
+    }
+    let scope = match node.borrow().authorization_support_scope(identity, &action) {
+        Ok(scope) => scope,
+        Err(_) => {
+            transport
+                .send(SyncMessage::AuthorizationScopeUnavailable { request_id })
+                .map_err(transport_error)?;
+            return Ok(());
+        }
+    };
+    let mut seen_support = BTreeSet::new();
+    let support_clauses = scope
+        .subscriptions
+        .iter()
+        .filter(|(shape, binding)| seen_support.insert((shape.shape_id(), binding.binding_id())))
+        .collect::<Vec<_>>();
+    let clause_count = u16::try_from(support_clauses.len()).map_err(|_| {
+        Error::new(
+            ErrorCode::Protocol,
+            "authorization scope has too many clauses",
+        )
+    })?;
+    if clause_count == 0 {
+        let advice =
+            evaluate_authoritative_permission_advice(&mut node.borrow_mut(), identity, action);
+        transport
+            .send(SyncMessage::AuthorizationScopeDecision { request_id, advice })
+            .map_err(transport_error)?;
+        return Ok(());
+    }
+    let current_claims_revision = node.borrow().session_claim_revision(identity);
+    let current_policy_epoch = node.borrow().active_catalogue_seq();
+    let current_cut = node.borrow().applied_global_watermark();
+    // A cache entry is evidence, not a generic response cache.  Prune every
+    // revision/cut mismatch before looking up this compiled support key.
+    hydrations.retain(|_, hydration| {
+        hydration.receipt.claims_revision == current_claims_revision
+            && hydration.receipt.policy_epoch == current_policy_epoch
+            && hydration.receipt.settled_through == current_cut
+    });
+    if let Some(hydration) = hydrations.get(&scope.key) {
+        for (index, clause) in hydration.clauses.iter().enumerate() {
+            transport
+                .send(clause.register.clone())
+                .map_err(transport_error)?;
+            transport
+                .send(clause.subscribe.clone())
+                .map_err(transport_error)?;
+            transport
+                .send(SyncMessage::AuthorizationScopeView {
+                    request_id,
+                    key: scope.key.clone(),
+                    clause_index: index as u16,
+                    clause_count,
+                    view: Box::new(clause.view.clone()),
+                })
+                .map_err(transport_error)?;
+        }
+        transport
+            .send(SyncMessage::AuthorizationScopeAggregateReceipt {
+                request_id,
+                receipt: hydration.receipt.clone(),
+            })
+            .map_err(transport_error)?;
+        for clause in &hydration.clauses {
+            transport
+                .send(SyncMessage::Unsubscribe {
+                    subscription: clause.subscription,
+                })
+                .map_err(transport_error)?;
+        }
+        return Ok(());
+    }
+    *hydration_count = hydration_count.saturating_add(1);
+    let mut aggregate = AuthorityScopeAggregate::new(
+        support_clauses
+            .iter()
+            .map(|(shape, binding)| (shape.shape_id(), binding.binding_id()))
+            .collect(),
+    );
+    let mut support_subscriptions = Vec::new();
+    let mut served_clauses = Vec::new();
+    for (index, (shape, binding)) in support_clauses.iter().enumerate() {
+        let subscription = SubscriptionKey {
+            shape_id: shape.shape_id(),
+            // This usage-site key belongs to the authority, and cannot be
+            // inferred from the canonical binding identity.
+            binding_id: crate::query::BindingId(uuid::Uuid::new_v4()),
+            read_view: scope.options.read_view_key(),
+        };
+        if !aggregate.register(subscription, (shape.shape_id(), binding.binding_id())) {
+            transport
+                .send(SyncMessage::AuthorizationScopeUnavailable { request_id })
+                .map_err(transport_error)?;
+            return Ok(());
+        }
+        let supported = node
+            .borrow_mut()
+            .ensure_peer_maintained_subscription_view_supported(
+                shape,
+                binding,
+                scope.options.tier,
+                identity,
+                &scope.options.read_view,
+                QueryAuthorizationMode::TrustedServing,
+            );
+        if supported.is_err() {
+            transport
+                .send(SyncMessage::AuthorizationScopeUnavailable { request_id })
+                .map_err(transport_error)?;
+            return Ok(());
+        }
+        let values = binding_values_in_param_order(shape, binding);
+        let register = SyncMessage::RegisterShape {
+            shape_id: shape.shape_id(),
+            ast: ShapeAst::from_validated(shape),
+            opts: scope.options.clone(),
+        };
+        transport.send(register.clone()).map_err(transport_error)?;
+        let subscribe = SyncMessage::Subscribe(Subscribe {
+            shape_id: shape.shape_id(),
+            subscription,
+            values,
+            known_state: None,
+        });
+        transport.send(subscribe.clone()).map_err(transport_error)?;
+        peer.declare_known_state(subscription, None);
+        let update = peer.rehydrate_query_for_subscription_with_opts(
+            &mut node.borrow_mut(),
+            subscription,
+            shape,
+            binding,
+            scope.options.clone(),
+        )?;
+        let SyncMessage::ViewUpdate {
+            settled_through: cut,
+            ..
+        } = &update
+        else {
+            return Err(Error::new(
+                ErrorCode::Protocol,
+                "scope hydration was not a view update",
+            ));
+        };
+        let progress = peer.authorization_progress_for_subscription(subscription);
+        if aggregate.apply(subscription, *cut, progress).is_none()
+            && index + 1 == support_clauses.len()
+        {
+            transport
+                .send(SyncMessage::AuthorizationScopeUnavailable { request_id })
+                .map_err(transport_error)?;
+            return Ok(());
+        }
+        transport
+            .send(SyncMessage::AuthorizationScopeView {
+                request_id,
+                key: scope.key.clone(),
+                clause_index: index as u16,
+                clause_count,
+                view: Box::new(update.clone()),
+            })
+            .map_err(transport_error)?;
+        support_subscriptions.push(subscription);
+        served_clauses.push(ServedAuthorizationScopeClause {
+            subscription,
+            register,
+            subscribe,
+            view: update,
+        });
+    }
+    let Some((settled_through, authorization_progress)) = aggregate.bounds() else {
+        transport
+            .send(SyncMessage::AuthorizationScopeUnavailable { request_id })
+            .map_err(transport_error)?;
+        return Ok(());
+    };
+    let receipt = AuthorizationScopeReceipt {
+        key: scope.key.clone(),
+        authority: *node.borrow().node_uuid().as_bytes(),
+        link: *identity.as_bytes(),
+        authority_epoch: connection_epoch,
+        claims_revision: current_claims_revision,
+        policy_epoch: current_policy_epoch,
+        settled_through,
+        authorization_progress,
+    };
+    transport
+        .send(SyncMessage::AuthorizationScopeAggregateReceipt {
+            request_id,
+            receipt: receipt.clone(),
+        })
+        .map_err(transport_error)?;
+    if hydrations.len() < MAX_AUTHORIZATION_SCOPES {
+        hydrations.insert(
+            scope.key,
+            ServedAuthorizationScopeHydration {
+                clauses: served_clauses,
+                receipt,
+            },
+        );
+    }
+    // Scope views are proof material, not application subscriptions.  Their
+    // lifetime ends after the receipt; FIFO keeps the receiver's local
+    // evaluation ahead of this cleanup.
+    for subscription in support_subscriptions {
+        transport
+            .send(SyncMessage::Unsubscribe { subscription })
+            .map_err(transport_error)?;
+        peer.forget_subscription_with_node(&mut node.borrow_mut(), subscription);
+    }
+    Ok(())
+}
+
+fn authorization_scope_receipt_for_view<S>(
+    node: &NodeState<S>,
+    peer: &PeerState,
+    link_identity: AuthorId,
+    connection_epoch: u64,
+    purpose: &AuthorizedScopePurpose,
+    update: &SyncMessage,
+) -> Option<(SubscriptionKey, AuthorizationScopeReceipt)>
+where
+    S: OrderedKvStorage,
+{
+    let SyncMessage::ViewUpdate {
+        subscription,
+        settled_through,
+        ..
+    } = update
+    else {
+        return None;
+    };
+    Some((
+        *subscription,
+        AuthorizationScopeReceipt {
+            key: purpose.key.clone(),
+            authority: *node.node_uuid().as_bytes(),
+            link: *link_identity.as_bytes(),
+            authority_epoch: connection_epoch,
+            claims_revision: node.session_claim_revision(link_identity),
+            policy_epoch: node.active_catalogue_seq(),
+            settled_through: *settled_through,
+            authorization_progress: peer.authorization_progress_for_subscription(*subscription),
+        },
+    ))
+}
+
+fn aggregate_authorization_scope_receipt_for_view<S>(
+    aggregates: &mut BTreeMap<
+        crate::protocol::AuthorizationSupportScopeKey,
+        AuthorityScopeAggregate,
+    >,
+    node: &NodeState<S>,
+    peer: &PeerState,
+    link_identity: AuthorId,
+    connection_epoch: u64,
+    purpose: &AuthorizedScopePurpose,
+    update: &SyncMessage,
+) -> Option<(SubscriptionKey, AuthorizationScopeReceipt)>
+where
+    S: OrderedKvStorage,
+{
+    let (subscription, mut receipt) = authorization_scope_receipt_for_view(
+        node,
+        peer,
+        link_identity,
+        connection_epoch,
+        purpose,
+        update,
+    )?;
+    let aggregate = aggregates.get_mut(&purpose.key)?;
+    if aggregate.expected_support() != &purpose.expected_support {
+        return None;
+    }
+    let (settled_through, authorization_progress) = aggregate.apply(
+        subscription,
+        receipt.settled_through,
+        receipt.authorization_progress,
+    )?;
+    receipt.settled_through = settled_through;
+    receipt.authorization_progress = authorization_progress;
+    Some((subscription, receipt))
+}
+
+/// Every support clause must be current in both dimensions.  They deliberately
+/// have independent lower bounds: cuts and authorization generations do not
+/// form a lexicographically ordered capability.
+#[cfg(test)]
+fn aggregate_authorization_scope_bounds(
+    applied: &BTreeMap<SubscriptionKey, (crate::time::GlobalSeq, u64)>,
+) -> Option<(crate::time::GlobalSeq, u64)> {
+    Some((
+        applied
+            .values()
+            .map(|(settled, _)| *settled)
+            .min_by_key(|settled| settled.0)?,
+        applied.values().map(|(_, progress)| *progress).min()?,
+    ))
+}
+
+/// Check a transported receipt against the authority identity authenticated by
+/// this connection and the support view already applied locally.
+fn authorization_scope_receipt_matches_transport_context(
+    receipt: &AuthorizationScopeReceipt,
+    expected: AuthorityContext,
+    applied_cut: Option<crate::time::GlobalSeq>,
+) -> bool {
+    receipt.link == expected.link
+        && receipt.link == *receipt.key.subject.as_bytes()
+        && receipt.authority == expected.authority
+        && receipt.authority_epoch == expected.connection_epoch
+        && receipt.claims_revision == expected.claims_revision
+        && receipt.policy_epoch == expected.policy_epoch
+        && receipt.authorization_progress >= expected.authorization_progress
+        && receipt.settled_through.0 >= expected.settled_through
+        && applied_cut.is_some_and(|cut| cut >= receipt.settled_through)
+}
+
+/// Scope support is authority-current.  Keep this separate from generic shape
+/// admission so a matching query identity cannot silently substitute a branch,
+/// snapshot, or local-tier view for the support proof it is meant to hydrate.
+fn authorization_scope_support_options_match(
+    expected: &RegisterShapeOptions,
+    actual: &RegisterShapeOptions,
+    subscription: SubscriptionKey,
+) -> bool {
+    actual == expected && subscription.read_view == expected.read_view_key()
+}
+
+fn move_scope_aggregate_member(
+    aggregates: &mut BTreeMap<
+        crate::protocol::AuthorizationSupportScopeKey,
+        AuthorityScopeAggregate,
+    >,
+    prior: Option<&AuthorizedScopePurpose>,
+    refreshed: &AuthorizedScopePurpose,
+    subscription: SubscriptionKey,
+) {
+    if let Some(prior) = prior
+        && prior.key != refreshed.key
+        && let Some(previous) = aggregates.get_mut(&prior.key)
+    {
+        previous.forget(subscription);
+        if previous.has_no_members() {
+            aggregates.remove(&prior.key);
+        }
+    }
+    let aggregate = aggregates
+        .entry(refreshed.key.clone())
+        .or_insert_with(|| AuthorityScopeAggregate::new(refreshed.expected_support.clone()));
+    if aggregate.expected_support() == &refreshed.expected_support {
+        // A changed scope identity must never reuse the old support cut.
+        let _ = aggregate.register(
+            subscription,
+            (subscription.shape_id, subscription.binding_id),
+        );
+    }
+}
+
+/// Forget a support subscription when its authority-derived purpose ceases to
+/// exist.  In particular, do not retain an applied cut across a policy/claims
+/// transition that later returns to the same scope key.
+fn remove_scope_aggregate_member(
+    aggregates: &mut BTreeMap<
+        crate::protocol::AuthorizationSupportScopeKey,
+        AuthorityScopeAggregate,
+    >,
+    key: &crate::protocol::AuthorizationSupportScopeKey,
+    subscription: SubscriptionKey,
+) {
+    let empty = if let Some(aggregate) = aggregates.get_mut(key) {
+        aggregate.forget(subscription);
+        aggregate.has_no_members()
+    } else {
+        false
+    };
+    if empty {
+        aggregates.remove(key);
+    }
+}
+
+fn refresh_authorized_scope_purpose<S>(
+    node: &NodeState<S>,
+    link_identity: AuthorId,
+    subscription: SubscriptionKey,
+    shape: &ValidatedQuery,
+    binding: &Binding,
+    prior: &AuthorizedScopePurpose,
+) -> Option<AuthorizedScopePurpose>
+where
+    S: OrderedKvStorage,
+{
+    let expected = node
+        .authorization_support_scope(link_identity, &prior.action)
+        .ok()?;
+    let exact_support = subscription.shape_id == shape.shape_id()
+        && subscription.binding_id == binding.binding_id()
+        && subscription.read_view == expected.options.read_view_key()
+        && expected
+            .subscriptions
+            .iter()
+            .any(|(expected_shape, expected_binding)| {
+                expected_shape.shape_id() == shape.shape_id()
+                    && expected_binding.binding_id() == binding.binding_id()
+            });
+    exact_support.then_some(AuthorizedScopePurpose {
+        key: expected.key,
+        operation: expected.operation,
+        action: prior.action.clone(),
+        expected_support: expected
+            .subscriptions
+            .iter()
+            .map(|(shape, binding)| (shape.shape_id(), binding.binding_id()))
+            .collect(),
+    })
+}
+
+fn query_root_filters_reference_id(query: &Query) -> bool {
+    query.filters.iter().any(predicate_references_id)
+        || !query.reachable.is_empty()
+        || query.joins.iter().any(root_join_references_id)
+        || query.policy_branches.iter().any(|branch| {
+            branch.filters.iter().any(predicate_references_id)
+                || !branch.reachable.is_empty()
+                || branch.joins.iter().any(root_join_references_id)
+        })
+}
+
+fn root_join_references_id(join: &crate::query::JoinVia) -> bool {
+    join.source_column
+        .as_deref()
+        .is_none_or(|column| column == "id")
+        || join
+            .source_lookup
+            .as_ref()
+            .is_some_and(|lookup| lookup.row_id_source_column == "id")
+        || join
+            .correlated_filters
+            .iter()
+            .any(|correlation| correlation.source_column == "id")
+}
+
+fn predicate_references_id(predicate: &Predicate) -> bool {
+    match predicate {
+        Predicate::All(items) | Predicate::Any(items) => items.iter().any(predicate_references_id),
+        Predicate::Not(item) => predicate_references_id(item),
+        Predicate::Eq(left, right)
+        | Predicate::Ne(left, right)
+        | Predicate::Gt(left, right)
+        | Predicate::Gte(left, right)
+        | Predicate::Lt(left, right)
+        | Predicate::Lte(left, right)
+        | Predicate::Contains(left, right) => operand_is_id(left) || operand_is_id(right),
+        Predicate::In(operand, values) => {
+            operand_is_id(operand) || values.iter().any(operand_is_id)
+        }
+        Predicate::IsNull(operand) => operand_is_id(operand),
+    }
+}
+
+fn operand_is_id(operand: &Operand) -> bool {
+    matches!(operand, Operand::Column(column) if column == "id")
 }
 
 fn drop_peer_request<S>(node: &Rc<RefCell<NodeState<S>>>)
@@ -6398,8 +9857,9 @@ fn summarize_sync_message(message: &SyncMessage) -> String {
             result_member_removes,
             program_fact_adds,
             program_fact_removes,
+            terminal_operations,
         } => format!(
-            "ViewUpdate {} settled={} reset={} bundles={} inventory={} adds={} removes={} fact_adds={} fact_removes={}",
+            "ViewUpdate {} settled={} reset={} bundles={} inventory={} adds={} removes={} fact_adds={} fact_removes={} terminal_ops={}",
             summarize_subscription_key(*subscription),
             settled_through.0,
             reset_result_set,
@@ -6411,35 +9871,8 @@ fn summarize_sync_message(message: &SyncMessage) -> String {
             result_member_adds.len(),
             result_member_removes.len(),
             program_fact_adds.len(),
-            program_fact_removes.len()
-        ),
-        SyncMessage::ViewUpdateChunk {
-            subscription,
-            settled_through,
-            reset_result_set,
-            final_chunk,
-            version_carriers,
-            version_bundles,
-            peer_payload_inventory,
-            result_member_adds,
-            result_member_removes,
-            program_fact_adds,
-            program_fact_removes,
-        } => format!(
-            "ViewUpdateChunk {} settled={} reset={} final={} bundles={} inventory={} adds={} removes={} fact_adds={} fact_removes={}",
-            summarize_subscription_key(*subscription),
-            settled_through.0,
-            reset_result_set,
-            final_chunk,
-            version_bundles.len()
-                + expand_version_carriers(version_carriers)
-                    .map(|bundles| bundles.len())
-                    .unwrap_or_default(),
-            peer_payload_inventory.complete_tx_payloads.len(),
-            result_member_adds.len(),
-            result_member_removes.len(),
-            program_fact_adds.len(),
-            program_fact_removes.len()
+            program_fact_removes.len(),
+            terminal_operations.len()
         ),
         SyncMessage::CommitUnit { tx, .. } => format!("CommitUnit tx={:?}", tx.tx_id),
         SyncMessage::FateUpdate { tx_id, fate, .. } => {
@@ -6454,6 +9887,18 @@ fn summarize_sync_message(message: &SyncMessage) -> String {
         SyncMessage::ContentExtents { extents } => {
             format!("ContentExtents extents={}", extents.len())
         }
+        SyncMessage::PermissionAdviceRequest { request_id, action } => {
+            let (kind, table) = match action {
+                PermissionAdviceAction::Insert { table, .. } => ("insert", table),
+                PermissionAdviceAction::Read { table, .. } => ("read", table),
+                PermissionAdviceAction::Update { table, .. } => ("update", table),
+                PermissionAdviceAction::Delete { table, .. } => ("delete", table),
+            };
+            format!("PermissionAdviceRequest id={request_id:?} action={kind} table={table}")
+        }
+        SyncMessage::PermissionAdviceResponse { request_id, advice } => {
+            format!("PermissionAdviceResponse id={request_id:?} advice={advice:?}")
+        }
         other => format!("{other:?}"),
     }
 }
@@ -6467,25 +9912,29 @@ fn send_with_content_extents<S>(
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
+    let snapshot = node.borrow().catalogue_snapshot();
+    let catalogue_fingerprint = *blake3::hash(
+        &serde_json::to_vec(&snapshot).expect("catalogue snapshot serialization is infallible"),
+    )
+    .as_bytes();
+    if peer.needs_catalogue_snapshot(catalogue_fingerprint) {
+        transport
+            .send(SyncMessage::CatalogueSnapshot(Box::new(snapshot)))
+            .map_err(transport_error)?;
+        peer.mark_catalogue_snapshot_announced(catalogue_fingerprint);
+    }
     let mut message = message;
-    match &mut message {
-        SyncMessage::ViewUpdate {
-            subscription,
-            peer_payload_inventory,
-            ..
-        }
-        | SyncMessage::ViewUpdateChunk {
-            subscription,
-            peer_payload_inventory,
-            ..
-        } => {
-            peer_payload_inventory.authorization_progress =
-                Some(peer.authorization_progress_for_subscription(*subscription));
-        }
-        _ => {}
+    if let SyncMessage::ViewUpdate {
+        subscription,
+        peer_payload_inventory,
+        ..
+    } = &mut message
+    {
+        peer_payload_inventory.authorization_progress =
+            Some(peer.authorization_progress_for_subscription(*subscription));
     }
     let extents = match &message {
-        SyncMessage::ViewUpdate { .. } | SyncMessage::ViewUpdateChunk { .. } => BTreeSet::new(),
+        SyncMessage::ViewUpdate { .. } => BTreeSet::new(),
         _ => node.borrow().content_refs_in_sync_message(&message)?,
     };
     let mut extents_by_row = BTreeMap::new();
@@ -6519,289 +9968,7 @@ fn send_sync_message_chunked(
     transport: &mut dyn Transport,
     message: SyncMessage,
 ) -> Result<(), Error> {
-    for message in split_oversized_view_update(message)? {
-        #[cfg(feature = "sync-autopsy")]
-        sync_autopsy::record(format!(
-            "transport send chunk {}",
-            summarize_sync_message(&message)
-        ));
-        transport.send(message).map_err(transport_error)?;
-    }
-    Ok(())
-}
-
-#[derive(Clone)]
-enum ViewUpdateChunkItem {
-    VersionBundle(VersionBundle),
-    CompleteTxPayload(TxId),
-    ResultMemberAdd(ResultMemberEntry),
-    ResultMemberRemove(ResultMemberEntry),
-    ProgramFactAdd(ProgramFactEntry),
-    ProgramFactRemove(ProgramFactEntry),
-}
-
-#[derive(Clone)]
-struct ViewUpdateChunkUnit {
-    items: Vec<ViewUpdateChunkItem>,
-}
-
-fn split_oversized_view_update(message: SyncMessage) -> Result<Vec<SyncMessage>, Error> {
-    let initial_encoded_bytes = serialized_uncompressed_wire_message_len(&message);
-    if validate_wire_frame_len(initial_encoded_bytes).is_ok() {
-        #[cfg(feature = "cold-settle-attribution")]
-        if matches!(&message, SyncMessage::ViewUpdate { .. }) {
-            crate::cold_settle_attribution::record_view_update_fit(initial_encoded_bytes);
-        }
-        return Ok(vec![message]);
-    }
-    let SyncMessage::ViewUpdate {
-        subscription,
-        settled_through,
-        reset_result_set,
-        version_carriers,
-        mut version_bundles,
-        peer_payload_inventory,
-        result_member_adds,
-        result_member_removes,
-        program_fact_adds,
-        program_fact_removes,
-    } = message
-    else {
-        return Ok(vec![message]);
-    };
-    #[cfg(feature = "cold-settle-attribution")]
-    crate::cold_settle_attribution::record_view_update_split();
-    version_bundles.extend(
-        expand_version_carriers(&version_carriers)
-            .map_err(|_| Error::new(ErrorCode::Protocol, "malformed version-bundle run"))?,
-    );
-
-    let units = view_update_chunk_units(
-        version_bundles,
-        peer_payload_inventory,
-        result_member_adds,
-        result_member_removes,
-        program_fact_adds,
-        program_fact_removes,
-    );
-
-    let mut chunks = Vec::new();
-    let mut start = 0;
-    while start < units.len() {
-        let reset_chunk = chunks.is_empty() && reset_result_set;
-        let remaining = units.len() - start;
-        let mut low = 1;
-        let mut high = remaining;
-        let mut best = 0;
-        #[cfg(feature = "cold-settle-attribution")]
-        let mut best_encoded_bytes = 0;
-        while low <= high {
-            let mid = low + (high - low) / 2;
-            #[cfg(feature = "cold-settle-attribution")]
-            let candidate_started = Instant::now();
-            let candidate = view_update_chunk_from_units(
-                subscription,
-                settled_through,
-                reset_chunk,
-                &units[start..start + mid],
-            );
-            let encoded_bytes = serialized_uncompressed_wire_message_len(&candidate);
-            #[cfg(feature = "cold-settle-attribution")]
-            crate::cold_settle_attribution::record_candidate(
-                encoded_bytes,
-                candidate_started.elapsed().as_nanos() as u64,
-            );
-            if encoded_bytes <= MAX_WIRE_FRAME_BYTES {
-                best = mid;
-                #[cfg(feature = "cold-settle-attribution")]
-                {
-                    best_encoded_bytes = encoded_bytes;
-                }
-                low = mid + 1;
-            } else {
-                high = mid.saturating_sub(1);
-            }
-        }
-        if best == 0 {
-            return Err(Error::new(
-                ErrorCode::Protocol,
-                "single view update chunk unit exceeds wire frame limit",
-            ));
-        }
-        chunks.push(view_update_chunk_from_units(
-            subscription,
-            settled_through,
-            reset_chunk,
-            &units[start..start + best],
-        ));
-        #[cfg(feature = "cold-settle-attribution")]
-        crate::cold_settle_attribution::record_selected_payload(best_encoded_bytes);
-        start += best;
-    }
-    if let Some(SyncMessage::ViewUpdateChunk { final_chunk, .. }) = chunks.last_mut() {
-        *final_chunk = true;
-    }
-    Ok(chunks)
-}
-
-fn view_update_chunk_units(
-    version_bundles: Vec<VersionBundle>,
-    peer_payload_inventory: PeerPayloadInventory,
-    result_member_adds: Vec<ResultMemberEntry>,
-    result_member_removes: Vec<ResultMemberEntry>,
-    program_fact_adds: Vec<ProgramFactEntry>,
-    program_fact_removes: Vec<ProgramFactEntry>,
-) -> Vec<ViewUpdateChunkUnit> {
-    let mut bundle_by_version_ref = BTreeMap::new();
-    for (bundle_idx, bundle) in version_bundles.iter().enumerate() {
-        for version in &bundle.versions {
-            bundle_by_version_ref.insert(
-                RowVersionRef::new(
-                    version.table().to_owned(),
-                    version.row_uuid(),
-                    bundle.tx.tx_id,
-                ),
-                bundle_idx,
-            );
-        }
-    }
-
-    let mut adds_by_bundle = BTreeMap::<usize, Vec<ResultMemberEntry>>::new();
-    let mut standalone_adds = Vec::new();
-    for add in result_member_adds {
-        let Some((table, row_uuid, tx_id)) = add.as_row() else {
-            standalone_adds.push(add);
-            continue;
-        };
-        let version_ref = RowVersionRef::new(table.to_string(), row_uuid, tx_id);
-        if let Some(bundle_idx) = bundle_by_version_ref.get(&version_ref).copied() {
-            adds_by_bundle.entry(bundle_idx).or_default().push(add);
-        } else {
-            standalone_adds.push(add);
-        }
-    }
-
-    let mut units = Vec::new();
-    for (idx, bundle) in version_bundles.into_iter().enumerate() {
-        let mut items = vec![ViewUpdateChunkItem::VersionBundle(bundle)];
-        if let Some(adds) = adds_by_bundle.remove(&idx) {
-            items.extend(adds.into_iter().map(ViewUpdateChunkItem::ResultMemberAdd));
-        }
-        units.push(ViewUpdateChunkUnit { items });
-    }
-
-    units.extend(
-        peer_payload_inventory
-            .complete_tx_payloads
-            .into_iter()
-            .map(|item| ViewUpdateChunkUnit {
-                items: vec![ViewUpdateChunkItem::CompleteTxPayload(item)],
-            }),
-    );
-    units.extend(standalone_adds.into_iter().map(|item| ViewUpdateChunkUnit {
-        items: vec![ViewUpdateChunkItem::ResultMemberAdd(item)],
-    }));
-    units.extend(
-        result_member_removes
-            .into_iter()
-            .map(|item| ViewUpdateChunkUnit {
-                items: vec![ViewUpdateChunkItem::ResultMemberRemove(item)],
-            }),
-    );
-    units.extend(
-        program_fact_adds
-            .into_iter()
-            .map(|item| ViewUpdateChunkUnit {
-                items: vec![ViewUpdateChunkItem::ProgramFactAdd(item)],
-            }),
-    );
-    units.extend(
-        program_fact_removes
-            .into_iter()
-            .map(|item| ViewUpdateChunkUnit {
-                items: vec![ViewUpdateChunkItem::ProgramFactRemove(item)],
-            }),
-    );
-    units
-}
-
-fn empty_view_update_chunk(
-    subscription: SubscriptionKey,
-    settled_through: GlobalSeq,
-    reset_result_set: bool,
-) -> SyncMessage {
-    SyncMessage::ViewUpdateChunk {
-        subscription,
-        settled_through,
-        reset_result_set,
-        final_chunk: false,
-        version_carriers: Vec::new(),
-        version_bundles: Vec::new(),
-        peer_payload_inventory: PeerPayloadInventory::default(),
-        result_member_adds: Vec::new(),
-        result_member_removes: Vec::new(),
-        program_fact_adds: Vec::new(),
-        program_fact_removes: Vec::new(),
-    }
-}
-
-fn view_update_chunk_from_units(
-    subscription: SubscriptionKey,
-    settled_through: GlobalSeq,
-    reset_result_set: bool,
-    units: &[ViewUpdateChunkUnit],
-) -> SyncMessage {
-    let mut chunk = empty_view_update_chunk(subscription, settled_through, reset_result_set);
-    for unit in units {
-        for item in &unit.items {
-            chunk = push_view_update_chunk_item(chunk, item.clone());
-        }
-    }
-    pack_view_update_chunk_version_bundles(chunk)
-}
-
-fn push_view_update_chunk_item(mut message: SyncMessage, item: ViewUpdateChunkItem) -> SyncMessage {
-    let SyncMessage::ViewUpdateChunk {
-        version_bundles,
-        peer_payload_inventory,
-        result_member_adds,
-        result_member_removes,
-        program_fact_adds,
-        program_fact_removes,
-        ..
-    } = &mut message
-    else {
-        unreachable!("view update chunk item can only be pushed to chunk messages")
-    };
-    match item {
-        ViewUpdateChunkItem::VersionBundle(item) => version_bundles.push(item),
-        ViewUpdateChunkItem::CompleteTxPayload(item) => {
-            peer_payload_inventory.complete_tx_payloads.push(item)
-        }
-        ViewUpdateChunkItem::ResultMemberAdd(item) => result_member_adds.push(item),
-        ViewUpdateChunkItem::ResultMemberRemove(item) => result_member_removes.push(item),
-        ViewUpdateChunkItem::ProgramFactAdd(item) => program_fact_adds.push(item),
-        ViewUpdateChunkItem::ProgramFactRemove(item) => program_fact_removes.push(item),
-    }
-    message
-}
-
-fn pack_view_update_chunk_version_bundles(mut message: SyncMessage) -> SyncMessage {
-    let SyncMessage::ViewUpdateChunk {
-        version_carriers,
-        version_bundles,
-        ..
-    } = &mut message
-    else {
-        unreachable!("view update chunk packing only applies to chunk messages")
-    };
-    if version_bundles.is_empty() {
-        return message;
-    }
-    if let Ok(carriers) = build_version_carriers_from_singletons(std::mem::take(version_bundles)) {
-        *version_carriers = carriers;
-    }
-    message
+    transport.send(message).map_err(transport_error)
 }
 
 fn send_with_local_content_extents<S>(
@@ -6843,17 +10010,14 @@ where
 
 fn view_update_subscription(message: &SyncMessage) -> Option<SubscriptionKey> {
     match message {
-        SyncMessage::ViewUpdate { subscription, .. }
-        | SyncMessage::ViewUpdateChunk { subscription, .. } => Some(*subscription),
+        SyncMessage::ViewUpdate { subscription, .. } => Some(*subscription),
         _ => None,
     }
 }
 
 fn retarget_view_update(mut message: SyncMessage, target: SubscriptionKey) -> SyncMessage {
-    match &mut message {
-        SyncMessage::ViewUpdate { subscription, .. }
-        | SyncMessage::ViewUpdateChunk { subscription, .. } => *subscription = target,
-        _ => {}
+    if let SyncMessage::ViewUpdate { subscription, .. } = &mut message {
+        *subscription = target;
     }
     message
 }
@@ -6899,17 +10063,6 @@ fn binding_values_in_param_order(shape: &ValidatedQuery, binding: &Binding) -> V
 fn view_update_is_empty(message: &SyncMessage) -> bool {
     match message {
         SyncMessage::ViewUpdate {
-            reset_result_set,
-            version_carriers,
-            version_bundles,
-            peer_payload_inventory,
-            result_member_adds,
-            result_member_removes,
-            program_fact_adds,
-            program_fact_removes,
-            ..
-        }
-        | SyncMessage::ViewUpdateChunk {
             reset_result_set,
             version_carriers,
             version_bundles,
@@ -7087,14 +10240,26 @@ pub enum Propagation {
 }
 
 /// Public API error with stable machine-readable codes.
-#[derive(Debug, Error, serde::Deserialize, serde::Serialize)]
-#[error("{code:?}: {message}")]
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
 pub struct Error {
     /// Stable error code.
     pub code: ErrorCode,
     /// Human-readable detail.
     pub message: String,
 }
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.code {
+            ErrorCode::TransactionConflict => {
+                write!(formatter, "(transaction_conflict): {}", self.message)
+            }
+            _ => write!(formatter, "{:?}: {}", self.code, self.message),
+        }
+    }
+}
+
+impl std::error::Error for Error {}
 
 impl Error {
     fn new(code: ErrorCode, message: impl Into<String>) -> Self {
@@ -7130,6 +10295,8 @@ pub enum ErrorCode {
     Query,
     /// Write was rejected.
     WriteRejected,
+    /// An exclusive transaction's fixed snapshot was invalidated locally.
+    TransactionConflict,
     /// Storage failed.
     Storage,
     /// Protocol or local node operation failed.
@@ -7150,6 +10317,7 @@ impl From<crate::node::Error> for Error {
             }
             crate::node::Error::Storage(_) | crate::node::Error::Groove(_) => ErrorCode::Storage,
             crate::node::Error::Query(_) => ErrorCode::Query,
+            crate::node::Error::TransactionConflict => ErrorCode::TransactionConflict,
             crate::node::Error::TableNotFound(_)
             | crate::node::Error::UnsupportedColumnType(_)
             | crate::node::Error::InvalidMergeableCommit(_) => ErrorCode::Schema,
@@ -7399,6 +10567,17 @@ fn coverage_key(
     }
 }
 
+fn subscriber_permissions_ready(permissions_ready: bool, trust: CommitUnitTrust) -> bool {
+    trust == CommitUnitTrust::TrustedBackend || permissions_ready
+}
+
+fn subscriber_permission_subject(ingest: CommitUnitIngestContext) -> AuthorId {
+    match ingest.trust {
+        CommitUnitTrust::Session => ingest.identity,
+        CommitUnitTrust::TrustedBackend => AuthorId::SYSTEM,
+    }
+}
+
 /// Row cells supplied to write methods.
 pub type RowCells = BTreeMap<String, Value>;
 
@@ -7496,7 +10675,7 @@ where
     fn db(&self) -> &Db<S>;
 
     /// The id of the already-open transaction.
-    fn tx_id(&self) -> OpenTxId;
+    fn tx_id(&self) -> OpenBatchId;
 
     /// Stage an insert with a generated row id.
     fn insert(&self, table: &str, cells: RowCells) -> Result<RowUuid, Error> {
@@ -7569,8 +10748,42 @@ where
             .node
             .node
             .borrow_mut()
-            .tx_read(self.tx_id(), table, row)
+            .tx_read_in_schema(self.tx_id(), self.db().schema_version_id, table, row)
             .map_err(Into::into)
+    }
+
+    /// Read a prepared query with this transaction's pending writes overlaid.
+    fn all_prepared(&self, prepared: &PreparedQuery) -> Result<Vec<CurrentRow>, Error> {
+        self.all_prepared_with_opts(prepared, ReadOpts::default())
+    }
+
+    /// Read a prepared query with transaction-local writes and explicit read semantics.
+    fn all_prepared_with_opts(
+        &self,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        self.db().transaction_all(self.tx_id(), prepared, opts)
+    }
+
+    /// Read a prepared query inside this transaction as `author`.
+    fn all_prepared_for_identity(
+        &self,
+        prepared: &PreparedQuery,
+        author: AuthorId,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        self.all_prepared_for_identity_with_opts(prepared, author, ReadOpts::default())
+    }
+
+    /// Read a prepared query as `author` with explicit read semantics.
+    fn all_prepared_for_identity_with_opts(
+        &self,
+        prepared: &PreparedQuery,
+        author: AuthorId,
+        opts: ReadOpts,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        self.db()
+            .transaction_all_for_identity(self.tx_id(), prepared, author, opts)
     }
 
     /// Stage an insert with an optional explicit provenance time.
@@ -7625,13 +10838,13 @@ where
 ///
 /// This handle owns the transaction lifetime and abandons an uncommitted
 /// transaction on drop. Use [`MergeableTxRef`] when a caller retains an
-/// [`OpenTxId`] between calls and must not close the transaction on return.
+/// [`OpenBatchId`] between calls and must not close the transaction on return.
 pub struct MergeableTx<'a, S>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
     db: &'a Db<S>,
-    tx_id: OpenTxId,
+    tx_id: OpenBatchId,
     /// Set once the transaction has been committed, so `Drop` does not then
     /// abandon it. Without this, `commit` consumed `self` and `Drop` still ran
     /// `abandon_transaction_handle` on an already-committed transaction — benign
@@ -7666,7 +10879,7 @@ where
         self.db
     }
 
-    fn tx_id(&self) -> OpenTxId {
+    fn tx_id(&self) -> OpenBatchId {
         self.tx_id
     }
 }
@@ -7674,13 +10887,13 @@ where
 /// Non-owning operations handle for an already-open mergeable transaction.
 ///
 /// Construct this with [`Db::mergeable_tx_ref`] when another layer owns the
-/// [`OpenTxId`] lifetime. Dropping this ref never abandons the transaction.
+/// [`OpenBatchId`] lifetime. Dropping this ref never abandons the transaction.
 pub struct MergeableTxRef<'a, S>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
     db: &'a Db<S>,
-    tx_id: OpenTxId,
+    tx_id: OpenBatchId,
 }
 
 impl<S> MergeableTxOps<S> for MergeableTxRef<'_, S>
@@ -7691,7 +10904,7 @@ where
         self.db
     }
 
-    fn tx_id(&self) -> OpenTxId {
+    fn tx_id(&self) -> OpenBatchId {
         self.tx_id
     }
 }
@@ -7721,7 +10934,7 @@ where
     fn db(&self) -> &Db<S>;
 
     /// The id of the already-open transaction.
-    fn tx_id(&self) -> OpenTxId;
+    fn tx_id(&self) -> OpenBatchId;
 
     /// Read one row inside the exclusive transaction.
     fn read(&self, table: &str, row: RowUuid) -> Result<Option<RowCells>, Error> {
@@ -7740,7 +10953,16 @@ where
 
     /// Read a prepared query inside the exclusive transaction.
     fn all_prepared(&self, prepared: &PreparedQuery) -> Result<Vec<CurrentRow>, Error> {
-        self.db().exclusive_all(self.tx_id(), prepared)
+        self.all_prepared_with_opts(prepared, ReadOpts::default())
+    }
+
+    /// Read a prepared query with transaction-local writes and explicit read semantics.
+    fn all_prepared_with_opts(
+        &self,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        self.db().transaction_all(self.tx_id(), prepared, opts)
     }
 
     /// Read a prepared query inside the exclusive transaction as `author`.
@@ -7749,8 +10971,18 @@ where
         prepared: &PreparedQuery,
         author: AuthorId,
     ) -> Result<Vec<CurrentRow>, Error> {
+        self.all_prepared_for_identity_with_opts(prepared, author, ReadOpts::default())
+    }
+
+    /// Read a prepared query as `author` with explicit read semantics.
+    fn all_prepared_for_identity_with_opts(
+        &self,
+        prepared: &PreparedQuery,
+        author: AuthorId,
+        opts: ReadOpts,
+    ) -> Result<Vec<CurrentRow>, Error> {
         self.db()
-            .exclusive_all_for_identity(self.tx_id(), prepared, author)
+            .transaction_all_for_identity(self.tx_id(), prepared, author, opts)
     }
 
     /// Stage an insert with a generated row id.
@@ -7789,13 +11021,13 @@ where
 ///
 /// This handle owns the transaction lifetime and abandons an uncommitted
 /// transaction on drop. Use [`ExclusiveTxRef`] when a caller retains an
-/// [`OpenTxId`] between calls and must not close the transaction on return.
+/// [`OpenBatchId`] between calls and must not close the transaction on return.
 pub struct ExclusiveTx<'a, S>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
     db: &'a Db<S>,
-    tx_id: OpenTxId,
+    tx_id: OpenBatchId,
     committed: bool,
 }
 
@@ -7825,7 +11057,7 @@ where
         self.db
     }
 
-    fn tx_id(&self) -> OpenTxId {
+    fn tx_id(&self) -> OpenBatchId {
         self.tx_id
     }
 }
@@ -7845,13 +11077,13 @@ where
 /// Non-owning operations handle for an already-open exclusive transaction.
 ///
 /// Construct this with [`Db::exclusive_tx_ref`] when another layer owns the
-/// [`OpenTxId`] lifetime. Dropping this ref never abandons the transaction.
+/// [`OpenBatchId`] lifetime. Dropping this ref never abandons the transaction.
 pub struct ExclusiveTxRef<'a, S>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
     db: &'a Db<S>,
-    tx_id: OpenTxId,
+    tx_id: OpenBatchId,
 }
 
 impl<S> ExclusiveTxOps<S> for ExclusiveTxRef<'_, S>
@@ -7862,7 +11094,7 @@ where
         self.db
     }
 
-    fn tx_id(&self) -> OpenTxId {
+    fn tx_id(&self) -> OpenBatchId {
         self.tx_id
     }
 }
@@ -7955,106 +11187,109 @@ fn write_rejected(reason: RejectionReason) -> Error {
     Error::new(ErrorCode::WriteRejected, format!("{reason:?}"))
 }
 
-/// Render the flat maintained/query fact boundary once, at the Jazz public
-/// result boundary. In particular, consumers must not rebuild relation trees
-/// from `RelationSnapshot` rows and edges themselves.
+/// Decode Groove's recursively assembled terminal value into Jazz's typed
+/// structured-result view. This separates relation fields from scalar row
+/// fields, but does not join or assemble relation facts.
 fn materialize_result_tree(query: &Query, snapshot: RelationSnapshot) -> Result<ResultTree, Error> {
-    type RowKey = (String, RowUuid);
-    let roots = snapshot
-        .rows
-        .iter()
-        .take(snapshot.root_count)
-        .map(|row| (row.table().to_owned(), row.row_uuid()))
-        .collect::<Vec<_>>();
-    let rows = snapshot
-        .rows
-        .into_iter()
-        .map(|row| ((row.table().to_owned(), row.row_uuid()), row))
-        .collect::<BTreeMap<RowKey, CurrentRow>>();
-    let mut edges = BTreeMap::<RowKey, Vec<RelationEdge>>::new();
-    for edge in snapshot.edges {
-        edges
-            .entry((edge.source_table.clone(), edge.source_row))
-            .or_default()
-            .push(edge);
-    }
-
-    fn node(
-        row_key: &(String, RowUuid),
-        row: &CurrentRow,
+    fn node_from_record(
+        table: &str,
+        record: OwnedRecord,
         arrays: &[crate::query::ArraySubquery],
-        rows: &BTreeMap<RowKey, CurrentRow>,
-        edges: &BTreeMap<RowKey, Vec<RelationEdge>>,
-        root: bool,
     ) -> Result<ResultNode, Error> {
+        let descriptor = *record.descriptor();
+        let values = record.to_values().map_err(|error| {
+            Error::new(
+                ErrorCode::Protocol,
+                format!("invalid Groove terminal record: {error}"),
+            )
+        })?;
+        let array_by_name = arrays
+            .iter()
+            .map(|array| (array.column_name.as_str(), array))
+            .collect::<BTreeMap<_, _>>();
+        let mut scalar_fields = Vec::new();
+        let mut scalar_values = Vec::new();
         let mut relations = BTreeMap::new();
-        for array in arrays {
-            let children = edges
-                .get(row_key)
+        for (field, value) in descriptor.fields().iter().zip(values) {
+            let Some(name) = field.name.as_deref() else {
+                return Err(Error::new(
+                    ErrorCode::Protocol,
+                    "Groove terminal emitted an unnamed field",
+                ));
+            };
+            let Some(array) = array_by_name.get(name) else {
+                scalar_fields.push((name.to_owned(), field.value_type.clone()));
+                scalar_values.push(value);
+                continue;
+            };
+            let Value::Array(children) = value else {
+                return Err(Error::new(
+                    ErrorCode::Protocol,
+                    format!("Groove terminal relation {name} was not an array"),
+                ));
+            };
+            let children = children
                 .into_iter()
-                .flatten()
-                .filter(|edge| edge.relation == array.column_name)
-                .filter_map(|edge| {
-                    let key = (edge.target_table.clone(), edge.target_row);
-                    rows.get(&key).map(|child| (key, child))
+                .map(|value| {
+                    let Value::Record(record) = value else {
+                        return Err(Error::new(
+                            ErrorCode::Protocol,
+                            format!("Groove terminal relation {name} contained a non-record"),
+                        ));
+                    };
+                    node_from_record(&array.table, record, &array.nested_arrays)
                 })
-                .map(|(key, child)| node(&key, child, &array.nested_arrays, rows, edges, false))
                 .collect::<Result<Vec<_>, _>>()?;
-            relations.insert(array.column_name.clone(), ResultRelation::Array(children));
+            relations.insert(name.to_owned(), ResultRelation::Array(children));
         }
+        let scalar_descriptor = RecordDescriptor::new(scalar_fields);
+        let raw = scalar_descriptor.create(&scalar_values).map_err(|error| {
+            Error::new(
+                ErrorCode::Protocol,
+                format!("invalid scalar projection from Groove terminal: {error}"),
+            )
+        })?;
+        let row = CurrentRow::new(table, OwnedRecord::new(raw, scalar_descriptor));
         let occurrence = OutputOccurrenceId::single_source(ObjectId::from_uuid(row.row_uuid().0));
-        let rendered_bytes = rendered_node_bytes(row, &relations);
-        if rendered_bytes > MAX_RESULT_TREE_PARENT_BYTES {
-            let relation_path = arrays
-                .first()
-                .map(|array| array.column_name.clone())
-                .unwrap_or_default();
-            return Err(Error::new(
-                ErrorCode::Query,
-                ParentTooLargeError {
-                    parent: row.row_uuid(),
-                    relation_path,
-                    rendered_bytes,
-                    limit: MAX_RESULT_TREE_PARENT_BYTES,
-                }
-                .to_string(),
-            ));
-        }
-        let _ = root;
         Ok(ResultNode {
             occurrence,
-            row: row.clone(),
+            row,
             relations,
         })
     }
 
-    let roots = roots
+    if !snapshot.edges.is_empty() {
+        return Err(Error::new(
+            ErrorCode::Protocol,
+            "structured result unexpectedly contained relation-fact edges",
+        ));
+    }
+    let roots = snapshot
+        .rows
         .into_iter()
-        .filter_map(|key| rows.get(&key).map(|row| (key, row)))
-        .map(|(key, row)| node(&key, row, &query.array_subqueries, &rows, &edges, true))
+        .take(snapshot.root_count)
+        .map(|row| {
+            let (descriptor, raw) = row.encoded_record();
+            node_from_record(
+                row.table(),
+                OwnedRecord::new(raw.to_vec(), *descriptor),
+                &query.array_subqueries,
+            )
+        })
         .collect::<Result<Vec<_>, _>>()?;
     Ok(ResultTree { roots })
 }
 
-fn rendered_node_bytes(row: &CurrentRow, relations: &BTreeMap<String, ResultRelation>) -> usize {
-    let mut bytes = row.encoded_record().1.len();
-    for (name, relation) in relations {
-        bytes += name.len();
-        if let ResultRelation::Array(children) = relation {
-            bytes += children
-                .iter()
-                .map(|child| rendered_node_bytes(&child.row, &child.relations))
-                .sum::<usize>();
-        }
-    }
-    bytes
-}
-
 struct SubscriptionState {
+    terminal_rows: bool,
     kind: SubscriptionKind,
     groove_runtime_token: u64,
+    /// The maintained subscription currently owned by this public stream.
+    /// Rehydration replaces the Groove ID, and drop must clean up that new ID.
+    local_subscription_cleanup: Rc<Cell<Option<(u64, groove::ivm::SubscriptionId)>>>,
     propagates_upstream: bool,
     author: AuthorId,
+    authorization_mode: QueryAuthorizationMode,
     read_tier: DurabilityTier,
     remote_read_tier: Option<DurabilityTier>,
     read_view: ReadViewSpec,
@@ -8078,7 +11313,7 @@ impl RelationSnapshotIndex {
         for (position, row) in snapshot.rows.iter().take(snapshot.root_count).enumerate() {
             index
                 .roots
-                .insert(single_source_occurrence_id(row), position);
+                .insert(subscription_row_occurrence_id(row), position);
         }
         for (offset, row) in snapshot.rows.iter().skip(snapshot.root_count).enumerate() {
             index.related.insert(
@@ -8116,6 +11351,17 @@ pub struct RemovedRow {
     pub occurrence_id: OutputOccurrenceId,
 }
 
+impl RemovedRow {
+    #[doc(hidden)]
+    pub fn from_result_key(table: String, row_uuid: RowUuid, key: ResultKey) -> Self {
+        Self {
+            table,
+            row_uuid,
+            occurrence_id: key.as_occurrence().clone(),
+        }
+    }
+}
+
 /// One row addressed by its maintained output occurrence identity.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SubscriptionOutputRow {
@@ -8133,9 +11379,6 @@ impl std::ops::Deref for SubscriptionOutputRow {
     }
 }
 
-/// Materialized relation edge removed from a subscription result.
-pub type RemovedRelationEdge = RelationEdge;
-
 /// Delta event emitted by a database subscription stream.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SubscriptionEvent {
@@ -8151,17 +11394,8 @@ pub enum SubscriptionEvent {
         updated: Vec<SubscriptionOutputRow>,
         /// Rows no longer visible to the subscription.
         removed: Vec<RemovedRow>,
-        /// Related rows newly referenced by relation edges.
-        ///
-        /// Relation subscriptions reduce `added`, `updated`, `removed`,
-        /// `added_related`, `added_edges`, and `removed_edges` into their local
-        /// view. The producer does not attach a full current snapshot to
-        /// incremental deltas.
-        added_related: Vec<CurrentRow>,
-        /// Relation edges newly visible to the subscription.
-        added_edges: Vec<RelationEdge>,
-        /// Relation edges no longer visible to the subscription.
-        removed_edges: Vec<RemovedRelationEdge>,
+        /// Typed structural edits to already hydrated terminal rows.
+        terminal_operations: Vec<groove::ivm::TerminalOperation>,
         /// Whether the result is complete at the requested read tier.
         settled: bool,
         /// Read tier used to materialize the rows.
@@ -8219,6 +11453,18 @@ impl SubscriptionStream {
     pub fn try_next_event(&mut self) -> Option<SubscriptionEvent> {
         self.receiver.try_recv().ok()
     }
+
+    #[cfg(test)]
+    fn retained_plan_authorization_mode(&self) -> Option<QueryAuthorizationMode> {
+        let state = self._state.borrow();
+        let SubscriptionKind::Prepared {
+            maintained_subscription,
+            ..
+        } = &state.kind;
+        maintained_subscription
+            .as_ref()
+            .and_then(LocalMaintainedViewSubscription::retained_plan_authorization_mode)
+    }
 }
 
 impl Stream for SubscriptionStream {
@@ -8245,6 +11491,9 @@ pub struct PreparedQuery {
     binding: Binding,
     local_plan: Option<PreparedQueryPlanHandle>,
     global_plan: Option<PreparedQueryPlanHandle>,
+    /// Plans contain IDs from one live Groove graph registry. A catalogue
+    /// change can replace that registry while this public handle survives.
+    groove_runtime_token: u64,
 }
 
 impl PreparedQuery {
@@ -8258,7 +11507,14 @@ impl PreparedQuery {
         &self.binding
     }
 
-    fn plan_for_tier(&self, tier: DurabilityTier) -> Option<&PreparedQueryPlanHandle> {
+    fn plan_for_tier(
+        &self,
+        tier: DurabilityTier,
+        groove_runtime_token: u64,
+    ) -> Option<&PreparedQueryPlanHandle> {
+        if self.groove_runtime_token != groove_runtime_token {
+            return None;
+        }
         match tier {
             DurabilityTier::Local => self.local_plan.as_ref(),
             DurabilityTier::Global => self.global_plan.as_ref(),
@@ -8268,7 +11524,8 @@ impl PreparedQuery {
 
     #[cfg(test)]
     fn has_plan_for_tier(&self, tier: DurabilityTier) -> bool {
-        self.plan_for_tier(tier).is_some()
+        self.plan_for_tier(tier, self.groove_runtime_token)
+            .is_some()
     }
 }
 
@@ -8281,27 +11538,60 @@ fn subscription_delta_event(
     settled: bool,
     previous: &RelationSnapshot,
     current: &RelationSnapshot,
+    _terminal_rows: bool,
 ) -> SubscriptionEvent {
-    subscription_delta_event_with_reset(tier, settled, previous, current, false)
+    subscription_delta_event_with_reset(tier, settled, previous, current, false, _terminal_rows)
 }
 
-fn subscription_reset_event(
+/// Publishes an ordered terminal as a root-addressed suffix splice.
+///
+/// A row delta has stable occurrence identities but no positional field. When
+/// terminal ordering changes, retracting and re-adding the first changed suffix
+/// is therefore the smallest representation that lets every consumer recover
+/// the authoritative Groove order. Content-only changes retain their position
+/// and remain ordinary `updated` roots, independent of total result size.
+fn subscription_terminal_delta_event(
     tier: DurabilityTier,
     settled: bool,
-    current: RelationSnapshot,
+    previous: &RelationSnapshot,
+    current: &RelationSnapshot,
 ) -> SubscriptionEvent {
+    let previous_roots = &previous.rows[..previous.root_count];
+    let current_roots = &current.rows[..current.root_count];
+    let common_prefix = previous_roots
+        .iter()
+        .zip(current_roots)
+        .take_while(|(previous, current)| {
+            subscription_row_occurrence_id(previous) == subscription_row_occurrence_id(current)
+        })
+        .count();
+
+    let updated = previous_roots[..common_prefix]
+        .iter()
+        .zip(&current_roots[..common_prefix])
+        .filter(|(previous, current)| previous != current)
+        .map(|(_, current)| subscription_output_row(current.clone()))
+        .collect();
+    let removed = previous_roots[common_prefix..]
+        .iter()
+        .map(|row| RemovedRow {
+            table: row.table().to_owned(),
+            row_uuid: row.row_uuid(),
+            occurrence_id: subscription_row_occurrence_id(row),
+        })
+        .collect();
+    let added = current_roots[common_prefix..]
+        .iter()
+        .cloned()
+        .map(subscription_output_row)
+        .collect();
+
     SubscriptionEvent::Delta {
-        reset: true,
-        added: current
-            .rows
-            .into_iter()
-            .map(subscription_output_row)
-            .collect(),
-        updated: Vec::new(),
-        removed: Vec::new(),
-        added_related: Vec::new(),
-        added_edges: current.edges,
-        removed_edges: Vec::new(),
+        reset: false,
+        added,
+        updated,
+        removed,
+        terminal_operations: Vec::new(),
         settled,
         tier,
     }
@@ -8313,6 +11603,7 @@ fn subscription_delta_event_with_reset(
     previous: &RelationSnapshot,
     current: &RelationSnapshot,
     reset: bool,
+    _terminal_rows: bool,
 ) -> SubscriptionEvent {
     let mut previous_by_id = BTreeMap::new();
     for row in &previous.rows {
@@ -8327,17 +11618,6 @@ fn subscription_delta_event_with_reset(
     let mut added = Vec::new();
     let mut updated = Vec::new();
     let mut removed = Vec::new();
-    let previous_edges = previous.edges.iter().cloned().collect::<BTreeSet<_>>();
-    let current_edges = current.edges.iter().cloned().collect::<BTreeSet<_>>();
-    let added_edges = current_edges
-        .difference(&previous_edges)
-        .cloned()
-        .collect::<Vec<_>>();
-    let removed_edges = previous_edges
-        .difference(&current_edges)
-        .cloned()
-        .collect::<Vec<_>>();
-
     for (key, row) in &current_by_id {
         match previous_by_id.get(key) {
             None => added.push(subscription_output_row((*row).clone())),
@@ -8350,10 +11630,11 @@ fn subscription_delta_event_with_reset(
 
     for (key, _) in &previous_by_id {
         if !current_by_id.contains_key(key) {
+            let row = previous_by_id[key];
             removed.push(RemovedRow {
-                table: key.0.clone(),
-                row_uuid: key.1,
-                occurrence_id: OutputOccurrenceId::single_source(ObjectId::from_uuid(key.1.0)),
+                table: row.table().to_owned(),
+                row_uuid: row.row_uuid(),
+                occurrence_id: key.clone(),
             });
         }
     }
@@ -8363,9 +11644,7 @@ fn subscription_delta_event_with_reset(
         added,
         updated,
         removed,
-        added_related: Vec::new(),
-        added_edges,
-        removed_edges,
+        terminal_operations: Vec::new(),
         settled,
         tier,
     }
@@ -8377,12 +11656,14 @@ fn apply_maintained_update_to_snapshot(
     update: LocalMaintainedViewSubscriptionUpdate,
     tier: DurabilityTier,
     settled: bool,
+    _terminal_rows: bool,
 ) -> SubscriptionEvent {
     let LocalMaintainedViewSubscriptionUpdate {
         added: update_added,
         removed: update_removed,
         added_edges: update_added_edges,
         removed_edges: update_removed_edges,
+        terminal_operations,
     } = update;
 
     if snapshot.rows.is_empty()
@@ -8394,19 +11675,23 @@ fn apply_maintained_update_to_snapshot(
         if update_added_edges.is_empty() {
             snapshot.root_count = update_added.len();
             snapshot.rows.reserve(update_added.len());
-            snapshot.rows.extend(update_added.iter().cloned());
-            *snapshot_index = RelationSnapshotIndex::from_snapshot(snapshot);
+            snapshot
+                .rows
+                .extend(update_added.iter().map(|(_, row)| row.clone()));
+            snapshot_index.roots = update_added
+                .iter()
+                .enumerate()
+                .map(|(index, (occurrence, _))| (occurrence.clone(), index))
+                .collect();
             return SubscriptionEvent::Delta {
                 reset: false,
                 added: update_added
                     .into_iter()
-                    .map(subscription_output_row)
+                    .map(|(occurrence_id, row)| SubscriptionOutputRow { occurrence_id, row })
                     .collect(),
                 updated: Vec::new(),
                 removed: Vec::new(),
-                added_related: Vec::new(),
-                added_edges: Vec::new(),
-                removed_edges: Vec::new(),
+                terminal_operations: terminal_operations.clone(),
                 settled,
                 tier,
             };
@@ -8415,9 +11700,9 @@ fn apply_maintained_update_to_snapshot(
         let mut event_added = Vec::with_capacity(update_added.len());
         let mut added_related = Vec::new();
         let mut seen_rows = BTreeSet::new();
-        for row in &update_added {
+        for (occurrence_id, row) in &update_added {
             seen_rows.insert((row.table().to_owned(), row.row_uuid()));
-            event_added.push(row.clone());
+            event_added.push((occurrence_id.clone(), row.clone()));
         }
 
         let mut seen_edges = BTreeSet::new();
@@ -8437,25 +11722,26 @@ fn apply_maintained_update_to_snapshot(
         snapshot
             .rows
             .reserve(event_added.len() + added_related.len());
-        snapshot.rows.extend(event_added.iter().cloned());
+        snapshot
+            .rows
+            .extend(event_added.iter().map(|(_, row)| row.clone()));
         snapshot.rows.extend(added_related.iter().cloned());
         *snapshot_index = RelationSnapshotIndex::from_snapshot(snapshot);
+        snapshot_index.roots = event_added
+            .iter()
+            .enumerate()
+            .map(|(index, (occurrence, _))| (occurrence.clone(), index))
+            .collect();
 
         return SubscriptionEvent::Delta {
             reset: false,
             added: event_added
-                .iter()
-                .cloned()
-                .map(subscription_output_row)
+                .into_iter()
+                .map(|(occurrence_id, row)| SubscriptionOutputRow { occurrence_id, row })
                 .collect(),
             updated: Vec::new(),
             removed: Vec::new(),
-            added_related,
-            added_edges: update_added_edges
-                .iter()
-                .map(|(edge, _)| edge.clone())
-                .collect(),
-            removed_edges: Vec::new(),
+            terminal_operations: terminal_operations.clone(),
             settled,
             tier,
         };
@@ -8466,12 +11752,14 @@ fn apply_maintained_update_to_snapshot(
     let mut removed = Vec::new();
     let mut added_related = Vec::new();
 
-    for row in &update_added {
-        let key = single_source_occurrence_id(row);
+    for (key, row) in &update_added {
         if let Some(position) = snapshot_index.roots.get(&key).copied() {
             if snapshot.rows[position] != *row {
                 snapshot.rows[position] = row.clone();
-                updated.push(subscription_output_row(row.clone()));
+                updated.push(SubscriptionOutputRow {
+                    occurrence_id: key.clone(),
+                    row: row.clone(),
+                });
             }
         } else {
             snapshot.rows.insert(snapshot.root_count, row.clone());
@@ -8480,38 +11768,46 @@ fn apply_maintained_update_to_snapshot(
             }
             snapshot_index
                 .roots
-                .insert(single_source_occurrence_id(row), snapshot.root_count);
+                .insert(key.clone(), snapshot.root_count);
             snapshot.root_count += 1;
-            added.push(subscription_output_row(row.clone()));
+            added.push(SubscriptionOutputRow {
+                occurrence_id: key.clone(),
+                row: row.clone(),
+            });
         }
     }
 
     let mut index = 0;
     while index < snapshot.root_count {
-        let row_key = (
-            snapshot.rows[index].table().to_owned(),
-            snapshot.rows[index].row_uuid(),
-        );
-        if update_removed
+        let occurrence_id = snapshot_index
+            .roots
             .iter()
-            .any(|(table, row_uuid)| row_key.0 == *table && row_key.1 == *row_uuid)
+            .find_map(|(occurrence, position)| (*position == index).then(|| occurrence.clone()))
+            .expect("every maintained root row has an occurrence index");
+        if update_removed.contains(&occurrence_id)
+            && !update_added
+                .iter()
+                .any(|(added, _)| *added == occurrence_id)
         {
             let row = snapshot.rows.remove(index);
             snapshot.root_count -= 1;
-            snapshot_index
-                .roots
-                .remove(&single_source_occurrence_id(&row));
+            snapshot_index.roots.remove(&occurrence_id);
+            for position in snapshot_index.roots.values_mut() {
+                if *position > index {
+                    *position -= 1;
+                }
+            }
+            for position in snapshot_index.related.values_mut() {
+                *position -= 1;
+            }
             removed.push(RemovedRow {
                 table: row.table().to_owned(),
                 row_uuid: row.row_uuid(),
-                occurrence_id: single_source_occurrence_id(&row),
+                occurrence_id,
             });
         } else {
             index += 1;
         }
-    }
-    if !update_removed.is_empty() {
-        *snapshot_index = RelationSnapshotIndex::from_snapshot(snapshot);
     }
 
     if !update_removed_edges.is_empty() {
@@ -8531,7 +11827,7 @@ fn apply_maintained_update_to_snapshot(
         let Some(row) = row else {
             continue;
         };
-        let root_key = single_source_occurrence_id(row);
+        let root_key = subscription_row_occurrence_id(row);
         if snapshot_index.roots.contains_key(&root_key) {
             continue;
         }
@@ -8573,12 +11869,7 @@ fn apply_maintained_update_to_snapshot(
         added,
         updated,
         removed,
-        added_related,
-        added_edges: update_added_edges
-            .iter()
-            .map(|(edge, _)| edge.clone())
-            .collect(),
-        removed_edges: update_removed_edges,
+        terminal_operations,
         settled,
         tier,
     }
@@ -8619,19 +11910,87 @@ where
     })
 }
 
-fn single_source_occurrence_id(row: &CurrentRow) -> OutputOccurrenceId {
-    OutputOccurrenceId::single_source(ObjectId::from_uuid(row.row_uuid().0))
+pub(crate) fn subscription_row_occurrence_id(row: &CurrentRow) -> OutputOccurrenceId {
+    let root = ObjectId::from_uuid(row.row_uuid().0);
+    let mut joined = Vec::new();
+    for position in 1.. {
+        let Some(Value::Uuid(row_id)) = row.raw_field(&format!("__flat_join_row_{position}"))
+        else {
+            break;
+        };
+        joined.push(ObjectId::from_uuid(row_id));
+    }
+    OutputOccurrenceId::new(root, joined)
+}
+
+fn subscription_outputs_with_occurrence_sidecar(
+    snapshot: &RelationSnapshot,
+    occurrence_ids: &[OutputOccurrenceId],
+) -> Result<Vec<SubscriptionOutputRow>, Error> {
+    if occurrence_ids.len() != snapshot.root_count {
+        return Err(Error::new(
+            ErrorCode::Protocol,
+            "maintained root occurrence sidecar length does not match root rows",
+        ));
+    }
+    let mut unique = BTreeSet::new();
+    snapshot
+        .rows
+        .iter()
+        .take(snapshot.root_count)
+        .zip(occurrence_ids)
+        .map(|(row, occurrence_id)| {
+            let bytes = occurrence_id.canonical_bytes();
+            if bytes.get(..16) != Some(row.row_uuid().0.as_bytes()) {
+                return Err(Error::new(
+                    ErrorCode::Protocol,
+                    "maintained root occurrence sidecar root does not match row",
+                ));
+            }
+            if !unique.insert(occurrence_id.clone()) {
+                return Err(Error::new(
+                    ErrorCode::Protocol,
+                    "maintained root occurrence sidecar contains duplicate identity",
+                ));
+            }
+            Ok(SubscriptionOutputRow {
+                occurrence_id: occurrence_id.clone(),
+                row: row.clone(),
+            })
+        })
+        .collect()
+}
+
+fn reset_removed_roots(
+    previous: &RelationSnapshot,
+    previous_index: &RelationSnapshotIndex,
+    current_occurrences: &[OutputOccurrenceId],
+) -> Vec<RemovedRow> {
+    let current = current_occurrences.iter().collect::<BTreeSet<_>>();
+    previous_index
+        .roots
+        .iter()
+        .filter(|(occurrence, _)| !current.contains(occurrence))
+        .map(|(occurrence_id, position)| {
+            let row = &previous.rows[*position];
+            RemovedRow {
+                table: row.table().to_owned(),
+                row_uuid: row.row_uuid(),
+                occurrence_id: occurrence_id.clone(),
+            }
+        })
+        .collect()
 }
 
 fn subscription_output_row(row: CurrentRow) -> SubscriptionOutputRow {
     SubscriptionOutputRow {
-        occurrence_id: single_source_occurrence_id(&row),
+        occurrence_id: subscription_row_occurrence_id(&row),
         row,
     }
 }
 
-fn subscription_row_key(row: &CurrentRow) -> (String, RowUuid) {
-    (row.table().to_owned(), row.row_uuid())
+fn subscription_row_key(row: &CurrentRow) -> OutputOccurrenceId {
+    subscription_row_occurrence_id(row)
 }
 
 #[cfg(test)]

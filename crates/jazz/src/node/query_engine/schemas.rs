@@ -120,6 +120,12 @@ pub(crate) struct ResultMembershipSchema {
     /// Ordered source-row identity fields for the rendered output occurrence.
     /// The root source is first; ordinary output contains only `row_field`.
     pub(crate) occurrence_id_fields: Vec<String>,
+    /// Typed UNION ALL arm discriminators keyed by joined-source position
+    /// (that is, position zero names the first field after the root).
+    pub(crate) occurrence_union_arm_fields: BTreeMap<usize, String>,
+    /// Flattened public tuple fields retained with the membership record when
+    /// this is a flat joined output. Ordinary row output leaves this empty.
+    pub(crate) payload_fields: Vec<TypedOutputField>,
     /// Branch/prefix field, when branch/prefix participates in result
     /// identity.
     pub(crate) branch_or_prefix_field: Option<String>,
@@ -250,6 +256,8 @@ pub(crate) struct VersionWitnessSchema {
     pub(crate) updated_at_field: String,
     /// Parent transaction set field.
     pub(crate) parents_field: String,
+    /// Nullable serialized set of explicitly authored user columns.
+    pub(crate) authored_columns_field: String,
     /// Nullable deletion event field.
     pub(crate) deletion_field: String,
     /// Terminal field name for each app column.
@@ -430,8 +438,8 @@ pub(crate) struct SyntheticResultMembershipSchema {
     pub(crate) table_field: String,
     /// Stable synthetic row id field.
     pub(crate) row_field: String,
-    /// Synthetic revision/version field used for replacement deltas.
-    pub(crate) revision_field: String,
+    /// Opaque replacement-token field; not a result-row version.
+    pub(crate) replacement_field: String,
     /// Retained binding/routing parameter fields.
     pub(crate) routing_param_fields: BTreeSet<String>,
 }

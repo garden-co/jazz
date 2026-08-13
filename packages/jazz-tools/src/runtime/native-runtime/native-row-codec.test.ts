@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import { PostcardReader, PostcardWriter } from "./native-codec.js";
 import {
   createRecord,
+  decodeNativeTerminalRow,
   decodeNativeRowValues,
   decodeRecordValue,
   encodeNativeRowValues,
@@ -28,9 +29,9 @@ describe("native row codec", () => {
     writeDescriptor(writer, [
       {
         name: "nested",
-        valueType: { tag: 13, record: [{ name: "label", valueType: { tag: 6 } }] },
+        valueType: { tag: 15, record: [{ name: "label", valueType: { tag: 8 } }] },
       },
-      { name: "count", valueType: { tag: 15 } },
+      { name: "count", valueType: { tag: 4 } },
     ]);
     writer.u64(42);
 
@@ -38,9 +39,9 @@ describe("native row codec", () => {
     expect(readDescriptor(reader)).toEqual([
       {
         name: "nested",
-        valueType: { tag: 13, record: [{ name: "label", valueType: { tag: 6 } }] },
+        valueType: { tag: 15, record: [{ name: "label", valueType: { tag: 8 } }] },
       },
-      { name: "count", valueType: { tag: 15 } },
+      { name: "count", valueType: { tag: 4 } },
     ]);
     expect(reader.u64()).toBe(42);
   });
@@ -59,15 +60,15 @@ describe("native row codec", () => {
       new Set(Array.from({ length: 16 }, (_, tag) => tag)),
     );
     expect(descriptor[9]?.valueType).toMatchObject({
-      tag: 9,
+      tag: 11,
       enumSchema: { name: "mode", variants: ["low", "high"] },
     });
-    expect(descriptor[10]?.valueType.members?.map((member) => member.tag)).toEqual([0, 14, 12, 15]);
+    expect(descriptor[10]?.valueType.members?.map((member) => member.tag)).toEqual([0, 5, 14, 4]);
     expect(descriptor[13]?.valueType).toMatchObject({
-      tag: 12,
-      inner: { tag: 11, inner: { tag: 12 } },
+      tag: 14,
+      inner: { tag: 13, inner: { tag: 14 } },
     });
-    expect(descriptor[15]?.valueType).toMatchObject({ tag: 11, inner: { tag: 13 } });
+    expect(descriptor[15]?.valueType).toMatchObject({ tag: 13, inner: { tag: 15 } });
 
     const descriptorWriter = new PostcardWriter();
     writeDescriptor(descriptorWriter, descriptor);
@@ -126,9 +127,125 @@ describe("native row codec", () => {
 
     const encoded = encodeNativeRowValues(columns, values);
     expect(bytesToHex(encoded)).toBe(
-      "00000000ffffff7f00000080ffffffff0000000000000000ffffffffffffff7f0000000000000080ffffffffffffffff01d6ffff7f0000000000000000ffffffffffffff7f0000000000000080ffffffffffffffff",
+      "00000080ffffffff00000000ffffff7f0000000000000080ffffffffffffffff0000000000000000ffffffffffffff7f01d6ffffff0000000000000080ffffffffffffffff0000000000000000ffffffffffffff7f",
     );
     expect(decodeNativeRowValues(columns, encoded)).toEqual(values);
+  });
+
+  it("rejects signed integer values outside their declared widths", () => {
+    const integerColumn = [
+      { name: "value", column_type: { type: "Integer" as const }, nullable: false },
+    ];
+    const bigintColumn = [
+      { name: "value", column_type: { type: "BigInt" as const }, nullable: false },
+    ];
+
+    for (const value of [-2_147_483_649, 2_147_483_648]) {
+      expect(() => encodeNativeRowValues(integerColumn, [{ type: "Integer", value }])).toThrow(
+        "Integer value must be a signed 32-bit integer",
+      );
+    }
+    for (const value of [-(1n << 63n) - 1n, 1n << 63n]) {
+      expect(() => encodeNativeRowValues(bigintColumn, [{ type: "BigInt", value }])).toThrow(
+        "BigInt value must be a signed 64-bit integer",
+      );
+    }
+  });
+
+  it("decodes sparse terminal carriers without leaking their presence tag", () => {
+    const columns = [
+      {
+        name: "title",
+        column_type: { type: "Text" as const },
+        nullable: false,
+        sparse: true,
+      },
+    ];
+
+    // Outer nullable 1 means the wildcard current-row carrier contains the
+    // field. The public value is still the unwrapped text.
+    const encoded = encodeNativeRowValues(columns, [{ type: "Text", value: "hello" }]);
+    expect(decodeNativeRowValues(columns, encoded)).toEqual([{ type: "Text", value: "hello" }]);
+  });
+
+  it("keeps sparse absence distinct from an explicit application null", () => {
+    const columns = [
+      {
+        name: "ownerId",
+        column_type: { type: "Uuid" as const },
+        nullable: true,
+        sparse: true,
+      },
+    ];
+
+    // The first tag is sparse presence; the second is the application's
+    // nullable value. Explicit null must consume both layers.
+    const explicitNull = encodeNativeRowValues(columns, [{ type: "Null" }]);
+    const sparseAbsence = encodeNativeRowValues(columns, []);
+    expect(explicitNull).not.toEqual(sparseAbsence);
+    expect(explicitNull[0]).toBe(1);
+    expect(sparseAbsence[0]).toBe(0);
+    expect(decodeNativeRowValues(columns, explicitNull)).toEqual([{ type: "Null" }]);
+    expect(decodeNativeRowValues(columns, sparseAbsence)).toEqual([{ type: "Null" }]);
+  });
+
+  it("decodes terminal arrays as physical nested records rather than packed row envelopes", () => {
+    const rootId = "00000000-0000-4000-8000-000000000001";
+    const firstChildId = "00000000-0000-4000-8000-000000000002";
+    const secondChildId = "00000000-0000-4000-8000-000000000003";
+    const children = [
+      { name: "children", column_type: { type: "Text" as const }, nullable: false },
+    ];
+    const columns = [
+      {
+        name: "children",
+        column_type: {
+          type: "Array" as const,
+          element: { type: "Row" as const, columns: children },
+        },
+        nullable: false,
+      },
+    ];
+    const childRecord = (id: string, name: string) =>
+      Uint8Array.from([...uuidBytes(id), ...new TextEncoder().encode(name)]);
+    const first = childRecord(firstChildId, "first");
+    const second = childRecord(secondChildId, "second");
+    const childArray = Uint8Array.from([
+      2,
+      0,
+      0,
+      0,
+      4 + 4 + first.length,
+      0,
+      0,
+      0,
+      ...first,
+      ...second,
+    ]);
+    const descriptor = [
+      { name: "__jazz_terminal_row_key", valueType: { tag: 10 } },
+      { name: "children", valueType: { tag: 13, inner: { tag: 15, record: [] } } },
+    ];
+    const raw = createRecord(descriptor, [uuidBytes(rootId), childArray]);
+
+    expect(decodeNativeTerminalRow(rootId, columns, raw)).toMatchObject({
+      id: rootId,
+      values: [
+        {
+          type: "Array",
+          value: [
+            {
+              type: "Row",
+              value: { id: firstChildId, values: [{ type: "Text", value: "first" }] },
+            },
+            {
+              type: "Row",
+              value: { id: secondChildId, values: [{ type: "Text", value: "second" }] },
+            },
+          ],
+        },
+      ],
+    });
   });
 });
 
@@ -151,4 +268,13 @@ function hexToBytes(hex: string): Uint8Array {
 
 function bytesToHex(bytes: Uint8Array): string {
   return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function uuidBytes(id: string): Uint8Array {
+  return Uint8Array.from(
+    id
+      .replaceAll("-", "")
+      .match(/../g)!
+      .map((hex) => Number.parseInt(hex, 16)),
+  );
 }

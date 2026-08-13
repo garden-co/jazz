@@ -111,6 +111,32 @@ fn insert_membership(db: &Db<MemoryStorage>, id: RowUuid, team: RowUuid, user: A
     .expect("insert membership");
 }
 
+/// An explicit-id upsert by Bob follows INSERT policy when the id is genuinely
+/// absent, but the same call cannot merge a now-existing row hidden by read
+/// policy. This distinguishes storage existence from policy-filtered absence
+/// without exposing hidden cells.
+///
+/// bob ──upsert(absent)──► insert ✓ ──upsert(hidden existing)──► denied
+#[test]
+fn upsert_applies_insert_policy_only_to_a_genuinely_absent_target() {
+    let db = open_db();
+    let document = row(0xd0);
+    let hidden_team = row(0xd1);
+    let cells = BTreeMap::from([
+        ("team".to_owned(), Value::Uuid(hidden_team.0)),
+        ("rank".to_owned(), Value::U64(1)),
+    ]);
+
+    db.upsert_for_identity(READER, DOCUMENTS, document, cells.clone())
+        .expect("absent target follows public insert policy");
+    let error = match db.upsert_for_identity(READER, DOCUMENTS, document, cells) {
+        Ok(_) => panic!("hidden existing target requires read permission"),
+        Err(error) => error,
+    };
+    assert_eq!(error.code, ErrorCode::WriteRejected);
+    assert!(error.message.contains("read policy denied UPSERT"));
+}
+
 fn ordered_page(
     db: &Db<MemoryStorage>,
     identity: AuthorId,
@@ -188,7 +214,8 @@ fn write_only_full_row_update_succeeds_but_partial_update_and_upsert_are_denied(
         )
         .expect("prepare exact ordered page");
 
-    db.update(
+    db.update_for_identity(
+        WRITER,
         DOCUMENTS,
         winner,
         BTreeMap::from([
@@ -199,7 +226,8 @@ fn write_only_full_row_update_succeeds_but_partial_update_and_upsert_are_denied(
     .expect("write-only principal can issue a full-row update");
     assert_eq!(ordered_page(&db, READER, &prepared), vec![second, refill]);
 
-    let partial_error = match db.update(
+    let partial_error = match db.update_for_identity(
+        WRITER,
         DOCUMENTS,
         winner,
         BTreeMap::from([("rank".to_owned(), Value::U64(40))]),
@@ -215,7 +243,8 @@ fn write_only_full_row_update_succeeds_but_partial_update_and_upsert_are_denied(
     );
     assert_eq!(ordered_page(&db, READER, &prepared), vec![second, refill]);
 
-    let upsert_error = match db.upsert(
+    let upsert_error = match db.upsert_for_identity(
+        WRITER,
         DOCUMENTS,
         winner,
         BTreeMap::from([
@@ -232,6 +261,23 @@ fn write_only_full_row_update_succeeds_but_partial_update_and_upsert_are_denied(
             && upsert_error.message.contains("requires read permission"),
         "upsert denial must explain its read authorization requirement: {upsert_error:?}"
     );
+
+    // An ordinary client staging path is deliberately permission-elided: it
+    // may carry an optimistic partial merge and let the serving host enforce
+    // policy when the write arrives. The explicit identity APIs above remain
+    // the trusted read-for-write boundary.
+    db.update(
+        DOCUMENTS,
+        winner,
+        BTreeMap::from([("rank".to_owned(), Value::U64(41))]),
+    )
+    .expect("client-local partial update stages optimistically");
+    db.upsert(
+        DOCUMENTS,
+        winner,
+        BTreeMap::from([("rank".to_owned(), Value::U64(42))]),
+    )
+    .expect("client-local upsert stages optimistically");
 }
 
 #[test]
@@ -287,7 +333,8 @@ fn maintained_authorization_restores_an_ordered_page_after_scope_reentry() {
          is only meaningful for a write-only principal"
     );
 
-    let denied = match db.update(
+    let denied = match db.update_for_identity(
+        WRITER,
         DOCUMENTS,
         winner,
         BTreeMap::from([("team".to_owned(), Value::Uuid(unauthorized_team.0))]),
@@ -339,4 +386,48 @@ fn maintained_authorization_restores_an_ordered_page_after_scope_reentry() {
     maintained.remove(&refill);
     maintained.insert(winner);
     assert_eq!(maintained, BTreeSet::from([winner, second]));
+}
+
+#[test]
+fn client_subscription_skips_policy_only_compile_validation_but_identity_subscription_guards_it() {
+    let schema = JazzSchema::new([
+        TableSchema::new("profiles", [ColumnSchema::new("name", ColumnType::String)]),
+        TableSchema::new(
+            "items",
+            [
+                ColumnSchema::new("name", ColumnType::String),
+                ColumnSchema::new("profile", ColumnType::Uuid),
+            ],
+        )
+        .with_reference("profile", "profiles")
+        .with_read_policy(Policy::shape(Query::from("items").include("profile")))
+        .with_write_policy(Policy::public()),
+    ]);
+    let families = schema.column_families();
+    let family_refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let db = block_on(Db::open(
+        DbConfig::new(
+            schema,
+            MemoryStorage::new(&family_refs),
+            DbIdentity {
+                node: NodeUuid::from_bytes([0x82; 16]),
+                author: WRITER,
+            },
+        )
+        .with_id_source(SeededRowIdSource::new(0x8200)),
+    ))
+    .expect("open client subscription validation fixture");
+    let prepared = db
+        .prepare_query(&Query::from("items"))
+        .expect("prepare items query");
+
+    let client = block_on(db.subscribe(&prepared, opts()));
+    if let Err(error) = client {
+        panic!("client-local subscription must skip serving-only policy compilation: {error:?}");
+    }
+    let trusted = block_on(db.subscribe_for_identity(&prepared, opts(), WRITER));
+    assert!(
+        trusted.is_err(),
+        "trusted-serving subscription must continue to validate policy dependencies"
+    );
 }

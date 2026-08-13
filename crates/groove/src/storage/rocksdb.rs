@@ -16,6 +16,7 @@ use rocksdb::{
     Direction, IteratorMode, MergeOperands, Options, ReadOptions, UniversalCompactOptions,
     WriteBatch, WriteBufferManager, WriteOptions, properties,
 };
+use serde::Serialize;
 
 use super::{
     ColumnFamilyName, Error, Key, OrderedKvStorage, ScanVisitor, Value, WriteFlushCadence,
@@ -48,6 +49,28 @@ pub struct RocksDbStorage {
     db: DB,
     write_options: WriteOptions,
     write_flush_cadence: RefCell<Option<WriteFlushCadence>>,
+}
+
+/// A best-effort, allocation-free snapshot of the RocksDB counters that are
+/// useful when attributing a storage receipt.  These are backend counters, not
+/// process memory measurements: in particular `memtable_bytes` excludes the
+/// shared block cache and Rust allocations.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct RocksDbMetrics {
+    /// Total bytes in all SST files, including files no longer live.
+    pub total_sst_bytes: Option<u64>,
+    /// Bytes in SST files reachable from the latest LSM version.
+    pub live_sst_bytes: Option<u64>,
+    /// Estimated bytes of live key/value data.
+    pub estimated_live_data_bytes: Option<u64>,
+    /// Bytes in mutable and immutable memtables; not the block cache.
+    pub memtable_bytes: Option<u64>,
+    /// Estimated bytes awaiting compaction (where supported by the profile).
+    pub pending_compaction_bytes: Option<u64>,
+    pub running_flushes: Option<u64>,
+    pub running_compactions: Option<u64>,
+    pub flush_pending: Option<bool>,
+    pub compaction_pending: Option<bool>,
 }
 
 impl RocksDbStorage {
@@ -87,6 +110,7 @@ impl RocksDbStorage {
             .iter()
             .map(|name| (*name).to_owned())
             .collect::<BTreeSet<_>>();
+        opened_column_families.insert("default".to_owned());
         if path.exists()
             && let Ok(existing) = DB::list_cf(&options, &path)
         {
@@ -124,6 +148,58 @@ impl RocksDbStorage {
             .cf_handle(cf)
             .ok_or_else(|| Error::ColumnFamilyNotFound(cf.to_owned()))
     }
+
+    /// Snapshot RocksDB's per-column-family size and background-work
+    /// properties.  This intentionally does not enable RocksDB statistics:
+    /// enabling counters changes the workload being measured.  Receipts should
+    /// record these snapshots before and after a workload alongside recursive
+    /// on-disk directory bytes and machine metadata.
+    pub fn metrics(&self) -> Result<RocksDbMetrics, Error> {
+        let mut total_sst = Vec::new();
+        let mut live_sst = Vec::new();
+        let mut live_data = Vec::new();
+        let mut memtables = Vec::new();
+        let mut pending_compaction = Vec::new();
+        let mut flush_pending = Vec::new();
+        let mut compaction_pending = Vec::new();
+        for name in &self.column_families {
+            let Some(handle) = self.db.cf_handle(name) else {
+                continue;
+            };
+            let property = |property| self.db.property_int_value_cf(handle, property);
+            total_sst.push(property(properties::TOTAL_SST_FILES_SIZE)?);
+            live_sst.push(property(properties::LIVE_SST_FILES_SIZE)?);
+            live_data.push(property(properties::ESTIMATE_LIVE_DATA_SIZE)?);
+            memtables.push(property(properties::SIZE_ALL_MEM_TABLES)?);
+            pending_compaction.push(property(properties::ESTIMATE_PENDING_COMPACTION_BYTES)?);
+            flush_pending.push(property(properties::MEM_TABLE_FLUSH_PENDING)?);
+            compaction_pending.push(property(properties::COMPACTION_PENDING)?);
+        }
+        let global = |property| self.db.property_int_value(property);
+        Ok(RocksDbMetrics {
+            total_sst_bytes: sum_available(&total_sst),
+            live_sst_bytes: sum_available(&live_sst),
+            estimated_live_data_bytes: sum_available(&live_data),
+            memtable_bytes: sum_available(&memtables),
+            pending_compaction_bytes: sum_available(&pending_compaction),
+            running_flushes: global(properties::NUM_RUNNING_FLUSHES)?,
+            running_compactions: global(properties::NUM_RUNNING_COMPACTIONS)?,
+            flush_pending: any_available(&flush_pending),
+            compaction_pending: any_available(&compaction_pending),
+        })
+    }
+}
+
+fn sum_available(values: &[Option<u64>]) -> Option<u64> {
+    values.iter().try_fold(0u64, |sum, value| {
+        value.map(|value| sum.saturating_add(value))
+    })
+}
+
+fn any_available(values: &[Option<u64>]) -> Option<bool> {
+    values
+        .iter()
+        .try_fold(false, |any, value| value.map(|value| any || value != 0))
 }
 
 fn rocksdb_options(block_cache: &Cache, write_buffer_manager: &WriteBufferManager) -> Options {
@@ -515,7 +591,7 @@ mod tests {
     use super::{
         CLASS_AHEAD_CURRENT_CF, CLASS_CHANGES_CF, CLASS_CONTENT_CF, CLASS_GLOBAL_CURRENT_CF,
         CLASS_HISTORY_CF, CLASS_INDICES_CF, CLASS_META_CF, CLASS_REGISTER_CF, RocksDbClassProfile,
-        RocksDbStorage, rocksdb_class_profile,
+        RocksDbStorage, any_available, rocksdb_class_profile, sum_available,
     };
 
     #[test]
@@ -563,5 +639,41 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let storage = RocksDbStorage::open(dir.path(), &["records"]).unwrap();
         assert!(storage.write_flush_cadence.borrow().is_none());
+    }
+
+    #[test]
+    fn metrics_include_memtable_bytes_written_to_each_column_family() {
+        use crate::storage::OrderedKvStorage;
+
+        let dir = tempfile::tempdir().unwrap();
+        let storage = RocksDbStorage::open(dir.path(), &["left", "right"]).unwrap();
+        let before = storage.metrics().unwrap();
+        storage.set("left", b"a", &vec![7; 32 * 1024]).unwrap();
+        storage.set("right", b"b", &vec![9; 32 * 1024]).unwrap();
+        let after = storage.metrics().unwrap();
+
+        assert!(
+            after.memtable_bytes.unwrap() > before.memtable_bytes.unwrap(),
+            "two writes must be visible to the per-CF metric aggregation: before={before:?}, after={after:?}"
+        );
+    }
+
+    #[test]
+    fn metrics_include_default_cf_and_keep_unavailable_aggregates_unknown() {
+        assert_eq!(sum_available(&[Some(2), Some(3)]), Some(5));
+        assert_eq!(sum_available(&[Some(2), None, Some(3)]), None);
+        assert_eq!(any_available(&[Some(0), Some(1)]), Some(true));
+        assert_eq!(any_available(&[Some(0), None]), None);
+
+        let dir = tempfile::tempdir().unwrap();
+        let storage = RocksDbStorage::open(dir.path(), &["left", "right"]).unwrap();
+        assert!(storage.column_families.contains("default"));
+        assert_eq!(
+            storage.metrics().unwrap().running_flushes,
+            storage
+                .db
+                .property_int_value(rocksdb::properties::NUM_RUNNING_FLUSHES)
+                .unwrap()
+        );
     }
 }

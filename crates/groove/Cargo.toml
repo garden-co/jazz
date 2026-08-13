@@ -32,6 +32,11 @@ jazz-benchmark-guard = { path = "../benchmark-guard" }
 hdrhistogram = "7.5.4"
 rusqlite = { version = "0.34", features = ["bundled"] }
 tempfile = "3.27.0"
+serde_json = "1"
+
+[[test]]
+name = "plain_row_receipt"
+required-features = ["rocksdb"]
 
 [[bench]]
 name = "scenario"

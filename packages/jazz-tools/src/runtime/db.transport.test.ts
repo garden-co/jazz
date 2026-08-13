@@ -1,6 +1,12 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { schema as s } from "../index.js";
-import { JazzClient, WriteResult, type InsertResult, type Runtime } from "./client.js";
+import {
+  JazzClient,
+  WriteResult,
+  type BatchId,
+  type InsertResult,
+  type Runtime,
+} from "./client.js";
 import { createDbWithRuntimeSource, Db, type DbConfig } from "./db.js";
 import {
   RuntimeSource,
@@ -83,9 +89,11 @@ function makeClientStub() {
     shutdown: vi.fn(async () => undefined),
     updateAuthToken: vi.fn(),
     connectTransport: vi.fn(),
+    disconnectTransport: vi.fn(async () => undefined),
     getRuntime: vi.fn(() => ({}) as never),
   } as unknown as JazzClient & {
     connectTransport: ReturnType<typeof vi.fn>;
+    disconnectTransport: ReturnType<typeof vi.fn>;
   };
 }
 
@@ -168,6 +176,55 @@ describe("runtime/Db native runtime path upstream wiring", () => {
     db.exposeGetClient(makeSchema());
 
     expect((client as any).connectTransport).not.toHaveBeenCalled();
+  });
+
+  it("DBRT-U02b disconnects and reconnects existing clients through the public Db API", async () => {
+    const client = makeClientStub();
+    vi.spyOn(JazzClient, "connectWithRuntime").mockReturnValue(client);
+
+    const db = new TestDb({
+      appId: "app",
+      serverUrl: "https://example.test",
+      jwtToken: "jwt-x",
+      adminSecret: "admin-y",
+    });
+    db.exposeGetClient(makeSchema());
+
+    await db.disconnect();
+    await db.reconnect();
+
+    expect((client as any).disconnectTransport).toHaveBeenCalledTimes(1);
+    expect((client as any).connectTransport).toHaveBeenCalledTimes(2);
+    expect((client as any).connectTransport).toHaveBeenLastCalledWith("https://example.test", {
+      jwt_token: "jwt-x",
+      admin_secret: "admin-y",
+      backend_secret: undefined,
+      backend_session: undefined,
+    });
+  });
+
+  it("DBRT-U02c keeps lazily-created clients offline until reconnect", async () => {
+    const client = makeClientStub();
+    vi.spyOn(JazzClient, "connectWithRuntime").mockReturnValue(client);
+
+    const db = new TestDb({
+      appId: "app",
+      serverUrl: "https://example.test",
+      jwtToken: "jwt-x",
+    });
+
+    await db.disconnect();
+    db.exposeGetClient(makeSchema());
+    expect((client as any).connectTransport).not.toHaveBeenCalled();
+
+    await db.reconnect();
+    expect((client as any).connectTransport).toHaveBeenCalledTimes(1);
+    expect((client as any).connectTransport).toHaveBeenCalledWith("https://example.test", {
+      jwt_token: "jwt-x",
+      admin_secret: undefined,
+      backend_secret: undefined,
+      backend_session: undefined,
+    });
   });
 
   it("DBRT-U03 strips local policies for memory-driver admin-secret clients", () => {
@@ -256,10 +313,11 @@ describe("runtime/Db native runtime path upstream wiring", () => {
     const runtimeRow: InsertResult = {
       id: "todo-1",
       values: [{ type: "Text", value: "Buy milk" }],
-      transactionId: "transaction-1",
+      kind: "committed",
+      batchId: "transaction-1" as BatchId,
     };
     const client = {
-      insert: vi.fn(() => new WriteResult(runtimeRow, runtimeRow.transactionId, client)),
+      insert: vi.fn(() => new WriteResult(runtimeRow, runtimeRow.batchId, client)),
       shutdown: vi.fn(async () => undefined),
       updateAuthToken: vi.fn(),
       connectTransport: vi.fn(),

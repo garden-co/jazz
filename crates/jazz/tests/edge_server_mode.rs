@@ -61,7 +61,10 @@ async fn subscription_orders_by_unprojected_field() {
                     .insert("todos", row_input!("title" => title, "rank" => rank))
                     .expect("insert ranked todo");
                 client
-                    .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
+                    .wait_for_batch(
+                        batch_id.expect("ordinary mutation commits immediately"),
+                        DurabilityTier::EdgeServer,
+                    )
                     .await
                     .expect("ranked todo settles at edge");
                 ids.push(id);
@@ -125,7 +128,10 @@ async fn edge_tier_public_subscription_opens_and_receives_rows() {
                 .insert("todos", row_input!("title" => "visible", "done" => false))
                 .expect("insert todo");
             client
-                .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
+                .wait_for_batch(
+                    batch_id.expect("ordinary mutation commits immediately"),
+                    DurabilityTier::EdgeServer,
+                )
                 .await
                 .expect("todo should settle at edge");
 
@@ -179,7 +185,10 @@ async fn public_root_default_order_and_windows_are_stable_across_reset() {
                     .insert("todos", row_input!("title" => title, "done" => false))
                     .expect("insert todo");
                 client
-                    .wait_for_batch(batch, DurabilityTier::EdgeServer)
+                    .wait_for_batch(
+                        batch.expect("ordinary mutation commits immediately"),
+                        DurabilityTier::EdgeServer,
+                    )
                     .await
                     .expect("todo settles at edge");
                 ids.push(id);
@@ -299,7 +308,10 @@ async fn maintained_window_uses_row_id_tie_breaker_and_tracks_rows_crossing_boun
                     .insert("todos", row_input!("title" => "same", "done" => false))
                     .expect("insert tied todo");
                 client
-                    .wait_for_batch(batch, DurabilityTier::EdgeServer)
+                    .wait_for_batch(
+                        batch.expect("ordinary mutation commits immediately"),
+                        DurabilityTier::EdgeServer,
+                    )
                     .await
                     .expect("tied todo settles at edge");
                 tied.push(id);
@@ -342,7 +354,12 @@ async fn maintained_window_uses_row_id_tie_breaker_and_tracks_rows_crossing_boun
                 initial
                     .added
                     .iter()
-                    .map(|change| change.id.root())
+                    .map(|change| {
+                        change
+                            .id
+                            .row_id()
+                            .expect("plain-table result key contains one row")
+                    })
                     .collect::<Vec<_>>(),
                 tied[..2],
                 "maintained tied rows use the same stable row-id tie-breaker"
@@ -356,7 +373,10 @@ async fn maintained_window_uses_row_id_tie_breaker_and_tracks_rows_crossing_boun
                 )
                 .expect("move row into window");
             client
-                .wait_for_batch(batch, DurabilityTier::EdgeServer)
+                .wait_for_batch(
+                    batch.expect("ordinary mutation commits immediately"),
+                    DurabilityTier::EdgeServer,
+                )
                 .await
                 .expect("promotion settles at edge");
             wait_for_subscription_update(
@@ -375,7 +395,10 @@ async fn maintained_window_uses_row_id_tie_breaker_and_tracks_rows_crossing_boun
                 )
                 .expect("move row out of window");
             client
-                .wait_for_batch(batch, DurabilityTier::EdgeServer)
+                .wait_for_batch(
+                    batch.expect("ordinary mutation commits immediately"),
+                    DurabilityTier::EdgeServer,
+                )
                 .await
                 .expect("demotion settles at edge");
             wait_for_subscription_update(
@@ -418,7 +441,10 @@ async fn public_subscription_stream_yields_delta_items_for_normal_changes() {
                 )
                 .expect("insert todo");
             client
-                .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
+                .wait_for_batch(
+                    batch_id.expect("ordinary mutation commits immediately"),
+                    DurabilityTier::EdgeServer,
+                )
                 .await
                 .expect("todo should settle at edge");
 
@@ -779,64 +805,114 @@ async fn seed_policy_graph_rows(admin: &JazzClient) -> PolicyGraphSeedRows {
             row_input!("identity_key" => "00000000-0000-4000-8000-0000000000b0"),
         )
         .expect("insert seed team");
-    wait_edge_batch(admin, seed_batch, "seed team").await;
+    wait_edge_batch(
+        admin,
+        seed_batch.expect("ordinary mutation commits immediately"),
+        "seed team",
+    )
+    .await;
     let (resource_team, _, resource_team_batch) = admin
         .insert("teams", row_input!("identity_key" => "other-sub"))
         .expect("insert resource team");
-    wait_edge_batch(admin, resource_team_batch, "resource team").await;
+    wait_edge_batch(
+        admin,
+        resource_team_batch.expect("ordinary mutation commits immediately"),
+        "resource team",
+    )
+    .await;
     let (_, _, edge_batch) = admin
         .insert(
             "team_team_edges",
             row_input!("child_team" => seed_team, "parent_team" => resource_team),
         )
         .expect("insert team edge");
-    wait_edge_batch(admin, edge_batch, "team edge").await;
+    wait_edge_batch(
+        admin,
+        edge_batch.expect("ordinary mutation commits immediately"),
+        "team edge",
+    )
+    .await;
     let (resource, _, resource_batch) = admin
         .insert("resources", row_input!("label" => "visible resource"))
         .expect("insert resource");
-    wait_edge_batch(admin, resource_batch, "resource").await;
+    wait_edge_batch(
+        admin,
+        resource_batch.expect("ordinary mutation commits immediately"),
+        "resource",
+    )
+    .await;
     let (_, _, access_batch) = admin
         .insert(
             "resource_access_edges",
             row_input!("resource" => resource, "team" => resource_team, "grant_role" => "viewer"),
         )
         .expect("insert resource access edge");
-    wait_edge_batch(admin, access_batch, "resource access").await;
+    wait_edge_batch(
+        admin,
+        access_batch.expect("ordinary mutation commits immediately"),
+        "resource access",
+    )
+    .await;
     let (data_entry, _, data_entry_batch) = admin
         .insert(
             "data_entries",
             row_input!("resource" => resource, "label" => "visible data entry"),
         )
         .expect("insert data entry");
-    wait_edge_batch(admin, data_entry_batch, "data entry").await;
+    wait_edge_batch(
+        admin,
+        data_entry_batch.expect("ordinary mutation commits immediately"),
+        "data entry",
+    )
+    .await;
     let (mapping_rule, _, mapping_rule_batch) = admin
         .insert(
             "mapping_rules",
             row_input!("label" => "visible mapping rule"),
         )
         .expect("insert mapping rule");
-    wait_edge_batch(admin, mapping_rule_batch, "mapping rule").await;
+    wait_edge_batch(
+        admin,
+        mapping_rule_batch.expect("ordinary mutation commits immediately"),
+        "mapping rule",
+    )
+    .await;
     let (_, _, mapping_rule_access_batch) = admin
         .insert(
             "mapping_rule_access_edges",
             row_input!("mapping_rule" => mapping_rule, "team" => resource_team, "grant_role" => "viewer"),
         )
         .expect("insert mapping rule access edge");
-    wait_edge_batch(admin, mapping_rule_access_batch, "mapping rule access").await;
+    wait_edge_batch(
+        admin,
+        mapping_rule_access_batch.expect("ordinary mutation commits immediately"),
+        "mapping rule access",
+    )
+    .await;
     let (data_entry_entry, _, data_entry_entry_batch) = admin
         .insert(
             "data_entry_entries",
             row_input!("data_entry" => data_entry, "label" => "visible data entry child"),
         )
         .expect("insert data entry child");
-    wait_edge_batch(admin, data_entry_entry_batch, "data entry child").await;
+    wait_edge_batch(
+        admin,
+        data_entry_entry_batch.expect("ordinary mutation commits immediately"),
+        "data entry child",
+    )
+    .await;
     let (mapping_rule_entry, _, mapping_rule_entry_batch) = admin
         .insert(
             "mapping_rule_entries",
             row_input!("mapping_rule" => mapping_rule, "label" => "visible mapping rule child"),
         )
         .expect("insert mapping rule child");
-    wait_edge_batch(admin, mapping_rule_entry_batch, "mapping rule child").await;
+    wait_edge_batch(
+        admin,
+        mapping_rule_entry_batch.expect("ordinary mutation commits immediately"),
+        "mapping rule child",
+    )
+    .await;
 
     PolicyGraphSeedRows {
         resource,
@@ -1068,7 +1144,10 @@ async fn edge_server_accepts_mergeable_write_while_core_down_then_promotes() {
                 )
                 .expect("alice inserts while core is down");
             alice
-                .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
+                .wait_for_batch(
+                    batch_id.expect("ordinary mutation commits immediately"),
+                    DurabilityTier::EdgeServer,
+                )
                 .await
                 .expect("edge accepts write while core link is down");
 
@@ -1089,7 +1168,10 @@ async fn edge_server_accepts_mergeable_write_while_core_down_then_promotes() {
                 .await;
 
             alice
-                .wait_for_batch(batch_id, DurabilityTier::GlobalServer)
+                .wait_for_batch(
+                    batch_id.expect("ordinary mutation commits immediately"),
+                    DurabilityTier::GlobalServer,
+                )
                 .await
                 .expect("edge-promoted write reaches global core");
             wait_for_row(

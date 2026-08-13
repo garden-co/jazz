@@ -21,9 +21,14 @@ persistent reopen, pending-write replay, and live sync.
 pnpm --filter jazz-tools build:runtime
 pnpm --filter jazz-rn ubrn:ios
 pnpm --filter jazz-rn ubrn:android
+pnpm --filter jazz-rn prepare
 pnpm --filter todo-client-localfirst-expo native:prebuild
 pnpm --filter todo-client-localfirst-expo build
 ```
+
+`prepare` rebuilds `jazz-rn/lib` after UniFFI regenerates `src/`; Metro resolves
+that package output in the development client, so skipping it can pair fresh
+native symbols with stale JavaScript checksums.
 
 ## iOS simulator E2E
 

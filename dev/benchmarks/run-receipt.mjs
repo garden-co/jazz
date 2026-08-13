@@ -8,6 +8,7 @@
  * smoke.sh.
  */
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -74,6 +75,10 @@ function gitDirty() {
     spawnSync("git", ["-C", root, "diff", "--quiet"]).status !== 0 ||
     spawnSync("git", ["-C", root, "diff", "--cached", "--quiet"]).status !== 0
   );
+}
+function commandVersion(command, args = ["--version"]) {
+  const result = spawnSync(command, args, { encoding: "utf8" });
+  return result.status === 0 ? result.stdout.trim() : "unavailable";
 }
 function rowsFromJson(value) {
   if (Array.isArray(value)) return value.flatMap(rowsFromJson);
@@ -332,6 +337,23 @@ async function main() {
     emitted_json_lines: rows.length,
     invocation: args.invocation,
     log: path.relative(root, log),
+    git_revision: git(["rev-parse", "HEAD"]),
+    git_branch: git(["branch", "--show-current"]),
+    git_dirty: gitDirty(),
+    machine: {
+      platform: os.platform(),
+      release: os.release(),
+      arch: os.arch(),
+      cpu_model: os.cpus()[0]?.model ?? "unknown",
+      logical_cpus: os.cpus().length,
+      total_memory_bytes: os.totalmem(),
+      free_memory_bytes_at_receipt: os.freemem(),
+    },
+    compiler: {
+      rustc: commandVersion("rustc"),
+      cargo: commandVersion("cargo"),
+      node: process.version,
+    },
   });
   fs.writeFileSync(jsonl, `${rows.map((row) => JSON.stringify(row)).join("\n")}\n`);
   appendLedger({

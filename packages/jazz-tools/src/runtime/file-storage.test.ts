@@ -5,7 +5,7 @@ import {
   type FileStorageDb,
 } from "./file-storage.js";
 import { QueryBuilder, QueryOptions, TableProxy } from "./db.js";
-import { WriteResult, JazzClient } from "./client.js";
+import { WriteResult, JazzClient, type BatchId } from "./client.js";
 
 interface StoredFile {
   id: string;
@@ -59,7 +59,7 @@ function makeTable<Row, Init>(table: string): QueryableTable<Row, Init> {
 
 class FakeDb implements FileStorageDb {
   private nextSyntheticId = 1;
-  private nextTransactionId = 1;
+  private nextBatchId = 1;
   readonly inserts: Array<{
     table: string;
     data: Record<string, unknown>;
@@ -69,28 +69,29 @@ class FakeDb implements FileStorageDb {
   readonly queries: BuiltQuery[] = [];
   readonly queryOptions: Array<QueryOptions | undefined> = [];
   readonly files = new Map<string, StoredFile>();
-  readonly #insertsByTransactionId = new Map<string, number>();
+  readonly #insertsByBatchId = new Map<string, number>();
 
   insert<T, Init>(table: TableProxy<T, Init>, data: Init): WriteResult<T> {
-    const transactionId = `transaction-${this.nextTransactionId++}`;
+    const batchId = `batch-${this.nextBatchId++}` as BatchId;
     const row = this.store(table, data);
-    this.#insertsByTransactionId.set(transactionId, this.inserts.length - 1);
+    this.#insertsByBatchId.set(batchId, this.inserts.length - 1);
     const client = {
-      waitForTransaction: async (persistedTransactionId: string, tier: string) => {
-        const insertIndex = this.#insertsByTransactionId.get(persistedTransactionId);
+      waitForTransaction: async (pendingBatchId: BatchId | Promise<BatchId>, tier: string) => {
+        const persistedBatchId = await pendingBatchId;
+        const insertIndex = this.#insertsByBatchId.get(persistedBatchId);
         if (insertIndex === undefined) {
-          throw new Error(`unknown transaction ${persistedTransactionId}`);
+          throw new Error(`unknown batch ${persistedBatchId}`);
         }
         const insert = this.inserts[insertIndex];
         if (!insert) {
-          throw new Error(`missing insert for transaction ${persistedTransactionId}`);
+          throw new Error(`missing insert for batch ${persistedBatchId}`);
         }
         insert.durable = true;
         insert.tier = tier;
       },
     } as unknown as JazzClient;
 
-    return new WriteResult(row as T, transactionId, client);
+    return new WriteResult(row as T, batchId, client);
   }
 
   async one<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T | null> {

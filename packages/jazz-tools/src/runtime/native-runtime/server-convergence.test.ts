@@ -146,6 +146,7 @@ describe("NativeRuntimeAdapter server convergence", () => {
         appId,
         dataDir,
         adminSecret,
+        schema: encodeSchema(schema),
       });
       const published = await publishSchema(server);
 
@@ -158,7 +159,7 @@ describe("NativeRuntimeAdapter server convergence", () => {
       immediateWriter.connectTransport(server.url, { admin_secret: server.adminSecret });
 
       const immediateInsert = immediateWriter.insert("todos", {
-        title: { type: "Text", value: "websocket dynamic activation" },
+        title: { type: "Text", value: "websocket durable restart" },
         done: { type: "Boolean", value: false },
       });
       await waitForPromise(

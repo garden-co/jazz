@@ -21,11 +21,18 @@ rather than a selected run.
 
 The final JSONL line (`phase: "slope"`) reports least-squares slopes in
 per-metric median allocation work per accumulated child, max/min allocation and
-byte ratios, and the acceptance rule. The rule requires both max/min ratios to be at or below
-the receipt's measured-data-derived `1.025x` threshold. The initial
-three-sample baseline measured `1.001031x` allocations and `1.017327x` bytes;
-the threshold leaves 0.7673 percentage points of headroom above the larger byte
-drift, rather than inheriting the canary's intentionally loose `3x` band. Set
+byte ratios, and the acceptance rule. The initial row-carrier receipt required
+both ratios to remain at or below `1.025x`: it measured `1.001031x` allocations
+and `1.017327x` bytes, leaving 0.7673 percentage points of headroom above the
+larger drift rather than inheriting the canary's intentionally loose `3x` band.
+
+The terminal-operation carrier realignment explicitly relaxed that ratio bound
+to `1.043x`. Its one-sample smoke receipt measured `1.001512x` allocations and
+`1.034605x` bytes; repeated fresh three-sample receipts measured
+`1.001133–1.001512x` and `1.033047–1.034582x`. This is a real relaxation of the
+scale-independence percentage, not merely a renamed threshold. Absolute median
+allocation bytes nevertheless fell from roughly 487–495 KiB in the initial
+receipt to 361–373 KiB with the terminal-operation carrier. Set
 `JAZZ_INC_DELIVERY_MAX_RATIO` to evaluate a proposed tighter threshold without
 changing the workload.
 

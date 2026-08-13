@@ -35,14 +35,13 @@ enum CanonicalEvent {
         added: Vec<CanonicalRow>,
         updated: Vec<CanonicalRow>,
         removed: Vec<(String, RowUuid)>,
-        added_related: Vec<CanonicalRow>,
-        added_edges: BTreeSet<RelationEdge>,
-        removed_edges: BTreeSet<RelationEdge>,
         settled: bool,
         tier: DurabilityTier,
     },
     Closed,
 }
+
+type NamedMutation = (&'static str, Box<dyn Fn(&Db<RocksDbStorage>)>);
 
 fn row(seed: u64) -> RowUuid {
     let mut bytes = [0_u8; 16];
@@ -86,8 +85,7 @@ fn query() -> Query {
         .array_subquery(
             ArraySubquery::new("children", "children", "parent_id", "id")
                 .select(["label", "rank"])
-                .order_by("rank", OrderDirection::Asc)
-                .unbounded(),
+                .order_by("rank", OrderDirection::Asc),
         )
 }
 
@@ -223,32 +221,20 @@ fn canonical_event(schema: &JazzSchema, event: &SubscriptionEvent) -> CanonicalE
             added,
             updated,
             removed,
-            added_related,
-            added_edges,
-            removed_edges,
             settled,
             tier,
-        } => {
-            let mut added_related = added_related
+            ..
+        } => CanonicalEvent::Delta {
+            reset: *reset,
+            added: added.iter().map(|row| canonical_row(schema, row)).collect(),
+            updated: updated
                 .iter()
                 .map(|row| canonical_row(schema, row))
-                .collect::<Vec<_>>();
-            sort_rows(&mut added_related);
-            CanonicalEvent::Delta {
-                reset: *reset,
-                added: added.iter().map(|row| canonical_row(schema, row)).collect(),
-                updated: updated
-                    .iter()
-                    .map(|row| canonical_row(schema, row))
-                    .collect(),
-                removed: canonical_removed(removed.clone()),
-                added_related,
-                added_edges: added_edges.iter().cloned().collect(),
-                removed_edges: removed_edges.iter().cloned().collect(),
-                settled: *settled,
-                tier: *tier,
-            }
-        }
+                .collect(),
+            removed: canonical_removed(removed.clone()),
+            settled: *settled,
+            tier: *tier,
+        },
         SubscriptionEvent::Rejected { reason } => {
             panic!("subscription rejected unexpectedly: {reason:?}")
         }
@@ -263,33 +249,14 @@ fn apply_subscription_event(snapshot: &mut RelationSnapshot, event: Subscription
             added,
             updated,
             removed,
-            added_related,
-            added_edges,
-            removed_edges,
             ..
         } => {
             if reset {
                 snapshot.rows.clear();
                 snapshot.edges.clear();
                 snapshot.root_count = 0;
-                let related_keys = added_edges
-                    .iter()
-                    .map(|edge| (edge.target_table.as_str(), edge.target_row))
-                    .collect::<BTreeSet<_>>();
-                let mut roots = Vec::new();
-                let mut related = Vec::new();
-                for row in added {
-                    let row = row.row;
-                    if related_keys.contains(&(row.table(), row.row_uuid())) {
-                        related.push(row);
-                    } else {
-                        roots.push(row);
-                    }
-                }
-                snapshot.root_count = roots.len();
-                snapshot.rows = roots;
-                snapshot.rows.extend(related);
-                snapshot.edges = added_edges;
+                snapshot.rows = added.into_iter().map(|row| row.row).collect();
+                snapshot.root_count = snapshot.rows.len();
                 return;
             }
 
@@ -332,52 +299,6 @@ fn apply_subscription_event(snapshot: &mut RelationSnapshot, event: Subscription
                 } else {
                     snapshot.rows.insert(snapshot.root_count, row);
                     snapshot.root_count += 1;
-                }
-            }
-
-            for row in added_related {
-                if snapshot
-                    .rows
-                    .iter()
-                    .take(snapshot.root_count)
-                    .any(|root| root.table() == row.table() && root.row_uuid() == row.row_uuid())
-                {
-                    continue;
-                }
-                if let Some(position) =
-                    snapshot
-                        .rows
-                        .iter()
-                        .skip(snapshot.root_count)
-                        .position(|current| {
-                            current.table() == row.table() && current.row_uuid() == row.row_uuid()
-                        })
-                {
-                    snapshot.rows[snapshot.root_count + position] = row;
-                } else {
-                    snapshot.rows.push(row);
-                }
-            }
-
-            snapshot
-                .edges
-                .retain(|edge| !removed_edges.iter().any(|removed| removed == edge));
-            for edge in added_edges {
-                if !snapshot.edges.iter().any(|current| current == &edge) {
-                    snapshot.edges.push(edge);
-                }
-            }
-
-            let mut index = snapshot.root_count;
-            while index < snapshot.rows.len() {
-                let row = &snapshot.rows[index];
-                let still_referenced = snapshot.edges.iter().any(|edge| {
-                    edge.target_table == row.table() && edge.target_row == row.row_uuid()
-                });
-                if still_referenced {
-                    index += 1;
-                } else {
-                    snapshot.rows.remove(index);
                 }
             }
         }
@@ -475,7 +396,7 @@ fn reopen_from_rebuild_and_persisted_placeholder_are_incrementally_equivalent() 
         "persisted placeholder open",
     );
 
-    let mutations: Vec<(&str, Box<dyn Fn(&Db<RocksDbStorage>)>)> = vec![
+    let mutations: Vec<NamedMutation> = vec![
         (
             "related row insert",
             Box::new(|db| {

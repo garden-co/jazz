@@ -100,6 +100,16 @@ interface NativeModuleInterface {
     optsJson: Uint8Array,
     uniffi_out_err: UniffiRustCallStatus
   ): Uint8Array;
+  ubrn_uniffi_jazz_rn_fn_method_rndb_attach_exclusive_tx(
+    ptr: bigint,
+    openBatchId: Uint8Array,
+    uniffi_out_err: UniffiRustCallStatus
+  ): bigint;
+  ubrn_uniffi_jazz_rn_fn_method_rndb_attach_mergeable_tx(
+    ptr: bigint,
+    openBatchId: Uint8Array,
+    uniffi_out_err: UniffiRustCallStatus
+  ): bigint;
   ubrn_uniffi_jazz_rn_fn_method_rndb_attach_query(
     ptr: bigint,
     query: bigint,
@@ -113,47 +123,35 @@ interface NativeModuleInterface {
     optsJson: Uint8Array,
     uniffi_out_err: UniffiRustCallStatus
   ): bigint;
-  ubrn_uniffi_jazz_rn_fn_method_rndb_can_delete_for_identity(
+  ubrn_uniffi_jazz_rn_fn_method_rndb_begin_transaction(
     ptr: bigint,
-    table: Uint8Array,
-    rowId: Uint8Array,
+    openBatchId: Uint8Array,
+    kind: Uint8Array,
     author: Uint8Array,
     uniffi_out_err: UniffiRustCallStatus
-  ): number;
-  ubrn_uniffi_jazz_rn_fn_method_rndb_can_insert_encoded(
-    ptr: bigint,
-    table: Uint8Array,
-    cells: Uint8Array,
-    uniffi_out_err: UniffiRustCallStatus
-  ): number;
-  ubrn_uniffi_jazz_rn_fn_method_rndb_can_insert_encoded_for_identity(
-    ptr: bigint,
-    table: Uint8Array,
-    cells: Uint8Array,
-    author: Uint8Array,
-    uniffi_out_err: UniffiRustCallStatus
-  ): number;
-  ubrn_uniffi_jazz_rn_fn_method_rndb_can_read_for_identity(
-    ptr: bigint,
-    table: Uint8Array,
-    rowId: Uint8Array,
-    author: Uint8Array,
-    uniffi_out_err: UniffiRustCallStatus
-  ): number;
-  ubrn_uniffi_jazz_rn_fn_method_rndb_can_update_encoded_for_identity(
-    ptr: bigint,
-    table: Uint8Array,
-    rowId: Uint8Array,
-    patch: Uint8Array,
-    author: Uint8Array,
-    uniffi_out_err: UniffiRustCallStatus
-  ): number;
+  ): void;
   ubrn_uniffi_jazz_rn_fn_method_rndb_close(
     ptr: bigint,
     uniffi_out_err: UniffiRustCallStatus
   ): void;
+  ubrn_uniffi_jazz_rn_fn_method_rndb_commit_transaction(
+    ptr: bigint,
+    openBatchId: Uint8Array,
+    kind: Uint8Array,
+    uniffi_out_err: UniffiRustCallStatus
+  ): bigint;
   ubrn_uniffi_jazz_rn_fn_method_rndb_connect_upstream(
     ptr: bigint,
+    uniffi_out_err: UniffiRustCallStatus
+  ): bigint;
+  ubrn_uniffi_jazz_rn_fn_method_rndb_connect_upstream_with_session(
+    ptr: bigint,
+    protocolVersion: number,
+    features: number,
+    remoteNode: Uint8Array,
+    remoteEpoch: bigint,
+    localNode: Uint8Array,
+    localEpoch: bigint,
     uniffi_out_err: UniffiRustCallStatus
   ): bigint;
   ubrn_uniffi_jazz_rn_fn_method_rndb_delete(
@@ -178,8 +176,13 @@ interface NativeModuleInterface {
   ): void;
   ubrn_uniffi_jazz_rn_fn_method_rndb_exclusive_tx(
     ptr: bigint,
+    openBatchId: Uint8Array,
     uniffi_out_err: UniffiRustCallStatus
   ): bigint;
+  ubrn_uniffi_jazz_rn_fn_method_rndb_free(
+    ptr: bigint,
+    uniffi_out_err: UniffiRustCallStatus
+  ): void;
   ubrn_uniffi_jazz_rn_fn_method_rndb_insert_with_id_encoded(
     ptr: bigint,
     table: Uint8Array,
@@ -205,10 +208,12 @@ interface NativeModuleInterface {
   ): Uint8Array;
   ubrn_uniffi_jazz_rn_fn_method_rndb_mergeable_tx(
     ptr: bigint,
+    openBatchId: Uint8Array,
     uniffi_out_err: UniffiRustCallStatus
   ): bigint;
   ubrn_uniffi_jazz_rn_fn_method_rndb_mergeable_tx_for_identity(
     ptr: bigint,
+    openBatchId: Uint8Array,
     author: Uint8Array,
     uniffi_out_err: UniffiRustCallStatus
   ): bigint;
@@ -222,6 +227,11 @@ interface NativeModuleInterface {
     attachment: bigint,
     uniffi_out_err: UniffiRustCallStatus
   ): number;
+  ubrn_uniffi_jazz_rn_fn_method_rndb_register_schema(
+    ptr: bigint,
+    schema: Uint8Array,
+    uniffi_out_err: UniffiRustCallStatus
+  ): bigint;
   ubrn_uniffi_jazz_rn_fn_method_rndb_restore_encoded(
     ptr: bigint,
     table: Uint8Array,
@@ -239,6 +249,11 @@ interface NativeModuleInterface {
     updatedAtMsValue: Uint8Array,
     uniffi_out_err: UniffiRustCallStatus
   ): bigint;
+  ubrn_uniffi_jazz_rn_fn_method_rndb_rollback_transaction(
+    ptr: bigint,
+    openBatchId: Uint8Array,
+    uniffi_out_err: UniffiRustCallStatus
+  ): void;
   ubrn_uniffi_jazz_rn_fn_method_rndb_set_identity_claims(
     ptr: bigint,
     author: Uint8Array,
@@ -443,6 +458,10 @@ interface NativeModuleInterface {
     handle: bigint,
     uniffi_out_err: UniffiRustCallStatus
   ): void;
+  ubrn_uniffi_jazz_rn_fn_method_rnwrite_batch_id(
+    ptr: bigint,
+    uniffi_out_err: UniffiRustCallStatus
+  ): Uint8Array;
   ubrn_uniffi_jazz_rn_fn_method_rnwrite_close(
     ptr: bigint,
     uniffi_out_err: UniffiRustCallStatus
@@ -632,19 +651,20 @@ interface NativeModuleInterface {
   ubrn_uniffi_jazz_rn_checksum_method_rndb_all_relation_query_for_identity(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rndb_all_relation_snapshot(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rndb_all_relation_snapshot_for_identity(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rndb_attach_exclusive_tx(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rndb_attach_mergeable_tx(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rndb_attach_query(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rndb_attach_query_for_identity(): number;
-  ubrn_uniffi_jazz_rn_checksum_method_rndb_can_delete_for_identity(): number;
-  ubrn_uniffi_jazz_rn_checksum_method_rndb_can_insert_encoded(): number;
-  ubrn_uniffi_jazz_rn_checksum_method_rndb_can_insert_encoded_for_identity(): number;
-  ubrn_uniffi_jazz_rn_checksum_method_rndb_can_read_for_identity(): number;
-  ubrn_uniffi_jazz_rn_checksum_method_rndb_can_update_encoded_for_identity(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rndb_begin_transaction(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rndb_close(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rndb_commit_transaction(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rndb_connect_upstream(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rndb_connect_upstream_with_session(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rndb_delete(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rndb_delete_for_identity(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rndb_detach_query(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rndb_exclusive_tx(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rndb_free(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rndb_insert_with_id_encoded(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rndb_insert_with_id_encoded_for_identity(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rndb_local_current_row(): number;
@@ -652,8 +672,10 @@ interface NativeModuleInterface {
   ubrn_uniffi_jazz_rn_checksum_method_rndb_mergeable_tx_for_identity(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rndb_prepare_query(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rndb_query_attachment_is_covered(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rndb_register_schema(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rndb_restore_encoded(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rndb_restore_encoded_for_identity(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rndb_rollback_transaction(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rndb_set_identity_claims(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rndb_set_tick_scheduler(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rndb_subscribe(): number;
@@ -680,6 +702,7 @@ interface NativeModuleInterface {
   ubrn_uniffi_jazz_rn_checksum_method_rntx_rollback(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rntx_update_encoded(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rntx_upsert_encoded(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rnwrite_batch_id(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnwrite_close(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnwrite_payload(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnwrite_register_write_state_waiter(): number;

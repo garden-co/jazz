@@ -11,7 +11,7 @@ use jazz::db::{
 use jazz::groove::records::Value;
 use jazz::groove::schema::{ColumnSchema, ColumnType};
 use jazz::groove::storage::MemoryStorage;
-use jazz::ids::{AuthorId, NodeUuid};
+use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::query::Query;
 use jazz::schema::{JazzSchema, TableSchema};
 use jazz::serving::{InMemoryServerShell, InMemoryServerShellConfig, NodeRole, ServerSession};
@@ -38,7 +38,10 @@ fn identity(node_byte: u8, author: AuthorId) -> DbIdentity {
 fn schema() -> JazzSchema {
     JazzSchema::new([TableSchema::new(
         "todos",
-        [ColumnSchema::new("title", ColumnType::String)],
+        [
+            ColumnSchema::new("title", ColumnType::String),
+            ColumnSchema::new("completed", ColumnType::Bool),
+        ],
     )])
 }
 
@@ -220,5 +223,104 @@ fn core_shell_client_upload_still_reports_global_immediately() {
     assert_eq!(
         visible_titles(&alice, DurabilityTier::Global),
         ["core global"]
+    );
+}
+
+/// Black-box regression for authored-column carriage across the public Db and
+/// sync/wire path. Bob explicitly writes the unchanged base title at the newer
+/// timestamp; that authored write must participate in per-column LWW and beat
+/// Alice's older concurrent title change after both commits cross the wire,
+/// without claiming Alice's independent `completed` edit.
+///
+/// Planted positive: removing `MergeableCommit::authored_columns` from the
+/// partial-update lowering makes Bob's entire materialized row look authored;
+/// Bob still wins `title`, but incorrectly reverts `completed` to false.
+#[test]
+fn explicit_unchanged_partial_write_survives_sync_and_wins_lww() {
+    let schema = schema();
+    let mut core = InMemoryServerShell::start(
+        InMemoryServerShellConfig::new(schema.clone(), identity(0xc1, AuthorId::SYSTEM))
+            .with_role(NodeRole::Core),
+    )
+    .unwrap();
+    let alice = open_db(0xa2, author(0xa2), &schema);
+    let bob = open_db(0xb2, author(0xb2), &schema);
+    let alice_wire = QueuedWireTransport::default();
+    let bob_wire = QueuedWireTransport::default();
+    let alice_session = connect_client_to_edge(&mut core, &alice, &alice_wire, author(0xa2));
+    let bob_session = connect_client_to_edge(&mut core, &bob, &bob_wire, author(0xb2));
+
+    // Keep every transaction identity distinct and the LWW order explicit:
+    // TxId includes each client's already-distinct node id plus this HLC time.
+    let row = RowUuid::from_bytes([0xd2; 16]);
+    alice
+        .insert_with_id_at_ms(
+            "todos",
+            row,
+            BTreeMap::from([
+                ("title".to_owned(), Value::String("base".to_owned())),
+                ("completed".to_owned(), Value::Bool(false)),
+            ]),
+            100,
+        )
+        .unwrap();
+    pump_client_edge(&alice, &alice_wire, &mut core, alice_session);
+
+    let prepared = bob.prepare_query(&Query::from("todos")).unwrap();
+    let _subscription = block_on(bob.subscribe(&prepared, ReadOpts::default())).unwrap();
+    let alice_prepared = alice.prepare_query(&Query::from("todos")).unwrap();
+    let _alice_subscription =
+        block_on(alice.subscribe(&alice_prepared, ReadOpts::default())).unwrap();
+    pump_client_edge(&bob, &bob_wire, &mut core, bob_session);
+    pump_client_edge(&alice, &alice_wire, &mut core, alice_session);
+
+    // Neither client is pumped after these writes until both heads exist, so
+    // they remain concurrent children of the shared t=100 base.
+    alice
+        .update_at_ms(
+            "todos",
+            row,
+            BTreeMap::from([
+                ("title".to_owned(), Value::String("alice-change".to_owned())),
+                ("completed".to_owned(), Value::Bool(true)),
+            ]),
+            200,
+        )
+        .unwrap();
+    let explicit_write = bob
+        .update_at_ms(
+            "todos",
+            row,
+            BTreeMap::from([("title".to_owned(), Value::String("base".to_owned()))]),
+            300,
+        )
+        .unwrap();
+    // An empty partial update is not a content mutation. It reuses the current
+    // write identity instead of emitting a newer legacy "all materialized cells
+    // authored" version that could clobber Alice's cells during reconciliation.
+    let no_op = bob
+        .update_at_ms("todos", row, BTreeMap::new(), 400)
+        .expect("empty patch remains a safe no-op");
+    assert_eq!(no_op.mergeable_tx_id(), explicit_write.mergeable_tx_id());
+
+    pump_client_edge(&alice, &alice_wire, &mut core, alice_session);
+    pump_client_edge(&bob, &bob_wire, &mut core, bob_session);
+    pump_client_edge(&alice, &alice_wire, &mut core, alice_session);
+    assert_eq!(visible_titles(&alice, DurabilityTier::Global), ["base"]);
+    let prepared = alice.prepare_query(&Query::from("todos")).unwrap();
+    let rows = block_on(alice.all(
+        &prepared,
+        ReadOpts {
+            tier: DurabilityTier::Global,
+            local_updates: LocalUpdates::Deferred,
+            propagation: Propagation::Full,
+            ..ReadOpts::default()
+        },
+    ))
+    .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].cell(&schema.tables[0], "completed"),
+        Some(Value::Bool(true))
     );
 }

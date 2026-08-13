@@ -26,7 +26,8 @@
     "tag": "alpha"
   },
   "scripts": {
-    "build": "wasm-pack build --target web --release",
-    "build:profiling": "wasm-pack build --target web --profiling"
+    "build": "node ../../dev/artifacts/build.mjs wasm release",
+    "build:fast": "node ../../dev/artifacts/build.mjs wasm fast",
+    "build:profiling": "node ../../dev/artifacts/build.mjs wasm profiling"
   }
 }

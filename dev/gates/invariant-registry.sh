@@ -15,7 +15,9 @@ rows=0
 missing_tests=0
 uncited_covered=0
 now_untested=0
-declare -A known_functions=()
+# Newline-delimited sets keep this gate compatible with macOS's system Bash
+# 3.2, which does not support associative arrays.
+known_functions=$'\n'
 
 fail() {
     printf 'invariant-registry: ERROR: %s\n' "$*" >&2
@@ -135,7 +137,7 @@ index_test_functions() {
     while IFS= read -r source_line; do
         if [[ $source_line =~ fn[[:space:]]+([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*\( ]]; then
             function=${BASH_REMATCH[1]}
-            known_functions[$function]=1
+            known_functions+="${function}"$'\n'
         fi
     done <<< "$output"
 }
@@ -158,7 +160,7 @@ check_test_citations() {
         citation=${BASH_REMATCH[0]}
         remaining=${remaining#*"$citation"}
         function=${citation##*::}
-        if [[ ! $function =~ ^[A-Za-z_][A-Za-z0-9_]*$ || -z ${known_functions[$function]+present} ]]; then
+        if [[ ! $function =~ ^[A-Za-z_][A-Za-z0-9_]*$ || $known_functions != *$'\n'"$function"$'\n'* ]]; then
             printf 'invariant-registry: missing test: %s:%s: %s\n' "$registry" "$id" "$citation" >&2
             missing_tests=$((missing_tests + 1))
             failures=$((failures + 1))
@@ -168,7 +170,7 @@ check_test_citations() {
 
 check_registry() {
     local registry=$1 record id invariant tests impl status coverage registry_rows=0
-    local -A seen_ids=()
+    local seen_ids=$'\n'
     parse_registry "$registry"
     while IFS=$'\x1f' read -r id invariant tests impl status coverage; do
         [[ -n $id ]] || continue
@@ -176,10 +178,10 @@ check_registry() {
             fail "$registry: invalid invariant id '$id'"
             continue
         fi
-        if [[ -n ${seen_ids[$id]+present} ]]; then
+        if [[ $seen_ids == *$'\n'"$id"$'\n'* ]]; then
             fail "$registry: duplicate invariant id '$id'"
         else
-            seen_ids[$id]=1
+            seen_ids+="${id}"$'\n'
         fi
         if [[ -z $status || -z $coverage ]]; then
             fail "$registry:$id: status and coverage must not be empty"

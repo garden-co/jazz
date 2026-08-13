@@ -19,8 +19,13 @@ declare module "jazz-wasm" {
 
   export class WasmPreparedQuery {}
   export class QueryAttachment {}
+  export class WasmPermissionAdviceRequest {
+    readonly promise: Promise<"allowed" | "denied" | "unknown">;
+    cancel(): void;
+  }
 
   export class WasmWrite {
+    readonly batchId: string;
     readonly payload: Uint8Array;
     writeState(): unknown;
     nextWriteStateChange(): Promise<void>;
@@ -70,6 +75,13 @@ declare module "jazz-wasm" {
     static openBrowser(namespace: string, schema: Uint8Array, config: Uint8Array): Promise<WasmDb>;
     static destroyBrowserStorage(namespace: string): Promise<void>;
 
+    registerSchema(schema: Uint8Array): WasmDb;
+    beginTransaction(openBatchId: string, kind: string, author?: Uint8Array | null): void;
+    commitTransaction(openBatchId: string, kind?: string | null): WasmWrite;
+    rollbackTransaction(openBatchId: string): void;
+    attachMergeableTx(openBatchId: string): WasmTx;
+    attachExclusiveTx(openBatchId: string): WasmTx;
+
     prepareQuery(query: Uint8Array): WasmPreparedQuery;
     all(query: WasmPreparedQuery, opts: unknown): Uint8Array;
     one(query: WasmPreparedQuery, opts: unknown): Uint8Array;
@@ -93,9 +105,12 @@ declare module "jazz-wasm" {
     ): ReadableStream<unknown>;
 
     insertEncoded(table: string, cells: Uint8Array): WasmWrite;
-    canInsertEncoded(table: string, cells: Uint8Array): boolean;
-    canInsertEncodedForIdentity(table: string, cells: Uint8Array, author: Uint8Array): boolean;
-    canReadForIdentity(table: string, rowId: Uint8Array, author: Uint8Array): boolean;
+    canInsertEncoded(table: string, cells: Uint8Array): "allowed" | "denied" | "unknown";
+    requestInsertPermissionAdviceEncoded(
+      table: string,
+      cells: Uint8Array,
+    ): WasmPermissionAdviceRequest;
+    requestReadPermissionAdvice(table: string, rowId: Uint8Array): WasmPermissionAdviceRequest;
     insertWithIdEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): WasmWrite;
     insertWithIdEncodedForIdentity(
       table: string,
@@ -110,13 +125,12 @@ declare module "jazz-wasm" {
       patch: Uint8Array,
       author: Uint8Array,
     ): WasmWrite;
-    canUpdateEncodedForIdentity(
+    requestUpdatePermissionAdviceEncoded(
       table: string,
       rowId: Uint8Array,
       patch: Uint8Array,
-      author: Uint8Array,
-    ): boolean;
-    canDeleteForIdentity(table: string, rowId: Uint8Array, author: Uint8Array): boolean;
+    ): WasmPermissionAdviceRequest;
+    requestDeletePermissionAdvice(table: string, rowId: Uint8Array): WasmPermissionAdviceRequest;
     upsertEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): WasmWrite;
     upsertEncodedForIdentity(
       table: string,
@@ -142,9 +156,17 @@ declare module "jazz-wasm" {
     tick(): void;
     close(): boolean;
     connectUpstream(): WasmTransport;
+    connectUpstreamWithSession(
+      protocolVersion: number,
+      features: number,
+      remoteNode: Uint8Array,
+      remoteEpoch: bigint,
+      localNode: Uint8Array,
+      localEpoch: bigint,
+    ): WasmTransport;
     acceptSubscriber(identity: Uint8Array): WasmTransport;
-    mergeableTx(): WasmTx;
-    mergeableTxForIdentity(author: Uint8Array): WasmTx;
-    exclusiveTx(): WasmTx;
+    mergeableTx(openBatchId: string): WasmTx;
+    mergeableTxForIdentity(openBatchId: string, author: Uint8Array): WasmTx;
+    exclusiveTx(openBatchId: string): WasmTx;
   }
 }

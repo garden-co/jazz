@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::mem;
 
-use groove::ivm::{MultisinkDeltas, RecordDeltas};
+use groove::ivm::{MultisinkDeltas, RecordDeltas, TerminalOperation};
 use groove::records::{BorrowedRecord, OwnedRecord, RecordDescriptor, RecordProjector, Value};
 
 use super::codec::{
@@ -17,7 +17,7 @@ use super::query_engine::{
 use crate::ids::{AuthorId, NodeAlias, NodeUuid, RowUuid};
 use crate::protocol::{
     ProgramFactEntry, RealRowMemberEntry, RelationEdgeEntry, ResultMemberEntry,
-    ResultMemberPayloadEntry, ResultRowLayer, RowVersionRefEntry,
+    ResultMemberPayloadEntry, ResultRowLayer, RowVersionRefEntry, SyntheticReplacementToken,
 };
 use crate::schema::TableSchema;
 use crate::time::{GlobalSeq, TxTime};
@@ -125,6 +125,9 @@ pub(crate) struct ResultTransitions {
     /// Root occurrences whose retained collector record changed in this tick.
     /// The future structured carrier can render exactly these parents.
     pub(crate) structured_app_row_changes: BTreeSet<RowUuid>,
+    /// Generic Groove terminal patches. These bypass relation/result assembly
+    /// and are forwarded unchanged to the subscription boundary.
+    pub(crate) terminal_operations: Vec<TerminalOperation>,
     pub(crate) allow_storage_witness_fallback: bool,
     pub(crate) observed_delta_batches: usize,
     pub(crate) observed_result_delta_batches: usize,
@@ -168,6 +171,9 @@ enum MaintainedTerminalKind {
     ReplacementDeletion(VersionWitnessSchema),
     RelationEdge(RelationEdgeSchema),
     StructuredAppRows(AppRowSchema),
+    /// Public aggregate rows are a one-shot output sibling. Maintained state
+    /// is driven by the typed AggregateResult fact terminal instead.
+    IgnoredAggregateAppRows,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -210,6 +216,9 @@ impl MaintainedSubscriptionView {
         node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
     ) -> Result<ResultTransitions, super::Error> {
         let kind = schemas.get(sink)?;
+        if matches!(kind, MaintainedTerminalKind::IgnoredAggregateAppRows) {
+            return Ok(ResultTransitions::default());
+        }
         let observed_result_delta_batch = !deltas.is_empty() && kind.is_result_terminal();
         let mut decode_plan_cache = VersionDecodePlanCache::new();
         let decoded = deltas
@@ -240,6 +249,16 @@ impl MaintainedSubscriptionView {
         node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
     ) -> Result<ResultTransitions, super::Error> {
         let mut transitions = ResultTransitions::default();
+        for (sink, terminal) in &deltas.terminal_sinks {
+            if matches!(
+                schemas.get(sink)?,
+                MaintainedTerminalKind::StructuredAppRows(_)
+            ) {
+                transitions
+                    .terminal_operations
+                    .extend(terminal.operations.iter().cloned());
+            }
+        }
         for (sink, deltas) in deltas.sinks {
             let delta_transitions =
                 self.apply_typed_deltas(&sink, &deltas, schemas, tables, node_aliases)?;
@@ -456,6 +475,13 @@ impl MaintainedSubscriptionView {
             .next()
     }
 
+    pub(crate) fn structured_app_rows(&self) -> Vec<(RowUuid, OwnedRecord)> {
+        self.structured_app_rows
+            .keys()
+            .filter_map(|root| self.structured_app_row(*root).map(|record| (*root, record)))
+            .collect()
+    }
+
     fn apply_structured_app_row_delta(&mut self, root: RowUuid, record: OwnedRecord, weight: i64) {
         self.structured_app_row_descriptor = Some(*record.descriptor());
         let records = self.structured_app_rows.entry(root).or_default();
@@ -470,6 +496,35 @@ impl MaintainedSubscriptionView {
         }
     }
 
+    /// Rebase aggregate terminal state after an authoritative remote reset.
+    /// The local IVM may still emit the matching before/after pair while its
+    /// source catches up; retaining an obsolete synthetic revision here would
+    /// otherwise turn that harmless pair into a later public removal.
+    pub(crate) fn replace_aggregate_result_state(
+        &mut self,
+        members: &BTreeSet<ResultMemberEntry>,
+        facts: &BTreeSet<ProgramFactEntry>,
+    ) {
+        self.result_weights
+            .retain(|member, _| !matches!(member, ResultMemberEntry::Synthetic { .. }));
+        self.result_payloads
+            .retain(|member, _| !matches!(member, ResultMemberEntry::Synthetic { .. }));
+        for member in members {
+            if matches!(member, ResultMemberEntry::Synthetic { .. }) {
+                self.result_weights.insert(member.clone(), 1);
+            }
+        }
+        for fact in facts {
+            let ProgramFactEntry::ResultPayload(payload) = fact else {
+                continue;
+            };
+            if matches!(payload.member, ResultMemberEntry::Synthetic { .. }) {
+                self.result_payloads
+                    .insert(payload.member.clone(), payload.clone());
+            }
+        }
+    }
+
     fn apply_result_delta(
         &mut self,
         entry: ResultMemberEntry,
@@ -481,13 +536,20 @@ impl MaintainedSubscriptionView {
         let new = old + weight;
         if old <= 0 && new > 0 {
             transitions.adds.push(entry.clone());
-            transitions
-                .result_payload_adds
-                .push((entry.clone(), payload.clone()));
+            if entry
+                .as_real_row()
+                .is_some_and(|row| row.row_digest.is_some())
+            {
+                transitions
+                    .result_payload_adds
+                    .push((entry.clone(), payload.clone()));
+                self.result_payloads.insert(entry.clone(), payload);
+            }
         }
         if old > 0 && new <= 0 {
             transitions.removes.push(entry.clone());
             transitions.result_payload_removes.push(entry.clone());
+            self.result_payloads.remove(&entry);
         }
         if new == 0 {
             self.result_weights.remove(&entry);
@@ -500,24 +562,21 @@ impl MaintainedSubscriptionView {
         &mut self,
         member: ResultMemberEntry,
         payload: ResultMemberPayloadEntry,
-        synthetic: &super::query_engine::SyntheticResultMembershipSchema,
-        value_fields: &[String],
+        _synthetic: &super::query_engine::SyntheticResultMembershipSchema,
+        _value_fields: &[String],
         weight: i64,
         transitions: &mut ResultTransitions,
     ) -> Result<(), super::Error> {
         let (old_member, old_payload) = self.aggregate_payload_for_stable_member(&member);
-        let materialized = materialize_aggregate_payload_delta(
-            old_payload.as_ref(),
-            payload,
-            synthetic,
-            value_fields,
-            weight,
-        )?;
-        if aggregate_payload_is_empty(&materialized, value_fields)? {
-            if let Some(old_member) = old_member {
-                transitions.removes.push(old_member.clone());
-                self.result_weights.remove(&old_member);
-                if let Some(existing) = self.result_payloads.remove(&old_member) {
+        if weight < 0 {
+            // Groove's aggregate operator emits complete before/after group
+            // rows. A retraction therefore removes only the payload it names;
+            // if its replacement is already current, it is stale.
+            if old_member.as_ref() == Some(&member) {
+                transitions.removes.push(member.clone());
+                self.result_weights.remove(&member);
+                if let Some(existing) = self.result_payloads.remove(&member) {
+                    transitions.result_payload_removes.push(member.clone());
                     transitions
                         .program_fact_removes
                         .push(ProgramFactEntry::ResultPayload(existing));
@@ -525,31 +584,30 @@ impl MaintainedSubscriptionView {
             }
             return Ok(());
         }
+
         if let Some(old_member) = old_member
-            && old_member != materialized.member
+            && old_member != member
         {
             transitions.removes.push(old_member.clone());
             self.result_weights.remove(&old_member);
-            if let Some(existing) = self.result_payloads.remove(&old_member) {
+            if let Some(existing) = self.result_payloads.remove(&old_member).or(old_payload) {
+                transitions.result_payload_removes.push(old_member.clone());
                 transitions
                     .program_fact_removes
                     .push(ProgramFactEntry::ResultPayload(existing));
             }
         }
-        let old = self
-            .result_weights
-            .get(&materialized.member)
-            .copied()
-            .unwrap_or(0);
-        if old <= 0 {
-            transitions.adds.push(materialized.member.clone());
+        if self.result_weights.get(&member).copied().unwrap_or(0) <= 0 {
+            transitions.adds.push(member.clone());
         }
         transitions
             .program_fact_adds
-            .push(ProgramFactEntry::ResultPayload(materialized.clone()));
-        self.result_payloads
-            .insert(materialized.member.clone(), materialized.clone());
-        self.result_weights.insert(materialized.member, 1);
+            .push(ProgramFactEntry::ResultPayload(payload.clone()));
+        transitions
+            .result_payload_adds
+            .push((member.clone(), payload.clone()));
+        self.result_payloads.insert(member.clone(), payload);
+        self.result_weights.insert(member, 1);
         Ok(())
     }
 
@@ -600,6 +658,11 @@ impl MaintainedTerminalSchemas {
                     sinks.insert(
                         terminal.sink.clone(),
                         MaintainedTerminalKind::StructuredAppRows(rows.clone()),
+                    );
+                } else {
+                    sinks.insert(
+                        terminal.sink.clone(),
+                        MaintainedTerminalKind::IgnoredAggregateAppRows,
                     );
                 }
                 continue;
@@ -695,6 +758,9 @@ fn decode_typed_terminal_record(
     decode_plan_cache: &mut VersionDecodePlanCache,
 ) -> Result<DecodedMaintainedEvent, super::Error> {
     match kind {
+        MaintainedTerminalKind::IgnoredAggregateAppRows => {
+            unreachable!("ignored aggregate app-row terminals are filtered before record decoding")
+        }
         MaintainedTerminalKind::ResultCurrent(schema) => {
             let table_name = match record.get_idx(field_idx(record, &schema.table_field)?)? {
                 Value::String(value) => value,
@@ -721,7 +787,26 @@ fn decode_typed_terminal_record(
                     "maintained result membership occurrence must include its root row",
                 ));
             };
-            let occurrence_id = OutputOccurrenceId::new(*root, joined.iter().copied());
+            let union_arms = schema
+                .occurrence_union_arm_fields
+                .iter()
+                .map(|(position, field)| {
+                    let label = match record.get_idx(field_idx(record, field)?)? {
+                        Value::String(label) if !label.is_empty() => label.clone(),
+                        _ => {
+                            return Err(super::Error::InvalidStoredValue(
+                                "maintained result union arm must be a non-empty string",
+                            ));
+                        }
+                    };
+                    Ok((*position, label))
+                })
+                .collect::<Result<Vec<_>, super::Error>>()?;
+            let occurrence_id =
+                OutputOccurrenceId::with_union_arms(*root, joined.iter().copied(), union_arms)
+                    .ok_or(super::Error::InvalidStoredValue(
+                        "maintained result union occurrence carrier is malformed",
+                    ))?;
             let (tx_time_field, tx_node_field) = match &schema.version {
                 super::query_engine::ResultMembershipVersionSchema::Content(content) => {
                     (&content.tx_time_field, &content.tx_node_field)
@@ -748,13 +833,37 @@ fn decode_typed_terminal_record(
                 .map(|field| nullable_u64(record, field).map(|seq| seq.map(GlobalSeq)))
                 .transpose()?
                 .flatten();
-            let member: ResultMemberEntry = RealRowMemberEntry::current_content((
+            let flat_join_digest = (!schema.payload_fields.is_empty())
+                .then(|| {
+                    schema
+                        .payload_fields
+                        .iter()
+                        .map(|field| {
+                            record
+                                .get_idx(field_idx(record, &field.name)?)
+                                .map_err(super::Error::from)
+                        })
+                        .collect::<Result<Vec<_>, _>>()
+                        .and_then(|values| {
+                            postcard::to_allocvec(&values).map_err(|_| {
+                                super::Error::InvalidStoredValue(
+                                    "flat joined result revision encoding failed",
+                                )
+                            })
+                        })
+                })
+                .transpose()?;
+            let member = RealRowMemberEntry::current_content((
                 table.name.clone().into(),
                 row_uuid,
                 TxId::new(tx_time, tx_node),
             ))
             .with_occurrence_id(occurrence_id)
-            .with_settle_position(settle_position)
+            .with_settle_position(settle_position);
+            let member: ResultMemberEntry = match flat_join_digest {
+                Some(digest) => member.with_row_digest(digest),
+                None => member,
+            }
             .into();
             let payload = ResultMemberPayloadEntry {
                 member: member.clone(),
@@ -776,15 +885,15 @@ fn decode_typed_terminal_record(
             let row = postcard::to_allocvec(&row_value).map_err(|_| {
                 super::Error::InvalidStoredValue("aggregate result row encoding failed")
             })?;
-            let revision_value =
-                record.get_idx(field_idx(record, &schema.synthetic.revision_field)?)?;
-            let revision = postcard::to_allocvec(&revision_value).map_err(|_| {
-                super::Error::InvalidStoredValue("aggregate result revision encoding failed")
+            let replacement_value =
+                record.get_idx(field_idx(record, &schema.synthetic.replacement_field)?)?;
+            let replacement = postcard::to_allocvec(&replacement_value).map_err(|_| {
+                super::Error::InvalidStoredValue("aggregate replacement token encoding failed")
             })?;
             let member = ResultMemberEntry::Synthetic {
                 table,
                 row,
-                revision,
+                replacement: SyntheticReplacementToken::from_encoded_record(replacement),
             };
             let payload = ResultMemberPayloadEntry {
                 member: member.clone(),
@@ -996,6 +1105,7 @@ fn decode_typed_version_witness(
         updated_by: AuthorId(record.get_uuid(plan.updated_by_idx)?),
         updated_at: TxTime(record_u64_idx(record, plan.updated_at_idx)?),
         cells: BTreeMap::new(),
+        authored_columns: None,
         deletion,
     };
     let values = register_values_from_parts(&parts)?;
@@ -1098,6 +1208,10 @@ fn build_content_witness_projector(
             .and_then(|field| field_idx_in_descriptor(terminal_descriptor, field))?;
         mapping.push((source, 9 + idx));
     }
+    mapping.push((
+        field_idx_in_descriptor(terminal_descriptor, &schema.authored_columns_field)?,
+        9 + table.columns.len(),
+    ));
     RecordProjector::new(terminal_descriptor, storage_descriptor, mapping).map_err(|_| {
         super::Error::InvalidStoredValue("content witness projector construction failed")
     })
@@ -1384,7 +1498,7 @@ fn option_vec_bytes<T>(value: &Option<Vec<T>>) -> usize {
 fn result_member_entry_bytes(member: &ResultMemberEntry) -> usize {
     mem::size_of_val(member)
         + match member {
-            ResultMemberEntry::Row(row) => {
+            ResultMemberEntry::Row(row) | ResultMemberEntry::TypedRow { row, .. } => {
                 intern_string_bytes(&row.table)
                     + option_vec_bytes(&row.branch_or_prefix)
                     + option_vec_bytes(&row.row_digest)
@@ -1392,8 +1506,8 @@ fn result_member_entry_bytes(member: &ResultMemberEntry) -> usize {
             ResultMemberEntry::Synthetic {
                 table,
                 row,
-                revision,
-            } => table.len() + vec_bytes(row) + vec_bytes(revision),
+                replacement,
+            } => table.len() + vec_bytes(row) + mem::size_of_val(replacement),
             ResultMemberEntry::PathTuple {
                 path,
                 source_table,
@@ -1492,143 +1606,6 @@ impl NetEvent {
     }
 }
 
-fn materialize_aggregate_payload_delta(
-    previous: Option<&ResultMemberPayloadEntry>,
-    delta: ResultMemberPayloadEntry,
-    synthetic: &super::query_engine::SyntheticResultMembershipSchema,
-    value_fields: &[String],
-    weight: i64,
-) -> Result<ResultMemberPayloadEntry, super::Error> {
-    let delta_descriptor = decode_payload_descriptor(&delta.descriptor)?;
-    let delta_record = BorrowedRecord::new(&delta.record, &delta_descriptor);
-    let mut values = if let Some(previous) = previous {
-        let previous_descriptor = decode_payload_descriptor(&previous.descriptor)?;
-        BorrowedRecord::new(&previous.record, &previous_descriptor)
-            .to_values()
-            .map_err(|_| super::Error::InvalidStoredValue("aggregate payload decode failed"))?
-    } else {
-        delta_record
-            .to_values()
-            .map_err(|_| super::Error::InvalidStoredValue("aggregate payload decode failed"))?
-    };
-    if previous.is_none() {
-        for field in value_fields {
-            let idx = field_idx(delta_record, field)?;
-            values[idx] = zero_aggregate_value(values[idx].clone());
-        }
-    }
-    for field in value_fields {
-        let idx = field_idx(delta_record, field)?;
-        let delta_value = delta_record.get_idx(idx)?;
-        values[idx] = apply_aggregate_value_delta(values[idx].clone(), delta_value, weight)?;
-    }
-    if let Some(first_value_field) = value_fields.first() {
-        let value_idx = field_idx(delta_record, first_value_field)?;
-        let revision_idx = field_idx(delta_record, &synthetic.revision_field)?;
-        values[revision_idx] = values[value_idx].clone();
-    }
-    let raw = delta_descriptor
-        .create(&values)
-        .map_err(|_| super::Error::InvalidStoredValue("aggregate payload encoding failed"))?;
-    let revision_value = values[field_idx(delta_record, &synthetic.revision_field)?].clone();
-    let revision = postcard::to_allocvec(&revision_value).map_err(|_| {
-        super::Error::InvalidStoredValue("aggregate result revision encoding failed")
-    })?;
-    let member = match delta.member {
-        ResultMemberEntry::Synthetic { table, row, .. } => ResultMemberEntry::Synthetic {
-            table,
-            row,
-            revision,
-        },
-        _ => delta.member,
-    };
-    Ok(ResultMemberPayloadEntry {
-        member,
-        descriptor: delta.descriptor,
-        record: raw,
-    })
-}
-
-fn decode_payload_descriptor(bytes: &[u8]) -> Result<RecordDescriptor, super::Error> {
-    let fields: Vec<(Option<String>, groove::records::ValueType)> = postcard::from_bytes(bytes)
-        .map_err(|_| super::Error::InvalidStoredValue("aggregate descriptor decoding failed"))?;
-    Ok(RecordDescriptor::new(fields.into_iter().map(
-        |(name, value_type)| (name.unwrap_or_default(), value_type),
-    )))
-}
-
-fn apply_aggregate_value_delta(
-    current: Value,
-    delta: Value,
-    weight: i64,
-) -> Result<Value, super::Error> {
-    macro_rules! signed_int {
-        ($value:expr, $variant:ident, $ty:ty) => {{
-            let next = ($value as i128)
-                .checked_add(
-                    (weight as i128)
-                        * (match delta {
-                            Value::$variant(value) => value as i128,
-                            _ => return Ok(delta),
-                        }),
-                )
-                .ok_or(super::Error::InvalidStoredValue("aggregate value overflow"))?;
-            Value::$variant(
-                <$ty>::try_from(next)
-                    .map_err(|_| super::Error::InvalidStoredValue("aggregate value overflow"))?,
-            )
-        }};
-    }
-    Ok(match current {
-        Value::U8(value) => signed_int!(value, U8, u8),
-        Value::U16(value) => signed_int!(value, U16, u16),
-        Value::U32(value) => signed_int!(value, U32, u32),
-        Value::U64(value) => signed_int!(value, U64, u64),
-        Value::I32(value) => signed_int!(value, I32, i32),
-        Value::I64(value) => signed_int!(value, I64, i64),
-        Value::F64(value) => match delta {
-            Value::F64(delta) => Value::F64(value + (weight as f64) * delta),
-            _ => delta,
-        },
-        _ => delta,
-    })
-}
-
-fn zero_aggregate_value(value: Value) -> Value {
-    match value {
-        Value::U8(_) => Value::U8(0),
-        Value::U16(_) => Value::U16(0),
-        Value::U32(_) => Value::U32(0),
-        Value::U64(_) => Value::U64(0),
-        Value::I32(_) => Value::I32(0),
-        Value::I64(_) => Value::I64(0),
-        Value::F64(_) => Value::F64(0.0),
-        other => other,
-    }
-}
-
-fn aggregate_payload_is_empty(
-    payload: &ResultMemberPayloadEntry,
-    value_fields: &[String],
-) -> Result<bool, super::Error> {
-    if value_fields.is_empty() {
-        return Ok(false);
-    }
-    let descriptor = decode_payload_descriptor(&payload.descriptor)?;
-    let record = BorrowedRecord::new(&payload.record, &descriptor);
-    for field in value_fields {
-        let value = record.get_idx(field_idx(record, field)?)?;
-        match value {
-            Value::U8(0) | Value::U16(0) | Value::U32(0) | Value::U64(0) => {}
-            Value::I32(0) => {}
-            Value::I64(0) => {}
-            Value::F64(0.0) => {}
-            _ => return Ok(false),
-        }
-    }
-    Ok(true)
-}
-
 fn encode_record_descriptor(descriptor: &RecordDescriptor) -> Result<Vec<u8>, super::Error> {
     let fields = descriptor
         .fields()
@@ -1674,6 +1651,7 @@ fn replacement_winner(
 mod tests {
     use std::collections::BTreeMap;
 
+    use groove::ivm::RecordDelta;
     use groove::records::Value;
     use groove::schema::ColumnType;
 
@@ -1720,6 +1698,7 @@ mod tests {
                 updated_by: AuthorId::SYSTEM,
                 updated_at: TxTime(time),
                 cells: BTreeMap::from([("title".to_owned(), Value::String(title.to_owned()))]),
+                authored_columns: Some(BTreeSet::from(["title".to_owned()])),
                 deletion: None,
             },
             None,
@@ -1742,6 +1721,7 @@ mod tests {
                 updated_by: AuthorId::SYSTEM,
                 updated_at: TxTime(time),
                 cells: BTreeMap::new(),
+                authored_columns: None,
                 deletion: Some(DeletionEvent::Deleted),
             },
             None,
@@ -1783,6 +1763,112 @@ mod tests {
         assert!(second.adds.is_empty());
         assert_eq!(second.removes, vec![member]);
         assert!(maintained.result_weights.is_empty());
+    }
+
+    #[test]
+    fn typed_union_terminal_removes_one_arm_and_rehydrates_the_other() {
+        let descriptor = RecordDescriptor::new([
+            ("table", groove::records::ValueType::String),
+            ("row_uuid", groove::records::ValueType::Uuid),
+            ("joined_uuid", groove::records::ValueType::Uuid),
+            ("union_arm", groove::records::ValueType::String),
+            ("tx_time", groove::records::ValueType::U64),
+            ("tx_node", groove::records::ValueType::U64),
+        ]);
+        let schema = ResultMembershipSchema {
+            table_field: "table".to_owned(),
+            row_field: "row_uuid".to_owned(),
+            occurrence_id_fields: vec!["row_uuid".to_owned(), "joined_uuid".to_owned()],
+            occurrence_union_arm_fields: BTreeMap::from([(0, "union_arm".to_owned())]),
+            payload_fields: Vec::new(),
+            branch_or_prefix_field: None,
+            version: ResultMembershipVersionSchema::Content(
+                super::super::query_engine::ContentVersionFields {
+                    tx_time_field: "tx_time".to_owned(),
+                    tx_node_field: "tx_node".to_owned(),
+                },
+            ),
+            settle_position_field: None,
+            routing_param_fields: BTreeSet::new(),
+        };
+        let schemas = MaintainedTerminalSchemas {
+            sinks: BTreeMap::from([(
+                "maintained.result_current".to_owned(),
+                MaintainedTerminalKind::ResultCurrent(schema),
+            )]),
+        };
+        let tables = BTreeMap::from([("todos".to_owned(), table())]);
+        let encoded = |label: &str, weight| RecordDeltas {
+            descriptor: descriptor.clone(),
+            deltas: vec![RecordDelta {
+                record: descriptor
+                    .create(&[
+                        Value::String("todos".to_owned()),
+                        Value::Uuid(row(1).0),
+                        Value::Uuid(row(2).0),
+                        Value::String(label.to_owned()),
+                        Value::U64(10),
+                        Value::U64(10),
+                    ])
+                    .unwrap()
+                    .into(),
+                weight,
+            }],
+        };
+        let mut maintained = MaintainedSubscriptionView::default();
+        let direct = maintained
+            .apply_typed_deltas(
+                "maintained.result_current",
+                &encoded("direct", 1),
+                &schemas,
+                &tables,
+                &aliases(),
+            )
+            .unwrap()
+            .adds
+            .pop()
+            .unwrap();
+        let inherited = maintained
+            .apply_typed_deltas(
+                "maintained.result_current",
+                &encoded("inherited", 1),
+                &schemas,
+                &tables,
+                &aliases(),
+            )
+            .unwrap()
+            .adds
+            .pop()
+            .unwrap();
+        assert_ne!(
+            direct.output_occurrence_id(),
+            inherited.output_occurrence_id()
+        );
+
+        let removed = maintained
+            .apply_typed_deltas(
+                "maintained.result_current",
+                &encoded("direct", -1),
+                &schemas,
+                &tables,
+                &aliases(),
+            )
+            .unwrap();
+        assert_eq!(removed.removes, [direct]);
+        assert_eq!(maintained.result_weights.get(&inherited), Some(&1));
+
+        let mut reopened = MaintainedSubscriptionView::default();
+        let rehydrated = reopened
+            .apply_typed_deltas(
+                "maintained.result_current",
+                &encoded("inherited", 1),
+                &schemas,
+                &tables,
+                &aliases(),
+            )
+            .unwrap();
+        assert_eq!(rehydrated.adds, std::slice::from_ref(&inherited));
+        assert_eq!(reopened.result_weights.get(&inherited), Some(&1));
     }
 
     #[test]

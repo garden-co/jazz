@@ -2,8 +2,11 @@
 
 mod support;
 
+use std::collections::BTreeMap;
 use std::time::Duration;
 
+use jazz::groove::records::Value as CoreValue;
+use jazz::ids::{BranchId, RowUuid};
 use jazz::row_input;
 use jazz::tools::public_schema::{PolicyExpr, TablePolicies};
 use jazz::tools::server::JazzServer;
@@ -153,7 +156,10 @@ async fn query_applies_claims_select_policy() {
                 )
                 .expect("admin creates claims-gated room");
             admin
-                .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
+                .wait_for_batch(
+                    batch_id.expect("ordinary mutation commits immediately"),
+                    DurabilityTier::EdgeServer,
+                )
                 .await
                 .expect("room reaches edge");
 
@@ -246,7 +252,10 @@ async fn numeric_claims_match_integer_columns_across_core_widths() {
                 )
                 .expect("admin creates integer claims row");
             admin
-                .wait_for_batch(integer_batch, DurabilityTier::EdgeServer)
+                .wait_for_batch(
+                    integer_batch.expect("ordinary mutation commits immediately"),
+                    DurabilityTier::EdgeServer,
+                )
                 .await
                 .expect("integer row reaches edge");
             let (bigint_row_id, _, bigint_batch) = admin
@@ -256,7 +265,10 @@ async fn numeric_claims_match_integer_columns_across_core_widths() {
                 )
                 .expect("admin creates bigint claims row");
             admin
-                .wait_for_batch(bigint_batch, DurabilityTier::EdgeServer)
+                .wait_for_batch(
+                    bigint_batch.expect("ordinary mutation commits immediately"),
+                    DurabilityTier::EdgeServer,
+                )
                 .await
                 .expect("bigint row reaches edge");
 
@@ -340,14 +352,20 @@ async fn session_role_in_list_matches_equivalent_or_policy() {
                 .insert("role_in_list_rooms", row_input!("name" => "in-list room"))
                 .expect("admin creates in-list room");
             admin
-                .wait_for_batch(in_list_batch_id, DurabilityTier::EdgeServer)
+                .wait_for_batch(
+                    in_list_batch_id.expect("ordinary mutation commits immediately"),
+                    DurabilityTier::EdgeServer,
+                )
                 .await
                 .expect("in-list room reaches edge");
             let (or_row_id, _, or_batch_id) = admin
                 .insert("role_or_rooms", row_input!("name" => "or room"))
                 .expect("admin creates or room");
             admin
-                .wait_for_batch(or_batch_id, DurabilityTier::EdgeServer)
+                .wait_for_batch(
+                    or_batch_id.expect("ordinary mutation commits immediately"),
+                    DurabilityTier::EdgeServer,
+                )
                 .await
                 .expect("or room reaches edge");
 
@@ -470,7 +488,10 @@ async fn subscription_matches_claims_select_query() {
                 )
                 .expect("admin creates claims-gated room");
             admin
-                .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
+                .wait_for_batch(
+                    batch_id.expect("ordinary mutation commits immediately"),
+                    DurabilityTier::EdgeServer,
+                )
                 .await
                 .expect("room reaches edge");
 
@@ -618,7 +639,7 @@ async fn claim_revocation_stops_existing_subscription_from_serving_future_rows()
                 )
                 .expect("writer inserts initially visible room");
             writer
-                .wait_for_batch(initial_batch, DurabilityTier::EdgeServer)
+                .wait_for_batch(initial_batch.expect("ordinary mutation commits immediately"), DurabilityTier::EdgeServer)
                 .await
                 .expect("initial room reaches edge");
 
@@ -670,7 +691,7 @@ async fn claim_revocation_stops_existing_subscription_from_serving_future_rows()
                 .insert("admin_rooms", row_input!("name" => "must remain private"))
                 .expect("writer inserts post-revocation room");
             writer
-                .wait_for_batch(future_batch, DurabilityTier::EdgeServer)
+                .wait_for_batch(future_batch.expect("ordinary mutation commits immediately"), DurabilityTier::EdgeServer)
                 .await
                 .expect("post-revocation room reaches edge");
             let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
@@ -707,7 +728,7 @@ async fn claim_revocation_stops_existing_subscription_from_serving_future_rows()
                 )
                 .expect("writer inserts post-restoration room");
             writer
-                .wait_for_batch(restored_batch, DurabilityTier::EdgeServer)
+                .wait_for_batch(restored_batch.expect("ordinary mutation commits immediately"), DurabilityTier::EdgeServer)
                 .await
                 .expect("post-restoration room reaches edge");
             wait_for_subscription_update(
@@ -754,7 +775,10 @@ async fn same_shape_subscriptions_route_claims_per_identity() {
                 )
                 .expect("admin creates alpha room");
             admin
-                .wait_for_batch(alpha_batch, DurabilityTier::EdgeServer)
+                .wait_for_batch(
+                    alpha_batch.expect("ordinary mutation commits immediately"),
+                    DurabilityTier::EdgeServer,
+                )
                 .await
                 .expect("alpha room reaches edge");
             let (beta_id, _, beta_batch) = admin
@@ -764,7 +788,10 @@ async fn same_shape_subscriptions_route_claims_per_identity() {
                 )
                 .expect("admin creates beta room");
             admin
-                .wait_for_batch(beta_batch, DurabilityTier::EdgeServer)
+                .wait_for_batch(
+                    beta_batch.expect("ordinary mutation commits immediately"),
+                    DurabilityTier::EdgeServer,
+                )
                 .await
                 .expect("beta room reaches edge");
 
@@ -889,11 +916,103 @@ async fn same_shape_subscriptions_route_claims_per_identity() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-#[ignore = "tracking: public QueryBuilder::branch is not wired into JazzClient read/subscribe opts yet"]
 async fn explicit_branch_subscription_should_match_claims_select_query() {
-    panic!(
-        "tracking: wire QueryBuilder::branch into the core read view for both one-shot reads and subscriptions"
-    );
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = branch_claims_gated_schema();
+            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let branch = BranchId(uuid::Uuid::from_bytes([0x42; 16]));
+            let branch_row = RowUuid(uuid::Uuid::from_bytes([0x43; 16]));
+            server
+                .seed_branch_row_for_test(
+                    branch,
+                    "rooms",
+                    branch_row,
+                    BTreeMap::from([
+                        (
+                            "name".to_owned(),
+                            CoreValue::String("branch room".to_owned()),
+                        ),
+                        (
+                            "join_code".to_owned(),
+                            CoreValue::String("branch-secret".to_owned()),
+                        ),
+                    ]),
+                )
+                .await;
+
+            let branch_query = QueryBuilder::new("rooms")
+                .branch(branch.0.to_string())
+                .build();
+            let root_query = QueryBuilder::new("rooms").branch("main").build();
+            let matching = TestingClient::builder()
+                .with_server(&server)
+                .with_schema(schema.clone())
+                .with_user_id("aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaa42")
+                .with_claims(json!({"join_code": "branch-secret"}))
+                .ready_on("rooms", READY_TIMEOUT)
+                .connect()
+                .await;
+
+            let branch_rows = matching
+                .query(branch_query.clone(), Some(DurabilityTier::EdgeServer))
+                .await
+                .expect("matching claim queries branch");
+            assert!(
+                branch_rows
+                    .iter()
+                    .any(|(id, _)| *id == jazz::tools::ObjectId::from_uuid(branch_row.0)),
+                "branch query must traverse the selected branch view: {branch_rows:?}"
+            );
+            let root_rows = matching
+                .query(root_query, Some(DurabilityTier::EdgeServer))
+                .await
+                .expect("matching claim queries root");
+            assert!(
+                root_rows
+                    .iter()
+                    .all(|(id, _)| *id != jazz::tools::ObjectId::from_uuid(branch_row.0)),
+                "root view must not contain branch-local data: {root_rows:?}"
+            );
+
+            let mut stream = matching
+                .subscribe(branch_query.clone())
+                .await
+                .expect("matching claim subscribes to branch");
+            let mut updates = Vec::new();
+            wait_for_subscription_update(
+                &mut stream,
+                &mut updates,
+                QUERY_TIMEOUT,
+                "branch subscription sees branch-local row",
+                |updates| has_added(updates, jazz::tools::ObjectId::from_uuid(branch_row.0)),
+            )
+            .await;
+
+            let denied = TestingClient::builder()
+                .with_server(&server)
+                .with_schema(schema)
+                .with_user_id("aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaa43")
+                .with_claims(json!({"join_code": "wrong"}))
+                .ready_on("rooms", READY_TIMEOUT)
+                .connect()
+                .await;
+            let denied_rows = denied
+                .query(branch_query, Some(DurabilityTier::EdgeServer))
+                .await
+                .expect("nonmatching claim queries branch");
+            assert!(
+                denied_rows
+                    .iter()
+                    .all(|(id, _)| *id != jazz::tools::ObjectId::from_uuid(branch_row.0)),
+                "branch query must retain ordinary select policy: {denied_rows:?}"
+            );
+
+            matching.shutdown().await.expect("shutdown matching client");
+            denied.shutdown().await.expect("shutdown denied client");
+            server.shutdown().await;
+        })
+        .await;
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -919,7 +1038,10 @@ async fn numeric_claims_authorize_writes_across_core_widths() {
                 )
                 .expect("I64 claim creates I32 row");
             bigint_claim_user
-                .wait_for_batch(integer_batch, DurabilityTier::EdgeServer)
+                .wait_for_batch(
+                    integer_batch.expect("ordinary mutation commits immediately"),
+                    DurabilityTier::EdgeServer,
+                )
                 .await
                 .expect("I64 claim matches I32 write policy");
 
@@ -939,7 +1061,10 @@ async fn numeric_claims_authorize_writes_across_core_widths() {
                 )
                 .expect("U32 claim creates I64 row");
             integer_claim_user
-                .wait_for_batch(bigint_batch, DurabilityTier::EdgeServer)
+                .wait_for_batch(
+                    bigint_batch.expect("ordinary mutation commits immediately"),
+                    DurabilityTier::EdgeServer,
+                )
                 .await
                 .expect("U32 claim matches I64 write policy");
 

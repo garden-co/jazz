@@ -9,7 +9,8 @@ use std::collections::BTreeMap;
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use jazz::db::{
-    Db, DbConfig, DbIdentity, ReadOpts, SeededRowIdSource, SubscriptionEvent, block_on,
+    Db, DbConfig, DbIdentity, PermissionAdvice, ReadOpts, SeededRowIdSource, SubscriptionEvent,
+    block_on,
 };
 use jazz::groove::records::Value;
 use jazz::groove::schema::{ColumnSchema, ColumnType};
@@ -413,9 +414,10 @@ fn core_owner_policy_insert(c: &mut Criterion) {
                 b.iter(|| {
                     next += 1;
                     let candidate = cells(next);
-                    assert!(
+                    assert_eq!(
                         db.can_insert("documents", candidate.clone())
-                            .expect("owner policy dry run should succeed")
+                            .expect("client permission advice should succeed"),
+                        PermissionAdvice::Unknown,
                     );
                     let write = db
                         .insert("documents", candidate)

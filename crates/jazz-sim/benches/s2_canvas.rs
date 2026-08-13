@@ -21,6 +21,7 @@ use jazz::schema::{JazzSchema, Policy, TableSchema};
 use jazz::time::GlobalSeq;
 use jazz::tx::{DurabilityTier, Fate};
 use jazz_sim::distributions::Lcg;
+use jazz_sim::view_accounting::{bytes_floor, view_update_bytes};
 use jazz_sim::{
     DeterministicDriver, DriverContext, Metrics, NodeRole, PeerProfile, SimulatorTransportCodec,
     ThreadedDriver, Topology, bench_profile, emit_json_line, loopback_transport_message, mem,
@@ -2532,102 +2533,6 @@ fn is_ancestor(
         }
     }
     false
-}
-
-fn view_update_bytes(update: &SyncMessage) -> u64 {
-    match update {
-        SyncMessage::ViewUpdate {
-            version_bundles,
-            peer_payload_inventory,
-            result_member_adds,
-            result_member_removes,
-            ..
-        }
-        | SyncMessage::ViewUpdateChunk {
-            version_bundles,
-            peer_payload_inventory,
-            result_member_adds,
-            result_member_removes,
-            ..
-        } => {
-            version_bundles
-                .iter()
-                .map(version_bundle_bytes)
-                .sum::<u64>()
-                + (peer_payload_inventory.complete_tx_payloads.len() as u64 * tx_id_wire_bytes())
-                + result_rows_bytes(result_member_adds)
-                + result_rows_bytes(result_member_removes)
-        }
-        SyncMessage::CommitUnit { tx, versions } => {
-            transaction_wire_bytes(tx) + versions.iter().map(version_record_bytes).sum::<u64>()
-        }
-        SyncMessage::FateUpdate { .. } => tx_id_wire_bytes() + 16,
-        SyncMessage::ContentExtents { extents } => {
-            extents.iter().map(|extent| extent.bytes.len() as u64).sum()
-        }
-        SyncMessage::RegisterShape { .. }
-        | SyncMessage::Subscribe(_)
-        | SyncMessage::PublishSchema { .. }
-        | SyncMessage::PublishLens { .. }
-        | SyncMessage::SetCurrentWriteSchema { .. }
-        | SyncMessage::CatalogueAck(_)
-        | SyncMessage::FetchContentExtent { .. }
-        | SyncMessage::SessionClaims { .. }
-        | SyncMessage::SubscribeRejected { .. }
-        | SyncMessage::Unsubscribe { .. }
-        | SyncMessage::FetchRowVersions { .. }
-        | SyncMessage::RowVersionPayloads { .. } => 0,
-    }
-}
-
-fn bytes_floor(update: &SyncMessage) -> u64 {
-    match update {
-        SyncMessage::ViewUpdate {
-            version_bundles, ..
-        }
-        | SyncMessage::ViewUpdateChunk {
-            version_bundles, ..
-        } => version_bundles
-            .iter()
-            .flat_map(|bundle| &bundle.versions)
-            .map(version_record_bytes)
-            .sum(),
-        _ => 0,
-    }
-}
-
-fn version_bundle_bytes(bundle: &jazz::protocol::VersionBundle) -> u64 {
-    transaction_wire_bytes(&bundle.tx)
-        + bundle
-            .versions
-            .iter()
-            .map(version_record_bytes)
-            .sum::<u64>()
-        + 16
-}
-
-fn version_record_bytes(version: &jazz::protocol::VersionRecord) -> u64 {
-    version.table().len() as u64 + version.record().raw().len() as u64
-}
-
-fn transaction_wire_bytes(tx: &jazz::tx::Transaction) -> u64 {
-    tx_id_wire_bytes()
-        + 4
-        + 16
-        + tx.user_metadata_json
-            .as_ref()
-            .map_or(0, |metadata| metadata.len() as u64)
-}
-
-fn result_rows_bytes(rows: &[jazz::protocol::ResultMemberEntry]) -> u64 {
-    rows.iter()
-        .filter_map(|entry| entry.as_row())
-        .map(|(table, _, _)| table.len() as u64 + 16 + tx_id_wire_bytes())
-        .sum()
-}
-
-fn tx_id_wire_bytes() -> u64 {
-    8 + 16
 }
 
 fn result_output_count(update: &SyncMessage, table: &str) -> usize {

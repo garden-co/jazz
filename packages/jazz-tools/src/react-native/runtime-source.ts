@@ -20,11 +20,25 @@ export interface ReactNativeDbConfig extends DbConfig {
   dataDirectory?: string;
 }
 
-/** @internal Preserve the binding's historical filename-safe database naming. */
+function stableDbNameHash(value: string): string {
+  // FNV-1a over Unicode code points is small enough for the RN bootstrap path,
+  // deterministic across JavaScript engines, and does not need node:crypto.
+  let hash = 0x811c9dc5;
+  for (const character of value) {
+    hash ^= character.codePointAt(0) ?? 0;
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+/** @internal Preserve safe names and put transformed names in a disjoint namespace. */
 export function sanitizeReactNativeDbName(dbName: string): string {
-  return Array.from(dbName, (character) =>
+  const sanitized = Array.from(dbName, (character) =>
     /[A-Za-z0-9_-]/.test(character) ? character : "_",
   ).join("");
+  // `~` is deliberately outside the accepted raw-name alphabet. Without this
+  // marker, a safe raw name could equal another raw name's sanitized+hash form.
+  return sanitized === dbName ? sanitized : `~${sanitized}-${stableDbNameHash(dbName)}`;
 }
 
 /** @internal Resolve and validate the native SQLite path for a persistent config. */

@@ -120,8 +120,11 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
       1,
       true,
       this.config.driver.type === "persistent"
-        ? { persistentPath: this.config.driver.dataPath }
-        : undefined,
+        ? {
+            persistentPath: this.config.driver.dataPath,
+            readAuthorizationHost: "trusted-serving",
+          }
+        : { readAuthorizationHost: "trusted-serving" },
     );
 
     this.client = JazzClient.connectWithRuntime(

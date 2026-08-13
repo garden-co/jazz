@@ -30,8 +30,8 @@ fn reachability_graph() -> GraphBuilder {
     let frontier = GraphBuilder::frontier_source(
         "frontier",
         RecordDescriptor::new([
-            ("src", ColumnType::U64.value_type()),
-            ("dst", ColumnType::U64.value_type()),
+            ("src", ColumnType::U64.clone()),
+            ("dst", ColumnType::U64.clone()),
         ]),
     );
     let edge_pairs = GraphBuilder::table("edges").project(["src", "dst"]);

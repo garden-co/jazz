@@ -58,6 +58,7 @@ describe("RnDbShim", () => {
       order.push("settled");
     });
     const write = {
+      batchId: () => "committed-batch",
       payload: () => buffer(1),
       wait: vi.fn(),
       writeState: () => JSON.stringify({ kind: "Pending" }),
@@ -83,7 +84,76 @@ describe("RnDbShim", () => {
     await change;
     expect(order).toEqual(["registered", "waited", "settled"]);
     expect(adapted.writeState()).toEqual({ kind: "Pending" });
+    expect(adapted.batchId).toBe("committed-batch");
     expect(adapted.payload).toEqual(new Uint8Array([1]));
+  });
+
+  it("adapts schema views, caller-minted batches, and session transports", () => {
+    const view = { free: vi.fn() };
+    const registerSchema = vi.fn((_schema: ArrayBuffer) => view);
+    const beginTransaction = vi.fn(
+      (_openBatchId: string, _kind: string, _author: ArrayBuffer | undefined) => {},
+    );
+    const rollbackTransaction = vi.fn();
+    const attachMergeableTx = vi.fn(() => ({}));
+    const attachExclusiveTx = vi.fn(() => ({}));
+    const commitTransaction = vi.fn(() => ({
+      batchId: () => "batch-1",
+      close: () => true,
+      payload: () => buffer(),
+      registerWriteStateWaiter: () => ({ wait: async () => {} }),
+      wait: vi.fn(),
+      writeState: () => JSON.stringify({}),
+    }));
+    const transport = {
+      close: () => true,
+      recvWireFrames: () => [],
+      sendWireFrame: vi.fn(),
+      sendWireFrames: vi.fn(),
+      tick: () => 0,
+    };
+    const connectUpstreamWithSession = vi.fn(() => transport);
+    const free = vi.fn();
+    const db = shim({
+      registerSchema,
+      beginTransaction,
+      commitTransaction,
+      rollbackTransaction,
+      attachMergeableTx,
+      attachExclusiveTx,
+      connectUpstreamWithSession,
+      free,
+    });
+    const schema = new Uint8Array([9, 8]);
+    const authorBacking = new Uint8Array([0, 7, 6, 0]);
+    const author = authorBacking.subarray(1, 3);
+
+    const adaptedView = db.registerSchema(schema);
+    db.beginTransaction("open-1", "mergeable", author);
+    expect(db.commitTransaction("open-1", "mergeable").batchId).toBe("batch-1");
+    db.rollbackTransaction("open-2");
+    db.attachMergeableTx("open-3");
+    db.attachExclusiveTx("open-4");
+    db.connectUpstreamWithSession(1, 3, new Uint8Array([1]), 5n, new Uint8Array([2]), 7n);
+    db.free();
+
+    expect(adaptedView).toBeInstanceOf(RnDbShim);
+    expect(new Uint8Array(registerSchema.mock.calls[0]![0])).toEqual(schema);
+    expect(beginTransaction.mock.calls[0]!.slice(0, 2)).toEqual(["open-1", "mergeable"]);
+    expect(new Uint8Array(beginTransaction.mock.calls[0]![2]!)).toEqual(new Uint8Array([7, 6]));
+    expect(commitTransaction).toHaveBeenCalledWith("open-1", "mergeable");
+    expect(rollbackTransaction).toHaveBeenCalledWith("open-2");
+    expect(attachMergeableTx).toHaveBeenCalledWith("open-3");
+    expect(attachExclusiveTx).toHaveBeenCalledWith("open-4");
+    expect(connectUpstreamWithSession).toHaveBeenCalledWith(
+      1,
+      3,
+      expect.any(ArrayBuffer),
+      5n,
+      expect.any(ArrayBuffer),
+      7n,
+    );
+    expect(free).toHaveBeenCalledOnce();
   });
 
   it("parses subscription events and restores native error markers", () => {
@@ -99,7 +169,7 @@ describe("RnDbShim", () => {
             eventType: "closed",
             reset: undefined,
             delta: undefined,
-            relationDelta: undefined,
+            terminalOperationsJson: undefined,
             settled: undefined,
             tier: undefined,
             reasonJson: undefined,
@@ -110,7 +180,9 @@ describe("RnDbShim", () => {
             eventType: "delta",
             reset: true,
             delta: buffer(1, 2),
-            relationDelta: buffer(3, 4),
+            terminalOperationsJson: JSON.stringify([
+              { root_key: [1], path: [], edit: { Remove: { key: [2] } } },
+            ]),
             settled: true,
             tier: "Local",
             reasonJson: undefined,
@@ -119,7 +191,7 @@ describe("RnDbShim", () => {
             eventType: "rejected",
             reset: undefined,
             delta: undefined,
-            relationDelta: undefined,
+            terminalOperationsJson: undefined,
             settled: undefined,
             tier: undefined,
             reasonJson: JSON.stringify({
@@ -130,6 +202,7 @@ describe("RnDbShim", () => {
         ],
       }),
       insertWithIdEncoded: () => ({
+        batchId: () => "error-batch",
         close: () => true,
         payload: () => buffer(),
         registerWriteStateWaiter: () => ({ wait: async () => {} }),
@@ -146,7 +219,7 @@ describe("RnDbShim", () => {
         type: "delta",
         reset: true,
         delta: new Uint8Array([1, 2]),
-        relation_delta: new Uint8Array([3, 4]),
+        terminalOperations: [{ root_key: [1], path: [], edit: { Remove: { key: [2] } } }],
         settled: true,
         tier: "Local",
       },

@@ -26,6 +26,7 @@ sync-autopsy = []
 # Disabled-by-default counters for the cold-settle attribution bench. They do
 # not alter protocol behavior or production measurement paths.
 cold-settle-attribution = ["groove/cold-settle-attribution"]
+r3-open-attribution = ["rocksdb", "testing"]
 testing = []
 transport-compression-lz4 = ["dep:lz4_flex"]
 transport-compression-zstd = ["dep:zstd"]
@@ -152,7 +153,6 @@ rcgen = { version = "0.13", default-features = false, features = ["ring"] }
 name = "jazz-tools"
 path = "src/bin/jazz-tools.rs"
 required-features = ["cli"]
-test = false
 
 [[bin]]
 name = "jazz-server"

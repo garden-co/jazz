@@ -1,17 +1,21 @@
 use std::collections::BTreeMap;
 
+use groove::ivm::{TerminalEdit, TerminalOperation, TerminalPathSegment};
 use groove::records::Value;
 use groove::schema::ColumnType;
-use jazz::ids::{AuthorId, MigrationLensId, NodeUuid, RowUuid, SchemaVersionId};
+use jazz::ids::{AuthorId, BranchId, MigrationLensId, NodeUuid, RowUuid, SchemaVersionId};
 use jazz::node::content_store::Extent;
 use jazz::protocol::{
-    CatalogueAck, ContentExtent, CurrentWriteSchema, LargeValueOwnerRef, LensOp, MigrationLens,
-    PeerPayloadInventory, RegisterShapeOptions, ResultRowEntry, RowVersionRef, SchemaVersion,
-    ShapeAst, Subscribe, SubscribeRejectReason, SubscribeServerFailureCode, SubscriptionKey,
-    SyncMessage, TableLens, VersionBundle, VersionCarrier, VersionRecord,
-    build_version_bundle_runs_from_singletons,
+    BranchMetadata, CatalogueAck, CatalogueSnapshot, ContentExtent, CurrentWriteSchema,
+    LargeValueOwnerRef, LensOp, MigrationLens, PeerPayloadInventory, RegisterShapeOptions,
+    ResultRowEntry, RowVersionRef, SchemaLineagePublication, SchemaVersion, ShapeAst, Subscribe,
+    SubscribeRejectReason, SubscribeServerFailureCode, SubscriptionKey, SyncMessage, TableLens,
+    VersionBundle, VersionCarrier, VersionRecord, build_version_bundle_runs_from_singletons,
 };
-use jazz::query::{BindingId, Query, ShapeId};
+use jazz::query::{
+    ArraySubquery, ArraySubqueryRequirement, BindingId, OrderDirection, Query, ShapeId, col, eq,
+    lit,
+};
 use jazz::schema::{ColumnSchema, JazzSchema, TableSchema};
 use jazz::time::{GlobalSeq, TxTime};
 use jazz::tx::{DurabilityTier, Fate, Transaction, TxId, TxKind};
@@ -24,6 +28,14 @@ use serde::{Deserialize, Serialize};
 const FIXTURE_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/fixtures/wire_message_frames.json"
+);
+const NATIVE_ROW_CODEC_FIXTURE_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/fixtures/native_row_codec.json"
+);
+const NATIVE_QUERY_CODEC_FIXTURE_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/fixtures/native_query_codec.json"
 );
 
 #[derive(Serialize)]
@@ -45,12 +57,12 @@ struct Fixture {
     decoded_debug: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct NativeRowCodecFixture {
     cases: Vec<NativeRowCodecCase>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct NativeRowCodecCase {
     name: String,
     descriptor_hex: Vec<String>,
@@ -58,10 +70,22 @@ struct NativeRowCodecCase {
     fields: Vec<NativeRowCodecField>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct NativeRowCodecField {
     name: String,
     encoded_hex: String,
+    decoded_hex: Option<String>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct NativeQueryCodecFixture {
+    cases: Vec<NativeQueryCodecCase>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct NativeQueryCodecCase {
+    name: String,
+    query_hex: String,
 }
 
 fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
@@ -79,14 +103,78 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
         read_view: Default::default(),
     };
     let content_extent = Extent {
+        schema: schema_version,
+        table: "docs".to_owned(),
         writer: author,
         row,
         column: "body".to_owned(),
         offset: 16,
         len: 12,
     };
+    let lineage_source = SchemaVersion::new(JazzSchema::new([TableSchema::new(
+        "todos",
+        [ColumnSchema::new("title", ColumnType::String)],
+    )]));
+    let lineage_target = SchemaVersion::new(JazzSchema::new([TableSchema::new(
+        "todos",
+        [
+            ColumnSchema::new("title", ColumnType::String),
+            ColumnSchema::text("body"),
+        ],
+    )]));
+    let lineage_target_id = lineage_target.id;
+    let lineage_lens = MigrationLens::new(
+        lineage_source.id,
+        lineage_target.id,
+        vec![TableLens {
+            source_table: "todos".to_owned(),
+            target_table: "todos".to_owned(),
+            ops: vec![
+                LensOp::CopyColumn {
+                    from: "title".to_owned(),
+                    to: "title".to_owned(),
+                },
+                LensOp::AddColumn {
+                    column: "body".to_owned(),
+                    default: Value::Bytes(Vec::new()),
+                },
+            ],
+        }],
+    );
+    let lineage_publication = SchemaLineagePublication::new(
+        lineage_target.clone(),
+        lineage_lens,
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    );
 
     vec![
+        (
+            "branch_metadata_root_open",
+            "BranchMetadata",
+            SyncMessage::BranchMetadata(BranchMetadata {
+                branch_id: BranchId::from_bytes([0x42; 16]),
+                created_by: AuthorId::from_bytes([0x43; 16]),
+                parent: None,
+                base: None,
+                open: true,
+            }),
+        ),
+        (
+            "fetch_branch_metadata",
+            "FetchBranchMetadata",
+            SyncMessage::FetchBranchMetadata {
+                branches: vec![BranchId::from_bytes([0x42; 16])],
+            },
+        ),
+        (
+            "session_claims_role_editor",
+            "SessionClaims",
+            SyncMessage::SessionClaims {
+                identity: author,
+                claims: BTreeMap::from([("role".to_owned(), Value::String("editor".to_owned()))]),
+            },
+        ),
         (
             "fate_update_accepted_global",
             "FateUpdate",
@@ -133,6 +221,11 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
             }),
         ),
         (
+            "unsubscribe_todos_binding",
+            "Unsubscribe",
+            SyncMessage::Unsubscribe { subscription },
+        ),
+        (
             "subscribe_rejected_unsupported_shape",
             "SubscribeRejected",
             SyncMessage::SubscribeRejected {
@@ -167,26 +260,7 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
                 },
                 result_member_adds: vec![result_row_entry(tx_id).into()],
                 result_member_removes: Vec::new(),
-                program_fact_adds: Vec::new(),
-                program_fact_removes: Vec::new(),
-            },
-        ),
-        (
-            "view_update_chunk_final_with_row_add",
-            "ViewUpdateChunk",
-            SyncMessage::ViewUpdateChunk {
-                subscription,
-                settled_through: GlobalSeq(7),
-                reset_result_set: true,
-                final_chunk: true,
-                version_carriers: Vec::new(),
-                version_bundles: Vec::new(),
-                peer_payload_inventory: PeerPayloadInventory {
-                    complete_tx_payloads: vec![tx_id],
-                    authorization_progress: Some(9),
-                },
-                result_member_adds: vec![result_row_entry(tx_id).into()],
-                result_member_removes: Vec::new(),
+                terminal_operations: Vec::new(),
                 program_fact_adds: Vec::new(),
                 program_fact_removes: Vec::new(),
             },
@@ -203,6 +277,31 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
                 peer_payload_inventory: PeerPayloadInventory::default(),
                 result_member_adds: Vec::new(),
                 result_member_removes: Vec::new(),
+                terminal_operations: Vec::new(),
+                program_fact_adds: Vec::new(),
+                program_fact_removes: Vec::new(),
+            },
+        ),
+        (
+            "view_update_terminal_patch",
+            "ViewUpdate",
+            SyncMessage::ViewUpdate {
+                subscription,
+                settled_through: GlobalSeq(9),
+                reset_result_set: false,
+                version_carriers: Vec::new(),
+                version_bundles: Vec::new(),
+                peer_payload_inventory: PeerPayloadInventory::default(),
+                result_member_adds: Vec::new(),
+                result_member_removes: Vec::new(),
+                terminal_operations: vec![TerminalOperation {
+                    root_key: vec![10; 17],
+                    path: vec![TerminalPathSegment::Collection("children".to_owned())],
+                    edit: TerminalEdit::Move {
+                        key: vec![11; 17],
+                        index: 3,
+                    },
+                }],
                 program_fact_adds: Vec::new(),
                 program_fact_removes: Vec::new(),
             },
@@ -222,7 +321,32 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
                     absent_read_set: None,
                     predicate_read_set: None,
                     user_metadata_json: Some("{\"fixture\":\"wire\"}".to_owned()),
-                    source_branch: None,
+                    target_lineage: jazz::tx::BranchLineage::Root,
+                    branch_merge: None,
+                    merge_strategy: None,
+                },
+                versions: Vec::new(),
+            },
+        ),
+        (
+            "commit_unit_branch_target_empty",
+            "CommitUnit",
+            SyncMessage::CommitUnit {
+                tx: Transaction {
+                    tx_id: TxId::new(TxTime(43), node),
+                    kind: TxKind::Mergeable,
+                    n_total_writes: 0,
+                    made_by: author,
+                    permission_subject: None,
+                    base_snapshot: None,
+                    row_read_set: None,
+                    absent_read_set: None,
+                    predicate_read_set: None,
+                    user_metadata_json: None,
+                    target_lineage: jazz::tx::BranchLineage::Branch(BranchId::from_bytes(
+                        [0x42; 16],
+                    )),
+                    branch_merge: None,
                     merge_strategy: None,
                 },
                 versions: Vec::new(),
@@ -268,6 +392,15 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
             },
         ),
         (
+            "publish_schema_with_lens_todos_body",
+            "PublishSchemaWithLens",
+            SyncMessage::PublishSchemaWithLens {
+                author,
+                catalogue_seq: 9,
+                publication: Box::new(lineage_publication.clone()),
+            },
+        ),
+        (
             "set_current_write_schema_revision",
             "SetCurrentWriteSchema",
             SyncMessage::SetCurrentWriteSchema {
@@ -295,6 +428,18 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
                 owner: LargeValueOwnerRef::current_row(row),
                 extent: content_extent.clone(),
             },
+        ),
+        (
+            "catalogue_snapshot_todos_lineage",
+            "CatalogueSnapshot",
+            SyncMessage::CatalogueSnapshot(Box::new(CatalogueSnapshot {
+                schemas: vec![lineage_source, lineage_target],
+                lineages: vec![(9, lineage_publication)],
+                current_write_schema: CurrentWriteSchema {
+                    revision: 9,
+                    schema: lineage_target_id,
+                },
+            })),
         ),
         (
             "content_extents_body_bytes",
@@ -353,7 +498,8 @@ fn mixed_version_carriers(
                     absent_read_set: None,
                     predicate_read_set: None,
                     user_metadata_json: None,
-                    source_branch: None,
+                    target_lineage: jazz::tx::BranchLineage::Root,
+                    branch_merge: None,
                     merge_strategy: None,
                 },
                 versions: vec![
@@ -416,7 +562,7 @@ fn fixture_manifest() -> Manifest {
         .collect();
 
     Manifest {
-        fixture_set: "jazz-wire-message-frames-v4",
+        fixture_set: "jazz-wire-message-frames-v6",
         codec: "postcard WireFrame::Message(WireEnvelope { payload: encode_sync_message(..) })",
         protocol_version: WIRE_PROTOCOL_VERSION,
         features: FEATURE_SYNC_MESSAGE_PAYLOAD,
@@ -470,6 +616,47 @@ fn wire_message_frame_fixtures_decode_to_expected_messages() {
 // record-layout contract, which is not observable through the public API.
 #[test]
 fn native_row_codec_fixture_round_trips_every_groove_value_type() {
+    if std::env::var_os("JAZZ_UPDATE_NATIVE_CODEC_FIXTURES").is_some() {
+        let (descriptor, values) = exhaustive_native_row_codec_case();
+        let descriptor_fields = descriptor
+            .fields()
+            .iter()
+            .map(|field| (field.name.clone(), field.value_type.clone()))
+            .collect::<Vec<_>>();
+        let descriptor_bytes =
+            postcard::to_allocvec(&descriptor_fields).expect("descriptor encodes");
+        let record = descriptor.create(&values).expect("record encodes");
+        let fields = descriptor
+            .fields()
+            .iter()
+            .enumerate()
+            .map(|(index, field)| {
+                let span = descriptor
+                    .field_span(&record, index)
+                    .expect("field span resolves");
+                let encoded = &record[span];
+                NativeRowCodecField {
+                    name: field.name.clone().expect("fixture fields are named"),
+                    encoded_hex: hex(encoded),
+                    decoded_hex: fixture_decoded_hex(encoded, &field.value_type),
+                }
+            })
+            .collect();
+        let fixture = NativeRowCodecFixture {
+            cases: vec![NativeRowCodecCase {
+                name: "all_value_types_depth_three".to_owned(),
+                descriptor_hex: vec![hex(&descriptor_bytes)],
+                record_hex: vec![hex(&record)],
+                fields,
+            }],
+        };
+        std::fs::write(
+            NATIVE_ROW_CODEC_FIXTURE_PATH,
+            serde_json::to_string_pretty(&fixture).expect("native row fixture serializes") + "\n",
+        )
+        .expect("native row fixture writes");
+        return;
+    }
     let fixture: NativeRowCodecFixture =
         serde_json::from_str(include_str!("../fixtures/native_row_codec.json"))
             .expect("native row codec fixture parses");
@@ -521,6 +708,106 @@ fn native_row_codec_fixture_round_trips_every_groove_value_type() {
             field.name
         );
     }
+}
+
+// This is intentionally a codec-level integration fixture: TypeScript emits
+// these exact postcard Query values and Rust independently decodes and emits
+// them. Query preparation is the public boundary; a raw fixture is the
+// narrowest way to protect its positional layout contract.
+#[test]
+fn native_query_codec_fixture_round_trips_relation_shapes() {
+    if std::env::var_os("JAZZ_UPDATE_NATIVE_CODEC_FIXTURES").is_some() {
+        let fixture = NativeQueryCodecFixture {
+            cases: native_query_codec_cases()
+                .into_iter()
+                .map(|(name, query)| NativeQueryCodecCase {
+                    name: name.to_owned(),
+                    query_hex: hex(&postcard::to_allocvec(&query).expect("query encodes")),
+                })
+                .collect(),
+        };
+        std::fs::write(
+            NATIVE_QUERY_CODEC_FIXTURE_PATH,
+            serde_json::to_string_pretty(&fixture).expect("native query fixture serializes") + "\n",
+        )
+        .expect("native query fixture writes");
+        return;
+    }
+    let fixture: NativeQueryCodecFixture =
+        serde_json::from_str(include_str!("../fixtures/native_query_codec.json"))
+            .expect("native query codec fixture parses");
+
+    for (name, expected) in native_query_codec_cases() {
+        let case = fixture
+            .cases
+            .iter()
+            .find(|case| case.name == name)
+            .unwrap_or_else(|| panic!("{name} fixture is present"));
+        assert_eq!(
+            hex(&postcard::to_allocvec(&expected).expect("query encodes")),
+            case.query_hex,
+            "{name} fixture encodes from Rust"
+        );
+        let bytes = parse_hex(&case.query_hex);
+        let decoded: Query = postcard::from_bytes(&bytes).unwrap_or_else(|error| {
+            panic!("{name} fixture decodes: {error}");
+        });
+        assert_eq!(
+            decoded, expected,
+            "{name} fixture decodes to the expected query"
+        );
+    }
+}
+
+fn fixture_decoded_hex(bytes: &[u8], value_type: &groove::records::ValueType) -> Option<String> {
+    match value_type {
+        groove::records::ValueType::Nullable(inner) => match bytes.first() {
+            Some(0) => None,
+            Some(1) => fixture_decoded_hex(&bytes[1..], inner),
+            _ => Some(hex(bytes)),
+        },
+        _ => Some(hex(bytes)),
+    }
+}
+
+fn native_query_codec_cases() -> Vec<(&'static str, Query)> {
+    let forward = Query::from("accounts")
+        .select(["label"])
+        .order_by("label", OrderDirection::Asc);
+    let mut forward = forward;
+    forward.array_subqueries.push(
+        ArraySubquery::new("entries", "entries", "account_id", "id")
+            .select(["label"])
+            .order_by("label", OrderDirection::Asc)
+            .limit(3)
+            .offset(1),
+    );
+
+    let mut reverse = Query::from("groups");
+    reverse.array_subqueries.push(
+        ArraySubquery::new("members", "members", "group_id", "id")
+            .filter(eq(col("state"), lit("active")))
+            .select(["name"])
+            .limit(4)
+            .requirement(ArraySubqueryRequirement::AtLeastOne)
+            .nested(
+                ArraySubquery::new("notes", "notes", "member_id", "id")
+                    .select(["body"])
+                    .limit(2)
+                    .requirement(ArraySubqueryRequirement::MatchCorrelationCardinality),
+            ),
+    );
+
+    let mut unbounded = Query::from("teams");
+    unbounded
+        .array_subqueries
+        .push(ArraySubquery::new("participants", "participants", "team_id", "id").offset(2));
+
+    vec![
+        ("forward_include_projected_optional", forward),
+        ("reverse_include_required_nested_projection", reverse),
+        ("unbounded_reverse_include_with_offset", unbounded),
+    ]
 }
 
 fn exhaustive_native_row_codec_case() -> (

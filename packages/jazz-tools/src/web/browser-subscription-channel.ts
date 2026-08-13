@@ -13,7 +13,12 @@ import type {
   FileReadOptions,
   FileWriteOptions,
 } from "../runtime/file-storage.js";
-import type { CreateOptions, DeleteOptions, UpdateOptions } from "../runtime/client.js";
+import type {
+  CreateOptions,
+  DeleteOptions,
+  PermissionAdvice,
+  UpdateOptions,
+} from "../runtime/client.js";
 import type { SubscriptionDelta } from "../runtime/subscription-manager.js";
 import type {
   AsyncWriteHandle,
@@ -144,7 +149,7 @@ export class BrowserWorkerSubscriptionChannel implements SubscriptionChannel {
     table: TableProxy<T, Init>,
     data: Init,
     session?: Session,
-  ): Promise<boolean> {
+  ): Promise<PermissionAdvice> {
     const db = await this.owner.db();
     return db.__withRuntimeOperationContext({ session }, () => db.canInsert(table, data));
   }
@@ -154,7 +159,7 @@ export class BrowserWorkerSubscriptionChannel implements SubscriptionChannel {
     id: string,
     data: Partial<Init>,
     session?: Session,
-  ): Promise<boolean> {
+  ): Promise<PermissionAdvice> {
     const db = await this.owner.db();
     return db.__withRuntimeOperationContext({ session }, () => db.canUpdate(table, id, data));
   }
@@ -163,7 +168,7 @@ export class BrowserWorkerSubscriptionChannel implements SubscriptionChannel {
     table: TableProxy<T, Init>,
     id: string,
     session?: Session,
-  ): Promise<boolean> {
+  ): Promise<PermissionAdvice> {
     const db = await this.owner.db();
     return db.__withRuntimeOperationContext({ session }, () => db.canDelete(table, id));
   }

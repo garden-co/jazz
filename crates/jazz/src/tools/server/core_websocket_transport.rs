@@ -3,13 +3,15 @@ use std::fmt;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crate::ids::AuthorId;
+use crate::db::ConnectionSessionContext;
+use crate::ids::{AuthorId, NodeUuid};
 use crate::wire::{
-    FEATURE_SYNC_MESSAGE_PAYLOAD, TransportError, WIRE_PROTOCOL_VERSION, WireError, WireFrame,
-    WireHello, WirePeerRole, WireTransport, current_wire_features, decode_frame, encode_frame,
-    negotiate_wire,
+    FEATURE_SYNC_MESSAGE_PAYLOAD, TransportError, WIRE_PROTOCOL_VERSION, WireAuthorityEndpoint,
+    WireError, WireFrame, WireHello, WirePeerRole, WireTransport, current_wire_features,
+    decode_frame, encode_frame, negotiate_wire,
 };
 use futures::{SinkExt as _, StreamExt as _};
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::mpsc;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
@@ -25,6 +27,7 @@ const WS_CLIENT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 const WS_CLIENT_BATCH_BYTES: usize = 1 << 20;
 const POSTCARD_FRAME_LENGTH_RESERVE: usize = 5;
 const POSTCARD_BATCH_LENGTH_RESERVE: usize = 5;
+static NEXT_CLIENT_CONNECTION_EPOCH: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug)]
 pub enum WebSocketClientError {
@@ -72,6 +75,9 @@ pub struct WebSocketTransport {
     outbound: mpsc::UnboundedSender<Vec<u8>>,
     wake: Arc<dyn Fn() + Send + Sync>,
     task: tokio::task::JoinHandle<()>,
+    protocol_version: u16,
+    features: u64,
+    session_context: Option<ConnectionSessionContext>,
 }
 
 impl fmt::Debug for WebSocketTransport {
@@ -115,10 +121,17 @@ impl WebSocketTransport {
             .await
             .map_err(WebSocketClientError::Send)?;
 
-        let hello = WireFrame::Hello(WireHello::current(
-            WirePeerRole::Client,
-            current_wire_features(),
-        ));
+        let client_endpoint = WireAuthorityEndpoint {
+            // The server authenticates the session subject separately. This
+            // endpoint only binds a fresh wire link and is never trusted as a
+            // semantic identity.
+            node: NodeUuid::from_bytes(*peer_identity.as_bytes()),
+            epoch: NEXT_CLIENT_CONNECTION_EPOCH.fetch_add(1, Ordering::Relaxed),
+        };
+        let hello = WireFrame::Hello(
+            WireHello::current(WirePeerRole::Client, current_wire_features())
+                .with_authority(client_endpoint.node, client_endpoint.epoch),
+        );
         let encoded_hello = encode_frame(&hello).map_err(WebSocketClientError::EncodeHello)?;
         let batch = postcard::to_allocvec(&vec![encoded_hello])
             .map_err(WebSocketClientError::EncodeHello)?;
@@ -127,18 +140,40 @@ impl WebSocketTransport {
             .map_err(WebSocketClientError::Send)?;
 
         let server_hello = receive_server_hello(&mut ws).await?;
-        let negotiated = negotiate_wire(
+        let mut negotiated = negotiate_wire(
             &server_hello,
             WIRE_PROTOCOL_VERSION,
             WIRE_PROTOCOL_VERSION,
             current_wire_features(),
         )
         .map_err(WebSocketClientError::Negotiation)?;
+        // Receipt semantics require an admitted authority endpoint, not merely
+        // a feature bit from a legacy hello.
+        if server_hello.authority.is_none() {
+            negotiated.features &= !(crate::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
+                | crate::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS);
+        }
         if negotiated.features & WS_CLIENT_REQUIRED_FEATURES != WS_CLIENT_REQUIRED_FEATURES {
             return Err(WebSocketClientError::ServerRejected(
                 "server did not negotiate sync message payload frames".to_owned(),
             ));
         }
+        let session_context = if negotiated.features
+            & (crate::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
+                | crate::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS)
+            != 0
+        {
+            server_hello
+                .authority
+                .map(|remote| ConnectionSessionContext {
+                    local: client_endpoint,
+                    remote,
+                    link_identity: peer_identity,
+                    negotiated_features: negotiated.features,
+                })
+        } else {
+            None
+        };
 
         let inbound = Arc::new(Mutex::new(VecDeque::new()));
         let (outbound, outbound_rx) = mpsc::unbounded_channel();
@@ -154,7 +189,17 @@ impl WebSocketTransport {
             outbound,
             wake,
             task,
+            protocol_version: negotiated.protocol_version,
+            features: negotiated.features,
+            session_context,
         })
+    }
+
+    /// Negotiated metadata authenticated during the websocket handshake.
+    pub(crate) fn negotiated_transport_metadata(
+        &self,
+    ) -> (u16, u64, Option<ConnectionSessionContext>) {
+        (self.protocol_version, self.features, self.session_context)
     }
 }
 

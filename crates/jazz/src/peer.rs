@@ -10,9 +10,10 @@ use std::sync::mpsc::TryRecvError;
 
 use groove::db::{StorageReadBucket, StorageReadMetrics};
 use groove::ivm::MultisinkSubscription;
-use groove::storage::OrderedKvStorage;
+use groove::storage::{OrderedKvStorage, ReopenableStorage};
 use web_time::Instant;
 
+use crate::authorization_scope::AuthorityScopeAggregate;
 use crate::ids::{AuthorId, RowUuid};
 use crate::node::content_store::Extent;
 use crate::node::maintained_subscription_view::{
@@ -29,7 +30,7 @@ use crate::protocol::{
     ShapeAst, Subscribe, SubscriptionKey, SyncMessage, VersionBundle, VersionCarrier,
     VersionRecord, expand_version_carriers,
 };
-use crate::protocol_limits::{MAX_SYNC_MESSAGE_BYTES, validate_fetch_row_versions};
+use crate::protocol_limits::validate_fetch_row_versions;
 use crate::query::{Binding, ValidatedQuery};
 use crate::schema::TableSchema;
 use crate::tools::OutputOccurrenceId;
@@ -61,16 +62,17 @@ fn fast_authorization_progress(known_state: &Option<KnownStateDeclaration>) -> O
             authorization_progress,
             ..
         }) => Some(*authorization_progress),
-        Some(
-            KnownStateDeclaration::Fast { .. } | KnownStateDeclaration::ExactVersionSet { .. },
-        )
+        Some(KnownStateDeclaration::Fast { .. })
+        | Some(KnownStateDeclaration::ExactVersionSet { .. })
         | None => None,
     }
 }
 
 fn member_settle_position(member: &ResultMemberEntry) -> Option<crate::time::GlobalSeq> {
     match member {
-        ResultMemberEntry::Row(row) => row.settle_position,
+        ResultMemberEntry::Row(row) | ResultMemberEntry::TypedRow { row, .. } => {
+            row.settle_position
+        }
         ResultMemberEntry::Synthetic { .. } | ResultMemberEntry::PathTuple { .. } => None,
     }
 }
@@ -87,12 +89,11 @@ fn fast_cursor_membership_mismatch(
 }
 
 fn fast_cursor_requires_authoritative_reset(
-    authorization_matches: bool,
     position: crate::time::GlobalSeq,
     previous: &BTreeSet<ResultMemberEntry>,
     current: &BTreeSet<ResultMemberEntry>,
 ) -> bool {
-    !authorization_matches && fast_cursor_membership_mismatch(position, previous, current)
+    fast_cursor_membership_mismatch(position, previous, current)
 }
 
 /// Tracks what one downstream peer has already received.
@@ -106,6 +107,10 @@ pub struct PeerState {
     deferred_edge_fates: BTreeMap<TxId, DeferredEdgeFate>,
     edge_scope_subscription_refs: BTreeMap<SubscriptionKey, usize>,
     idle_edge_scope_subscriptions: BTreeMap<SubscriptionKey, u64>,
+    /// Completed authority-local aggregate proofs used by terminal commit
+    /// admission.  This is intentionally separate from ordinary views.
+    authority_scope_proofs: u64,
+    announced_catalogue_fingerprint: Option<[u8; 32]>,
     /// Deterministic counters for this peer.
     pub metrics: PeerMetrics,
 }
@@ -155,6 +160,7 @@ struct PeerSubscriptionState {
     groove_runtime_token: Option<u64>,
     known_state: Option<KnownStateDeclaration>,
     authorization_progress: u64,
+    has_served_authorization_progress: bool,
 }
 
 impl PeerSubscriptionState {
@@ -279,6 +285,8 @@ impl Default for PeerState {
             deferred_edge_fates: BTreeMap::new(),
             edge_scope_subscription_refs: BTreeMap::new(),
             idle_edge_scope_subscriptions: BTreeMap::new(),
+            authority_scope_proofs: 0,
+            announced_catalogue_fingerprint: None,
             metrics: PeerMetrics::default(),
         }
     }
@@ -292,6 +300,31 @@ fn edge_scope_ttl_ms() -> u64 {
 }
 
 impl PeerState {
+    fn fast_cursor_authorization_matches(
+        &self,
+        subscription: SubscriptionKey,
+        known_state: &Option<KnownStateDeclaration>,
+    ) -> bool {
+        match self.role {
+            PeerRole::Relay => true,
+            PeerRole::ClientLink { .. } => {
+                self.subscriptions.get(&subscription).is_some_and(|state| {
+                    state.has_served_authorization_progress
+                        && fast_authorization_progress(known_state)
+                            == Some(state.authorization_progress)
+                })
+            }
+        }
+    }
+
+    pub(crate) fn needs_catalogue_snapshot(&self, fingerprint: [u8; 32]) -> bool {
+        self.announced_catalogue_fingerprint != Some(fingerprint)
+    }
+
+    pub(crate) fn mark_catalogue_snapshot_announced(&mut self, fingerprint: [u8; 32]) {
+        self.announced_catalogue_fingerprint = Some(fingerprint);
+    }
+
     /// Construct a permanent relay peer.
     pub fn new() -> Self {
         Self::default()
@@ -584,6 +617,7 @@ impl PeerState {
                 peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
                 result_member_adds: Vec::new(),
                 result_member_removes: Vec::new(),
+                terminal_operations: Vec::new(),
                 program_fact_adds: Vec::new(),
                 program_fact_removes: Vec::new(),
             });
@@ -666,6 +700,7 @@ impl PeerState {
             allow_storage_witness_fallback,
             observed_delta_batches: _,
             observed_result_delta_batches,
+            terminal_operations,
         } = transitions;
         let result_add_count = result_member_adds.len();
         let result_remove_count = result_member_removes.len();
@@ -679,6 +714,7 @@ impl PeerState {
         if observed_result_delta_batches > 0
             && result_member_adds.is_empty()
             && result_member_removes.is_empty()
+            && terminal_operations.is_empty()
             && program_fact_adds.is_empty()
             && program_fact_removes.is_empty()
         {
@@ -726,11 +762,13 @@ impl PeerState {
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect();
-        if result_member_adds.is_empty()
-            && result_member_removes.is_empty()
-            && program_fact_adds.is_empty()
-            && program_fact_removes.is_empty()
-        {
+        if maintained_view_update_is_empty(
+            &result_member_adds,
+            &result_member_removes,
+            &terminal_operations,
+            &program_fact_adds,
+            &program_fact_removes,
+        ) {
             return Ok(SyncMessage::ViewUpdate {
                 subscription,
                 settled_through: node.applied_global_watermark(),
@@ -740,6 +778,7 @@ impl PeerState {
                 peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
                 result_member_adds: Vec::new(),
                 result_member_removes: Vec::new(),
+                terminal_operations: Vec::new(),
                 program_fact_adds: Vec::new(),
                 program_fact_removes: Vec::new(),
             });
@@ -793,7 +832,14 @@ impl PeerState {
                 },
             )
         };
-        let update = update?;
+        let mut update = update?;
+        if let SyncMessage::ViewUpdate {
+            terminal_operations: outgoing,
+            ..
+        } = &mut update
+        {
+            *outgoing = terminal_operations;
+        }
         let bundle_elapsed = bundle_start.elapsed();
         let bundle_reads = trace_rehydrate.then(|| node.take_storage_read_metrics());
         if trace_rehydrate {
@@ -832,7 +878,7 @@ impl PeerState {
     fn drain_maintained_subscription_view_changes<S>(
         &mut self,
         node: &mut NodeState<S>,
-        _shape: &ValidatedQuery,
+        shape: &ValidatedQuery,
         subscription: SubscriptionKey,
         result_table_filter: Option<&str>,
         flush_query_runtime: bool,
@@ -859,12 +905,18 @@ impl PeerState {
             .and_then(|state| state.maintained_subscription_view.as_ref())
             .map(|maintained| maintained.tables.clone())
             .unwrap_or_default();
+        let aggregate_is_policy_scoped = shape.query().aggregate.is_some()
+            && node
+                .table(shape.query().table.as_str())?
+                .read_policy
+                .is_some();
         let mut states = BTreeMap::<ResultMemberEntry, (bool, bool)>::new();
         let mut program_fact_adds = Vec::new();
         let mut program_fact_removes = Vec::new();
         let mut allow_storage_witness_fallback = false;
         let mut observed_delta_batches = 0_usize;
         let mut observed_result_delta_batches = 0_usize;
+        let mut terminal_operations = Vec::new();
         {
             let Some(maintained_subscription_view) = self
                 .subscriptions
@@ -887,6 +939,7 @@ impl PeerState {
                                 &node.node_aliases,
                             )?;
                         observed_result_delta_batches += transitions.observed_result_delta_batches;
+                        terminal_operations.extend(transitions.terminal_operations);
                         program_fact_adds.extend(filter_program_facts_for_result_table(
                             transitions.program_fact_adds,
                             result_table_filter,
@@ -951,11 +1004,14 @@ impl PeerState {
             let Some(table_name) = member.table_name() else {
                 continue;
             };
-            if result_table_filter.is_some_and(|table| table_name != table) {
+            if !matches!(member, ResultMemberEntry::Synthetic { .. })
+                && result_table_filter.is_some_and(|table| table_name != table)
+            {
                 continue;
             }
             if !output_tables.contains_key(table_name)
-                && !matches!(member, ResultMemberEntry::Synthetic { .. })
+                && (!matches!(member, ResultMemberEntry::Synthetic { .. })
+                    || aggregate_is_policy_scoped)
             {
                 continue;
             }
@@ -976,6 +1032,7 @@ impl PeerState {
             allow_storage_witness_fallback,
             observed_delta_batches,
             observed_result_delta_batches,
+            terminal_operations,
         })
     }
 
@@ -1017,17 +1074,18 @@ impl PeerState {
         let raw_fact_add_count = transitions.program_fact_adds.len();
         let filter_start = Instant::now();
         let output_tables = tables.clone();
+        let aggregate_is_policy_scoped = shape.query().aggregate.is_some()
+            && node
+                .table(shape.query().table.as_str())?
+                .read_policy
+                .is_some();
         let known_state = self
             .subscriptions
             .get(&subscription)
             .and_then(|state| state.known_state.clone());
         let known_membership_position = fast_current_membership_position(&known_state);
-        let authorization_matches = self.subscriptions.get(&subscription).is_some_and(|state| {
-            fast_authorization_progress(&known_state)
-                .map_or(state.authorization_progress == 0, |progress| {
-                    progress == state.authorization_progress
-                })
-        });
+        let authorization_matches =
+            self.fast_cursor_authorization_matches(subscription, &known_state);
         let watermark = node.applied_global_watermark();
         let simple_membership_delta =
             transitions.program_fact_adds.is_empty() && transitions.program_fact_removes.is_empty();
@@ -1038,9 +1096,11 @@ impl PeerState {
                 let Some(table_name) = member.table_name() else {
                     return false;
                 };
-                result_table_filter.is_none_or(|table| table_name == table)
+                (matches!(member, ResultMemberEntry::Synthetic { .. })
+                    || result_table_filter.is_none_or(|table| table_name == table))
                     && (output_tables.contains_key(table_name)
-                        || matches!(member, ResultMemberEntry::Synthetic { .. }))
+                        || (matches!(member, ResultMemberEntry::Synthetic { .. })
+                            && !aggregate_is_policy_scoped))
             })
             .collect::<Vec<_>>();
         let current_member_result_set = result_member_adds.iter().cloned().collect::<BTreeSet<_>>();
@@ -1052,14 +1112,19 @@ impl PeerState {
         // removed prior member or newly visible pre-cursor member cannot be
         // reconstructed from that cursor, so it cannot safely suppress the
         // authoritative membership diff or the payload needed to apply it.
-        let cursor_membership_mismatch = known_membership_position.is_some_and(|position| {
-            fast_cursor_requires_authoritative_reset(
-                authorization_matches,
-                position,
-                previous_member_result_set,
-                &current_member_result_set,
-            )
-        });
+        // A relay has no per-client authorization boundary. A client may only
+        // reuse a pre-cursor membership diff when this peer retained the view
+        // and the receiver echoes its exact server-stamped authorization
+        // generation. Fresh, legacy, and tokenless client declarations keep
+        // the #1266 authoritative reset.
+        let cursor_membership_mismatch = !authorization_matches
+            && known_membership_position.is_some_and(|position| {
+                fast_cursor_requires_authoritative_reset(
+                    position,
+                    previous_member_result_set,
+                    &current_member_result_set,
+                )
+            });
         let (program_fact_adds, program_fact_removes, reset_result_set) = if reset_result_set
             && !cursor_membership_mismatch
             && let Some(position) = known_membership_position
@@ -1183,6 +1248,10 @@ impl PeerState {
         state.maintained_subscription_view = Some(maintained_subscription);
         state.groove_runtime_token = Some(node.groove_runtime_token());
         self.record_outgoing_view_update(&update);
+        self.subscriptions
+            .entry(subscription)
+            .or_default()
+            .has_served_authorization_progress = true;
         self.metrics.maintained_subscription_view.hits_out += 1;
         self.refresh_maintained_subscription_view_footprint(subscription);
         Ok(update)
@@ -1252,10 +1321,25 @@ impl PeerState {
             .get(&subscription)
             .map(PeerSubscriptionState::member_result_set)
             .unwrap_or_default();
+        let previous_program_fact_set = self
+            .subscriptions
+            .get(&subscription)
+            .map(PeerSubscriptionState::program_fact_set)
+            .unwrap_or_default();
+        let previous_member_index = self
+            .subscriptions
+            .get(&subscription)
+            .map(|state| state.member_index.clone())
+            .unwrap_or_default();
         let known_state = self
             .subscriptions
             .get(&subscription)
             .and_then(|state| state.known_state.clone());
+        let retained_authorization = self.subscriptions.get(&subscription).and_then(|state| {
+            state
+                .has_served_authorization_progress
+                .then_some(state.authorization_progress)
+        });
         self.forget_subscription_with_node(node, subscription);
         let plan = node.mark_peer_maintained_query_shape_cache(shape, binding, opts.tier);
         let cached = CachedPeerQueryPlan::with_plan(opts.tier, plan);
@@ -1263,6 +1347,13 @@ impl PeerState {
         state.prepared_query = Some(cached);
         state.groove_runtime_token = Some(node.groove_runtime_token());
         state.known_state = known_state;
+        state.result_member_set = previous_member_result_set.clone();
+        state.program_fact_set = previous_program_fact_set;
+        state.member_index = previous_member_index;
+        if let Some(authorization_progress) = retained_authorization {
+            state.authorization_progress = authorization_progress;
+            state.has_served_authorization_progress = true;
+        }
         self.rehydrate_query_maintained_subscription_view(
             node,
             MaintainedRehydrateRequest {
@@ -1309,9 +1400,11 @@ impl PeerState {
             allow_storage_witness_fallback: source_allow_storage_witness_fallback,
             observed_delta_batches: _,
             observed_result_delta_batches: _,
+            terminal_operations: source_terminal_operations,
         } = source_transitions;
         if !source_adds.is_empty()
             || !source_removes.is_empty()
+            || !source_terminal_operations.is_empty()
             || !source_program_fact_adds.is_empty()
             || !source_program_fact_removes.is_empty()
         {
@@ -1324,6 +1417,7 @@ impl PeerState {
                 peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
                 result_member_adds: source_adds,
                 result_member_removes: source_removes,
+                terminal_operations: source_terminal_operations,
                 program_fact_adds: source_program_fact_adds,
                 program_fact_removes: source_program_fact_removes,
             });
@@ -1645,7 +1739,9 @@ impl PeerState {
         S: OrderedKvStorage,
     {
         let versions = node.row_version_payloads_for_refs(requests, self.identity())?;
-        split_row_version_payloads(versions)
+        Ok(vec![SyncMessage::RowVersionPayloads {
+            version_bundles: versions,
+        }])
     }
 
     /// Build a bulk-lane response for extents that belong to one row.
@@ -1709,7 +1805,7 @@ impl PeerState {
         now_ms: u64,
     ) -> Result<Vec<SyncMessage>, Error>
     where
-        S: OrderedKvStorage,
+        S: OrderedKvStorage + ReopenableStorage,
     {
         self.evict_idle_edge_scope_subscriptions(node, now_ms);
         if tx.kind != TxKind::Mergeable {
@@ -1718,7 +1814,7 @@ impl PeerState {
             ));
         }
         let permission_identity = self.identity();
-        if let Some(scope_subscriptions) = self.unsettled_permission_scope_subscriptions(
+        if let Some(scope_subscriptions) = self.unsettled_authority_scope_subscriptions(
             node,
             permission_identity,
             &versions,
@@ -1758,7 +1854,7 @@ impl PeerState {
         now_ms: u64,
     ) -> Result<Vec<SyncMessage>, Error>
     where
-        S: OrderedKvStorage,
+        S: OrderedKvStorage + ReopenableStorage,
     {
         self.evict_idle_edge_scope_subscriptions(node, now_ms);
         let deferred = self
@@ -1769,7 +1865,7 @@ impl PeerState {
         let mut updates = Vec::new();
         for (tx_id, fate) in deferred {
             if self
-                .unsettled_permission_scope_subscriptions(
+                .unsettled_authority_scope_subscriptions(
                     node,
                     fate.permission_identity,
                     &fate.versions,
@@ -1834,7 +1930,90 @@ impl PeerState {
             .count() as u64;
     }
 
-    fn unsettled_permission_scope_subscriptions<S>(
+    /// Establish the same all-clause aggregate proof used by wire advice
+    /// before a terminal authority admits a client commit.  The action list is
+    /// reconstructed by `NodeState` from the actual version records, so
+    /// insert, update (including candidate patch), and delete each compile the
+    /// correct policy clauses rather than sharing a placeholder update.
+    pub(crate) fn prove_terminal_commit_authorization<S>(
+        &mut self,
+        node: &mut NodeState<S>,
+        writer: AuthorId,
+        versions: &[VersionRecord],
+    ) -> Result<(), Error>
+    where
+        S: OrderedKvStorage,
+    {
+        for action in node.authorization_actions_for_versions(versions)? {
+            let scope = node.authorization_support_scope(writer, &action)?;
+            if scope.subscriptions.is_empty() {
+                continue;
+            }
+            let mut aggregate = AuthorityScopeAggregate::new(
+                scope
+                    .subscriptions
+                    .iter()
+                    .map(|(shape, binding)| (shape.shape_id(), binding.binding_id()))
+                    .collect(),
+            );
+            for (shape, binding) in scope.subscriptions {
+                let subscription = SubscriptionKey {
+                    shape_id: shape.shape_id(),
+                    binding_id: binding.binding_id(),
+                    read_view: scope.options.read_view_key(),
+                };
+                if !aggregate.register(subscription, (shape.shape_id(), binding.binding_id())) {
+                    continue;
+                }
+                let (cut, progress) = if self
+                    .subscriptions
+                    .get(&subscription)
+                    .is_some_and(|state| state.maintained_subscription_view.is_some())
+                {
+                    (
+                        node.applied_global_watermark(),
+                        self.authorization_progress_for_subscription(subscription),
+                    )
+                } else {
+                    let previous_role = self.role;
+                    self.role = PeerRole::ClientLink { identity: writer };
+                    let update = self.rehydrate_query(node, &shape, &binding);
+                    self.role = previous_role;
+                    let SyncMessage::ViewUpdate {
+                        settled_through, ..
+                    } = update?
+                    else {
+                        return Err(Error::UnsupportedSyncMessage(
+                            "terminal authority support hydration did not return a view",
+                        ));
+                    };
+                    (
+                        settled_through,
+                        self.authorization_progress_for_subscription(subscription),
+                    )
+                };
+                let _ = aggregate.apply(subscription, cut, progress);
+            }
+            if aggregate.bounds().is_none() {
+                return Err(Error::UnsupportedSyncMessage(
+                    "terminal authority support proof is incomplete",
+                ));
+            }
+            self.authority_scope_proofs = self.authority_scope_proofs.saturating_add(1);
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn terminal_authority_scope_proof_count(&self) -> u64 {
+        self.authority_scope_proofs
+    }
+
+    /// Locally hydrate the same action-specific support clauses that an
+    /// admitted upstream authority would send in `AuthorizationScopeView`.
+    /// Terminal cores do not put those views on a wire, but they must never
+    /// fall back to the historical table-wide permission query.
+    fn unsettled_authority_scope_subscriptions<S>(
         &mut self,
         node: &mut NodeState<S>,
         writer: AuthorId,
@@ -1845,41 +2024,94 @@ impl PeerState {
         S: OrderedKvStorage,
     {
         let mut unsettled = Vec::new();
-        let tables = versions
-            .iter()
-            .map(|version| version.table().to_owned())
-            .collect::<BTreeSet<_>>();
-        for table in tables {
-            let Some((shape, binding)) = node.permission_scope_shape_binding(&table, writer)?
-            else {
+        for action in node.authorization_actions_for_versions(versions)? {
+            let scope = node.authorization_support_scope(writer, &action)?;
+            if scope.subscriptions.is_empty() {
+                // A policy with no support clauses is structurally complete;
+                // its terminal decision is evaluated by the same authority
+                // path without inventing an empty receipt.
                 continue;
-            };
-            let subscription = SubscriptionKey {
-                shape_id: shape.shape_id(),
-                binding_id: binding.binding_id(),
-                read_view: Default::default(),
-            };
-            if retained_scope_is_unsettled
-                && self
-                    .edge_scope_subscription_refs
-                    .contains_key(&subscription)
-            {
+            }
+            let mut aggregate = AuthorityScopeAggregate::new(
+                scope
+                    .subscriptions
+                    .iter()
+                    .map(|(shape, binding)| (shape.shape_id(), binding.binding_id()))
+                    .collect(),
+            );
+            for (shape, binding) in scope.subscriptions {
+                let subscription = SubscriptionKey {
+                    shape_id: shape.shape_id(),
+                    binding_id: binding.binding_id(),
+                    read_view: scope.options.read_view_key(),
+                };
+                if !aggregate.register(subscription, (shape.shape_id(), binding.binding_id())) {
+                    // The compiler may reach the same canonical clause through
+                    // more than one policy edge.  It remains one support
+                    // proof clause, never a second maintained subscription.
+                    continue;
+                }
+                if retained_scope_is_unsettled
+                    && self
+                        .edge_scope_subscription_refs
+                        .contains_key(&subscription)
+                {
+                    unsettled.push(subscription);
+                    continue;
+                }
+                if self
+                    .subscriptions
+                    .get(&subscription)
+                    .is_some_and(|state| state.maintained_subscription_view.is_some())
+                {
+                    let _ = aggregate.apply(
+                        subscription,
+                        node.applied_global_watermark(),
+                        self.authorization_progress_for_subscription(subscription),
+                    );
+                    continue;
+                }
+                let previous_role = self.role;
+                self.role = PeerRole::ClientLink { identity: writer };
+                let rehydrate = self.rehydrate_query(node, &shape, &binding);
+                self.role = previous_role;
+                let update = rehydrate?;
+                let SyncMessage::ViewUpdate {
+                    settled_through, ..
+                } = update
+                else {
+                    return Err(Error::UnsupportedSyncMessage(
+                        "authority support hydration did not return a view",
+                    ));
+                };
+                let _ = aggregate.apply(
+                    subscription,
+                    settled_through,
+                    self.authorization_progress_for_subscription(subscription),
+                );
+                // This legacy direct-PeerState entry point is retained only
+                // for compatibility tests.  Db edge admission uses the
+                // authority-owned upstream receipt path; a caller already
+                // parked here still waits for its next drain turn.
                 unsettled.push(subscription);
-                continue;
             }
-            if self
-                .subscriptions
-                .get(&subscription)
-                .is_some_and(|state| state.maintained_subscription_view.is_some())
-            {
-                continue;
+            if aggregate.bounds().is_none() {
+                // Preserve the exact subscriptions that still need a newer
+                // clause view so an existing parked caller can retain them.
+                let missing = aggregate
+                    .expected_support()
+                    .iter()
+                    .filter_map(|(shape_id, binding_id)| {
+                        let subscription = SubscriptionKey {
+                            shape_id: *shape_id,
+                            binding_id: *binding_id,
+                            read_view: scope.options.read_view_key(),
+                        };
+                        (!unsettled.contains(&subscription)).then_some(subscription)
+                    })
+                    .collect::<Vec<_>>();
+                unsettled.extend(missing);
             }
-            let previous_role = self.role;
-            self.role = PeerRole::ClientLink { identity: writer };
-            let rehydrate = self.rehydrate_query(node, &shape, &binding);
-            self.role = previous_role;
-            let _ = rehydrate?;
-            unsettled.push(subscription);
         }
         if unsettled.is_empty() {
             Ok(None)
@@ -2017,6 +2249,20 @@ impl PeerState {
     }
 }
 
+fn maintained_view_update_is_empty(
+    result_member_adds: &[ResultMemberEntry],
+    result_member_removes: &[ResultMemberEntry],
+    terminal_operations: &[groove::ivm::TerminalOperation],
+    program_fact_adds: &[ProgramFactEntry],
+    program_fact_removes: &[ProgramFactEntry],
+) -> bool {
+    result_member_adds.is_empty()
+        && result_member_removes.is_empty()
+        && terminal_operations.is_empty()
+        && program_fact_adds.is_empty()
+        && program_fact_removes.is_empty()
+}
+
 fn member_row_key(member: &ResultMemberEntry) -> Option<RowKey> {
     member.output_occurrence_id()
 }
@@ -2050,9 +2296,9 @@ fn filter_program_facts_for_result_table(
                 let Some(table_name) = payload.member.table_name() else {
                     return false;
                 };
-                result_table_filter.is_none_or(|table| table_name == table)
-                    && (output_tables.contains_key(table_name)
-                        || matches!(payload.member, ResultMemberEntry::Synthetic { .. }))
+                matches!(payload.member, ResultMemberEntry::Synthetic { .. })
+                    || (result_table_filter.is_none_or(|table| table_name == table)
+                        && output_tables.contains_key(table_name))
             }
             _ => true,
         })
@@ -2167,48 +2413,6 @@ fn view_update_singleton_bundles(
         bundles.append(&mut expanded);
     }
     bundles
-}
-
-fn split_row_version_payloads(
-    version_bundles: Vec<VersionBundle>,
-) -> Result<Vec<SyncMessage>, Error> {
-    let mut messages = Vec::new();
-    let mut current = Vec::new();
-    for bundle in version_bundles {
-        let single_encoded = postcard::to_allocvec(&SyncMessage::RowVersionPayloads {
-            version_bundles: vec![bundle.clone()],
-        })
-        .map_err(|_| Error::UnsupportedSyncMessage("failed to measure row-version payload"))?;
-        if single_encoded.len() > MAX_SYNC_MESSAGE_BYTES {
-            return Err(Error::UnsupportedSyncMessage(
-                "row-version payload exceeds sync message limit",
-            ));
-        }
-        if current.is_empty() {
-            current.push(bundle);
-            continue;
-        }
-        let mut candidate = current.clone();
-        candidate.push(bundle.clone());
-        let encoded = postcard::to_allocvec(&SyncMessage::RowVersionPayloads {
-            version_bundles: candidate,
-        })
-        .map_err(|_| Error::UnsupportedSyncMessage("failed to measure row-version payload"))?;
-        if encoded.len() > MAX_SYNC_MESSAGE_BYTES {
-            messages.push(SyncMessage::RowVersionPayloads {
-                version_bundles: current,
-            });
-            current = vec![bundle];
-        } else {
-            current.push(bundle);
-        }
-    }
-    if !current.is_empty() {
-        messages.push(SyncMessage::RowVersionPayloads {
-            version_bundles: current,
-        });
-    }
-    Ok(messages)
 }
 
 fn storage_read_metrics_buckets(metrics: &StorageReadMetrics) -> String {
@@ -2354,10 +2558,12 @@ mod tests {
     use crate::node::MergeableCommit;
     use crate::protocol::{ProgramFactEntry, RealRowMemberEntry, SyncMessage, VersionRecord};
     use crate::query::{
-        Aggregate, OrderDirection, Query, claim, col, eq, gt, is_null, lit, ne, not, param,
+        Aggregate, ArraySubquery, OrderDirection, Query, claim, col, eq, gt, is_null, lit, ne, not,
+        param,
     };
     use crate::schema::{JazzSchema, Policy, TableSchema};
     use crate::time::{GlobalSeq, TxTime};
+    use crate::tools::OpenBatchId;
     use crate::tx::DeletionEvent;
     use crate::tx::{DurabilityTier, Fate, TxKind};
     use groove::records::{BorrowedRecord, RecordDescriptor, Value, ValueType};
@@ -2416,7 +2622,7 @@ mod tests {
     }
 
     #[test]
-    fn fast_authorization_progress_bounds_membership_resets() {
+    fn fast_cursor_membership_bounds_authoritative_resets() {
         // This is intentionally an internal test: the four-way decision is a
         // peer-only protocol control-plane predicate, with no public API
         // surface. End-to-end rehydrate tests cover application of its output.
@@ -2427,36 +2633,185 @@ mod tests {
 
         // (1) same authorization, sufficient cursor: no reset.
         assert!(!fast_cursor_requires_authoritative_reset(
-            true, cursor, &previous, &previous,
+            cursor, &previous, &previous,
         ));
-        // (2) same authorization, insufficient cursor: an incremental repair
-        // remains permitted; this predicate must not force a reset.
+        // (2) same authorization, post-cursor add: incremental repair remains
+        // sufficient and this predicate must not force a reset.
         assert!(!fast_cursor_requires_authoritative_reset(
-            true,
             cursor,
             &previous,
             &BTreeSet::from([old.clone(), new.clone()]),
         ));
+        // Membership-affecting policy facts need the #1266 authoritative reset
+        // even when the link-local authorization generation did not advance.
+        assert!(fast_cursor_requires_authoritative_reset(
+            cursor,
+            &previous,
+            &BTreeSet::from([old.clone(), settled_member(row(3), 8)]),
+        ));
+        assert!(fast_cursor_requires_authoritative_reset(
+            cursor,
+            &previous,
+            &BTreeSet::new(),
+        ));
         // (3) changed authorization with a reconstructible post-cursor add.
         assert!(!fast_cursor_requires_authoritative_reset(
-            false,
             cursor,
             &previous,
             &BTreeSet::from([old.clone(), new]),
         ));
         // (4) changed authorization with either a pre-cursor grant or revoke.
         assert!(fast_cursor_requires_authoritative_reset(
-            false,
             cursor,
             &previous,
             &BTreeSet::from([old.clone(), settled_member(row(3), 8)]),
         ));
         assert!(fast_cursor_requires_authoritative_reset(
-            false,
             cursor,
             &previous,
             &BTreeSet::new(),
         ));
+    }
+
+    #[test]
+    fn client_fast_cursor_requires_retained_matching_authorization_progress() {
+        let subscription = SubscriptionKey {
+            shape_id: crate::query::ShapeId(uuid::Uuid::from_u128(1)),
+            binding_id: crate::query::BindingId(uuid::Uuid::from_u128(2)),
+            read_view: Default::default(),
+        };
+        let cursor = GlobalSeq(10);
+        let known_state = Some(KnownStateDeclaration::FastWithAuthorizationProgress {
+            completeness: KnownStateCompleteness::FastCurrentMembership,
+            position: cursor,
+            authorization_progress: 0,
+        });
+        let previous = BTreeSet::from([settled_member(row(1), 7)]);
+        let revoked = BTreeSet::new();
+
+        let mut fresh_client = PeerState::client_link(AuthorId::from_bytes([0x11; 16]));
+        fresh_client.declare_known_state(subscription, known_state.clone());
+        assert!(!fresh_client.fast_cursor_authorization_matches(subscription, &known_state));
+        assert!(fast_cursor_requires_authoritative_reset(
+            cursor, &previous, &revoked,
+        ));
+
+        let state = fresh_client.subscriptions.get_mut(&subscription).unwrap();
+        state.authorization_progress = 0;
+        state.has_served_authorization_progress = true;
+        assert!(fresh_client.fast_cursor_authorization_matches(subscription, &known_state));
+
+        let legacy = Some(KnownStateDeclaration::Fast {
+            completeness: KnownStateCompleteness::FastCurrentMembership,
+            position: cursor,
+        });
+        assert!(!fresh_client.fast_cursor_authorization_matches(subscription, &legacy));
+        assert!(!fresh_client.fast_cursor_authorization_matches(subscription, &None));
+
+        let relay = PeerState::relay();
+        assert!(relay.fast_cursor_authorization_matches(subscription, &legacy));
+    }
+
+    #[test]
+    fn client_fast_cursor_authorization_proof_controls_rehydrate_reset() {
+        let (_dir, mut core) = open_node_with_uuid(node(0x91));
+        let live = row(0x31);
+        let live_tx = core
+            .commit_mergeable(MergeableCommit::new("todos", live, 1_000).cells(title_cells("live")))
+            .unwrap();
+        accept_global(&mut core, live_tx, 1);
+        let shape = Query::from("todos").validate(&schema()).unwrap();
+        let binding = shape.bind(BTreeMap::new()).unwrap();
+        let subscription = subscription_key(&shape, &binding);
+        let known = |position, authorization_progress| {
+            Some(KnownStateDeclaration::FastWithAuthorizationProgress {
+                completeness: KnownStateCompleteness::FastCurrentMembership,
+                position: GlobalSeq(position),
+                authorization_progress,
+            })
+        };
+
+        let identity = AuthorId::from_bytes([0x11; 16]);
+        let mut fresh = PeerState::client_link(identity);
+        fresh.declare_known_state(subscription, known(1, 0));
+        let fresh_update = fresh.rehydrate_query(&mut core, &shape, &binding).unwrap();
+        let SyncMessage::ViewUpdate {
+            reset_result_set,
+            result_member_adds,
+            ..
+        } = fresh_update
+        else {
+            panic!("expected view update");
+        };
+        assert!(
+            reset_result_set,
+            "fresh client token must not suppress reset"
+        );
+        assert_eq!(result_member_adds.len(), 1);
+
+        let retained_member = fresh.subscriptions[&subscription]
+            .result_member_set
+            .iter()
+            .next()
+            .unwrap()
+            .clone();
+        apply_contribution_add(
+            fresh.subscriptions.get_mut(&subscription).unwrap(),
+            std::iter::once(&retained_member),
+            &mut Vec::new(),
+            &mut Vec::new(),
+        );
+        assert_eq!(
+            fresh.subscriptions[&subscription]
+                .member_index
+                .values()
+                .next()
+                .unwrap()
+                .refcount,
+            2
+        );
+
+        fresh.declare_known_state(subscription, known(1, 0));
+        let retained_update = fresh.rehydrate_query(&mut core, &shape, &binding).unwrap();
+        let SyncMessage::ViewUpdate {
+            reset_result_set,
+            result_member_adds,
+            ..
+        } = retained_update
+        else {
+            panic!("expected view update");
+        };
+        assert!(!reset_result_set, "retained matching token may resume");
+        assert!(result_member_adds.is_empty());
+        assert_eq!(
+            fresh.subscriptions[&subscription]
+                .member_index
+                .values()
+                .next()
+                .unwrap()
+                .refcount,
+            2,
+            "retained resume must preserve contribution refcounts"
+        );
+
+        let deleted_tx = core
+            .commit_mergeable(
+                MergeableCommit::new("todos", live, 2_000).deletion(DeletionEvent::Deleted),
+            )
+            .unwrap();
+        accept_global(&mut core, deleted_tx, 2);
+        fresh.declare_known_state(subscription, known(2, 1));
+        let revoke_update = fresh.rehydrate_query(&mut core, &shape, &binding).unwrap();
+        let SyncMessage::ViewUpdate {
+            reset_result_set, ..
+        } = revoke_update
+        else {
+            panic!("expected view update");
+        };
+        assert!(
+            reset_result_set,
+            "mismatched authorization token must reset a retained revoke"
+        );
     }
 
     fn output_member(root: RowUuid, joined: RowUuid, time: u64) -> ResultMemberEntry {
@@ -2495,6 +2850,7 @@ mod tests {
             peer_payload_inventory: Default::default(),
             result_member_adds: adds,
             result_member_removes: removes,
+            terminal_operations: Vec::new(),
             program_fact_adds: Vec::new(),
             program_fact_removes: Vec::new(),
         };
@@ -2878,11 +3234,6 @@ mod tests {
                 version_carriers,
                 version_bundles,
                 ..
-            }
-            | SyncMessage::ViewUpdateChunk {
-                version_carriers,
-                version_bundles,
-                ..
             } => {
                 let mut bundles = version_bundles.clone();
                 bundles.extend(
@@ -3059,6 +3410,83 @@ mod tests {
         peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
 
         assert!(maintained_subscription_id(&peer, subscription).is_some());
+    }
+
+    #[test]
+    fn maintained_structured_terminal_only_change_is_not_dropped_by_empty_guard() {
+        let schema = JazzSchema::new([
+            TableSchema::new("users", [ColumnSchema::new("name", ColumnType::String)]),
+            TableSchema::new(
+                "todos",
+                [
+                    ColumnSchema::new("title", ColumnType::String),
+                    ColumnSchema::new("owner_id", ColumnType::Uuid),
+                ],
+            ),
+        ]);
+        let (_dir, mut core) = open_node_with_schema(node(0x93), schema.clone());
+        let user = row(0xa1);
+        let user_tx =
+            core.commit_mergeable(MergeableCommit::new("users", user, 1_000).cells(
+                BTreeMap::from([("name".to_owned(), Value::String("owner".to_owned()))]),
+            ))
+            .unwrap();
+        accept_global(&mut core, user_tx, 1);
+        let shape = Query::from("users")
+            .array_subquery(ArraySubquery::new(
+                "todosViaOwner",
+                "todos",
+                "owner_id",
+                "id",
+            ))
+            .validate(&schema)
+            .unwrap();
+        let binding = shape.bind(BTreeMap::new()).unwrap();
+        let mut peer = PeerState::new();
+        peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
+
+        let child_tx = core
+            .commit_mergeable(MergeableCommit::new("todos", row(0xb1), 1_001).cells(
+                BTreeMap::from([
+                    ("title".to_owned(), Value::String("child".to_owned())),
+                    ("owner_id".to_owned(), Value::Uuid(user.0)),
+                ]),
+            ))
+            .unwrap();
+        accept_global(&mut core, child_tx, 2);
+        peer.query_update(&mut core, &shape, &binding).unwrap();
+        let child_update_tx = core
+            .commit_mergeable(MergeableCommit::new("todos", row(0xb1), 1_002).cells(
+                BTreeMap::from([(
+                    "title".to_owned(),
+                    Value::String("updated child".to_owned()),
+                )]),
+            ))
+            .unwrap();
+        accept_global(&mut core, child_update_tx, 3);
+        let update = peer.query_update(&mut core, &shape, &binding).unwrap();
+        let SyncMessage::ViewUpdate {
+            result_member_adds,
+            result_member_removes,
+            program_fact_adds,
+            program_fact_removes,
+            terminal_operations,
+            ..
+        } = update
+        else {
+            panic!("expected view update")
+        };
+        assert!(result_member_adds.is_empty());
+        assert!(result_member_removes.is_empty());
+        assert!(!terminal_operations.is_empty());
+        assert!(!maintained_view_update_is_empty(
+            &[],
+            &[],
+            &terminal_operations,
+            &[],
+            &[],
+        ));
+        let _ = (program_fact_adds, program_fact_removes);
     }
 
     #[test]
@@ -4296,7 +4724,7 @@ mod tests {
         let binding = shape.bind(BTreeMap::new()).unwrap();
 
         for (identity, expected_count, expected_sum) in
-            [(admin, 2, 30), (member, 2, 40), (spy, 0, 0)]
+            [(admin, 2, Some(30)), (member, 2, Some(40)), (spy, 0, None)]
         {
             let rows = core
                 .query_rows_with_prepared_plan_for_identity(
@@ -4307,13 +4735,12 @@ mod tests {
                     identity,
                 )
                 .unwrap();
-            if expected_count == 0 {
-                assert!(rows.is_empty());
-                continue;
-            }
             let cells = aggregate_cells(&rows[0]);
             assert_eq!(cells["count"], Value::U64(expected_count));
-            assert_eq!(cells["sum_score"], Value::U64(expected_sum));
+            assert_eq!(
+                cells.get("sum_score").cloned(),
+                expected_sum.map(Value::U64)
+            );
         }
     }
 
@@ -4367,6 +4794,7 @@ mod tests {
                 peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
                 result_member_adds: Vec::new(),
                 result_member_removes: Vec::new(),
+                terminal_operations: Vec::new(),
                 program_fact_adds: Vec::new(),
                 program_fact_removes: Vec::new(),
             }
@@ -4849,7 +5277,8 @@ mod tests {
         let mut peer = PeerState::new();
 
         peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
-        let tx = core.open_exclusive().unwrap();
+        let tx = OpenBatchId::new();
+        core.open_exclusive(tx).unwrap();
         core.tx_write(tx, "todos", row(0x61), title_cells("match"), None)
             .unwrap();
         let (tx_id, _unit) = core.commit_exclusive(tx, AuthorId::SYSTEM, 1_000).unwrap();
@@ -4883,7 +5312,8 @@ mod tests {
         let mut peer = PeerState::new();
 
         peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
-        let tx = core.open_exclusive().unwrap();
+        let tx = OpenBatchId::new();
+        core.open_exclusive(tx).unwrap();
         core.tx_write(tx, "todos", row(0x71), title_cells("match"), None)
             .unwrap();
         core.tx_write(tx, "todos", row(0x72), title_cells("other"), None)
@@ -4930,7 +5360,8 @@ mod tests {
         peer.set_ship_complete_exclusive_payloads(true);
 
         peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
-        let tx = core.open_exclusive().unwrap();
+        let tx = OpenBatchId::new();
+        core.open_exclusive(tx).unwrap();
         core.tx_write(tx, "todos", row(0x71), title_cells("match"), None)
             .unwrap();
         core.tx_write(tx, "todos", row(0x72), title_cells("other"), None)
@@ -4983,7 +5414,8 @@ mod tests {
                 (row(0x72), title_cells("other")),
             ]
         );
-        let open = reader.open_exclusive().unwrap();
+        let open = OpenBatchId::new();
+        reader.open_exclusive(open).unwrap();
         assert_eq!(
             reader.tx_read(open, "todos", row(0x72)).unwrap(),
             Some(title_cells("other"))
@@ -5061,7 +5493,8 @@ mod tests {
         let doc_b = row(0x82);
         let project = row(0x83);
 
-        let tx = core.open_exclusive().unwrap();
+        let tx = OpenBatchId::new();
+        core.open_exclusive(tx).unwrap();
         core.tx_write(tx, "docs", doc_a, doc_cells("a", project), None)
             .unwrap();
         core.tx_write(tx, "docs", doc_b, doc_cells("b", project), None)
@@ -5340,7 +5773,8 @@ mod tests {
         let doc_two = row(2);
         let project = row(9);
 
-        let tx = writer.open_exclusive().unwrap();
+        let tx = OpenBatchId::new();
+        writer.open_exclusive(tx).unwrap();
         writer
             .tx_write(tx, "docs", doc_one, doc_cells("one", project), None)
             .unwrap();
@@ -5468,7 +5902,8 @@ mod tests {
         assert!(result_member_adds.is_empty());
         assert!(version_bundles.is_empty());
 
-        let tx = core.open_exclusive().unwrap();
+        let tx = OpenBatchId::new();
+        core.open_exclusive(tx).unwrap();
         core.tx_write(tx, "todos", row_one, title_cells("one"), None)
             .unwrap();
         core.tx_write(tx, "todos", row_two, title_cells("two"), None)

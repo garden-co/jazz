@@ -12,18 +12,34 @@ use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 
 use groove::records::{OwnedRecord, Value};
 
-use crate::ids::{AuthorId, MigrationLensId, NodeUuid, RowUuid, SchemaVersionId};
+use crate::ids::{
+    AuthorId, BranchId, MigrationLensId, NodeUuid, RowUuid, SchemaLineagePublicationId,
+    SchemaVersionId,
+};
 use crate::node::content_store::Extent;
 use crate::query::{BindingId, Query, RelationQuery, ShapeId};
 use crate::schema::{JazzSchema, TableSchema};
 use crate::time::GlobalSeq;
 use crate::time::TxTime;
-use crate::tools::{ObjectId, OutputOccurrenceId};
+use crate::tools::{ObjectId, OutputOccurrenceId, ResultKey};
 use crate::tx::{DeletionEvent, DurabilityTier, Fate, Snapshot, Transaction, TxId};
 
 /// Messages exchanged between Jazz nodes.
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub enum SyncMessage {
+    /// Durable routing metadata required before a branch-target commit unit or
+    /// branch-scoped view payload can be admitted. This is intentionally
+    /// separate from the ordinary transaction payload: it selects the target
+    /// partition, but never changes transaction semantics.
+    BranchMetadata(BranchMetadata),
+    /// Bounded repair request for branch routing metadata observed out of
+    /// order. Trusted peers may retain every branch; serving policy decides
+    /// whether a client is sent a requested record.
+    FetchBranchMetadata {
+        /// Exact branch routing records requested, bounded by the protocol
+        /// repair limit at decode and serving boundaries.
+        branches: Vec<BranchId>,
+    },
     /// Trusted backend assertion of process-local auth claims for a write subject.
     SessionClaims {
         /// Identity these claims describe.
@@ -79,6 +95,15 @@ pub enum SyncMessage {
         /// Schema payload.
         schema: Box<SchemaVersion>,
     },
+    /// Atomically publish a non-genesis schema with its lineage-defining lens.
+    PublishSchemaWithLens {
+        /// Authenticated catalogue admin.
+        author: AuthorId,
+        /// Database-wide authoritative catalogue ordering position.
+        catalogue_seq: u64,
+        /// Complete schema-and-lineage publication bundle.
+        publication: Box<SchemaLineagePublication>,
+    },
     /// Publish an immutable migration lens payload.
     PublishLens {
         /// Authenticated catalogue admin.
@@ -130,41 +155,10 @@ pub enum SyncMessage {
         result_member_adds: Vec<ResultMemberEntry>,
         /// Typed result membership removals for the subscription.
         result_member_removes: Vec<ResultMemberEntry>,
-        /// Non-row program fact additions, such as relation edges.
-        program_fact_adds: Vec<ProgramFactEntry>,
-        /// Non-row program fact removals, such as relation edges.
-        program_fact_removes: Vec<ProgramFactEntry>,
-    },
-    /// Bounded chunk of a downstream current-row view update.
-    ///
-    /// Chunks carry the same record payload types as [`SyncMessage::ViewUpdate`]
-    /// but split an otherwise oversized snapshot across multiple sync messages.
-    /// Receivers may ingest non-final chunks immediately, but must not publish
-    /// subscription settlement until `final_chunk` is true.
-    ViewUpdateChunk {
-        /// Query binding result set addressed by this update.
-        subscription: SubscriptionKey,
-        /// Serving node's contiguous applied global watermark when the original
-        /// update was assembled.
-        settled_through: GlobalSeq,
-        /// Whether receiver result_set should be reset first.
-        reset_result_set: bool,
-        /// Whether this chunk completes the logical view update.
-        final_chunk: bool,
-        /// General carrier stream for singleton bundles and packed runs.
-        ///
-        /// Receivers validate this stream and apply packed runs directly.
-        /// Legacy/test paths may still expand carriers into `version_bundles`.
-        version_carriers: Vec<VersionCarrier>,
-        /// Version bundles not previously shipped on the peer.
-        version_bundles: Vec<VersionBundle>,
-        /// Peer-scoped payload coverage that may be referenced instead of
-        /// resending bytes.
-        peer_payload_inventory: PeerPayloadInventory,
-        /// Typed result membership additions for the subscription.
-        result_member_adds: Vec<ResultMemberEntry>,
-        /// Typed result membership removals for the subscription.
-        result_member_removes: Vec<ResultMemberEntry>,
+        /// Terminal-owned structural edits, addressed by stable result keys and
+        /// typed paths. These are applied after an authoritative reset or the
+        /// preceding update on this FIFO link.
+        terminal_operations: Vec<groove::ivm::TerminalOperation>,
         /// Non-row program fact additions, such as relation edges.
         program_fact_adds: Vec<ProgramFactEntry>,
         /// Non-row program fact removals, such as relation edges.
@@ -192,16 +186,269 @@ pub enum SyncMessage {
         /// Version bundles visible to the requesting link identity.
         version_bundles: Vec<VersionBundle>,
     },
+    /// Trusted upstream catalogue metadata required to decode immutable
+    /// authored-version payloads before their view update arrives.
+    CatalogueSnapshot(Box<CatalogueSnapshot>),
+    /// One-shot permission preflight. The authenticated link identity is the
+    /// subject; identity and claims are intentionally absent from the payload.
+    PermissionAdviceRequest {
+        /// Client-generated opaque id, unique among requests on this live link.
+        request_id: PermissionAdviceRequestId,
+        /// Hypothetical operation to evaluate without mutation.
+        action: PermissionAdviceAction,
+    },
+    /// One-shot permission preflight result. No supporting rows or denial
+    /// reason are carried across this boundary.
+    PermissionAdviceResponse {
+        /// Opaque id copied from the request.
+        request_id: PermissionAdviceRequestId,
+        /// Final serving-authority result, or `Unknown` when unavailable.
+        advice: PermissionAdvice,
+    },
+    /// Register and hydrate a support view for one authorization scope.
+    ///
+    /// Appended to preserve every pre-existing postcard enum discriminant.
+    /// This wraps the existing subscription pipeline rather than creating a
+    /// second query transport, and is feature-gated for old peers.
+    AuthorizationScopeSubscribe {
+        /// Ordinary shape/binding subscription carrying the support view.
+        subscribe: Subscribe,
+        /// Scope and non-secret operation purpose of that support view.
+        purpose: AuthorizationScopePurpose,
+    },
+    /// Authority proof emitted after the matching support `ViewUpdate`.
+    AuthorizationScopeReceipt {
+        /// Support view that the receiver must apply before accepting proof.
+        subscription: SubscriptionKey,
+        /// Bound authority receipt.
+        receipt: AuthorizationScopeReceipt,
+    },
+    /// Minimal request for an authority-owned authorization support scope.
+    ///
+    /// The caller supplies only an opaque correlation id and the hypothetical
+    /// action.  In particular it cannot select a shape, binding, scope key, or
+    /// authenticated subject.
+    AuthorizationScopeIntent {
+        /// Opaque request correlation chosen by the client.
+        request_id: PermissionAdviceRequestId,
+        /// Candidate operation; all support scope details are authority-derived.
+        action: PermissionAdviceAction,
+    },
+    /// One authority-selected support clause for an authorization intent.
+    /// `view` is an ordinary `ViewUpdate`, wrapped only to carry its opaque
+    /// request and server-chosen scope metadata.
+    AuthorizationScopeView {
+        /// Opaque request correlation from the matching intent.
+        request_id: PermissionAdviceRequestId,
+        /// Authority-derived scope identity.
+        key: AuthorizationSupportScopeKey,
+        /// Zero-based authority clause ordinal.
+        clause_index: u16,
+        /// Total number of authority clauses in this hydration.
+        clause_count: u16,
+        /// Ordinary settlement-bearing `ViewUpdate` payload.
+        view: Box<SyncMessage>,
+    },
+    /// Aggregate proof for every clause sent in an authority scope view set.
+    AuthorizationScopeAggregateReceipt {
+        /// Opaque request correlation from the matching intent.
+        request_id: PermissionAdviceRequestId,
+        /// Aggregate authority proof after every clause view.
+        receipt: AuthorizationScopeReceipt,
+    },
+    /// The admitted authority cannot currently hydrate an intent.  This is a
+    /// conservative terminal result: clients resolve the corresponding advice
+    /// as `Unknown` and park normal authority work.
+    AuthorizationScopeUnavailable {
+        /// Opaque request correlation from the matching intent.
+        request_id: PermissionAdviceRequestId,
+    },
+    /// Decision for an action with no policy-support clauses.  It deliberately
+    /// carries no support rows, shape identifiers, or binding identifiers.
+    AuthorizationScopeDecision {
+        /// Opaque request correlation from the matching intent.
+        request_id: PermissionAdviceRequestId,
+        /// Final authority result for the zero-support action.
+        advice: PermissionAdvice,
+    },
+}
+
+/// Opaque identity for one permission-advice exchange.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
+)]
+pub struct PermissionAdviceRequestId(pub [u8; 16]);
+
+/// Hypothetical operation sent to a trusted serving authority.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub enum PermissionAdviceAction {
+    /// Insert a candidate row.
+    Insert {
+        /// Table name.
+        table: String,
+        /// Candidate cells after client-side value encoding.
+        cells: BTreeMap<String, Value>,
+    },
+    /// Read one current row.
+    Read {
+        /// Table name.
+        table: String,
+        /// Row id.
+        row: RowUuid,
+    },
+    /// Update one current row.
+    Update {
+        /// Table name.
+        table: String,
+        /// Row id.
+        row: RowUuid,
+        /// Candidate patch. It is carried for forward-compatible exact
+        /// update-check evaluation and is never echoed in the response.
+        patch: BTreeMap<String, Value>,
+    },
+    /// Delete one current row.
+    Delete {
+        /// Table name.
+        table: String,
+        /// Row id.
+        row: RowUuid,
+    },
+}
+
+/// The policy operation proven by an authorization-scope receipt.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize,
+)]
+pub enum AuthorizationScopeOperation {
+    /// Read-policy evaluation.
+    Read,
+    /// Insert-check evaluation.
+    Insert,
+    /// Update-using and update-check evaluation.
+    Update,
+    /// Delete-using evaluation.
+    Delete,
+}
+
+/// Stable, action-specific identity for one authority-hydrated policy scope.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+pub struct AuthorizationSupportScopeKey {
+    /// Compiled policy support shape, including the selected operation clause.
+    pub support_shape_digest: [u8; 32],
+    /// Authenticated subject, never caller-supplied on a serving link.
+    pub subject: AuthorId,
+    /// Canonical digest of authenticated claims.
+    pub claims_digest: [u8; 32],
+    /// Compiled policy shape and selected policy epoch.
+    pub policy_digest: [u8; 32],
+}
+
+/// Ephemeral candidate-specific key used only for final evaluation.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct AuthorizationOperationKey {
+    /// Exact operation to evaluate.
+    pub operation: AuthorizationScopeOperation,
+    /// Protected table.
+    pub table: String,
+    /// Target row when applicable.
+    pub row: Option<RowUuid>,
+    /// Canonical candidate/patch digest when applicable.
+    pub candidate_digest: [u8; 32],
+}
+
+/// Minimal caller intent for a regular subscription opened as authorization
+/// support. The authority derives the scope key and operation itself from this
+/// intent, its authenticated link identity, and the registered shape/binding.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct AuthorizationScopePurpose {
+    /// Candidate operation whose policy support is being hydrated.
+    pub action: PermissionAdviceAction,
+}
+
+/// Authority-issued receipt proving one scope was hydrated through its stated cut.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct AuthorizationScopeReceipt {
+    /// Scope covered by this receipt.
+    pub key: AuthorizationSupportScopeKey,
+    /// Authenticated authority identity that issued this receipt.
+    pub authority: [u8; 16],
+    /// Authenticated subscriber link to which this proof is restricted.
+    pub link: [u8; 16],
+    /// Authority-local connection/process epoch.
+    pub authority_epoch: u64,
+    /// Authenticated-claims revision paired with this proof.
+    pub claims_revision: u64,
+    /// Policy/schema epoch used to compile the scope.
+    pub policy_epoch: u64,
+    /// Complete authoritative history cut reflected by the support view.
+    pub settled_through: GlobalSeq,
+    /// Authority authorization generation paired with that cut.
+    pub authorization_progress: u64,
+}
+
+/// Advisory result of a permission preflight.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub enum PermissionAdvice {
+    /// A trusted serving authority determined that the operation is allowed.
+    Allowed,
+    /// A trusted serving authority determined that the operation is denied.
+    Denied,
+    /// No trusted serving authority produced a final decision.
+    Unknown,
+}
+
+/// Ordered schema lineage metadata shipped ahead of authored row payloads.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct CatalogueSnapshot {
+    /// Every immutable schema payload known to the sender.
+    pub schemas: Vec<SchemaVersion>,
+    /// Active non-genesis lineage publications in catalogue order.
+    pub lineages: Vec<(u64, SchemaLineagePublication)>,
+    /// Sender's active write-schema pointer.
+    pub current_write_schema: CurrentWriteSchema,
+}
+
+/// Wire-stable durable description of one branch routing target.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct BranchMetadata {
+    /// Stable target lineage identifier.
+    pub branch_id: BranchId,
+    /// Session identity that created this immutable branch record.
+    pub created_by: AuthorId,
+    /// Optional parent lineage for a snapshot-base branch.
+    pub parent: Option<BranchId>,
+    /// Frozen base used by ordinary branch reads.
+    pub base: Option<Snapshot>,
+    /// `false` denotes the terminal discarded state.
+    pub open: bool,
 }
 
 impl SyncMessage {
+    /// Optional wire capabilities required to serialize this semantic message.
+    ///
+    /// Kept on the semantic type so every codec caller uses one exhaustive
+    /// classification rather than accidentally sending a future enum variant
+    /// to an older peer.
+    pub fn required_wire_features(&self) -> crate::wire::WireFeatures {
+        match self {
+            Self::AuthorizationScopeSubscribe { .. } | Self::AuthorizationScopeReceipt { .. } => {
+                crate::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
+            }
+            Self::AuthorizationScopeIntent { .. }
+            | Self::AuthorizationScopeView { .. }
+            | Self::AuthorizationScopeAggregateReceipt { .. }
+            | Self::AuthorizationScopeUnavailable { .. }
+            | Self::AuthorizationScopeDecision { .. } => {
+                crate::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS
+            }
+            _ => crate::wire::FEATURE_NONE,
+        }
+    }
+
     /// Validate any packed view-update carrier runs in this message.
     pub fn validate_version_carriers(&self) -> Result<(), VersionBundleRunError> {
         match self {
             Self::ViewUpdate {
-                version_carriers, ..
-            }
-            | Self::ViewUpdateChunk {
                 version_carriers, ..
             } => {
                 for carrier in version_carriers {
@@ -217,21 +464,14 @@ impl SyncMessage {
 
     /// Expand packed view-update carriers into `version_bundles` for legacy paths/tests.
     pub fn expand_version_carriers_for_receive(mut self) -> Result<Self, VersionBundleRunError> {
-        match &mut self {
-            Self::ViewUpdate {
-                version_carriers,
-                version_bundles,
-                ..
-            }
-            | Self::ViewUpdateChunk {
-                version_carriers,
-                version_bundles,
-                ..
-            } => {
-                version_bundles.extend(expand_version_carriers(version_carriers)?);
-                version_carriers.clear();
-            }
-            _ => {}
+        if let Self::ViewUpdate {
+            version_carriers,
+            version_bundles,
+            ..
+        } = &mut self
+        {
+            version_bundles.extend(expand_version_carriers(version_carriers)?);
+            version_carriers.clear();
         }
         Ok(self)
     }
@@ -295,6 +535,10 @@ pub struct VersionRecord {
     table: groove::Intern<String>,
     schema_version: SchemaVersionId,
     record: OwnedRecord,
+    /// `None` denotes a legacy or lens-translated payload whose authored
+    /// presence is unavailable; consumers must conservatively treat every
+    /// present payload cell as authored.
+    authored_columns: Option<BTreeSet<String>>,
 }
 
 impl VersionRecord {
@@ -308,7 +552,20 @@ impl VersionRecord {
             table: groove::Intern::new(table.into()),
             schema_version,
             record,
+            authored_columns: None,
         }
+    }
+
+    pub(crate) fn with_authored_columns(
+        mut self,
+        authored_columns: Option<BTreeSet<String>>,
+    ) -> Self {
+        self.authored_columns = authored_columns;
+        self
+    }
+
+    pub(crate) fn authored_columns(&self) -> Option<&BTreeSet<String>> {
+        self.authored_columns.as_ref()
     }
 
     /// Encode a wire record directly from typed row payload parts.
@@ -530,6 +787,7 @@ impl Ord for VersionRecord {
             .cmp(other.table())
             .then_with(|| self.schema_version.cmp(&other.schema_version))
             .then_with(|| self.record.raw().cmp(other.record.raw()))
+            .then_with(|| self.authored_columns.cmp(&other.authored_columns))
     }
 }
 
@@ -1541,6 +1799,37 @@ pub enum SubscribeServerFailureCode {
 /// `(table, row_uuid, content_tx_id)`.
 pub type ResultRowEntry = (groove::Intern<String>, RowUuid, TxId);
 
+/// Opaque replacement discriminator for a synthetic result member.
+///
+/// Aggregate result rows have no revision or version. The runtime needs a
+/// token solely to pair a retracted aggregate record with its replacement;
+/// callers cannot inspect or construct the token as a meaningful value.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+pub struct SyntheticReplacementToken(Vec<u8>);
+
+impl std::fmt::Debug for SyntheticReplacementToken {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("SyntheticReplacementToken(..)")
+    }
+}
+
+impl SyntheticReplacementToken {
+    pub(crate) fn from_encoded_record(value: Vec<u8>) -> Self {
+        Self(value)
+    }
+}
+
+#[cfg(test)]
+mod synthetic_replacement_token_tests {
+    use super::SyntheticReplacementToken;
+
+    #[test]
+    fn replacement_token_does_not_expose_a_plausible_revision_value() {
+        let token = SyntheticReplacementToken::from_encoded_record(vec![6]);
+        assert_eq!(format!("{token:?}"), "SyntheticReplacementToken(..)");
+    }
+}
+
 /// Protocol-visible result member.
 ///
 /// A member identifies one terminal output of a lowered query program. Ordinary
@@ -1554,12 +1843,12 @@ pub enum ResultMemberEntry {
     Row(RealRowMemberEntry),
     /// Synthetic result row, such as aggregate output.
     Synthetic {
-        /// Logical synthetic table/relation.
+        /// Logical synthetic result kind. This is a label, not identity.
         table: String,
-        /// Stable synthetic row id.
+        /// Stable identity derived from the aggregate group key.
         row: Vec<u8>,
-        /// Synthetic revision/version id.
-        revision: Vec<u8>,
+        /// Opaque runtime-only discriminator for replacement pairing.
+        replacement: SyntheticReplacementToken,
     },
     /// Relation/path tuple membership.
     PathTuple {
@@ -1577,6 +1866,14 @@ pub enum ResultMemberEntry {
         edge_id: Option<Vec<u8>>,
         /// Stable tuple revision.
         revision: Vec<u8>,
+    },
+    /// Real row whose occurrence needs typed derivation discriminators.
+    /// Appended after every legacy variant so their postcard tags stay exact.
+    TypedRow {
+        /// Compatibility row payload and legacy ordered source-row identity.
+        row: RealRowMemberEntry,
+        /// Versioned full output occurrence identity.
+        occurrence_key: ResultKey,
     },
 }
 
@@ -1661,6 +1958,13 @@ impl RealRowMemberEntry {
     /// terminal. Join contributors remain in declared source order.
     pub fn with_occurrence_id(mut self, occurrence_id: OutputOccurrenceId) -> Self {
         self.occurrence_id = Some(occurrence_id);
+        self
+    }
+
+    /// Attach the rendered-output revision. Flat joins use this to distinguish
+    /// a source-content replacement while retaining the same occurrence id.
+    pub fn with_row_digest(mut self, row_digest: Vec<u8>) -> Self {
+        self.row_digest = Some(row_digest);
         self
     }
 
@@ -1771,7 +2075,7 @@ impl ResultMemberEntry {
     /// output. Synthetic rows use their synthetic table/relation name.
     pub fn table_name(&self) -> Option<&str> {
         match self {
-            Self::Row(entry) => Some(entry.table.as_str()),
+            Self::Row(entry) | Self::TypedRow { row: entry, .. } => Some(entry.table.as_str()),
             Self::Synthetic { table, .. } => Some(table.as_str()),
             Self::PathTuple { target_table, .. } => Some(target_table.as_str()),
         }
@@ -1780,21 +2084,25 @@ impl ResultMemberEntry {
     /// Return the real-row member payload, when this member is a real row.
     pub fn as_real_row(&self) -> Option<&RealRowMemberEntry> {
         match self {
-            Self::Row(entry) => Some(entry),
+            Self::Row(entry) | Self::TypedRow { row: entry, .. } => Some(entry),
             Self::Synthetic { .. } | Self::PathTuple { .. } => None,
         }
     }
 
     /// Return the stable rendered-output address for a real-row member.
     pub fn output_occurrence_id(&self) -> Option<OutputOccurrenceId> {
-        self.as_real_row()
-            .map(RealRowMemberEntry::output_occurrence_id)
+        match self {
+            Self::TypedRow { occurrence_key, .. } => Some(occurrence_key.as_occurrence().clone()),
+            _ => self
+                .as_real_row()
+                .map(RealRowMemberEntry::output_occurrence_id),
+        }
     }
 
     /// Return the ordinary current-content projection when this member has one.
     pub fn as_row(&self) -> Option<ResultRowEntry> {
         match self {
-            Self::Row(entry) => entry.row_projection(),
+            Self::Row(entry) | Self::TypedRow { row: entry, .. } => entry.row_projection(),
             Self::Synthetic { .. } | Self::PathTuple { .. } => None,
         }
     }
@@ -1802,7 +2110,7 @@ impl ResultMemberEntry {
     /// Consume the ordinary row entry when this member is row-shaped.
     pub fn into_row(self) -> Option<ResultRowEntry> {
         match self {
-            Self::Row(entry) => entry.row_projection(),
+            Self::Row(entry) | Self::TypedRow { row: entry, .. } => entry.row_projection(),
             Self::Synthetic { .. } | Self::PathTuple { .. } => None,
         }
     }
@@ -1816,7 +2124,19 @@ impl From<ResultRowEntry> for ResultMemberEntry {
 
 impl From<RealRowMemberEntry> for ResultMemberEntry {
     fn from(entry: RealRowMemberEntry) -> Self {
-        Self::Row(entry)
+        let occurrence_key = entry
+            .occurrence_id
+            .as_ref()
+            .filter(|occurrence| occurrence.has_typed_discriminators())
+            .cloned()
+            .map(ResultKey::from_occurrence);
+        match occurrence_key {
+            Some(occurrence_key) => Self::TypedRow {
+                row: entry,
+                occurrence_key,
+            },
+            None => Self::Row(entry),
+        }
     }
 }
 
@@ -2203,6 +2523,10 @@ pub struct LargeValueExtentEntry {
 pub const MIGRATION_LENS_NAMESPACE: uuid::Uuid =
     uuid::uuid!("5d13f9cb-8a10-5e0f-9a58-e56630a1dc22");
 
+/// Namespace used for atomic schema-lineage publication UUIDv5 ids.
+pub const SCHEMA_LINEAGE_PUBLICATION_NAMESPACE: uuid::Uuid =
+    uuid::uuid!("a1b3ff15-9358-52e0-baa8-f384b1d5db1c");
+
 /// Namespace used for semantic read-view UUIDv5 ids.
 pub const READ_VIEW_NAMESPACE: uuid::Uuid = uuid::uuid!("1a87cf70-f8f0-5ae7-a574-1f9b5e4517f1");
 
@@ -2213,6 +2537,71 @@ pub struct SchemaVersion {
     pub id: SchemaVersionId,
     /// Full schema payload.
     pub schema: JazzSchema,
+}
+
+/// Atomic catalogue payload that admits one non-genesis schema.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct SchemaLineagePublication {
+    /// Content-addressed identity of this complete bundle.
+    pub id: SchemaLineagePublicationId,
+    /// New immutable schema payload.
+    pub schema: SchemaVersion,
+    /// Lineage-defining lens from one already-admitted schema.
+    pub lens: MigrationLens,
+    /// Target tables that begin fresh physical lineages.
+    pub new_tables: Vec<String>,
+    /// Source tables intentionally absent from the target schema.
+    pub dropped_tables: Vec<String>,
+}
+
+impl SchemaLineagePublication {
+    /// Construct an atomic schema-lineage publication payload.
+    pub fn new(
+        schema: SchemaVersion,
+        lens: MigrationLens,
+        new_tables: impl IntoIterator<Item = impl Into<String>>,
+        dropped_tables: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        let mut publication = Self {
+            id: SchemaLineagePublicationId(uuid::Uuid::nil()),
+            schema,
+            lens,
+            new_tables: new_tables.into_iter().map(Into::into).collect(),
+            dropped_tables: dropped_tables.into_iter().map(Into::into).collect(),
+        };
+        publication.id = publication.content_id();
+        publication
+    }
+
+    /// Return the content-addressed id implied by this payload.
+    pub fn content_id(&self) -> SchemaLineagePublicationId {
+        let mut bytes = Vec::new();
+        put_str(&mut bytes, "jazz-schema-lineage-publication-v1");
+        put_bytes(
+            &mut bytes,
+            &serde_json::to_vec(&self.schema).expect("schema publication serializes"),
+        );
+        put_bytes(
+            &mut bytes,
+            &serde_json::to_vec(&self.lens).expect("lineage lens serializes"),
+        );
+        let mut new_tables = self.new_tables.clone();
+        new_tables.sort();
+        put_len(&mut bytes, new_tables.len());
+        for table in new_tables {
+            put_str(&mut bytes, &table);
+        }
+        let mut dropped_tables = self.dropped_tables.clone();
+        dropped_tables.sort();
+        put_len(&mut bytes, dropped_tables.len());
+        for table in dropped_tables {
+            put_str(&mut bytes, &table);
+        }
+        SchemaLineagePublicationId(uuid::Uuid::new_v5(
+            &SCHEMA_LINEAGE_PUBLICATION_NAMESPACE,
+            &bytes,
+        ))
+    }
 }
 
 impl SchemaVersion {
@@ -2583,9 +2972,70 @@ pub enum OutboxMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use groove::schema::{ColumnSchema, ColumnType};
 
     fn schema_id(byte: u8) -> SchemaVersionId {
         SchemaVersionId::from_bytes([byte; 16])
+    }
+
+    #[test]
+    fn result_member_transport_preserves_typed_union_occurrence() {
+        let root = ObjectId::from_uuid(uuid::Uuid::from_bytes([1; 16]));
+        let joined = ObjectId::from_uuid(uuid::Uuid::from_bytes([2; 16]));
+        let occurrence =
+            OutputOccurrenceId::with_union_arms(root, [joined], [(0, "direct".to_owned())])
+                .unwrap();
+        let member: ResultMemberEntry = RealRowMemberEntry::current_content((
+            groove::Intern::new("todos".to_owned()),
+            RowUuid(*root.uuid()),
+            TxId::new(TxTime(1), NodeUuid::from_bytes([3; 16])),
+        ))
+        .with_occurrence_id(occurrence.clone())
+        .into();
+        let bytes = postcard::to_allocvec(&member).unwrap();
+        let decoded: ResultMemberEntry = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(decoded.output_occurrence_id(), Some(occurrence));
+    }
+
+    #[test]
+    fn legacy_row_member_postcard_golden_decodes() {
+        const LEGACY: &[u8] = &[
+            0, 1, 116, 16, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 16, 1, 1, 1, 1, 1, 1,
+            1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 2, 16, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
+            3, 0, 0, 0, 16, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ];
+        let member = ResultMemberEntry::Row(RealRowMemberEntry::current_content((
+            groove::Intern::new("t".to_owned()),
+            RowUuid::from_bytes([1; 16]),
+            TxId::new(TxTime(2), NodeUuid::from_bytes([3; 16])),
+        )));
+        assert_eq!(postcard::to_allocvec(&member).unwrap(), LEGACY);
+        let decoded: ResultMemberEntry = postcard::from_bytes(LEGACY).unwrap();
+        assert_eq!(decoded, member);
+    }
+
+    #[test]
+    fn version_record_ordering_distinguishes_authored_presence() {
+        let table = TableSchema::new("todos", [ColumnSchema::new("title", ColumnType::String)]);
+        let base = VersionRecord::from_cells(
+            &table,
+            schema_id(1),
+            RowUuid::from_bytes([1; 16]),
+            Vec::new(),
+            AuthorId::SYSTEM,
+            TxTime(1),
+            AuthorId::SYSTEM,
+            TxTime(1),
+            &BTreeMap::from([("title".to_owned(), Value::String("x".to_owned()))]),
+            None,
+        )
+        .unwrap();
+        let authored = base
+            .clone()
+            .with_authored_columns(Some(BTreeSet::from(["title".to_owned()])));
+
+        assert_ne!(base, authored);
+        assert_ne!(base.cmp(&authored), Ordering::Equal);
     }
 
     fn sample_lens() -> MigrationLens {

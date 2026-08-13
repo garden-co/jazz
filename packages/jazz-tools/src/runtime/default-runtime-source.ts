@@ -14,6 +14,8 @@ import {
 import { NativeRuntimeAdapter } from "./native-runtime/native-runtime-adapter.js";
 import { PersistentBrowserOpfsRuntime } from "./native-runtime/persistent-browser-runtime.js";
 import { installWasmTelemetry } from "./sync-telemetry.js";
+import { parseJwtPayload } from "./client-session.js";
+import type { WasmSchema } from "../drivers/types.js";
 import { resolveInitialSyncFlushEvery, resolveRuntimeIdentity } from "./runtime-identity.js";
 
 const DEFAULT_WASM_LOG_LEVEL = "warn";
@@ -24,6 +26,8 @@ function setGlobalWasmLogLevel(level?: DbConfig["logLevel"]): void {
 
 export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
   private module: WasmModule | null = null;
+  private ownerRuntime: NativeRuntimeAdapter | null = null;
+  private persistentOwnerRuntime: PersistentBrowserOpfsRuntime | null = null;
 
   private get wasmModule(): WasmModule {
     if (!this.module) {
@@ -54,23 +58,61 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
     const { node, author } = resolveRuntimeIdentity(config, persistentBrowserDbName);
     const flushEvery = resolveInitialSyncFlushEvery(config);
     const mainThreadPeerRuntime = persistentBrowserDbName
-      ? new PersistentBrowserOpfsRuntime(
-          config.runtimeSources,
-          schema,
-          persistentBrowserDbName,
-          node,
-          author,
-          flushEvery,
-        )
-      : new NativeRuntimeAdapter(this.wasmModule.WasmDb, schema, node, author, 1, true, {
-          initialSyncFlushEvery: flushEvery,
-        });
+      ? this.persistentSchemaView(config, schema, persistentBrowserDbName, node, author, flushEvery)
+      : this.nativeSchemaView(schema, node, author, flushEvery);
 
     return JazzClient.connectWithRuntime(
       mainThreadPeerRuntime,
       this.connectContext(config, schema),
       runtimeOptions,
     );
+  }
+
+  private persistentSchemaView(
+    config: DbConfig,
+    schema: WasmSchema,
+    dbName: string,
+    node: Uint8Array,
+    author: Uint8Array,
+    flushEvery: number,
+  ): PersistentBrowserOpfsRuntime {
+    if (!this.persistentOwnerRuntime) {
+      this.persistentOwnerRuntime = new PersistentBrowserOpfsRuntime(
+        config.runtimeSources,
+        schema,
+        dbName,
+        node,
+        author,
+        flushEvery,
+      );
+      return this.persistentOwnerRuntime;
+    }
+    return Object.keys(schema).length === 0
+      ? this.persistentOwnerRuntime
+      : this.persistentOwnerRuntime.registerSchemaView(schema);
+  }
+
+  private nativeSchemaView(
+    schema: WasmSchema,
+    node: Uint8Array,
+    author: Uint8Array,
+    flushEvery: number,
+  ): NativeRuntimeAdapter {
+    if (!this.ownerRuntime) {
+      this.ownerRuntime = new NativeRuntimeAdapter(
+        this.wasmModule.WasmDb,
+        schema,
+        node,
+        author,
+        1,
+        true,
+        { initialSyncFlushEvery: flushEvery },
+      );
+      return this.ownerRuntime;
+    }
+    return Object.keys(schema).length === 0
+      ? this.ownerRuntime
+      : this.ownerRuntime.registerSchemaView(schema);
   }
 
   override installTelemetry({

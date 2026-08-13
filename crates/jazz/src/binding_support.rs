@@ -15,14 +15,17 @@ use thiserror::Error;
 
 use crate::db::{
     Db, DbConfig, DbIdentity, Error as DbError, ErrorCode, InitialSyncFlushCadence, LocalUpdates,
-    Propagation, ReadOpts, RowCells, SeededRowIdSource, SubscriptionEvent, WriteState, block_on,
+    Propagation, ReadOpts, RowCells, SeededRowIdSource, SubscriptionEvent, SubscriptionOutputRow,
+    WriteState, block_on,
 };
+use crate::groove::ivm::TerminalOperation;
 use crate::groove::records::{BorrowedRecord, RecordDescriptor, Value};
 use crate::groove::storage::{OrderedKvStorage, ReopenableStorage};
 use crate::ids::{AuthorId, NodeUuid, RowUuid};
-use crate::node::{CurrentRow, RelationEdge, RelationSnapshot};
+use crate::node::{CurrentRow, RelationSnapshot};
 use crate::query::{Query, RelationExpr, RelationQuery};
 use crate::schema::JazzSchema;
+use crate::tools::{OutputOccurrenceId, ResultKey};
 use crate::tx::{DurabilityTier, Fate, TxId};
 use crate::wire::{TransportError, WireTransport};
 
@@ -106,10 +109,11 @@ pub enum EncodedSubscriptionEvent {
     Delta {
         /// Whether this delta replaces all previously observed state.
         reset: bool,
-        /// Postcard-encoded row delta.
+        /// Postcard-encoded row delta. Empty of rows when
+        /// `terminal_operations` carries the change instead.
         delta: Vec<u8>,
-        /// Postcard-encoded relation delta.
-        relation_delta: Vec<u8>,
+        /// Typed structural edits to already hydrated terminal rows.
+        terminal_operations: Vec<TerminalOperation>,
         /// Whether the requested read tier is settled.
         settled: bool,
         /// Debug-stable durability-tier spelling used by JavaScript adapters.
@@ -468,11 +472,13 @@ pub fn encode_rows(rows: &[CurrentRow]) -> Result<Vec<u8>, BindingError> {
 
 /// Serialize a relation snapshot in the runtime postcard format.
 pub fn encode_relation_snapshot(snapshot: &RelationSnapshot) -> Result<Vec<u8>, BindingError> {
+    // Two fields, in this order — `readNativeRelationSubscriptionSnapshot`
+    // reads `root_count` then `rows` positionally. The pre-swap cursor/edges
+    // fields are gone from the carrier; emitting them would decode as
+    // garbage row counts on the client, not fail.
     postcard::to_allocvec(&BindingRelationSnapshot {
-        cursor: 0,
         root_count: snapshot.root_count as u64,
         rows: row_batches(&snapshot.rows),
-        edges: snapshot.edges.iter().map(relation_edge).collect(),
     })
     .map_err(|error| BindingError::Encode(format!("encode relation snapshot: {error}")))
 }
@@ -487,33 +493,26 @@ pub fn encode_subscription_event(
             added,
             updated,
             removed,
-            added_related,
-            added_edges,
-            removed_edges,
+            terminal_operations,
             settled,
             tier,
         } => {
-            let added = added
-                .iter()
-                .map(|output| output.row.clone())
-                .collect::<Vec<_>>();
-            let updated = updated
-                .iter()
-                .map(|output| output.row.clone())
-                .collect::<Vec<_>>();
-            let delta = encode_subscription_delta(&added, &updated, removed)?;
-            let relation_delta = encode_relation_subscription_delta(
-                &added,
-                &updated,
-                removed,
-                added_related,
-                added_edges,
-                removed_edges,
-            )?;
+            // The row delta and the terminal operations are alternatives, not
+            // companions: when the core sends typed patches, the receiver
+            // applies those instead of whole rows. Sending both would make the
+            // client apply every change twice. `jazz-napi` and `jazz-wasm`
+            // gate the same way.
+            let carries_rows = terminal_operations.is_empty();
+            let empty_removed: Vec<crate::db::RemovedRow> = Vec::new();
+            let delta = if carries_rows {
+                encode_subscription_delta(added, updated, removed)?
+            } else {
+                encode_subscription_delta(&[], &[], &empty_removed)?
+            };
             Ok(EncodedSubscriptionEvent::Delta {
                 reset: *reset,
                 delta,
-                relation_delta,
+                terminal_operations: terminal_operations.clone(),
                 settled: *settled,
                 tier: format!("{tier:?}"),
             })
@@ -550,14 +549,14 @@ pub fn subscription_event_to_json(event: &SubscriptionEvent) -> Result<JsonValue
         EncodedSubscriptionEvent::Delta {
             reset,
             delta,
-            relation_delta,
+            terminal_operations,
             settled,
             tier,
         } => Ok(serde_json::json!({
             "type": "delta",
             "reset": reset,
             "delta": delta,
-            "relation_delta": relation_delta,
+            "terminalOperations": terminal_operations,
             "settled": settled,
             "tier": tier,
         })),
@@ -569,13 +568,23 @@ pub fn subscription_event_to_json(event: &SubscriptionEvent) -> Result<JsonValue
 }
 
 fn encode_subscription_delta(
-    added: &[CurrentRow],
-    updated: &[CurrentRow],
+    added: &[SubscriptionOutputRow],
+    updated: &[SubscriptionOutputRow],
     removed: &[crate::db::RemovedRow],
 ) -> Result<Vec<u8>, BindingError> {
+    // Field order is the wire contract: `readNativeSubscriptionDelta` in
+    // native-row-codec.ts reads these six positionally and then asserts each
+    // occurrence-key vector matches its row count. Reordering or omitting a
+    // vector is not a compile error here — it surfaces as a decode failure on
+    // the client.
+    let added_rows = added.iter().map(|row| row.row.clone()).collect::<Vec<_>>();
+    let updated_rows = updated
+        .iter()
+        .map(|row| row.row.clone())
+        .collect::<Vec<_>>();
     postcard::to_allocvec(&BindingSubscriptionDelta {
-        added: row_batches(added),
-        updated: row_batches(updated),
+        added: row_batches(&added_rows),
+        updated: row_batches(&updated_rows),
         removed: removed
             .iter()
             .map(|row| BindingRemovedRow {
@@ -583,37 +592,19 @@ fn encode_subscription_delta(
                 row_id: row.row_uuid,
             })
             .collect(),
+        added_occurrence_keys: occurrence_keys(added.iter().map(|row| &row.occurrence_id)),
+        updated_occurrence_keys: occurrence_keys(updated.iter().map(|row| &row.occurrence_id)),
+        removed_occurrence_keys: occurrence_keys(removed.iter().map(|row| &row.occurrence_id)),
     })
     .map_err(|error| BindingError::Encode(format!("encode subscription delta: {error}")))
 }
 
-fn encode_relation_subscription_delta(
-    added: &[CurrentRow],
-    updated: &[CurrentRow],
-    removed: &[crate::db::RemovedRow],
-    added_related: &[CurrentRow],
-    added_edges: &[RelationEdge],
-    removed_edges: &[crate::db::RemovedRelationEdge],
-) -> Result<Vec<u8>, BindingError> {
-    let mut relation_added = Vec::with_capacity(added.len() + added_related.len());
-    relation_added.extend_from_slice(added);
-    relation_added.extend_from_slice(added_related);
-    postcard::to_allocvec(&BindingRelationSubscriptionDelta {
-        base_cursor: None,
-        cursor: 0,
-        added: row_batches(&relation_added),
-        updated: row_batches(updated),
-        removed: removed
-            .iter()
-            .map(|row| BindingRemovedRow {
-                table: row.table.clone(),
-                row_id: row.row_uuid,
-            })
-            .collect(),
-        added_edges: added_edges.iter().map(relation_edge).collect(),
-        removed_edges: removed_edges.iter().map(relation_edge).collect(),
-    })
-    .map_err(|error| BindingError::Encode(format!("encode relation subscription delta: {error}")))
+fn occurrence_keys<'a>(
+    occurrences: impl Iterator<Item = &'a OutputOccurrenceId>,
+) -> Vec<ResultKey> {
+    occurrences
+        .map(|occurrence| ResultKey::from_occurrence(occurrence.clone()))
+        .collect()
 }
 
 fn row_batches(rows: &[CurrentRow]) -> Vec<BindingRowBatch<'_>> {
@@ -637,18 +628,13 @@ fn row_batches(rows: &[CurrentRow]) -> Vec<BindingRowBatch<'_>> {
 fn binding_row<'a>(row: &CurrentRow, raw: &'a [u8]) -> BindingRow<'a> {
     BindingRow {
         row_id: row.row_uuid(),
-        deleted: row.is_deleted(),
+        // Transaction-overlay queries carry include-deleted state as the
+        // query-engine marker, while ordinary current-row reads set the
+        // `CurrentRow` flag. Normalize both representations at the binding
+        // boundary so ReadOpts::include_deleted has one native contract.
+        deleted: row.is_deleted()
+            || matches!(row.raw_field("__jazz_deleted"), Some(Value::Bool(true))),
         raw,
-    }
-}
-
-fn relation_edge(edge: &RelationEdge) -> BindingRelationEdge {
-    BindingRelationEdge {
-        source_table: edge.source_table.clone(),
-        source_row_id: edge.source_row,
-        relation: edge.relation.clone(),
-        target_table: edge.target_table.clone(),
-        target_row_id: edge.target_row,
     }
 }
 
@@ -674,10 +660,8 @@ struct BindingRow<'a> {
 
 #[derive(Serialize)]
 struct BindingRelationSnapshot<'a> {
-    cursor: u64,
     root_count: u64,
     rows: Vec<BindingRowBatch<'a>>,
-    edges: Vec<BindingRelationEdge>,
 }
 
 #[derive(Serialize)]
@@ -685,17 +669,9 @@ struct BindingSubscriptionDelta<'a> {
     added: Vec<BindingRowBatch<'a>>,
     updated: Vec<BindingRowBatch<'a>>,
     removed: Vec<BindingRemovedRow>,
-}
-
-#[derive(Serialize)]
-struct BindingRelationSubscriptionDelta<'a> {
-    base_cursor: Option<u64>,
-    cursor: u64,
-    added: Vec<BindingRowBatch<'a>>,
-    updated: Vec<BindingRowBatch<'a>>,
-    removed: Vec<BindingRemovedRow>,
-    added_edges: Vec<BindingRelationEdge>,
-    removed_edges: Vec<BindingRelationEdge>,
+    added_occurrence_keys: Vec<ResultKey>,
+    updated_occurrence_keys: Vec<ResultKey>,
+    removed_occurrence_keys: Vec<ResultKey>,
 }
 
 #[derive(Serialize)]
@@ -704,19 +680,52 @@ struct BindingRemovedRow {
     row_id: RowUuid,
 }
 
-#[derive(Serialize)]
-struct BindingRelationEdge {
-    source_table: String,
-    source_row_id: RowUuid,
-    relation: String,
-    target_table: String,
-    target_row_id: RowUuid,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::RemovedRow;
+    use crate::groove::ivm::{TerminalEdit, TerminalOperation};
+    use crate::node::{RelationEdge, RelationSnapshot};
+    use crate::tools::ObjectId;
     use crate::tx::RejectionReason;
+
+    type DecodedRows = Vec<(String, RecordDescriptor, Vec<(RowUuid, bool, Vec<u8>)>)>;
+    type DecodedRemoved = Vec<(String, RowUuid)>;
+
+    fn occurrence(row: &CurrentRow) -> OutputOccurrenceId {
+        OutputOccurrenceId::single_source(ObjectId::from_uuid(row.row_uuid().0))
+    }
+
+    fn test_row(row_byte: u8, title: &str) -> CurrentRow {
+        let db = block_on(crate::db::doctest_support::open_todos_db()).expect("open test db");
+        let row_id = RowUuid::from_bytes([row_byte; 16]);
+        db.insert_with_id(
+            "todos",
+            row_id,
+            crate::db::doctest_support::todo_cells(title, false),
+        )
+        .expect("insert test row");
+        db.local_current_row("todos", row_id)
+            .expect("read current row")
+            .expect("current row exists")
+    }
+
+    fn decode_delta(
+        bytes: &[u8],
+    ) -> (
+        DecodedRows,
+        DecodedRows,
+        DecodedRemoved,
+        Vec<ResultKey>,
+        Vec<ResultKey>,
+        Vec<ResultKey>,
+    ) {
+        postcard::from_bytes(bytes).expect("decode subscription delta")
+    }
+
+    fn row_count(batches: &DecodedRows) -> usize {
+        batches.iter().map(|(_, _, rows)| rows.len()).sum()
+    }
 
     #[test]
     fn wait_state_errors_keep_adapter_markers() {
@@ -743,5 +752,114 @@ mod tests {
                 .to_string()
                 .starts_with("NotObserved:")
         );
+    }
+
+    #[test]
+    fn subscription_delta_carries_occurrence_sidecars_for_every_row() {
+        let added_row = test_row(0x31, "added");
+        let updated_row = test_row(0x32, "updated");
+        let removed_row = test_row(0x33, "removed");
+        let event = SubscriptionEvent::Delta {
+            reset: false,
+            added: vec![SubscriptionOutputRow {
+                occurrence_id: occurrence(&added_row),
+                row: added_row,
+            }],
+            updated: vec![SubscriptionOutputRow {
+                occurrence_id: occurrence(&updated_row),
+                row: updated_row,
+            }],
+            removed: vec![RemovedRow {
+                table: removed_row.table().to_owned(),
+                row_uuid: removed_row.row_uuid(),
+                occurrence_id: occurrence(&removed_row),
+            }],
+            terminal_operations: Vec::new(),
+            settled: true,
+            tier: DurabilityTier::Local,
+        };
+
+        let EncodedSubscriptionEvent::Delta { delta, .. } =
+            encode_subscription_event(&event).expect("encode delta")
+        else {
+            panic!("expected delta event");
+        };
+        let (added, updated, removed, added_keys, updated_keys, removed_keys) =
+            decode_delta(&delta);
+        assert_eq!(row_count(&added), 1);
+        assert_eq!(row_count(&updated), 1);
+        assert_eq!(removed.len(), 1);
+        assert_eq!(added_keys.len(), row_count(&added));
+        assert_eq!(updated_keys.len(), row_count(&updated));
+        assert_eq!(removed_keys.len(), removed.len());
+    }
+
+    #[test]
+    fn terminal_operations_replace_row_delta_and_use_the_public_json_key() {
+        let row = test_row(0x41, "terminal");
+        let operation = TerminalOperation {
+            root_key: vec![1],
+            path: Vec::new(),
+            edit: TerminalEdit::Remove { key: vec![2] },
+        };
+        let event = SubscriptionEvent::Delta {
+            reset: false,
+            added: vec![SubscriptionOutputRow {
+                occurrence_id: occurrence(&row),
+                row,
+            }],
+            updated: Vec::new(),
+            removed: Vec::new(),
+            terminal_operations: vec![operation.clone()],
+            settled: true,
+            tier: DurabilityTier::Local,
+        };
+
+        let EncodedSubscriptionEvent::Delta {
+            delta,
+            terminal_operations,
+            ..
+        } = encode_subscription_event(&event).expect("encode terminal delta")
+        else {
+            panic!("expected delta event");
+        };
+        let (added, updated, removed, added_keys, updated_keys, removed_keys) =
+            decode_delta(&delta);
+        assert_eq!(row_count(&added), 0);
+        assert_eq!(row_count(&updated), 0);
+        assert!(removed.is_empty());
+        assert!(added_keys.is_empty());
+        assert!(updated_keys.is_empty());
+        assert!(removed_keys.is_empty());
+        assert_eq!(terminal_operations, [operation]);
+
+        let json = subscription_event_to_json(&event).expect("encode subscription json");
+        assert_eq!(json["terminalOperations"].as_array().map(Vec::len), Some(1));
+        assert!(json.get("relation_delta").is_none());
+    }
+
+    #[test]
+    fn relation_snapshot_is_exactly_root_count_then_rows() {
+        let row = test_row(0x51, "snapshot");
+        let row_id = row.row_uuid();
+        let snapshot = RelationSnapshot {
+            root_count: 1,
+            rows: vec![row],
+            // Edges remain a core result-tree concern, but are deliberately
+            // absent from the native snapshot carrier.
+            edges: vec![RelationEdge {
+                source_table: "todos".to_owned(),
+                source_row: row_id,
+                relation: "children".to_owned(),
+                target_table: "todos".to_owned(),
+                target_row: row_id,
+            }],
+        };
+
+        let bytes = encode_relation_snapshot(&snapshot).expect("encode relation snapshot");
+        let (root_count, rows): (u64, DecodedRows) =
+            postcard::from_bytes(&bytes).expect("decode exact two-field snapshot");
+        assert_eq!(root_count, 1);
+        assert_eq!(row_count(&rows), 1);
     }
 }

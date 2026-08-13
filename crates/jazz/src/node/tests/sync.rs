@@ -99,7 +99,8 @@ fn client_side_rejection_cascades_to_local_mergeable_descendant() {
         &mut core,
         MergeableCommit::new("todos", row, 1).cells(title_cells("old")),
     );
-    let tx_id = client.open_exclusive().unwrap();
+    let tx_id = OpenBatchId::new();
+    client.open_exclusive(tx_id).unwrap();
     client
         .tx_write(tx_id, "todos", row, title_cells("exclusive"), None)
         .unwrap();
@@ -171,7 +172,8 @@ fn authority_unparks_child_after_unknown_parent_accepts() {
     let (_client_dir, mut client) = open_node_with_uuid(node(1));
     let (_core_dir, mut core) = open_node_with_uuid(node(9));
     let row = row(7);
-    let tx_id = client.open_exclusive().unwrap();
+    let tx_id = OpenBatchId::new();
+    client.open_exclusive(tx_id).unwrap();
     client
         .tx_write(tx_id, "todos", row, title_cells("exclusive"), None)
         .unwrap();
@@ -494,6 +496,7 @@ fn receiver_batch_ingests_non_reset_complete_bundles_once() {
             authorization_progress: None,
             result_member_adds,
             result_member_removes,
+            terminal_operations: Vec::new(),
             program_fact_adds,
             program_fact_removes,
         }])
@@ -563,6 +566,7 @@ fn receiver_batch_preloads_peer_inventory_bundles_before_membership() {
                     tx_id,
                 ))],
                 result_member_removes: Vec::new(),
+                terminal_operations: Vec::new(),
                 program_fact_adds: Vec::new(),
                 program_fact_removes: Vec::new(),
             },
@@ -583,6 +587,7 @@ fn receiver_batch_preloads_peer_inventory_bundles_before_membership() {
             authorization_progress: None,
                 result_member_adds: Vec::new(),
                 result_member_removes: Vec::new(),
+                terminal_operations: Vec::new(),
                 program_fact_adds: Vec::new(),
                 program_fact_removes: Vec::new(),
             },
@@ -619,7 +624,8 @@ fn receiver_batch_coalesces_partial_bundles_for_same_tx() {
         absent_read_set: None,
         predicate_read_set: None,
         user_metadata_json: None,
-        source_branch: None,
+        target_lineage: crate::tx::BranchLineage::Root,
+        branch_merge: None,
         merge_strategy: None,
     };
     let first = version_record(row(1), Vec::new(), title_cells("one"), None);
@@ -648,6 +654,7 @@ fn receiver_batch_coalesces_partial_bundles_for_same_tx() {
                     tx_id,
                 ))],
                 result_member_removes: Vec::new(),
+                terminal_operations: Vec::new(),
                 program_fact_adds: Vec::new(),
                 program_fact_removes: Vec::new(),
             },
@@ -672,6 +679,7 @@ fn receiver_batch_coalesces_partial_bundles_for_same_tx() {
                     tx_id,
                 ))],
                 result_member_removes: Vec::new(),
+                terminal_operations: Vec::new(),
                 program_fact_adds: Vec::new(),
                 program_fact_removes: Vec::new(),
             },
@@ -713,7 +721,8 @@ fn sequential_partial_exclusive_bundles_index_the_complete_transaction() {
         absent_read_set: None,
         predicate_read_set: None,
         user_metadata_json: None,
-        source_branch: None,
+        target_lineage: crate::tx::BranchLineage::Root,
+        branch_merge: None,
         merge_strategy: None,
     };
     let updates = [
@@ -759,7 +768,8 @@ fn completing_partial_exclusive_transaction_rejects_conflicting_metadata() {
         absent_read_set: None,
         predicate_read_set: None,
         user_metadata_json: None,
-        source_branch: None,
+        target_lineage: crate::tx::BranchLineage::Root,
+        branch_merge: None,
         merge_strategy: None,
     };
     reader
@@ -822,6 +832,7 @@ fn partial_exclusive_view_update(
             tx_id,
         ))],
         result_member_removes: Vec::new(),
+        terminal_operations: Vec::new(),
         program_fact_adds: Vec::new(),
         program_fact_removes: Vec::new(),
     }
@@ -918,6 +929,7 @@ fn receiver_batch_resolves_current_winner_across_bundles() {
                 new_tx,
             ))],
             result_member_removes: Vec::new(),
+            terminal_operations: Vec::new(),
             program_fact_adds: Vec::new(),
             program_fact_removes: Vec::new(),
         }])
@@ -950,7 +962,8 @@ fn receiver_tracks_partial_mergeable_payload_coverage() {
         absent_read_set: None,
         predicate_read_set: None,
         user_metadata_json: None,
-        source_branch: None,
+        target_lineage: crate::tx::BranchLineage::Root,
+        branch_merge: None,
         merge_strategy: None,
     };
     let first = version_record(row(1), Vec::new(), title_cells("one"), None);
@@ -972,6 +985,7 @@ fn receiver_tracks_partial_mergeable_payload_coverage() {
             peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
             result_member_adds: vec![("todos".to_owned().into(), row(1), tx_id).into()],
             result_member_removes: Vec::new(),
+            terminal_operations: Vec::new(),
             program_fact_adds: Vec::new(),
             program_fact_removes: Vec::new(),
         })
@@ -1006,6 +1020,7 @@ fn receiver_tracks_partial_mergeable_payload_coverage() {
             peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
             result_member_adds: vec![("todos".to_owned().into(), row(2), tx_id).into()],
             result_member_removes: Vec::new(),
+            terminal_operations: Vec::new(),
             program_fact_adds: Vec::new(),
             program_fact_removes: Vec::new(),
         })
@@ -1039,6 +1054,7 @@ fn view_updates_drop_unknown_usage_site_bindings() {
             peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
             result_member_adds: Vec::new(),
             result_member_removes: Vec::new(),
+            terminal_operations: Vec::new(),
             program_fact_adds: Vec::new(),
             program_fact_removes: Vec::new(),
         })
@@ -1267,7 +1283,8 @@ fn originating_causality_rejection_retains_child_payload() {
             absent_read_set: None,
             predicate_read_set: None,
             user_metadata_json: None,
-            source_branch: None,
+            target_lineage: crate::tx::BranchLineage::Root,
+            branch_merge: None,
             merge_strategy: None,
         },
         vec![version_record(row, Vec::new(), title_cells("parent"), None)],
@@ -1555,7 +1572,8 @@ fn peer_rejects_sequenced_non_global_view_bundle_before_persisting_it() {
                     absent_read_set: None,
                     predicate_read_set: None,
                     user_metadata_json: None,
-                    source_branch: None,
+                    target_lineage: crate::tx::BranchLineage::Root,
+                    branch_merge: None,
                     merge_strategy: None,
                 },
                 versions: Vec::new(),
@@ -1566,6 +1584,7 @@ fn peer_rejects_sequenced_non_global_view_bundle_before_persisting_it() {
             peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
             result_member_adds: Vec::new(),
             result_member_removes: Vec::new(),
+            terminal_operations: Vec::new(),
             program_fact_adds: Vec::new(),
             program_fact_removes: Vec::new(),
         })
@@ -1612,7 +1631,14 @@ fn content_extent_fetch_rejects_row_context_mismatch_and_invisible_content() {
     let other_row = row(8);
     let extent = node
         .content_store()
-        .append(author, visible_row, "title", b"unreferenced")
+        .append(
+            schema().version_id(),
+            "todos",
+            author,
+            visible_row,
+            "title",
+            b"unreferenced",
+        )
         .unwrap();
     let mut peer = PeerState::client_link(author);
 
@@ -1913,6 +1939,32 @@ fn policy_graph_dropdown_entry_cells(dropdown: RowUuid, idx: usize) -> BTreeMap<
     ])
 }
 
+fn assert_policy_graph_perf_fixture_matches_schema(schema: &JazzSchema) {
+    for (table_name, column_name, expected_type) in [
+        ("t50", "c632", ColumnType::I32),
+        ("t67", "c488", ColumnType::I32.nullable()),
+        ("t67", "c733", ColumnType::I32.nullable()),
+    ] {
+        let table = schema
+            .tables
+            .iter()
+            .find(|candidate| candidate.name == table_name)
+            .unwrap_or_else(|| panic!("policy-graph performance fixture is missing {table_name}"));
+        let column = table
+            .columns
+            .iter()
+            .find(|candidate| candidate.name == column_name)
+            .unwrap_or_else(|| {
+                panic!("policy-graph performance fixture is missing {table_name}.{column_name}")
+            });
+        assert_eq!(
+            column.column_type,
+            expected_type,
+            "policy-graph performance fixture writes {table_name}.{column_name} as Value::I32"
+        );
+    }
+}
+
 fn policy_graph_version(
     schema: &JazzSchema,
     table: &str,
@@ -1937,7 +1989,9 @@ fn policy_graph_version(
         None,
     )
     .unwrap_or_else(|error| {
-        panic!("policy graph fixture row {table}/{row_uuid:?} is invalid: {error:?}")
+        panic!(
+            "policy-graph performance fixture has invalid cells for table={table} row={row_uuid:?}: {error:?}; cells={cells:?}"
+        )
     })
 }
 
@@ -1962,7 +2016,8 @@ fn seed_policy_graph_known_global(
                 absent_read_set: None,
                 predicate_read_set: None,
                 user_metadata_json: None,
-                source_branch: None,
+                target_lineage: crate::tx::BranchLineage::Root,
+                branch_merge: None,
                 merge_strategy: None,
             },
             vec![version],
@@ -2068,6 +2123,7 @@ fn policy_graph_reset_ingest_fixture(
     dropdown_count: usize,
 ) -> PolicyGraphResetIngestFixture {
     let schema = policy_graph_perf_schema_fixture();
+    assert_policy_graph_perf_fixture_matches_schema(&schema);
     let (_core_dir, mut core) = open_node_with_schema(node(0x22), schema.clone());
 
     let member = policy_graph_author(0x31, 1);
@@ -2347,6 +2403,7 @@ fn late_view_update_for_detached_subscription_is_dropped_and_counted() {
             row_uuid,
             TxId::new(TxTime(777), node(44)),
         ))],
+        terminal_operations: Vec::new(),
         program_fact_adds: Vec::new(),
         program_fact_removes: Vec::new(),
     };
@@ -2387,6 +2444,7 @@ fn late_view_update_for_never_registered_subscription_is_dropped_and_counted() {
         peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
         result_member_adds: Vec::new(),
         result_member_removes: Vec::new(),
+        terminal_operations: Vec::new(),
         program_fact_adds: Vec::new(),
         program_fact_removes: Vec::new(),
     };
@@ -2450,6 +2508,7 @@ fn known_state_removal_without_local_body_clears_membership_without_repair() {
             row_uuid,
             invisible_tx,
         ))],
+        terminal_operations: Vec::new(),
         program_fact_adds: Vec::new(),
         program_fact_removes: Vec::new(),
     };
@@ -2498,6 +2557,7 @@ fn known_state_removal_for_never_known_row_is_noop_but_settles() {
             row_uuid,
             TxId::new(TxTime(1000), node(45)),
         ))],
+        terminal_operations: Vec::new(),
         program_fact_adds: Vec::new(),
         program_fact_removes: Vec::new(),
     };
@@ -2589,6 +2649,7 @@ fn empty_reset_for_duplicate_usage_subscription_does_not_degrade_canonical_view(
             peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
             result_member_adds: Vec::new(),
             result_member_removes: Vec::new(),
+            terminal_operations: Vec::new(),
             program_fact_adds: Vec::new(),
             program_fact_removes: Vec::new(),
         })
@@ -3510,6 +3571,7 @@ fn view_updates_ship_current_versions_to_downstream_nodes() {
             authorization_progress: None,
             result_member_adds,
             result_member_removes,
+            terminal_operations: Vec::new(),
             program_fact_adds: Vec::new(),
             program_fact_removes: Vec::new(),
         })
@@ -3571,6 +3633,7 @@ fn view_updates_use_peer_payload_inventory_refs_for_previously_shipped_complete_
             authorization_progress: None,
             result_member_adds,
             result_member_removes,
+            terminal_operations: Vec::new(),
             program_fact_adds: Vec::new(),
             program_fact_removes: Vec::new(),
         })
@@ -3619,6 +3682,7 @@ fn view_updates_use_peer_payload_inventory_refs_for_previously_shipped_complete_
             authorization_progress: None,
             result_member_adds,
             result_member_removes,
+            terminal_operations: Vec::new(),
             program_fact_adds: Vec::new(),
             program_fact_removes: Vec::new(),
         })
@@ -3644,6 +3708,7 @@ fn view_updates_downgrade_unknown_peer_payload_inventory_refs() {
             authorization_progress: None,
             result_member_adds: Vec::new(),
             result_member_removes: Vec::new(),
+            terminal_operations: Vec::new(),
             program_fact_adds: Vec::new(),
             program_fact_removes: Vec::new(),
         })
@@ -3726,7 +3791,8 @@ fn duplicate_commit_units_compare_versions_without_wire_order() {
         absent_read_set: None,
         predicate_read_set: None,
         user_metadata_json: None,
-        source_branch: None,
+        target_lineage: crate::tx::BranchLineage::Root,
+        branch_merge: None,
         merge_strategy: None,
     };
     let versions = vec![
@@ -3741,5 +3807,82 @@ fn duplicate_commit_units_compare_versions_without_wire_order() {
     assert!(
         core.ingest_commit_unit(tx, reversed, u64::MAX - SKEW_TOLERANCE_MS)
             .is_ok()
+    );
+}
+/// A locally pending partial update is rebuilt from durable history after
+/// `bob` reopens, then uploaded as a real commit unit. Its explicitly authored
+/// `title` wins while `alice`'s concurrent `completed` edit survives.
+///
+/// ```text
+/// base(base,false) ─┬─ alice(completed=true) ──┐
+///                   └─ bob(title=base) ─ reopen ─ upload ─┴─► base,true
+/// ```
+///
+/// Planted positive: force `VersionRecord::from_stored` to attach
+/// `authored_columns=None`. Bob's materialized `completed=false` then appears
+/// authored on the rebuilt wire unit and this test fails.
+#[test]
+fn reopened_pending_partial_update_upload_preserves_authored_columns() {
+    let schema = JazzSchema::new([TableSchema::new(
+        "todos",
+        [
+            ColumnSchema::new("title", ColumnType::String),
+            ColumnSchema::new("completed", ColumnType::Bool),
+        ],
+    )]);
+    let (bob_dir, mut bob) = open_node_with_schema(node(0x91), schema.clone());
+    let (_alice_dir, mut alice) = open_node_with_schema(node(0x92), schema.clone());
+    let (_core_dir, mut core) =
+        open_history_complete_node_with_schema(node(0x93), schema.clone());
+    let row_uuid = row(0x91);
+
+    let (base, base_unit) = bob
+        .commit_mergeable_unit(
+            MergeableCommit::new("todos", row_uuid, 10).cells(BTreeMap::from([
+                ("title".to_owned(), Value::String("base".to_owned())),
+                ("completed".to_owned(), Value::Bool(false)),
+            ])),
+        )
+        .unwrap();
+    let [base_fate] = core.apply_sync_message(base_unit).unwrap().try_into().unwrap();
+    bob.apply_sync_message(base_fate).unwrap();
+
+    let (_alice_tx, alice_unit) = alice
+        .commit_mergeable_unit(
+            MergeableCommit::new("todos", row_uuid, 20)
+                .parents(vec![base])
+                .cells(BTreeMap::from([(
+                    "completed".to_owned(),
+                    Value::Bool(true),
+                )])),
+        )
+        .unwrap();
+    core.apply_sync_message(alice_unit).unwrap();
+
+    let bob_tx = bob
+        .commit_mergeable(
+            MergeableCommit::new("todos", row_uuid, 30)
+                .parents(vec![base])
+                .cells(BTreeMap::from([
+                    ("title".to_owned(), Value::String("base".to_owned())),
+                    ("completed".to_owned(), Value::Bool(false)),
+                ]))
+                .authored_columns(BTreeSet::from(["title".to_owned()])),
+        )
+        .unwrap();
+    drop(bob);
+
+    let mut reopened = reopen_node_at(&bob_dir, node(0x91), schema);
+    let rebuilt = reopened.commit_unit_for(bob_tx).unwrap();
+    core.apply_sync_message(rebuilt).unwrap();
+
+    let rows = core.current_rows("todos", DurabilityTier::Local).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].test_cells_by_descriptor(),
+        BTreeMap::from([
+            ("title".to_owned(), Value::String("base".to_owned())),
+            ("completed".to_owned(), Value::Bool(true)),
+        ])
     );
 }

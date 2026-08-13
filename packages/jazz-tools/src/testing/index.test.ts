@@ -2,7 +2,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { anyOf, definePermissions } from "../permissions/index.js";
 import { schema as s } from "../index.js";
 import {
@@ -11,6 +11,7 @@ import {
   type LocalJazzServerHandle,
   startLocalJazzServer,
 } from "./index.js";
+import { settlePolicySeed } from "./policy-test-app.js";
 
 const tempRoots: string[] = [];
 const localServers = new Set<LocalJazzServerHandle>();
@@ -315,17 +316,38 @@ describe("deploy", () => {
 });
 
 describe("createPolicyTestApp", () => {
+  it("waits for local seed visibility and returns the settled value", async () => {
+    let settle!: (value: { id: string }) => void;
+    const settled = new Promise<{ id: string }>((resolve) => {
+      settle = resolve;
+    });
+    const wait = vi.fn(() => settled);
+
+    let resolved = false;
+    const result = settlePolicySeed({ value: { id: "optimistic" }, wait }).then((value) => {
+      resolved = true;
+      return value;
+    });
+    await Promise.resolve();
+
+    expect(wait).toHaveBeenCalledOnce();
+    expect(wait).toHaveBeenCalledWith({ tier: "local" });
+    expect(resolved).toBe(false);
+
+    settle({ id: "settled" });
+    await expect(result).resolves.toEqual({ id: "settled" });
+  });
+
   it("creates a test app from an app definition and compiled permissions", async () => {
     const policyTestApp = await createPolicyTestApp(testApp, testPermissions, expect);
 
     try {
-      const seeded = policyTestApp.seed((db) => {
-        const { value } = db.insert(testApp.todos, {
+      const seeded = await policyTestApp.seed((db) => {
+        return db.insert(testApp.todos, {
           title: "Ship the direct app API",
           done: false,
           ownerId: "alice",
         });
-        return value;
       });
 
       const alice = policyTestApp.as({ user_id: "alice", claims: {}, authMode: "local-first" });
@@ -355,8 +377,8 @@ describe("createPolicyTestApp", () => {
         });
       });
 
-      bob.expectDenied((db) => {
-        db.insert(testApp.todos, {
+      await bob.expectDenied((db) => {
+        return db.insert(testApp.todos, {
           title: "Bob cannot insert Alice's todo",
           done: false,
           ownerId: "alice",

@@ -7,14 +7,13 @@
 //! runtime module.
 
 use super::*;
-use std::cell::Cell;
-use std::rc::Rc;
 use std::sync::mpsc::TryRecvError;
 use std::time::Instant;
 
 use crate::ivm::{
     AggregateExpr, AggregateFunction, CollectByField, CollectBySlotBuilder, IvmRuntimeError,
-    LiteralValue, PlanExpr, PredicateExpr, ProjectField, StaticScanSpec, TopByLimit, TopByOrder,
+    LiteralValue, PlanExpr, PredicateExpr, ProjectField, StaticScanSpec, TerminalEdit,
+    TerminalPathSegment, TopByLimit, TopByOrder,
 };
 use crate::queries::{
     BinaryOp, ColumnRef, Cte, Expr, JoinConstraint, JoinKind, Query, Select, SelectItem, TableRef,
@@ -25,11 +24,13 @@ use crate::schema::{
     ColumnSchema, ColumnType, DatabaseSchema, DirectRecordStoreSchema, IndexSchema, IntegerKeyType,
     PrimaryKey, PrimaryKeyColumn, PrimaryKeyType,
 };
-use crate::storage::{
-    ColumnFamilyName, Error as StorageError, Key, KeyValue, MemoryStorage, OrderedKvStorage,
-    RocksDbStorage, ScanVisitor, StorageLayout, Value as StorageValue, WriteOperation,
-};
-use crate::window_codec::TARGET_RECORDS_PER_WINDOW;
+use crate::storage::{MemoryStorage, OrderedKvStorage, RocksDbStorage, StorageLayout};
+
+fn version_zero_payload(stored: &[u8]) -> &[u8] {
+    let (version, payload) = crate::records::split_versioned_record(stored).unwrap();
+    assert_eq!(version, 0);
+    payload
+}
 
 fn albums_schema() -> DatabaseSchema {
     DatabaseSchema::new([TableSchema::new(
@@ -225,15 +226,17 @@ fn collect_tree_schema() -> DatabaseSchema {
 }
 
 fn collect_tree_values(
-    id: u64,
-    child: u64,
-    child_order: u64,
-    grandchild: u64,
-    grandchild_order: u64,
-    left: u64,
-    left_order: u64,
-    right: u64,
-    right_order: u64,
+    [
+        id,
+        child,
+        child_order,
+        grandchild,
+        grandchild_order,
+        left,
+        left_order,
+        right,
+        right_order,
+    ]: [u64; 9],
 ) -> Vec<Value> {
     vec![
         Value::U64(id),
@@ -794,8 +797,8 @@ fn select_query(select: Select) -> Query {
 
 fn reachability_graph(max_iters: usize) -> GraphBuilder {
     let reach = RecordDescriptor::new([
-        ("src", ColumnType::U64.value_type()),
-        ("dst", ColumnType::U64.value_type()),
+        ("src", ColumnType::U64.clone()),
+        ("dst", ColumnType::U64.clone()),
     ]);
     let seed = GraphBuilder::table("edges").project(["src", "dst"]);
     let edge_pairs = GraphBuilder::table("edges").project(["src", "dst"]);
@@ -809,12 +812,12 @@ fn reachability_graph(max_iters: usize) -> GraphBuilder {
 
 fn prepared_reachability_graph(edge_input: GraphBuilder, max_iters: usize) -> GraphBuilder {
     let reach = RecordDescriptor::new([
-        ("seed", ColumnType::U64.value_type()),
-        ("dst", ColumnType::U64.value_type()),
+        ("seed", ColumnType::U64.clone()),
+        ("dst", ColumnType::U64.clone()),
     ]);
     let seed = GraphBuilder::binding_source(
         "prepared-reach",
-        RecordDescriptor::new([("seed", ColumnType::U64.value_type())]),
+        RecordDescriptor::new([("seed", ColumnType::U64.clone())]),
     )
     .project_fields([
         ProjectField::renamed("seed", "seed"),
@@ -841,7 +844,7 @@ fn prepared_reachability_shape(
         .prepare_one_sink(
             prepared_reachability_graph(GraphBuilder::table("edges"), 16),
             "prepared-reach",
-            RecordDescriptor::new([("seed", ColumnType::U64.value_type())]),
+            RecordDescriptor::new([("seed", ColumnType::U64.clone())]),
             ["seed".to_owned()],
         )
         .unwrap()
@@ -860,7 +863,7 @@ fn prepared_reachability_with_antijoin_shape(
         .prepare_one_sink(
             prepared_reachability_graph(unblocked, 16),
             "prepared-reach",
-            RecordDescriptor::new([("seed", ColumnType::U64.value_type())]),
+            RecordDescriptor::new([("seed", ColumnType::U64.clone())]),
             ["seed".to_owned()],
         )
         .unwrap()
@@ -888,7 +891,7 @@ fn unblocked_edges_graph() -> GraphBuilder {
 fn artist_album_shape_graph() -> GraphBuilder {
     let params = GraphBuilder::binding_source(
         "artist_params",
-        RecordDescriptor::new([("artist_id", ColumnType::U64.value_type())]),
+        RecordDescriptor::new([("artist_id", ColumnType::U64.clone())]),
     );
     let albums = GraphBuilder::table("albums").project(["artist_id", "id", "title"]);
     GraphBuilder::join(params, albums, ["artist_id"], ["artist_id"]).project_fields([
@@ -899,7 +902,7 @@ fn artist_album_shape_graph() -> GraphBuilder {
 }
 
 fn artist_binding_descriptor() -> RecordDescriptor {
-    RecordDescriptor::new([("artist_id", ColumnType::U64.value_type())])
+    RecordDescriptor::new([("artist_id", ColumnType::U64.clone())])
 }
 
 fn insert_edge(batch: &mut DatabaseBatch, id: u64, src: u64, dst: u64) {
@@ -941,10 +944,10 @@ fn grant_shape_schema() -> DatabaseSchema {
 }
 
 fn grant_shape_graph() -> GraphBuilder {
-    let binding_descriptor = RecordDescriptor::new([("seed", ColumnType::U64.value_type())]);
+    let binding_descriptor = RecordDescriptor::new([("seed", ColumnType::U64.clone())]);
     let reach_descriptor = RecordDescriptor::new([
-        ("seed", ColumnType::U64.value_type()),
-        ("group", ColumnType::U64.value_type()),
+        ("seed", ColumnType::U64.clone()),
+        ("group", ColumnType::U64.clone()),
     ]);
     let seed = GraphBuilder::binding_source("grant-claim", binding_descriptor).project_fields([
         ProjectField::renamed("seed", "seed"),
@@ -990,7 +993,7 @@ fn prepare_grant_shape(database: &mut Database<MemoryStorage>) -> crate::ivm::Pr
         .prepare_one_sink(
             grant_shape_graph(),
             "grant-claim",
-            RecordDescriptor::new([("seed", ColumnType::U64.value_type())]),
+            RecordDescriptor::new([("seed", ColumnType::U64.clone())]),
             ["seed"],
         )
         .unwrap()
@@ -1100,16 +1103,17 @@ fn commits_insert_update_and_delete_batches() {
             .storage
             .get("albums", &PrimaryKeyValue::U64(7).into_bytes())
             .unwrap(),
-        Some(
-            database
+        Some(crate::records::encode_versioned_record(
+            0,
+            &database
                 .ivm_runtime
                 .schema()
                 .table("albums")
                 .unwrap()
                 .record_schema()
                 .create(&[Value::U64(7), Value::String("Blue Train".to_owned())])
-                .unwrap()
-        )
+                .unwrap(),
+        ))
     );
 
     let mut batch = database.open_batch();
@@ -1129,8 +1133,9 @@ fn commits_insert_update_and_delete_batches() {
         .table("albums")
         .unwrap()
         .record_schema();
+    let stored = version_zero_payload(&stored);
     assert_eq!(
-        descriptor.get(&stored, "title").unwrap(),
+        descriptor.get(stored, "title").unwrap(),
         Value::String("Giant Steps".to_owned())
     );
 
@@ -1560,10 +1565,10 @@ fn direct_record_store_stores_ordered_records_independent_of_tables() {
     let schema = albums_schema().with_direct_record_store(DirectRecordStoreSchema::new(
         "streams",
         RecordDescriptor::new([
-            ("namespace", ColumnType::String.value_type()),
-            ("path", ColumnType::String.value_type()),
+            ("namespace", ColumnType::String.clone()),
+            ("path", ColumnType::String.clone()),
         ]),
-        RecordDescriptor::new([("bytes", ColumnType::Bytes.value_type())]),
+        RecordDescriptor::new([("bytes", ColumnType::Bytes.clone())]),
     ));
     let column_families = schema.column_families();
     let storage = RocksDbStorage::open(temp_dir.path(), &column_families).unwrap();
@@ -1777,7 +1782,9 @@ fn assert_direct_record_store_round_trips_array_of_record_values() {
     let results = Value::Array(vec![Value::Record(first), Value::Record(second)]);
     let store = database.direct_record_store("rendered_results").unwrap();
 
-    store.set(&[Value::U64(7)], &[results.clone()]).unwrap();
+    store
+        .set(&[Value::U64(7)], std::slice::from_ref(&results))
+        .unwrap();
 
     assert_eq!(
         store
@@ -2058,178 +2065,58 @@ fn subscribe_sends_empty_hydration_snapshot_without_writes() {
 }
 
 #[test]
-fn history_windows_are_transparent_to_subscription_hydration() {
-    let mut database = jazz_docs_history_database();
-    let row_count = 260;
-    seed_jazz_docs_history(&mut database, 0, row_count);
+fn history_rows_remain_plain_across_hydration_post_write_and_reopen() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let schema = jazz_docs_history_schema();
+    let column_families = schema.column_families();
 
-    database
-        .consolidate_table_windows("jazz_docs_history", TARGET_RECORDS_PER_WINDOW)
-        .unwrap();
-    assert!(
+    {
+        let storage = RocksDbStorage::open(temp_dir.path(), &column_families).unwrap();
+        let mut database = Database::new(schema.clone(), storage).unwrap();
+        seed_jazz_docs_history(&mut database, 0, 12);
+
+        // A history record is one ordinary row at its primary key. The exact
+        // physical count makes a future hidden packer/window write observable.
+        assert_eq!(
+            database
+                .storage
+                .prefix("jazz_docs_history", b"")
+                .unwrap()
+                .len(),
+            12
+        );
+
+        let subscription = database
+            .subscribe_one_sink(GraphBuilder::table("jazz_docs_history"))
+            .unwrap();
+        assert_eq!(subscription.recv().unwrap().deltas.len(), 12);
+
+        seed_jazz_docs_history(&mut database, 12, 1);
+        assert_eq!(subscription.recv().unwrap().deltas.len(), 1);
+        assert_eq!(
+            database
+                .storage
+                .prefix("jazz_docs_history", b"")
+                .unwrap()
+                .len(),
+            13
+        );
+    }
+
+    let storage = RocksDbStorage::open(temp_dir.path(), &column_families).unwrap();
+    let mut database = Database::new(schema, storage).unwrap();
+    assert_eq!(
         database
             .storage
             .prefix("jazz_docs_history", b"")
             .unwrap()
-            .len()
-            < row_count as usize
+            .len(),
+        13
     );
-
     let subscription = database
         .subscribe_one_sink(GraphBuilder::table("jazz_docs_history"))
         .unwrap();
-    let rows = subscription.recv().unwrap();
-    assert_eq!(rows.deltas.len(), row_count as usize);
-
-    let indexed = database
-        .index_scan_raw(
-            "jazz_docs_history",
-            "by_tx",
-            &[Value::U64(128), Value::U64(7)],
-        )
-        .unwrap();
-    assert_eq!(indexed.len(), 1);
-}
-
-#[test]
-fn post_tick_history_consolidation_preserves_live_subscription_deltas_and_hydration() {
-    let mut control = jazz_docs_history_database();
-    let mut consolidated = jazz_docs_history_database();
-    seed_jazz_docs_history(&mut control, 0, 260);
-    seed_jazz_docs_history(&mut consolidated, 0, 260);
-
-    let control_live = control
-        .subscribe_one_sink(GraphBuilder::table("jazz_docs_history"))
-        .unwrap();
-    let consolidated_live = consolidated
-        .subscribe_one_sink(GraphBuilder::table("jazz_docs_history"))
-        .unwrap();
-    assert_eq!(
-        control_live.recv().unwrap(),
-        consolidated_live.recv().unwrap()
-    );
-    control.flush().unwrap();
-    consolidated.flush().unwrap();
-
-    let report = consolidated
-        .consolidate_history_windows(TARGET_RECORDS_PER_WINDOW, 2)
-        .unwrap();
-    assert_eq!(report.windows, 1);
-    assert_eq!(report.records, TARGET_RECORDS_PER_WINDOW);
-
-    seed_jazz_docs_history(&mut control, 260, 1);
-    seed_jazz_docs_history(&mut consolidated, 260, 1);
-    assert_eq!(
-        control_live.recv().unwrap(),
-        consolidated_live.recv().unwrap()
-    );
-
-    let control_fresh = control
-        .subscribe_one_sink(GraphBuilder::table("jazz_docs_history"))
-        .unwrap();
-    let consolidated_fresh = consolidated
-        .subscribe_one_sink(GraphBuilder::table("jazz_docs_history"))
-        .unwrap();
-    assert_eq!(
-        control_fresh.recv().unwrap(),
-        consolidated_fresh.recv().unwrap()
-    );
-}
-
-#[test]
-fn history_consolidation_visits_direct_record_stores() {
-    let schema = DatabaseSchema::new([]).with_direct_record_store(DirectRecordStoreSchema::new(
-        "jazz_docs_history",
-        RecordDescriptor::new([
-            ("row_uuid", ValueType::Uuid),
-            ("tx_time", ValueType::U64),
-            ("tx_node_id", ValueType::Uuid),
-        ]),
-        RecordDescriptor::new([("body", ValueType::Bytes)]),
-    ));
-    let storage = MemoryStorage::new(&schema.column_families());
-    let database = Database::new(schema, storage).unwrap();
-    let store = database.direct_record_store("jazz_docs_history").unwrap();
-    let row = uuid::Uuid::from_u128(7);
-    let node = uuid::Uuid::from_u128(9);
-    for idx in 0..(TARGET_RECORDS_PER_WINDOW + 3) {
-        store
-            .set(
-                &[Value::Uuid(row), Value::U64(idx as u64), Value::Uuid(node)],
-                &[Value::Bytes(vec![idx as u8])],
-            )
-            .unwrap();
-    }
-
-    let report = database
-        .consolidate_history_windows(TARGET_RECORDS_PER_WINDOW, 2)
-        .unwrap();
-
-    assert_eq!(
-        report,
-        WindowConsolidation {
-            windows: 1,
-            records: TARGET_RECORDS_PER_WINDOW
-        }
-    );
-    assert_eq!(
-        store
-            .get(&[
-                Value::Uuid(row),
-                Value::U64((TARGET_RECORDS_PER_WINDOW + 2) as u64),
-                Value::Uuid(node),
-            ])
-            .unwrap()
-            .unwrap()
-            .get("body")
-            .unwrap(),
-        Value::Bytes(vec![(TARGET_RECORDS_PER_WINDOW + 2) as u8])
-    );
-}
-
-#[test]
-fn partial_history_tail_is_marked_converged_until_dirtied() {
-    let schema = jazz_docs_history_schema();
-    let layout = StorageLayout::jazz_class_v1();
-    let physical_cfs = layout.physical_column_families(schema.column_families());
-    let physical_cf_refs = physical_cfs.iter().map(String::as_str).collect::<Vec<_>>();
-    let storage = ScanCountingStorage::new(&physical_cf_refs);
-    let counter = storage.clone();
-    let mut database = Database::new_with_storage_layout(schema, storage, layout).unwrap();
-
-    seed_jazz_docs_history(&mut database, 0, 3);
-    let scans_after_seed = counter.scan_range_count();
-
-    let first = database.consolidate_history_windows(4, 2).unwrap();
-    assert_eq!(first, WindowConsolidation::default());
-    assert!(counter.scan_range_count() > scans_after_seed);
-
-    let scans_after_first = counter.scan_range_count();
-    let second = database.consolidate_history_windows(4, 2).unwrap();
-    assert_eq!(second, WindowConsolidation::default());
-    assert_eq!(counter.scan_range_count(), scans_after_first);
-
-    seed_jazz_docs_history(&mut database, 3, 1);
-    let scans_after_dirty = counter.scan_range_count();
-    let after_dirty = database.consolidate_history_windows(4, 2).unwrap();
-    assert_eq!(
-        after_dirty,
-        WindowConsolidation {
-            windows: 1,
-            records: 4
-        }
-    );
-    assert!(counter.scan_range_count() > scans_after_dirty);
-
-    let scans_after_reconverge = counter.scan_range_count();
-    let after_reconverge = database.consolidate_history_windows(4, 2).unwrap();
-    assert_eq!(after_reconverge, WindowConsolidation::default());
-    assert!(counter.scan_range_count() > scans_after_reconverge);
-
-    let scans_after_tail_converged = counter.scan_range_count();
-    let skipped = database.consolidate_history_windows(4, 2).unwrap();
-    assert_eq!(skipped, WindowConsolidation::default());
-    assert_eq!(counter.scan_range_count(), scans_after_tail_converged);
+    assert_eq!(subscription.recv().unwrap().deltas.len(), 13);
 }
 
 fn jazz_docs_history_schema() -> DatabaseSchema {
@@ -2251,111 +2138,6 @@ fn jazz_docs_history_schema() -> DatabaseSchema {
         "by_tx",
         ["tx_time", "tx_node", "row_uuid"],
     ))])
-}
-
-fn jazz_docs_history_database() -> Database<MemoryStorage> {
-    let schema = jazz_docs_history_schema();
-    let layout = StorageLayout::jazz_class_v1();
-    let physical_cfs = layout.physical_column_families(schema.column_families());
-    let physical_cf_refs = physical_cfs.iter().map(String::as_str).collect::<Vec<_>>();
-    let storage = MemoryStorage::new(&physical_cf_refs);
-    Database::new_with_storage_layout(schema, storage, layout).unwrap()
-}
-
-#[derive(Clone)]
-struct ScanCountingStorage {
-    inner: MemoryStorage,
-    scan_range_count: Rc<Cell<usize>>,
-}
-
-impl ScanCountingStorage {
-    fn new(column_families: &[&str]) -> Self {
-        Self {
-            inner: MemoryStorage::new(column_families),
-            scan_range_count: Rc::new(Cell::new(0)),
-        }
-    }
-
-    fn scan_range_count(&self) -> usize {
-        self.scan_range_count.get()
-    }
-}
-
-impl OrderedKvStorage for ScanCountingStorage {
-    fn get(&self, cf: &ColumnFamilyName, key: &Key) -> Result<Option<StorageValue>, StorageError> {
-        self.inner.get(cf, key)
-    }
-
-    fn set(&self, cf: &ColumnFamilyName, key: &Key, value: &[u8]) -> Result<(), StorageError> {
-        self.inner.set(cf, key, value)
-    }
-
-    fn delete(&self, cf: &ColumnFamilyName, key: &Key) -> Result<(), StorageError> {
-        self.inner.delete(cf, key)
-    }
-
-    fn close(&self) -> Result<(), StorageError> {
-        self.inner.close()
-    }
-
-    fn approximate_class_bytes(&self, cf: &ColumnFamilyName) -> Result<Option<u64>, StorageError> {
-        self.inner.approximate_class_bytes(cf)
-    }
-
-    fn scan_range(
-        &self,
-        cf: &ColumnFamilyName,
-        start: &Key,
-        end: &Key,
-        visit: &mut ScanVisitor<'_>,
-    ) -> Result<(), StorageError> {
-        self.scan_range_count
-            .set(self.scan_range_count.get().saturating_add(1));
-        self.inner.scan_range(cf, start, end, visit)
-    }
-
-    fn scan_prefix(
-        &self,
-        cf: &ColumnFamilyName,
-        prefix: &Key,
-        visit: &mut ScanVisitor<'_>,
-    ) -> Result<(), StorageError> {
-        self.inner.scan_prefix(cf, prefix, visit)
-    }
-
-    fn scan_prefix_reverse(
-        &self,
-        cf: &ColumnFamilyName,
-        prefix: &Key,
-        visit: &mut ScanVisitor<'_>,
-    ) -> Result<(), StorageError> {
-        self.inner.scan_prefix_reverse(cf, prefix, visit)
-    }
-
-    fn last_with_prefix(
-        &self,
-        cf: &ColumnFamilyName,
-        prefix: &Key,
-    ) -> Result<Option<KeyValue>, StorageError> {
-        self.inner.last_with_prefix(cf, prefix)
-    }
-
-    fn last_with_prefix_before_or_at(
-        &self,
-        cf: &ColumnFamilyName,
-        prefix: &Key,
-        upper: &Key,
-    ) -> Result<Option<KeyValue>, StorageError> {
-        self.inner.last_with_prefix_before_or_at(cf, prefix, upper)
-    }
-
-    fn write_many(&self, operations: &[WriteOperation<'_>]) -> Result<(), StorageError> {
-        self.inner.write_many(operations)
-    }
-
-    fn column_family_names(&self) -> Option<Vec<String>> {
-        self.inner.column_family_names()
-    }
 }
 
 fn seed_jazz_docs_history<S: OrderedKvStorage>(
@@ -2596,15 +2378,50 @@ fn inserts_accept_values_in_table_declaration_order_even_when_storage_order_diff
         .unwrap()
         .unwrap();
 
-    assert_eq!(descriptor.get(&stored, "id").unwrap(), Value::U64(7));
+    let stored = version_zero_payload(&stored);
+    assert_eq!(descriptor.get(stored, "id").unwrap(), Value::U64(7));
     assert_eq!(
-        descriptor.get(&stored, "title").unwrap(),
+        descriptor.get(stored, "title").unwrap(),
         Value::String("Blue Train".to_owned())
     );
     assert_eq!(
-        descriptor.get(&stored, "rating").unwrap(),
+        descriptor.get(stored, "rating").unwrap(),
         Value::Nullable(Some(Box::new(Value::F64(4.5))))
     );
+}
+
+#[test]
+fn record_valued_columns_round_trip_through_table_storage() {
+    let child = RecordDescriptor::new([("title", ValueType::String), ("year", ValueType::I32)]);
+    let schema = DatabaseSchema::new([TableSchema::new(
+        "albums",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("metadata", ColumnType::Record(Box::new(child))),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+    let storage = MemoryStorage::new(&schema.column_families());
+    let mut database = Database::new(schema, storage).unwrap();
+    let metadata = crate::records::OwnedRecord::new(
+        child
+            .create(&[Value::String("Blue Train".to_owned()), Value::I32(1957)])
+            .unwrap(),
+        child,
+    );
+
+    let mut batch = database.open_batch();
+    batch.insert(
+        "albums",
+        vec![Value::U64(7), Value::Record(metadata.clone())],
+    );
+    database.commit_batch(batch).unwrap();
+
+    let stored = database
+        .primary_key_scan("albums", &[Value::U64(7)])
+        .unwrap();
+    assert_eq!(stored.len(), 1);
+    assert_eq!(stored[0].get("metadata").unwrap(), Value::Record(metadata));
 }
 
 #[test]
@@ -2690,7 +2507,9 @@ fn composite_primary_keys_are_encoded_from_multiple_columns() {
         .record_schema();
     let stored = database.storage.get("history", &key).unwrap().unwrap();
     assert_eq!(
-        descriptor.get(&stored, "payload").unwrap(),
+        descriptor
+            .get(version_zero_payload(&stored), "payload")
+            .unwrap(),
         Value::String("first".to_owned())
     );
 
@@ -2993,7 +2812,7 @@ fn subscription_reports_incremental_contains_filter_deltas() {
 fn prepared_subscription_reports_incremental_eq_field_filter_deltas() {
     let storage = MemoryStorage::new(&["albums"]);
     let mut database = Database::new(albums_schema(), storage).unwrap();
-    let binding_descriptor = RecordDescriptor::new([("wanted", ColumnType::String.value_type())]);
+    let binding_descriptor = RecordDescriptor::new([("wanted", ColumnType::String.clone())]);
     let routing_field = "__routing";
     let binding = GraphBuilder::binding_source("title_eq_param", binding_descriptor)
         .project_fields([
@@ -3052,7 +2871,7 @@ fn prepared_subscription_reports_incremental_eq_field_filter_deltas() {
 fn prepared_binding_source_reuse_validates_descriptor() {
     let storage = MemoryStorage::new(&["albums"]);
     let mut database = Database::new(albums_schema(), storage).unwrap();
-    let string_descriptor = RecordDescriptor::new([("wanted", ColumnType::String.value_type())]);
+    let string_descriptor = RecordDescriptor::new([("wanted", ColumnType::String.clone())]);
     let string_graph = GraphBuilder::binding_source("shared_params", string_descriptor)
         .project_fields([ProjectField::named("wanted")]);
 
@@ -3068,7 +2887,7 @@ fn prepared_binding_source_reuse_validates_descriptor() {
         .prepare_one_sink(string_graph, "shared_params", string_descriptor, ["wanted"])
         .unwrap();
 
-    let u64_descriptor = RecordDescriptor::new([("wanted", ColumnType::U64.value_type())]);
+    let u64_descriptor = RecordDescriptor::new([("wanted", ColumnType::U64.clone())]);
     let u64_graph = GraphBuilder::binding_source("shared_params", u64_descriptor)
         .project_fields([ProjectField::named("wanted")]);
     let err = database
@@ -3085,7 +2904,7 @@ fn prepared_binding_source_reuse_validates_descriptor() {
 fn graph_prepared_subscription_can_hide_internal_routing_fields() {
     let storage = MemoryStorage::new(&["albums"]);
     let mut database = Database::new(albums_schema(), storage).unwrap();
-    let binding_descriptor = RecordDescriptor::new([("wanted", ColumnType::String.value_type())]);
+    let binding_descriptor = RecordDescriptor::new([("wanted", ColumnType::String.clone())]);
     let binding = GraphBuilder::binding_source("hidden_title_eq_param", binding_descriptor);
     let graph = GraphBuilder::join(
         binding,
@@ -3107,8 +2926,8 @@ fn graph_prepared_subscription_can_hide_internal_routing_fields() {
         )
         .unwrap();
     let public_output = RecordDescriptor::new([
-        ("id", ColumnType::U64.value_type()),
-        ("title", ColumnType::String.value_type()),
+        ("id", ColumnType::U64.clone()),
+        ("title", ColumnType::String.clone()),
     ]);
     let subscription = database
         .bind_shape_one_sink_with_output(
@@ -3160,7 +2979,7 @@ fn graph_prepared_subscription_can_hide_internal_routing_fields() {
 fn prepared_subscription_uses_route_terminal_with_clean_public_projection() {
     let storage = MemoryStorage::new(&["albums"]);
     let mut database = Database::new(albums_schema(), storage).unwrap();
-    let binding_descriptor = RecordDescriptor::new([("wanted", ColumnType::String.value_type())]);
+    let binding_descriptor = RecordDescriptor::new([("wanted", ColumnType::String.clone())]);
     let output_graph = GraphBuilder::table("albums")
         .project_fields([ProjectField::named("id"), ProjectField::named("title")]);
     let routing_graph = GraphBuilder::join(
@@ -3191,8 +3010,8 @@ fn prepared_subscription_uses_route_terminal_with_clean_public_projection() {
     assert_eq!(
         initial.descriptor,
         RecordDescriptor::new([
-            ("id", ColumnType::U64.value_type()),
-            ("title", ColumnType::String.value_type()),
+            ("id", ColumnType::U64.clone()),
+            ("title", ColumnType::String.clone()),
         ])
     );
     assert!(initial.is_empty());
@@ -3273,11 +3092,11 @@ fn prepared_subscription_routes_nullable_uuid_and_string_binding_keys() {
     let binding_descriptor = RecordDescriptor::new([
         (
             "owner",
-            ValueType::Nullable(Box::new(ColumnType::Uuid.value_type())),
+            ValueType::Nullable(Box::new(ColumnType::Uuid.clone())),
         ),
         (
             "tag",
-            ValueType::Nullable(Box::new(ColumnType::String.value_type())),
+            ValueType::Nullable(Box::new(ColumnType::String.clone())),
         ),
     ]);
     let output_graph = GraphBuilder::table("docs")
@@ -3330,6 +3149,76 @@ fn prepared_subscription_routes_nullable_uuid_and_string_binding_keys() {
 }
 
 #[test]
+fn prepared_nullable_binding_arg_max_emits_initial_snapshot() {
+    let storage = MemoryStorage::new(&["docs"]);
+    let mut database = Database::new(nullable_routed_docs_schema(), storage).unwrap();
+    let join_code = "invite-code";
+
+    let mut batch = database.open_batch();
+    batch.insert(
+        "docs",
+        vec![
+            Value::U64(1),
+            Value::Nullable(None),
+            Value::Nullable(Some(Box::new(Value::String(join_code.to_owned())))),
+            Value::String("initial invite row".to_owned()),
+        ],
+    );
+    database.commit_batch(batch).unwrap();
+
+    let binding_descriptor = RecordDescriptor::new([(
+        "join_code",
+        ValueType::Nullable(Box::new(ValueType::String)),
+    )]);
+    let routed_docs = GraphBuilder::table("docs")
+        .unwrap_nullable("tag")
+        .project_fields([
+            ProjectField::named("id"),
+            ProjectField::named("title"),
+            ProjectField::nullable("tag", "__route_join_code"),
+        ]);
+    let bound = GraphBuilder::join(
+        GraphBuilder::binding_source("invite", binding_descriptor),
+        routed_docs,
+        ["join_code"],
+        ["__route_join_code"],
+    )
+    .project_fields([
+        ProjectField::renamed("right.__route_join_code", "join_code"),
+        ProjectField::renamed("right.id", "id"),
+        ProjectField::renamed("right.title", "title"),
+    ]);
+    let shape = database
+        .prepare_one_sink(
+            GraphBuilder::arg_max_by(bound, ["join_code"], ["id"]),
+            "invite",
+            binding_descriptor,
+            ["join_code"],
+        )
+        .unwrap();
+
+    let subscription = database
+        .bind_shape_one_sink(
+            shape.id(),
+            &[Value::Nullable(Some(Box::new(Value::String(
+                join_code.to_owned(),
+            ))))],
+        )
+        .unwrap();
+    assert_eq!(
+        expect_recv_vals(&subscription),
+        [(
+            vec![
+                Value::Nullable(Some(Box::new(Value::String(join_code.to_owned())))),
+                Value::U64(1),
+                Value::String("initial invite row".to_owned()),
+            ],
+            1,
+        )]
+    );
+}
+
+#[test]
 fn prepared_subscription_routes_null_nullable_binding_keys() {
     let storage = MemoryStorage::new(&["docs"]);
     let mut database = Database::new(nullable_routed_docs_schema(), storage).unwrap();
@@ -3358,11 +3247,11 @@ fn prepared_subscription_routes_null_nullable_binding_keys() {
     let binding_descriptor = RecordDescriptor::new([
         (
             "owner",
-            ValueType::Nullable(Box::new(ColumnType::Uuid.value_type())),
+            ValueType::Nullable(Box::new(ColumnType::Uuid.clone())),
         ),
         (
             "tag",
-            ValueType::Nullable(Box::new(ColumnType::String.value_type())),
+            ValueType::Nullable(Box::new(ColumnType::String.clone())),
         ),
     ]);
     let output_graph = GraphBuilder::table("docs")
@@ -3428,7 +3317,7 @@ fn prepared_subscription_routes_null_nullable_binding_keys() {
 fn prepared_subscription_rejects_routing_graph_missing_clean_output_fields() {
     let storage = MemoryStorage::new(&["albums"]);
     let mut database = Database::new(albums_schema(), storage).unwrap();
-    let binding_descriptor = RecordDescriptor::new([("wanted", ColumnType::String.value_type())]);
+    let binding_descriptor = RecordDescriptor::new([("wanted", ColumnType::String.clone())]);
     let output_graph = GraphBuilder::table("albums")
         .project_fields([ProjectField::named("id"), ProjectField::named("title")]);
     let routing_graph = GraphBuilder::join(
@@ -3469,7 +3358,7 @@ fn prepared_subscription_with_separate_routing_hydrates_existing_rows_on_first_b
     );
     database.commit_batch(batch).unwrap();
 
-    let binding_descriptor = RecordDescriptor::new([("wanted", ColumnType::String.value_type())]);
+    let binding_descriptor = RecordDescriptor::new([("wanted", ColumnType::String.clone())]);
     let output_graph = GraphBuilder::join(
         GraphBuilder::binding_source("existing_route_title_param", binding_descriptor),
         GraphBuilder::table("albums"),
@@ -3520,13 +3409,13 @@ fn prepared_recursive_subscription_with_separate_routing_hydrates_existing_rows_
     insert_edge(&mut batch, 3, 4, 5);
     database.commit_batch(batch).unwrap();
 
-    let binding_descriptor = RecordDescriptor::new([("seed", ColumnType::U64.value_type())]);
+    let binding_descriptor = RecordDescriptor::new([("seed", ColumnType::U64.clone())]);
     let output_graph = prepared_reachability_graph(GraphBuilder::table("edges"), 16);
 
     let reach = RecordDescriptor::new([
-        ("seed", ColumnType::U64.value_type()),
-        ("dst", ColumnType::U64.value_type()),
-        ("__routing_seed", ColumnType::U64.value_type()),
+        ("seed", ColumnType::U64.clone()),
+        ("dst", ColumnType::U64.clone()),
+        ("__routing_seed", ColumnType::U64.clone()),
     ]);
     let seed = GraphBuilder::binding_source("prepared-routed-reach", binding_descriptor)
         .project_fields([
@@ -3581,7 +3470,7 @@ fn prepared_recursive_subscription_joins_new_closure_to_preexisting_downstream_r
     batch.insert("docs", vec![Value::U64(11), Value::U64(3)]);
     database.commit_batch(batch).unwrap();
 
-    let binding_descriptor = RecordDescriptor::new([("seed", ColumnType::U64.value_type())]);
+    let binding_descriptor = RecordDescriptor::new([("seed", ColumnType::U64.clone())]);
     let reach = prepared_reachability_graph(GraphBuilder::table("edges"), 16);
     let graph = GraphBuilder::join(GraphBuilder::table("docs"), reach, ["team"], ["dst"])
         .project_fields([
@@ -3616,11 +3505,11 @@ fn routed_prepared_recursive_subscription_joins_new_closure_to_preexisting_downs
     batch.insert("docs", vec![Value::U64(11), Value::U64(3)]);
     database.commit_batch(batch).unwrap();
 
-    let binding_descriptor = RecordDescriptor::new([("seed", ColumnType::U64.value_type())]);
+    let binding_descriptor = RecordDescriptor::new([("seed", ColumnType::U64.clone())]);
     let reach = RecordDescriptor::new([
-        ("seed", ColumnType::U64.value_type()),
-        ("dst", ColumnType::U64.value_type()),
-        ("__routing_seed", ColumnType::U64.value_type()),
+        ("seed", ColumnType::U64.clone()),
+        ("dst", ColumnType::U64.clone()),
+        ("__routing_seed", ColumnType::U64.clone()),
     ]);
     let seed = GraphBuilder::binding_source("prepared-routed-reach-docs", binding_descriptor)
         .project_fields([
@@ -3683,11 +3572,11 @@ fn routed_prepared_recursive_subscription_joins_new_closure_to_preexisting_downs
 #[test]
 fn routed_recursive_sibling_terminals_each_replay_positive_table_deltas() {
     fn routed_reach_graph(binding_shape: &str, route_field: &str) -> GraphBuilder {
-        let binding_descriptor = RecordDescriptor::new([("seed", ColumnType::U64.value_type())]);
+        let binding_descriptor = RecordDescriptor::new([("seed", ColumnType::U64.clone())]);
         let reach = RecordDescriptor::new([
-            ("seed", ColumnType::U64.value_type()),
-            ("dst", ColumnType::U64.value_type()),
-            (route_field, ColumnType::U64.value_type()),
+            ("seed", ColumnType::U64.clone()),
+            ("dst", ColumnType::U64.clone()),
+            (route_field, ColumnType::U64.clone()),
         ]);
         let seed =
             GraphBuilder::binding_source(binding_shape, binding_descriptor).project_fields([
@@ -3726,7 +3615,7 @@ fn routed_recursive_sibling_terminals_each_replay_positive_table_deltas() {
     batch.insert("docs", vec![Value::U64(11), Value::U64(3)]);
     database.commit_batch(batch).unwrap();
 
-    let binding_descriptor = RecordDescriptor::new([("seed", ColumnType::U64.value_type())]);
+    let binding_descriptor = RecordDescriptor::new([("seed", ColumnType::U64.clone())]);
     let shape = database
         .prepare(
             [
@@ -3775,10 +3664,10 @@ fn prepared_recursive_subscription_joins_two_simultaneous_closure_deltas() {
     batch.insert("docs", vec![Value::U64(11), Value::U64(3)]);
     database.commit_batch(batch).unwrap();
 
-    let binding_descriptor = RecordDescriptor::new([("seed", ColumnType::U64.value_type())]);
+    let binding_descriptor = RecordDescriptor::new([("seed", ColumnType::U64.clone())]);
     let reach_descriptor = RecordDescriptor::new([
-        ("seed", ColumnType::U64.value_type()),
-        ("dst", ColumnType::U64.value_type()),
+        ("seed", ColumnType::U64.clone()),
+        ("dst", ColumnType::U64.clone()),
     ]);
     let reachable = |frontier_name: &str| {
         let seed = GraphBuilder::binding_source("prepared-double-reach", binding_descriptor)
@@ -3913,7 +3802,7 @@ fn prepared_subscription_with_routing_can_route_output_that_already_depends_on_b
     );
     database.commit_batch(batch).unwrap();
 
-    let binding_descriptor = RecordDescriptor::new([("wanted", ColumnType::String.value_type())]);
+    let binding_descriptor = RecordDescriptor::new([("wanted", ColumnType::String.clone())]);
     let output_graph = GraphBuilder::join(
         GraphBuilder::binding_source("double_route_title_param", binding_descriptor),
         GraphBuilder::table("albums"),
@@ -3966,7 +3855,7 @@ fn prepared_subscription_with_routing_can_route_output_that_already_depends_on_b
 fn prepared_subscription_reports_incremental_contains_field_filter_deltas() {
     let storage = MemoryStorage::new(&["albums"]);
     let mut database = Database::new(albums_schema(), storage).unwrap();
-    let binding_descriptor = RecordDescriptor::new([("needle", ColumnType::String.value_type())]);
+    let binding_descriptor = RecordDescriptor::new([("needle", ColumnType::String.clone())]);
     let routing_field = "__routing";
     let binding =
         GraphBuilder::binding_source("needle_param", binding_descriptor).project_fields([
@@ -5062,15 +4951,11 @@ fn collect_by_expand_rejects_duplicate_occurrence_source_ids() {
 }
 
 #[test]
-fn collect_by_rejects_every_consumer_including_another_collector() {
+fn collect_by_rejects_join_and_nested_collector_consumers() {
     let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
     let mut database = Database::new(history_schema(), storage).unwrap();
     let collector = history_collect_by(2);
-    let consumers = [
-        collector
-            .clone()
-            .filter(PredicateExpr::eq("row", Value::U64(1))),
-        collector.clone().project(["row"]),
+    let relational_consumers = [
         GraphBuilder::join(
             collector.clone(),
             GraphBuilder::table("history"),
@@ -5089,7 +4974,7 @@ fn collect_by_rejects_every_consumer_including_another_collector() {
             TopByLimit::Finite(1),
         ),
     ];
-    for graph in consumers {
+    for graph in relational_consumers {
         assert!(matches!(
             database.subscribe_one_sink(graph),
             Err(Error::IvmRuntime(IvmRuntimeError::CollectByMustBeTerminal))
@@ -5131,6 +5016,86 @@ fn collect_by_suppresses_unchanged_rendered_group_and_replaces_once_at_boundary(
 }
 
 #[test]
+fn collect_by_multisink_emits_descendant_terminal_operations() {
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
+    let mut database = Database::new(history_schema(), storage).unwrap();
+    let subscription = database
+        .subscribe([("rows", history_collect_by(2))])
+        .unwrap();
+    let initial = subscription.recv().unwrap();
+    assert!(initial.terminal_sinks.is_empty());
+
+    let mut batch = database.open_batch();
+    batch.insert("history", history_values(1, 10, 10, "first"));
+    batch.insert("history", history_values(1, 20, 20, "second"));
+    database.commit_batch(batch).unwrap();
+    let initial_rows = subscription.recv().unwrap();
+    assert!(matches!(
+        initial_rows.terminal_sinks["rows"].operations.as_slice(),
+        [crate::ivm::TerminalOperation {
+            path,
+            edit: TerminalEdit::Insert { .. },
+            ..
+        }] if path.is_empty()
+    ));
+
+    let mut batch = database.open_batch();
+    batch.insert("history", history_values(1, 5, 5, "front"));
+    database.commit_batch(batch).unwrap();
+    let update = subscription.recv().unwrap();
+    let operations = &update.terminal_sinks["rows"].operations;
+    assert!(operations.iter().all(|operation| {
+        matches!(operation.path.as_slice(), [TerminalPathSegment::Collection(field)] if field == "children")
+    }));
+    assert!(
+        operations
+            .iter()
+            .any(|operation| matches!(operation.edit, TerminalEdit::Insert { index: 0, .. }))
+    );
+    assert!(
+        operations
+            .iter()
+            .any(|operation| matches!(operation.edit, TerminalEdit::Remove { .. }))
+    );
+    assert!(
+        operations
+            .iter()
+            .all(|operation| !matches!(operation.edit, TerminalEdit::Update { .. }))
+    );
+}
+
+#[test]
+fn one_shot_query_does_not_discard_live_collect_by_arrangement() {
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
+    let mut database = Database::new(history_schema(), storage).unwrap();
+    let mut batch = database.open_batch();
+    batch.insert("history", history_values(1, 10, 10, "first"));
+    database.commit_batch(batch).unwrap();
+
+    let subscription = database.subscribe_one_sink(history_collect_by(2)).unwrap();
+    assert_eq!(
+        subscription.recv().unwrap().to_values().unwrap(),
+        [(collect_parent(1, &[(10, "first")]), 1)]
+    );
+
+    // One-shot queries collect their ephemeral graph immediately. That GC
+    // boundary must retain arrangements owned by an unrelated live terminal.
+    let snapshot = database.query_graph(GraphBuilder::table("rows")).unwrap();
+    assert!(snapshot.is_empty());
+
+    let mut batch = database.open_batch();
+    batch.insert("history", history_values(1, 20, 20, "second"));
+    database.commit_batch(batch).unwrap();
+    assert_eq!(
+        subscription.recv().unwrap().to_values().unwrap(),
+        [
+            (collect_parent(1, &[(10, "first")]), -1),
+            (collect_parent(1, &[(10, "first"), (20, "second")]), 1),
+        ]
+    );
+}
+
+#[test]
 fn collect_by_tree_renders_sibling_slots_and_grandchildren_with_independent_windows() {
     let storage = MemoryStorage::new(&["tree"]);
     let mut database = Database::new(collect_tree_schema(), storage).unwrap();
@@ -5138,9 +5103,18 @@ fn collect_by_tree_renders_sibling_slots_and_grandchildren_with_independent_wind
     assert!(subscription.recv().unwrap().is_empty());
 
     let mut batch = database.open_batch();
-    batch.insert("tree", collect_tree_values(1, 10, 20, 100, 10, 3, 3, 9, 9));
-    batch.insert("tree", collect_tree_values(2, 10, 20, 101, 20, 1, 1, 5, 5));
-    batch.insert("tree", collect_tree_values(3, 20, 10, 200, 10, 2, 2, 7, 7));
+    batch.insert(
+        "tree",
+        collect_tree_values([1, 10, 20, 100, 10, 3, 3, 9, 9]),
+    );
+    batch.insert(
+        "tree",
+        collect_tree_values([2, 10, 20, 101, 20, 1, 1, 5, 5]),
+    );
+    batch.insert(
+        "tree",
+        collect_tree_values([3, 20, 10, 200, 10, 2, 2, 7, 7]),
+    );
     database.commit_batch(batch).unwrap();
     let initial = subscription.recv().unwrap().to_values().unwrap();
     assert_eq!(initial.len(), 1);
@@ -5203,8 +5177,14 @@ fn collect_by_tree_grandchild_change_replaces_one_whole_parent_and_suppresses_un
     let subscription = database.subscribe_one_sink(collect_tree_graph()).unwrap();
     assert!(subscription.recv().unwrap().is_empty());
     let mut batch = database.open_batch();
-    batch.insert("tree", collect_tree_values(1, 10, 20, 100, 10, 3, 3, 9, 9));
-    batch.insert("tree", collect_tree_values(2, 10, 20, 101, 20, 1, 1, 5, 5));
+    batch.insert(
+        "tree",
+        collect_tree_values([1, 10, 20, 100, 10, 3, 3, 9, 9]),
+    );
+    batch.insert(
+        "tree",
+        collect_tree_values([2, 10, 20, 101, 20, 1, 1, 5, 5]),
+    );
     database.commit_batch(batch).unwrap();
     let _initial = subscription.recv().unwrap();
 
@@ -5212,7 +5192,7 @@ fn collect_by_tree_grandchild_change_replaces_one_whole_parent_and_suppresses_un
     // parent must change. Its one -/+ pair proves delivery is whole-parent,
     // not a child delta or one replacement at each descriptor level.
     let mut batch = database.open_batch();
-    batch.insert("tree", collect_tree_values(3, 10, 20, 99, 0, 2, 2, 7, 7));
+    batch.insert("tree", collect_tree_values([3, 10, 20, 99, 0, 2, 2, 7, 7]));
     database.commit_batch(batch).unwrap();
     let replacement = subscription.recv().unwrap().to_values().unwrap();
     assert_eq!(replacement.len(), 2);
@@ -5248,7 +5228,7 @@ fn collect_by_tree_grandchild_change_replaces_one_whole_parent_and_suppresses_un
     let mut batch = database.open_batch();
     batch.insert(
         "tree",
-        collect_tree_values(4, 10, 20, 999, 999, 999, 999, 1, 1),
+        collect_tree_values([4, 10, 20, 999, 999, 999, 999, 1, 1]),
     );
     database.commit_batch(batch).unwrap();
     assert!(matches!(subscription.try_recv(), Err(TryRecvError::Empty)));
@@ -5763,6 +5743,10 @@ fn metric_values(id: u64, bucket: u64, score: u64) -> Vec<Value> {
     vec![Value::U64(id), Value::U64(bucket), Value::U64(score)]
 }
 
+fn nullable_metric(value: Value) -> Value {
+    Value::Nullable(Some(Box::new(value)))
+}
+
 fn metric_aggregate_graph(input: GraphBuilder) -> GraphBuilder {
     GraphBuilder::aggregate(
         input,
@@ -5856,10 +5840,10 @@ fn aggregate_hydrates_and_updates_group_summaries() {
                 vec![
                     Value::U64(10),
                     Value::U64(2),
-                    Value::U64(12),
-                    Value::F64(6.0),
-                    Value::U64(5),
-                    Value::U64(7),
+                    nullable_metric(Value::U64(12)),
+                    nullable_metric(Value::F64(6.0)),
+                    nullable_metric(Value::U64(5)),
+                    nullable_metric(Value::U64(7)),
                 ],
                 1,
             ),
@@ -5867,10 +5851,10 @@ fn aggregate_hydrates_and_updates_group_summaries() {
                 vec![
                     Value::U64(20),
                     Value::U64(1),
-                    Value::U64(11),
-                    Value::F64(11.0),
-                    Value::U64(11),
-                    Value::U64(11),
+                    nullable_metric(Value::U64(11)),
+                    nullable_metric(Value::F64(11.0)),
+                    nullable_metric(Value::U64(11)),
+                    nullable_metric(Value::U64(11)),
                 ],
                 1,
             ),
@@ -5887,10 +5871,10 @@ fn aggregate_hydrates_and_updates_group_summaries() {
                 vec![
                     Value::U64(10),
                     Value::U64(2),
-                    Value::U64(12),
-                    Value::F64(6.0),
-                    Value::U64(5),
-                    Value::U64(7),
+                    nullable_metric(Value::U64(12)),
+                    nullable_metric(Value::F64(6.0)),
+                    nullable_metric(Value::U64(5)),
+                    nullable_metric(Value::U64(7)),
                 ],
                 -1,
             ),
@@ -5898,10 +5882,10 @@ fn aggregate_hydrates_and_updates_group_summaries() {
                 vec![
                     Value::U64(10),
                     Value::U64(2),
-                    Value::U64(8),
-                    Value::F64(4.0),
-                    Value::U64(3),
-                    Value::U64(5),
+                    nullable_metric(Value::U64(8)),
+                    nullable_metric(Value::F64(4.0)),
+                    nullable_metric(Value::U64(3)),
+                    nullable_metric(Value::U64(5)),
                 ],
                 1,
             ),
@@ -5918,10 +5902,10 @@ fn aggregate_hydrates_and_updates_group_summaries() {
             vec![
                 Value::U64(10),
                 Value::U64(2),
-                Value::U64(8),
-                Value::F64(4.0),
-                Value::U64(3),
-                Value::U64(5),
+                nullable_metric(Value::U64(8)),
+                nullable_metric(Value::F64(4.0)),
+                nullable_metric(Value::U64(3)),
+                nullable_metric(Value::U64(5)),
             ],
             -1,
         )]
@@ -5951,10 +5935,10 @@ fn aggregate_counts_weighted_multiplicity_from_bag_union() {
             vec![
                 Value::U64(10),
                 Value::U64(4),
-                Value::U64(24),
-                Value::F64(6.0),
-                Value::U64(5),
-                Value::U64(7),
+                nullable_metric(Value::U64(24)),
+                nullable_metric(Value::F64(6.0)),
+                nullable_metric(Value::U64(5)),
+                nullable_metric(Value::U64(7)),
             ],
             1,
         )]
@@ -6034,10 +6018,10 @@ fn aggregate_query_hydration_does_not_perturb_subscription_deltas() {
             vec![
                 Value::U64(10),
                 Value::U64(1),
-                Value::U64(5),
-                Value::F64(5.0),
-                Value::U64(5),
-                Value::U64(5),
+                nullable_metric(Value::U64(5)),
+                nullable_metric(Value::F64(5.0)),
+                nullable_metric(Value::U64(5)),
+                nullable_metric(Value::U64(5)),
             ],
             1,
         )]
@@ -6120,7 +6104,7 @@ fn arg_max_by_routes_through_prepared_bindings() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = RocksDbStorage::open(temp_dir.path(), &["history", "rows", "blockers"]).unwrap();
     let mut database = Database::new(history_schema(), storage).unwrap();
-    let params = RecordDescriptor::new([("row", ColumnType::U64.value_type())]);
+    let params = RecordDescriptor::new([("row", ColumnType::U64.clone())]);
     let shape = database
         .prepare_one_sink(
             GraphBuilder::join(
@@ -6414,8 +6398,8 @@ fn arg_max_by_rejects_unsupported_inputs_and_bad_primary_keys() {
             GraphBuilder::frontier_source(
                 "frontier",
                 RecordDescriptor::new([
-                    ("row", ColumnType::U64.value_type()),
-                    ("stamp", ColumnType::U64.value_type()),
+                    ("row", ColumnType::U64.clone()),
+                    ("stamp", ColumnType::U64.clone()),
                 ]),
             ),
             "frontier",
@@ -6494,7 +6478,7 @@ fn unwrap_nullable_can_feed_prepared_binding_join_key() {
     batch.insert("tracks", track_values(3, 7, Some(2), "Outro"));
     database.commit_batch(batch).unwrap();
 
-    let binding_descriptor = RecordDescriptor::new([("disc", ColumnType::U64.value_type())]);
+    let binding_descriptor = RecordDescriptor::new([("disc", ColumnType::U64.clone())]);
     let shape = database
         .prepare_one_sink(
             GraphBuilder::join(
@@ -6538,7 +6522,7 @@ fn prepared_binding_join_hydrates_anti_join_input() {
     batch.insert("tracks", track_values(2, 7, Some(2), "Outro"));
     database.commit_batch(batch).unwrap();
 
-    let binding_descriptor = RecordDescriptor::new([("disc", ColumnType::U64.value_type())]);
+    let binding_descriptor = RecordDescriptor::new([("disc", ColumnType::U64.clone())]);
     let visible = GraphBuilder::anti_join(
         GraphBuilder::table("tracks").unwrap_nullable("disc"),
         GraphBuilder::table("blockers"),
@@ -6610,7 +6594,7 @@ fn prepared_binding_join_hydrates_filtered_unwrapped_anti_join_input() {
     );
     database.commit_batch(batch).unwrap();
 
-    let binding_descriptor = RecordDescriptor::new([("owner", ColumnType::Uuid.value_type())]);
+    let binding_descriptor = RecordDescriptor::new([("owner", ColumnType::Uuid.clone())]);
     let visible = GraphBuilder::anti_join(
         GraphBuilder::table("items")
             .unwrap_nullable("state")
@@ -6951,7 +6935,7 @@ fn same_key_writes_in_one_batch_emit_deltas_against_earlier_batch_writes() {
             .table("albums")
             .unwrap()
             .record_schema()
-            .get(&stored, "title")
+            .get(version_zero_payload(&stored), "title")
             .unwrap(),
         Value::String("Giant Steps".to_owned())
     );
@@ -6995,7 +6979,7 @@ fn inserts_over_existing_primary_keys_are_rejected() {
             .table("albums")
             .unwrap()
             .record_schema()
-            .get(&stored, "title")
+            .get(version_zero_payload(&stored), "title")
             .unwrap(),
         Value::String("Blue Train".to_owned())
     );
@@ -7422,7 +7406,7 @@ fn prepared_recursive_binding_skips_recompute_for_unrelated_table_delta() {
         .prepare_one_sink(
             prepared_reachability_graph(GraphBuilder::table("edges"), 16),
             "prepared-reach",
-            RecordDescriptor::new([("seed", ColumnType::U64.value_type())]),
+            RecordDescriptor::new([("seed", ColumnType::U64.clone())]),
             ["seed".to_owned()],
         )
         .unwrap();
@@ -7884,8 +7868,8 @@ fn recursive_graphs_reject_seed_and_step_output_descriptor_mismatch() {
     let frontier = GraphBuilder::frontier_source(
         "frontier",
         RecordDescriptor::new([
-            ("src", ColumnType::U64.value_type()),
-            ("dst", ColumnType::U64.value_type()),
+            ("src", ColumnType::U64.clone()),
+            ("dst", ColumnType::U64.clone()),
         ]),
     );
     let step = frontier.project(["src"]);
@@ -7908,8 +7892,8 @@ fn recursive_graphs_reject_nested_recursion_for_v0() {
     let storage = RocksDbStorage::open(temp_dir.path(), &["edges"]).unwrap();
     let mut database = Database::new(edges_schema(), storage).unwrap();
     let reach = RecordDescriptor::new([
-        ("src", ColumnType::U64.value_type()),
-        ("dst", ColumnType::U64.value_type()),
+        ("src", ColumnType::U64.clone()),
+        ("dst", ColumnType::U64.clone()),
     ]);
     let graph = GraphBuilder::recursive(
         reachability_graph(16),
@@ -9509,8 +9493,7 @@ fn prepared_subscription_filters_not_equal_parameter_predicates() {
     );
     database.commit_batch(batch).unwrap();
 
-    let binding_descriptor =
-        RecordDescriptor::new([("title_param", ColumnType::String.value_type())]);
+    let binding_descriptor = RecordDescriptor::new([("title_param", ColumnType::String.clone())]);
     let graph = GraphBuilder::join(
         GraphBuilder::binding_source("title_neq_params", binding_descriptor).project_fields([
             ProjectField::named("title_param"),
@@ -9688,7 +9671,7 @@ fn graph_level_prepare_rejects_output_key_fields_not_in_output_descriptor() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = RocksDbStorage::open(temp_dir.path(), &["albums", "artists"]).unwrap();
     let mut database = Database::new(albums_artists_schema(), storage).unwrap();
-    let binding_descriptor = RecordDescriptor::new([("artist_id", ColumnType::U64.value_type())]);
+    let binding_descriptor = RecordDescriptor::new([("artist_id", ColumnType::U64.clone())]);
     let graph = GraphBuilder::join(
         GraphBuilder::binding_source("artist_params", binding_descriptor),
         GraphBuilder::table("albums"),
@@ -9713,7 +9696,7 @@ fn prepared_shapes_retain_output_graph_nodes_without_subscribers() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = RocksDbStorage::open(temp_dir.path(), &["albums", "artists"]).unwrap();
     let mut database = Database::new(albums_artists_schema(), storage).unwrap();
-    let binding_descriptor = RecordDescriptor::new([("artist_id", ColumnType::U64.value_type())]);
+    let binding_descriptor = RecordDescriptor::new([("artist_id", ColumnType::U64.clone())]);
     let graph = GraphBuilder::join(
         GraphBuilder::binding_source("artist_params", binding_descriptor),
         GraphBuilder::table("albums"),
@@ -11555,7 +11538,7 @@ fn table_pairs_from_query(
         .collect()
 }
 
-fn record_values(records: Vec<Record<'_>>) -> Vec<Vec<Value>> {
+fn record_values(records: Vec<VersionedRecord>) -> Vec<Vec<Value>> {
     records
         .into_iter()
         .map(|record| record.to_values().unwrap())

@@ -7,6 +7,7 @@ import type {
   Tx,
   Write,
 } from "../runtime/native-runtime/native-runtime-adapter.js";
+import type { OpenBatchId, TransactionKind } from "../runtime/client.js";
 
 type GeneratedPreparedQuery = object;
 type GeneratedQueryAttachment = object;
@@ -16,6 +17,7 @@ interface GeneratedWriteStateWaiter {
 }
 
 interface GeneratedWrite {
+  batchId(): string;
   close(): boolean;
   payload(): ArrayBuffer;
   registerWriteStateWaiter(): GeneratedWriteStateWaiter;
@@ -27,7 +29,7 @@ interface GeneratedSubscriptionEvent {
   eventType: string;
   reset: boolean | undefined;
   delta: ArrayBuffer | undefined;
-  relationDelta: ArrayBuffer | undefined;
+  terminalOperationsJson: string | undefined;
   settled: boolean | undefined;
   tier: string | undefined;
   reasonJson: string | undefined;
@@ -78,6 +80,12 @@ interface GeneratedTx {
 }
 
 interface GeneratedDb {
+  registerSchema(schema: ArrayBuffer): GeneratedDb;
+  beginTransaction(openBatchId: string, kind: string, author: ArrayBuffer | undefined): void;
+  commitTransaction(openBatchId: string, kind: string | undefined): GeneratedWrite;
+  rollbackTransaction(openBatchId: string): void;
+  attachMergeableTx(openBatchId: string): GeneratedTx;
+  attachExclusiveTx(openBatchId: string): GeneratedTx;
   all(query: GeneratedPreparedQuery, optsJson: string | undefined): ArrayBuffer;
   allForIdentity(
     query: GeneratedPreparedQuery,
@@ -116,18 +124,16 @@ interface GeneratedDb {
     author: ArrayBuffer,
     optsJson: string | undefined,
   ): GeneratedQueryAttachment;
-  canDeleteForIdentity(table: string, rowId: ArrayBuffer, author: ArrayBuffer): boolean;
-  canInsertEncoded(table: string, cells: ArrayBuffer): boolean;
-  canInsertEncodedForIdentity(table: string, cells: ArrayBuffer, author: ArrayBuffer): boolean;
-  canReadForIdentity(table: string, rowId: ArrayBuffer, author: ArrayBuffer): boolean;
-  canUpdateEncodedForIdentity(
-    table: string,
-    rowId: ArrayBuffer,
-    patch: ArrayBuffer,
-    author: ArrayBuffer,
-  ): boolean;
   close(): void;
   connectUpstream(): GeneratedTransport;
+  connectUpstreamWithSession(
+    protocolVersion: number,
+    features: number,
+    remoteNode: ArrayBuffer,
+    remoteEpoch: bigint,
+    localNode: ArrayBuffer,
+    localEpoch: bigint,
+  ): GeneratedTransport;
   delete_(table: string, rowId: ArrayBuffer, updatedAtMs: number | undefined): GeneratedWrite;
   deleteForIdentity(
     table: string,
@@ -136,7 +142,8 @@ interface GeneratedDb {
     updatedAtMs: number | undefined,
   ): GeneratedWrite;
   detachQuery(attachment: GeneratedQueryAttachment): void;
-  exclusiveTx(): GeneratedTx;
+  exclusiveTx(openBatchId: string): GeneratedTx;
+  free(): void;
   insertWithIdEncoded(
     table: string,
     rowId: ArrayBuffer,
@@ -151,8 +158,8 @@ interface GeneratedDb {
     updatedAtMs: number | undefined,
   ): GeneratedWrite;
   localCurrentRow(table: string, rowId: ArrayBuffer): ArrayBuffer;
-  mergeableTx(): GeneratedTx;
-  mergeableTxForIdentity(author: ArrayBuffer): GeneratedTx;
+  mergeableTx(openBatchId: string): GeneratedTx;
+  mergeableTxForIdentity(openBatchId: string, author: ArrayBuffer): GeneratedTx;
   prepareQuery(query: ArrayBuffer): GeneratedPreparedQuery;
   queryAttachmentIsCovered(attachment: GeneratedQueryAttachment): boolean;
   restoreEncoded(
@@ -255,14 +262,18 @@ function parseJson(value: string): unknown {
 function subscriptionEvent(event: GeneratedSubscriptionEvent): unknown {
   switch (event.eventType) {
     case "delta": {
-      if (event.delta === undefined || event.relationDelta === undefined) {
-        throw new Error("React Native subscription delta is missing binary payloads");
+      if (event.delta === undefined || event.terminalOperationsJson === undefined) {
+        throw new Error("React Native subscription delta is missing its payload");
+      }
+      const terminalOperations = parseJson(event.terminalOperationsJson);
+      if (!Array.isArray(terminalOperations)) {
+        throw new Error("React Native subscription terminal operations must be an array");
       }
       return {
         type: "delta",
         reset: event.reset === true,
         delta: toUint8Array(event.delta),
-        relation_delta: toUint8Array(event.relationDelta),
+        terminalOperations,
         settled: event.settled === true,
         tier: event.tier,
       };
@@ -403,6 +414,10 @@ class RnWriteShim implements Write {
     this.write = normalizeGeneratedObject(write);
   }
 
+  get batchId(): string {
+    return this.write.batchId();
+  }
+
   get payload(): Uint8Array {
     return toUint8Array(this.write.payload());
   }
@@ -518,6 +533,34 @@ export class RnDbShim implements NativeDb {
           ),
         ),
     };
+  }
+
+  registerSchema(schema: Uint8Array): NativeDb {
+    return new RnDbShim(this.db.registerSchema(toArrayBuffer(schema)));
+  }
+
+  beginTransaction(openBatchId: string, kind: TransactionKind, author?: Uint8Array): void {
+    this.db.beginTransaction(
+      openBatchId,
+      kind,
+      author === undefined ? undefined : toArrayBuffer(author),
+    );
+  }
+
+  commitTransaction(openBatchId: string, kind?: TransactionKind): Write {
+    return new RnWriteShim(this.db.commitTransaction(openBatchId, kind));
+  }
+
+  rollbackTransaction(openBatchId: string): void {
+    this.db.rollbackTransaction(openBatchId);
+  }
+
+  attachMergeableTx(openBatchId: string): Tx {
+    return new RnTxShim(this.db.attachMergeableTx(openBatchId));
+  }
+
+  attachExclusiveTx(openBatchId: string): Tx {
+    return new RnTxShim(this.db.attachExclusiveTx(openBatchId));
   }
 
   all(query: PreparedQuery, opts: unknown): Uint8Array {
@@ -789,46 +832,16 @@ export class RnDbShim implements NativeDb {
     );
   }
 
-  canInsertEncoded(table: string, cells: Uint8Array): boolean {
-    return this.db.canInsertEncoded(table, toArrayBuffer(cells));
+  mergeableTx(openBatchId: OpenBatchId): Tx {
+    return new RnTxShim(this.db.mergeableTx(openBatchId));
   }
 
-  canInsertEncodedForIdentity(table: string, cells: Uint8Array, author: Uint8Array): boolean {
-    return this.db.canInsertEncodedForIdentity(table, toArrayBuffer(cells), toArrayBuffer(author));
+  mergeableTxForIdentity(openBatchId: OpenBatchId, author: Uint8Array): Tx {
+    return new RnTxShim(this.db.mergeableTxForIdentity(openBatchId, toArrayBuffer(author)));
   }
 
-  canReadForIdentity(table: string, rowId: Uint8Array, author: Uint8Array): boolean {
-    return this.db.canReadForIdentity(table, toArrayBuffer(rowId), toArrayBuffer(author));
-  }
-
-  canUpdateEncodedForIdentity(
-    table: string,
-    rowId: Uint8Array,
-    patch: Uint8Array,
-    author: Uint8Array,
-  ): boolean {
-    return this.db.canUpdateEncodedForIdentity(
-      table,
-      toArrayBuffer(rowId),
-      toArrayBuffer(patch),
-      toArrayBuffer(author),
-    );
-  }
-
-  canDeleteForIdentity(table: string, rowId: Uint8Array, author: Uint8Array): boolean {
-    return this.db.canDeleteForIdentity(table, toArrayBuffer(rowId), toArrayBuffer(author));
-  }
-
-  mergeableTx(): Tx {
-    return new RnTxShim(this.db.mergeableTx());
-  }
-
-  mergeableTxForIdentity(author: Uint8Array): Tx {
-    return new RnTxShim(this.db.mergeableTxForIdentity(toArrayBuffer(author)));
-  }
-
-  exclusiveTx(): Tx {
-    return new RnTxShim(this.db.exclusiveTx());
+  exclusiveTx(openBatchId: OpenBatchId): Tx {
+    return new RnTxShim(this.db.exclusiveTx(openBatchId));
   }
 
   allInTransaction(query: PreparedQuery, tx: Tx, opts: unknown): Uint8Array {
@@ -877,11 +890,35 @@ export class RnDbShim implements NativeDb {
     return new RnTransportShim(this.db.connectUpstream());
   }
 
+  connectUpstreamWithSession(
+    protocolVersion: number,
+    features: number,
+    remoteNode: Uint8Array,
+    remoteEpoch: bigint,
+    localNode: Uint8Array,
+    localEpoch: bigint,
+  ): Transport {
+    return new RnTransportShim(
+      this.db.connectUpstreamWithSession(
+        protocolVersion,
+        features,
+        toArrayBuffer(remoteNode),
+        remoteEpoch,
+        toArrayBuffer(localNode),
+        localEpoch,
+      ),
+    );
+  }
+
   tick(): void {
     this.db.tick();
   }
 
   close(): void {
     this.db.close();
+  }
+
+  free(): void {
+    this.db.free();
   }
 }

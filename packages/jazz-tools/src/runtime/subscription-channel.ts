@@ -8,7 +8,14 @@ import type {
 } from "./file-storage.js";
 import type { AuthState } from "./auth-state.js";
 import type { RowDelta, SubscriptionDelta } from "./subscription-manager.js";
-import type { CreateOptions, DeleteOptions, DurabilityTier, UpdateOptions } from "./client.js";
+import type {
+  BatchId,
+  CreateOptions,
+  DeleteOptions,
+  DurabilityTier,
+  PermissionAdvice,
+  UpdateOptions,
+} from "./client.js";
 
 type MaybePromise<T> = T | Promise<T>;
 
@@ -77,18 +84,18 @@ export interface SubscriptionChannel {
     table: TableProxy<T, Init>,
     data: Init,
     session?: Session,
-  ): MaybePromise<boolean>;
+  ): MaybePromise<PermissionAdvice>;
   canUpdate<T, Init>(
     table: TableProxy<T, Init>,
     id: string,
     data: Partial<Init>,
     session?: Session,
-  ): MaybePromise<boolean>;
+  ): MaybePromise<PermissionAdvice>;
   canDelete<T, Init>(
     table: TableProxy<T, Init>,
     id: string,
     session?: Session,
-  ): MaybePromise<boolean>;
+  ): MaybePromise<PermissionAdvice>;
   getAuthState(): MaybePromise<AuthState>;
   onAuthChanged(listener: (state: AuthState) => void): () => void;
   updateAuthToken(token: string | null): MaybePromise<void>;
@@ -111,7 +118,7 @@ export interface SubscriptionChannel {
 }
 
 export interface AsyncWriteHandle<T = void> {
-  readonly transactionId: string;
+  readonly batchId: Promise<BatchId>;
   wait(options: { tier: DurabilityTier }): Promise<T>;
 }
 
@@ -194,7 +201,7 @@ export class InProcessSubscriptionChannel implements SubscriptionChannel {
     table: TableProxy<T, Init>,
     data: Init,
     session?: Session,
-  ): MaybePromise<boolean> {
+  ): MaybePromise<PermissionAdvice> {
     return this.target.canInsert(table, data, session);
   }
 
@@ -203,7 +210,7 @@ export class InProcessSubscriptionChannel implements SubscriptionChannel {
     id: string,
     data: Partial<Init>,
     session?: Session,
-  ): MaybePromise<boolean> {
+  ): MaybePromise<PermissionAdvice> {
     return this.target.canUpdate(table, id, data, session);
   }
 
@@ -211,7 +218,7 @@ export class InProcessSubscriptionChannel implements SubscriptionChannel {
     table: TableProxy<T, Init>,
     id: string,
     session?: Session,
-  ): MaybePromise<boolean> {
+  ): MaybePromise<PermissionAdvice> {
     return this.target.canDelete(table, id, session);
   }
 

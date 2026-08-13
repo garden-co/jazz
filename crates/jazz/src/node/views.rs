@@ -114,7 +114,7 @@ fn content_row_members_for_bundle(
         .filter(|member| member.as_row().is_some())
         .map(|member| {
             member.as_row().ok_or(Error::InvalidStoredValue(match member {
-                ResultMemberEntry::Row(_) => context,
+                ResultMemberEntry::Row(_) | ResultMemberEntry::TypedRow { .. } => context,
                 ResultMemberEntry::Synthetic { .. } => {
                     "synthetic result members require typed payload facts before row bundle shipping"
                 }
@@ -181,8 +181,10 @@ where
     /// Subscribe to the raw history storage table.
     pub fn subscribe_history(&mut self, table: &str) -> Result<Subscription, Error> {
         self.table(table)?;
+        let schema_version = self.catalogue.current_schema_version_id;
+        let source = self.physical_history_source_graph(schema_version, table)?;
         self.database
-            .subscribe_query(select_all(&history_table_name(table)))
+            .subscribe_one_sink(source)
             .map_err(Error::Groove)
     }
 
@@ -626,6 +628,7 @@ where
             },
             result_member_adds: result_member_adds.into_iter().collect(),
             result_member_removes: result_member_removes.into_iter().collect(),
+            terminal_operations: Vec::new(),
             program_fact_adds,
             program_fact_removes,
         })
@@ -751,9 +754,24 @@ where
             authorization_progress,
             result_member_adds,
             result_member_removes,
+            terminal_operations,
             program_fact_adds,
             program_fact_removes,
         } = update;
+        let synthetic_result_changed = result_member_adds
+            .iter()
+            .chain(&result_member_removes)
+            .any(|member| matches!(member, ResultMemberEntry::Synthetic { .. }))
+            || program_fact_adds
+                .iter()
+                .chain(&program_fact_removes)
+                .any(|fact| {
+                    matches!(
+                        fact,
+                        ProgramFactEntry::ResultPayload(payload)
+                            if matches!(payload.member, ResultMemberEntry::Synthetic { .. })
+                    )
+                });
         let version_bundle_refs =
             version_bundle_refs_for_carriers(&version_bundles, &version_carriers)?;
         let binding_view_key = match self.binding_view_key_for_subscription(subscription) {
@@ -779,8 +797,18 @@ where
         }
         if reset_result_set {
             self.query
+                .pending_terminal_operations_by_binding_view
+                .remove(&binding_view_key);
+            self.query
                 .initial_hydration_binding_views
                 .insert(binding_view_key);
+        }
+        if !terminal_operations.is_empty() {
+            self.query
+                .pending_terminal_operations_by_binding_view
+                .entry(binding_view_key)
+                .or_default()
+                .extend(terminal_operations);
         }
         if defer_settlement {
             self.query
@@ -937,6 +965,16 @@ where
             program_facts.extend(program_fact_adds);
             fact_rewrite = None;
         }
+        if synthetic_result_changed
+            && self
+                .query
+                .initial_hydration_binding_views
+                .contains(&binding_view_key)
+        {
+            self.query
+                .pending_authoritative_reset_binding_views
+                .insert(binding_view_key);
+        }
         if !defer_settlement {
             self.query
                 .settled_through_by_binding_view
@@ -992,6 +1030,12 @@ where
                 .initial_hydration_binding_views
                 .remove(&binding_view_key);
         }
+        let generation = self
+            .query
+            .applied_view_update_generations
+            .entry(binding_view_key)
+            .or_default();
+        *generation = generation.wrapping_add(1);
         Ok(())
     }
 
@@ -1214,7 +1258,8 @@ where
             permission_subject,
             base_snapshot,
             user_metadata_json,
-            source_branch,
+            target_lineage,
+            branch_merge,
             merge_strategy,
             ..
         } = stored_tx.tx.clone();
@@ -1229,19 +1274,77 @@ where
             absent_read_set: None,
             predicate_read_set: None,
             user_metadata_json,
-            source_branch,
+            target_lineage,
+            branch_merge,
             merge_strategy,
         };
+        let mut versions = Vec::with_capacity(tx_versions.len());
+        for version in tx_versions {
+            let canonical = self.canonical_maintained_view_witness(version)?;
+            versions.push(self.version_record_from_row(canonical.as_ref().unwrap_or(version))?);
+        }
         Ok(VersionBundle {
             tx: tx_payload,
-            versions: tx_versions
-                .iter()
-                .map(|version| self.version_record_from_row(version))
-                .collect::<Result<Vec<_>, Error>>()?,
+            versions,
             fate: stored_tx.fate.clone(),
             global_seq: stored_tx.global_seq,
             durability: stored_tx.durability,
         })
+    }
+
+    /// Maintained query evaluation uses rows projected into the subscription's
+    /// schema. Sync must still ship the immutable payload authored under the
+    /// row's stored schema alias, so recover that exact history row only when
+    /// the projected witness no longer has its authored logical layout.
+    pub(super) fn canonical_maintained_view_witness(
+        &mut self,
+        version: &VersionRow,
+    ) -> Result<Option<VersionRow>, Error> {
+        let authored_schema = self
+            .schema_version_for_alias(version.schema_version_alias())
+            .ok_or(Error::InvalidStoredValue(
+                "maintained witness schema version alias must exist",
+            ))?;
+        let has_authored_layout = self
+            .table_in_schema(version.table(), authored_schema)
+            .is_ok_and(|table| {
+                let descriptor = if version.layer() == VersionLayer::Deletion {
+                    table.register_storage_table().record_schema()
+                } else {
+                    table.history_storage_table().record_schema()
+                };
+                version.record.descriptor() == &descriptor
+                    && !table.columns.iter().any(|column| {
+                        column.large_value.is_some()
+                            && version.cell(&table, &column.name).is_ok_and(|value| {
+                                matches!(value, Some(Value::Bytes(bytes)) if bytes.starts_with(LARGE_VALUE_HANDLE_MAGIC))
+                            })
+                    })
+            });
+        if has_authored_layout {
+            return Ok(None);
+        }
+
+        for storage_table in
+            self.version_storage_sources_for_layer(version.table(), version.layer())?
+        {
+            let Some(canonical) = self.query_version_by_alias_with_storage(
+                version.table(),
+                &storage_table,
+                version.row_uuid(),
+                version.tx_time(),
+                version.tx_node_alias(),
+            )?
+            else {
+                continue;
+            };
+            if canonical.schema_version_alias() == version.schema_version_alias() {
+                return Ok(Some(canonical));
+            }
+        }
+        Err(Error::MaintainedViewMissingBundleWitness(
+            "projected maintained witness is missing its canonical history row",
+        ))
     }
 }
 

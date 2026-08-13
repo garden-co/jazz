@@ -30,15 +30,15 @@ use crate::ivm::{
     NodeDurability, NodeId, OpType, PersistOp, PlanExpr, PredicateExpr, ProjectExpr, ProjectField,
     ProjectionExpr, RecursiveOp, Retainer, StaticScanSpec, TableSourceOp, TopByDirection,
     TopByLimit, TopByOp, TopByOrderField, UnnestOp, UnwrapNullableOp, ValueComparison,
+    VariantProjectionTarget,
 };
 use crate::records::{
     self, BorrowedRecord, OwnedRecord, RawProjectionField, RawProjectionScratch, RecordDescriptor,
     Value, ValueType,
 };
-use crate::schema::{DatabaseSchema, IndexSchema, PrimaryKey, TableSchema};
+use crate::schema::{DatabaseSchema, IndexSchema, TableSchema};
 use crate::storage::{
     OrderedKvStorage, OwnedWriteOperation, RecordStore, StagedWriteOverlay, StagedWriteState,
-    is_windowed_history_table,
 };
 use thiserror::Error;
 
@@ -46,7 +46,7 @@ mod join;
 mod persist;
 mod recursion;
 
-use join::{AntiJoinState, ArrangementState, JoinState};
+use join::{AntiJoinState, ArrangementState, JoinState, touched_join_keys};
 use persist::apply_persist_delta;
 use recursion::{
     RecursiveState, hydrate_recursive_arrangements, recompute_recursive, recursive_delta,
@@ -57,6 +57,38 @@ const DEFAULT_SINK: &str = "__default";
 const EVAL_MEMO_MAX_ENTRIES: usize = 8192;
 const EVAL_MEMO_MAX_BYTES: usize = 128 * 1024 * 1024;
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(super) struct VariantProjectionKey {
+    table: String,
+    target: VariantProjectionTarget,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct VariantProjection {
+    output: RecordDescriptor,
+    cases: HashMap<u64, VariantProjectionCase>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum VariantProjectionCase {
+    Project {
+        source: RecordDescriptor,
+        project: MapProjectOp,
+        raw_projection: Option<Arc<[RawProjectionField]>>,
+    },
+    Ignore {
+        source: RecordDescriptor,
+    },
+}
+
+impl VariantProjectionCase {
+    fn source(&self) -> RecordDescriptor {
+        match self {
+            Self::Project { source, .. } | Self::Ignore { source } => *source,
+        }
+    }
+}
+
 // These maps are keyed by local runtime/schema/graph metadata produced after
 // validation. Wire-facing or otherwise adversarial-input maps must keep the
 // standard hasher; this alias is intentionally scoped to the IVM runtime.
@@ -66,6 +98,9 @@ const EVAL_MEMO_MAX_BYTES: usize = 128 * 1024 * 1024;
 pub struct IvmRuntime {
     schema: DatabaseSchema,
     table_descriptors: HashMap<String, RecordDescriptor>,
+    /// Append-only, fixed-output projection families for heterogeneous table
+    /// sources. Cases are runtime input metadata rather than graph identity.
+    variant_projections: HashMap<VariantProjectionKey, VariantProjection>,
     graph: IvmGraph,
     multisink_subscriptions: HashMap<SubscriptionId, MultisinkSubscriptionState>,
     prepared_shapes: HashMap<PreparedShapeId, RoutedMultisinkShapeState>,
@@ -108,11 +143,13 @@ impl IvmRuntime {
         let table_descriptors = schema
             .tables
             .iter()
+            .filter(|table| !table.has_schema_variants())
             .map(|table| (table.name.clone(), table.record_schema()))
             .collect();
         let mut runtime = Self {
             schema,
             table_descriptors,
+            variant_projections: HashMap::default(),
             graph: IvmGraph::new(),
             multisink_subscriptions: HashMap::default(),
             operator_states: HashMap::default(),
@@ -137,6 +174,7 @@ impl IvmRuntime {
             binding_sources: HashMap::default(),
             pending_binding_retractions: Vec::new(),
         };
+        runtime.define_schema_index_variant_projections()?;
         runtime.add_dedup_schema_indices()?;
         Ok(runtime)
     }
@@ -163,6 +201,391 @@ impl IvmRuntime {
 
     pub fn table_descriptor(&self, table: &str) -> Option<&RecordDescriptor> {
         self.table_descriptors.get(table)
+    }
+
+    pub(crate) fn register_table(&mut self, table: TableSchema) -> Result<(), IvmRuntimeError> {
+        if self.schema.table(&table.name).is_some() {
+            return Err(IvmRuntimeError::TableAlreadyExists(table.name));
+        }
+        if !table.has_schema_variants() {
+            self.table_descriptors
+                .insert(table.name.clone(), table.record_schema());
+        }
+        self.schema.tables.push(table);
+        self.define_schema_index_variant_projections()?;
+        self.add_dedup_schema_indices()?;
+        Ok(())
+    }
+
+    pub(crate) fn register_table_schema_version_with_columns(
+        &mut self,
+        table: &str,
+        columns: Vec<crate::schema::ColumnSchema>,
+        schema_version: crate::schema::TableSchemaVersion,
+    ) -> Result<(), IvmRuntimeError> {
+        let table_schema = self
+            .schema
+            .tables
+            .iter_mut()
+            .find(|candidate| candidate.name == table)
+            .ok_or_else(|| IvmRuntimeError::TableNotFound(table.to_owned()))?;
+        if table_schema
+            .schema_version(schema_version.version)
+            .is_some()
+        {
+            return Err(IvmRuntimeError::DuplicateTableSchemaVersion {
+                table: table.to_owned(),
+                version: schema_version.version,
+            });
+        }
+        for column in columns {
+            if table_schema
+                .columns
+                .iter()
+                .any(|existing| existing.name == column.name)
+            {
+                return Err(IvmRuntimeError::TableFieldAlreadyExists {
+                    table: table.to_owned(),
+                    field: column.name,
+                });
+            }
+            table_schema.columns.push(column);
+        }
+        let version = schema_version.version;
+        table_schema.schema_versions.push(schema_version);
+        let table_schema = table_schema.clone();
+        for index in &table_schema.indices {
+            self.register_schema_index_variant_case(&table_schema, index, version)?;
+        }
+        self.invalidate_table_inputs(table);
+        Ok(())
+    }
+
+    pub(crate) fn register_table_index<S>(
+        &mut self,
+        table: &str,
+        index: IndexSchema,
+        storage: &S,
+    ) -> Result<(), IvmRuntimeError>
+    where
+        S: OrderedKvStorage,
+    {
+        let table_position = self
+            .schema
+            .tables
+            .iter()
+            .position(|candidate| candidate.name == table)
+            .ok_or_else(|| IvmRuntimeError::TableNotFound(table.to_owned()))?;
+        self.schema.tables[table_position]
+            .indices
+            .push(index.clone());
+        let table_schema = self.schema.tables[table_position].clone();
+        if table_schema.has_schema_variants() {
+            let target = VariantProjectionTarget::SchemaIndex(index.name.clone());
+            self.define_variant_projection_target(
+                table,
+                target,
+                schema_index_input_descriptor(&table_schema, &index)?,
+            )?;
+            for schema_version in &table_schema.schema_versions {
+                self.register_schema_index_variant_case(
+                    &table_schema,
+                    &index,
+                    schema_version.version,
+                )?;
+            }
+        }
+        let persist = self.add_dedup_schema_index(&table_schema, &index)?;
+        self.invalidate_table_inputs(table);
+        self.hydration_snapshot(persist, storage)?;
+        Ok(())
+    }
+
+    pub(crate) fn define_variant_projection(
+        &mut self,
+        table: &str,
+        target: &str,
+        output: RecordDescriptor,
+    ) -> Result<(), IvmRuntimeError> {
+        self.define_variant_projection_target(
+            table,
+            VariantProjectionTarget::Named(target.to_owned()),
+            output,
+        )
+    }
+
+    fn define_variant_projection_target(
+        &mut self,
+        table: &str,
+        target: VariantProjectionTarget,
+        output: RecordDescriptor,
+    ) -> Result<(), IvmRuntimeError> {
+        if self.schema.table(table).is_none() {
+            return Err(IvmRuntimeError::TableNotFound(table.to_owned()));
+        }
+        let key = VariantProjectionKey {
+            table: table.to_owned(),
+            target: target.clone(),
+        };
+        match self.variant_projections.entry(key) {
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(VariantProjection {
+                    output,
+                    cases: HashMap::default(),
+                });
+            }
+            std::collections::hash_map::Entry::Occupied(entry) if entry.get().output == output => {}
+            std::collections::hash_map::Entry::Occupied(_) => {
+                return Err(IvmRuntimeError::VariantProjectionOutputMismatch {
+                    table: table.to_owned(),
+                    target: variant_projection_target_name(&target).to_owned(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn register_variant_projection_case(
+        &mut self,
+        table: &str,
+        target: &str,
+        schema_version: u64,
+        fields: &[ProjectField],
+    ) -> Result<(), IvmRuntimeError> {
+        self.register_variant_projection_target_case(
+            table,
+            VariantProjectionTarget::Named(target.to_owned()),
+            schema_version,
+            Some(fields),
+        )
+    }
+
+    pub(crate) fn register_variant_projection_ignore_case(
+        &mut self,
+        table: &str,
+        target: &str,
+        schema_version: u64,
+    ) -> Result<(), IvmRuntimeError> {
+        self.register_variant_projection_target_case(
+            table,
+            VariantProjectionTarget::Named(target.to_owned()),
+            schema_version,
+            None,
+        )
+    }
+
+    pub(crate) fn project_variant_record(
+        &self,
+        table: &str,
+        target: &str,
+        record: &records::VersionedRecord,
+    ) -> Result<Option<OwnedRecord>, IvmRuntimeError> {
+        let key = VariantProjectionKey {
+            table: table.to_owned(),
+            target: VariantProjectionTarget::Named(target.to_owned()),
+        };
+        let projection = self.variant_projections.get(&key).ok_or_else(|| {
+            IvmRuntimeError::VariantProjectionNotFound {
+                table: table.to_owned(),
+                target: target.to_owned(),
+            }
+        })?;
+        let case = projection
+            .cases
+            .get(&record.schema_version())
+            .ok_or_else(|| IvmRuntimeError::VariantProjectionCaseNotFound {
+                table: table.to_owned(),
+                target: target.to_owned(),
+                version: record.schema_version(),
+            })?;
+        if case.source() != *record.record().descriptor() {
+            return Err(IvmRuntimeError::VariantProjectionSourceMismatch {
+                table: table.to_owned(),
+                target: target.to_owned(),
+                version: record.schema_version(),
+            });
+        }
+        let VariantProjectionCase::Project {
+            project,
+            raw_projection,
+            ..
+        } = case
+        else {
+            return Ok(None);
+        };
+        let input = RecordDeltas {
+            descriptor: *record.record().descriptor(),
+            deltas: vec![RecordDelta {
+                record: Bytes::copy_from_slice(record.record().raw()),
+                weight: 1,
+            }],
+        };
+        let projected = NodeState::update_map_project(
+            project,
+            projection.output,
+            &input,
+            raw_projection.as_deref(),
+        )?;
+        let record = projected
+            .deltas
+            .into_iter()
+            .next()
+            .ok_or(IvmRuntimeError::GraphOutputMismatch)?;
+        Ok(Some(OwnedRecord::new(
+            record.record.to_vec(),
+            projection.output,
+        )))
+    }
+
+    fn register_variant_projection_target_case(
+        &mut self,
+        table: &str,
+        target: VariantProjectionTarget,
+        schema_version: u64,
+        fields: Option<&[ProjectField]>,
+    ) -> Result<(), IvmRuntimeError> {
+        let source = self
+            .schema
+            .table(table)
+            .ok_or_else(|| IvmRuntimeError::TableNotFound(table.to_owned()))?
+            .record_schema_for_version(schema_version)
+            .ok_or_else(|| IvmRuntimeError::UnknownTableSchemaVersion {
+                table: table.to_owned(),
+                version: schema_version,
+            })?;
+        let key = VariantProjectionKey {
+            table: table.to_owned(),
+            target: target.clone(),
+        };
+        let projection = self.variant_projections.get_mut(&key).ok_or_else(|| {
+            IvmRuntimeError::VariantProjectionNotFound {
+                table: table.to_owned(),
+                target: variant_projection_target_name(&target).to_owned(),
+            }
+        })?;
+        let case = if let Some(fields) = fields {
+            let projected = project_descriptor(&source, fields)?;
+            if projected != projection.output {
+                return Err(IvmRuntimeError::VariantProjectionOutputMismatch {
+                    table: table.to_owned(),
+                    target: variant_projection_target_name(&target).to_owned(),
+                });
+            }
+            let mapping = fields
+                .iter()
+                .filter_map(|field| {
+                    field.source().map(|source_field| {
+                        resolve_field_ref(&source, source_field).map(|idx| (0, idx))
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let project = MapProjectOp {
+                expressions: fields
+                    .iter()
+                    .map(|field| {
+                        project_field_expr(&source, field).map(|expression| ProjectionExpr {
+                            expression,
+                            output_name: Some(field.output_name.clone()),
+                        })
+                    })
+                    .collect::<Result<Vec<_>, IvmRuntimeError>>()?,
+                mapping,
+            };
+            let raw_projection = raw_projection_fields(&project, &source, projection.output)?
+                .map(Arc::<[RawProjectionField]>::from);
+            VariantProjectionCase::Project {
+                source,
+                project,
+                raw_projection,
+            }
+        } else {
+            VariantProjectionCase::Ignore { source }
+        };
+        match projection.cases.entry(schema_version) {
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(case);
+            }
+            std::collections::hash_map::Entry::Occupied(entry) if entry.get() == &case => {}
+            std::collections::hash_map::Entry::Occupied(_) => {
+                return Err(IvmRuntimeError::VariantProjectionCaseAlreadyRegistered {
+                    table: table.to_owned(),
+                    target: variant_projection_target_name(&target).to_owned(),
+                    version: schema_version,
+                });
+            }
+        }
+        self.invalidate_table_inputs(table);
+        Ok(())
+    }
+
+    fn define_schema_index_variant_projections(&mut self) -> Result<(), IvmRuntimeError> {
+        for table in self.schema.tables.clone() {
+            if !table.has_schema_variants() {
+                continue;
+            }
+            for index in &table.indices {
+                let target = VariantProjectionTarget::SchemaIndex(index.name.clone());
+                self.define_variant_projection_target(
+                    &table.name,
+                    target,
+                    schema_index_input_descriptor(&table, index)?,
+                )?;
+                for schema_version in &table.schema_versions {
+                    self.register_schema_index_variant_case(&table, index, schema_version.version)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn register_schema_index_variant_case(
+        &mut self,
+        table: &TableSchema,
+        index: &IndexSchema,
+        schema_version: u64,
+    ) -> Result<(), IvmRuntimeError> {
+        let version = table.schema_version(schema_version).ok_or_else(|| {
+            IvmRuntimeError::UnknownTableSchemaVersion {
+                table: table.name.clone(),
+                version: schema_version,
+            }
+        })?;
+        let fields = index
+            .columns
+            .iter()
+            .all(|indexed| version.fields.contains(indexed))
+            .then(|| {
+                schema_index_input_fields(table, index).map(|fields| {
+                    fields
+                        .into_iter()
+                        .map(ProjectField::named)
+                        .collect::<Vec<_>>()
+                })
+            })
+            .transpose()?;
+        self.register_variant_projection_target_case(
+            &table.name,
+            VariantProjectionTarget::SchemaIndex(index.name.clone()),
+            schema_version,
+            fields.as_deref(),
+        )
+    }
+
+    fn invalidate_table_inputs(&mut self, table: &str) {
+        *self.table_frontiers.entry(table.to_owned()).or_default() += 1;
+        self.eval_memo.retain(|key, _| {
+            self.node_meta
+                .get(&key.node)
+                .and_then(|meta| meta.input_signature.as_ref())
+                .is_none_or(|signature| {
+                    !signature.tables.iter().any(|candidate| candidate == table)
+                })
+        });
+        self.eval_memo_bytes = self
+            .eval_memo
+            .values()
+            .map(|entry| entry.payload_bytes)
+            .sum();
     }
 
     pub fn index(&self, table: &str, index_name: &str) -> Option<&IndexSchema> {
@@ -195,6 +618,7 @@ impl IvmRuntime {
         let CompiledNode {
             output,
             node: output_node,
+            ..
         } = self.add_dedup_graph(&graph)?;
         let records = self.hydration_snapshot(output_node, storage);
         for node in self.gc_ephemeral_nodes(0) {
@@ -337,6 +761,7 @@ impl IvmRuntime {
         let mut evaluator = TickEvaluator {
             schema: &self.schema,
             graph: &self.graph,
+            variant_projections: &self.variant_projections,
             table_deltas: &table_deltas,
             binding_deltas: &binding_deltas,
             binding_snapshots: &binding_snapshots,
@@ -352,20 +777,61 @@ impl IvmRuntime {
             storage: Some(storage),
             context: EvalContext::root(),
             metrics: &mut metrics,
+            terminal_deltas: HashMap::default(),
+            root_ordering_windows: HashMap::default(),
         };
 
         for (subscription_id, subscription) in &self.multisink_subscriptions {
             let mut sinks = BTreeMap::new();
+            let mut terminal_sinks = BTreeMap::new();
             for (sink, output) in &subscription.outputs {
                 let records = evaluator.update_node(output.node)?;
                 if !records.deltas.is_empty() && records.descriptor != output.output {
                     return Err(IvmRuntimeError::GraphOutputMismatch);
                 }
+                let structured = evaluator.output_is_structured_collect_by(output.node)?;
+                let public_root = evaluator.output_has_public_root(output.node)?;
+                let terminal_owned = output.root_ordering_node.is_some() || structured;
+                let records = records.as_ref().clone();
+                if terminal_owned {
+                    let terminal = if structured {
+                        if let Some(terminal) =
+                            evaluator.take_terminal_deltas_for_output(output.node)?
+                        {
+                            Some(terminal)
+                        } else if !public_root && !records.is_empty() {
+                            Some(terminal_deltas_from_record_deltas(&records)?)
+                        } else {
+                            None
+                        }
+                    } else if !records.is_empty() {
+                        // The ordering node can be above a wider source row.
+                        // It contributes only root positions; terminal payloads
+                        // must be encoded from the public sink descriptor.
+                        Some(terminal_deltas_from_record_deltas(&records)?)
+                    } else {
+                        None
+                    };
+                    if let Some(mut terminal) = terminal {
+                        if let Some(root_ordering_node) = output.root_ordering_node {
+                            evaluator.apply_root_ordering(root_ordering_node, &mut terminal)?;
+                        }
+                        if !terminal.is_empty() {
+                            terminal_sinks.insert(sink.clone(), terminal);
+                        }
+                    }
+                }
                 if !records.is_empty() {
-                    sinks.insert(sink.clone(), records.as_ref().clone());
+                    // Keep the rendered terminal record available for legacy
+                    // single-sink consumers and hydration. Structured carriers
+                    // select `terminal_sinks` for incremental delivery.
+                    sinks.insert(sink.clone(), records);
                 }
             }
-            let records = MultisinkDeltas { sinks };
+            let records = MultisinkDeltas {
+                sinks,
+                terminal_sinks,
+            };
             if !records.is_empty() {
                 evaluator.metrics.notifications_sent += 1;
                 evaluator.metrics.notification_records += multisink_deltas_record_count(&records);
@@ -528,6 +994,7 @@ impl IvmRuntime {
         let mut evaluator = TickEvaluator {
             schema: &self.schema,
             graph: &self.graph,
+            variant_projections: &self.variant_projections,
             table_deltas: &table_deltas,
             binding_deltas: &[],
             binding_snapshots: &binding_snapshots,
@@ -549,6 +1016,8 @@ impl IvmRuntime {
             storage: Some(storage),
             context: EvalContext::root_snapshot(),
             metrics: &mut metrics,
+            terminal_deltas: HashMap::default(),
+            root_ordering_windows: HashMap::default(),
         };
         let records = evaluator
             .update_node(output_node)
@@ -568,13 +1037,23 @@ impl IvmRuntime {
     {
         let mut sinks = BTreeMap::new();
         for (sink, output) in outputs {
-            let records = self.hydration_snapshot(output.node, storage)?;
+            let ordering = output
+                .root_ordering_node
+                .map(|node| self.hydration_snapshot(node, storage))
+                .transpose()?;
+            let mut records = self.hydration_snapshot(output.node, storage)?;
             if records.descriptor != output.output {
                 return Err(IvmRuntimeError::GraphOutputMismatch);
             }
+            if let Some(ordering) = &ordering {
+                order_terminal_snapshot(&mut records, ordering)?;
+            }
             sinks.insert(sink.clone(), records);
         }
-        Ok(MultisinkDeltas { sinks })
+        Ok(MultisinkDeltas {
+            sinks,
+            terminal_sinks: BTreeMap::new(),
+        })
     }
 
     fn subscription_hydration_snapshot<S>(
@@ -592,6 +1071,7 @@ impl IvmRuntime {
         let mut evaluator = TickEvaluator {
             schema: &self.schema,
             graph: &self.graph,
+            variant_projections: &self.variant_projections,
             table_deltas: &table_deltas,
             binding_deltas: &[],
             binding_snapshots: &binding_snapshots,
@@ -611,6 +1091,8 @@ impl IvmRuntime {
                 EvalContext::root_snapshot()
             },
             metrics: &mut metrics,
+            terminal_deltas: HashMap::default(),
+            root_ordering_windows: HashMap::default(),
         };
         let records = evaluator
             .update_node(output_node)
@@ -630,13 +1112,23 @@ impl IvmRuntime {
     {
         let mut sinks = BTreeMap::new();
         for (sink, output) in outputs {
-            let records = self.subscription_hydration_snapshot(output.node, storage)?;
+            let ordering = output
+                .root_ordering_node
+                .map(|node| self.subscription_hydration_snapshot(node, storage))
+                .transpose()?;
+            let mut records = self.subscription_hydration_snapshot(output.node, storage)?;
             if records.descriptor != output.output {
                 return Err(IvmRuntimeError::GraphOutputMismatch);
             }
+            if let Some(ordering) = &ordering {
+                order_terminal_snapshot(&mut records, ordering)?;
+            }
             sinks.insert(sink.clone(), records);
         }
-        Ok(MultisinkDeltas { sinks })
+        Ok(MultisinkDeltas {
+            sinks,
+            terminal_sinks: BTreeMap::new(),
+        })
     }
 
     fn hydration_snapshots_for_subscription<S>(
@@ -690,6 +1182,7 @@ impl IvmRuntime {
         let mut evaluator = TickEvaluator {
             schema: &self.schema,
             graph: &self.graph,
+            variant_projections: &self.variant_projections,
             table_deltas,
             binding_deltas: &[],
             binding_snapshots: &binding_snapshots,
@@ -705,6 +1198,8 @@ impl IvmRuntime {
             storage: Some(storage),
             context: EvalContext::root(),
             metrics: &mut metrics,
+            terminal_deltas: HashMap::default(),
+            root_ordering_windows: HashMap::default(),
         };
 
         for node in durable_nodes {
@@ -854,6 +1349,20 @@ impl IvmRuntime {
                     expected: binding_descriptor.fields().len(),
                     actual: terminal.route_fields.len(),
                 });
+            }
+            if terminal.route_value_indices.len() != terminal.route_fields.len() {
+                return Err(IvmRuntimeError::RoutedMultisinkRouteArityMismatch {
+                    sink: terminal.sink.clone(),
+                    expected: terminal.route_fields.len(),
+                    actual: terminal.route_value_indices.len(),
+                });
+            }
+            if let Some(index) = terminal
+                .route_value_indices
+                .iter()
+                .find(|index| **index >= binding_descriptor.fields().len())
+            {
+                return Err(IvmRuntimeError::GraphFieldIndexOutOfBounds(*index));
             }
             let output = self.infer_builder_output(&terminal.graph)?;
             for field in terminal.route_fields.iter().chain(&terminal.public_fields) {
@@ -1288,11 +1797,33 @@ impl IvmRuntime {
         output_memo: &mut HashMap<usize, RecordDescriptor>,
     ) -> Result<RecordDescriptor, IvmRuntimeError> {
         match graph {
-            GraphBuilder::Table { table, .. } => self
-                .schema
-                .table(table)
-                .ok_or_else(|| IvmRuntimeError::TableNotFound(table.clone()))
-                .map(TableSchema::record_schema),
+            GraphBuilder::Table {
+                table,
+                variant_projection,
+                ..
+            } => {
+                if let Some(target) = variant_projection {
+                    return self
+                        .variant_projections
+                        .get(&VariantProjectionKey {
+                            table: table.clone(),
+                            target: VariantProjectionTarget::Named(target.clone()),
+                        })
+                        .map(|projection| projection.output)
+                        .ok_or_else(|| IvmRuntimeError::VariantProjectionNotFound {
+                            table: table.clone(),
+                            target: target.clone(),
+                        });
+                }
+                let table_schema = self
+                    .schema
+                    .table(table)
+                    .ok_or_else(|| IvmRuntimeError::TableNotFound(table.clone()))?;
+                if table_schema.has_schema_variants() {
+                    return Err(IvmRuntimeError::VariantProjectionRequired(table.clone()));
+                }
+                Ok(table_schema.record_schema())
+            }
             GraphBuilder::InlineRecords { output, .. } => Ok(*output),
             GraphBuilder::Index { .. } => Ok(index_record_descriptor()),
             GraphBuilder::FrontierSource { output, .. }
@@ -1306,6 +1837,9 @@ impl IvmRuntime {
             GraphBuilder::CollectBy { input, collect, .. } => {
                 let input = self.infer_builder_output_cached(input, output_memo)?;
                 match collect.mode {
+                    CollectByMode::Root => {
+                        collect_by_root_descriptor(&input, &collect.parent_fields)
+                    }
                     CollectByMode::Collect if collect.slots.is_empty() => collect_by_descriptor(
                         &input,
                         &collect.parent_fields,
@@ -1754,6 +2288,19 @@ impl IvmRuntime {
                         });
                     }
                 }
+                OpType::CollectBy(collect_by) => {
+                    if let [input] = node.descriptor.inputs.as_slice()
+                        && let Some(input_node) = self.graph.node(*input)
+                    {
+                        referenced.insert(ArrangementKey {
+                            scope: ScopeId::root(),
+                            input: *input,
+                            fields: Arc::from(collect_by.group_fields.clone()),
+                            descriptor: input_node.descriptor.output,
+                            comparison: ValueComparison::Exact,
+                        });
+                    }
+                }
                 OpType::Aggregate(aggregate) => {
                     if let [input] = node.descriptor.inputs.as_slice()
                         && let Some(input_node) = self.graph.node(*input)
@@ -1821,13 +2368,58 @@ impl IvmRuntime {
     ) -> Result<CompiledNode, IvmRuntimeError> {
         let inferred_output = self.infer_builder_output_cached(graph, output_memo)?;
         match graph {
-            GraphBuilder::Table { table, scan } => {
+            GraphBuilder::Table { .. }
+            | GraphBuilder::InlineRecords { .. }
+            | GraphBuilder::Index { .. }
+            | GraphBuilder::FrontierSource { .. }
+            | GraphBuilder::BindingSource { .. }
+            | GraphBuilder::Recursive { .. }
+            | GraphBuilder::CollectBy { .. } => {
+                self.add_dedup_source_graph(graph, inferred_output, output_memo)
+            }
+            GraphBuilder::ArgMaxBy { .. }
+            | GraphBuilder::ArgMinBy { .. }
+            | GraphBuilder::TopBy { .. } => {
+                self.add_dedup_ordering_graph(graph, inferred_output, output_memo)
+            }
+            GraphBuilder::Aggregate { .. }
+            | GraphBuilder::Filter { .. }
+            | GraphBuilder::Project { .. }
+            | GraphBuilder::UnwrapNullable { .. }
+            | GraphBuilder::Unnest { .. }
+            | GraphBuilder::Union { .. } => {
+                self.add_dedup_unary_graph(graph, inferred_output, output_memo)
+            }
+            GraphBuilder::Join { .. }
+            | GraphBuilder::SemiJoin { .. }
+            | GraphBuilder::AntiJoin { .. } => {
+                self.add_dedup_join_graph(graph, inferred_output, output_memo)
+            }
+        }
+    }
+
+    #[inline(never)]
+    fn add_dedup_source_graph(
+        &mut self,
+        graph: &GraphBuilder,
+        inferred_output: RecordDescriptor,
+        output_memo: &mut HashMap<usize, RecordDescriptor>,
+    ) -> Result<CompiledNode, IvmRuntimeError> {
+        match graph {
+            GraphBuilder::Table {
+                table,
+                scan,
+                variant_projection,
+            } => {
                 let output = inferred_output;
                 let node = self.graph.dedup_node(
                     NodeDescriptor::new(
                         OpType::TableSource(TableSourceOp {
                             table: table.clone(),
                             scan: scan.clone(),
+                            variant_projection: variant_projection
+                                .clone()
+                                .map(VariantProjectionTarget::Named),
                         }),
                         [],
                         output,
@@ -1835,7 +2427,11 @@ impl IvmRuntime {
                     NodeDurability::Ephemeral,
                 );
                 self.initialize_node_runtime(node);
-                Ok(CompiledNode { output, node })
+                Ok(CompiledNode {
+                    output,
+                    node,
+                    root_ordering_node: None,
+                })
             }
             GraphBuilder::InlineRecords { output, records } => {
                 if inferred_output != *output {
@@ -1855,6 +2451,7 @@ impl IvmRuntime {
                 Ok(CompiledNode {
                     output: *output,
                     node,
+                    root_ordering_node: None,
                 })
             }
             GraphBuilder::Index { table, index, scan } => {
@@ -1876,7 +2473,11 @@ impl IvmRuntime {
                     NodeDurability::Ephemeral,
                 );
                 self.initialize_node_runtime(node);
-                Ok(CompiledNode { output, node })
+                Ok(CompiledNode {
+                    output,
+                    node,
+                    root_ordering_node: None,
+                })
             }
             GraphBuilder::FrontierSource { binding, output } => {
                 let node = self.graph.dedup_node(
@@ -1893,6 +2494,7 @@ impl IvmRuntime {
                 Ok(CompiledNode {
                     output: inferred_output,
                     node,
+                    root_ordering_node: None,
                 })
             }
             GraphBuilder::BindingSource { shape, output } => {
@@ -1910,6 +2512,7 @@ impl IvmRuntime {
                 Ok(CompiledNode {
                     output: inferred_output,
                     node,
+                    root_ordering_node: None,
                 })
             }
             GraphBuilder::Recursive {
@@ -1946,8 +2549,27 @@ impl IvmRuntime {
                     NodeDurability::Ephemeral,
                 );
                 self.initialize_node_runtime(node);
-                Ok(CompiledNode { output, node })
+                Ok(CompiledNode {
+                    output,
+                    node,
+                    root_ordering_node: None,
+                })
             }
+            GraphBuilder::CollectBy { input, collect } => {
+                self.add_collect_by_graph(input, collect, inferred_output, output_memo)
+            }
+            _ => unreachable!("dispatcher routes only source graph builders here"),
+        }
+    }
+
+    #[inline(never)]
+    fn add_dedup_ordering_graph(
+        &mut self,
+        graph: &GraphBuilder,
+        inferred_output: RecordDescriptor,
+        output_memo: &mut HashMap<usize, RecordDescriptor>,
+    ) -> Result<CompiledNode, IvmRuntimeError> {
+        match graph {
             GraphBuilder::ArgMaxBy {
                 input,
                 group_cols,
@@ -2020,7 +2642,11 @@ impl IvmRuntime {
                     NodeDurability::Ephemeral,
                 );
                 self.initialize_node_runtime(node);
-                Ok(CompiledNode { output, node })
+                Ok(CompiledNode {
+                    output,
+                    node,
+                    root_ordering_node: compiled_input.root_ordering_node,
+                })
             }
             GraphBuilder::ArgMinBy {
                 input,
@@ -2094,7 +2720,11 @@ impl IvmRuntime {
                     NodeDurability::Ephemeral,
                 );
                 self.initialize_node_runtime(node);
-                Ok(CompiledNode { output, node })
+                Ok(CompiledNode {
+                    output,
+                    node,
+                    root_ordering_node: compiled_input.root_ordering_node,
+                })
             }
             GraphBuilder::TopBy {
                 input,
@@ -2167,11 +2797,24 @@ impl IvmRuntime {
                     NodeDurability::Ephemeral,
                 );
                 self.initialize_node_runtime(node);
-                Ok(CompiledNode { output, node })
+                Ok(CompiledNode {
+                    output,
+                    node,
+                    root_ordering_node: Some(node),
+                })
             }
-            GraphBuilder::CollectBy { input, collect } => {
-                self.add_collect_by_graph(input, collect, inferred_output, output_memo)
-            }
+            _ => unreachable!("dispatcher routes only ordering graph builders here"),
+        }
+    }
+
+    #[inline(never)]
+    fn add_dedup_unary_graph(
+        &mut self,
+        graph: &GraphBuilder,
+        inferred_output: RecordDescriptor,
+        output_memo: &mut HashMap<usize, RecordDescriptor>,
+    ) -> Result<CompiledNode, IvmRuntimeError> {
+        match graph {
             GraphBuilder::Aggregate {
                 input,
                 group_cols,
@@ -2206,7 +2849,11 @@ impl IvmRuntime {
                     NodeDurability::Ephemeral,
                 );
                 self.initialize_node_runtime(node);
-                Ok(CompiledNode { output, node })
+                Ok(CompiledNode {
+                    output,
+                    node,
+                    root_ordering_node: compiled_input.root_ordering_node,
+                })
             }
             GraphBuilder::Filter {
                 input,
@@ -2228,7 +2875,11 @@ impl IvmRuntime {
                     NodeDurability::Ephemeral,
                 );
                 self.initialize_node_runtime(node);
-                Ok(CompiledNode { output, node })
+                Ok(CompiledNode {
+                    output,
+                    node,
+                    root_ordering_node: compiled_input.root_ordering_node,
+                })
             }
             GraphBuilder::Project { input, fields } => {
                 let compiled_input = self.add_dedup_graph_cached(input, output_memo)?;
@@ -2265,7 +2916,11 @@ impl IvmRuntime {
                     NodeDurability::Ephemeral,
                 );
                 self.initialize_node_runtime(node);
-                Ok(CompiledNode { output, node })
+                Ok(CompiledNode {
+                    output,
+                    node,
+                    root_ordering_node: compiled_input.root_ordering_node,
+                })
             }
             GraphBuilder::UnwrapNullable { input, field } => {
                 let compiled_input = self.add_dedup_graph_cached(input, output_memo)?;
@@ -2285,7 +2940,11 @@ impl IvmRuntime {
                     NodeDurability::Ephemeral,
                 );
                 self.initialize_node_runtime(node);
-                Ok(CompiledNode { output, node })
+                Ok(CompiledNode {
+                    output,
+                    node,
+                    root_ordering_node: compiled_input.root_ordering_node,
+                })
             }
             GraphBuilder::Unnest {
                 input,
@@ -2310,12 +2969,23 @@ impl IvmRuntime {
                     NodeDurability::Ephemeral,
                 );
                 self.initialize_node_runtime(node);
-                Ok(CompiledNode { output, node })
+                Ok(CompiledNode {
+                    output,
+                    node,
+                    root_ordering_node: compiled_input.root_ordering_node,
+                })
             }
             GraphBuilder::Union { inputs } => {
                 let mut input_nodes = Vec::with_capacity(inputs.len());
+                let mut public_root_ordering = None;
                 for input in inputs {
                     let compiled_input = self.add_dedup_graph_cached(input, output_memo)?;
+                    if input_nodes.is_empty() {
+                        // Structured lowering places the public/root anchor
+                        // first; later arms carry association rows and may
+                        // contain their own nested TopBy nodes.
+                        public_root_ordering = compiled_input.root_ordering_node;
+                    }
                     let input_node = compiled_input.node;
                     let input_output = compiled_input.output;
                     if inferred_output != input_output {
@@ -2329,8 +2999,24 @@ impl IvmRuntime {
                     NodeDurability::Ephemeral,
                 );
                 self.initialize_node_runtime(node);
-                Ok(CompiledNode { output, node })
+                Ok(CompiledNode {
+                    output,
+                    node,
+                    root_ordering_node: public_root_ordering,
+                })
             }
+            _ => unreachable!("dispatcher routes only unary graph builders here"),
+        }
+    }
+
+    #[inline(never)]
+    fn add_dedup_join_graph(
+        &mut self,
+        graph: &GraphBuilder,
+        inferred_output: RecordDescriptor,
+        output_memo: &mut HashMap<usize, RecordDescriptor>,
+    ) -> Result<CompiledNode, IvmRuntimeError> {
+        match graph {
             GraphBuilder::Join {
                 left,
                 right,
@@ -2368,7 +3054,16 @@ impl IvmRuntime {
                     .graph
                     .dedup_node(node_descriptor, NodeDurability::Ephemeral);
                 self.initialize_node_runtime(node);
-                Ok(CompiledNode { output, node })
+                Ok(CompiledNode {
+                    output,
+                    node,
+                    // Jazz lowers the public/root relation on the left and
+                    // nested relation inputs on the right. Prefer the public
+                    // side so a nested TopBy cannot become root ordering.
+                    root_ordering_node: compiled_left
+                        .root_ordering_node
+                        .or(compiled_right.root_ordering_node),
+                })
             }
             GraphBuilder::SemiJoin {
                 left,
@@ -2407,7 +3102,13 @@ impl IvmRuntime {
                     .graph
                     .dedup_node(node_descriptor, NodeDurability::Ephemeral);
                 self.initialize_node_runtime(node);
-                Ok(CompiledNode { output, node })
+                Ok(CompiledNode {
+                    output,
+                    node,
+                    root_ordering_node: compiled_left
+                        .root_ordering_node
+                        .or(compiled_right.root_ordering_node),
+                })
             }
             GraphBuilder::AntiJoin {
                 left,
@@ -2446,8 +3147,15 @@ impl IvmRuntime {
                     .graph
                     .dedup_node(node_descriptor, NodeDurability::Ephemeral);
                 self.initialize_node_runtime(node);
-                Ok(CompiledNode { output, node })
+                Ok(CompiledNode {
+                    output,
+                    node,
+                    root_ordering_node: compiled_left
+                        .root_ordering_node
+                        .or(compiled_right.root_ordering_node),
+                })
             }
+            _ => unreachable!("dispatcher routes only join graph builders here"),
         }
     }
 
@@ -2466,7 +3174,9 @@ impl IvmRuntime {
             .map(|field| resolve_field_ref(&input_output, field))
             .collect::<Result<Vec<_>, _>>()?;
         let parent_fields = collect_by_projections(&input_output, &collect.parent_fields)?;
-        if collect.mode == CollectByMode::Collect && !collect.slots.is_empty() {
+        if matches!(collect.mode, CollectByMode::Collect | CollectByMode::Root)
+            && (!collect.slots.is_empty() || collect.mode == CollectByMode::Root)
+        {
             if parent_fields.is_empty() {
                 return Err(IvmRuntimeError::InvalidCollectBy(
                     "tree collect requires a parent projection".into(),
@@ -2474,6 +3184,26 @@ impl IvmRuntime {
             }
             validate_collect_by_key_types(&input_output, &group_field_indices)?;
             let slots = collect_by_slots(&input_output, &collect.slots, &group_field_indices, 1)?;
+            let order_field_indices = if collect.order_cols.is_empty() {
+                group_field_indices.clone()
+            } else {
+                collect
+                    .order_cols
+                    .iter()
+                    .map(|order| resolve_field_ref(&input_output, &order.field))
+                    .collect::<Result<Vec<_>, _>>()?
+            };
+            let tie_field_indices = if collect.tie_cols.is_empty() {
+                group_field_indices.clone()
+            } else {
+                collect
+                    .tie_cols
+                    .iter()
+                    .map(|field| resolve_field_ref(&input_output, field))
+                    .collect::<Result<Vec<_>, _>>()?
+            };
+            validate_collect_by_key_types(&input_output, &order_field_indices)?;
+            validate_collect_by_key_types(&input_output, &tie_field_indices)?;
             let group_fields = group_field_indices
                 .iter()
                 .map(|field| field_name_at(&input_output, *field))
@@ -2493,12 +3223,44 @@ impl IvmRuntime {
                         tuple_fields: Vec::new(),
                         occurrence_id_fields: Vec::new(),
                         occurrence_id_field_indices: Vec::new(),
-                        order_fields: Vec::new(),
-                        tie_fields: Vec::new(),
-                        sort_field_indices: Vec::new(),
-                        sort_directions: Vec::new(),
-                        offset: 0,
-                        limit: TopByLimit::Unbounded,
+                        order_fields: order_field_indices
+                            .iter()
+                            .enumerate()
+                            .map(|(index, field_idx)| {
+                                Ok(TopByOrderField {
+                                    field: field_name_at(&input_output, *field_idx)?,
+                                    direction: collect
+                                        .order_cols
+                                        .get(index)
+                                        .map_or(TopByDirection::Asc, |order| order.direction),
+                                })
+                            })
+                            .collect::<Result<Vec<_>, IvmRuntimeError>>()?,
+                        tie_fields: tie_field_indices
+                            .iter()
+                            .map(|field| field_name_at(&input_output, *field))
+                            .collect::<Result<Vec<_>, _>>()?,
+                        sort_field_indices: order_field_indices
+                            .iter()
+                            .chain(&tie_field_indices)
+                            .copied()
+                            .collect(),
+                        sort_directions: order_field_indices
+                            .iter()
+                            .enumerate()
+                            .map(|(index, _)| {
+                                collect
+                                    .order_cols
+                                    .get(index)
+                                    .map_or(TopByDirection::Asc, |order| order.direction)
+                            })
+                            .chain(std::iter::repeat_n(
+                                TopByDirection::Asc,
+                                tie_field_indices.len(),
+                            ))
+                            .collect(),
+                        offset: collect.offset,
+                        limit: collect.limit,
                     })),
                     [compiled_input.node],
                     output,
@@ -2506,7 +3268,11 @@ impl IvmRuntime {
                 NodeDurability::Ephemeral,
             );
             self.initialize_node_runtime(node);
-            return Ok(CompiledNode { output, node });
+            return Ok(CompiledNode {
+                output,
+                node,
+                root_ordering_node: compiled_input.root_ordering_node,
+            });
         }
         let child_fields = collect_by_projections(&input_output, &collect.child_fields)?;
         let tuple_fields = collect_by_projections(&input_output, &collect.tuple_fields)?;
@@ -2621,7 +3387,13 @@ impl IvmRuntime {
             NodeDurability::Ephemeral,
         );
         self.initialize_node_runtime(node);
-        Ok(CompiledNode { output, node })
+        Ok(CompiledNode {
+            output,
+            node,
+            // CollectBy changes representation, not the identity/order of
+            // public roots selected upstream.
+            root_ordering_node: compiled_input.root_ordering_node,
+        })
     }
 
     fn add_dedup_schema_index(
@@ -2630,12 +3402,20 @@ impl IvmRuntime {
         index: &IndexSchema,
     ) -> Result<NodeId, IvmRuntimeError> {
         self.logical_nodes_requested += 3;
-        let table_descriptor = table.record_schema();
+        let (table_descriptor, variant_projection) = if table.has_schema_variants() {
+            (
+                schema_index_input_descriptor(table, index)?,
+                Some(VariantProjectionTarget::SchemaIndex(index.name.clone())),
+            )
+        } else {
+            (table.record_schema(), None)
+        };
         let input = self.graph.dedup_node(
             NodeDescriptor::new(
                 OpType::TableSource(TableSourceOp {
                     table: table.name.clone(),
                     scan: None,
+                    variant_projection,
                 }),
                 [],
                 table_descriptor,
@@ -2647,6 +3427,7 @@ impl IvmRuntime {
         let CompiledNode {
             output: index_descriptor,
             node: index_by,
+            ..
         } = self.add_dedup_index_by_from_input(table, index, input, table_descriptor, None)?;
 
         let storage = DurableStorage {
@@ -2681,7 +3462,14 @@ impl IvmRuntime {
         index: &IndexSchema,
         scan: Option<StaticScanSpec>,
     ) -> Result<IndexSourceOp, IvmRuntimeError> {
-        let table_descriptor = table.record_schema();
+        let (table_descriptor, variant_projection) = if table.has_schema_variants() {
+            (
+                schema_index_input_descriptor(table, index)?,
+                Some(VariantProjectionTarget::SchemaIndex(index.name.clone())),
+            )
+        } else {
+            (table.record_schema(), None)
+        };
         let key_fields = index
             .columns
             .iter()
@@ -2712,6 +3500,8 @@ impl IvmRuntime {
         Ok(IndexSourceOp {
             table: table.name.clone(),
             index: index.name.clone(),
+            input_descriptor: table_descriptor,
+            variant_projection,
             key_fields,
             value_fields,
             unique: index.unique || index_key_covers_primary_key,
@@ -2787,6 +3577,7 @@ impl IvmRuntime {
         Ok(CompiledNode {
             output: index_descriptor,
             node,
+            root_ordering_node: None,
         })
     }
 }
@@ -3199,6 +3990,8 @@ pub struct RoutedMultisinkTerminal {
     pub sink: String,
     pub graph: GraphBuilder,
     pub route_fields: Vec<String>,
+    /// Binding descriptor positions paired with `route_fields`.
+    pub route_value_indices: Vec<usize>,
     pub public_fields: Vec<String>,
 }
 
@@ -3209,12 +4002,24 @@ impl RoutedMultisinkTerminal {
         route_fields: impl IntoIterator<Item = impl Into<String>>,
         public_fields: impl IntoIterator<Item = impl Into<String>>,
     ) -> Self {
+        let route_fields = route_fields.into_iter().map(Into::into).collect::<Vec<_>>();
+        let route_value_indices = (0..route_fields.len()).collect();
         Self {
             sink: sink.into(),
             graph,
-            route_fields: route_fields.into_iter().map(Into::into).collect(),
+            route_fields,
+            route_value_indices,
             public_fields: public_fields.into_iter().map(Into::into).collect(),
         }
+    }
+
+    /// Select non-prefix binding values for the terminal's route predicates.
+    pub fn with_route_value_indices(
+        mut self,
+        route_value_indices: impl IntoIterator<Item = usize>,
+    ) -> Self {
+        self.route_value_indices = route_value_indices.into_iter().collect();
+        self
     }
 }
 
@@ -3258,6 +4063,9 @@ impl Subscription {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MultisinkDeltas {
     pub sinks: BTreeMap<String, RecordDeltas>,
+    /// Structured terminal operations are a subscription-boundary output.
+    /// Relational operators never consume this map.
+    pub terminal_sinks: BTreeMap<String, TerminalDeltas>,
 }
 
 #[derive(Debug)]
@@ -3277,11 +4085,259 @@ impl QueuedMultisinkDeltas {
 impl MultisinkDeltas {
     pub fn is_empty(&self) -> bool {
         self.sinks.values().all(RecordDeltas::is_empty)
+            && self.terminal_sinks.values().all(TerminalDeltas::is_empty)
     }
 
     pub fn get(&self, sink: &str) -> Option<&RecordDeltas> {
         self.sinks.get(sink)
     }
+}
+
+/// Incremental edits to a materialized terminal tree. Paths alternate public
+/// collection fields and stable descendant keys, starting below `root_key`.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct TerminalDeltas {
+    pub operations: Vec<TerminalOperation>,
+}
+
+impl TerminalDeltas {
+    pub fn is_empty(&self) -> bool {
+        self.operations.is_empty()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct TerminalOperation {
+    pub root_key: Vec<u8>,
+    pub path: Vec<TerminalPathSegment>,
+    pub edit: TerminalEdit,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub enum TerminalPathSegment {
+    Collection(String),
+    Key(Vec<u8>),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub enum TerminalEdit {
+    Insert {
+        index: usize,
+        key: Vec<u8>,
+        value: Vec<u8>,
+    },
+    Update {
+        key: Vec<u8>,
+        value: Vec<u8>,
+    },
+    Remove {
+        key: Vec<u8>,
+    },
+    Move {
+        key: Vec<u8>,
+        index: usize,
+    },
+}
+
+fn terminal_deltas_from_record_deltas(
+    deltas: &RecordDeltas,
+) -> Result<TerminalDeltas, IvmRuntimeError> {
+    let mut before = BTreeMap::<Vec<u8>, OwnedRecord>::new();
+    let mut after = BTreeMap::<Vec<u8>, OwnedRecord>::new();
+    for delta in &deltas.deltas {
+        let key = encoded_record_key_part(deltas.descriptor, delta.raw(), &[0])?;
+        let record = OwnedRecord::new(delta.raw().to_vec(), deltas.descriptor);
+        if delta.weight < 0 {
+            before.insert(key, record);
+        } else if delta.weight > 0 {
+            after.insert(key, record);
+        }
+    }
+
+    let mut keys = BTreeSet::new();
+    keys.extend(before.keys().cloned());
+    keys.extend(after.keys().cloned());
+    let mut operations = Vec::new();
+    for key in keys {
+        match (before.get(&key), after.get(&key)) {
+            (None, Some(record)) => operations.push(TerminalOperation {
+                root_key: key.clone(),
+                path: Vec::new(),
+                edit: TerminalEdit::Insert {
+                    index: 0,
+                    key: key.clone(),
+                    value: record.raw().to_vec(),
+                },
+            }),
+            (Some(_), None) => operations.push(TerminalOperation {
+                root_key: key.clone(),
+                path: Vec::new(),
+                edit: TerminalEdit::Remove { key: key.clone() },
+            }),
+            (Some(before), Some(after)) => {
+                diff_terminal_record(&key, Vec::new(), before, after, &mut operations)?
+            }
+            (None, None) => unreachable!("terminal key came from before or after"),
+        }
+    }
+    Ok(TerminalDeltas { operations })
+}
+
+fn order_terminal_snapshot(
+    terminal: &mut RecordDeltas,
+    ordering: &RecordDeltas,
+) -> Result<(), IvmRuntimeError> {
+    let mut positions = BTreeMap::new();
+    for (index, delta) in ordering
+        .deltas
+        .iter()
+        .filter(|delta| delta.weight > 0)
+        .enumerate()
+    {
+        let key = encoded_record_key_part(ordering.descriptor, delta.raw(), &[0])?;
+        positions.entry(key).or_insert(index);
+    }
+    let mut keyed = terminal
+        .deltas
+        .drain(..)
+        .map(|delta| {
+            let key = encoded_record_key_part(terminal.descriptor, delta.raw(), &[0])?;
+            let position = positions.get(&key).copied().unwrap_or(usize::MAX);
+            Ok((position, key, delta))
+        })
+        .collect::<Result<Vec<_>, IvmRuntimeError>>()?;
+    keyed.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+    terminal.deltas = keyed.into_iter().map(|(_, _, delta)| delta).collect();
+    Ok(())
+}
+
+fn diff_terminal_record(
+    root_key: &[u8],
+    path: Vec<TerminalPathSegment>,
+    before: &OwnedRecord,
+    after: &OwnedRecord,
+    operations: &mut Vec<TerminalOperation>,
+) -> Result<(), IvmRuntimeError> {
+    let before_values = before
+        .to_values()
+        .map_err(IvmRuntimeError::RecordEncoding)?;
+    let after_values = after.to_values().map_err(IvmRuntimeError::RecordEncoding)?;
+    let mut scalar_changed = false;
+    for (index, (before_value, after_value)) in before_values.iter().zip(&after_values).enumerate()
+    {
+        let descriptor_field = after
+            .descriptor()
+            .fields()
+            .get(index)
+            .ok_or(IvmRuntimeError::GraphFieldIndexOutOfBounds(index))?;
+        match (before_value, after_value) {
+            (Value::Array(before_children), Value::Array(after_children))
+                if matches!(
+                    &descriptor_field.value_type,
+                    ValueType::Array(inner) if matches!(inner.as_ref(), ValueType::Record(_))
+                ) =>
+            {
+                let field = descriptor_field
+                    .name
+                    .clone()
+                    .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound("<unnamed>".to_owned()))?;
+                let mut child_path = path.clone();
+                child_path.push(TerminalPathSegment::Collection(field));
+                diff_terminal_collection(
+                    root_key,
+                    child_path,
+                    before_children,
+                    after_children,
+                    operations,
+                )?;
+            }
+            _ if before_value != after_value => scalar_changed = true,
+            _ => {}
+        }
+    }
+    if scalar_changed {
+        let key = encoded_record_key_part(*after.descriptor(), after.raw(), &[0])?;
+        operations.push(TerminalOperation {
+            root_key: root_key.to_vec(),
+            path,
+            edit: TerminalEdit::Update {
+                key,
+                value: after.raw().to_vec(),
+            },
+        });
+    }
+    Ok(())
+}
+
+fn diff_terminal_collection(
+    root_key: &[u8],
+    path: Vec<TerminalPathSegment>,
+    before_values: &[Value],
+    after_values: &[Value],
+    operations: &mut Vec<TerminalOperation>,
+) -> Result<(), IvmRuntimeError> {
+    let children =
+        |values: &[Value]| -> Result<BTreeMap<Vec<u8>, (usize, OwnedRecord)>, IvmRuntimeError> {
+            let mut children = BTreeMap::new();
+            for (index, value) in values.iter().enumerate() {
+                let Value::Record(record) = value else {
+                    return Err(IvmRuntimeError::InvalidCollectBy(
+                        "structured terminal arrays must contain records".to_owned(),
+                    ));
+                };
+                let key = encoded_record_key_part(*record.descriptor(), record.raw(), &[0])?;
+                if children.insert(key, (index, record.clone())).is_some() {
+                    return Err(IvmRuntimeError::DuplicateCollectByOccurrenceId);
+                }
+            }
+            Ok(children)
+        };
+    let before = children(before_values)?;
+    let after = children(after_values)?;
+    let mut keys = BTreeSet::new();
+    keys.extend(before.keys().cloned());
+    keys.extend(after.keys().cloned());
+    for key in keys {
+        match (before.get(&key), after.get(&key)) {
+            (None, Some((index, record))) => operations.push(TerminalOperation {
+                root_key: root_key.to_vec(),
+                path: path.clone(),
+                edit: TerminalEdit::Insert {
+                    index: *index,
+                    key: key.clone(),
+                    value: record.raw().to_vec(),
+                },
+            }),
+            (Some(_), None) => operations.push(TerminalOperation {
+                root_key: root_key.to_vec(),
+                path: path.clone(),
+                edit: TerminalEdit::Remove { key: key.clone() },
+            }),
+            (Some((before_index, before_record)), Some((after_index, after_record))) => {
+                if before_index != after_index {
+                    operations.push(TerminalOperation {
+                        root_key: root_key.to_vec(),
+                        path: path.clone(),
+                        edit: TerminalEdit::Move {
+                            key: key.clone(),
+                            index: *after_index,
+                        },
+                    });
+                }
+                let mut descendant_path = path.clone();
+                descendant_path.push(TerminalPathSegment::Key(key));
+                diff_terminal_record(
+                    root_key,
+                    descendant_path,
+                    before_record,
+                    after_record,
+                    operations,
+                )?;
+            }
+            (None, None) => unreachable!("child key came from before or after"),
+        }
+    }
+    Ok(())
 }
 
 /// Receiving end of a live multisink graph subscription.
@@ -3361,6 +4417,9 @@ impl PredicateExpr {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TableDelta {
     pub table: String,
+    /// Table-local discriminator selecting the descriptor for every encoded
+    /// payload in this homogeneous delta group.
+    pub schema_version: u64,
     pub descriptor: RecordDescriptor,
     pub deltas: Vec<RecordDelta>,
 }
@@ -3451,6 +4510,12 @@ pub(super) struct BindingDelta {
 struct CompiledNode {
     output: RecordDescriptor,
     node: NodeId,
+    /// The `TopBy` node that defines ordering of public terminal roots.
+    ///
+    /// This is explicit lowering metadata: walking graph ancestors is
+    /// ambiguous once a structured plan contains independently ordered nested
+    /// collections.
+    root_ordering_node: Option<NodeId>,
 }
 
 /// Descriptor plus a batch of weighted encoded record changes.
@@ -3522,27 +4587,7 @@ pub(super) fn record_store_for_table<'a, S>(
 where
     S: OrderedKvStorage,
 {
-    if is_windowed_history_table(&table.name)
-        && let Some(primary_key) = &table.primary_key
-    {
-        RecordStore::new_windowed(
-            storage,
-            &table.name,
-            primary_key_descriptor(primary_key),
-            descriptor,
-        )
-    } else {
-        RecordStore::new(storage, &table.name, descriptor)
-    }
-}
-
-fn primary_key_descriptor(primary_key: &PrimaryKey) -> RecordDescriptor {
-    RecordDescriptor::new(primary_key.columns.iter().map(|column| {
-        (
-            column.column.clone(),
-            column.key_type.column_type().value_type(),
-        )
-    }))
+    RecordStore::new(storage, &table.name, descriptor)
 }
 
 fn validate_public_output_fields(
@@ -3587,17 +4632,36 @@ fn bound_routed_multisink_graph(
     let predicates = terminal
         .route_fields
         .iter()
-        .zip(binding_values)
-        .map(|(field, value)| route_predicate(field, value))
+        .zip(&terminal.route_value_indices)
+        .map(|(field, index)| route_predicate(field, &binding_values[*index]))
         .collect::<Vec<_>>();
-    let graph = match predicates.as_slice() {
-        [] => terminal.graph.clone(),
-        [predicate] => terminal.graph.clone().filter(predicate.clone()),
-        _ => terminal
-            .graph
-            .clone()
-            .filter(PredicateExpr::And(predicates).canonicalize()),
+    let predicate = match predicates.as_slice() {
+        [] => None,
+        [predicate] => Some(predicate.clone()),
+        _ => Some(PredicateExpr::And(predicates).canonicalize()),
     };
+    if let GraphBuilder::CollectBy { input, collect } = &terminal.graph {
+        // CollectBy is terminal-only. Route its flat input before rendering and
+        // remove hidden route columns from the collector's own projection,
+        // rather than appending filter/project consumers after the collector.
+        let mut collect = collect.as_ref().clone();
+        collect
+            .parent_fields
+            .retain(|field| terminal.public_fields.contains(&field.output_name));
+        collect
+            .tuple_fields
+            .retain(|field| terminal.public_fields.contains(&field.output_name));
+        let input = predicate
+            .map(|predicate| input.as_ref().clone().filter(predicate))
+            .unwrap_or_else(|| input.as_ref().clone());
+        return GraphBuilder::CollectBy {
+            input: Box::new(input),
+            collect: Box::new(collect),
+        };
+    }
+    let graph = predicate
+        .map(|predicate| terminal.graph.clone().filter(predicate))
+        .unwrap_or_else(|| terminal.graph.clone());
     graph.project(terminal.public_fields.clone())
 }
 
@@ -4579,6 +5643,7 @@ impl NodeState {
     fn update_table_source(
         input: &TableSourceOp,
         schema: &DatabaseSchema,
+        variant_projections: &HashMap<VariantProjectionKey, VariantProjection>,
         output_desc: &RecordDescriptor,
         table_deltas: &[TableDelta],
     ) -> Result<RecordDeltas, IvmRuntimeError> {
@@ -4587,11 +5652,80 @@ impl NodeState {
             .ok_or_else(|| IvmRuntimeError::TableNotFound(input.table.clone()))?;
         let primary_key_fields = primary_key_field_indices(table_schema, output_desc)?;
         let mut deltas = Vec::new();
+        let projection = input
+            .variant_projection
+            .as_ref()
+            .map(|target| {
+                variant_projections
+                    .get(&VariantProjectionKey {
+                        table: input.table.clone(),
+                        target: target.clone(),
+                    })
+                    .ok_or_else(|| IvmRuntimeError::VariantProjectionNotFound {
+                        table: input.table.clone(),
+                        target: variant_projection_target_name(target).to_owned(),
+                    })
+            })
+            .transpose()?;
         for delta in table_deltas
             .iter()
             .filter(|delta| delta.table == input.table)
         {
-            for record_delta in &delta.deltas {
+            let projected;
+            let source_deltas = if let Some(projection) = projection {
+                if projection.output != *output_desc {
+                    return Err(IvmRuntimeError::GraphOutputMismatch);
+                }
+                let case = projection.cases.get(&delta.schema_version).ok_or_else(|| {
+                    IvmRuntimeError::VariantProjectionCaseNotFound {
+                        table: input.table.clone(),
+                        target: input
+                            .variant_projection
+                            .as_ref()
+                            .map(variant_projection_target_name)
+                            .unwrap_or_default()
+                            .to_owned(),
+                        version: delta.schema_version,
+                    }
+                })?;
+                if case.source() != delta.descriptor {
+                    return Err(IvmRuntimeError::VariantProjectionSourceMismatch {
+                        table: input.table.clone(),
+                        target: input
+                            .variant_projection
+                            .as_ref()
+                            .map(variant_projection_target_name)
+                            .unwrap_or_default()
+                            .to_owned(),
+                        version: delta.schema_version,
+                    });
+                }
+                match case {
+                    VariantProjectionCase::Project {
+                        project,
+                        raw_projection,
+                        ..
+                    } => {
+                        projected = Self::update_map_project(
+                            project,
+                            *output_desc,
+                            &RecordDeltas {
+                                descriptor: delta.descriptor,
+                                deltas: delta.deltas.clone(),
+                            },
+                            raw_projection.as_deref(),
+                        )?;
+                        &projected.deltas
+                    }
+                    VariantProjectionCase::Ignore { .. } => continue,
+                }
+            } else {
+                if delta.descriptor != *output_desc {
+                    return Err(IvmRuntimeError::GraphOutputMismatch);
+                }
+                &delta.deltas
+            };
+            for record_delta in source_deltas {
                 if let Some(scan) = &input.scan {
                     let key = primary_key_value_bytes(
                         output_desc,
@@ -4613,6 +5747,8 @@ impl NodeState {
 
     fn update_index_source<S>(
         input: &IndexSourceOp,
+        schema: &DatabaseSchema,
+        variant_projections: &HashMap<VariantProjectionKey, VariantProjection>,
         output_desc: &RecordDescriptor,
         table_deltas: &[TableDelta],
         storage: Option<&S>,
@@ -4657,17 +5793,18 @@ impl NodeState {
             store_value: input.store_value,
             scan: input.scan.clone(),
         };
-        let mut deltas = Vec::new();
-        for table_delta in table_deltas
-            .iter()
-            .filter(|table_delta| table_delta.table == input.table)
-        {
-            deltas.extend(apply_index_by(
-                &index_by,
-                &table_delta.descriptor,
-                &table_delta.deltas,
-            )?);
-        }
+        let source = Self::update_table_source(
+            &TableSourceOp {
+                table: input.table.clone(),
+                scan: None,
+                variant_projection: input.variant_projection.clone(),
+            },
+            schema,
+            variant_projections,
+            &input.input_descriptor,
+            table_deltas,
+        )?;
+        let deltas = apply_index_by(&index_by, &input.input_descriptor, &source.deltas)?;
         Ok(RecordDeltas {
             descriptor: *output_desc,
             deltas,
@@ -4927,7 +6064,17 @@ enum OperatorState {
     SemiJoin(AntiJoinState),
     AntiJoin(AntiJoinState),
     Recursive(AsOf<RecursiveState, Tick>),
+    CollectBy(CollectByIncrementalState),
 }
+
+#[derive(Clone, Debug, Default)]
+struct CollectByIncrementalState {
+    groups: CollectByGroups,
+    roots: BTreeMap<CollectByOrderKey, i64>,
+}
+
+type CollectByOrderKey = (Vec<TopBySortPart>, Bytes);
+type CollectByGroups = BTreeMap<Vec<u8>, BTreeMap<CollectByOrderKey, i64>>;
 
 fn operator_state_for(operator: &OpType) -> OperatorState {
     match operator {
@@ -4935,6 +6082,7 @@ fn operator_state_for(operator: &OpType) -> OperatorState {
         OpType::SemiJoin(_) => OperatorState::SemiJoin(AntiJoinState),
         OpType::AntiJoin(_) => OperatorState::AntiJoin(AntiJoinState),
         OpType::Recursive(_) => OperatorState::Recursive(AsOf::new(RecursiveState::default())),
+        OpType::CollectBy(_) => OperatorState::CollectBy(CollectByIncrementalState::default()),
         _ => OperatorState::Stateless,
     }
 }
@@ -5010,9 +6158,16 @@ fn validate_arg_by_primary_key_indices(
 }
 
 /// Single-tick evaluator over a deduplicated graph.
+#[derive(Clone, Debug, Default)]
+struct RootOrderingWindows {
+    before: BTreeMap<Vec<u8>, usize>,
+    after: BTreeMap<Vec<u8>, usize>,
+}
+
 struct TickEvaluator<'a, S> {
     schema: &'a DatabaseSchema,
     graph: &'a IvmGraph,
+    variant_projections: &'a HashMap<VariantProjectionKey, VariantProjection>,
     table_deltas: &'a [TableDelta],
     binding_deltas: &'a [BindingDelta],
     binding_snapshots: &'a HashMap<String, RecordDeltas>,
@@ -5028,6 +6183,11 @@ struct TickEvaluator<'a, S> {
     storage: Option<&'a S>,
     context: EvalContext,
     metrics: &'a mut TickMetrics,
+    terminal_deltas: HashMap<NodeId, TerminalDeltas>,
+    /// Exact pre/post windows captured by TopBy evaluation for terminal
+    /// ordering. Kept per node so nested collection ordering cannot be
+    /// confused with public root ordering.
+    root_ordering_windows: HashMap<NodeId, RootOrderingWindows>,
 }
 
 /// Borrowed runtime pieces used by recursive evaluation to run child graphs.
@@ -5035,6 +6195,7 @@ struct TickEvaluator<'a, S> {
 pub(super) struct GraphRuntimeView<'a, S> {
     pub(super) schema: &'a DatabaseSchema,
     pub(super) graph: &'a IvmGraph,
+    pub(super) variant_projections: &'a HashMap<VariantProjectionKey, VariantProjection>,
     pub(super) table_deltas: &'a [TableDelta],
     pub(super) binding_deltas: &'a [BindingDelta],
     pub(super) binding_snapshots: &'a HashMap<String, RecordDeltas>,
@@ -5056,6 +6217,7 @@ pub(super) struct GraphRuntimeView<'a, S> {
 fn graph_runtime_view<'a, S>(
     schema: &'a DatabaseSchema,
     graph: &'a IvmGraph,
+    variant_projections: &'a HashMap<VariantProjectionKey, VariantProjection>,
     table_deltas: &'a [TableDelta],
     binding_deltas: &'a [BindingDelta],
     binding_snapshots: &'a HashMap<String, RecordDeltas>,
@@ -5075,6 +6237,7 @@ fn graph_runtime_view<'a, S>(
     GraphRuntimeView {
         schema,
         graph,
+        variant_projections,
         table_deltas,
         binding_deltas,
         binding_snapshots,
@@ -5107,6 +6270,7 @@ where
         let mut evaluator = TickEvaluator {
             schema: self.schema,
             graph: self.graph,
+            variant_projections: self.variant_projections,
             table_deltas: self.table_deltas,
             binding_deltas: self.binding_deltas,
             binding_snapshots: self.binding_snapshots,
@@ -5122,6 +6286,8 @@ where
             storage: Some(self.storage),
             context: EvalContext::with_binding(self.scope, sub_tick, binding, deltas),
             metrics: self.metrics,
+            terminal_deltas: HashMap::default(),
+            root_ordering_windows: HashMap::default(),
         };
         evaluator
             .update_node(node)
@@ -5141,6 +6307,7 @@ where
         let mut evaluator = TickEvaluator {
             schema: self.schema,
             graph: self.graph,
+            variant_projections: self.variant_projections,
             table_deltas,
             binding_deltas: self.binding_deltas,
             binding_snapshots: self.binding_snapshots,
@@ -5162,6 +6329,8 @@ where
                 ArrangementUpdateMode::Replace,
             ),
             metrics: self.metrics,
+            terminal_deltas: HashMap::default(),
+            root_ordering_windows: HashMap::default(),
         };
         evaluator
             .update_node(node)
@@ -5177,6 +6346,7 @@ where
         let mut evaluator = TickEvaluator {
             schema: self.schema,
             graph: self.graph,
+            variant_projections: self.variant_projections,
             table_deltas: self.table_deltas,
             binding_deltas: self.binding_deltas,
             binding_snapshots: self.binding_snapshots,
@@ -5200,6 +6370,8 @@ where
                 hydrate_arrangements: false,
             },
             metrics: self.metrics,
+            terminal_deltas: HashMap::default(),
+            root_ordering_windows: HashMap::default(),
         };
         evaluator
             .update_node(node)
@@ -5211,6 +6383,99 @@ impl<S> TickEvaluator<'_, S>
 where
     S: OrderedKvStorage,
 {
+    fn apply_root_ordering(
+        &self,
+        ordering_node: NodeId,
+        terminal: &mut TerminalDeltas,
+    ) -> Result<(), IvmRuntimeError> {
+        let Some(windows) = self.root_ordering_windows.get(&ordering_node) else {
+            return Ok(());
+        };
+        apply_root_ordering_operations(&windows.before, &windows.after, terminal);
+        Ok(())
+    }
+
+    fn take_terminal_deltas_for_output(
+        &mut self,
+        node: NodeId,
+    ) -> Result<Option<TerminalDeltas>, IvmRuntimeError> {
+        let mut pending = vec![node];
+        let mut seen = HashSet::new();
+        let mut fallback = None;
+        let mut has_public_root = false;
+        while let Some(node) = pending.pop() {
+            if !seen.insert(node) {
+                continue;
+            }
+            let graph_node = self
+                .graph
+                .node(node)
+                .ok_or(IvmRuntimeError::GraphNodeNotFound(node))?;
+            let is_public_root = matches!(
+                &graph_node.descriptor.operator,
+                OpType::CollectBy(collect_by) if collect_by.mode == CollectByMode::Root
+            );
+            has_public_root |= is_public_root;
+            if self.terminal_deltas.contains_key(&node) {
+                if is_public_root {
+                    return Ok(self.terminal_deltas.remove(&node));
+                }
+                fallback.get_or_insert(node);
+            }
+            pending.extend(graph_node.descriptor.inputs.iter().copied());
+        }
+        Ok((!has_public_root)
+            .then_some(fallback)
+            .flatten()
+            .and_then(|node| self.terminal_deltas.remove(&node)))
+    }
+
+    fn output_is_structured_collect_by(&self, node: NodeId) -> Result<bool, IvmRuntimeError> {
+        let mut pending = vec![node];
+        let mut seen = HashSet::new();
+        while let Some(node) = pending.pop() {
+            if !seen.insert(node) {
+                continue;
+            }
+            let node = self
+                .graph
+                .node(node)
+                .ok_or(IvmRuntimeError::GraphNodeNotFound(node))?;
+            match &node.descriptor.operator {
+                OpType::CollectBy(collect_by) => {
+                    return Ok(matches!(
+                        collect_by.mode,
+                        CollectByMode::Collect | CollectByMode::Root
+                    ));
+                }
+                _ => pending.extend(node.descriptor.inputs.iter().copied()),
+            }
+        }
+        Ok(false)
+    }
+
+    fn output_has_public_root(&self, node: NodeId) -> Result<bool, IvmRuntimeError> {
+        let mut pending = vec![node];
+        let mut seen = HashSet::new();
+        while let Some(node) = pending.pop() {
+            if !seen.insert(node) {
+                continue;
+            }
+            let node = self
+                .graph
+                .node(node)
+                .ok_or(IvmRuntimeError::GraphNodeNotFound(node))?;
+            if matches!(
+                &node.descriptor.operator,
+                OpType::CollectBy(collect_by) if collect_by.mode == CollectByMode::Root
+            ) {
+                return Ok(true);
+            }
+            pending.extend(node.descriptor.inputs.iter().copied());
+        }
+        Ok(false)
+    }
+
     fn node_depends_on_aggregate(&self, node: NodeId) -> Result<bool, IvmRuntimeError> {
         let mut ancestors = HashSet::new();
         self.graph.mark_ancestors(node, &mut ancestors);
@@ -5325,11 +6590,17 @@ where
             return Ok(result);
         }
         let result = match &graph_node.descriptor.operator {
-            OpType::TableSource(input) => {
-                NodeState::update_table_source(input, self.schema, &output_desc, self.table_deltas)
-            }
+            OpType::TableSource(input) => NodeState::update_table_source(
+                input,
+                self.schema,
+                self.variant_projections,
+                &output_desc,
+                self.table_deltas,
+            ),
             OpType::IndexSource(input) => NodeState::update_index_source(
                 input,
+                self.schema,
+                self.variant_projections,
                 &output_desc,
                 self.table_deltas,
                 self.storage,
@@ -5816,8 +7087,32 @@ where
             .unwrap_or_default();
         // Pull arrangements out while applying so both sides can be mutated
         // without aliasing the arrangement map.
-        let mut right_arrangement = if left_key == right_key {
-            left_arrangement.clone()
+        let shared_arrangement_keys = if left_key == right_key {
+            let mut keys = touched_join_keys(
+                &join.left_descriptor,
+                &left_key.fields,
+                left_delta,
+                join.comparison,
+            )?;
+            keys.extend(touched_join_keys(
+                &join.right_descriptor,
+                &right_key.fields,
+                right_delta,
+                join.comparison,
+            )?);
+            // `replace_keys` consumes each replacement bucket. A key can be
+            // present in both sides' deltas, so pass every touched key once.
+            keys.sort_unstable();
+            keys.dedup();
+            Some(keys)
+        } else {
+            None
+        };
+        let mut right_arrangement = if let Some(keys) = &shared_arrangement_keys {
+            AsOf {
+                value: left_arrangement.value().clone_keys(keys.iter()),
+                as_of: left_arrangement.as_of(),
+            }
         } else {
             self.arrangement_states
                 .remove(&right_key)
@@ -5839,8 +7134,10 @@ where
             self.arrangement_sub_tick(&right_key),
             self.context.arrangement_update_mode,
         )?;
-        if left_key == right_key {
-            left_arrangement = right_arrangement;
+        if let Some(keys) = shared_arrangement_keys {
+            left_arrangement
+                .value_mut()
+                .replace_keys(keys.iter(), right_arrangement.value().clone());
         } else {
             self.arrangement_states.insert(right_key, right_arrangement);
         }
@@ -6074,7 +7371,7 @@ where
         let mut touched_groups = BTreeMap::<Vec<u8>, Vec<RecordDelta>>::new();
         for delta in &input.deltas {
             let group_key =
-                encoded_record_key_part(output_desc, delta.raw(), spec.group_field_indices)?;
+                encoded_arrangement_key_part(output_desc, delta.raw(), spec.group_field_indices)?;
             touched_groups
                 .entry(group_key)
                 .or_default()
@@ -6194,6 +7491,9 @@ where
             let after = top_by_window_from_records(output_desc, after_records.clone(), top_by)?;
             let before =
                 top_by_window_before_from_deltas(output_desc, after_records, group_deltas, top_by)?;
+            let windows = self.root_ordering_windows.entry(node).or_default();
+            extend_root_window_positions(output_desc, &before, &mut windows.before)?;
+            extend_root_window_positions(output_desc, &after, &mut windows.after)?;
             output.extend(diff_record_windows(before, after));
         }
         self.arrangement_states.insert(arrangement_key, arrangement);
@@ -6218,6 +7518,42 @@ where
         if input.deltas.is_empty() || collect_by.limit == TopByLimit::Finite(0) {
             return Ok(RecordDeltas::empty(output_desc));
         }
+        let direct_tree_slot = match collect_by.slots.as_slice() {
+            [] if collect_by.limit == TopByLimit::Unbounded => None,
+            [slot] if slot.slots.is_empty() && slot.limit == TopByLimit::Unbounded => Some(slot),
+            _ => None,
+        };
+        if collect_by.mode == CollectByMode::Root
+            || (collect_by.mode == CollectByMode::Collect
+                && (collect_by.slots.is_empty() || direct_tree_slot.is_some())
+                && (collect_by.limit == TopByLimit::Unbounded || direct_tree_slot.is_some()))
+        {
+            let operator_key = self.operator_key(node)?;
+            let mut operator = self
+                .operator_states
+                .remove(&operator_key)
+                .unwrap_or_else(|| OperatorState::CollectBy(CollectByIncrementalState::default()));
+            let OperatorState::CollectBy(state) = &mut operator else {
+                return Err(IvmRuntimeError::NodeStateOperatorMismatch(node));
+            };
+            let operations = update_unbounded_collect_by_terminal_state(
+                input.descriptor,
+                output_desc,
+                collect_by,
+                direct_tree_slot,
+                state,
+                &input.deltas,
+                self.context.eval_mode == EvalMode::Tick,
+            )?;
+            self.operator_states.insert(operator_key, operator);
+            if self.context.eval_mode == EvalMode::Tick {
+                if !operations.is_empty() {
+                    self.terminal_deltas
+                        .insert(node, TerminalDeltas { operations });
+                }
+                return Ok(RecordDeltas::empty(output_desc));
+            }
+        }
         let [input_node] = self
             .graph
             .node(node)
@@ -6235,11 +7571,9 @@ where
             Arc::from(collect_by.group_fields.clone()),
             ValueComparison::Exact,
         )?;
-        // A CollectBy input is always a root graph node: validate this here as
-        // a runtime backstop to keep its materialization out of recursive state.
-        if arrangement_key.scope != ScopeId::root() {
-            return Err(IvmRuntimeError::CollectByMustBeTerminal);
-        }
+        // Structural validation permits only terminal filter/projection
+        // adapters above CollectBy, so a non-root evaluation scope here is a
+        // routed terminal adapter, never recursive relational state.
         let sub_tick = self.arrangement_sub_tick(&arrangement_key);
         let mut arrangement = self
             .arrangement_states
@@ -6292,9 +7626,16 @@ where
             let after_records = arrangement.value().records_for_key(&group_prefix);
             let before_records = records_before_deltas(after_records.clone(), &group_deltas);
             match collect_by.mode {
-                CollectByMode::Collect => {
+                CollectByMode::Collect | CollectByMode::Root => {
                     let render = |records: &[(Bytes, i64)]| {
-                        if collect_by.slots.is_empty() {
+                        if collect_by.mode == CollectByMode::Root {
+                            collect_by_root_from_records(
+                                input_desc,
+                                output_desc,
+                                collect_by,
+                                records,
+                            )
+                        } else if collect_by.slots.is_empty() {
                             collect_by_parent_from_records(
                                 input_desc,
                                 output_desc,
@@ -6380,6 +7721,15 @@ where
         input: &RecordDeltas,
     ) -> Result<RecordDeltas, IvmRuntimeError> {
         if input.deltas.is_empty() {
+            if self.context.eval_mode == EvalMode::Hydrate && aggregate.group_key.is_empty() {
+                let record =
+                    aggregate_row_from_records(input.descriptor, output_desc, aggregate, &[])?
+                        .ok_or(IvmRuntimeError::UnsupportedOperator)?;
+                return Ok(RecordDeltas {
+                    descriptor: output_desc,
+                    deltas: vec![RecordDelta { record, weight: 1 }],
+                });
+            }
             return Ok(RecordDeltas::empty(output_desc));
         }
         let [input_node] = self
@@ -6444,10 +7794,6 @@ where
             ValueComparison::Exact,
         )?;
         let sub_tick = self.arrangement_sub_tick(&arrangement_key);
-        let mut arrangement = self
-            .arrangement_states
-            .remove(&arrangement_key)
-            .unwrap_or_default();
         let mut touched_groups = BTreeMap::<Vec<u8>, Vec<RecordDelta>>::new();
         for delta in &input.deltas {
             let group_key =
@@ -6457,50 +7803,58 @@ where
                 .or_default()
                 .push(delta.clone());
         }
-        let before_groups =
-            if self.context.arrangement_update_mode == ArrangementUpdateMode::Replace {
-                BTreeMap::new()
-            } else {
-                touched_groups
-                    .keys()
-                    .map(|group| (group.clone(), arrangement.value().records_for_key(group)))
-                    .collect::<BTreeMap<_, _>>()
-            };
+        let current_arrangement = self.arrangement_states.get(&arrangement_key);
+        let current_as_of = current_arrangement.and_then(AsOf::as_of);
         let should_apply_arrangement = self.context.arrangement_update_mode
             == ArrangementUpdateMode::Replace
-            || arrangement.as_of() != Some(sub_tick);
+            || current_as_of != Some(sub_tick);
+        let replace_within_same_tick = self.context.arrangement_update_mode
+            == ArrangementUpdateMode::Replace
+            && current_as_of.is_some_and(|current| current.tick == sub_tick.tick);
+        if !replace_within_same_tick && current_as_of.is_some_and(|current| current > sub_tick) {
+            return Err(IvmRuntimeError::OutOfOrderRuntimeState {
+                current: format!("{:?}", current_as_of.expect("checked above")),
+                next: format!("{sub_tick:?}"),
+            });
+        }
+        let before_groups = if self.context.arrangement_update_mode
+            == ArrangementUpdateMode::Replace
+            || !should_apply_arrangement
+        {
+            BTreeMap::new()
+        } else {
+            touched_groups
+                .keys()
+                .map(|group| {
+                    (
+                        group.clone(),
+                        current_arrangement
+                            .map(|arrangement| arrangement.value().records_for_key(group))
+                            .unwrap_or_default(),
+                    )
+                })
+                .collect::<BTreeMap<_, _>>()
+        };
+        let mut staged_arrangement =
+            if self.context.arrangement_update_mode == ArrangementUpdateMode::Replace {
+                ArrangementState::default()
+            } else {
+                current_arrangement
+                    .map(|arrangement| arrangement.value().clone_keys(touched_groups.keys()))
+                    .unwrap_or_default()
+            };
         if should_apply_arrangement {
-            let replace_within_same_tick = self.context.arrangement_update_mode
-                == ArrangementUpdateMode::Replace
-                && arrangement
-                    .as_of()
-                    .is_some_and(|current| current.tick == sub_tick.tick);
-            if !replace_within_same_tick
-                && arrangement
-                    .as_of()
-                    .is_some_and(|current| current > sub_tick)
-            {
-                return Err(IvmRuntimeError::OutOfOrderRuntimeState {
-                    current: format!("{:?}", arrangement.as_of().expect("checked above")),
-                    next: format!("{sub_tick:?}"),
-                });
-            }
-            arrangement.value_mut().apply_record_deltas(
+            staged_arrangement.apply_record_deltas(
                 input_desc,
                 group_fields.as_ref(),
                 &input.deltas,
                 self.context.arrangement_update_mode,
             )?;
-            if replace_within_same_tick {
-                arrangement.replace_as_of_at_least(sub_tick);
-            } else {
-                arrangement.mark_forward_as_of(sub_tick)?;
-            }
         }
 
         let mut output = Vec::new();
         for group_prefix in touched_groups.keys() {
-            let after_records = arrangement.value().records_for_key(group_prefix);
+            let after_records = staged_arrangement.records_for_key(group_prefix);
             let after =
                 aggregate_row_from_records(input_desc, output_desc, aggregate, &after_records)?;
             let before_records = if let Some(records) = before_groups
@@ -6529,7 +7883,29 @@ where
                 output.push(RecordDelta { record, weight: 1 });
             }
         }
-        self.arrangement_states.insert(arrangement_key, arrangement);
+        if should_apply_arrangement {
+            match self.context.arrangement_update_mode {
+                ArrangementUpdateMode::Accumulate => {
+                    let arrangement = self.arrangement_states.entry(arrangement_key).or_default();
+                    arrangement.mark_forward_as_of(sub_tick)?;
+                    arrangement
+                        .value_mut()
+                        .replace_keys(touched_groups.keys(), staged_arrangement);
+                }
+                ArrangementUpdateMode::Replace => {
+                    let mut arrangement = AsOf {
+                        value: staged_arrangement,
+                        as_of: current_as_of,
+                    };
+                    if replace_within_same_tick {
+                        arrangement.replace_as_of_at_least(sub_tick);
+                    } else {
+                        arrangement.mark_forward_as_of(sub_tick)?;
+                    }
+                    self.arrangement_states.insert(arrangement_key, arrangement);
+                }
+            }
+        }
 
         Ok(RecordDeltas {
             descriptor: output_desc,
@@ -6663,6 +8039,7 @@ where
             let next = recompute_recursive(
                 self.schema,
                 self.graph,
+                self.variant_projections,
                 node,
                 recursive,
                 output_desc,
@@ -6680,6 +8057,7 @@ where
             let mut runtime = graph_runtime_view(
                 self.schema,
                 self.graph,
+                self.variant_projections,
                 self.table_deltas,
                 self.binding_deltas,
                 self.binding_snapshots,
@@ -6709,6 +8087,7 @@ where
             graph_runtime_view(
                 self.schema,
                 self.graph,
+                self.variant_projections,
                 self.table_deltas,
                 self.binding_deltas,
                 self.binding_snapshots,
@@ -6750,6 +8129,79 @@ where
             .first()
             .ok_or(IvmRuntimeError::GraphInputMissing(node))?;
         self.update_node(input)
+    }
+}
+
+fn extend_root_window_positions(
+    descriptor: RecordDescriptor,
+    window: &[WindowedRecord],
+    positions: &mut BTreeMap<Vec<u8>, usize>,
+) -> Result<(), IvmRuntimeError> {
+    let mut index = 0usize;
+    for (record, copies) in window {
+        let key = encoded_record_key_part(descriptor, record, &[0])?;
+        positions.entry(key).or_insert(index);
+        index = index.saturating_add(usize::try_from(*copies).unwrap_or(usize::MAX));
+    }
+    Ok(())
+}
+
+fn apply_root_ordering_operations(
+    before: &BTreeMap<Vec<u8>, usize>,
+    after: &BTreeMap<Vec<u8>, usize>,
+    terminal: &mut TerminalDeltas,
+) {
+    let mut current = before
+        .iter()
+        .map(|(key, index)| (*index, key.clone()))
+        .collect::<Vec<_>>();
+    current.sort_by_key(|(index, _)| *index);
+    let mut current = current.into_iter().map(|(_, key)| key).collect::<Vec<_>>();
+    for operation in &mut terminal.operations {
+        if !operation.path.is_empty() {
+            continue;
+        }
+        match &mut operation.edit {
+            TerminalEdit::Insert { index, key, .. } => {
+                if let Some(actual) = after.get(key) {
+                    *index = *actual;
+                }
+                if let Some(existing) = current.iter().position(|candidate| candidate == key) {
+                    current.remove(existing);
+                }
+                current.insert((*index).min(current.len()), key.clone());
+            }
+            TerminalEdit::Remove { key } => {
+                if let Some(existing) = current.iter().position(|candidate| candidate == key) {
+                    current.remove(existing);
+                }
+            }
+            TerminalEdit::Update { .. } | TerminalEdit::Move { .. } => {}
+        }
+    }
+
+    // Payload/nested edits are applied first. Positional edits follow, so a
+    // consumer never observes a move targeting a root that is not present.
+    let mut desired = after
+        .iter()
+        .map(|(key, index)| (*index, key.clone()))
+        .collect::<Vec<_>>();
+    desired.sort_by_key(|(index, _)| *index);
+    for (after_index, key) in desired {
+        if current.get(after_index) != Some(&key)
+            && let Some(existing) = current.iter().position(|candidate| candidate == &key)
+        {
+            current.remove(existing);
+            current.insert(after_index.min(current.len()), key.clone());
+            terminal.operations.push(TerminalOperation {
+                root_key: key.clone(),
+                path: Vec::new(),
+                edit: TerminalEdit::Move {
+                    key,
+                    index: after_index,
+                },
+            });
+        }
     }
 }
 
@@ -6827,7 +8279,7 @@ fn collect_by_descriptor(
         let index = resolve_field_ref(input, &field.field)?;
         output.push((
             field.output_name.clone(),
-            input.fields()[index].value_type.clone(),
+            collect_by_field_value_type(input, index, field)?,
         ));
     }
     let mut child_names = HashSet::new();
@@ -6841,7 +8293,7 @@ fn collect_by_descriptor(
         let index = resolve_field_ref(input, &field.field)?;
         child.push((
             field.output_name.clone(),
-            input.fields()[index].value_type.clone(),
+            collect_by_field_value_type(input, index, field)?,
         ));
     }
     output.push((
@@ -6851,6 +8303,28 @@ fn collect_by_descriptor(
         )))),
     ));
     Ok(RecordDescriptor::new(output))
+}
+
+fn collect_by_root_descriptor(
+    input: &RecordDescriptor,
+    parent_fields: &[CollectByField],
+) -> Result<RecordDescriptor, IvmRuntimeError> {
+    if parent_fields.is_empty() {
+        return Err(IvmRuntimeError::InvalidCollectBy(
+            "root collect requires a parent projection".into(),
+        ));
+    }
+    parent_fields
+        .iter()
+        .map(|field| {
+            let index = resolve_field_ref(input, &field.field)?;
+            Ok((
+                field.output_name.clone(),
+                collect_by_field_value_type(input, index, field)?,
+            ))
+        })
+        .collect::<Result<Vec<_>, IvmRuntimeError>>()
+        .map(RecordDescriptor::new)
 }
 
 fn collect_by_tree_descriptor(
@@ -6874,7 +8348,7 @@ fn collect_by_tree_descriptor(
         let index = resolve_field_ref(input, &field.field)?;
         output.push((
             field.output_name.clone(),
-            input.fields()[index].value_type.clone(),
+            collect_by_field_value_type(input, index, field)?,
         ));
     }
     for slot in slots {
@@ -6924,7 +8398,7 @@ fn collect_by_slot_descriptor(
         let index = resolve_field_ref(input, &field.field)?;
         output.push((
             field.output_name.clone(),
-            input.fields()[index].value_type.clone(),
+            collect_by_field_value_type(input, index, field)?,
         ));
     }
     for nested in &slot.slots {
@@ -7084,7 +8558,7 @@ fn collect_by_expand_descriptor(
             let index = resolve_field_ref(input, &field.field)?;
             Ok((
                 field.output_name.clone(),
-                input.fields()[index].value_type.clone(),
+                collect_by_field_value_type(input, index, field)?,
             ))
         })
         .collect::<Result<Vec<_>, IvmRuntimeError>>()
@@ -7102,36 +8576,56 @@ fn collect_by_projections(
                 field: field_ref_name(input, &field.field)?,
                 field_idx: resolve_field_ref(input, &field.field)?,
                 output_name: field.output_name.clone(),
+                unwrap_nullable: field.unwrap_nullable,
             })
         })
         .collect()
+}
+
+fn collect_by_field_value_type(
+    input: &RecordDescriptor,
+    index: usize,
+    field: &CollectByField,
+) -> Result<ValueType, IvmRuntimeError> {
+    let value_type = input.fields()[index].value_type.clone();
+    if !field.unwrap_nullable {
+        return Ok(value_type);
+    }
+    Ok(match value_type {
+        ValueType::Nullable(inner) => *inner,
+        value_type => value_type,
+    })
 }
 
 fn validate_collect_by_key_types(
     input: &RecordDescriptor,
     indices: &[usize],
 ) -> Result<(), IvmRuntimeError> {
+    fn ordered_scalar(value_type: &ValueType) -> bool {
+        match value_type {
+            ValueType::Nullable(inner) => ordered_scalar(inner),
+            ValueType::U8
+            | ValueType::U16
+            | ValueType::U32
+            | ValueType::U64
+            | ValueType::I32
+            | ValueType::I64
+            | ValueType::F64
+            | ValueType::Bool
+            | ValueType::String
+            | ValueType::Bytes
+            | ValueType::Uuid
+            | ValueType::Enum(_) => true,
+            _ => false,
+        }
+    }
     for &index in indices {
         let value_type = &input
             .fields()
             .get(index)
             .ok_or(IvmRuntimeError::GraphFieldIndexOutOfBounds(index))?
             .value_type;
-        let scalar = matches!(
-            value_type,
-            ValueType::U8
-                | ValueType::U16
-                | ValueType::U32
-                | ValueType::U64
-                | ValueType::I32
-                | ValueType::I64
-                | ValueType::F64
-                | ValueType::Bool
-                | ValueType::String
-                | ValueType::Bytes
-                | ValueType::Uuid
-                | ValueType::Enum(_)
-        );
+        let scalar = ordered_scalar(value_type);
         if value_type.contains_record() || !scalar {
             return Err(IvmRuntimeError::InvalidCollectBy(
                 "group, order, and tie fields must be scalar ordered values without records".into(),
@@ -7184,9 +8678,10 @@ fn validate_collect_by_terminality(graph: &GraphBuilder) -> Result<(), IvmRuntim
             validate_collect_by_terminality(seed)?;
             validate_collect_by_terminality(step)
         }
-        GraphBuilder::Filter { input, .. }
-        | GraphBuilder::Project { input, .. }
-        | GraphBuilder::UnwrapNullable { input, .. }
+        GraphBuilder::Filter { input, .. } | GraphBuilder::Project { input, .. } => {
+            validate_collect_by_terminality(input)
+        }
+        GraphBuilder::UnwrapNullable { input, .. }
         | GraphBuilder::Unnest { input, .. }
         | GraphBuilder::ArgMaxBy { input, .. }
         | GraphBuilder::ArgMinBy { input, .. }
@@ -7471,7 +8966,7 @@ fn aggregate_output_type(
 ) -> Result<ValueType, IvmRuntimeError> {
     Ok(match aggregate.function {
         AggregateFunction::Count => ValueType::U64,
-        AggregateFunction::Avg => ValueType::F64,
+        AggregateFunction::Avg => ValueType::Nullable(Box::new(ValueType::F64)),
         AggregateFunction::Sum => {
             let value_type = aggregate_expr_value_type(input, aggregate)?;
             match non_nullable_type(&value_type) {
@@ -7481,12 +8976,13 @@ fn aggregate_output_type(
                 | ValueType::U64
                 | ValueType::I32
                 | ValueType::I64
-                | ValueType::F64 => value_type,
+                | ValueType::F64 => nullable_type(&value_type),
                 _ => return Err(IvmRuntimeError::UnsupportedOperator),
             }
         }
         AggregateFunction::Min | AggregateFunction::Max => {
-            aggregate_expr_value_type(input, aggregate)?
+            let value_type = aggregate_expr_value_type(input, aggregate)?;
+            nullable_type(&value_type)
         }
     })
 }
@@ -7524,11 +9020,59 @@ fn non_nullable_type(value_type: &ValueType) -> &ValueType {
     }
 }
 
+/// Used for converting non-nullable column types to nullable column types when aggregating.
+fn nullable_type(value_type: &ValueType) -> ValueType {
+    ValueType::Nullable(Box::new(non_nullable_type(value_type).clone()))
+}
+
 fn index_record_descriptor() -> RecordDescriptor {
     static DESCRIPTOR: std::sync::OnceLock<RecordDescriptor> = std::sync::OnceLock::new();
     *DESCRIPTOR.get_or_init(|| {
         RecordDescriptor::new([("key", ValueType::Bytes), ("value", ValueType::Bytes)])
     })
+}
+
+fn variant_projection_target_name(target: &VariantProjectionTarget) -> &str {
+    match target {
+        VariantProjectionTarget::Named(name) | VariantProjectionTarget::SchemaIndex(name) => name,
+    }
+}
+
+fn schema_index_input_fields(
+    table: &TableSchema,
+    index: &IndexSchema,
+) -> Result<Vec<String>, IvmRuntimeError> {
+    let primary_key = table
+        .primary_key
+        .as_ref()
+        .ok_or_else(|| IvmRuntimeError::MissingPrimaryKey(table.name.clone()))?;
+    let catalogue = table.record_schema();
+    let mut fields = Vec::new();
+    for field in index
+        .columns
+        .iter()
+        .chain(primary_key.columns.iter().map(|column| &column.column))
+    {
+        if catalogue.field_index(field).is_none() {
+            return Err(IvmRuntimeError::GraphFieldNotFound(field.clone()));
+        }
+        if !fields.contains(field) {
+            fields.push(field.clone());
+        }
+    }
+    Ok(fields)
+}
+
+fn schema_index_input_descriptor(
+    table: &TableSchema,
+    index: &IndexSchema,
+) -> Result<RecordDescriptor, IvmRuntimeError> {
+    let catalogue = table.record_schema();
+    let fields = schema_index_input_fields(table, index)?
+        .into_iter()
+        .map(ProjectField::named)
+        .collect::<Vec<_>>();
+    project_descriptor(&catalogue, &fields)
 }
 
 fn apply_index_by(
@@ -8523,14 +10067,16 @@ fn aggregate_row_from_records(
             positive.push((record.as_ref(), *weight));
         }
     }
-    if total_weight == 0 {
+    if total_weight == 0 && !aggregate.group_key.is_empty() {
         return Ok(None);
     }
 
-    let first = BorrowedRecord::new(positive[0].0, &input_desc);
     let mut values = Vec::new();
-    for group_expr in &aggregate.group_key {
-        values.push(evaluate_aggregate_expr(&first, group_expr)?);
+    if let Some((first, _)) = positive.first() {
+        let first = BorrowedRecord::new(first, &input_desc);
+        for group_expr in &aggregate.group_key {
+            values.push(evaluate_aggregate_expr(&first, group_expr)?);
+        }
     }
     for aggregate_expr in &aggregate.aggregates {
         values.push(evaluate_aggregate(records, input_desc, aggregate_expr)?);
@@ -8572,10 +10118,14 @@ fn evaluate_aggregate(
             }
             Ok(Value::U64(count))
         }
-        AggregateFunction::Sum => aggregate_sum(records, input_desc, aggregate),
-        AggregateFunction::Avg => aggregate_avg(records, input_desc, aggregate),
+        AggregateFunction::Sum => {
+            aggregate_sum(records, input_desc, aggregate).map(nullable_aggregate_value)
+        }
+        AggregateFunction::Avg => {
+            aggregate_avg(records, input_desc, aggregate).map(nullable_aggregate_value)
+        }
         AggregateFunction::Min | AggregateFunction::Max => {
-            aggregate_extremum(records, input_desc, aggregate)
+            aggregate_extremum(records, input_desc, aggregate).map(nullable_aggregate_value)
         }
     }
 }
@@ -8584,7 +10134,7 @@ fn aggregate_sum(
     records: &[(Bytes, i64)],
     input_desc: RecordDescriptor,
     aggregate: &AggregateExpr,
-) -> Result<Value, IvmRuntimeError> {
+) -> Result<Option<Value>, IvmRuntimeError> {
     let Some(expr) = &aggregate.expression else {
         return Err(IvmRuntimeError::UnsupportedOperator);
     };
@@ -8632,23 +10182,28 @@ fn aggregate_sum(
             _ => return Err(IvmRuntimeError::UnsupportedOperator),
         }
     }
-    match kind.ok_or(IvmRuntimeError::UnsupportedOperator)? {
-        ValueType::U8 => u8::try_from(u64_sum)
+    match kind {
+        None => Ok(None),
+        Some(ValueType::U8) => u8::try_from(u64_sum)
             .map(Value::U8)
-            .map_err(|_| IvmRuntimeError::UnsupportedOperator),
-        ValueType::U16 => u16::try_from(u64_sum)
+            .map(Some)
+            .map_err(|_| IvmRuntimeError::AggregateOverflow),
+        Some(ValueType::U16) => u16::try_from(u64_sum)
             .map(Value::U16)
-            .map_err(|_| IvmRuntimeError::UnsupportedOperator),
-        ValueType::U32 => u32::try_from(u64_sum)
+            .map(Some)
+            .map_err(|_| IvmRuntimeError::AggregateOverflow),
+        Some(ValueType::U32) => u32::try_from(u64_sum)
             .map(Value::U32)
-            .map_err(|_| IvmRuntimeError::UnsupportedOperator),
-        ValueType::U64 => Ok(Value::U64(u64_sum)),
-        ValueType::I32 => i32::try_from(i64_sum)
+            .map(Some)
+            .map_err(|_| IvmRuntimeError::AggregateOverflow),
+        Some(ValueType::U64) => Ok(Some(Value::U64(u64_sum))),
+        Some(ValueType::I32) => i32::try_from(i64_sum)
             .map(Value::I32)
-            .map_err(|_| IvmRuntimeError::UnsupportedOperator),
-        ValueType::I64 => Ok(Value::I64(i64_sum)),
-        ValueType::F64 => Ok(Value::F64(f64_sum)),
-        _ => Err(IvmRuntimeError::UnsupportedOperator),
+            .map(Some)
+            .map_err(|_| IvmRuntimeError::AggregateOverflow),
+        Some(ValueType::F64) => Ok(Some(Value::F64(f64_sum))),
+        Some(ValueType::I64) => Ok(Some(Value::I64(i64_sum))),
+        Some(_) => Err(IvmRuntimeError::UnsupportedOperator),
     }
 }
 
@@ -8656,7 +10211,7 @@ fn aggregate_avg(
     records: &[(Bytes, i64)],
     input_desc: RecordDescriptor,
     aggregate: &AggregateExpr,
-) -> Result<Value, IvmRuntimeError> {
+) -> Result<Option<Value>, IvmRuntimeError> {
     let Some(expr) = &aggregate.expression else {
         return Err(IvmRuntimeError::UnsupportedOperator);
     };
@@ -8675,16 +10230,16 @@ fn aggregate_avg(
         count += *weight;
     }
     if count <= 0 {
-        return Err(IvmRuntimeError::UnsupportedOperator);
+        return Ok(None);
     }
-    Ok(Value::F64(sum / (count as f64)))
+    Ok(Some(Value::F64(sum / (count as f64))))
 }
 
 fn aggregate_extremum(
     records: &[(Bytes, i64)],
     input_desc: RecordDescriptor,
     aggregate: &AggregateExpr,
-) -> Result<Value, IvmRuntimeError> {
+) -> Result<Option<Value>, IvmRuntimeError> {
     let Some(expr) = &aggregate.expression else {
         return Err(IvmRuntimeError::UnsupportedOperator);
     };
@@ -8714,19 +10269,18 @@ fn aggregate_extremum(
             best = Some((value_key, record.clone(), value));
         }
     }
-    best.map(|(_, _, value)| value)
-        .ok_or(IvmRuntimeError::UnsupportedOperator)
+    Ok(best.map(|(_, _, value)| value))
 }
 
 fn add_weighted_u64(current: u64, value: u64, weight: i64) -> Result<u64, IvmRuntimeError> {
-    let weight = u64::try_from(weight).map_err(|_| IvmRuntimeError::UnsupportedOperator)?;
+    let weight = u64::try_from(weight).map_err(|_| IvmRuntimeError::AggregateOverflow)?;
     current
         .checked_add(
             value
                 .checked_mul(weight)
-                .ok_or(IvmRuntimeError::UnsupportedOperator)?,
+                .ok_or(IvmRuntimeError::AggregateOverflow)?,
         )
-        .ok_or(IvmRuntimeError::UnsupportedOperator)
+        .ok_or(IvmRuntimeError::AggregateOverflow)
 }
 
 fn add_weighted_i64(current: i64, value: i64, weight: i64) -> Result<i64, IvmRuntimeError> {
@@ -8734,9 +10288,9 @@ fn add_weighted_i64(current: i64, value: i64, weight: i64) -> Result<i64, IvmRun
         .checked_add(
             value
                 .checked_mul(weight)
-                .ok_or(IvmRuntimeError::UnsupportedOperator)?,
+                .ok_or(IvmRuntimeError::AggregateOverflow)?,
         )
-        .ok_or(IvmRuntimeError::UnsupportedOperator)
+        .ok_or(IvmRuntimeError::AggregateOverflow)
 }
 
 fn numeric_value_as_f64(value: &Value) -> Result<f64, IvmRuntimeError> {
@@ -8750,6 +10304,10 @@ fn numeric_value_as_f64(value: &Value) -> Result<f64, IvmRuntimeError> {
         Value::F64(value) => Ok(*value),
         _ => Err(IvmRuntimeError::UnsupportedOperator),
     }
+}
+
+fn nullable_aggregate_value(value: Option<Value>) -> Value {
+    Value::Nullable(value.map(Box::new))
 }
 
 fn unwrap_nullable_value(value: Value) -> Option<Value> {
@@ -8783,17 +10341,33 @@ fn evaluate_aggregate_expr(
 type SourceRecord = (Vec<u8>, Bytes);
 type WindowedRecord = (Bytes, i64);
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 struct TopBySortPart {
-    key: Vec<u8>,
+    key: Value,
     direction: TopByDirection,
 }
+
+impl PartialEq for TopBySortPart {
+    fn eq(&self, other: &Self) -> bool {
+        self.direction == other.direction
+            && compare_values_sql(&self.key, &other.key, ValueComparison::Exact)
+                == Some(std::cmp::Ordering::Equal)
+    }
+}
+
+impl Eq for TopBySortPart {}
 
 impl Ord for TopBySortPart {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         match self.direction {
-            TopByDirection::Asc => self.key.cmp(&other.key),
-            TopByDirection::Desc => other.key.cmp(&self.key),
+            TopByDirection::Asc => {
+                compare_values_sql(&self.key, &other.key, ValueComparison::Exact)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            }
+            TopByDirection::Desc => {
+                compare_values_sql(&other.key, &self.key, ValueComparison::Exact)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            }
         }
     }
 }
@@ -8952,6 +10526,378 @@ fn records_before_deltas(
     records.into_iter().collect()
 }
 
+fn collect_by_projection_value_type(
+    input_desc: RecordDescriptor,
+    field: &CollectByProjection,
+) -> Result<ValueType, IvmRuntimeError> {
+    let value_type = input_desc
+        .fields()
+        .get(field.field_idx)
+        .ok_or(IvmRuntimeError::GraphFieldIndexOutOfBounds(field.field_idx))?
+        .value_type
+        .clone();
+    if !field.unwrap_nullable {
+        return Ok(value_type);
+    }
+    Ok(match value_type {
+        ValueType::Nullable(inner) => *inner,
+        value_type => value_type,
+    })
+}
+
+fn collect_by_output_value(output_type: &ValueType, value: Value) -> Value {
+    match (output_type, value) {
+        (ValueType::Nullable(_), value @ Value::Nullable(_)) => value,
+        (ValueType::Nullable(_), value) => Value::Nullable(Some(Box::new(value))),
+        (_, value) => value,
+    }
+}
+
+fn collect_by_projected_value(
+    values: &[Value],
+    field: &CollectByProjection,
+) -> Result<Value, IvmRuntimeError> {
+    let value = values
+        .get(field.field_idx)
+        .cloned()
+        .ok_or(IvmRuntimeError::GraphFieldIndexOutOfBounds(field.field_idx))?;
+    if !field.unwrap_nullable {
+        return Ok(value);
+    }
+    match value {
+        Value::Nullable(Some(value)) => Ok(*value),
+        // A present child can legitimately carry an application NULL. Keep
+        // it saturated at NULL; descriptor validation will reject this value
+        // when the requested output field is non-nullable.
+        Value::Nullable(None) => Ok(Value::Nullable(None)),
+        value => Ok(value),
+    }
+}
+
+fn update_unbounded_collect_by_terminal_state(
+    input_desc: RecordDescriptor,
+    output_desc: RecordDescriptor,
+    collect_by: &CollectByOp,
+    direct_tree_slot: Option<&CollectBySlot>,
+    state: &mut CollectByIncrementalState,
+    deltas: &[RecordDelta],
+    emit: bool,
+) -> Result<Vec<TerminalOperation>, IvmRuntimeError> {
+    if collect_by.mode == CollectByMode::Root {
+        return update_collect_by_root_terminal_state(
+            input_desc,
+            output_desc,
+            collect_by,
+            state,
+            deltas,
+            emit,
+        );
+    }
+    if !emit {
+        state.groups.clear();
+        state.roots.clear();
+    }
+    let root_groups_before = direct_tree_slot
+        .is_none()
+        .then(|| state.groups.keys().cloned().collect::<BTreeSet<_>>());
+    let mut operations = Vec::new();
+    for delta in deltas {
+        let group_key =
+            encoded_record_key_part(input_desc, delta.raw(), &collect_by.group_field_indices)?;
+        if let Some(presence_field) = direct_tree_slot.and_then(|slot| slot.presence_field_index)
+            && !BorrowedRecord::new(delta.raw(), &input_desc).get_bool(presence_field)?
+        {
+            let state_key = (
+                collect_by_sort_key(input_desc, delta.raw(), collect_by)?,
+                delta.record.clone(),
+            );
+            let before_weight = state.roots.get(&state_key).copied().unwrap_or_default();
+            let after_weight = before_weight + delta.weight;
+            if after_weight == 0 {
+                state.roots.remove(&state_key);
+            } else {
+                state.roots.insert(state_key.clone(), after_weight);
+            }
+            if !emit || (before_weight > 0) == (after_weight > 0) {
+                continue;
+            }
+            if after_weight > 0 {
+                let index = state
+                    .roots
+                    .range(..state_key)
+                    .filter(|(_, weight)| **weight > 0)
+                    .count();
+                let record = collect_by_tree_parent_from_records(
+                    input_desc,
+                    output_desc,
+                    collect_by,
+                    &[(delta.record.clone(), 1)],
+                )?
+                .ok_or_else(|| {
+                    IvmRuntimeError::InvalidCollectBy(
+                        "root anchor did not render a terminal row".to_owned(),
+                    )
+                })?;
+                operations.push(TerminalOperation {
+                    root_key: group_key.clone(),
+                    path: Vec::new(),
+                    edit: TerminalEdit::Insert {
+                        index,
+                        key: group_key,
+                        value: record.to_vec(),
+                    },
+                });
+            } else {
+                operations.push(TerminalOperation {
+                    root_key: group_key.clone(),
+                    path: Vec::new(),
+                    edit: TerminalEdit::Remove { key: group_key },
+                });
+            }
+            continue;
+        }
+        let (sort_field_indices, sort_directions) = direct_tree_slot.map_or(
+            (
+                collect_by.sort_field_indices.as_slice(),
+                collect_by.sort_directions.as_slice(),
+            ),
+            |slot| {
+                (
+                    slot.sort_field_indices.as_slice(),
+                    slot.sort_directions.as_slice(),
+                )
+            },
+        );
+        let sort_key = collect_by_sort_key_for_fields(
+            input_desc,
+            delta.raw(),
+            sort_field_indices,
+            sort_directions,
+        )?;
+        let state_key = (sort_key, delta.record.clone());
+        let group = state.groups.entry(group_key.clone()).or_default();
+        let before_weight = group.get(&state_key).copied().unwrap_or_default();
+        let before_index = (before_weight > 0).then(|| {
+            group
+                .range(..state_key.clone())
+                .filter(|(_, weight)| **weight > 0)
+                .count()
+        });
+        let after_weight = before_weight + delta.weight;
+        if after_weight == 0 {
+            group.remove(&state_key);
+        } else {
+            group.insert(state_key.clone(), after_weight);
+        }
+        if !emit || (before_weight > 0) == (after_weight > 0) {
+            continue;
+        }
+        let source_values = BorrowedRecord::new(delta.raw(), &input_desc)
+            .to_values()
+            .map_err(IvmRuntimeError::RecordEncoding)?;
+        let child_fields = direct_tree_slot
+            .map(|slot| slot.child_fields.as_slice())
+            .unwrap_or(collect_by.child_fields.as_slice());
+        let child_descriptor = direct_tree_slot
+            .map(|slot| slot.child_descriptor)
+            .unwrap_or(collect_by.child_descriptor);
+        let collection_field = direct_tree_slot
+            .map(|slot| slot.collection_field.as_str())
+            .unwrap_or(collect_by.collection_field.as_str());
+        let child_values = child_fields
+            .iter()
+            .enumerate()
+            .map(|(index, field)| {
+                Ok::<Value, IvmRuntimeError>(collect_by_output_value(
+                    &child_descriptor.fields()[index].value_type,
+                    collect_by_projected_value(&source_values, field)?,
+                ))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let child_record: Vec<u8> = child_descriptor.create(&child_values)?;
+        let child_key = encoded_record_key_part(child_descriptor, &child_record, &[0])?;
+        let path = vec![TerminalPathSegment::Collection(collection_field.to_owned())];
+        if after_weight > 0 {
+            let index = group
+                .range(..state_key)
+                .filter(|(_, weight)| **weight > 0)
+                .count();
+            operations.push(TerminalOperation {
+                root_key: group_key,
+                path,
+                edit: TerminalEdit::Insert {
+                    index,
+                    key: child_key,
+                    value: child_record,
+                },
+            });
+        } else {
+            operations.push(TerminalOperation {
+                root_key: group_key,
+                path,
+                edit: TerminalEdit::Remove { key: child_key },
+            });
+            debug_assert!(before_index.is_some());
+        }
+    }
+    state.groups.retain(|_, group| !group.is_empty());
+    if let Some(root_groups_before) = root_groups_before {
+        let root_groups_after = state.groups.keys().cloned().collect::<BTreeSet<_>>();
+        operations.retain(|operation| {
+            root_groups_before.contains(&operation.root_key)
+                && root_groups_after.contains(&operation.root_key)
+        });
+        for root_key in root_groups_before.difference(&root_groups_after) {
+            operations.push(TerminalOperation {
+                root_key: root_key.clone(),
+                path: Vec::new(),
+                edit: TerminalEdit::Remove {
+                    key: root_key.clone(),
+                },
+            });
+        }
+        for root_key in root_groups_after.difference(&root_groups_before) {
+            let group = state
+                .groups
+                .get(root_key)
+                .expect("root key came from collect state");
+            let records = group
+                .iter()
+                .map(|((_, record), weight)| (record.clone(), *weight))
+                .collect::<Vec<_>>();
+            let record =
+                collect_by_parent_from_records(input_desc, output_desc, collect_by, &records)?
+                    .ok_or_else(|| {
+                        IvmRuntimeError::InvalidCollectBy(
+                            "new collect root did not render a terminal row".to_owned(),
+                        )
+                    })?;
+            let index = root_groups_after.range(..root_key.clone()).count();
+            operations.push(TerminalOperation {
+                root_key: root_key.clone(),
+                path: Vec::new(),
+                edit: TerminalEdit::Insert {
+                    index,
+                    key: root_key.clone(),
+                    value: record.to_vec(),
+                },
+            });
+        }
+    }
+    Ok(operations)
+}
+
+fn update_collect_by_root_terminal_state(
+    input_desc: RecordDescriptor,
+    output_desc: RecordDescriptor,
+    collect_by: &CollectByOp,
+    state: &mut CollectByIncrementalState,
+    deltas: &[RecordDelta],
+    emit: bool,
+) -> Result<Vec<TerminalOperation>, IvmRuntimeError> {
+    if !emit {
+        state.groups.clear();
+        state.roots.clear();
+    }
+    let mut before = BTreeMap::<Vec<u8>, Option<Bytes>>::new();
+    for delta in deltas {
+        let group_key =
+            encoded_record_key_part(input_desc, delta.raw(), &collect_by.group_field_indices)?;
+        if emit && !before.contains_key(&group_key) {
+            let rendered = state.groups.get(&group_key).map_or(Ok(None), |group| {
+                let records = group
+                    .iter()
+                    .map(|((_, record), weight)| (record.clone(), *weight))
+                    .collect::<Vec<_>>();
+                collect_by_root_from_records(input_desc, output_desc, collect_by, &records)
+            })?;
+            before.insert(group_key.clone(), rendered);
+        }
+        let sort_key = collect_by_sort_key(input_desc, delta.raw(), collect_by)?;
+        let state_key = (sort_key, delta.record.clone());
+        let group = state.groups.entry(group_key).or_default();
+        let weight = group.get(&state_key).copied().unwrap_or_default() + delta.weight;
+        if weight == 0 {
+            group.remove(&state_key);
+        } else {
+            group.insert(state_key, weight);
+        }
+    }
+    state.groups.retain(|_, group| !group.is_empty());
+    if !emit {
+        return Ok(Vec::new());
+    }
+
+    let mut operations = Vec::new();
+    for (root_key, before_record) in before {
+        let after_record = state.groups.get(&root_key).map_or(Ok(None), |group| {
+            let records = group
+                .iter()
+                .map(|((_, record), weight)| (record.clone(), *weight))
+                .collect::<Vec<_>>();
+            collect_by_root_from_records(input_desc, output_desc, collect_by, &records)
+        })?;
+        if before_record == after_record {
+            continue;
+        }
+        let edit = match (before_record, after_record) {
+            (None, Some(record)) => TerminalEdit::Insert {
+                index: state
+                    .groups
+                    .keys()
+                    .take_while(|key| *key < &root_key)
+                    .count(),
+                key: root_key.clone(),
+                value: record.to_vec(),
+            },
+            (Some(_), Some(record)) => TerminalEdit::Update {
+                key: root_key.clone(),
+                value: record.to_vec(),
+            },
+            (Some(_), None) => TerminalEdit::Remove {
+                key: root_key.clone(),
+            },
+            (None, None) => continue,
+        };
+        operations.push(TerminalOperation {
+            root_key,
+            path: Vec::new(),
+            edit,
+        });
+    }
+    Ok(operations)
+}
+
+fn collect_by_root_from_records(
+    input_desc: RecordDescriptor,
+    output_desc: RecordDescriptor,
+    collect_by: &CollectByOp,
+    records: &[(Bytes, i64)],
+) -> Result<Option<Bytes>, IvmRuntimeError> {
+    let Some((parent_record, _)) = records.iter().find(|(_, weight)| *weight > 0) else {
+        return Ok(None);
+    };
+    let parent_values = BorrowedRecord::new(parent_record, &input_desc)
+        .to_values()
+        .map_err(|error| {
+            IvmRuntimeError::InvalidCollectBy(format!("root input decode failed: {error}"))
+        })?;
+    let values = collect_by
+        .parent_fields
+        .iter()
+        .enumerate()
+        .map(|(index, field)| {
+            let value = collect_by_projected_value(&parent_values, field)?;
+            let output_type = &output_desc.fields()[index].value_type;
+            Ok::<Value, IvmRuntimeError>(collect_by_output_value(output_type, value))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let record = output_desc.create(&values).map_err(|error| {
+        IvmRuntimeError::InvalidCollectBy(format!("root record render failed: {error}"))
+    })?;
+    Ok(Some(record.into()))
+}
+
 fn collect_by_parent_from_records(
     input_desc: RecordDescriptor,
     output_desc: RecordDescriptor,
@@ -8967,11 +10913,11 @@ fn collect_by_parent_from_records(
     let mut values = collect_by
         .parent_fields
         .iter()
-        .map(|field| {
-            parent_values
-                .get(field.field_idx)
-                .cloned()
-                .ok_or(IvmRuntimeError::GraphFieldIndexOutOfBounds(field.field_idx))
+        .enumerate()
+        .map(|(index, field)| {
+            let value = collect_by_projected_value(&parent_values, field)?;
+            let output_type = &output_desc.fields()[index].value_type;
+            Ok::<Value, IvmRuntimeError>(collect_by_output_value(output_type, value))
         })
         .collect::<Result<Vec<_>, _>>()?;
     let window = collect_by_window_from_records(input_desc, records, collect_by)?;
@@ -8983,11 +10929,12 @@ fn collect_by_parent_from_records(
         let child_values = collect_by
             .child_fields
             .iter()
-            .map(|field| {
-                source_values
-                    .get(field.field_idx)
-                    .cloned()
-                    .ok_or(IvmRuntimeError::GraphFieldIndexOutOfBounds(field.field_idx))
+            .enumerate()
+            .map(|(index, field)| {
+                Ok::<Value, IvmRuntimeError>(collect_by_output_value(
+                    &collect_by.child_descriptor.fields()[index].value_type,
+                    collect_by_projected_value(&source_values, field)?,
+                ))
             })
             .collect::<Result<Vec<_>, _>>()?;
         let child = OwnedRecord::new(
@@ -9017,11 +10964,12 @@ fn collect_by_tree_parent_from_records(
     let mut values = collect_by
         .parent_fields
         .iter()
-        .map(|field| {
-            parent_values
-                .get(field.field_idx)
-                .cloned()
-                .ok_or(IvmRuntimeError::GraphFieldIndexOutOfBounds(field.field_idx))
+        .enumerate()
+        .map(|(index, field)| {
+            Ok::<Value, IvmRuntimeError>(collect_by_output_value(
+                &output_desc.fields()[index].value_type,
+                collect_by_projected_value(&parent_values, field)?,
+            ))
         })
         .collect::<Result<Vec<_>, _>>()?;
     values.extend(render_collect_by_slots(
@@ -9050,13 +10998,17 @@ fn render_collect_by_slots(
             // A nested flat association can repeat its owning child once for
             // every grandchild. Collapse those repetitions by the rendered
             // child projection before applying this slot's order/window.
-            let child_key_descriptor =
-                RecordDescriptor::new(slot.child_fields.iter().map(|field| {
-                    (
+            let child_key_fields = slot
+                .child_fields
+                .iter()
+                .map(|field| {
+                    Ok((
                         field.output_name.clone(),
-                        input_desc.fields()[field.field_idx].value_type.clone(),
-                    )
-                }));
+                        collect_by_projection_value_type(input_desc, field)?,
+                    ))
+                })
+                .collect::<Result<Vec<_>, IvmRuntimeError>>()?;
+            let child_key_descriptor = RecordDescriptor::new(child_key_fields);
             let mut candidates = BTreeMap::<Bytes, Bytes>::new();
             for (record, weight) in records {
                 if *weight <= 0
@@ -9076,12 +11028,7 @@ fn render_collect_by_slots(
                 let child_values = slot
                     .child_fields
                     .iter()
-                    .map(|field| {
-                        source_values
-                            .get(field.field_idx)
-                            .cloned()
-                            .ok_or(IvmRuntimeError::GraphFieldIndexOutOfBounds(field.field_idx))
-                    })
+                    .map(|field| collect_by_projected_value(&source_values, field))
                     .collect::<Result<Vec<_>, _>>()?;
                 candidates
                     .entry(child_key_descriptor.create(&child_values)?.into())
@@ -9100,11 +11047,12 @@ fn render_collect_by_slots(
                 let mut child_values = slot
                     .child_fields
                     .iter()
-                    .map(|field| {
-                        source_values
-                            .get(field.field_idx)
-                            .cloned()
-                            .ok_or(IvmRuntimeError::GraphFieldIndexOutOfBounds(field.field_idx))
+                    .enumerate()
+                    .map(|(index, field)| {
+                        Ok::<Value, IvmRuntimeError>(collect_by_output_value(
+                            &slot.child_descriptor.fields()[index].value_type,
+                            collect_by_projected_value(&source_values, field)?,
+                        ))
                     })
                     .collect::<Result<Vec<_>, _>>()?;
                 child_values.extend(render_collect_by_slots(
@@ -9171,9 +11119,9 @@ fn collect_by_expanded_window(
     for (record, copies) in window {
         let occurrence =
             encoded_record_key_part(input_desc, &record, &collect_by.occurrence_id_field_indices)?;
-        // A weighted duplicate or two different source rows that map to the
-        // same vector cannot be addressed by OutputOccurrenceId yet. Do not
-        // silently turn that ambiguity into one row.
+        // The complete typed occurrence carrier must distinguish every
+        // derivation. A residual weighted duplicate is therefore malformed;
+        // do not silently turn that ambiguity into one row.
         if copies != 1 || expanded.contains_key(&occurrence) {
             return Err(IvmRuntimeError::DuplicateCollectByOccurrenceId);
         }
@@ -9183,12 +11131,7 @@ fn collect_by_expanded_window(
         let tuple = collect_by
             .tuple_fields
             .iter()
-            .map(|field| {
-                values
-                    .get(field.field_idx)
-                    .cloned()
-                    .ok_or(IvmRuntimeError::GraphFieldIndexOutOfBounds(field.field_idx))
-            })
+            .map(|field| collect_by_projected_value(&values, field))
             .collect::<Result<Vec<_>, _>>()?;
         expanded.insert(occurrence, output_desc.create(&tuple)?.into());
     }
@@ -9257,12 +11200,18 @@ fn collect_by_sort_key_for_fields(
     sort_field_indices: &[usize],
     sort_directions: &[TopByDirection],
 ) -> Result<Vec<TopBySortPart>, IvmRuntimeError> {
+    let values = BorrowedRecord::new(record, &descriptor)
+        .to_values()
+        .map_err(IvmRuntimeError::RecordEncoding)?;
     sort_field_indices
         .iter()
         .zip(sort_directions)
         .map(|(field_idx, direction)| {
             Ok(TopBySortPart {
-                key: encoded_record_key_part(descriptor, record, &[*field_idx])?,
+                key: values
+                    .get(*field_idx)
+                    .cloned()
+                    .ok_or(IvmRuntimeError::GraphFieldIndexOutOfBounds(*field_idx))?,
                 direction: *direction,
             })
         })
@@ -9274,17 +11223,12 @@ fn top_by_sort_key(
     record: &[u8],
     top_by: &TopByOp,
 ) -> Result<Vec<TopBySortPart>, IvmRuntimeError> {
-    top_by
-        .sort_field_indices
-        .iter()
-        .zip(&top_by.sort_directions)
-        .map(|(field_idx, direction)| {
-            Ok(TopBySortPart {
-                key: encoded_record_key_part(descriptor, record, &[*field_idx])?,
-                direction: *direction,
-            })
-        })
-        .collect()
+    collect_by_sort_key_for_fields(
+        descriptor,
+        record,
+        &top_by.sort_field_indices,
+        &top_by.sort_directions,
+    )
 }
 
 fn diff_record_windows(
@@ -9292,23 +11236,29 @@ fn diff_record_windows(
     after: Vec<WindowedRecord>,
 ) -> Vec<RecordDelta> {
     let mut weights = BTreeMap::<Bytes, i64>::new();
-    for (record, copies) in before {
-        *weights.entry(record).or_default() -= copies;
+    for (record, copies) in &before {
+        *weights.entry(record.clone()).or_default() -= *copies;
     }
-    for (record, copies) in after {
-        *weights.entry(record).or_default() += copies;
+    for (record, copies) in &after {
+        *weights.entry(record.clone()).or_default() += *copies;
     }
-    let mut retractions = Vec::new();
-    let mut insertions = Vec::new();
-    for (record, weight) in weights {
-        match weight.cmp(&0) {
-            std::cmp::Ordering::Less => retractions.push(RecordDelta { record, weight }),
-            std::cmp::Ordering::Greater => insertions.push(RecordDelta { record, weight }),
-            std::cmp::Ordering::Equal => {}
+    let mut deltas = Vec::new();
+    for (record, _) in before {
+        if weights.get(&record).is_some_and(|weight| *weight < 0)
+            && let Some(weight) = weights.remove(&record)
+        {
+            deltas.push(RecordDelta { record, weight });
         }
     }
-    retractions.extend(insertions);
-    retractions
+    for (record, _) in after {
+        if weights.get(&record).is_some_and(|weight| *weight > 0)
+            && let Some(weight) = weights.remove(&record)
+        {
+            deltas.push(RecordDelta { record, weight });
+        }
+    }
+    debug_assert!(weights.values().all(|weight| *weight == 0));
+    deltas
 }
 
 pub(super) fn encoded_record_key_part(
@@ -9320,6 +11270,18 @@ pub(super) fn encoded_record_key_part(
     for field_idx in field_indices {
         let value = descriptor.get_idx(record, *field_idx)?;
         encode_runtime_primary_key_part(&mut key, &value)?;
+    }
+    Ok(key)
+}
+
+fn encoded_arrangement_key_part(
+    descriptor: RecordDescriptor,
+    record: &[u8],
+    field_indices: &[usize],
+) -> Result<Vec<u8>, IvmRuntimeError> {
+    let mut key = Vec::new();
+    for field_idx in field_indices {
+        encode_key_part(&mut key, &descriptor.get_idx(record, *field_idx)?)?;
     }
     Ok(key)
 }
@@ -9420,6 +11382,8 @@ fn encode_runtime_ordered_bytes(key: &mut Vec<u8>, value: &[u8]) {
 
 #[derive(Debug, Error)]
 pub enum IvmRuntimeError {
+    #[error("aggregate result exceeds its declared numeric width")]
+    AggregateOverflow,
     #[error("graph field not found: {0}")]
     GraphFieldNotFound(String),
     #[error("graph field index out of bounds: {0}")]
@@ -9466,6 +11430,8 @@ pub enum IvmRuntimeError {
     BindingSourceNotFound(String),
     #[error("binding source descriptor mismatch: {0}")]
     BindingSourceDescriptorMismatch(String),
+    #[error("duplicate schema version {version} for table {table}")]
+    DuplicateTableSchemaVersion { table: String, version: u64 },
     #[error(transparent)]
     RecordEncoding(#[from] records::Error),
     #[error("recursive node {node:?} exceeded iteration limit {max_iters}")]
@@ -9483,6 +11449,38 @@ pub enum IvmRuntimeError {
     },
     #[error("table not found: {0}")]
     TableNotFound(String),
+    #[error("table already exists: {0}")]
+    TableAlreadyExists(String),
+    #[error("field already exists in the live catalogue: {table}.{field}")]
+    TableFieldAlreadyExists { table: String, field: String },
+    #[error("unknown schema version {version} for table {table}")]
+    UnknownTableSchemaVersion { table: String, version: u64 },
+    #[error("variant projection not found: {table}.{target}")]
+    VariantProjectionNotFound { table: String, target: String },
+    #[error("schema-variant table requires a fixed-output projection: {0}")]
+    VariantProjectionRequired(String),
+    #[error("variant projection output descriptor mismatch: {table}.{target}")]
+    VariantProjectionOutputMismatch { table: String, target: String },
+    #[error(
+        "variant projection case already registered with different semantics: {table}.{target} version {version}"
+    )]
+    VariantProjectionCaseAlreadyRegistered {
+        table: String,
+        target: String,
+        version: u64,
+    },
+    #[error("variant projection case not found: {table}.{target} version {version}")]
+    VariantProjectionCaseNotFound {
+        table: String,
+        target: String,
+        version: u64,
+    },
+    #[error("variant projection source descriptor mismatch: {table}.{target} version {version}")]
+    VariantProjectionSourceMismatch {
+        table: String,
+        target: String,
+        version: u64,
+    },
     #[error("unique index violation: {index}")]
     UniqueIndexViolation { index: String },
     #[error("unsupported join key")]
@@ -9510,6 +11508,85 @@ mod tests {
         ColumnSchema, ColumnType, DatabaseSchema, IndexSchema, IntegerKeyType, PrimaryKey,
     };
     use crate::storage::{RecordStore, RocksDbStorage};
+
+    #[test]
+    fn collect_by_terminal_records_preserve_nullable_descriptor_wrappers() {
+        let uuid = uuid::Uuid::from_bytes([7; 16]);
+
+        assert_eq!(
+            collect_by_output_value(
+                &ValueType::Nullable(Box::new(ValueType::I32)),
+                Value::I32(3),
+            ),
+            Value::Nullable(Some(Box::new(Value::I32(3))))
+        );
+        assert_eq!(
+            collect_by_output_value(
+                &ValueType::Nullable(Box::new(ValueType::Uuid)),
+                Value::Uuid(uuid),
+            ),
+            Value::Nullable(Some(Box::new(Value::Uuid(uuid))))
+        );
+        assert_eq!(
+            collect_by_output_value(
+                &ValueType::Nullable(Box::new(ValueType::I32)),
+                Value::Nullable(None),
+            ),
+            Value::Nullable(None)
+        );
+    }
+
+    #[test]
+    fn root_ordering_rewrites_insert_indices_and_emits_moves_after_payload_edits() {
+        // Internal coverage is intentional: the public browser matrix proves
+        // end-to-end ordering, while this pins the terminal operation protocol
+        // ordering that is not otherwise observable through the public API.
+        let key = |byte| vec![byte];
+        let before = BTreeMap::from([(key(1), 0), (key(2), 1), (key(3), 2)]);
+        let after = BTreeMap::from([(key(3), 0), (key(4), 1), (key(1), 2), (key(2), 3)]);
+        let mut terminal = TerminalDeltas {
+            operations: vec![
+                TerminalOperation {
+                    root_key: key(2),
+                    path: Vec::new(),
+                    edit: TerminalEdit::Update {
+                        key: key(2),
+                        value: vec![22],
+                    },
+                },
+                TerminalOperation {
+                    root_key: key(4),
+                    path: Vec::new(),
+                    edit: TerminalEdit::Insert {
+                        index: 0,
+                        key: key(4),
+                        value: vec![44],
+                    },
+                },
+            ],
+        };
+
+        apply_root_ordering_operations(&before, &after, &mut terminal);
+
+        assert!(matches!(
+            terminal.operations[1].edit,
+            TerminalEdit::Insert { index: 1, .. }
+        ));
+        assert!(matches!(
+            terminal.operations[0].edit,
+            TerminalEdit::Update { .. }
+        ));
+        assert_eq!(
+            terminal.operations[2..]
+                .iter()
+                .map(|operation| match &operation.edit {
+                    TerminalEdit::Move { key, index } => (key.clone(), *index),
+                    edit => panic!("expected root move after payload edits, got {edit:?}"),
+                })
+                .collect::<Vec<_>>(),
+            vec![(key(3), 0), (key(4), 1)]
+        );
+    }
 
     fn albums_schema() -> DatabaseSchema {
         DatabaseSchema::new([TableSchema::new(
@@ -9570,8 +11647,8 @@ mod tests {
 
     fn reach_descriptor() -> RecordDescriptor {
         RecordDescriptor::new([
-            ("src", ColumnType::U64.value_type()),
-            ("dst", ColumnType::U64.value_type()),
+            ("src", ColumnType::U64.clone()),
+            ("dst", ColumnType::U64.clone()),
         ])
     }
 
@@ -9788,6 +11865,7 @@ mod tests {
         runtime
             .tick(
                 vec![TableDelta {
+                    schema_version: 0,
                     table: "albums".to_owned(),
                     descriptor: albums,
                     deltas: vec![
@@ -9843,6 +11921,7 @@ mod tests {
         runtime
             .tick(
                 vec![TableDelta {
+                    schema_version: 0,
                     table: "albums".to_owned(),
                     descriptor: albums,
                     deltas: vec![RecordDelta {
@@ -9867,6 +11946,8 @@ mod tests {
         let second = albums
             .create(&[Value::U64(2), Value::String("two".to_owned())])
             .unwrap();
+        let first = crate::records::encode_versioned_record(0, &first);
+        let second = crate::records::encode_versioned_record(0, &second);
         store
             .write_many(&[store.set(b"1", &first), store.set(b"2", &second)])
             .unwrap();
@@ -9981,6 +12062,7 @@ mod tests {
             runtime
                 .tick(
                     vec![TableDelta {
+                        schema_version: 0,
                         table: "albums".to_owned(),
                         descriptor: albums,
                         deltas: vec![RecordDelta {
@@ -10084,6 +12166,7 @@ mod tests {
         runtime
             .tick(
                 vec![TableDelta {
+                    schema_version: 0,
                     table: "albums".to_owned(),
                     descriptor: albums,
                     deltas: vec![
@@ -10156,6 +12239,7 @@ mod tests {
         runtime
             .tick(
                 vec![TableDelta {
+                    schema_version: 0,
                     table: "albums".to_owned(),
                     descriptor: albums,
                     deltas: vec![RecordDelta {
@@ -10195,6 +12279,8 @@ mod tests {
         let second = albums
             .create(&[Value::U64(2), Value::String("two".to_owned())])
             .unwrap();
+        let first = crate::records::encode_versioned_record(0, &first);
+        let second = crate::records::encode_versioned_record(0, &second);
 
         store
             .write_many(&[store.set(b"1", &first), store.set(b"2", &second)])
@@ -10306,6 +12392,7 @@ mod tests {
         runtime
             .tick(
                 vec![TableDelta {
+                    schema_version: 0,
                     table: "records".to_owned(),
                     descriptor,
                     deltas: vec![
@@ -10401,6 +12488,7 @@ mod tests {
         let labels = schema.table("labels").unwrap().record_schema();
         let deltas = vec![
             TableDelta {
+                schema_version: 0,
                 table: "artists".to_owned(),
                 descriptor: artists,
                 deltas: vec![RecordDelta {
@@ -10412,6 +12500,7 @@ mod tests {
                 }],
             },
             TableDelta {
+                schema_version: 0,
                 table: "labels".to_owned(),
                 descriptor: labels,
                 deltas: vec![RecordDelta {
@@ -10427,6 +12516,7 @@ mod tests {
                 }],
             },
             TableDelta {
+                schema_version: 0,
                 table: "albums".to_owned(),
                 descriptor: albums,
                 deltas: vec![RecordDelta {
@@ -10458,6 +12548,7 @@ mod tests {
         let schema = edges_schema();
         let edges = schema.table("edges").unwrap().record_schema();
         let deltas = vec![TableDelta {
+            schema_version: 0,
             table: "edges".to_owned(),
             descriptor: edges,
             deltas: vec![
@@ -10518,6 +12609,7 @@ mod tests {
         };
         let scores = schema.table("scores").unwrap().record_schema();
         let deltas = vec![TableDelta {
+            schema_version: 0,
             table: "scores".to_owned(),
             descriptor: scores,
             deltas: vec![
@@ -10798,6 +12890,7 @@ mod tests {
             .tick(
                 vec![
                     TableDelta {
+                        schema_version: 0,
                         table: "albums".to_owned(),
                         descriptor: albums,
                         deltas: vec![RecordDelta {
@@ -10813,6 +12906,7 @@ mod tests {
                         }],
                     },
                     TableDelta {
+                        schema_version: 0,
                         table: "artists".to_owned(),
                         descriptor: artists,
                         deltas: vec![RecordDelta {
@@ -10870,6 +12964,7 @@ mod tests {
 
         let edges = schema.table("edges").unwrap().record_schema();
         let table_delta = TableDelta {
+            schema_version: 0,
             table: "edges".to_owned(),
             descriptor: edges,
             deltas: vec![

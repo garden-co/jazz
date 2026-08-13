@@ -173,6 +173,8 @@ pub enum ValueType {
     U16,
     U32,
     U64,
+    I32,
+    I64,
     F64,
     Bool,
     String,
@@ -186,11 +188,19 @@ pub enum ValueType {
     Nullable(Box<ValueType>),
     /// A variable-width nested record interpreted by this inline descriptor.
     Record(Box<RecordDescriptor>),
-    I64,
-    I32,
 }
 
 impl ValueType {
+    /// Wrap this type in an explicit nullable representation.
+    pub fn nullable(self) -> Self {
+        Self::Nullable(Box::new(self))
+    }
+
+    /// Wrap this type in a variable-length array representation.
+    pub fn array_of(self) -> Self {
+        Self::Array(Box::new(self))
+    }
+
     /// Whether this type contains an inline record at any nesting depth.
     pub(crate) fn contains_record(&self) -> bool {
         match self {

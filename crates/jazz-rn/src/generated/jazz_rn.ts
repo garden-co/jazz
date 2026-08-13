@@ -51,6 +51,7 @@ import {
   FfiConverterInt32,
   FfiConverterObject,
   FfiConverterOptional,
+  FfiConverterUInt16,
   FfiConverterUInt32,
   FfiConverterUInt64,
   RustBuffer,
@@ -207,13 +208,18 @@ export type RnSubscriptionEvent = {
    */
   reset: boolean | undefined;
   /**
-   * Postcard-encoded row delta.
+   * Postcard-encoded row delta. Carries no rows when
+   * `terminal_operations_json` is present.
    */
   delta: ArrayBuffer | undefined;
   /**
-   * Postcard-encoded relation delta.
+   * Typed structural edits to already hydrated rows, as a JSON array.
+   *
+   * UniFFI has no mapping for `serde_json::Value`, so this crosses as a
+   * string and the TypeScript shim parses it — the same treatment
+   * `reason_json` gets.
    */
-  relationDelta: ArrayBuffer | undefined;
+  terminalOperationsJson: string | undefined;
   /**
    * Read-tier settlement marker for delta events.
    */
@@ -266,7 +272,7 @@ const FfiConverterTypeRnSubscriptionEvent = (() => {
         eventType: FfiConverterString.read(from),
         reset: FfiConverterOptionalBool.read(from),
         delta: FfiConverterOptionalArrayBuffer.read(from),
-        relationDelta: FfiConverterOptionalArrayBuffer.read(from),
+        terminalOperationsJson: FfiConverterOptionalString.read(from),
         settled: FfiConverterOptionalBool.read(from),
         tier: FfiConverterOptionalString.read(from),
         reasonJson: FfiConverterOptionalString.read(from),
@@ -276,7 +282,7 @@ const FfiConverterTypeRnSubscriptionEvent = (() => {
       FfiConverterString.write(value.eventType, into);
       FfiConverterOptionalBool.write(value.reset, into);
       FfiConverterOptionalArrayBuffer.write(value.delta, into);
-      FfiConverterOptionalArrayBuffer.write(value.relationDelta, into);
+      FfiConverterOptionalString.write(value.terminalOperationsJson, into);
       FfiConverterOptionalBool.write(value.settled, into);
       FfiConverterOptionalString.write(value.tier, into);
       FfiConverterOptionalString.write(value.reasonJson, into);
@@ -286,7 +292,9 @@ const FfiConverterTypeRnSubscriptionEvent = (() => {
         FfiConverterString.allocationSize(value.eventType) +
         FfiConverterOptionalBool.allocationSize(value.reset) +
         FfiConverterOptionalArrayBuffer.allocationSize(value.delta) +
-        FfiConverterOptionalArrayBuffer.allocationSize(value.relationDelta) +
+        FfiConverterOptionalString.allocationSize(
+          value.terminalOperationsJson
+        ) +
         FfiConverterOptionalBool.allocationSize(value.settled) +
         FfiConverterOptionalString.allocationSize(value.tier) +
         FfiConverterOptionalString.allocationSize(value.reasonJson)
@@ -734,7 +742,7 @@ export interface RnDbInterface {
     optsJson: string | undefined
   ) /*throws*/ : ArrayBuffer;
   /**
-   * Read through an exclusive transaction's overlay.
+   * Read through a mergeable or exclusive transaction's overlay.
    */
   allInTransaction(
     query: RnPreparedQueryInterface,
@@ -742,7 +750,7 @@ export interface RnDbInterface {
     optsJson: string | undefined
   ) /*throws*/ : ArrayBuffer;
   /**
-   * Read through an exclusive transaction's overlay as an explicit identity.
+   * Read through a mergeable or exclusive transaction's overlay as an explicit identity.
    */
   allInTransactionForIdentity(
     query: RnPreparedQueryInterface,
@@ -781,6 +789,14 @@ export interface RnDbInterface {
     optsJson: string | undefined
   ) /*throws*/ : ArrayBuffer;
   /**
+   * Attach this schema view to an existing exclusive batch.
+   */
+  attachExclusiveTx(openBatchId: string) /*throws*/ : RnTxInterface;
+  /**
+   * Attach this schema view to an existing mergeable batch.
+   */
+  attachMergeableTx(openBatchId: string) /*throws*/ : RnTxInterface;
+  /**
    * Attach a one-shot query coverage request.
    */
   attachQuery(
@@ -796,50 +812,39 @@ export interface RnDbInterface {
     optsJson: string | undefined
   ) /*throws*/ : RnQueryAttachmentInterface;
   /**
-   * Probe delete permission as an explicit identity.
+   * Begin one owner-wide batch without creating a transaction attachment.
    */
-  canDeleteForIdentity(
-    table: string,
-    rowId: ArrayBuffer,
-    author: ArrayBuffer
-  ) /*throws*/ : boolean;
+  beginTransaction(
+    openBatchId: string,
+    kind: string,
+    author: ArrayBuffer | undefined
+  ) /*throws*/ : void;
   /**
-   * Probe insert permission as the database identity.
-   */
-  canInsertEncoded(table: string, cells: ArrayBuffer) /*throws*/ : boolean;
-  /**
-   * Probe insert permission as an explicit identity.
-   */
-  canInsertEncodedForIdentity(
-    table: string,
-    cells: ArrayBuffer,
-    author: ArrayBuffer
-  ) /*throws*/ : boolean;
-  /**
-   * Probe read permission as an explicit identity.
-   */
-  canReadForIdentity(
-    table: string,
-    rowId: ArrayBuffer,
-    author: ArrayBuffer
-  ) /*throws*/ : boolean;
-  /**
-   * Probe update permission as an explicit identity.
-   */
-  canUpdateEncodedForIdentity(
-    table: string,
-    rowId: ArrayBuffer,
-    patch: ArrayBuffer,
-    author: ArrayBuffer
-  ) /*throws*/ : boolean;
-  /**
-   * Close storage, cancel waiters, and join the core actor.
+   * Close the root runtime, or release this non-root schema view.
    */
   close() /*throws*/ : void;
+  /**
+   * Commit an owner-wide batch by caller-minted id.
+   */
+  commitTransaction(
+    openBatchId: string,
+    kind: string | undefined
+  ) /*throws*/ : RnWriteInterface;
   /**
    * Attach a binding-owned upstream transport.
    */
   connectUpstream() /*throws*/ : RnTransportInterface;
+  /**
+   * Connect using the protocol and authority facts negotiated by the carrier.
+   */
+  connectUpstreamWithSession(
+    protocolVersion: /*u16*/ number,
+    features: /*u32*/ number,
+    remoteNode: ArrayBuffer,
+    remoteEpoch: /*u64*/ bigint,
+    localNode: ArrayBuffer,
+    localEpoch: /*u64*/ bigint
+  ) /*throws*/ : RnTransportInterface;
   /**
    * Soft-delete a row.
    */
@@ -862,9 +867,13 @@ export interface RnDbInterface {
    */
   detachQuery(attachment: RnQueryAttachmentInterface) /*throws*/ : void;
   /**
-   * Begin an exclusive transaction.
+   * Begin an exclusive batch and return its owning attachment.
    */
-  exclusiveTx() /*throws*/ : RnTxInterface;
+  exclusiveTx(openBatchId: string) /*throws*/ : RnTxInterface;
+  /**
+   * Release a non-root schema view without closing the shared runtime.
+   */
+  free() /*throws*/ : void;
   /**
    * Insert a caller-supplied row id.
    */
@@ -889,13 +898,16 @@ export interface RnDbInterface {
    */
   localCurrentRow(table: string, rowId: ArrayBuffer) /*throws*/ : ArrayBuffer;
   /**
-   * Begin a mergeable transaction.
+   * Begin a mergeable batch and return its owning attachment.
    */
-  mergeableTx() /*throws*/ : RnTxInterface;
+  mergeableTx(openBatchId: string) /*throws*/ : RnTxInterface;
   /**
-   * Begin a mergeable transaction as an explicit identity.
+   * Begin a mergeable batch as an explicit identity and return its owner.
    */
-  mergeableTxForIdentity(author: ArrayBuffer) /*throws*/ : RnTxInterface;
+  mergeableTxForIdentity(
+    openBatchId: string,
+    author: ArrayBuffer
+  ) /*throws*/ : RnTxInterface;
   /**
    * Validate and retain a postcard query.
    */
@@ -906,6 +918,10 @@ export interface RnDbInterface {
   queryAttachmentIsCovered(
     attachment: RnQueryAttachmentInterface
   ) /*throws*/ : boolean;
+  /**
+   * Register and return a schema view over the same runtime owner.
+   */
+  registerSchema(schema: ArrayBuffer) /*throws*/ : RnDbInterface;
   /**
    * Restore a deleted row.
    */
@@ -925,6 +941,10 @@ export interface RnDbInterface {
     author: ArrayBuffer,
     updatedAtMsValue: /*f64*/ number | undefined
   ) /*throws*/ : RnWriteInterface;
+  /**
+   * Roll back an owner-wide batch by caller-minted id.
+   */
+  rollbackTransaction(openBatchId: string) /*throws*/ : void;
   /**
    * Set policy claims for an author from a JSON object.
    */
@@ -1127,7 +1147,7 @@ export class RnDb extends UniffiAbstractObject implements RnDbInterface {
   }
 
   /**
-   * Read through an exclusive transaction's overlay.
+   * Read through a mergeable or exclusive transaction's overlay.
    */
   allInTransaction(
     query: RnPreparedQueryInterface,
@@ -1154,7 +1174,7 @@ export class RnDb extends UniffiAbstractObject implements RnDbInterface {
   }
 
   /**
-   * Read through an exclusive transaction's overlay as an explicit identity.
+   * Read through a mergeable or exclusive transaction's overlay as an explicit identity.
    */
   allInTransactionForIdentity(
     query: RnPreparedQueryInterface,
@@ -1287,6 +1307,48 @@ export class RnDb extends UniffiAbstractObject implements RnDbInterface {
   }
 
   /**
+   * Attach this schema view to an existing exclusive batch.
+   */
+  attachExclusiveTx(openBatchId: string): RnTxInterface /*throws*/ {
+    return FfiConverterTypeRnTx.lift(
+      uniffiCaller.rustCallWithError(
+        /*liftError:*/ FfiConverterTypeJazzRnError.lift.bind(
+          FfiConverterTypeJazzRnError
+        ),
+        /*caller:*/ (callStatus) => {
+          return nativeModule().ubrn_uniffi_jazz_rn_fn_method_rndb_attach_exclusive_tx(
+            uniffiTypeRnDbObjectFactory.clonePointer(this),
+            FfiConverterString.lower(openBatchId),
+            callStatus
+          );
+        },
+        /*liftString:*/ FfiConverterString.lift
+      )
+    );
+  }
+
+  /**
+   * Attach this schema view to an existing mergeable batch.
+   */
+  attachMergeableTx(openBatchId: string): RnTxInterface /*throws*/ {
+    return FfiConverterTypeRnTx.lift(
+      uniffiCaller.rustCallWithError(
+        /*liftError:*/ FfiConverterTypeJazzRnError.lift.bind(
+          FfiConverterTypeJazzRnError
+        ),
+        /*caller:*/ (callStatus) => {
+          return nativeModule().ubrn_uniffi_jazz_rn_fn_method_rndb_attach_mergeable_tx(
+            uniffiTypeRnDbObjectFactory.clonePointer(this),
+            FfiConverterString.lower(openBatchId),
+            callStatus
+          );
+        },
+        /*liftString:*/ FfiConverterString.lift
+      )
+    );
+  }
+
+  /**
    * Attach a one-shot query coverage request.
    */
   attachQuery(
@@ -1339,139 +1401,32 @@ export class RnDb extends UniffiAbstractObject implements RnDbInterface {
   }
 
   /**
-   * Probe delete permission as an explicit identity.
+   * Begin one owner-wide batch without creating a transaction attachment.
    */
-  canDeleteForIdentity(
-    table: string,
-    rowId: ArrayBuffer,
-    author: ArrayBuffer
-  ): boolean /*throws*/ {
-    return FfiConverterBool.lift(
-      uniffiCaller.rustCallWithError(
-        /*liftError:*/ FfiConverterTypeJazzRnError.lift.bind(
-          FfiConverterTypeJazzRnError
-        ),
-        /*caller:*/ (callStatus) => {
-          return nativeModule().ubrn_uniffi_jazz_rn_fn_method_rndb_can_delete_for_identity(
-            uniffiTypeRnDbObjectFactory.clonePointer(this),
-            FfiConverterString.lower(table),
-            FfiConverterArrayBuffer.lower(rowId),
-            FfiConverterArrayBuffer.lower(author),
-            callStatus
-          );
-        },
-        /*liftString:*/ FfiConverterString.lift
-      )
+  beginTransaction(
+    openBatchId: string,
+    kind: string,
+    author: ArrayBuffer | undefined
+  ): void /*throws*/ {
+    uniffiCaller.rustCallWithError(
+      /*liftError:*/ FfiConverterTypeJazzRnError.lift.bind(
+        FfiConverterTypeJazzRnError
+      ),
+      /*caller:*/ (callStatus) => {
+        nativeModule().ubrn_uniffi_jazz_rn_fn_method_rndb_begin_transaction(
+          uniffiTypeRnDbObjectFactory.clonePointer(this),
+          FfiConverterString.lower(openBatchId),
+          FfiConverterString.lower(kind),
+          FfiConverterOptionalArrayBuffer.lower(author),
+          callStatus
+        );
+      },
+      /*liftString:*/ FfiConverterString.lift
     );
   }
 
   /**
-   * Probe insert permission as the database identity.
-   */
-  canInsertEncoded(table: string, cells: ArrayBuffer): boolean /*throws*/ {
-    return FfiConverterBool.lift(
-      uniffiCaller.rustCallWithError(
-        /*liftError:*/ FfiConverterTypeJazzRnError.lift.bind(
-          FfiConverterTypeJazzRnError
-        ),
-        /*caller:*/ (callStatus) => {
-          return nativeModule().ubrn_uniffi_jazz_rn_fn_method_rndb_can_insert_encoded(
-            uniffiTypeRnDbObjectFactory.clonePointer(this),
-            FfiConverterString.lower(table),
-            FfiConverterArrayBuffer.lower(cells),
-            callStatus
-          );
-        },
-        /*liftString:*/ FfiConverterString.lift
-      )
-    );
-  }
-
-  /**
-   * Probe insert permission as an explicit identity.
-   */
-  canInsertEncodedForIdentity(
-    table: string,
-    cells: ArrayBuffer,
-    author: ArrayBuffer
-  ): boolean /*throws*/ {
-    return FfiConverterBool.lift(
-      uniffiCaller.rustCallWithError(
-        /*liftError:*/ FfiConverterTypeJazzRnError.lift.bind(
-          FfiConverterTypeJazzRnError
-        ),
-        /*caller:*/ (callStatus) => {
-          return nativeModule().ubrn_uniffi_jazz_rn_fn_method_rndb_can_insert_encoded_for_identity(
-            uniffiTypeRnDbObjectFactory.clonePointer(this),
-            FfiConverterString.lower(table),
-            FfiConverterArrayBuffer.lower(cells),
-            FfiConverterArrayBuffer.lower(author),
-            callStatus
-          );
-        },
-        /*liftString:*/ FfiConverterString.lift
-      )
-    );
-  }
-
-  /**
-   * Probe read permission as an explicit identity.
-   */
-  canReadForIdentity(
-    table: string,
-    rowId: ArrayBuffer,
-    author: ArrayBuffer
-  ): boolean /*throws*/ {
-    return FfiConverterBool.lift(
-      uniffiCaller.rustCallWithError(
-        /*liftError:*/ FfiConverterTypeJazzRnError.lift.bind(
-          FfiConverterTypeJazzRnError
-        ),
-        /*caller:*/ (callStatus) => {
-          return nativeModule().ubrn_uniffi_jazz_rn_fn_method_rndb_can_read_for_identity(
-            uniffiTypeRnDbObjectFactory.clonePointer(this),
-            FfiConverterString.lower(table),
-            FfiConverterArrayBuffer.lower(rowId),
-            FfiConverterArrayBuffer.lower(author),
-            callStatus
-          );
-        },
-        /*liftString:*/ FfiConverterString.lift
-      )
-    );
-  }
-
-  /**
-   * Probe update permission as an explicit identity.
-   */
-  canUpdateEncodedForIdentity(
-    table: string,
-    rowId: ArrayBuffer,
-    patch: ArrayBuffer,
-    author: ArrayBuffer
-  ): boolean /*throws*/ {
-    return FfiConverterBool.lift(
-      uniffiCaller.rustCallWithError(
-        /*liftError:*/ FfiConverterTypeJazzRnError.lift.bind(
-          FfiConverterTypeJazzRnError
-        ),
-        /*caller:*/ (callStatus) => {
-          return nativeModule().ubrn_uniffi_jazz_rn_fn_method_rndb_can_update_encoded_for_identity(
-            uniffiTypeRnDbObjectFactory.clonePointer(this),
-            FfiConverterString.lower(table),
-            FfiConverterArrayBuffer.lower(rowId),
-            FfiConverterArrayBuffer.lower(patch),
-            FfiConverterArrayBuffer.lower(author),
-            callStatus
-          );
-        },
-        /*liftString:*/ FfiConverterString.lift
-      )
-    );
-  }
-
-  /**
-   * Close storage, cancel waiters, and join the core actor.
+   * Close the root runtime, or release this non-root schema view.
    */
   close(): void /*throws*/ {
     uniffiCaller.rustCallWithError(
@@ -1489,6 +1444,31 @@ export class RnDb extends UniffiAbstractObject implements RnDbInterface {
   }
 
   /**
+   * Commit an owner-wide batch by caller-minted id.
+   */
+  commitTransaction(
+    openBatchId: string,
+    kind: string | undefined
+  ): RnWriteInterface /*throws*/ {
+    return FfiConverterTypeRnWrite.lift(
+      uniffiCaller.rustCallWithError(
+        /*liftError:*/ FfiConverterTypeJazzRnError.lift.bind(
+          FfiConverterTypeJazzRnError
+        ),
+        /*caller:*/ (callStatus) => {
+          return nativeModule().ubrn_uniffi_jazz_rn_fn_method_rndb_commit_transaction(
+            uniffiTypeRnDbObjectFactory.clonePointer(this),
+            FfiConverterString.lower(openBatchId),
+            FfiConverterOptionalString.lower(kind),
+            callStatus
+          );
+        },
+        /*liftString:*/ FfiConverterString.lift
+      )
+    );
+  }
+
+  /**
    * Attach a binding-owned upstream transport.
    */
   connectUpstream(): RnTransportInterface /*throws*/ {
@@ -1500,6 +1480,39 @@ export class RnDb extends UniffiAbstractObject implements RnDbInterface {
         /*caller:*/ (callStatus) => {
           return nativeModule().ubrn_uniffi_jazz_rn_fn_method_rndb_connect_upstream(
             uniffiTypeRnDbObjectFactory.clonePointer(this),
+            callStatus
+          );
+        },
+        /*liftString:*/ FfiConverterString.lift
+      )
+    );
+  }
+
+  /**
+   * Connect using the protocol and authority facts negotiated by the carrier.
+   */
+  connectUpstreamWithSession(
+    protocolVersion: /*u16*/ number,
+    features: /*u32*/ number,
+    remoteNode: ArrayBuffer,
+    remoteEpoch: /*u64*/ bigint,
+    localNode: ArrayBuffer,
+    localEpoch: /*u64*/ bigint
+  ): RnTransportInterface /*throws*/ {
+    return FfiConverterTypeRnTransport.lift(
+      uniffiCaller.rustCallWithError(
+        /*liftError:*/ FfiConverterTypeJazzRnError.lift.bind(
+          FfiConverterTypeJazzRnError
+        ),
+        /*caller:*/ (callStatus) => {
+          return nativeModule().ubrn_uniffi_jazz_rn_fn_method_rndb_connect_upstream_with_session(
+            uniffiTypeRnDbObjectFactory.clonePointer(this),
+            FfiConverterUInt16.lower(protocolVersion),
+            FfiConverterUInt32.lower(features),
+            FfiConverterArrayBuffer.lower(remoteNode),
+            FfiConverterUInt64.lower(remoteEpoch),
+            FfiConverterArrayBuffer.lower(localNode),
+            FfiConverterUInt64.lower(localEpoch),
             callStatus
           );
         },
@@ -1584,9 +1597,9 @@ export class RnDb extends UniffiAbstractObject implements RnDbInterface {
   }
 
   /**
-   * Begin an exclusive transaction.
+   * Begin an exclusive batch and return its owning attachment.
    */
-  exclusiveTx(): RnTxInterface /*throws*/ {
+  exclusiveTx(openBatchId: string): RnTxInterface /*throws*/ {
     return FfiConverterTypeRnTx.lift(
       uniffiCaller.rustCallWithError(
         /*liftError:*/ FfiConverterTypeJazzRnError.lift.bind(
@@ -1595,11 +1608,30 @@ export class RnDb extends UniffiAbstractObject implements RnDbInterface {
         /*caller:*/ (callStatus) => {
           return nativeModule().ubrn_uniffi_jazz_rn_fn_method_rndb_exclusive_tx(
             uniffiTypeRnDbObjectFactory.clonePointer(this),
+            FfiConverterString.lower(openBatchId),
             callStatus
           );
         },
         /*liftString:*/ FfiConverterString.lift
       )
+    );
+  }
+
+  /**
+   * Release a non-root schema view without closing the shared runtime.
+   */
+  free(): void /*throws*/ {
+    uniffiCaller.rustCallWithError(
+      /*liftError:*/ FfiConverterTypeJazzRnError.lift.bind(
+        FfiConverterTypeJazzRnError
+      ),
+      /*caller:*/ (callStatus) => {
+        nativeModule().ubrn_uniffi_jazz_rn_fn_method_rndb_free(
+          uniffiTypeRnDbObjectFactory.clonePointer(this),
+          callStatus
+        );
+      },
+      /*liftString:*/ FfiConverterString.lift
     );
   }
 
@@ -1686,9 +1718,9 @@ export class RnDb extends UniffiAbstractObject implements RnDbInterface {
   }
 
   /**
-   * Begin a mergeable transaction.
+   * Begin a mergeable batch and return its owning attachment.
    */
-  mergeableTx(): RnTxInterface /*throws*/ {
+  mergeableTx(openBatchId: string): RnTxInterface /*throws*/ {
     return FfiConverterTypeRnTx.lift(
       uniffiCaller.rustCallWithError(
         /*liftError:*/ FfiConverterTypeJazzRnError.lift.bind(
@@ -1697,6 +1729,7 @@ export class RnDb extends UniffiAbstractObject implements RnDbInterface {
         /*caller:*/ (callStatus) => {
           return nativeModule().ubrn_uniffi_jazz_rn_fn_method_rndb_mergeable_tx(
             uniffiTypeRnDbObjectFactory.clonePointer(this),
+            FfiConverterString.lower(openBatchId),
             callStatus
           );
         },
@@ -1706,9 +1739,12 @@ export class RnDb extends UniffiAbstractObject implements RnDbInterface {
   }
 
   /**
-   * Begin a mergeable transaction as an explicit identity.
+   * Begin a mergeable batch as an explicit identity and return its owner.
    */
-  mergeableTxForIdentity(author: ArrayBuffer): RnTxInterface /*throws*/ {
+  mergeableTxForIdentity(
+    openBatchId: string,
+    author: ArrayBuffer
+  ): RnTxInterface /*throws*/ {
     return FfiConverterTypeRnTx.lift(
       uniffiCaller.rustCallWithError(
         /*liftError:*/ FfiConverterTypeJazzRnError.lift.bind(
@@ -1717,6 +1753,7 @@ export class RnDb extends UniffiAbstractObject implements RnDbInterface {
         /*caller:*/ (callStatus) => {
           return nativeModule().ubrn_uniffi_jazz_rn_fn_method_rndb_mergeable_tx_for_identity(
             uniffiTypeRnDbObjectFactory.clonePointer(this),
+            FfiConverterString.lower(openBatchId),
             FfiConverterArrayBuffer.lower(author),
             callStatus
           );
@@ -1762,6 +1799,27 @@ export class RnDb extends UniffiAbstractObject implements RnDbInterface {
           return nativeModule().ubrn_uniffi_jazz_rn_fn_method_rndb_query_attachment_is_covered(
             uniffiTypeRnDbObjectFactory.clonePointer(this),
             FfiConverterTypeRnQueryAttachment.lower(attachment),
+            callStatus
+          );
+        },
+        /*liftString:*/ FfiConverterString.lift
+      )
+    );
+  }
+
+  /**
+   * Register and return a schema view over the same runtime owner.
+   */
+  registerSchema(schema: ArrayBuffer): RnDbInterface /*throws*/ {
+    return FfiConverterTypeRnDb.lift(
+      uniffiCaller.rustCallWithError(
+        /*liftError:*/ FfiConverterTypeJazzRnError.lift.bind(
+          FfiConverterTypeJazzRnError
+        ),
+        /*caller:*/ (callStatus) => {
+          return nativeModule().ubrn_uniffi_jazz_rn_fn_method_rndb_register_schema(
+            uniffiTypeRnDbObjectFactory.clonePointer(this),
+            FfiConverterArrayBuffer.lower(schema),
             callStatus
           );
         },
@@ -1827,6 +1885,25 @@ export class RnDb extends UniffiAbstractObject implements RnDbInterface {
         },
         /*liftString:*/ FfiConverterString.lift
       )
+    );
+  }
+
+  /**
+   * Roll back an owner-wide batch by caller-minted id.
+   */
+  rollbackTransaction(openBatchId: string): void /*throws*/ {
+    uniffiCaller.rustCallWithError(
+      /*liftError:*/ FfiConverterTypeJazzRnError.lift.bind(
+        FfiConverterTypeJazzRnError
+      ),
+      /*caller:*/ (callStatus) => {
+        nativeModule().ubrn_uniffi_jazz_rn_fn_method_rndb_rollback_transaction(
+          uniffiTypeRnDbObjectFactory.clonePointer(this),
+          FfiConverterString.lower(openBatchId),
+          callStatus
+        );
+      },
+      /*liftString:*/ FfiConverterString.lift
     );
   }
 
@@ -3148,6 +3225,10 @@ const FfiConverterTypeRnTx = new FfiConverterObject(
  */
 export interface RnWriteInterface {
   /**
+   * Stable public id of the committed batch.
+   */
+  batchId(): string;
+  /**
    * Release this write handle.
    */
   close() /*throws*/ : boolean;
@@ -3181,6 +3262,23 @@ export class RnWrite extends UniffiAbstractObject implements RnWriteInterface {
     super();
     this[pointerLiteralSymbol] = pointer;
     this[destructorGuardSymbol] = uniffiTypeRnWriteObjectFactory.bless(pointer);
+  }
+
+  /**
+   * Stable public id of the committed batch.
+   */
+  batchId(): string {
+    return FfiConverterString.lift(
+      uniffiCaller.rustCall(
+        /*caller:*/ (callStatus) => {
+          return nativeModule().ubrn_uniffi_jazz_rn_fn_method_rnwrite_batch_id(
+            uniffiTypeRnWriteObjectFactory.clonePointer(this),
+            callStatus
+          );
+        },
+        /*liftString:*/ FfiConverterString.lift
+      )
+    );
   }
 
   /**
@@ -3595,7 +3693,7 @@ function uniffiEnsureInitialized() {
   }
   if (
     nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rndb_all_in_transaction() !==
-    17108
+    26534
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
       'uniffi_jazz_rn_checksum_method_rndb_all_in_transaction'
@@ -3603,7 +3701,7 @@ function uniffiEnsureInitialized() {
   }
   if (
     nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rndb_all_in_transaction_for_identity() !==
-    22635
+    32327
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
       'uniffi_jazz_rn_checksum_method_rndb_all_in_transaction_for_identity'
@@ -3642,6 +3740,22 @@ function uniffiEnsureInitialized() {
     );
   }
   if (
+    nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rndb_attach_exclusive_tx() !==
+    8794
+  ) {
+    throw new UniffiInternalError.ApiChecksumMismatch(
+      'uniffi_jazz_rn_checksum_method_rndb_attach_exclusive_tx'
+    );
+  }
+  if (
+    nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rndb_attach_mergeable_tx() !==
+    26046
+  ) {
+    throw new UniffiInternalError.ApiChecksumMismatch(
+      'uniffi_jazz_rn_checksum_method_rndb_attach_mergeable_tx'
+    );
+  }
+  if (
     nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rndb_attach_query() !==
     1869
   ) {
@@ -3658,50 +3772,26 @@ function uniffiEnsureInitialized() {
     );
   }
   if (
-    nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rndb_can_delete_for_identity() !==
-    32769
+    nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rndb_begin_transaction() !==
+    29829
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
-      'uniffi_jazz_rn_checksum_method_rndb_can_delete_for_identity'
+      'uniffi_jazz_rn_checksum_method_rndb_begin_transaction'
     );
   }
   if (
-    nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rndb_can_insert_encoded() !==
-    3786
-  ) {
-    throw new UniffiInternalError.ApiChecksumMismatch(
-      'uniffi_jazz_rn_checksum_method_rndb_can_insert_encoded'
-    );
-  }
-  if (
-    nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rndb_can_insert_encoded_for_identity() !==
-    30701
-  ) {
-    throw new UniffiInternalError.ApiChecksumMismatch(
-      'uniffi_jazz_rn_checksum_method_rndb_can_insert_encoded_for_identity'
-    );
-  }
-  if (
-    nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rndb_can_read_for_identity() !==
-    54031
-  ) {
-    throw new UniffiInternalError.ApiChecksumMismatch(
-      'uniffi_jazz_rn_checksum_method_rndb_can_read_for_identity'
-    );
-  }
-  if (
-    nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rndb_can_update_encoded_for_identity() !==
-    56018
-  ) {
-    throw new UniffiInternalError.ApiChecksumMismatch(
-      'uniffi_jazz_rn_checksum_method_rndb_can_update_encoded_for_identity'
-    );
-  }
-  if (
-    nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rndb_close() !== 24607
+    nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rndb_close() !== 12761
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
       'uniffi_jazz_rn_checksum_method_rndb_close'
+    );
+  }
+  if (
+    nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rndb_commit_transaction() !==
+    21053
+  ) {
+    throw new UniffiInternalError.ApiChecksumMismatch(
+      'uniffi_jazz_rn_checksum_method_rndb_commit_transaction'
     );
   }
   if (
@@ -3710,6 +3800,14 @@ function uniffiEnsureInitialized() {
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
       'uniffi_jazz_rn_checksum_method_rndb_connect_upstream'
+    );
+  }
+  if (
+    nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rndb_connect_upstream_with_session() !==
+    59287
+  ) {
+    throw new UniffiInternalError.ApiChecksumMismatch(
+      'uniffi_jazz_rn_checksum_method_rndb_connect_upstream_with_session'
     );
   }
   if (
@@ -3737,10 +3835,17 @@ function uniffiEnsureInitialized() {
   }
   if (
     nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rndb_exclusive_tx() !==
-    29928
+    55829
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
       'uniffi_jazz_rn_checksum_method_rndb_exclusive_tx'
+    );
+  }
+  if (
+    nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rndb_free() !== 16944
+  ) {
+    throw new UniffiInternalError.ApiChecksumMismatch(
+      'uniffi_jazz_rn_checksum_method_rndb_free'
     );
   }
   if (
@@ -3769,7 +3874,7 @@ function uniffiEnsureInitialized() {
   }
   if (
     nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rndb_mergeable_tx() !==
-    41618
+    36942
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
       'uniffi_jazz_rn_checksum_method_rndb_mergeable_tx'
@@ -3777,7 +3882,7 @@ function uniffiEnsureInitialized() {
   }
   if (
     nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rndb_mergeable_tx_for_identity() !==
-    24742
+    18430
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
       'uniffi_jazz_rn_checksum_method_rndb_mergeable_tx_for_identity'
@@ -3800,6 +3905,14 @@ function uniffiEnsureInitialized() {
     );
   }
   if (
+    nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rndb_register_schema() !==
+    44829
+  ) {
+    throw new UniffiInternalError.ApiChecksumMismatch(
+      'uniffi_jazz_rn_checksum_method_rndb_register_schema'
+    );
+  }
+  if (
     nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rndb_restore_encoded() !==
     5629
   ) {
@@ -3813,6 +3926,14 @@ function uniffiEnsureInitialized() {
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
       'uniffi_jazz_rn_checksum_method_rndb_restore_encoded_for_identity'
+    );
+  }
+  if (
+    nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rndb_rollback_transaction() !==
+    36879
+  ) {
+    throw new UniffiInternalError.ApiChecksumMismatch(
+      'uniffi_jazz_rn_checksum_method_rndb_rollback_transaction'
     );
   }
   if (
@@ -4017,6 +4138,14 @@ function uniffiEnsureInitialized() {
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
       'uniffi_jazz_rn_checksum_method_rntx_upsert_encoded'
+    );
+  }
+  if (
+    nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rnwrite_batch_id() !==
+    1297
+  ) {
+    throw new UniffiInternalError.ApiChecksumMismatch(
+      'uniffi_jazz_rn_checksum_method_rnwrite_batch_id'
     );
   }
   if (

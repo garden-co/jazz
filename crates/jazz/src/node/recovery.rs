@@ -17,8 +17,8 @@ where
         tx_id: TxId,
     ) -> Result<Vec<RejectedVersion>, Error> {
         let mut versions = Vec::new();
-        for table in self.catalogue.schema.tables.clone() {
-            let storage_table = rejected_versions_table_name(&table.name);
+        for table_id in self.physical_table_ids() {
+            let storage_table = physical_rejected_versions_table_name(table_id);
             for raw in self.database.primary_key_scan_raw(
                 &storage_table,
                 &[Value::U64(tx_id.time.0), Value::U64(alias.0)],
@@ -29,9 +29,19 @@ where
                 if node_id != alias.0 || time != tx_id.time.0 {
                     continue;
                 }
+                let schema_alias = SchemaVersionAlias(raw.schema_version());
+                let schema_version = self.schema_version_for_alias(schema_alias).ok_or(
+                    Error::InvalidStoredValue("rejected row schema version alias missing"),
+                )?;
+                let logical_table =
+                    self.logical_table_for_physical_alias(table_id, schema_alias)?;
+                let logical_descriptor = self
+                    .table_in_schema(&logical_table, schema_version)?
+                    .rejected_versions_storage_table()
+                    .record_schema();
                 versions.push(RejectedVersion::new(
-                    table.name.clone(),
-                    OwnedRecord::new(raw.raw().to_vec(), record.descriptor()),
+                    logical_table,
+                    OwnedRecord::new(raw.raw().to_vec(), logical_descriptor),
                 ));
             }
         }
@@ -46,6 +56,28 @@ where
     }
 
     pub(super) fn recover_from_storage(&mut self) -> Result<(), Error> {
+        #[cfg(feature = "testing")]
+        {
+            self.recover_from_storage_inner(None)
+        }
+        #[cfg(not(feature = "testing"))]
+        self.recover_from_storage_inner()
+    }
+
+    #[cfg(feature = "testing")]
+    pub(super) fn recover_from_storage_with_receipt(
+        &mut self,
+        receipt: &mut NodeOpenReceipt,
+    ) -> Result<(), Error> {
+        self.recover_from_storage_inner(Some(receipt))
+    }
+
+    fn recover_from_storage_inner(
+        &mut self,
+        #[cfg(feature = "testing")] mut receipt: Option<&mut NodeOpenReceipt>,
+    ) -> Result<(), Error> {
+        #[cfg(feature = "testing")]
+        let started = receipt.as_ref().map(|_| web_time::Instant::now());
         let cleanly_closed = self.take_valid_clean_close_marker()?;
         let storage_consistent_through = if cleanly_closed {
             None
@@ -57,17 +89,6 @@ where
             let alias = record.get_u64(NodeAliasRowRecord::FIELD_ID_IDX)?;
             let uuid = NodeUuid(record.get_uuid(NodeAliasRowRecord::FIELD_UUID_IDX)?);
             self.node_aliases.insert(uuid, NodeAlias(alias));
-        }
-        for raw in self
-            .database
-            .primary_key_scan_raw("jazz_schema_versions", &[])?
-        {
-            let record = raw.record();
-            let alias =
-                SchemaVersionAlias(record.get_u64(SchemaVersionAliasRowRecord::FIELD_ID_IDX)?);
-            let uuid =
-                SchemaVersionId(record.get_uuid(SchemaVersionAliasRowRecord::FIELD_UUID_IDX)?);
-            self.catalogue.schema_version_aliases.insert(uuid, alias);
         }
         let branch_records = self
             .database
@@ -98,29 +119,63 @@ where
                 raw.record().get_u64(TransactionRowRecord::FIELD_TIME_IDX)?,
             ));
         }
-        for table in self.catalogue.schema.tables.clone() {
-            if let Some(raw) =
-                self.database
-                    .index_last_raw(&history_table_name(&table.name), "by_tx", &[])?
-            {
+        let physical_table_ids = self
+            .catalogue
+            .physical_mappings
+            .values()
+            .flat_map(|mapping| mapping.tables.values().map(|table| table.table_id))
+            .collect::<BTreeSet<_>>();
+        for table_id in physical_table_ids {
+            if let Some(raw) = self.database.index_last_raw(
+                &physical_history_table_name(table_id),
+                "by_tx",
+                &[],
+            )? {
                 self.merge_tx_time(TxTime(
                     raw.record().get_u64(HistoryRowRecord::FIELD_TX_TIME_IDX)?,
                 ));
             }
-            if let Some(raw) =
-                self.database
-                    .index_last_raw(&register_table_name(&table.name), "by_tx", &[])?
-            {
+            if let Some(raw) = self.database.index_last_raw(
+                &physical_register_table_name(table_id),
+                "by_tx",
+                &[],
+            )? {
                 self.merge_tx_time(TxTime(
                     raw.record().get_u64(RegisterRowRecord::FIELD_TX_TIME_IDX)?,
                 ));
             }
         }
+        #[cfg(feature = "testing")]
+        if let (Some(receipt), Some(started)) = (&mut receipt, started) {
+            receipt.recover_catalogue_state = started.elapsed();
+        }
+        #[cfg(feature = "testing")]
+        let started = receipt.as_ref().map(|_| web_time::Instant::now());
         let mut accepted_global_seqs = Vec::new();
-        for raw in self
-            .database
-            .index_scan_raw("jazz_transactions", "by_global_seq", &[])?
-        {
+        #[cfg(feature = "testing")]
+        let mut global_sequence_records_scanned = 0usize;
+        // Nullable index keys order `None` before `Some`. Range over only the
+        // `Some` bucket so local pending/rejected transactions cannot make
+        // recovery O(total transactions). The range end is exclusive, hence
+        // the separate exact lookup preserves the prior u64::MAX behavior.
+        let first_global_seq = Value::Nullable(Some(Box::new(Value::U64(0))));
+        let last_global_seq = Value::Nullable(Some(Box::new(Value::U64(u64::MAX))));
+        let mut sequenced_transactions = self.database.index_scan_range_raw(
+            "jazz_transactions",
+            "by_global_seq",
+            std::slice::from_ref(&first_global_seq),
+            std::slice::from_ref(&last_global_seq),
+        )?;
+        sequenced_transactions.extend(self.database.index_scan_raw(
+            "jazz_transactions",
+            "by_global_seq",
+            std::slice::from_ref(&last_global_seq),
+        )?);
+        for raw in sequenced_transactions {
+            #[cfg(feature = "testing")]
+            {
+                global_sequence_records_scanned += 1;
+            }
             let record = raw.record();
             let global_seq = record.get_nullable_u64(TransactionRowRecord::FIELD_GLOBAL_SEQ_IDX)?;
             if global_seq.is_some()
@@ -141,10 +196,21 @@ where
         }
         accepted_global_seqs.sort();
         accepted_global_seqs.dedup();
+        #[cfg(feature = "testing")]
+        if let Some(receipt) = &mut receipt {
+            receipt.accepted_global_sequences = accepted_global_seqs.len();
+            receipt.global_sequence_records_scanned = global_sequence_records_scanned;
+        }
         for global_seq in accepted_global_seqs {
             self.record_applied_global_seq(global_seq);
         }
+        #[cfg(feature = "testing")]
+        if let (Some(receipt), Some(started)) = (&mut receipt, started) {
+            receipt.recover_global_sequences = started.elapsed();
+        }
 
+        #[cfg(feature = "testing")]
+        let started = receipt.as_ref().map(|_| web_time::Instant::now());
         let mut pending_edges = Vec::new();
         for raw in self
             .database
@@ -219,8 +285,18 @@ where
                 .rejected_transactions
                 .insert(tx_id, RejectedTransaction::new(tx_id, record, versions));
         }
+        #[cfg(feature = "testing")]
+        if let (Some(receipt), Some(started)) = (&mut receipt, started) {
+            receipt.recover_pending_and_rejected = started.elapsed();
+        }
+        #[cfg(feature = "testing")]
+        let started = receipt.as_ref().map(|_| web_time::Instant::now());
         if !cleanly_closed {
             self.cleanup_settled_ahead_current_leftovers(storage_consistent_through)?;
+        }
+        #[cfg(feature = "testing")]
+        if let (Some(receipt), Some(started)) = (&mut receipt, started) {
+            receipt.recover_unclean_close = started.elapsed();
         }
         Ok(())
     }

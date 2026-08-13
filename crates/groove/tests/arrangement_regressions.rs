@@ -56,8 +56,8 @@ fn edges_schema() -> DatabaseSchema {
 
 fn reach_descriptor() -> RecordDescriptor {
     RecordDescriptor::new([
-        ("src", ColumnType::U64.value_type()),
-        ("dst", ColumnType::U64.value_type()),
+        ("src", ColumnType::U64.clone()),
+        ("dst", ColumnType::U64.clone()),
     ])
 }
 

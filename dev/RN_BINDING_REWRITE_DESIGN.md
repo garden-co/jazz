@@ -1,6 +1,9 @@
 # React Native binding rewrite — design
 
 Status: implemented (M1–M5 landed 2026-08-10). Owner: RN surface owner.
+Amended by `dev/RN_BINDING_CORE_REALIGN_DESIGN.md` (2026-08-12): the core
+engine-swap branch moved subscription carriers, transactions, and permissions
+underneath this binding; that document records the realignment.
 Scope: `crates/groove` SQLite storage backend, `crates/jazz-rn` rewrite,
 `packages/jazz-tools/src/react-native` wiring, revived Expo example E2E.
 
@@ -393,14 +396,17 @@ options and subscription events are JSON strings (`serde_json::Value` has no
 uniffi mapping; the adapter already `JSON.parse`s equivalent payloads on the
 wasm path).
 
-**Shared binding helpers.** The payload codecs and open path today live as
-per-crate copies in `jazz-napi` (`decode_core_open_args`, `open_core_db`,
-`decode_core_cells`, `encode_core_rows`, wait-state checking, …) with twins
-in `jazz-wasm`. jazz-rn does not become copy three: M2 extracts these into a
-shared `jazz` binding-support module (move, not redesign), `jazz-napi`
-switches to it in the same change (its existing suite verifies the move), and
-`jazz-wasm` adoption is a recorded follow-up. This is what makes the §4.6
-"cannot drift" rule structural rather than aspirational.
+**Shared binding helpers (amended exception).** The original M2 plan was to
+extract the payload codecs and open path from the per-crate `jazz-napi` copy
+(`decode_core_open_args`, `open_core_db`, `decode_core_cells`,
+`encode_core_rows`, wait-state checking, …) into a shared `jazz`
+binding-support module and switch both jazz-rn and `jazz-napi` in the same
+change. The core realignment implemented the shared module and jazz-rn
+adoption, but deliberately deferred the N-API switch to avoid mis-encoding its
+changed carrier. Therefore the "no third copy" rule is not currently a
+structural invariant: `jazz-napi` still has its own copy, with drift guarded by
+the cross-binding contract test until the follow-up. See the realignment
+design's §2 decision 2 and §12.1 for the live exception and options.
 
 ### 4.6 Error contract
 

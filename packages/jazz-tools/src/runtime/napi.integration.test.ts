@@ -6,7 +6,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { WebSocket as UndiciWebSocket } from "undici";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import type { WasmSchema } from "../drivers/types.js";
-import { type Row } from "./client.js";
+import { type BatchId, type Row } from "./client.js";
 import type { Db, QueryBuilder, TableProxy } from "./db.js";
 import { translateQuery } from "./query-adapter.js";
 import { loadCompiledSchema, type LoadedSchemaProject } from "../schema-loader.js";
@@ -17,8 +17,9 @@ import {
   loadNapiModule,
 } from "./testing/napi-runtime-test-utils.js";
 
-type RuntimeRowWithTransactionId = Row & {
-  transactionId: string;
+type RuntimeCommittedRow = Row & {
+  kind: "committed";
+  batchId: BatchId | Promise<BatchId>;
 };
 
 type TestRuntimeWithTransport = {
@@ -459,12 +460,12 @@ describe("NAPI integration", () => {
       env: "test",
       userBranch: "main",
     })) as unknown as {
-      insert(table: string, values: unknown): RuntimeRowWithTransactionId;
+      insert(table: string, values: unknown): RuntimeCommittedRow;
       update(
         table: string,
         objectId: string,
         updates: Record<string, unknown>,
-      ): { transactionId: string };
+      ): { kind: "committed"; batchId: BatchId | Promise<BatchId> };
       query(queryJson: string): Promise<Row[]>;
       close(): void;
     };
@@ -478,7 +479,7 @@ describe("NAPI integration", () => {
         title: { type: "Text", value: oversizedTitle },
         done: { type: "Boolean", value: false },
       });
-      expect(insertedRow.transactionId).toEqual(expect.any(String));
+      expect(await insertedRow.batchId).toEqual(expect.any(String));
 
       let rows = await runtime.query(queryJson);
       expect(rows).toHaveLength(1);
@@ -490,12 +491,12 @@ describe("NAPI integration", () => {
         title: { type: "Text", value: "kept title" },
         done: { type: "Boolean", value: false },
       });
-      expect(secondRow.transactionId).toEqual(expect.any(String));
+      expect(await secondRow.batchId).toEqual(expect.any(String));
 
       const updateResult = runtime.update("todos", secondRow.id, {
         title: { type: "Text", value: updatedOversizedTitle },
       });
-      expect(updateResult.transactionId).toEqual(expect.any(String));
+      expect(await updateResult.batchId).toEqual(expect.any(String));
 
       rows = await runtime.query(queryJson);
       expect(rows).toHaveLength(2);
@@ -600,14 +601,16 @@ describe("NAPI integration", () => {
         { timeout: 20_000 },
       );
 
-      expect(() =>
-        aliceDb.insert(policyTodosTable, {
-          title: "session-policy-denied",
-          done: false,
-          description: "",
-          owner_id: "bob",
-        }),
-      ).toThrow('Insert failed: WriteError("policy denied INSERT on table todos")');
+      await expect(
+        aliceDb
+          .insert(policyTodosTable, {
+            title: "session-policy-denied",
+            done: false,
+            description: "",
+            owner_id: "bob",
+          })
+          .wait({ tier: "edge" }),
+      ).rejects.toThrow(/AuthorizationDenied|Write rejected by server authorization/);
 
       await withTimeout(
         aliceDb.update(policyTodosTable, createdTodo.id, { done: true }).wait({ tier: "edge" }),
@@ -1165,8 +1168,8 @@ describe("NAPI integration", () => {
       >("t187", policyGraphSchema);
       const now = new Date("2026-07-10T00:00:00.000Z");
 
-      await backendDb
-        .transaction((tx) => {
+      await (
+        await backendDb.transaction((tx) => {
           tx.insert(
             teamTable,
             {
@@ -1217,7 +1220,7 @@ describe("NAPI integration", () => {
             { id: randomUUID() },
           );
         })
-        .wait({ tier: "global" });
+      ).wait({ tier: "global" });
 
       await context.shutdown();
       context = null;

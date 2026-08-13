@@ -458,6 +458,63 @@ describe("db.subscribeAll browser integration", () => {
     unsubscribe();
   });
 
+  it("registers a persistent-worker subscription before a subsequently called write", async () => {
+    const db = track(
+      await createDb({
+        appId: "db-subscribe-test",
+        driver: { type: "persistent", dbName: uniqueDbName("subscription-write-fifo") },
+      }),
+    );
+    await db.all(makeQuery<Todo>("todos", {}), {
+      tier: "local",
+      localUpdates: "immediate",
+      propagation: "local-only",
+    });
+    const clients = (db as unknown as { clients: Map<string, unknown> }).clients;
+    const client = clients.values().next().value as { runtime: unknown };
+    const runtime = client.runtime as {
+      opened: Promise<void>;
+      worker: { postMessage(message: unknown): void };
+    };
+    await runtime.opened;
+    const postedMethods: string[] = [];
+    const postMessage = runtime.worker.postMessage.bind(runtime.worker);
+    runtime.worker.postMessage = (message: unknown) => {
+      postedMethods.push((message as { method: string }).method);
+      postMessage(message);
+    };
+    let releaseReadiness!: () => void;
+    runtime.opened = new Promise<void>((resolve) => {
+      releaseReadiness = resolve;
+    });
+    const deltas: Array<SubscriptionDelta<Todo>> = [];
+    const unsubscribe = trackUnsubscribe(
+      db.subscribeAll(makeQuery<Todo>("todos", {}), (delta) => deltas.push(delta)),
+    );
+
+    const { value } = db.insert(todos, {
+      title: "after subscription registration",
+      done: false,
+      priority: 1,
+      owner_id: undefined,
+      tags: [],
+    });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const writeOvertookSubscriptionReadiness = postedMethods.includes("insert");
+    releaseReadiness();
+    expect(writeOvertookSubscriptionReadiness).toBe(false);
+
+    await waitForCondition(
+      () => deltas.some((delta) => hasChangeForId(delta, 0, value.id)),
+      4000,
+      "expected the registered subscription to observe the subsequent write",
+    );
+    expect(deltas[0]?.all).toEqual([]);
+    expect(deltas.slice(1).some((delta) => hasChangeForId(delta, 0, value.id))).toBe(true);
+
+    unsubscribe();
+  });
+
   for (const testCase of conditionCases) {
     it(`supports condition filter ${testCase.name}`, async () => {
       const deltas: Array<SubscriptionDelta<Todo>> = [];
@@ -732,6 +789,69 @@ describe("db.subscribeAll browser integration", () => {
     unsubscribe();
   });
 
+  it("decodes nullable child records delivered through an include terminal", async () => {
+    const db = track(
+      await createDb({
+        appId: "db-subscribe-test",
+        driver: { type: "persistent", dbName: uniqueDbName("include-nullable-child") },
+      }),
+    );
+
+    const {
+      value: { id: userId },
+    } = db.insert(users, { name: "Owner", team_id: undefined });
+    const deltas: Array<SubscriptionDelta<User & { todosViaOwner?: Todo[] }>> = [];
+    const unsubscribe = trackUnsubscribe(
+      db.subscribeAll(
+        makeQuery<User & { todosViaOwner?: Todo[] }>("users", {
+          conditions: [{ column: "id", op: "eq", value: userId }],
+          includes: { todosViaOwner: true },
+        }),
+        (delta) => deltas.push(delta),
+      ),
+    );
+
+    const {
+      value: { id: todoId },
+    } = db.insert(todos, {
+      title: "nullable terminal child",
+      done: false,
+      priority: 3,
+      owner_id: userId,
+      tags: ["x"],
+      payload: Uint8Array.of(7, 0, 8),
+    });
+
+    await waitForCondition(
+      () => {
+        const child = deltas[deltas.length - 1]?.all[0]?.todosViaOwner?.find(
+          (todo) => todo.id === todoId,
+        );
+        return child?.id === todoId;
+      },
+      4000,
+      "expected nullable child record through include terminal",
+    );
+    const child = deltas[deltas.length - 1]?.all[0]?.todosViaOwner?.find(
+      (todo) => todo.id === todoId,
+    );
+    expect(child?.priority).toBe(3);
+    expect(child?.owner_id).toBe(userId);
+    expect(child?.payload).toEqual(Uint8Array.of(7, 0, 8));
+
+    await db.update(todos, todoId, { priority: 7 });
+    await waitForCondition(
+      () =>
+        deltas[deltas.length - 1]?.all[0]?.todosViaOwner?.some(
+          (todo) => todo.id === todoId && todo.priority === 7,
+        ) === true,
+      4000,
+      "expected nullable child terminal update to decode",
+    );
+
+    unsubscribe();
+  });
+
   it("supports hop queries", async () => {
     const db = track(
       await createDb({
@@ -949,7 +1069,15 @@ describe("db.subscribeAll browser integration", () => {
       () => {
         const latestAll = deltas[deltas.length - 1]?.all ?? [];
         const ids = latestAll.map((row) => row.id);
-        return ids.includes(rootId) && ids.includes(midId) && ids.includes(leafId);
+        const names = latestAll.map((row) => row.name);
+        return (
+          ids.includes(rootId) &&
+          ids.includes(midId) &&
+          ids.includes(leafId) &&
+          names.includes("root") &&
+          names.includes("mid") &&
+          names.includes("leaf")
+        );
       },
       4000,
       "expected gather query subscription result",

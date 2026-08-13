@@ -6,6 +6,9 @@ import {
   type Runtime,
   type TransactionalRuntime,
   PersistedWriteRejectedError,
+  type BatchId,
+  type OpenBatchId,
+  type WriteReceipt,
 } from "./client.js";
 import type { AppContext } from "./context.js";
 import type { WasmSchema } from "../drivers/types.js";
@@ -13,13 +16,22 @@ import type { WasmSchema } from "../drivers/types.js";
 function makeFakeRuntime() {
   let nextTransactionNumber = 0;
 
-  function transactionIdFromWriteContext(writeContextJson?: string | null): string | undefined {
+  function openBatchIdFromWriteContext(writeContextJson?: string | null): OpenBatchId | undefined {
     if (!writeContextJson) {
       return undefined;
     }
     const writeContext = JSON.parse(writeContextJson) as { batch_id?: unknown };
-    return typeof writeContext.batch_id === "string" ? writeContext.batch_id : undefined;
+    return typeof writeContext.batch_id === "string"
+      ? (writeContext.batch_id as OpenBatchId)
+      : undefined;
   }
+
+  const receipt = (writeContextJson: string | null | undefined, id: string): WriteReceipt => {
+    const openBatchId = openBatchIdFromWriteContext(writeContextJson);
+    return openBatchId
+      ? { kind: "staged", openBatchId }
+      : { kind: "committed", batchId: id as BatchId };
+  };
 
   const runtime = {
     updateAuth: vi.fn<(auth_json: string) => void>(),
@@ -27,37 +39,33 @@ function makeFakeRuntime() {
     // Runtime interface stubs
     insert: vi.fn(
       (table: string, values: any, writeContextJson?: string | null, objectId?: string | null) => {
-        const transactionId = transactionIdFromWriteContext(writeContextJson);
         return {
           id: objectId ?? "todo-transaction-query",
           values: [],
-          transactionId: transactionId ?? "transaction-query",
+          ...receipt(writeContextJson, "transaction-query"),
         };
       },
     ),
     restore: vi.fn(
       (table: string, objectId: string, values: any, writeContextJson?: string | null) => {
-        const transactionId = transactionIdFromWriteContext(writeContextJson);
         return {
           id: objectId,
           values: [],
-          transactionId: transactionId ?? "transaction-query",
+          ...receipt(writeContextJson, "transaction-query"),
         };
       },
     ),
     update: vi.fn(
-      (_table: string, _objectId: string, _values: any, writeContextJson?: string | null) => ({
-        transactionId: transactionIdFromWriteContext(writeContextJson) ?? "transaction-update",
-      }),
+      (_table: string, _objectId: string, _values: any, writeContextJson?: string | null) =>
+        receipt(writeContextJson, "transaction-update"),
     ),
     upsert: vi.fn(
-      (table: string, objectId: string, values: any, writeContextJson?: string | null) => ({
-        transactionId: transactionIdFromWriteContext(writeContextJson) ?? "transaction-upsert",
-      }),
+      (table: string, objectId: string, values: any, writeContextJson?: string | null) =>
+        receipt(writeContextJson, "transaction-upsert"),
     ),
-    delete: vi.fn((_table: string, _objectId: string, writeContextJson?: string | null) => ({
-      transactionId: transactionIdFromWriteContext(writeContextJson) ?? "transaction-delete",
-    })),
+    delete: vi.fn((_table: string, _objectId: string, writeContextJson?: string | null) =>
+      receipt(writeContextJson, "transaction-delete"),
+    ),
     query:
       vi.fn<
         (
@@ -78,15 +86,17 @@ function makeFakeRuntime() {
       >(),
     executeSubscription: vi.fn<(handle: number, on_update: Function) => void>(),
     unsubscribe: vi.fn<(handle: number) => void>(),
-    beginTransaction: vi.fn<TransactionalRuntime["beginTransaction"]>((kind) => {
+    beginTransaction: vi.fn<TransactionalRuntime["beginTransaction"]>((_kind, id) => {
       nextTransactionNumber += 1;
-      return `transaction-${kind}-${nextTransactionNumber}`;
+      return id;
     }),
     connect: vi.fn<Runtime["connect"]>(),
     disconnect: vi.fn<Runtime["disconnect"]>(),
-    commitTransaction: vi.fn<(transaction_id: string) => void>(),
+    commitTransaction: vi.fn<TransactionalRuntime["commitTransaction"]>(
+      async () => `committed-${nextTransactionNumber}` as BatchId,
+    ),
     waitForTransaction: vi.fn<Runtime["waitForTransaction"]>(async () => undefined),
-    rollbackTransaction: vi.fn<TransactionalRuntime["rollbackTransaction"]>(() => false),
+    rollbackTransaction: vi.fn<TransactionalRuntime["rollbackTransaction"]>(async () => false),
     close: vi.fn(),
   } satisfies TransactionalRuntime;
 
@@ -284,7 +294,7 @@ describe("JazzClient transaction query plumbing", () => {
     await expect(
       client.query(JSON.stringify({ relation_ir: { table: "todos" } }), {
         localUpdates: "deferred",
-        transactionId,
+        openBatchId: transactionId,
       }),
     ).resolves.toEqual([{ id: "todo-transaction-query", values: [] }]);
 
@@ -303,7 +313,9 @@ describe("JazzClient runtime transaction waits", () => {
     runtime.waitForTransaction = vi.fn(async () => undefined);
     const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
 
-    await expect(client.waitForTransaction("transaction-runtime", "edge")).resolves.toBeUndefined();
+    await expect(
+      client.waitForTransaction("transaction-runtime" as BatchId, "edge"),
+    ).resolves.toBeUndefined();
 
     expect(runtime.waitForTransaction).toHaveBeenCalledWith("transaction-runtime", "edge");
   });
@@ -311,7 +323,7 @@ describe("JazzClient runtime transaction waits", () => {
   it("waits for connected exclusive transactions at the global tier", async () => {
     const runtime = makeFakeRuntime();
     const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
-    const handle = new ExclusiveWriteHandle("transaction-exclusive", client);
+    const handle = new ExclusiveWriteHandle("transaction-exclusive" as BatchId, client);
 
     await expect(handle.wait()).resolves.toBeUndefined();
 
@@ -324,7 +336,7 @@ describe("JazzClient runtime transaction waits", () => {
       ...makeContext(),
       serverUrl: undefined,
     });
-    const handle = new ExclusiveWriteHandle("transaction-exclusive", client);
+    const handle = new ExclusiveWriteHandle("transaction-exclusive" as BatchId, client);
 
     await expect(handle.wait()).resolves.toBeUndefined();
 
@@ -333,7 +345,7 @@ describe("JazzClient runtime transaction waits", () => {
 
   it("surfaces runtime wait rejection as PersistedWriteRejectedError", async () => {
     const runtime = makeFakeRuntime();
-    const transactionId = "transaction-runtime-rejected";
+    const batchId = "transaction-runtime-rejected" as BatchId;
     let rejectWait!: (error: unknown) => void;
     runtime.waitForTransaction = vi.fn(
       () =>
@@ -343,12 +355,12 @@ describe("JazzClient runtime transaction waits", () => {
     );
     const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
 
-    const waitPromise = client.waitForTransaction(transactionId, "edge");
+    const waitPromise = client.waitForTransaction(batchId, "edge");
     await Promise.resolve();
 
     rejectWait({
       kind: "rejected",
-      transactionId: transactionId,
+      batchId,
       code: "permission_denied",
       reason: "write rejected by policy",
     });

@@ -9,13 +9,18 @@ use std::thread::JoinHandle;
 use futures::channel::oneshot;
 use jazz::binding_support::{self as binding, WireQueues};
 use jazz::db::{
-    Db, Error as DbError, ExclusiveTxOps, MergeableTxOps, PeerConnection, PreparedQuery,
-    QueryAttachment, SubscriptionStream, WireTransportAdapter, WriteHandle, block_on,
+    ConnectionSessionContext, Db, Error as DbError, ExclusiveTxOps, MergeableTxOps, PeerConnection,
+    PreparedQuery, QueryAttachment, SubscriptionStream, WireTransportAdapter, WriteHandle,
+    block_on,
 };
 use jazz::groove::storage::{MemoryStorage, SqliteStorage};
-use jazz::ids::RowUuid;
-use jazz::node::OpenTxId;
+use jazz::ids::{AuthorId, NodeUuid, RowUuid};
+use jazz::tools::{BatchId, OpenBatchId};
 use jazz::tx::TxId;
+use jazz::wire::{
+    FEATURE_AUTHORIZATION_SCOPE_RECEIPTS, FEATURE_AUTHORIZATION_SCOPE_VIEWS, WIRE_PROTOCOL_VERSION,
+    WireAuthorityEndpoint, current_wire_features,
+};
 
 use crate::scheduler::RnScheduler;
 use crate::{
@@ -29,13 +34,15 @@ use crate::{
 /// body written once type-checks in both arms. Without this every operation
 /// would be spelled twice and the two copies could silently drift apart.
 macro_rules! with_db {
-    ($state:expr, |$db:ident| $body:expr) => {
-        match &$state.db {
+    ($state:expr, $view:expr, |$db:ident| $body:expr) => {{
+        match $state.view($view)? {
             CoreDb::Memory($db) => $body,
             CoreDb::Persistent($db) => $body,
         }
-    };
+    }};
 }
+
+const ROOT_VIEW: u64 = 0;
 
 type Job = Box<dyn ActorJob>;
 
@@ -238,8 +245,7 @@ impl ActorHandle {
         callback: Box<dyn TickSchedulerCallback>,
     ) -> Result<(), JazzRnError> {
         self.call("set_tick_scheduler", move |state| {
-            state.set_tick_scheduler(callback);
-            Ok(())
+            state.set_tick_scheduler(callback)
         })
     }
 
@@ -247,10 +253,26 @@ impl ActorHandle {
         self.call("tick", CoreState::tick)
     }
 
-    pub(crate) fn prepare_query(&self, query: Vec<u8>) -> Result<u64, JazzRnError> {
+    pub(crate) fn register_schema(&self, view: u64, schema: Vec<u8>) -> Result<u64, JazzRnError> {
+        let id = self.next_id();
+        self.call("register_schema", move |state| {
+            state.register_schema(view, id, &schema)?;
+            Ok(id)
+        })
+    }
+
+    pub(crate) fn release_view(&self, view: u64) -> Result<(), JazzRnError> {
+        self.call("release_view", move |state| state.release_view(view))
+    }
+
+    pub(crate) fn release_view_if_present(&self, view: u64) {
+        self.cast(move |state| state.release_view_if_present(view));
+    }
+
+    pub(crate) fn prepare_query(&self, view: u64, query: Vec<u8>) -> Result<u64, JazzRnError> {
         let id = self.next_id();
         self.call("prepare_query", move |state| {
-            state.prepare_query(id, &query)?;
+            state.prepare_query(view, id, &query)?;
             Ok(id)
         })
     }
@@ -264,34 +286,37 @@ impl ActorHandle {
 
     pub(crate) fn all(
         &self,
+        view: u64,
         query: u64,
         author: Option<Vec<u8>>,
         opts_json: Option<String>,
     ) -> Result<Vec<u8>, JazzRnError> {
         self.call("all", move |state| {
-            state.all(query, author.as_deref(), opts_json.as_deref())
+            state.all(view, query, author.as_deref(), opts_json.as_deref())
         })
     }
 
     pub(crate) fn all_relation_snapshot(
         &self,
+        view: u64,
         query: u64,
         author: Option<Vec<u8>>,
         opts_json: Option<String>,
     ) -> Result<Vec<u8>, JazzRnError> {
         self.call("all_relation_snapshot", move |state| {
-            state.all_relation_snapshot(query, author.as_deref(), opts_json.as_deref())
+            state.all_relation_snapshot(view, query, author.as_deref(), opts_json.as_deref())
         })
     }
 
     pub(crate) fn all_relation_query(
         &self,
+        view: u64,
         query_json: String,
         author: Option<Vec<u8>>,
         opts_json: Option<String>,
     ) -> Result<Vec<u8>, JazzRnError> {
         self.call("all_relation_query", move |state| {
-            state.all_relation_query(&query_json, author.as_deref(), opts_json.as_deref())
+            state.all_relation_query(view, &query_json, author.as_deref(), opts_json.as_deref())
         })
     }
 
@@ -309,77 +334,36 @@ impl ActorHandle {
 
     pub(crate) fn local_current_row(
         &self,
+        view: u64,
         table: String,
         row_id: Vec<u8>,
     ) -> Result<Vec<u8>, JazzRnError> {
         self.call("local_current_row", move |state| {
-            state.local_current_row(&table, &row_id)
+            state.local_current_row(view, &table, &row_id)
         })
     }
 
     pub(crate) fn set_identity_claims(
         &self,
+        view: u64,
         author: Vec<u8>,
         claims_json: Option<String>,
     ) -> Result<(), JazzRnError> {
         self.call("set_identity_claims", move |state| {
-            state.set_identity_claims(&author, claims_json.as_deref())
-        })
-    }
-
-    pub(crate) fn can_insert(
-        &self,
-        table: String,
-        cells: Vec<u8>,
-        author: Option<Vec<u8>>,
-    ) -> Result<bool, JazzRnError> {
-        self.call("can_insert", move |state| {
-            state.can_insert(&table, &cells, author.as_deref())
-        })
-    }
-
-    pub(crate) fn can_read(
-        &self,
-        table: String,
-        row_id: Vec<u8>,
-        author: Vec<u8>,
-    ) -> Result<bool, JazzRnError> {
-        self.call("can_read", move |state| {
-            state.can_read(&table, &row_id, &author)
-        })
-    }
-
-    pub(crate) fn can_update(
-        &self,
-        table: String,
-        row_id: Vec<u8>,
-        author: Vec<u8>,
-    ) -> Result<bool, JazzRnError> {
-        self.call("can_update", move |state| {
-            state.can_update(&table, &row_id, &author)
-        })
-    }
-
-    pub(crate) fn can_delete(
-        &self,
-        table: String,
-        row_id: Vec<u8>,
-        author: Vec<u8>,
-    ) -> Result<bool, JazzRnError> {
-        self.call("can_delete", move |state| {
-            state.can_delete(&table, &row_id, &author)
+            state.set_identity_claims(view, &author, claims_json.as_deref())
         })
     }
 
     pub(crate) fn attach_query(
         &self,
+        view: u64,
         query: u64,
         author: Option<Vec<u8>>,
         opts_json: Option<String>,
     ) -> Result<u64, JazzRnError> {
         let id = self.next_id();
         self.call("attach_query", move |state| {
-            state.attach_query(id, query, author.as_deref(), opts_json.as_deref())?;
+            state.attach_query(view, id, query, author.as_deref(), opts_json.as_deref())?;
             Ok(id)
         })
     }
@@ -400,19 +384,21 @@ impl ActorHandle {
 
     pub(crate) fn subscribe(
         &self,
+        view: u64,
         query: u64,
         author: Option<Vec<u8>>,
         opts_json: Option<String>,
     ) -> Result<u64, JazzRnError> {
         let id = self.next_id();
         self.call("subscribe", move |state| {
-            state.subscribe(id, query, author.as_deref(), opts_json.as_deref())?;
+            state.subscribe(view, id, query, author.as_deref(), opts_json.as_deref())?;
             Ok(id)
         })
     }
 
     pub(crate) fn subscribe_relation_query(
         &self,
+        view: u64,
         query_json: String,
         author: Option<Vec<u8>>,
         opts_json: Option<String>,
@@ -420,6 +406,7 @@ impl ActorHandle {
         let id = self.next_id();
         self.call("subscribe_relation_query", move |state| {
             state.subscribe_relation_query(
+                view,
                 id,
                 &query_json,
                 author.as_deref(),
@@ -453,6 +440,7 @@ impl ActorHandle {
 
     pub(crate) fn insert_with_id(
         &self,
+        view: u64,
         table: String,
         row_id: Vec<u8>,
         cells: Vec<u8>,
@@ -461,19 +449,21 @@ impl ActorHandle {
     ) -> Result<u64, JazzRnError> {
         let id = self.next_id();
         self.call("insert_with_id", move |state| {
-            state.insert_with_id(
+            state.insert_with_id(WriteArgs {
+                view,
                 id,
-                &table,
-                &row_id,
-                &cells,
-                author.as_deref(),
+                table: &table,
+                row_id: &row_id,
+                cells: &cells,
+                author: author.as_deref(),
                 updated_at_ms,
-            )
+            })
         })
     }
 
     pub(crate) fn update(
         &self,
+        view: u64,
         table: String,
         row_id: Vec<u8>,
         patch: Vec<u8>,
@@ -482,19 +472,21 @@ impl ActorHandle {
     ) -> Result<u64, JazzRnError> {
         let id = self.next_id();
         self.call("update", move |state| {
-            state.update(
+            state.update(WriteArgs {
+                view,
                 id,
-                &table,
-                &row_id,
-                &patch,
-                author.as_deref(),
+                table: &table,
+                row_id: &row_id,
+                cells: &patch,
+                author: author.as_deref(),
                 updated_at_ms,
-            )
+            })
         })
     }
 
     pub(crate) fn upsert(
         &self,
+        view: u64,
         table: String,
         row_id: Vec<u8>,
         cells: Vec<u8>,
@@ -503,19 +495,21 @@ impl ActorHandle {
     ) -> Result<u64, JazzRnError> {
         let id = self.next_id();
         self.call("upsert", move |state| {
-            state.upsert(
+            state.upsert(WriteArgs {
+                view,
                 id,
-                &table,
-                &row_id,
-                &cells,
-                author.as_deref(),
+                table: &table,
+                row_id: &row_id,
+                cells: &cells,
+                author: author.as_deref(),
                 updated_at_ms,
-            )
+            })
         })
     }
 
     pub(crate) fn delete(
         &self,
+        view: u64,
         table: String,
         row_id: Vec<u8>,
         author: Option<Vec<u8>>,
@@ -523,12 +517,13 @@ impl ActorHandle {
     ) -> Result<u64, JazzRnError> {
         let id = self.next_id();
         self.call("delete", move |state| {
-            state.delete(id, &table, &row_id, author.as_deref(), updated_at_ms)
+            state.delete(view, id, &table, &row_id, author.as_deref(), updated_at_ms)
         })
     }
 
     pub(crate) fn restore(
         &self,
+        view: u64,
         table: String,
         row_id: Vec<u8>,
         cells: Vec<u8>,
@@ -537,25 +532,56 @@ impl ActorHandle {
     ) -> Result<u64, JazzRnError> {
         let id = self.next_id();
         self.call("restore", move |state| {
-            state.restore(
+            state.restore(WriteArgs {
+                view,
                 id,
-                &table,
-                &row_id,
-                &cells,
-                author.as_deref(),
+                table: &table,
+                row_id: &row_id,
+                cells: &cells,
+                author: author.as_deref(),
                 updated_at_ms,
-            )
+            })
         })
     }
 
-    pub(crate) fn begin_transaction(
+    pub(crate) fn begin_batch(
         &self,
+        open_batch_id: String,
+        kind: TransactionKind,
+        author: Option<Vec<u8>>,
+    ) -> Result<(), JazzRnError> {
+        self.call("begin_transaction", move |state| {
+            state.begin_batch(&open_batch_id, kind, author.as_deref())
+        })
+    }
+
+    pub(crate) fn attach_transaction(
+        &self,
+        view: u64,
+        open_batch_id: String,
+        kind: TransactionKind,
+    ) -> Result<u64, JazzRnError> {
+        let id = self.next_id();
+        self.call("attach_transaction", move |state| {
+            state.attach_transaction(id, view, &open_batch_id, kind, false)?;
+            Ok(id)
+        })
+    }
+
+    pub(crate) fn open_owning_transaction(
+        &self,
+        view: u64,
+        open_batch_id: String,
         kind: TransactionKind,
         author: Option<Vec<u8>>,
     ) -> Result<u64, JazzRnError> {
         let id = self.next_id();
-        self.call("begin_transaction", move |state| {
-            state.begin_transaction(id, kind, author.as_deref())?;
+        self.call("open_owning_transaction", move |state| {
+            state.begin_batch(&open_batch_id, kind, author.as_deref())?;
+            if let Err(error) = state.attach_transaction(id, view, &open_batch_id, kind, true) {
+                let _ = state.rollback_batch(&open_batch_id);
+                return Err(error);
+            }
             Ok(id)
         })
     }
@@ -586,6 +612,19 @@ impl ActorHandle {
         })
     }
 
+    pub(crate) fn tx_upsert(
+        &self,
+        transaction: u64,
+        table: String,
+        row_id: Vec<u8>,
+        cells: Vec<u8>,
+        updated_at_ms: Option<u64>,
+    ) -> Result<(), JazzRnError> {
+        self.call("tx_upsert", move |state| {
+            state.tx_upsert(transaction, &table, &row_id, &cells, updated_at_ms)
+        })
+    }
+
     pub(crate) fn tx_delete(
         &self,
         transaction: u64,
@@ -611,27 +650,50 @@ impl ActorHandle {
         })
     }
 
-    pub(crate) fn commit_transaction(&self, transaction: u64) -> Result<u64, JazzRnError> {
+    pub(crate) fn commit_batch(
+        &self,
+        open_batch_id: String,
+        kind: Option<TransactionKind>,
+    ) -> Result<u64, JazzRnError> {
         let write_id = self.next_id();
         self.call("commit_transaction", move |state| {
+            state.commit_batch(&open_batch_id, kind, write_id)
+        })
+    }
+
+    pub(crate) fn rollback_batch(&self, open_batch_id: String) -> Result<(), JazzRnError> {
+        self.call("rollback_transaction", move |state| {
+            state.rollback_batch(&open_batch_id)
+        })
+    }
+
+    pub(crate) fn commit_transaction(&self, transaction: u64) -> Result<u64, JazzRnError> {
+        let write_id = self.next_id();
+        self.call("commit_transaction_handle", move |state| {
             state.commit_transaction(transaction, write_id)
         })
     }
 
     pub(crate) fn rollback_transaction(&self, transaction: u64) -> Result<(), JazzRnError> {
-        self.call("rollback_transaction", move |state| {
+        self.call("rollback_transaction_handle", move |state| {
             state.rollback_transaction(transaction)
         })
     }
 
     pub(crate) fn release_transaction(&self, transaction: u64) {
-        self.cast(move |state| state.rollback_transaction_if_present(transaction));
+        self.cast(move |state| state.release_transaction_if_present(transaction));
     }
 
     pub(crate) fn write_payload(&self, write: u64) -> Result<Vec<u8>, JazzRnError> {
         self.call("write_payload", move |state| {
             let entry = *state.write(write)?;
             binding::encode_write_result(entry.row_id, entry.tx_id).map_err(Into::into)
+        })
+    }
+
+    pub(crate) fn write_batch_id(&self, write: u64) -> Result<String, JazzRnError> {
+        self.call("write_batch_id", move |state| {
+            Ok(state.write(write)?.batch_id.to_string())
         })
     }
 
@@ -676,10 +738,35 @@ impl ActorHandle {
         });
     }
 
-    pub(crate) fn connect_upstream(&self) -> Result<u64, JazzRnError> {
+    pub(crate) fn connect_upstream(&self, view: u64) -> Result<u64, JazzRnError> {
         let id = self.next_id();
         self.call("connect_upstream", move |state| {
-            state.connect_upstream(id)?;
+            state.connect_upstream(view, id, None)?;
+            Ok(id)
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn connect_upstream_with_session(
+        &self,
+        view: u64,
+        protocol_version: u16,
+        features: u32,
+        remote_node: Vec<u8>,
+        remote_epoch: u64,
+        local_node: Vec<u8>,
+        local_epoch: u64,
+    ) -> Result<u64, JazzRnError> {
+        let id = self.next_id();
+        self.call("connect_upstream_with_session", move |state| {
+            let session = connection_session_context(
+                features,
+                &remote_node,
+                remote_epoch,
+                &local_node,
+                local_epoch,
+            )?;
+            state.connect_upstream(view, id, Some((protocol_version, features as u64, session)))?;
             Ok(id)
         })
     }
@@ -905,6 +992,7 @@ fn mark_poisoned(control: &Weak<Mutex<Control>>, reason: String) {
     }
 }
 
+#[derive(Clone)]
 enum CoreDb {
     Memory(Rc<Db<MemoryStorage>>),
     Persistent(Rc<Db<SqliteStorage>>),
@@ -916,10 +1004,50 @@ pub(crate) enum TransactionKind {
     Exclusive,
 }
 
+impl TransactionKind {
+    pub(crate) fn from_str(kind: &str) -> Result<Self, JazzRnError> {
+        match kind {
+            "mergeable" => Ok(Self::Mergeable),
+            "exclusive" => Ok(Self::Exclusive),
+            other => Err(JazzRnError::InvalidPayload {
+                message: format!("unknown batch kind {other}"),
+            }),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Mergeable => "mergeable",
+            Self::Exclusive => "exclusive",
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
-struct TransactionEntry {
+struct BatchEntry {
     kind: TransactionKind,
-    open_tx: OpenTxId,
+}
+
+#[derive(Clone, Copy)]
+struct TxAttachment {
+    batch: OpenBatchId,
+    view: u64,
+    owns_lifetime: bool,
+}
+
+struct PreparedQueryEntry {
+    view: u64,
+    query: PreparedQuery,
+}
+
+struct QueryAttachmentEntry {
+    view: u64,
+    attachment: QueryAttachment,
+}
+
+struct SubscriptionEntry {
+    view: u64,
+    stream: SubscriptionStream,
 }
 
 /// The ids a completed write exposes. Both are `Copy`, and the postcard
@@ -929,6 +1057,17 @@ struct TransactionEntry {
 struct WriteEntry {
     row_id: RowUuid,
     tx_id: TxId,
+    batch_id: BatchId,
+}
+
+struct WriteArgs<'a> {
+    view: u64,
+    id: u64,
+    table: &'a str,
+    row_id: &'a [u8],
+    cells: &'a [u8],
+    author: Option<&'a [u8]>,
+    updated_at_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -944,11 +1083,13 @@ struct WaiterEntry {
 
 enum TransportEntry {
     Memory {
+        view: u64,
         db: Rc<Db<MemoryStorage>>,
         connection: Rc<RefCell<PeerConnection<MemoryStorage>>>,
         queues: WireQueues,
     },
     Persistent {
+        view: u64,
         db: Rc<Db<SqliteStorage>>,
         connection: Rc<RefCell<PeerConnection<SqliteStorage>>>,
         queues: WireQueues,
@@ -956,6 +1097,12 @@ enum TransportEntry {
 }
 
 impl TransportEntry {
+    fn view(&self) -> u64 {
+        match self {
+            Self::Memory { view, .. } | Self::Persistent { view, .. } => *view,
+        }
+    }
+
     fn queues(&self) -> &WireQueues {
         match self {
             Self::Memory { queues, .. } | Self::Persistent { queues, .. } => queues,
@@ -988,14 +1135,15 @@ impl TransportEntry {
 }
 
 struct CoreState {
-    db: CoreDb,
+    views: HashMap<u64, CoreDb>,
     scheduler: RnScheduler,
-    queries: HashMap<u64, PreparedQuery>,
-    attachments: HashMap<u64, QueryAttachment>,
-    transactions: HashMap<u64, TransactionEntry>,
+    queries: HashMap<u64, PreparedQueryEntry>,
+    query_attachments: HashMap<u64, QueryAttachmentEntry>,
+    open_batches: HashMap<OpenBatchId, BatchEntry>,
+    tx_attachments: HashMap<u64, TxAttachment>,
     writes: HashMap<u64, WriteEntry>,
     waiters: HashMap<u64, WaiterEntry>,
-    subscriptions: HashMap<u64, SubscriptionStream>,
+    subscriptions: HashMap<u64, SubscriptionEntry>,
     transports: HashMap<u64, TransportEntry>,
     closed: bool,
 }
@@ -1048,11 +1196,12 @@ impl CoreState {
             }
         };
         Ok(Self {
-            db,
+            views: HashMap::from([(ROOT_VIEW, db)]),
             scheduler: RnScheduler::default(),
             queries: HashMap::new(),
-            attachments: HashMap::new(),
-            transactions: HashMap::new(),
+            query_attachments: HashMap::new(),
+            open_batches: HashMap::new(),
+            tx_attachments: HashMap::new(),
             writes: HashMap::new(),
             waiters: HashMap::new(),
             subscriptions: HashMap::new(),
@@ -1061,35 +1210,131 @@ impl CoreState {
         })
     }
 
-    fn set_tick_scheduler(&mut self, callback: Box<dyn TickSchedulerCallback>) {
+    fn view(&self, id: u64) -> Result<&CoreDb, JazzRnError> {
+        self.views.get(&id).ok_or_else(|| invalid_view(id))
+    }
+
+    fn set_tick_scheduler(
+        &mut self,
+        callback: Box<dyn TickSchedulerCallback>,
+    ) -> Result<(), JazzRnError> {
         self.scheduler.set_callback(Some(callback));
         let scheduler = Rc::new(self.scheduler.clone());
-        with_db!(self, |db| db.set_tick_scheduler(Some(scheduler)))
+        with_db!(self, ROOT_VIEW, |db| db.set_tick_scheduler(Some(scheduler)));
+        Ok(())
     }
 
     fn tick(&mut self) -> Result<(), JazzRnError> {
-        with_db!(self, |db| db.tick()).map_err(core_error)
+        with_db!(self, ROOT_VIEW, |db| db.tick()).map_err(core_error)
     }
 
-    fn prepare_query(&mut self, id: u64, bytes: &[u8]) -> Result<(), JazzRnError> {
+    fn register_schema(
+        &mut self,
+        source_view: u64,
+        id: u64,
+        bytes: &[u8],
+    ) -> Result<(), JazzRnError> {
+        let schema = postcard::from_bytes(bytes).map_err(|error| JazzRnError::InvalidPayload {
+            message: format!("decode schema: {error}"),
+        })?;
+        let view = match self.view(source_view)? {
+            CoreDb::Memory(db) => CoreDb::Memory(Rc::new(
+                db.register_schema_view(schema).map_err(core_error)?,
+            )),
+            CoreDb::Persistent(db) => CoreDb::Persistent(Rc::new(
+                db.register_schema_view(schema).map_err(core_error)?,
+            )),
+        };
+        self.views.insert(id, view);
+        Ok(())
+    }
+
+    fn release_view(&mut self, view: u64) -> Result<(), JazzRnError> {
+        if view == ROOT_VIEW {
+            return Ok(());
+        }
+        if !self.views.contains_key(&view) {
+            return Err(invalid_view(view));
+        }
+        self.release_view_resources(view);
+        self.views.remove(&view);
+        Ok(())
+    }
+
+    fn release_view_if_present(&mut self, view: u64) -> Result<(), JazzRnError> {
+        if view != ROOT_VIEW && self.views.contains_key(&view) {
+            self.release_view_resources(view);
+            self.views.remove(&view);
+        }
+        Ok(())
+    }
+
+    fn release_view_resources(&mut self, view: u64) {
+        self.queries.retain(|_, query| query.view != view);
+        self.subscriptions.retain(|_, stream| stream.view != view);
+
+        let query_attachment_ids = self
+            .query_attachments
+            .iter()
+            .filter_map(|(id, entry)| (entry.view == view).then_some(*id))
+            .collect::<Vec<_>>();
+        for id in query_attachment_ids {
+            let _ = self.detach_query_if_present(id);
+        }
+
+        let transaction_ids = self
+            .tx_attachments
+            .iter()
+            .filter_map(|(id, attachment)| (attachment.view == view).then_some(*id))
+            .collect::<Vec<_>>();
+        for id in transaction_ids {
+            let _ = self.release_transaction_if_present(id);
+        }
+
+        let transport_ids = self
+            .transports
+            .iter()
+            .filter_map(|(id, transport)| (transport.view() == view).then_some(*id))
+            .collect::<Vec<_>>();
+        for id in transport_ids {
+            if let Some(transport) = self.transports.remove(&id) {
+                transport.close();
+            }
+        }
+    }
+
+    fn prepare_query(&mut self, view: u64, id: u64, bytes: &[u8]) -> Result<(), JazzRnError> {
         let query = binding::decode_query(bytes)?;
-        let prepared = with_db!(self, |db| db.prepare_query(&query)).map_err(core_error)?;
-        self.queries.insert(id, prepared);
+        let prepared = with_db!(self, view, |db| db.prepare_query(&query)).map_err(core_error)?;
+        self.queries.insert(
+            id,
+            PreparedQueryEntry {
+                view,
+                query: prepared,
+            },
+        );
         Ok(())
     }
 
     fn query(&self, id: u64) -> Result<PreparedQuery, JazzRnError> {
         self.queries
             .get(&id)
-            .cloned()
+            .map(|entry| entry.query.clone())
             .ok_or_else(|| invalid_handle("prepared query", id))
     }
 
-    fn transaction(&self, id: u64) -> Result<TransactionEntry, JazzRnError> {
-        self.transactions
+    fn transaction(&self, id: u64) -> Result<TxAttachment, JazzRnError> {
+        self.tx_attachments
             .get(&id)
             .copied()
             .ok_or_else(|| invalid_handle("transaction", id))
+    }
+
+    fn batch(&self, id: OpenBatchId) -> Result<BatchEntry, JazzRnError> {
+        self.open_batches
+            .get(&id)
+            .copied()
+            .ok_or_else(|| invalid_batch(id))
     }
 
     fn write(&self, id: u64) -> Result<&WriteEntry, JazzRnError> {
@@ -1100,6 +1345,7 @@ impl CoreState {
 
     fn all(
         &mut self,
+        view: u64,
         query: u64,
         author: Option<&[u8]>,
         opts_json: Option<&str>,
@@ -1107,7 +1353,7 @@ impl CoreState {
         let query = self.query(query)?;
         let opts = binding::read_opts_from_json_str(opts_json)?;
         let author = author.map(binding::author_id_from_bytes).transpose()?;
-        let rows = with_db!(self, |db| match author {
+        let rows = with_db!(self, view, |db| match author {
             Some(author) => {
                 block_on(db.all_for_identity(&query, opts, author))
             }
@@ -1119,6 +1365,7 @@ impl CoreState {
 
     fn all_relation_snapshot(
         &mut self,
+        view: u64,
         query: u64,
         author: Option<&[u8]>,
         opts_json: Option<&str>,
@@ -1126,7 +1373,7 @@ impl CoreState {
         let query = self.query(query)?;
         let opts = binding::read_opts_from_json_str(opts_json)?;
         let author = author.map(binding::author_id_from_bytes).transpose()?;
-        let snapshot = with_db!(self, |db| match author {
+        let snapshot = with_db!(self, view, |db| match author {
             Some(author) => {
                 block_on(db.all_relation_snapshot_for_identity(&query, opts, author))
             }
@@ -1138,6 +1385,7 @@ impl CoreState {
 
     fn all_relation_query(
         &mut self,
+        view: u64,
         query_json: &str,
         author: Option<&[u8]>,
         opts_json: Option<&str>,
@@ -1145,7 +1393,7 @@ impl CoreState {
         let query = binding::relation_query_from_json(query_json)?;
         let opts = binding::read_opts_from_json_str(opts_json)?;
         let author = author.map(binding::author_id_from_bytes).transpose()?;
-        let snapshot = with_db!(self, |db| match author {
+        let snapshot = with_db!(self, view, |db| match author {
             Some(author) => {
                 block_on(db.all_relation_query_for_identity(&query, opts, author))
             }
@@ -1162,35 +1410,44 @@ impl CoreState {
         author: Option<&[u8]>,
         opts_json: Option<&str>,
     ) -> Result<Vec<u8>, JazzRnError> {
-        let _opts = binding::read_opts_from_json_str(opts_json)?;
+        let opts = binding::read_opts_from_json_str(opts_json)?;
         let query = self.query(query)?;
         let transaction = self.transaction(transaction)?;
-        if transaction.kind != TransactionKind::Exclusive {
-            return Err(JazzRnError::Runtime {
-                message: "transaction reads require an exclusive transaction".to_owned(),
-            });
-        }
+        let batch = self.batch(transaction.batch)?;
         let author = author.map(binding::author_id_from_bytes).transpose()?;
-        let rows = with_db!(self, |db| match author {
-            Some(author) => db
-                .exclusive_tx_ref(transaction.open_tx)
-                .all_prepared_for_identity(&query, author),
-            None => db
-                .exclusive_tx_ref(transaction.open_tx)
-                .all_prepared(&query),
+        let rows = with_db!(self, transaction.view, |db| match (batch.kind, author) {
+            (TransactionKind::Mergeable, Some(author)) => db
+                .mergeable_tx_ref(transaction.batch)
+                .all_prepared_for_identity_with_opts(&query, author, opts),
+            (TransactionKind::Mergeable, None) => db
+                .mergeable_tx_ref(transaction.batch)
+                .all_prepared_with_opts(&query, opts),
+            (TransactionKind::Exclusive, Some(author)) => db
+                .exclusive_tx_ref(transaction.batch)
+                .all_prepared_for_identity_with_opts(&query, author, opts),
+            (TransactionKind::Exclusive, None) => db
+                .exclusive_tx_ref(transaction.batch)
+                .all_prepared_with_opts(&query, opts),
         })
         .map_err(core_error)?;
         binding::encode_rows(&rows).map_err(Into::into)
     }
 
-    fn local_current_row(&mut self, table: &str, row_id: &[u8]) -> Result<Vec<u8>, JazzRnError> {
+    fn local_current_row(
+        &mut self,
+        view: u64,
+        table: &str,
+        row_id: &[u8],
+    ) -> Result<Vec<u8>, JazzRnError> {
         let row_id = binding::row_uuid_from_bytes(row_id)?;
-        let row = with_db!(self, |db| db.local_current_row(table, row_id)).map_err(core_error)?;
+        let row =
+            with_db!(self, view, |db| db.local_current_row(table, row_id)).map_err(core_error)?;
         binding::encode_rows(&row.into_iter().collect::<Vec<_>>()).map_err(Into::into)
     }
 
     fn set_identity_claims(
         &mut self,
+        view: u64,
         author: &[u8],
         claims_json: Option<&str>,
     ) -> Result<(), JazzRnError> {
@@ -1203,55 +1460,13 @@ impl CoreState {
             })
             .transpose()?;
         let claims = binding::claims_from_json(author, claims)?;
-        with_db!(self, |db| db.set_identity_claims(author, claims));
+        with_db!(self, view, |db| db.set_identity_claims(author, claims));
         Ok(())
-    }
-
-    fn can_insert(
-        &mut self,
-        table: &str,
-        cells: &[u8],
-        author: Option<&[u8]>,
-    ) -> Result<bool, JazzRnError> {
-        let cells = binding::decode_cells(cells)?;
-        let author = author.map(binding::author_id_from_bytes).transpose()?;
-        with_db!(self, |db| match author {
-            Some(author) => db.can_insert_for_identity(table, cells, author),
-            None => db.can_insert(table, cells),
-        })
-        .map_err(core_error)
-    }
-
-    fn can_read(&mut self, table: &str, row_id: &[u8], author: &[u8]) -> Result<bool, JazzRnError> {
-        let row_id = binding::row_uuid_from_bytes(row_id)?;
-        let author = binding::author_id_from_bytes(author)?;
-        with_db!(self, |db| db.can_read_for_identity(table, row_id, author)).map_err(core_error)
-    }
-
-    fn can_update(
-        &mut self,
-        table: &str,
-        row_id: &[u8],
-        author: &[u8],
-    ) -> Result<bool, JazzRnError> {
-        let row_id = binding::row_uuid_from_bytes(row_id)?;
-        let author = binding::author_id_from_bytes(author)?;
-        with_db!(self, |db| db.can_update_for_identity(table, row_id, author)).map_err(core_error)
-    }
-
-    fn can_delete(
-        &mut self,
-        table: &str,
-        row_id: &[u8],
-        author: &[u8],
-    ) -> Result<bool, JazzRnError> {
-        let row_id = binding::row_uuid_from_bytes(row_id)?;
-        let author = binding::author_id_from_bytes(author)?;
-        with_db!(self, |db| db.can_delete_for_identity(table, row_id, author)).map_err(core_error)
     }
 
     fn attach_query(
         &mut self,
+        view: u64,
         id: u64,
         query: u64,
         author: Option<&[u8]>,
@@ -1260,43 +1475,48 @@ impl CoreState {
         let query = self.query(query)?;
         let opts = binding::read_opts_from_json_str(opts_json)?;
         let author = author.map(binding::author_id_from_bytes).transpose()?;
-        let attachment = with_db!(self, |db| match author {
+        let attachment = with_db!(self, view, |db| match author {
             Some(author) => {
                 db.attach_query_with_opts_for_identity(&query, opts, author)
             }
             None => db.attach_query_with_opts(&query, opts),
         })
         .map_err(core_error)?;
-        self.attachments.insert(id, attachment);
+        self.query_attachments
+            .insert(id, QueryAttachmentEntry { view, attachment });
         Ok(())
     }
 
     fn attachment_is_covered(&self, id: u64) -> Result<bool, JazzRnError> {
         let attachment = self
-            .attachments
+            .query_attachments
             .get(&id)
             .ok_or_else(|| invalid_handle("query attachment", id))?;
-        Ok(with_db!(self, |db| db.query_attachment_is_covered(attachment)))
+        Ok(with_db!(self, attachment.view, |db| db
+            .query_attachment_is_covered(&attachment.attachment)))
     }
 
     fn detach_query(&mut self, id: u64) -> Result<(), JazzRnError> {
         let attachment = self
-            .attachments
+            .query_attachments
             .remove(&id)
             .ok_or_else(|| invalid_handle("query attachment", id))?;
-        with_db!(self, |db| db.detach_query(attachment));
+        with_db!(self, attachment.view, |db| db
+            .detach_query(attachment.attachment));
         Ok(())
     }
 
     fn detach_query_if_present(&mut self, id: u64) -> Result<(), JazzRnError> {
-        if let Some(attachment) = self.attachments.remove(&id) {
-            with_db!(self, |db| db.detach_query(attachment))
+        if let Some(attachment) = self.query_attachments.remove(&id) {
+            with_db!(self, attachment.view, |db| db
+                .detach_query(attachment.attachment))
         }
         Ok(())
     }
 
     fn subscribe(
         &mut self,
+        view: u64,
         id: u64,
         query: u64,
         author: Option<&[u8]>,
@@ -1305,19 +1525,21 @@ impl CoreState {
         let query = self.query(query)?;
         let opts = binding::read_opts_from_json_str(opts_json)?;
         let author = author.map(binding::author_id_from_bytes).transpose()?;
-        let stream = with_db!(self, |db| match author {
+        let stream = with_db!(self, view, |db| match author {
             Some(author) => {
                 block_on(db.subscribe_for_identity(&query, opts, author))
             }
             None => block_on(db.subscribe(&query, opts)),
         })
         .map_err(core_error)?;
-        self.subscriptions.insert(id, stream);
+        self.subscriptions
+            .insert(id, SubscriptionEntry { view, stream });
         Ok(())
     }
 
     fn subscribe_relation_query(
         &mut self,
+        view: u64,
         id: u64,
         query_json: &str,
         author: Option<&[u8]>,
@@ -1326,14 +1548,15 @@ impl CoreState {
         let query = binding::relation_query_from_json(query_json)?;
         let opts = binding::read_opts_from_json_str(opts_json)?;
         let author = author.map(binding::author_id_from_bytes).transpose()?;
-        let stream = with_db!(self, |db| match author {
+        let stream = with_db!(self, view, |db| match author {
             Some(author) => {
                 block_on(db.subscribe_relation_query_for_identity(&query, opts, author))
             }
             None => block_on(db.subscribe_relation_query(&query, opts)),
         })
         .map_err(core_error)?;
-        self.subscriptions.insert(id, stream);
+        self.subscriptions
+            .insert(id, SubscriptionEntry { view, stream });
         Ok(())
     }
 
@@ -1343,19 +1566,25 @@ impl CoreState {
             .get_mut(&id)
             .ok_or_else(|| invalid_handle("subscription", id))?;
         let mut events = Vec::new();
-        while let Some(event) = stream.try_next_event() {
+        while let Some(event) = stream.stream.try_next_event() {
             let event = match binding::encode_subscription_event(&event)? {
                 binding::EncodedSubscriptionEvent::Delta {
                     reset,
                     delta,
-                    relation_delta,
+                    terminal_operations,
                     settled,
                     tier,
                 } => RnSubscriptionEvent {
                     event_type: "delta".to_owned(),
                     reset: Some(reset),
                     delta: Some(delta),
-                    relation_delta: Some(relation_delta),
+                    terminal_operations_json: Some(
+                        serde_json::to_string(&terminal_operations).map_err(|error| {
+                            JazzRnError::Internal {
+                                message: format!("encode terminal operations: {error}"),
+                            }
+                        })?,
+                    ),
                     settled: Some(settled),
                     tier: Some(tier),
                     reason_json: None,
@@ -1364,7 +1593,7 @@ impl CoreState {
                     event_type: "rejected".to_owned(),
                     reset: None,
                     delta: None,
-                    relation_delta: None,
+                    terminal_operations_json: None,
                     settled: None,
                     tier: None,
                     reason_json: Some(serde_json::to_string(&reason).map_err(|error| {
@@ -1377,7 +1606,7 @@ impl CoreState {
                     event_type: "closed".to_owned(),
                     reset: None,
                     delta: None,
-                    relation_delta: None,
+                    terminal_operations_json: None,
                     settled: None,
                     tier: None,
                     reason_json: None,
@@ -1388,19 +1617,20 @@ impl CoreState {
         Ok(events)
     }
 
-    fn insert_with_id(
-        &mut self,
-        id: u64,
-        table: &str,
-        row_id: &[u8],
-        cells: &[u8],
-        author: Option<&[u8]>,
-        updated_at_ms: Option<u64>,
-    ) -> Result<u64, JazzRnError> {
+    fn insert_with_id(&mut self, args: WriteArgs<'_>) -> Result<u64, JazzRnError> {
+        let WriteArgs {
+            view,
+            id,
+            table,
+            row_id,
+            cells,
+            author,
+            updated_at_ms,
+        } = args;
         let row_id = binding::row_uuid_from_bytes(row_id)?;
         let cells = binding::decode_cells(cells)?;
         let author = author.map(binding::author_id_from_bytes).transpose()?;
-        let (row_id, tx_id) = with_db!(self, |db| match (author, updated_at_ms) {
+        let (row_id, tx_id) = with_db!(self, view, |db| match (author, updated_at_ms) {
             (Some(author), Some(now)) => write_parts(
                 db.insert_with_id_for_identity_at_ms(author, table, row_id, cells, now)
             )?,
@@ -1412,19 +1642,20 @@ impl CoreState {
         self.register_write(id, row_id, tx_id)
     }
 
-    fn update(
-        &mut self,
-        id: u64,
-        table: &str,
-        row_id: &[u8],
-        patch: &[u8],
-        author: Option<&[u8]>,
-        updated_at_ms: Option<u64>,
-    ) -> Result<u64, JazzRnError> {
+    fn update(&mut self, args: WriteArgs<'_>) -> Result<u64, JazzRnError> {
+        let WriteArgs {
+            view,
+            id,
+            table,
+            row_id,
+            cells: patch,
+            author,
+            updated_at_ms,
+        } = args;
         let row_id = binding::row_uuid_from_bytes(row_id)?;
         let patch = binding::decode_cells(patch)?;
         let author = author.map(binding::author_id_from_bytes).transpose()?;
-        let (row_id, tx_id) = with_db!(self, |db| match (author, updated_at_ms) {
+        let (row_id, tx_id) = with_db!(self, view, |db| match (author, updated_at_ms) {
             (Some(author), Some(now)) =>
                 write_parts(db.update_for_identity_at_ms(author, table, row_id, patch, now))?,
             (Some(author), None) =>
@@ -1437,19 +1668,20 @@ impl CoreState {
         self.register_write(id, row_id, tx_id)
     }
 
-    fn upsert(
-        &mut self,
-        id: u64,
-        table: &str,
-        row_id: &[u8],
-        cells: &[u8],
-        author: Option<&[u8]>,
-        updated_at_ms: Option<u64>,
-    ) -> Result<u64, JazzRnError> {
+    fn upsert(&mut self, args: WriteArgs<'_>) -> Result<u64, JazzRnError> {
+        let WriteArgs {
+            view,
+            id,
+            table,
+            row_id,
+            cells,
+            author,
+            updated_at_ms,
+        } = args;
         let row_id = binding::row_uuid_from_bytes(row_id)?;
         let cells = binding::decode_cells(cells)?;
         let author = author.map(binding::author_id_from_bytes).transpose()?;
-        let (row_id, tx_id) = with_db!(self, |db| match (author, updated_at_ms) {
+        let (row_id, tx_id) = with_db!(self, view, |db| match (author, updated_at_ms) {
             (Some(author), Some(now)) =>
                 write_parts(db.upsert_for_identity_at_ms(author, table, row_id, cells, now))?,
             (Some(author), None) =>
@@ -1464,6 +1696,7 @@ impl CoreState {
 
     fn delete(
         &mut self,
+        view: u64,
         id: u64,
         table: &str,
         row_id: &[u8],
@@ -1472,7 +1705,7 @@ impl CoreState {
     ) -> Result<u64, JazzRnError> {
         let row_id = binding::row_uuid_from_bytes(row_id)?;
         let author = author.map(binding::author_id_from_bytes).transpose()?;
-        let (row_id, tx_id) = with_db!(self, |db| match (author, updated_at_ms) {
+        let (row_id, tx_id) = with_db!(self, view, |db| match (author, updated_at_ms) {
             (Some(author), Some(now)) =>
                 write_parts(db.delete_for_identity_at_ms(author, table, row_id, now))?,
             (Some(author), None) => write_parts(db.delete_for_identity(author, table, row_id))?,
@@ -1486,19 +1719,20 @@ impl CoreState {
         self.register_write(id, row_id, tx_id)
     }
 
-    fn restore(
-        &mut self,
-        id: u64,
-        table: &str,
-        row_id: &[u8],
-        cells: &[u8],
-        author: Option<&[u8]>,
-        updated_at_ms: Option<u64>,
-    ) -> Result<u64, JazzRnError> {
+    fn restore(&mut self, args: WriteArgs<'_>) -> Result<u64, JazzRnError> {
+        let WriteArgs {
+            view,
+            id,
+            table,
+            row_id,
+            cells,
+            author,
+            updated_at_ms,
+        } = args;
         let row_id = binding::row_uuid_from_bytes(row_id)?;
         let cells = binding::decode_cells(cells)?;
         let author = author.map(binding::author_id_from_bytes).transpose()?;
-        let (row_id, tx_id) = with_db!(self, |db| match (author, updated_at_ms) {
+        let (row_id, tx_id) = with_db!(self, view, |db| match (author, updated_at_ms) {
             (Some(author), Some(now)) =>
                 write_parts(db.restore_for_identity_at_ms(author, table, row_id, cells, now))?,
             (Some(author), None) =>
@@ -1517,27 +1751,76 @@ impl CoreState {
         row_id: RowUuid,
         tx_id: TxId,
     ) -> Result<u64, JazzRnError> {
-        self.writes.insert(id, WriteEntry { row_id, tx_id });
+        self.writes.insert(
+            id,
+            WriteEntry {
+                row_id,
+                tx_id,
+                batch_id: BatchId::from_committed_tx(tx_id),
+            },
+        );
         Ok(id)
     }
 
-    fn begin_transaction(
+    fn begin_batch(
         &mut self,
-        id: u64,
+        raw_batch: &str,
         kind: TransactionKind,
         author: Option<&[u8]>,
     ) -> Result<(), JazzRnError> {
+        let batch = parse_open_batch_id(raw_batch)?;
+        if self.open_batches.contains_key(&batch) {
+            return Err(JazzRnError::Runtime {
+                message: format!("batch {batch} has already been opened"),
+            });
+        }
+        if kind == TransactionKind::Exclusive && author.is_some() {
+            return Err(JazzRnError::InvalidPayload {
+                message: "exclusive batches do not accept an identity override".to_owned(),
+            });
+        }
         let author = author.map(binding::author_id_from_bytes).transpose()?;
-        let open_tx = with_db!(self, |db| match (kind, author) {
+        with_db!(self, ROOT_VIEW, |db| match (kind, author) {
             (TransactionKind::Mergeable, Some(author)) => {
-                db.begin_mergeable_for_identity(author)
+                db.begin_mergeable_for_identity(batch, author)
             }
-            (TransactionKind::Mergeable, None) => db.begin_mergeable(),
-            (TransactionKind::Exclusive, _) => db.begin_exclusive(),
+            (TransactionKind::Mergeable, None) => db.begin_mergeable(batch),
+            (TransactionKind::Exclusive, None) => db.begin_exclusive(batch),
+            (TransactionKind::Exclusive, Some(_)) => unreachable!("validated above"),
         })
         .map_err(core_error)?;
-        self.transactions
-            .insert(id, TransactionEntry { kind, open_tx });
+        self.open_batches.insert(batch, BatchEntry { kind });
+        Ok(())
+    }
+
+    fn attach_transaction(
+        &mut self,
+        id: u64,
+        view: u64,
+        raw_batch: &str,
+        kind: TransactionKind,
+        owns_lifetime: bool,
+    ) -> Result<(), JazzRnError> {
+        self.view(view)?;
+        let batch = parse_open_batch_id(raw_batch)?;
+        let actual = self.batch(batch)?;
+        if actual.kind != kind {
+            return Err(JazzRnError::InvalidPayload {
+                message: format!(
+                    "batch {batch} is {}, not {}",
+                    actual.kind.as_str(),
+                    kind.as_str()
+                ),
+            });
+        }
+        self.tx_attachments.insert(
+            id,
+            TxAttachment {
+                batch,
+                view,
+                owns_lifetime,
+            },
+        );
         Ok(())
     }
 
@@ -1550,17 +1833,18 @@ impl CoreState {
         updated_at_ms: Option<u64>,
     ) -> Result<(), JazzRnError> {
         let transaction = self.transaction(transaction)?;
+        let kind = self.batch(transaction.batch)?.kind;
         let row_id = binding::row_uuid_from_bytes(row_id)?;
         let cells = binding::decode_cells(cells)?;
-        with_db!(self, |db| match (transaction.kind, updated_at_ms) {
+        with_db!(self, transaction.view, |db| match (kind, updated_at_ms) {
             (TransactionKind::Mergeable, Some(now)) => db
-                .mergeable_tx_ref(transaction.open_tx)
+                .mergeable_tx_ref(transaction.batch)
                 .insert_with_id_at_ms(table, row_id, cells, now),
             (TransactionKind::Mergeable, None) => db
-                .mergeable_tx_ref(transaction.open_tx)
+                .mergeable_tx_ref(transaction.batch)
                 .insert_with_id(table, row_id, cells),
             (TransactionKind::Exclusive, _) => db
-                .exclusive_tx_ref(transaction.open_tx)
+                .exclusive_tx_ref(transaction.batch)
                 .insert_with_id(table, row_id, cells),
         })
         .map_err(core_error)
@@ -1575,18 +1859,62 @@ impl CoreState {
         updated_at_ms: Option<u64>,
     ) -> Result<(), JazzRnError> {
         let transaction = self.transaction(transaction)?;
+        let kind = self.batch(transaction.batch)?.kind;
         let row_id = binding::row_uuid_from_bytes(row_id)?;
         let patch = binding::decode_cells(patch)?;
-        with_db!(self, |db| match (transaction.kind, updated_at_ms) {
+        with_db!(self, transaction.view, |db| match (kind, updated_at_ms) {
             (TransactionKind::Mergeable, Some(now)) => db
-                .mergeable_tx_ref(transaction.open_tx)
+                .mergeable_tx_ref(transaction.batch)
                 .update_at_ms(table, row_id, patch, now),
             (TransactionKind::Mergeable, None) => db
-                .mergeable_tx_ref(transaction.open_tx)
+                .mergeable_tx_ref(transaction.batch)
                 .update(table, row_id, patch),
             (TransactionKind::Exclusive, _) => db
-                .exclusive_tx_ref(transaction.open_tx)
+                .exclusive_tx_ref(transaction.batch)
                 .update(table, row_id, patch),
+        })
+        .map_err(core_error)
+    }
+
+    fn tx_upsert(
+        &mut self,
+        transaction: u64,
+        table: &str,
+        row_id: &[u8],
+        cells: &[u8],
+        updated_at_ms: Option<u64>,
+    ) -> Result<(), JazzRnError> {
+        let transaction = self.transaction(transaction)?;
+        let kind = self.batch(transaction.batch)?.kind;
+        let row_id = binding::row_uuid_from_bytes(row_id)?;
+        let cells = binding::decode_cells(cells)?;
+        with_db!(self, transaction.view, |db| match kind {
+            TransactionKind::Mergeable => {
+                let tx = db.mergeable_tx_ref(transaction.batch);
+                tx.read(table, row_id).and_then(|existing| {
+                    if existing.is_some() {
+                        match updated_at_ms {
+                            Some(now) => tx.update_at_ms(table, row_id, cells, now),
+                            None => tx.update(table, row_id, cells),
+                        }
+                    } else {
+                        match updated_at_ms {
+                            Some(now) => tx.insert_with_id_at_ms(table, row_id, cells, now),
+                            None => tx.insert_with_id(table, row_id, cells),
+                        }
+                    }
+                })
+            }
+            TransactionKind::Exclusive => {
+                let tx = db.exclusive_tx_ref(transaction.batch);
+                tx.read(table, row_id).and_then(|existing| {
+                    if existing.is_some() {
+                        tx.update(table, row_id, cells)
+                    } else {
+                        tx.insert_with_id(table, row_id, cells)
+                    }
+                })
+            }
         })
         .map_err(core_error)
     }
@@ -1599,17 +1927,16 @@ impl CoreState {
         updated_at_ms: Option<u64>,
     ) -> Result<(), JazzRnError> {
         let transaction = self.transaction(transaction)?;
+        let kind = self.batch(transaction.batch)?.kind;
         let row_id = binding::row_uuid_from_bytes(row_id)?;
-        with_db!(self, |db| match (transaction.kind, updated_at_ms) {
+        with_db!(self, transaction.view, |db| match (kind, updated_at_ms) {
             (TransactionKind::Mergeable, Some(now)) => db
-                .mergeable_tx_ref(transaction.open_tx)
+                .mergeable_tx_ref(transaction.batch)
                 .delete_at_ms(table, row_id, now),
-            (TransactionKind::Mergeable, None) => db
-                .mergeable_tx_ref(transaction.open_tx)
-                .delete(table, row_id),
-            (TransactionKind::Exclusive, _) => db
-                .exclusive_tx_ref(transaction.open_tx)
-                .delete(table, row_id),
+            (TransactionKind::Mergeable, None) =>
+                db.mergeable_tx_ref(transaction.batch).delete(table, row_id),
+            (TransactionKind::Exclusive, _) =>
+                db.exclusive_tx_ref(transaction.batch).delete(table, row_id),
         })
         .map_err(core_error)
     }
@@ -1623,20 +1950,75 @@ impl CoreState {
         updated_at_ms: Option<u64>,
     ) -> Result<(), JazzRnError> {
         let transaction = self.transaction(transaction)?;
+        let kind = self.batch(transaction.batch)?.kind;
         let row_id = binding::row_uuid_from_bytes(row_id)?;
         let cells = binding::decode_cells(cells)?;
-        with_db!(self, |db| match (transaction.kind, updated_at_ms) {
+        with_db!(self, transaction.view, |db| match (kind, updated_at_ms) {
             (TransactionKind::Mergeable, Some(now)) => db
-                .mergeable_tx_ref(transaction.open_tx)
+                .mergeable_tx_ref(transaction.batch)
                 .restore_at_ms(table, row_id, cells, now),
             (TransactionKind::Mergeable, None) => db
-                .mergeable_tx_ref(transaction.open_tx)
+                .mergeable_tx_ref(transaction.batch)
                 .restore(table, row_id, cells),
             (TransactionKind::Exclusive, _) => db
-                .exclusive_tx_ref(transaction.open_tx)
+                .exclusive_tx_ref(transaction.batch)
                 .restore(table, row_id, cells),
         })
         .map_err(core_error)
+    }
+
+    fn commit_batch(
+        &mut self,
+        raw_batch: &str,
+        requested_kind: Option<TransactionKind>,
+        write_id: u64,
+    ) -> Result<u64, JazzRnError> {
+        let batch = parse_open_batch_id(raw_batch)?;
+        let actual_kind = self.batch(batch)?.kind;
+        let requested_kind = requested_kind.unwrap_or(TransactionKind::Mergeable);
+        if requested_kind != actual_kind {
+            return Err(JazzRnError::InvalidPayload {
+                message: format!(
+                    "batch {batch} is {}, not {}",
+                    actual_kind.as_str(),
+                    requested_kind.as_str()
+                ),
+            });
+        }
+        self.commit_open_batch(batch, actual_kind, write_id)
+    }
+
+    fn commit_open_batch(
+        &mut self,
+        batch: OpenBatchId,
+        kind: TransactionKind,
+        write_id: u64,
+    ) -> Result<u64, JazzRnError> {
+        let tx_id = with_db!(self, ROOT_VIEW, |db| match kind {
+            TransactionKind::Mergeable => db.commit_mergeable_handle(batch),
+            TransactionKind::Exclusive => db.commit_exclusive_handle(batch),
+        })
+        .map_err(core_error)?;
+        self.finish_batch(batch);
+        self.register_write(write_id, RowUuid::from_bytes([0; 16]), tx_id)
+    }
+
+    fn rollback_batch(&mut self, raw_batch: &str) -> Result<(), JazzRnError> {
+        let batch = parse_open_batch_id(raw_batch)?;
+        self.batch(batch)?;
+        self.abandon_open_batch(batch)
+    }
+
+    fn abandon_open_batch(&mut self, batch: OpenBatchId) -> Result<(), JazzRnError> {
+        with_db!(self, ROOT_VIEW, |db| db.abandon_transaction_handle(batch)).map_err(core_error)?;
+        self.finish_batch(batch);
+        Ok(())
+    }
+
+    fn finish_batch(&mut self, batch: OpenBatchId) {
+        self.open_batches.remove(&batch);
+        self.tx_attachments
+            .retain(|_, attachment| attachment.batch != batch);
     }
 
     fn commit_transaction(
@@ -1645,46 +2027,45 @@ impl CoreState {
         write_id: u64,
     ) -> Result<u64, JazzRnError> {
         let transaction = self.transaction(transaction_id)?;
-        let tx_id = with_db!(self, |db| match transaction.kind {
-            TransactionKind::Mergeable => {
-                db.commit_mergeable_handle(transaction.open_tx)
-            }
-            TransactionKind::Exclusive => {
-                db.commit_exclusive_handle(transaction.open_tx)
-            }
-        })
-        .map_err(core_error)?;
-        self.transactions.remove(&transaction_id);
-        self.register_write(write_id, RowUuid::from_bytes([0; 16]), tx_id)
+        if !transaction.owns_lifetime {
+            return Err(JazzRnError::Runtime {
+                message: "attached transaction views cannot commit the owner-wide batch".to_owned(),
+            });
+        }
+        let kind = self.batch(transaction.batch)?.kind;
+        self.commit_open_batch(transaction.batch, kind, write_id)
     }
 
     fn rollback_transaction(&mut self, transaction_id: u64) -> Result<(), JazzRnError> {
         let transaction = self.transaction(transaction_id)?;
-        with_db!(self, |db| db
-            .abandon_transaction_handle(transaction.open_tx))
-        .map_err(core_error)?;
-        self.transactions.remove(&transaction_id);
-        Ok(())
+        if !transaction.owns_lifetime {
+            return Err(JazzRnError::Runtime {
+                message: "attached transaction views cannot roll back the owner-wide batch"
+                    .to_owned(),
+            });
+        }
+        self.abandon_open_batch(transaction.batch)
     }
 
-    fn rollback_transaction_if_present(&mut self, transaction_id: u64) -> Result<(), JazzRnError> {
-        let Some(transaction) = self.transactions.remove(&transaction_id) else {
+    fn release_transaction_if_present(&mut self, transaction_id: u64) -> Result<(), JazzRnError> {
+        let Some(transaction) = self.tx_attachments.remove(&transaction_id) else {
             return Ok(());
         };
-        with_db!(self, |db| db
-            .abandon_transaction_handle(transaction.open_tx))
-        .map_err(core_error)
+        if transaction.owns_lifetime && self.open_batches.contains_key(&transaction.batch) {
+            self.abandon_open_batch(transaction.batch)?;
+        }
+        Ok(())
     }
 
     fn wait_for_write(&mut self, write: u64, tier: &str) -> Result<(), JazzRnError> {
         let tx_id = self.write(write)?.tx_id;
         let tier = binding::durability_tier_from_str(tier)?;
-        with_db!(self, |db| binding::wait_for_tx(db, tx_id, tier)).map_err(Into::into)
+        with_db!(self, ROOT_VIEW, |db| binding::wait_for_tx(db, tx_id, tier)).map_err(Into::into)
     }
 
     fn write_state(&mut self, write: u64) -> Result<String, JazzRnError> {
         let tx_id = self.write(write)?.tx_id;
-        let state = with_db!(self, |db| db.write_state(tx_id)).map_err(core_error)?;
+        let state = with_db!(self, ROOT_VIEW, |db| db.write_state(tx_id)).map_err(core_error)?;
         serde_json::to_string(&binding::write_state_to_json(&state)).map_err(|error| {
             JazzRnError::Internal {
                 message: format!("encode write state json: {error}"),
@@ -1701,25 +2082,52 @@ impl CoreState {
         let (sender, receiver) = oneshot::channel();
         let completion = Rc::new(RefCell::new(Some(sender)));
         let callback_completion = Rc::clone(&completion);
-        with_db!(self, |db| db.on_next_write_state_change(tx_id, move || {
-            if let Some(sender) = callback_completion.borrow_mut().take() {
-                let _ = sender.send(WaiterSignal::Changed);
+        with_db!(self, ROOT_VIEW, |db| db.on_next_write_state_change(
+            tx_id,
+            move || {
+                if let Some(sender) = callback_completion.borrow_mut().take() {
+                    let _ = sender.send(WaiterSignal::Changed);
+                }
             }
-        }));
+        ));
         self.waiters.insert(waiter, WaiterEntry { completion });
         Ok(receiver)
     }
 
-    fn connect_upstream(&mut self, id: u64) -> Result<(), JazzRnError> {
+    fn connect_upstream(
+        &mut self,
+        view: u64,
+        id: u64,
+        session: Option<(u16, u64, ConnectionSessionContext)>,
+    ) -> Result<(), JazzRnError> {
         let queues = WireQueues::default();
-        let transport = Box::new(WireTransportAdapter::current(queues.transport()));
-        let entry = match &self.db {
+        let transport = match session {
+            Some((protocol_version, features, context)) => {
+                Box::new(WireTransportAdapter::new_with_session_context(
+                    queues.transport(),
+                    protocol_version,
+                    features,
+                    None,
+                    Some(context),
+                ))
+            }
+            None => Box::new(WireTransportAdapter::new(
+                queues.transport(),
+                WIRE_PROTOCOL_VERSION,
+                current_wire_features()
+                    & !(FEATURE_AUTHORIZATION_SCOPE_RECEIPTS | FEATURE_AUTHORIZATION_SCOPE_VIEWS),
+                None,
+            )),
+        };
+        let entry = match self.view(view)? {
             CoreDb::Memory(db) => TransportEntry::Memory {
+                view,
                 db: Rc::clone(db),
                 connection: db.connect_upstream(transport),
                 queues,
             },
             CoreDb::Persistent(db) => TransportEntry::Persistent {
+                view,
                 db: Rc::clone(db),
                 connection: db.connect_upstream(transport),
                 queues,
@@ -1777,22 +2185,27 @@ impl CoreState {
             return Ok(());
         }
         self.cancel_waiters(waiter_signal);
-        with_db!(self, |db| db.set_tick_scheduler(None));
+        with_db!(self, ROOT_VIEW, |db| db.set_tick_scheduler(None));
         self.scheduler.shutdown();
         for (_, transport) in self.transports.drain() {
             transport.close();
         }
         self.subscriptions.clear();
-        for (_, attachment) in self.attachments.drain() {
-            with_db!(self, |db| db.detach_query(attachment));
+        let query_attachments = std::mem::take(&mut self.query_attachments);
+        for (_, attachment) in query_attachments {
+            with_db!(self, attachment.view, |db| db
+                .detach_query(attachment.attachment));
         }
-        for (_, transaction) in self.transactions.drain() {
-            let _ = with_db!(self, |db| db
-                .abandon_transaction_handle(transaction.open_tx));
+        let open_batches = self.open_batches.keys().copied().collect::<Vec<_>>();
+        for batch in open_batches {
+            let _ = with_db!(self, ROOT_VIEW, |db| db.abandon_transaction_handle(batch));
         }
+        self.open_batches.clear();
+        self.tx_attachments.clear();
         self.writes.clear();
         self.queries.clear();
-        let result = with_db!(self, |db| db.close()).map_err(core_error);
+        let result = with_db!(self, ROOT_VIEW, |db| db.close()).map_err(core_error);
+        self.views.clear();
         self.closed = true;
         result
     }
@@ -1815,6 +2228,53 @@ fn invalid_handle(kind: &str, id: u64) -> JazzRnError {
     JazzRnError::Runtime {
         message: format!("{kind} handle {id} is closed or belongs to another database"),
     }
+}
+
+fn invalid_view(id: u64) -> JazzRnError {
+    JazzRnError::Runtime {
+        message: format!("schema view {id} is closed or belongs to another database"),
+    }
+}
+
+fn invalid_batch(id: OpenBatchId) -> JazzRnError {
+    JazzRnError::Runtime {
+        message: format!("batch {id} is closed or belongs to another database"),
+    }
+}
+
+fn parse_open_batch_id(raw: &str) -> Result<OpenBatchId, JazzRnError> {
+    raw.parse()
+        .map_err(|message| JazzRnError::InvalidPayload { message })
+}
+
+fn endpoint_node(bytes: &[u8], label: &str) -> Result<NodeUuid, JazzRnError> {
+    let bytes: [u8; 16] = bytes.try_into().map_err(|_| JazzRnError::InvalidPayload {
+        message: format!("{label} must be 16 bytes"),
+    })?;
+    Ok(NodeUuid::from_bytes(bytes))
+}
+
+fn connection_session_context(
+    features: u32,
+    remote_node: &[u8],
+    remote_epoch: u64,
+    local_node: &[u8],
+    local_epoch: u64,
+) -> Result<ConnectionSessionContext, JazzRnError> {
+    let remote_node = endpoint_node(remote_node, "server hello authority node")?;
+    let local_node = endpoint_node(local_node, "local peer identity")?;
+    Ok(ConnectionSessionContext {
+        local: WireAuthorityEndpoint {
+            node: local_node,
+            epoch: local_epoch,
+        },
+        remote: WireAuthorityEndpoint {
+            node: remote_node,
+            epoch: remote_epoch,
+        },
+        link_identity: AuthorId::from_bytes(*local_node.0.as_bytes()),
+        negotiated_features: features as u64,
+    })
 }
 
 #[cfg(test)]

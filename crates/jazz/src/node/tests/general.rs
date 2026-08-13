@@ -82,6 +82,18 @@ fn policy_graph_perf_fixture_version_layouts_round_trip_all_storage_records() {
             groove::schema::ColumnType::Nullable(member) => {
                 Value::Nullable(Some(Box::new(sample_value(member, seed.wrapping_add(1)))))
             }
+            groove::schema::ColumnType::Record(descriptor) => {
+                let values = descriptor
+                    .fields()
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, field)| sample_value(&field.value_type, seed.wrapping_add(idx as u8 + 1)))
+                    .collect::<Vec<_>>();
+                Value::Record(groove::records::OwnedRecord::new(
+                    descriptor.create(&values).unwrap(),
+                    **descriptor,
+                ))
+            }
         }
     }
 
@@ -114,6 +126,9 @@ fn policy_graph_perf_fixture_version_layouts_round_trip_all_storage_records() {
                     )
                 })
                 .collect(),
+            authored_columns: deletion
+                .is_none()
+                .then(|| table.columns.iter().map(|column| column.name.clone()).collect()),
             deletion,
         }
     }
@@ -195,6 +210,9 @@ fn mergeable_commits_persist_transaction_and_history_rows() {
             .unwrap(),
         &v("write tests")
     );
+    let history = node
+        .physical_history_source_graph(node.catalogue.current_schema_version_id, "todos")
+        .unwrap();
     let mut database = node.into_database();
     assert!(
         !database
@@ -202,12 +220,7 @@ fn mergeable_commits_persist_transaction_and_history_rows() {
             .unwrap()
             .is_empty()
     );
-    assert!(
-        !database
-            .query(select_all("jazz_todos_history"))
-            .unwrap()
-            .is_empty()
-    );
+    assert!(database.query_graph(history).unwrap().iter().next().is_some());
 }
 
 #[test]
@@ -480,7 +493,8 @@ fn late_lower_hlc_child_is_rejected_at_admission() {
                 absent_read_set: None,
                 predicate_read_set: None,
                 user_metadata_json: None,
-            source_branch: None,
+                target_lineage: crate::tx::BranchLineage::Root,
+                branch_merge: None,
             merge_strategy: None,
             },
             vec![version_record(row, Vec::new(), title_cells("parent"), None)],
@@ -510,7 +524,8 @@ fn late_lower_hlc_child_is_rejected_at_admission() {
                 absent_read_set: None,
                 predicate_read_set: None,
                 user_metadata_json: None,
-            source_branch: None,
+                target_lineage: crate::tx::BranchLineage::Root,
+                branch_merge: None,
             merge_strategy: None,
             },
             vec![version_record(
@@ -564,7 +579,8 @@ fn unlawful_child_with_known_parent_rejects_before_global_state() {
                 absent_read_set: None,
                 predicate_read_set: None,
                 user_metadata_json: None,
-            source_branch: None,
+                target_lineage: crate::tx::BranchLineage::Root,
+                branch_merge: None,
             merge_strategy: None,
             },
             vec![version_record(row, Vec::new(), title_cells("parent"), None)],
@@ -593,7 +609,8 @@ fn unlawful_child_with_known_parent_rejects_before_global_state() {
                 absent_read_set: None,
                 predicate_read_set: None,
                 user_metadata_json: None,
-            source_branch: None,
+                target_lineage: crate::tx::BranchLineage::Root,
+                branch_merge: None,
             merge_strategy: None,
             },
             vec![version_record(

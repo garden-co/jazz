@@ -1260,14 +1260,10 @@ fn lowered_write_policy_keeps_v1_policy_pinned_after_table_rename() {
     )]);
     let v2_payload = SchemaVersion::new(v2.clone());
     let (_dir, mut core) = open_node_with_schema(node(0xe2), v1.clone());
-    core.apply_sync_message(SyncMessage::PublishSchema {
-        author: AuthorId::SYSTEM,
-        schema: Box::new(v2_payload.clone()),
-    })
-    .unwrap();
-    core.apply_sync_message(SyncMessage::PublishLens {
-        author: AuthorId::SYSTEM,
-        lens: MigrationLens::new(
+    publish_schema_lineage(
+        &mut core,
+        v2_payload.clone(),
+        MigrationLens::new(
             v1.version_id(),
             v2_payload.id,
             vec![TableLens {
@@ -1279,9 +1275,11 @@ fn lowered_write_policy_keeps_v1_policy_pinned_after_table_rename() {
                 }],
             }],
         ),
-    })
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
     .unwrap();
-    core.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
@@ -1367,13 +1365,13 @@ fn lowered_write_policy_keeps_v1_policy_pinned_after_table_rename() {
         .cells(candidate.clone())
         .parents(vec![existing_tx]);
     assert!(
-        core.dry_run_mergeable_write_allows(update.clone().made_by(owner))
+        core.advisory_mergeable_write_allows(update.clone().made_by(owner))
             .unwrap(),
         "the actual v2 update must use the pinned v1 update clauses"
     );
     assert!(
         !core
-            .dry_run_mergeable_write_allows(update.made_by(user(0xe4)))
+            .advisory_mergeable_write_allows(update.made_by(user(0xe4)))
             .unwrap(),
         "the actual v2 update must deny an identity rejected by the pinned v1 update clauses"
     );
@@ -1382,13 +1380,13 @@ fn lowered_write_policy_keeps_v1_policy_pinned_after_table_rename() {
         .parents(vec![existing_tx])
         .deletion(DeletionEvent::Deleted);
     assert!(
-        core.dry_run_mergeable_write_allows(delete.clone().made_by(owner))
+        core.advisory_mergeable_write_allows(delete.clone().made_by(owner))
             .unwrap(),
         "the actual v2 delete must use the pinned v1 delete clause"
     );
     assert!(
         !core
-            .dry_run_mergeable_write_allows(delete.made_by(user(0xe4)))
+            .advisory_mergeable_write_allows(delete.made_by(user(0xe4)))
             .unwrap(),
         "the actual v2 delete must deny an identity rejected by the pinned v1 delete clause"
     );

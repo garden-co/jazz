@@ -131,6 +131,9 @@ pub(crate) fn lower_query_program(
                 .is_some_and(|_| parameters.claim_params.contains_key(field))
     });
 
+    let internal_app_rows_graph = (request.output.app_rows.is_some()
+        && root_aggregate_step(&plan).is_none())
+    .then(|| lowered.graph.clone());
     let terminals = lowered_terminals(
         lowered.graph,
         &request,
@@ -162,6 +165,7 @@ pub(crate) fn lower_query_program(
     Ok(QueryProgram {
         lowered: LoweredGraph {
             terminals,
+            internal_app_rows_graph,
             parameters,
             output,
             maintained_terminal_tables: resolved_sources
@@ -329,9 +333,16 @@ fn source_authorization_for_source(
     request: &QueryProgramRequest,
     source: &SourceId,
 ) -> CapabilityResult<SourceAuthorizationRequest> {
+    // Client-local results are scoped by the upstream emission boundary, not
+    // by a second, potentially stale/incomplete local policy evaluation.
+    if request.authorization_mode == QueryAuthorizationMode::ClientLocal {
+        return Ok(SourceAuthorizationRequest::System);
+    }
     match &request.policy {
         PolicyContext::System => Ok(SourceAuthorizationRequest::System),
-        PolicyContext::AuthorizationSubplan { .. } => Ok(SourceAuthorizationRequest::System),
+        PolicyContext::AuthorizationSubplan {
+            protected_source, ..
+        } if protected_source == source => Ok(SourceAuthorizationRequest::System),
         PolicyContext::Identity {
             permission_subject, ..
         } => Ok(SourceAuthorizationRequest::PolicyFiltered {
@@ -344,6 +355,9 @@ fn source_authorization_for_source(
                 binding_user_params: binding_user_param_types(&request.input.binding)?,
             },
         }),
+        // Auxiliary closure and payload sources do not establish policy
+        // membership, so proof compilation reads them under system authority.
+        PolicyContext::AuthorizationSubplan { .. } => Ok(SourceAuthorizationRequest::System),
     }
 }
 
@@ -352,6 +366,9 @@ fn binding_user_param_types(
 ) -> CapabilityResult<BTreeMap<String, ColumnType>> {
     let mut params = binding.extra_user_params.clone();
     for name in binding.values.keys() {
+        if binding.claim_params.contains_key(name) {
+            continue;
+        }
         let Some(ty) = binding.param_types.get(name) else {
             return Err(single_gap_report(UnsupportedReason::Runtime(format!(
                 "binding parameter '{name}' is missing a validated type"
@@ -421,6 +438,16 @@ fn parameter_domain_for_request(
     request: &QueryProgramRequest,
 ) -> Result<ParameterDomain, UnsupportedReason> {
     let mut domain = parameter_domain(&request.input.shape);
+    for (name, ty) in &request.input.binding.extra_user_params {
+        if let Some(existing) = domain.user_params.get(name)
+            && existing != ty
+        {
+            return Err(UnsupportedReason::Runtime(format!(
+                "binding parameter '{name}' has inconsistent validated types"
+            )));
+        }
+        domain.user_params.insert(name.clone(), ty.clone());
+    }
     if request.input.binding.claim_params.is_empty() {
         return Ok(domain);
     }
@@ -451,8 +478,8 @@ fn parameter_domain_for_request(
         }
     }
     for (name, claim) in pre_retarget_claims {
+        domain.user_params.remove(&name);
         domain.claim_params.insert(name.clone(), claim);
-        domain.routing_params.insert(name.clone());
     }
     Ok(domain)
 }
@@ -520,14 +547,14 @@ fn collect_binding_source_params(graph: &GraphBuilder, domain: &mut ParameterDom
                         .entry(name.to_owned())
                         .or_insert_with(|| ClaimParameter {
                             path,
-                            ty: column_type_from_value_type(&field.value_type),
+                            ty: field.value_type.clone(),
                         });
                     domain.routing_params.insert(name.to_owned());
                 } else {
                     domain
                         .user_params
                         .entry(name.to_owned())
-                        .or_insert_with(|| column_type_from_value_type(&field.value_type));
+                        .or_insert_with(|| field.value_type.clone());
                     domain.routing_params.insert(route_param_field(name));
                 }
             }
@@ -560,37 +587,6 @@ fn collect_binding_source_params(graph: &GraphBuilder, domain: &mut ParameterDom
         | GraphBuilder::InlineRecords { .. }
         | GraphBuilder::Index { .. }
         | GraphBuilder::FrontierSource { .. } => {}
-    }
-}
-
-fn column_type_from_value_type(value_type: &ValueType) -> ColumnType {
-    match value_type {
-        ValueType::U8 => ColumnType::U8,
-        ValueType::U16 => ColumnType::U16,
-        ValueType::U32 => ColumnType::U32,
-        ValueType::U64 => ColumnType::U64,
-        ValueType::I32 => ColumnType::I32,
-        ValueType::I64 => ColumnType::I64,
-        ValueType::F64 => ColumnType::F64,
-        ValueType::Bool => ColumnType::Bool,
-        ValueType::String => ColumnType::String,
-        ValueType::Bytes => ColumnType::Bytes,
-        ValueType::Uuid => ColumnType::Uuid,
-        ValueType::Enum(schema) => ColumnType::Enum(schema.clone()),
-        ValueType::Tuple(members) => {
-            ColumnType::Tuple(members.iter().map(column_type_from_value_type).collect())
-        }
-        ValueType::Array(member) => {
-            ColumnType::Array(Box::new(column_type_from_value_type(member)))
-        }
-        ValueType::Nullable(inner) => {
-            ColumnType::Nullable(Box::new(column_type_from_value_type(inner)))
-        }
-        ValueType::Record(_) => {
-            panic!(
-                "record-valued Groove outputs are not part of the Jazz query schema in this stage"
-            )
-        }
     }
 }
 
@@ -718,6 +714,7 @@ impl UnionPlan {
 
 #[derive(Clone, Debug)]
 struct UnionBranchPlan {
+    label: String,
     plan: RelationInputPlan,
 }
 
@@ -1699,12 +1696,41 @@ fn analyze_union(
         ));
     }
 
+    let mut labels = BTreeSet::new();
     let mut branches = Vec::new();
     for input in inputs {
+        if input.label.is_empty() || input.label.contains('\0') {
+            return Err(UnsupportedReason::Operator(
+                "union arm labels must be non-empty, NUL-free stable semantic identities"
+                    .to_owned(),
+            ));
+        }
+        if !labels.insert(input.label.as_str()) {
+            return Err(UnsupportedReason::Operator(format!(
+                "union arm label {:?} is duplicated; occurrence identity requires unique stable semantic arm labels",
+                input.label
+            )));
+        }
         let plan = analyze_relation_input_node(&input.node, nodes, visited)?;
-        branches.push(UnionBranchPlan { plan });
+        branches.push(UnionBranchPlan {
+            label: input.label.clone(),
+            plan,
+        });
     }
     Ok(UnionPlan { branches })
+}
+
+#[cfg(test)]
+pub(super) fn analyzed_union_labels(
+    inputs: &[UnionInput],
+    nodes: &BTreeMap<RowSetNodeId, RowSetExpr>,
+) -> Result<Vec<String>, UnsupportedReason> {
+    analyze_union(inputs, nodes, &mut BTreeSet::new()).map(|plan| {
+        plan.branches
+            .into_iter()
+            .map(|branch| branch.label)
+            .collect()
+    })
 }
 
 fn validate_join_relation(plan: &LinearCurrentRoot) -> Result<(), UnsupportedReason> {
@@ -1823,6 +1849,17 @@ fn source_requirements(
         requirements.insert(source, SourceRequirements::default());
     }
 
+    // A flat output carries an occurrence-addressed tuple. Keep source
+    // version metadata available at the source boundary so joined-side
+    // changes can be represented as maintained replacements.
+    if !flat_join_payload_fields(plan).is_empty() {
+        for requirements in requirements.values_mut() {
+            requirements
+                .metadata
+                .insert(SourceMetadataRequirement::VersionWitnesses);
+        }
+    }
+
     if let Some(app_rows) = &output.app_rows {
         if !matches!(
             plan,
@@ -1842,11 +1879,49 @@ fn source_requirements(
         let root_requirements = requirements
             .get_mut(plan.root_source())
             .expect("root source requirements were initialized");
+        // The same lowered program also owns the storage-shaped graph used by
+        // synchronous Rust materialization. Keep its provenance tuple complete
+        // while the public Root collector below still publishes only the
+        // explicitly selected magic fields.
+        let projects_provenance = matches!(
+            &app_rows.projection,
+            PayloadProjection::Tree(AppProjectionTree {
+                fields: FieldProjection::Fields(fields),
+                ..
+            }) if fields.iter().any(|field| matches!(
+                field.as_str(),
+                "$createdAt" | "$createdBy" | "$updatedAt" | "$updatedBy"
+            ))
+        );
+        if app_rows.public_terminal && projects_provenance {
+            root_requirements.metadata.extend([
+                SourceMetadataRequirement::Provenance(ProvenanceField::CreatedAt),
+                SourceMetadataRequirement::Provenance(ProvenanceField::CreatedBy),
+                SourceMetadataRequirement::Provenance(ProvenanceField::UpdatedAt),
+                SourceMetadataRequirement::Provenance(ProvenanceField::UpdatedBy),
+            ]);
+        }
         root_requirements.app_fields = match &app_rows.projection {
             PayloadProjection::ShapeDefault => FieldRequirement::All,
             PayloadProjection::Tree(tree) => tree.fields.clone().into(),
         };
         if let PayloadProjection::Tree(tree) = &app_rows.projection {
+            if let FieldProjection::Fields(fields) = &tree.fields {
+                for field in fields {
+                    let provenance = match field.as_str() {
+                        "$createdAt" => Some(ProvenanceField::CreatedAt),
+                        "$createdBy" => Some(ProvenanceField::CreatedBy),
+                        "$updatedAt" => Some(ProvenanceField::UpdatedAt),
+                        "$updatedBy" => Some(ProvenanceField::UpdatedBy),
+                        _ => None,
+                    };
+                    if let Some(provenance) = provenance {
+                        root_requirements
+                            .metadata
+                            .insert(SourceMetadataRequirement::Provenance(provenance));
+                    }
+                }
+            }
             collect_app_path_projection_requirements(&tree.paths, &mut requirements)?;
         }
     }
@@ -2267,6 +2342,13 @@ fn lower_correlated_path_plan(
         resolved_sources,
         request,
     )?;
+    let child_graph = lower_required_nested_parent_graph(
+        child.graph,
+        &path.nested,
+        child_source,
+        resolved_sources,
+        request,
+    )?;
     let (parent_key, child_key) = lower_path_key_pair(
         &path.correlation,
         path.parent.root.source().ok_or_else(|| {
@@ -2279,8 +2361,8 @@ fn lower_correlated_path_plan(
     )?;
     let parent_key_nullable_depth = source_field_nullable_depth(root_source, &parent_key);
     let child_key_nullable_depth = source_field_nullable_depth(child_source, &child_key);
-    let child =
-        unwrap_join_key_if_nullable(child.graph, child_key.clone(), child_key_nullable_depth);
+    let child_graph =
+        unwrap_join_key_if_nullable(child_graph, child_key.clone(), child_key_nullable_depth);
 
     let lowered = match path.requirement {
         CorrelationRequirement::Optional => Ok(LoweredRelationInput {
@@ -2289,6 +2371,7 @@ fn lower_correlated_path_plan(
             fields: source_fields(root_source).collect(),
             nullable_fields: source_nullable_fields(root_source),
             nullable_field_depths: source_nullable_field_depths(root_source),
+            union_occurrence_carrier: None,
         }),
         CorrelationRequirement::AtLeastOne => {
             let parent = unwrap_join_key_if_nullable(
@@ -2297,7 +2380,7 @@ fn lower_correlated_path_plan(
                 parent_key_nullable_depth,
             );
             let joined =
-                GraphBuilder::join(parent, child, [parent_key], [child_key]).project_fields(
+                GraphBuilder::join(parent, child_graph, [parent_key], [child_key]).project_fields(
                     project_source_fields_from_prefix(root_source, LEFT_JOIN_PREFIX),
                 );
             Ok(LoweredRelationInput {
@@ -2310,6 +2393,7 @@ fn lower_correlated_path_plan(
                 fields: source_fields(root_source).collect(),
                 nullable_fields: source_nullable_fields(root_source),
                 nullable_field_depths: source_nullable_field_depths(root_source),
+                union_occurrence_carrier: None,
             })
         }
         CorrelationRequirement::MatchCorrelationCardinality => {
@@ -2320,7 +2404,7 @@ fn lower_correlated_path_plan(
             );
             lower_cardinality_complete_parent_graph(
                 parent,
-                child,
+                child_graph,
                 root_source,
                 parent_key,
                 child_key,
@@ -2331,6 +2415,7 @@ fn lower_correlated_path_plan(
                 fields: source_fields(root_source).collect(),
                 nullable_fields: source_nullable_fields(root_source),
                 nullable_field_depths: source_nullable_field_depths(root_source),
+                union_occurrence_carrier: None,
             })
         }
     }
@@ -2346,6 +2431,27 @@ fn lower_correlated_path_plan(
         }
     })?;
     Ok(lowered)
+}
+
+/// Apply requirements declared by nested relation builders to the rows of
+/// their immediate parent. Optional nested relations never gate that parent;
+/// their own descendants are handled when the optional relation is collected.
+fn lower_required_nested_parent_graph(
+    mut parent: GraphBuilder,
+    nested: &[CorrelatedPathPlan],
+    parent_source: &ResolvedSource,
+    resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
+    request: &QueryProgramRequest,
+) -> Result<GraphBuilder, UnsupportedReason> {
+    for path in nested {
+        if path.requirement == CorrelationRequirement::Optional {
+            continue;
+        }
+        parent =
+            lower_correlated_path_plan(parent, path, parent_source, resolved_sources, request)?
+                .graph;
+    }
+    Ok(parent)
 }
 
 fn lower_cardinality_complete_parent_graph(
@@ -2432,6 +2538,7 @@ fn lower_correlated_path_relation_graph(
         root_source,
         resolved_sources,
         request,
+        true,
     )
 }
 
@@ -2441,6 +2548,7 @@ fn lower_correlated_path_relation_graph_from_parent(
     parent_source: &ResolvedSource,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
     request: &QueryProgramRequest,
+    retain_child_window: bool,
 ) -> Result<LoweredRelationInput, UnsupportedReason> {
     let child_root = path
         .child
@@ -2455,11 +2563,27 @@ fn lower_correlated_path_relation_graph_from_parent(
     })?;
     let child_plan = LinearCurrentRoot {
         root: path.child.root.clone(),
-        steps: child_steps_for_relation_edges(&path.child.steps),
+        steps: if retain_child_window {
+            child_steps_for_relation_edges(&path.child.steps)
+        } else {
+            path.child
+                .steps
+                .iter()
+                .filter(|step| !matches!(step, LinearStep::OrderBy(_) | LinearStep::Slice { .. }))
+                .cloned()
+                .collect()
+        },
     };
     let child = lower_linear_plan_steps(
         child_source.graph.clone(),
         &child_plan,
+        child_source,
+        resolved_sources,
+        request,
+    )?;
+    let child_graph = lower_required_nested_parent_graph(
+        child.graph,
+        &path.nested,
         child_source,
         resolved_sources,
         request,
@@ -2478,13 +2602,14 @@ fn lower_correlated_path_relation_graph_from_parent(
     let child_key_nullable_depth = source_field_nullable_depth(child_source, &child_key);
     let parent = unwrap_join_key_if_nullable(parent, parent_key.clone(), parent_key_nullable_depth);
     let child =
-        unwrap_join_key_if_nullable(child.graph, child_key.clone(), child_key_nullable_depth);
+        unwrap_join_key_if_nullable(child_graph, child_key.clone(), child_key_nullable_depth);
     Ok(LoweredRelationInput {
         graph: GraphBuilder::join(parent, child, [parent_key], [child_key]),
         root_source: None,
         fields: BTreeSet::new(),
         nullable_fields: BTreeSet::new(),
         nullable_field_depths: BTreeMap::new(),
+        union_occurrence_carrier: None,
     })
 }
 
@@ -2531,6 +2656,9 @@ struct LoweredRelationInput {
     fields: BTreeSet<String>,
     nullable_fields: BTreeSet<String>,
     nullable_field_depths: BTreeMap<String, usize>,
+    /// Hidden `(stable union-arm label, source row UUID)` identity retained by
+    /// UNION ALL relation inputs for occurrence-addressed public output.
+    union_occurrence_carrier: Option<(String, String)>,
 }
 
 fn lower_relation_input(
@@ -2579,13 +2707,94 @@ fn lower_union_relation_input(
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
     request: &QueryProgramRequest,
 ) -> Result<LoweredRelationInput, UnsupportedReason> {
+    lower_union_relation_input_with_prefix(union, resolved_sources, request, None)
+}
+
+fn lower_union_relation_input_with_prefix(
+    union: &UnionPlan,
+    resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
+    request: &QueryProgramRequest,
+    prefix: Option<&str>,
+) -> Result<LoweredRelationInput, UnsupportedReason> {
     let mut lowered = Vec::new();
     for branch in &union.branches {
-        lowered.push(lower_relation_input(
-            &branch.plan,
+        let label = prefix.map_or_else(
+            || branch.label.clone(),
+            |prefix| format!("{prefix}\u{0}{}", branch.label),
+        );
+        let linear = match &branch.plan {
+            RelationInputPlan::Linear(linear) => linear,
+            RelationInputPlan::Union(nested) => {
+                lowered.push(lower_union_relation_input_with_prefix(
+                    nested,
+                    resolved_sources,
+                    request,
+                    Some(&label),
+                )?);
+                continue;
+            }
+            RelationInputPlan::Recursive(_) => {
+                return Err(UnsupportedReason::Operator(
+                    "recursive UNION ALL join arms lack a stable finite occurrence carrier"
+                        .to_owned(),
+                ));
+            }
+        };
+        let source_id = linear.root.source().ok_or_else(|| {
+            UnsupportedReason::Operator(
+                "UNION ALL join occurrence identity requires a stable source row".to_owned(),
+            )
+        })?;
+        let source = resolved_sources.get(source_id).ok_or_else(|| {
+            UnsupportedReason::Runtime(format!("union source {source_id:?} was not resolved"))
+        })?;
+        let mut retained = linear.clone();
+        if let Some(LinearStep::Project(columns)) = retained.steps.last_mut() {
+            columns.push(RowProjection {
+                output: TypedOutputField {
+                    name: "__union_occurrence_row".to_owned(),
+                    ty: ColumnType::Uuid,
+                },
+                value: NormalizedValueRef::RowId(RowIdRef::Source(source_id.clone())),
+            });
+        }
+        let mut output = lower_linear_plan_steps(
+            source.graph.clone(),
+            &retained,
+            source,
             resolved_sources,
             request,
-        )?);
+        )?;
+        if !output.fields.contains("__union_occurrence_row") {
+            let row_field = &source.row_shape.row_uuid_field;
+            if !output.fields.contains(row_field) {
+                return Err(UnsupportedReason::Operator(
+                    "UNION ALL arm projection discarded its stable source row identity".to_owned(),
+                ));
+            }
+            output.graph =
+                output
+                    .graph
+                    .project_fields(output.fields.iter().map(ProjectField::named).chain(
+                        std::iter::once(ProjectField::renamed(row_field, "__union_occurrence_row")),
+                    ));
+            output.fields.insert("__union_occurrence_row".to_owned());
+        }
+        output.graph =
+            output
+                .graph
+                .project_fields(output.fields.iter().map(ProjectField::named).chain(
+                    std::iter::once(ProjectField::literal(
+                        "__union_occurrence_arm",
+                        Value::String(label),
+                    )),
+                ));
+        output.fields.insert("__union_occurrence_arm".to_owned());
+        output.union_occurrence_carrier = Some((
+            "__union_occurrence_arm".to_owned(),
+            "__union_occurrence_row".to_owned(),
+        ));
+        lowered.push(output);
     }
     lower_union_inputs(lowered, request)
 }
@@ -2652,6 +2861,7 @@ fn lower_union_inputs(
     let first = lowered.next().ok_or_else(|| {
         UnsupportedReason::Operator("union row-set nodes require at least one input".to_owned())
     })?;
+    let union_occurrence_carrier = first.union_occurrence_carrier.clone();
     let mut graphs = vec![first.graph];
     let mut root_source = first.root_source;
     let fields = first.fields;
@@ -2661,6 +2871,11 @@ fn lower_union_inputs(
         if branch.fields != fields {
             return Err(UnsupportedReason::Operator(
                 "union branches must output the same fields".to_owned(),
+            ));
+        }
+        if branch.union_occurrence_carrier != union_occurrence_carrier {
+            return Err(UnsupportedReason::Operator(
+                "union branches must use the same typed occurrence carrier".to_owned(),
             ));
         }
         nullable_fields.extend(branch.nullable_fields);
@@ -2686,6 +2901,7 @@ fn lower_union_inputs(
         fields,
         nullable_fields,
         nullable_field_depths,
+        union_occurrence_carrier,
     })
 }
 
@@ -2712,17 +2928,52 @@ fn align_union_route_fields(
         ));
     }
 
-    let project_fields = fields
-        .iter()
-        .map(|field| {
-            if branch.fields.contains(field) {
-                Ok(ProjectField::named(field.clone()))
-            } else {
-                route_literal_project_field(field, request)
-            }
-        })
-        .collect::<Result<Vec<_>, UnsupportedReason>>()?;
-    branch.graph = branch.graph.project_fields(project_fields);
+    if let Some(binding_source_shape) = &request.input.binding.source_shape {
+        let binding = GraphBuilder::binding_source(
+            binding_source_shape.clone(),
+            binding_source_descriptor_with_user_params(request, [])?,
+        );
+        let project_fields = fields
+            .iter()
+            .map(|field| {
+                if branch.fields.contains(field) {
+                    ProjectField::renamed(left_field(field), field.clone())
+                } else {
+                    let binding_field = route_param_from_field(field).unwrap_or(field);
+                    ProjectField::renamed(right_field(binding_field), field.clone())
+                }
+            })
+            .collect::<Vec<_>>();
+        let existing_route_fields = branch
+            .fields
+            .intersection(&route_fields)
+            .cloned()
+            .collect::<Vec<_>>();
+        let binding_route_fields = existing_route_fields
+            .iter()
+            .map(|field| route_param_from_field(field).unwrap_or(field).to_owned())
+            .collect::<Vec<_>>();
+        branch.graph = policy_join_if_needed(
+            branch.graph,
+            binding,
+            existing_route_fields,
+            binding_route_fields,
+            request,
+        )
+        .project_fields(project_fields);
+    } else {
+        let project_fields = fields
+            .iter()
+            .map(|field| {
+                if branch.fields.contains(field) {
+                    Ok(ProjectField::named(field.clone()))
+                } else {
+                    route_literal_project_field(field, request)
+                }
+            })
+            .collect::<Result<Vec<_>, UnsupportedReason>>()?;
+        branch.graph = branch.graph.project_fields(project_fields);
+    }
     branch.fields = fields.clone();
     Ok(branch)
 }
@@ -2824,6 +3075,7 @@ fn lower_recursive_relation(
         fields,
         nullable_fields: BTreeSet::new(),
         nullable_field_depths: BTreeMap::new(),
+        union_occurrence_carrier: None,
     })
 }
 
@@ -2868,6 +3120,10 @@ fn lower_linear_plan_steps(
         BTreeMap<String, usize>,
         BTreeSet<String>,
     )> = None;
+    // Earlier inner-join inputs are flattened into the left record before a
+    // subsequent join. Keep their source-qualified field addresses so the
+    // final flat-join projection can still name every contributing source.
+    let mut accumulated_join_fields = BTreeMap::<(SourceId, String), (String, usize)>::new();
     let mut available_route_fields = if matches!(plan.root, LinearRoot::Source { .. }) {
         root_source.routing_fields.clone()
     } else {
@@ -2890,6 +3146,7 @@ fn lower_linear_plan_steps(
                         predicate,
                         source,
                         root_source,
+                        &available_route_fields,
                         request,
                     )?;
                 graph = joined;
@@ -2917,6 +3174,7 @@ fn lower_linear_plan_steps(
                     root_source,
                     right,
                     &lowered_right,
+                    &accumulated_join_fields,
                     request,
                 )?;
                 if matches!(&plan.root, LinearRoot::Source { .. }) {
@@ -3017,23 +3275,120 @@ fn lower_linear_plan_steps(
                 }
                 let next_is_project =
                     matches!(plan.steps.get(step_index + 1), Some(LinearStep::Project(_)));
+                let next_is_join = matches!(
+                    plan.steps.get(step_index + 1),
+                    Some(LinearStep::Join { .. })
+                );
+                if *mode == JoinMode::Inner && next_is_join {
+                    let (_, right_nullable, right_depths, right_fields) = last_join_right
+                        .take()
+                        .expect("inner join records its right input");
+                    let right_source = right.root_source().ok_or_else(|| {
+                        UnsupportedReason::Operator(
+                            "multi-source flat join requires a source-rooted right input"
+                                .to_owned(),
+                        )
+                    })?;
+                    let mut projection = fields
+                        .iter()
+                        .map(|field| ProjectField::renamed(left_field(field), field.clone()))
+                        .collect::<Vec<_>>();
+                    let mut next_fields = fields.clone();
+                    let mut next_nullable = nullable_fields.clone();
+                    let mut next_depths = nullable_field_depths.clone();
+                    for field in right_fields {
+                        let output = format!("__flat_join_source_{step_index}_{field}");
+                        projection.push(ProjectField::renamed(right_field(&field), output.clone()));
+                        let nullable_depth = right_depths.get(&field).copied().unwrap_or(0);
+                        accumulated_join_fields.insert(
+                            (right_source.clone(), field.clone()),
+                            (output.clone(), nullable_depth),
+                        );
+                        next_fields.insert(output.clone());
+                        if right_nullable.contains(&field) {
+                            next_nullable.insert(output.clone());
+                            next_depths.insert(output, nullable_depth.max(1));
+                        }
+                    }
+                    graph = graph.project_fields(projection);
+                    fields = next_fields;
+                    nullable_fields = next_nullable;
+                    nullable_field_depths = next_depths;
+                }
                 if matches!(mode, JoinMode::Inner | JoinMode::Semi)
                     && matches!(&plan.root, LinearRoot::Source { .. })
                     && !next_is_project
+                    && !next_is_join
                 {
                     let introduced_route_fields = route_fields
                         .iter()
                         .filter(|field| lowered_right.fields.contains(*field))
                         .cloned()
                         .collect::<BTreeSet<_>>();
-                    graph = graph.project_fields(project_left_source_fields_with_join_routes(
+                    let mut projection = project_left_source_fields_with_join_routes(
                         root_source,
                         &available_route_fields,
                         &introduced_route_fields,
-                    ));
+                    );
+                    let mut occurrence_fields = BTreeSet::new();
+                    if *mode == JoinMode::Inner {
+                        for ((source_id, field), (output, _)) in &accumulated_join_fields {
+                            let is_row_id = resolved_sources
+                                .get(source_id)
+                                .is_some_and(|source| source.row_shape.row_uuid_field == *field);
+                            if is_row_id {
+                                projection.push(ProjectField::renamed(
+                                    left_field(output),
+                                    output.clone(),
+                                ));
+                                occurrence_fields.insert(output.clone());
+                            }
+                        }
+                        if let Some(right_source_id) = right.root_source() {
+                            let right_source = resolved_sources.get(right_source_id).ok_or_else(|| {
+                                UnsupportedReason::Operator(format!(
+                                    "inner join occurrence source {right_source_id:?} was not resolved"
+                                ))
+                            })?;
+                            let app_join_source = matches!(
+                                right_source_id.path.components.last(),
+                                Some(SourceRole::Alias(_))
+                            );
+                            let right_row = &right_source.row_shape.row_uuid_field;
+                            if app_join_source
+                                && last_join_right
+                                    .as_ref()
+                                    .is_some_and(|(_, _, _, fields)| fields.contains(right_row))
+                            {
+                                let output = format!("__root_join_row_{step_index}");
+                                projection.push(ProjectField::renamed(
+                                    right_field(right_row),
+                                    output.clone(),
+                                ));
+                                occurrence_fields.insert(output);
+                            }
+                        } else if let Some((arm_field, row_field)) =
+                            &lowered_right.union_occurrence_carrier
+                        {
+                            let arm_output = format!("__root_join_arm_{step_index}");
+                            let row_output = format!("__root_join_row_{step_index}");
+                            projection.push(ProjectField::renamed(
+                                right_field(arm_field),
+                                arm_output.clone(),
+                            ));
+                            projection.push(ProjectField::renamed(
+                                right_field(row_field),
+                                row_output.clone(),
+                            ));
+                            occurrence_fields.insert(arm_output);
+                            occurrence_fields.insert(row_output);
+                        }
+                    }
+                    graph = graph.project_fields(projection);
                     fields = source_fields(root_source).collect();
                     fields.extend(available_route_fields.iter().cloned());
                     fields.extend(introduced_route_fields.iter().cloned());
+                    fields.extend(occurrence_fields);
                     nullable_fields = source_nullable_fields(root_source);
                     nullable_field_depths = source_nullable_field_depths(root_source);
                     available_route_fields.extend(introduced_route_fields);
@@ -3052,6 +3407,7 @@ fn lower_linear_plan_steps(
                             root_source,
                             &fields,
                             last_join_right.as_ref(),
+                            &accumulated_join_fields,
                             request,
                         )?;
                         for (source, depth) in field.unwrap_before_project {
@@ -3192,6 +3548,7 @@ fn lower_linear_plan_steps(
         fields,
         nullable_fields,
         nullable_field_depths,
+        union_occurrence_carrier: None,
     })
 }
 
@@ -3217,7 +3574,7 @@ fn value_source_descriptor(columns: &[ValueSourceColumn]) -> RecordDescriptor {
     RecordDescriptor::new(
         columns
             .iter()
-            .map(|column| (column.name.clone(), column.ty.value_type())),
+            .map(|column| (column.name.clone(), column.ty.clone())),
     )
 }
 
@@ -3227,7 +3584,7 @@ fn binding_descriptor_params_with_user_params(
 ) -> Result<Vec<(String, ColumnType)>, UnsupportedReason> {
     let domain = parameter_domain_for_request(request)?;
     let mut user_params = request.input.binding.extra_user_params.clone();
-    user_params.extend(domain.user_params);
+    user_params.extend(domain.user_params.clone());
     user_params.extend(additional_user_params);
     Ok(user_params
         .into_iter()
@@ -3253,7 +3610,7 @@ fn binding_source_descriptor_with_user_params(
     Ok(RecordDescriptor::new(
         binding_descriptor_params_with_user_params(request, additional_user_params)?
             .into_iter()
-            .map(|(name, column_type)| (name, column_type.value_type())),
+            .map(|(name, column_type)| (name, column_type.clone())),
     ))
 }
 
@@ -3319,7 +3676,7 @@ fn lower_value_source(
             let input_descriptor = RecordDescriptor::new(
                 params
                     .iter()
-                    .map(|(name, column_type)| (name.clone(), column_type.value_type())),
+                    .map(|(name, column_type)| (name.clone(), column_type.clone())),
             );
             let projected = columns
                 .iter()
@@ -3500,13 +3857,25 @@ fn lower_linear_join_key_pair(
     left_source: &ResolvedSource,
     right_plan: &RelationInputPlan,
     right_output: &LoweredRelationInput,
+    accumulated_join_fields: &BTreeMap<(SourceId, String), (String, usize)>,
     request: &QueryProgramRequest,
 ) -> Result<(String, String), UnsupportedReason> {
     lower_bidirectional_key_pair(
         predicate,
         "join_via only lowers equality join predicates",
         "join_via join predicate must compare left root and right relation fields",
-        |value| lower_linear_root_key_ref(value, left_root, left_source, request),
+        |value| {
+            lower_linear_root_key_ref(value, left_root, left_source, request).or_else(|_| {
+                accumulated_join_field(value, accumulated_join_fields)
+                    .map(|(field, _)| field)
+                    .ok_or_else(|| {
+                        UnsupportedReason::Operator(
+                            "join left key must reference the root or an accumulated join source"
+                                .to_owned(),
+                        )
+                    })
+            })
+        },
         |value| lower_relation_key_ref(value, right_plan, right_output, request),
     )
 }
@@ -3517,6 +3886,7 @@ fn lower_linear_join_key_pairs(
     left_source: &ResolvedSource,
     right_plan: &RelationInputPlan,
     right_output: &LoweredRelationInput,
+    accumulated_join_fields: &BTreeMap<(SourceId, String), (String, usize)>,
     request: &QueryProgramRequest,
 ) -> Result<(Vec<String>, Vec<String>), UnsupportedReason> {
     let pairs = match predicate {
@@ -3529,6 +3899,7 @@ fn lower_linear_join_key_pairs(
                     left_source,
                     right_plan,
                     right_output,
+                    accumulated_join_fields,
                     request,
                 )
             })
@@ -3539,6 +3910,7 @@ fn lower_linear_join_key_pairs(
             left_source,
             right_plan,
             right_output,
+            accumulated_join_fields,
             request,
         )?],
     };
@@ -3741,6 +4113,18 @@ fn lower_linear_root_key_ref(
     }
 }
 
+fn accumulated_join_field(
+    value: &NormalizedValueRef,
+    fields: &BTreeMap<(SourceId, String), (String, usize)>,
+) -> Option<(String, usize)> {
+    let (source, field) = match value {
+        NormalizedValueRef::SourceField { source, field } => (source, user_column_field(field)),
+        NormalizedValueRef::RowId(RowIdRef::Source(source)) => (source, "row_uuid".to_owned()),
+        _ => return None,
+    };
+    fields.get(&(source.clone(), field)).cloned()
+}
+
 fn lower_projection_field(
     column: &RowProjection,
     plan: &LinearCurrentRoot,
@@ -3752,6 +4136,7 @@ fn lower_projection_field(
         BTreeMap<String, usize>,
         BTreeSet<String>,
     )>,
+    accumulated_join_fields: &BTreeMap<(SourceId, String), (String, usize)>,
     request: &QueryProgramRequest,
 ) -> Result<ProjectionFieldPlan, UnsupportedReason> {
     let mut unwrap_before_project = BTreeMap::new();
@@ -3762,15 +4147,14 @@ fn lower_projection_field(
         source,
         fields,
         last_join_right,
+        accumulated_join_fields,
         request,
     )? {
         ProjectionSource::Field {
             field,
             nullable_depth,
         } => {
-            if nullable_depth > 0
-                && !matches!(column.output.ty.value_type(), ValueType::Nullable(_))
-            {
+            if nullable_depth > 0 && !matches!(column.output.ty.clone(), ValueType::Nullable(_)) {
                 unwrap_before_project.insert(field.clone(), nullable_depth);
             } else if nullable_depth > 0 {
                 nullable_after_project = Some((column.output.name.clone(), nullable_depth));
@@ -3815,6 +4199,7 @@ fn lower_projection_source(
         BTreeMap<String, usize>,
         BTreeSet<String>,
     )>,
+    accumulated_join_fields: &BTreeMap<(SourceId, String), (String, usize)>,
     request: &QueryProgramRequest,
 ) -> Result<ProjectionSource, UnsupportedReason> {
     if let Ok(field) = lower_linear_root_key_ref(value, &plan.root, source, request) {
@@ -3841,6 +4226,15 @@ fn lower_projection_source(
                 None => param.clone(),
             },
             nullable_depth: 0,
+        });
+    }
+    if let Some((field, nullable_depth)) = accumulated_join_field(value, accumulated_join_fields) {
+        return Ok(ProjectionSource::Field {
+            field: match last_join_right {
+                Some(_) => left_field(&field),
+                None => field,
+            },
+            nullable_depth,
         });
     }
     if let Some((right, nullable_fields, nullable_field_depths, _)) = last_join_right {
@@ -3934,6 +4328,7 @@ fn lower_equality_param_filter_joins(
     predicate: &PredicateExpr,
     source_id: &SourceId,
     source: &ResolvedSource,
+    available_route_fields: &BTreeSet<String>,
     request: &QueryProgramRequest,
 ) -> Result<(GraphBuilder, PredicateExpr, BTreeSet<String>), UnsupportedReason> {
     let predicates = match predicate {
@@ -3941,7 +4336,7 @@ fn lower_equality_param_filter_joins(
         _ => std::slice::from_ref(predicate),
     };
     let mut residual = Vec::new();
-    let mut retained_route_fields = BTreeSet::<String>::new();
+    let mut retained_route_fields = available_route_fields.clone();
     for predicate in predicates {
         let Some(join) = equality_param_join(predicate, source_id, source)? else {
             residual.push(predicate.clone());
@@ -3958,31 +4353,68 @@ fn lower_equality_param_filter_joins(
         } else {
             binding_source_descriptor_with_user_params(
                 request,
-                [(
-                    join.param.clone(),
-                    column_type_from_value_type(&join.value_type),
-                )],
+                [(join.param.clone(), join.value_type.clone())],
             )?
         };
-        let binding =
+        let binding_fields = binding_descriptor
+            .fields()
+            .iter()
+            .map(|field| {
+                field.name.clone().ok_or_else(|| {
+                    UnsupportedReason::Operator("binding fields must be named".to_owned())
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut binding =
             GraphBuilder::binding_source(binding_source_shape.clone(), binding_descriptor);
         let route_field = if is_claim_param {
             join.param.clone()
         } else {
             route_param_field(&join.param)
         };
-        let mut projection = project_source_fields_from_prefix(source, LEFT_JOIN_PREFIX);
+        let route_is_nullable = domain
+            .claim_params
+            .get(&join.param)
+            .map(|claim| matches!(claim.ty, ColumnType::Nullable(_)))
+            .or_else(|| {
+                domain
+                    .user_params
+                    .get(&join.param)
+                    .map(|ty| matches!(ty, ColumnType::Nullable(_)))
+            })
+            .unwrap_or(false);
+        // Equality unwrapping must not become the route carrier's value
+        // conversion. Keep a second, untouched copy of a nullable binding for
+        // the policy-arm union and for the downstream result-membership
+        // window, then unwrap only the copy used as the equality key.
+        let route_carrier = (join.nullable && route_is_nullable)
+            .then(|| format!("__jazz_route_carrier:{}", join.param));
+        if let Some(route_carrier) = &route_carrier {
+            let mut fields = binding_fields
+                .iter()
+                .cloned()
+                .map(ProjectField::named)
+                .collect::<Vec<_>>();
+            fields.push(ProjectField::renamed(join.param.clone(), route_carrier));
+            binding = binding.project_fields(fields);
+        }
+        let mut projection = project_source_fields_from_prefix_rewrapping_nullable(
+            source,
+            LEFT_JOIN_PREFIX,
+            join.nullable.then_some(join.field.as_str()),
+        );
         projection.extend(
             retained_route_fields
                 .iter()
                 .map(|field| ProjectField::renamed(left_field(&field), field.clone())),
         );
         projection.push(ProjectField::renamed(
-            right_field(&join.param),
+            right_field(route_carrier.as_deref().unwrap_or(&join.param)),
             route_field.clone(),
         ));
         if join.nullable {
             graph = graph.unwrap_nullable(join.field.clone());
+            binding = binding.unwrap_nullable(join.param.clone());
         }
         graph = policy_join_if_needed(graph, binding, [join.field], [join.param], request)
             .project_fields(projection);
@@ -4206,9 +4638,6 @@ fn lower_window(
         if offset == 0 && limit == Some(1) {
             return Ok(GraphBuilder::arg_min_by(graph, group_cols, tie_cols));
         }
-        if offset == 0 && limit.is_none() {
-            return Ok(graph);
-        }
         return Ok(GraphBuilder::top_by(
             graph,
             group_cols,
@@ -4279,6 +4708,7 @@ fn lower_aggregate(
         fields,
         nullable_fields: BTreeSet::new(),
         nullable_field_depths: BTreeMap::new(),
+        union_occurrence_carrier: None,
     })
 }
 
@@ -4558,19 +4988,10 @@ fn coerce_literal_for_source_field(
     source: &ResolvedSource,
     field: &str,
 ) -> LiteralValue {
-    if field == source.row_shape.row_uuid_field {
-        return coerce_literal_for_value_type(value, &ValueType::Uuid);
-    }
-    let logical_field = logical_user_column(field);
-    let Some(column) = source
-        .table_schema
-        .columns
-        .iter()
-        .find(|column| column.name == logical_field)
-    else {
+    let Some(value_type) = source_field_type(source, field) else {
         return value;
     };
-    coerce_literal_for_value_type(value, &column.column_type.value_type())
+    coerce_literal_for_value_type(value, non_null_value_type(value_type))
 }
 
 fn non_null_value_type(mut value_type: &ValueType) -> &ValueType {
@@ -4694,10 +5115,16 @@ fn lower_value_ref(
         NormalizedValueRef::SourceField {
             source: value_source,
             field,
-        } if value_source == source_id => Ok(LoweredValueRef::Field(require_source_field(
-            source,
-            &user_column_field(field),
-        )?)),
+        } if value_source == source_id => {
+            let field = if source.row_shape.descriptor.field_index(field).is_some() {
+                field.clone()
+            } else {
+                user_column_field(field)
+            };
+            Ok(LoweredValueRef::Field(require_source_field(
+                source, &field,
+            )?))
+        }
         NormalizedValueRef::SourceField { source, .. } => Err(UnsupportedReason::Operator(
             format!("predicate references unsupported source {:?}", source),
         )),
@@ -4837,6 +5264,26 @@ fn lowered_terminals(
         .intersection(available_fields)
         .cloned()
         .collect::<BTreeSet<_>>();
+    // Closure evidence is an authorization boundary only for policy-claim
+    // routes. Ordinary query parameters can be absent from provenance-only
+    // closure graphs; requiring those fields would either reject the program
+    // or suppress raw evidence needed for local evaluation.
+    let claim_route_fields = parameter_domain_for_request(request)
+        .map_err(single_gap_report)?
+        .claim_params
+        .keys()
+        .filter(|field| root_route_fields.contains(*field))
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let root_occurrence_fields = root_join_occurrence_fields(plan, resolved_sources)?
+        .into_iter()
+        .map(|(name, _)| name)
+        .filter(|name| available_fields.contains(name))
+        .collect::<BTreeSet<_>>();
+    let closure_root_carrier_fields = root_route_fields
+        .union(&root_occurrence_fields)
+        .cloned()
+        .collect::<BTreeSet<_>>();
     let mut terminals = Vec::new();
     let closure = lower_closure_membership(
         graph.clone(),
@@ -4844,6 +5291,7 @@ fn lowered_terminals(
         source,
         resolved_sources,
         &root_route_fields,
+        &closure_root_carrier_fields,
     )?;
     let visible_root_with_routes = if root_route_fields.is_empty() {
         closure.visible_root.clone()
@@ -4861,24 +5309,15 @@ fn lowered_terminals(
     // domain rather than only `root_route_fields` to keep routed maintained
     // array queries on their existing fact-terminal path; the tree collector
     // cannot retain any routed binding fields yet.
-    let has_routed_tree_app_projection = matches!(
-        &request.output.app_rows,
-        Some(AppRowOutputRequest {
-            projection: PayloadProjection::Tree(tree),
-            ..
-        }) if !tree.paths.is_empty() && !routing_param_fields.is_empty()
-    );
-    if let Some(app_rows) = &request.output.app_rows
-        && !has_routed_tree_app_projection
-    {
+    if let Some(app_rows) = &request.output.app_rows {
+        let projected_output = projected_multisource_terminal(plan, source);
         let (graph, descriptor, hidden_fields) = match app_rows.projection.clone() {
-            PayloadProjection::Tree(tree) if !tree.paths.is_empty() => {
-                if !root_route_fields.is_empty() {
-                    return Err(single_gap_report(UnsupportedReason::Operator(
-                        "tree app projections with routed parameters are not lowered yet"
-                            .to_owned(),
-                    )));
-                }
+            _ if !app_rows.public_terminal => (
+                closure.visible_root.clone(),
+                source.row_shape.descriptor.clone(),
+                hidden_source_fields(&source.row_shape),
+            ),
+            PayloadProjection::Tree(tree) => {
                 let collected = lower_collect_by_app_rows(
                     closure.visible_root.clone(),
                     &tree,
@@ -4886,6 +5325,8 @@ fn lowered_terminals(
                     source,
                     resolved_sources,
                     request,
+                    &root_route_fields,
+                    available_fields,
                 )?;
                 (
                     collected.graph,
@@ -4893,18 +5334,60 @@ fn lowered_terminals(
                     collected.hidden_fields,
                 )
             }
-            _ => (
-                if root_route_fields.is_empty() {
-                    closure.visible_root.clone()
-                } else {
-                    visible_root_with_routes.clone()
-                },
-                source.row_shape.descriptor.clone(),
-                hidden_source_fields(&source.row_shape)
+            _ if projected_output.is_some() => {
+                let (output_source_id, output_fields, _is_flat) = projected_output
+                    .as_ref()
+                    .expect("guarded projected multi-source output");
+                let output_source = resolved_sources.get(output_source_id).ok_or_else(|| {
+                    single_gap_report(UnsupportedReason::Runtime(format!(
+                        "projected output source {output_source_id:?} was not resolved"
+                    )))
+                })?;
+                let hidden_fields = hidden_source_fields(&output_source.row_shape)
                     .into_iter()
-                    .chain(root_route_fields.clone())
-                    .collect(),
-            ),
+                    .chain(
+                        output_fields
+                            .iter()
+                            .filter(|field| field.name.starts_with("__flat_join_row_"))
+                            .map(|field| field.name.clone()),
+                    )
+                    .collect::<BTreeSet<_>>();
+                let public_fields = output_fields
+                    .iter()
+                    .filter(|field| !hidden_fields.contains(&field.name))
+                    .collect::<Vec<_>>();
+                let descriptor = RecordDescriptor::new(
+                    public_fields
+                        .iter()
+                        .map(|field| (field.name.clone(), field.ty.clone())),
+                );
+                let graph = graph.clone().project_fields(
+                    public_fields
+                        .iter()
+                        .map(|field| ProjectField::named(&field.name)),
+                );
+                (graph, descriptor, BTreeSet::new())
+            }
+            _ => {
+                let collected = lower_collect_by_app_rows(
+                    closure.visible_root.clone(),
+                    &AppProjectionTree {
+                        fields: FieldProjection::All,
+                        paths: Vec::new(),
+                    },
+                    plan,
+                    source,
+                    resolved_sources,
+                    request,
+                    &root_route_fields,
+                    available_fields,
+                )?;
+                (
+                    collected.graph,
+                    collected.descriptor,
+                    collected.hidden_fields,
+                )
+            }
         };
         terminals.push(LoweredTerminal {
             sink: "app_rows".to_owned(),
@@ -4925,9 +5408,27 @@ fn lowered_terminals(
                 resolved_sources,
                 routing_param_fields.clone(),
             )?;
+            // Closure membership is a root-row projection: it may discard
+            // output-only columns while constructing the root closure. A
+            // flat join instead needs its complete already-policy-filtered
+            // tuple here, including the internal contributor ids used by the
+            // occurrence address. This matters when a joined source resolves
+            // through a lens (for example a renamed table on an old branch),
+            // where that projection otherwise loses `__flat_join_row_N`.
+            let occurrence_addressed = matches!(
+                &output.schema,
+                ProgramFactSchema::ResultMembership(schema)
+                    if schema.occurrence_id_fields.len() > 1
+            );
+            let result_membership_input =
+                if flat_join_payload_fields(plan).is_empty() && !occurrence_addressed {
+                    visible_root_with_routes.clone()
+                } else {
+                    graph.clone()
+                };
             let result_graph = fact_terminal_graph(
                 fact,
-                visible_root_with_routes.clone(),
+                result_membership_input,
                 plan,
                 source,
                 resolved_sources,
@@ -4939,38 +5440,45 @@ fn lowered_terminals(
                 graph: result_graph,
                 output: OutputTerminalSchema::Fact(output.clone()),
             });
-            for (source_id, closure_graph) in &closure.result_members {
-                let resolved_source = resolved_sources.get(&source_id).ok_or_else(|| {
-                    Box::new(CapabilityReport {
-                        gaps: vec![UnsupportedReason::Runtime(format!(
-                            "closure member source {:?} was not resolved",
-                            source_id
-                        ))],
-                        explain: ExplainPlan::default(),
-                    })
-                })?;
-                let output = fact_output_with_terminal(
-                    fact,
-                    ProgramFactTerminal::Primary,
-                    plan,
-                    resolved_source,
-                    resolved_sources,
-                    BTreeSet::new(),
-                )?;
-                let graph = fact_terminal_graph(
-                    fact,
-                    closure_graph.clone(),
-                    plan,
-                    resolved_source,
-                    resolved_sources,
-                    request,
-                    output_routing_fields(&output),
-                )?;
-                terminals.push(LoweredTerminal {
-                    sink: scoped_fact_sink_name(fact, &source_id),
-                    graph,
-                    output: OutputTerminalSchema::Fact(output),
-                });
+            // A flat join's one wide primary terminal is its public output.
+            // The ordinary closure terminals are source-only membership facts;
+            // they neither carry the tuple payload nor its contributor ids.
+            // Emitting them would also ask a source graph for
+            // `__flat_join_row_N`, which only exists after the wide project.
+            if flat_join_payload_fields(plan).is_empty() {
+                for (source_id, closure_graph) in &closure.result_members {
+                    let resolved_source = resolved_sources.get(&source_id).ok_or_else(|| {
+                        Box::new(CapabilityReport {
+                            gaps: vec![UnsupportedReason::Runtime(format!(
+                                "closure member source {:?} was not resolved",
+                                source_id
+                            ))],
+                            explain: ExplainPlan::default(),
+                        })
+                    })?;
+                    let output = fact_output_with_terminal(
+                        fact,
+                        ProgramFactTerminal::Primary,
+                        plan,
+                        resolved_source,
+                        resolved_sources,
+                        claim_route_fields.clone(),
+                    )?;
+                    let graph = fact_terminal_graph(
+                        fact,
+                        closure_graph.clone(),
+                        plan,
+                        resolved_source,
+                        resolved_sources,
+                        request,
+                        output_routing_fields(&output),
+                    )?;
+                    terminals.push(LoweredTerminal {
+                        sink: scoped_fact_sink_name(fact, &source_id),
+                        graph,
+                        output: OutputTerminalSchema::Fact(output),
+                    });
+                }
             }
             if has_explicit_closure_path(&request.input.shape) {
                 for contribution in &request.input.shape.join_contributions {
@@ -4990,7 +5498,7 @@ fn lowered_terminals(
                         plan,
                         resolved_source,
                         resolved_sources,
-                        BTreeSet::new(),
+                        claim_route_fields.clone(),
                     )?;
                     let contribution_graph = join_contribution_membership_graph(
                         closure.visible_root.clone(),
@@ -5130,9 +5638,11 @@ struct CollectFlatField {
     input: String,
     output: String,
     value_type: ValueType,
+    output_value_type: ValueType,
     source_field: Option<String>,
     is_row_id: bool,
     is_presence: bool,
+    is_output: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -5142,12 +5652,21 @@ struct CollectSlotLayout {
     fields: Vec<CollectFlatField>,
     row_id_input: String,
     presence_input: String,
+    order_cols: Vec<TopByOrder>,
+    tie_cols: Vec<String>,
+    offset: u64,
+    limit: TopByLimit,
     children: Vec<CollectSlotLayout>,
 }
 
 #[derive(Clone, Debug)]
 struct CollectLayout {
     root_fields: Vec<CollectFlatField>,
+    root_occurrence_inputs: Vec<String>,
+    root_order_cols: Vec<TopByOrder>,
+    root_tie_cols: Vec<String>,
+    root_offset: u64,
+    root_limit: TopByLimit,
     slots: Vec<CollectSlotLayout>,
 }
 
@@ -5165,8 +5684,77 @@ fn lower_collect_by_app_rows(
     root_source: &ResolvedSource,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
     request: &QueryProgramRequest,
+    route_fields: &BTreeSet<String>,
+    available_fields: &BTreeSet<String>,
 ) -> CapabilityResult<LoweredCollectByAppRows> {
-    let layout = collect_layout(projection, root_source, resolved_sources)?;
+    let mut parameter_domain = parameter_domain_for_request(request).map_err(single_gap_report)?;
+    collect_binding_source_params(&visible_root, &mut parameter_domain);
+    let mut layout = collect_layout(
+        projection,
+        plan,
+        root_source,
+        resolved_sources,
+        request,
+        route_fields,
+        &parameter_domain,
+        available_fields,
+    )?;
+    align_collect_root_window(&mut layout, plan)?;
+    align_collect_join_key_types(&mut layout.slots, plan, resolved_sources, request)?;
+    if layout.slots.is_empty() {
+        let anchor = collect_anchor_graph(visible_root, &layout)?;
+        let has_window = root_linear_steps(plan).is_some_and(|steps| {
+            steps
+                .iter()
+                .any(|step| matches!(step, LinearStep::OrderBy(_) | LinearStep::Slice { .. }))
+        });
+        let anchor = if has_window {
+            anchor
+        } else {
+            GraphBuilder::top_by(
+                anchor,
+                Vec::<String>::new(),
+                layout.root_order_cols.clone(),
+                layout.root_tie_cols.clone(),
+                0,
+                TopByLimit::Unbounded,
+            )
+        };
+        let root_group = layout
+            .root_fields
+            .iter()
+            .find(|field| field.is_row_id)
+            .expect("collector root retains row id")
+            .input
+            .clone();
+        let graph = GraphBuilder::collect_root_ordered(
+            anchor,
+            std::iter::once(root_group)
+                .chain(layout.root_occurrence_inputs.iter().cloned())
+                .chain(route_fields.iter().cloned()),
+            layout
+                .root_fields
+                .iter()
+                .filter(|field| field.is_output)
+                .map(|field| {
+                    if field.is_row_id || field.value_type == field.output_value_type {
+                        CollectByField::renamed(&field.input, &field.output)
+                    } else {
+                        CollectByField::renamed_unwrap_nullable(&field.input, &field.output)
+                    }
+                }),
+            layout.root_order_cols.clone(),
+            layout.root_tie_cols.clone(),
+            layout.root_offset,
+            layout.root_limit,
+        );
+        let descriptor = collect_output_descriptor(&layout)?;
+        return Ok(LoweredCollectByAppRows {
+            graph,
+            descriptor,
+            hidden_fields: BTreeSet::new(),
+        });
+    }
     let root_context = root_collect_context_graph(visible_root.clone(), &layout)?;
     let mut association_graphs = Vec::new();
     for slot in &layout.slots {
@@ -5202,31 +5790,349 @@ fn lower_collect_by_app_rows(
         })?
         .input
         .clone();
-    let graph = GraphBuilder::collect_by_tree(
+    let graph = GraphBuilder::collect_by_tree_ordered(
         input,
-        [root_group.clone()],
+        std::iter::once(root_group.clone())
+            .chain(layout.root_occurrence_inputs.iter().cloned())
+            .chain(route_fields.iter().cloned()),
         layout
             .root_fields
             .iter()
-            .map(|field| CollectByField::renamed(&field.input, &field.output)),
+            .filter(|field| field.is_output)
+            .map(|field| {
+                if field.is_row_id || field.value_type == field.output_value_type {
+                    CollectByField::renamed(&field.input, &field.output)
+                } else {
+                    CollectByField::renamed_unwrap_nullable(&field.input, &field.output)
+                }
+            }),
         layout
             .slots
             .iter()
-            .map(|slot| collect_slot_builder(slot, &root_group)),
+            .map(|slot| collect_slot_builder(slot, &root_group, route_fields)),
+        layout.root_order_cols,
+        layout.root_tie_cols,
+        layout.root_offset,
+        layout.root_limit,
     );
+    let mut hidden_fields = hidden_source_fields(&root_source.row_shape);
+    hidden_fields.extend(route_fields.iter().cloned());
     Ok(LoweredCollectByAppRows {
         graph,
         descriptor,
-        hidden_fields: hidden_source_fields(&root_source.row_shape),
+        hidden_fields,
     })
+}
+
+fn align_collect_join_key_types(
+    slots: &mut [CollectSlotLayout],
+    plan: &AnalyzedQueryPlan,
+    resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
+    request: &QueryProgramRequest,
+) -> CapabilityResult<()> {
+    for slot in slots {
+        let path = find_correlated_path(plan, &slot.path).ok_or_else(|| {
+            single_gap_report(UnsupportedReason::Operator(format!(
+                "app projection path {:?} is not a correlated path in the query shape",
+                slot.path
+            )))
+        })?;
+        let parent_id = path.parent.root.source().ok_or_else(|| {
+            single_gap_report(UnsupportedReason::Operator(
+                "collector path parent must be a source".to_owned(),
+            ))
+        })?;
+        let child_id = path.child.root.source().ok_or_else(|| {
+            single_gap_report(UnsupportedReason::Operator(
+                "collector path child must be a source".to_owned(),
+            ))
+        })?;
+        let parent = resolved_sources.get(parent_id).ok_or_else(|| {
+            single_gap_report(UnsupportedReason::Runtime(format!(
+                "collector parent source {parent_id:?} was not resolved"
+            )))
+        })?;
+        let child = resolved_sources.get(child_id).ok_or_else(|| {
+            single_gap_report(UnsupportedReason::Runtime(format!(
+                "collector child source {child_id:?} was not resolved"
+            )))
+        })?;
+        let (_, child_key) = lower_path_key_pair(
+            &path.correlation,
+            parent_id,
+            parent,
+            child_id,
+            child,
+            request,
+        )
+        .map_err(single_gap_report)?;
+        if let Some(field) = slot
+            .fields
+            .iter_mut()
+            .find(|field| field.source_field.as_deref() == Some(child_key.as_str()))
+        {
+            let mut payload = &field.value_type;
+            while let ValueType::Nullable(inner) = payload {
+                payload = inner.as_ref();
+            }
+            field.value_type = ValueType::Nullable(Box::new(payload.clone()));
+        }
+        for step in &path.child.steps {
+            match step {
+                LinearStep::OrderBy(keys) => {
+                    slot.order_cols = keys
+                        .iter()
+                        .map(|key| {
+                            let field = collect_slot_input_for_value(slot, &key.value)?;
+                            Ok(match key.direction {
+                                SortDirection::Asc => TopByOrder::asc(field),
+                                SortDirection::Desc => TopByOrder::desc(field),
+                            })
+                        })
+                        .collect::<CapabilityResult<Vec<_>>>()?;
+                }
+                LinearStep::Slice {
+                    limit,
+                    offset,
+                    tie_breaker,
+                    ..
+                } => {
+                    slot.offset = u64::from(*offset);
+                    slot.limit = limit
+                        .map(|limit| TopByLimit::Finite(u64::from(limit)))
+                        .unwrap_or(TopByLimit::Unbounded);
+                    slot.tie_cols = tie_breaker
+                        .iter()
+                        .map(|value| collect_slot_input_for_value(slot, value))
+                        .collect::<CapabilityResult<Vec<_>>>()?;
+                }
+                _ => {}
+            }
+        }
+        if slot.order_cols.is_empty() {
+            slot.order_cols = vec![TopByOrder::asc(&slot.row_id_input)];
+        }
+        if slot.tie_cols.is_empty() {
+            slot.tie_cols = vec![slot.row_id_input.clone()];
+        }
+        align_collect_join_key_types(&mut slot.children, plan, resolved_sources, request)?;
+    }
+    Ok(())
+}
+
+fn align_collect_root_window(
+    layout: &mut CollectLayout,
+    plan: &AnalyzedQueryPlan,
+) -> CapabilityResult<()> {
+    let steps = match plan {
+        AnalyzedQueryPlan::Linear(linear) => linear.steps.iter().collect::<Vec<_>>(),
+        AnalyzedQueryPlan::CorrelatedPath(path) => path
+            .parent
+            .steps
+            .iter()
+            .chain(&path.output_steps)
+            .collect::<Vec<_>>(),
+        _ => Vec::new(),
+    };
+    for step in steps {
+        match step {
+            LinearStep::OrderBy(keys) => {
+                layout.root_order_cols = keys
+                    .iter()
+                    .map(|key| {
+                        let field = collect_root_input_for_value(layout, &key.value)?;
+                        Ok(match key.direction {
+                            SortDirection::Asc => TopByOrder::asc(field),
+                            SortDirection::Desc => TopByOrder::desc(field),
+                        })
+                    })
+                    .collect::<CapabilityResult<Vec<_>>>()?;
+            }
+            LinearStep::Slice {
+                limit,
+                offset,
+                tie_breaker,
+                ..
+            } => {
+                layout.root_offset = u64::from(*offset);
+                layout.root_limit = limit
+                    .map(|limit| TopByLimit::Finite(u64::from(limit)))
+                    .unwrap_or(TopByLimit::Unbounded);
+                layout.root_tie_cols = tie_breaker
+                    .iter()
+                    .map(|value| collect_root_input_for_value(layout, value))
+                    .collect::<CapabilityResult<Vec<_>>>()?;
+            }
+            _ => {}
+        }
+    }
+    let row_id = layout
+        .root_fields
+        .iter()
+        .find(|field| field.is_row_id)
+        .expect("collector root retains row id")
+        .input
+        .clone();
+    if layout.root_order_cols.is_empty() {
+        layout.root_order_cols = vec![TopByOrder::asc(&row_id)];
+    }
+    if layout.root_tie_cols.is_empty() {
+        layout.root_tie_cols = vec![row_id];
+    }
+    for occurrence in &layout.root_occurrence_inputs {
+        if !layout.root_tie_cols.contains(occurrence) {
+            layout.root_tie_cols.push(occurrence.clone());
+        }
+    }
+    Ok(())
+}
+
+fn collect_root_input_for_value(
+    layout: &CollectLayout,
+    value: &NormalizedValueRef,
+) -> CapabilityResult<String> {
+    match value {
+        NormalizedValueRef::SourceField { field, .. } => layout
+            .root_fields
+            .iter()
+            .find(|candidate| {
+                candidate.source_field.as_deref() == Some(field)
+                    || candidate
+                        .source_field
+                        .as_deref()
+                        .is_some_and(|source| logical_user_column(source) == field)
+            })
+            .map(|candidate| candidate.input.clone()),
+        NormalizedValueRef::RowId(RowIdRef::Source(_)) => layout
+            .root_fields
+            .iter()
+            .find(|field| field.is_row_id)
+            .map(|field| field.input.clone()),
+        _ => None,
+    }
+    .ok_or_else(|| {
+        single_gap_report(UnsupportedReason::Operator(format!(
+            "collector root window key {value:?} is not present in the root projection"
+        )))
+    })
+}
+
+fn collect_slot_input_for_value(
+    slot: &CollectSlotLayout,
+    value: &NormalizedValueRef,
+) -> CapabilityResult<String> {
+    match value {
+        NormalizedValueRef::SourceField { field, .. } => slot
+            .fields
+            .iter()
+            .find(|candidate| {
+                candidate.source_field.as_deref() == Some(field)
+                    || candidate
+                        .source_field
+                        .as_deref()
+                        .is_some_and(|source| logical_user_column(source) == field)
+            })
+            .map(|candidate| candidate.input.clone()),
+        NormalizedValueRef::RowId(RowIdRef::Source(_)) => Some(slot.row_id_input.clone()),
+        _ => None,
+    }
+    .ok_or_else(|| {
+        single_gap_report(UnsupportedReason::Operator(format!(
+            "collector window key {value:?} is not present in the child projection"
+        )))
+    })
+}
+
+fn root_join_occurrence_fields(
+    plan: &AnalyzedQueryPlan,
+    resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
+) -> CapabilityResult<Vec<(String, ValueType)>> {
+    let Some(steps) = root_linear_steps(plan) else {
+        return Ok(Vec::new());
+    };
+    let mut fields = Vec::new();
+    for (step_index, step) in steps.iter().enumerate() {
+        let LinearStep::Join {
+            right,
+            mode: JoinMode::Inner,
+            ..
+        } = step
+        else {
+            continue;
+        };
+        if matches!(steps.get(step_index + 1), Some(LinearStep::Project(_))) {
+            continue;
+        }
+        if matches!(right.as_ref(), RelationInputPlan::Union(_)) {
+            fields.push((format!("__root_join_arm_{step_index}"), ValueType::String));
+            fields.push((format!("__root_join_row_{step_index}"), ValueType::Uuid));
+            continue;
+        }
+        let Some(source_id) = right.root_source() else {
+            continue;
+        };
+        let source = resolved_sources.get(source_id).ok_or_else(|| {
+            single_gap_report(UnsupportedReason::Runtime(format!(
+                "inner join occurrence source {source_id:?} was not resolved"
+            )))
+        })?;
+        if !matches!(source_id.path.components.last(), Some(SourceRole::Alias(_))) {
+            continue;
+        }
+        let exposes_row_id = match right.as_ref() {
+            RelationInputPlan::Linear(linear) => !matches!(
+                linear.steps.last(),
+                Some(LinearStep::Project(columns))
+                    if !columns.iter().any(|column| {
+                        column.output.name == source.row_shape.row_uuid_field
+                    })
+            ),
+            RelationInputPlan::Union(_) | RelationInputPlan::Recursive(_) => false,
+        };
+        if !exposes_row_id {
+            continue;
+        }
+        let name = if matches!(steps.get(step_index + 1), Some(LinearStep::Join { .. })) {
+            format!(
+                "__flat_join_source_{step_index}_{}",
+                source.row_shape.row_uuid_field
+            )
+        } else {
+            format!("__root_join_row_{step_index}")
+        };
+        fields.push((name, ValueType::Uuid));
+    }
+    Ok(fields)
 }
 
 fn collect_layout(
     projection: &AppProjectionTree,
+    plan: &AnalyzedQueryPlan,
     root_source: &ResolvedSource,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
+    request: &QueryProgramRequest,
+    routing_param_fields: &BTreeSet<String>,
+    parameter_domain: &ParameterDomain,
+    available_fields: &BTreeSet<String>,
 ) -> CapabilityResult<CollectLayout> {
-    let root_fields = root_source
+    let explicit_root_projection = matches!(projection.fields, FieldProjection::Fields(_));
+    let mut selected_root = BTreeSet::from([root_source.row_shape.row_uuid_field.clone()]);
+    match &projection.fields {
+        FieldProjection::All => selected_root.extend(
+            root_source
+                .table_schema
+                .columns
+                .iter()
+                .map(|column| user_column_field(&column.name)),
+        ),
+        FieldProjection::Fields(fields) => selected_root.extend(
+            fields
+                .iter()
+                .filter(|field| field.as_str() != "id")
+                .map(|field| collect_projection_source_field(root_source, field)),
+        ),
+    }
+    let mut root_fields = root_source
         .row_shape
         .descriptor
         .fields()
@@ -5234,17 +6140,100 @@ fn collect_layout(
         .filter_map(|field| {
             field.name.as_ref().map(|name| CollectFlatField {
                 input: format!("__collect_root_{name}"),
-                output: name.clone(),
+                output: if name == &root_source.row_shape.row_uuid_field {
+                    name.clone()
+                } else {
+                    collect_projection_output_field(name)
+                },
                 value_type: field.value_type.clone(),
+                output_value_type: if explicit_root_projection {
+                    collect_logical_output_type(root_source, name, &field.value_type)
+                } else {
+                    field.value_type.clone()
+                },
                 source_field: Some(name.clone()),
                 is_row_id: name == &root_source.row_shape.row_uuid_field,
                 is_presence: false,
+                is_output: selected_root.contains(name),
             })
         })
         .collect::<Vec<_>>();
+    let root_occurrence_inputs = root_join_occurrence_fields(plan, resolved_sources)?
+        .into_iter()
+        .filter(|(name, _)| available_fields.contains(name))
+        .map(|(name, value_type)| {
+            let input = format!("__collect_root_{name}");
+            root_fields.push(CollectFlatField {
+                input: input.clone(),
+                output: name.clone(),
+                value_type: value_type.clone(),
+                output_value_type: value_type,
+                source_field: Some(name),
+                is_row_id: false,
+                is_presence: false,
+                is_output: false,
+            });
+            input
+        })
+        .collect::<Vec<_>>();
+    for route_field in routing_param_fields {
+        let value_type = if let Some(param) = route_param_from_field(route_field) {
+            parameter_domain
+                .user_params
+                .get(param)
+                .or_else(|| request.input.binding.param_types.get(param))
+                .cloned()
+        } else {
+            parameter_domain
+                .claim_params
+                .get(route_field)
+                .map(|claim| claim.ty.clone())
+        }
+        .ok_or_else(|| {
+            single_gap_report(UnsupportedReason::Runtime(format!(
+                "collector route field {route_field:?} has no parameter type"
+            )))
+        })?;
+        root_fields.push(CollectFlatField {
+            input: route_field.clone(),
+            output: route_field.clone(),
+            value_type: value_type.clone(),
+            output_value_type: value_type,
+            source_field: Some(route_field.clone()),
+            is_row_id: false,
+            is_presence: false,
+            is_output: true,
+        });
+    }
     let mut next_slot = 0usize;
     let slots = collect_slot_layouts(&projection.paths, resolved_sources, 1, &mut next_slot)?;
-    Ok(CollectLayout { root_fields, slots })
+    Ok(CollectLayout {
+        root_fields,
+        root_occurrence_inputs,
+        root_order_cols: Vec::new(),
+        root_tie_cols: Vec::new(),
+        root_offset: 0,
+        root_limit: TopByLimit::Unbounded,
+        slots,
+    })
+}
+
+fn collect_logical_output_type(
+    source: &ResolvedSource,
+    source_field: &str,
+    fallback: &ValueType,
+) -> ValueType {
+    if source_field == source.row_shape.row_uuid_field {
+        return fallback.clone();
+    }
+    let logical = logical_user_column(source_field);
+    source
+        .table_schema
+        .columns
+        .iter()
+        .find(|column| column.name == logical)
+        .map(|column| column.column_type.clone())
+        .unwrap_or_else(|| fallback.clone())
 }
 
 fn collect_slot_layouts(
@@ -5283,35 +6272,48 @@ fn collect_slot_layouts(
                     fields
                         .iter()
                         .filter(|field| field.as_str() != "id")
-                        .map(|field| user_column_field(field)),
+                        .map(|field| {
+                            collect_projection_source_field(source, field)
+                        }),
                 ),
             }
-            let fields = selected
-                .into_iter()
+            let fields = source
+                .row_shape
+                .descriptor
+                .fields()
+                .iter()
+                .filter_map(|field| field.name.clone())
+                .filter(|source_field| selected.contains(source_field))
                 .map(|source_field| {
-                    let value_type = source_field_type(source, &source_field).cloned().ok_or_else(|| {
+                    let source_value_type = source_field_type(source, &source_field).cloned().ok_or_else(|| {
                         single_gap_report(UnsupportedReason::Operator(format!(
                             "association projection source {:?} does not provide field {source_field:?}",
                             source.row_shape.source
                         )))
                     })?;
                     let is_row_id = source_field == source.row_shape.row_uuid_field;
-                    if !is_row_id && !matches!(value_type, ValueType::Nullable(_)) {
-                        return Err(single_gap_report(UnsupportedReason::Operator(format!(
-                            "association projection field {source_field:?} must be nullable to retain parent anchors"
-                        ))));
-                    }
+                    let output_value_type =
+                        collect_logical_output_type(source, &source_field, &source_value_type);
+                    let value_type = if !is_row_id
+                        && !matches!(source_value_type, ValueType::Nullable(_))
+                    {
+                        ValueType::Nullable(Box::new(source_value_type))
+                    } else {
+                        source_value_type
+                    };
                     Ok(CollectFlatField {
                         input: format!("{prefix}_{source_field}"),
                         output: if is_row_id {
                             source_field.clone()
                         } else {
-                            logical_user_column(&source_field).to_owned()
+                            collect_nested_projection_output_field(&source_field)
                         },
                         value_type,
+                        output_value_type,
                         source_field: Some(source_field),
                         is_row_id,
                         is_presence: false,
+                        is_output: true,
                     })
                 })
                 .collect::<CapabilityResult<Vec<_>>>()?;
@@ -5329,10 +6331,50 @@ fn collect_slot_layouts(
                 fields,
                 row_id_input,
                 presence_input,
+                order_cols: Vec::new(),
+                tie_cols: Vec::new(),
+                offset: 0,
+                limit: TopByLimit::Unbounded,
                 children,
             })
         })
         .collect()
+}
+
+fn collect_projection_source_field(_source: &ResolvedSource, field: &str) -> String {
+    match field {
+        "$createdAt" | "$createdBy" | "$updatedAt" | "$updatedBy" => field.to_owned(),
+        _ => user_column_field(field),
+    }
+}
+
+fn collect_projection_output_field(field: &str) -> String {
+    match field {
+        "$createdAt" | "$createdBy" | "$updatedAt" | "$updatedBy" => field.to_owned(),
+        "created_at" => "$createdAt".to_owned(),
+        "created_by" => "$createdBy".to_owned(),
+        "updated_at" => "$updatedAt".to_owned(),
+        "updated_by" => "$updatedBy".to_owned(),
+        // The terminal owns row assembly, but its encoded record remains in
+        // the canonical current-row codec namespace. Native/WASM adapters map
+        // `user_*` fields to public column names from the negotiated schema;
+        // emitting logical names here makes core CurrentRow decoding silently
+        // treat every selected cell as absent.
+        _ => field.to_owned(),
+    }
+}
+
+fn collect_nested_projection_output_field(field: &str) -> String {
+    match field {
+        "$createdAt" | "$createdBy" | "$updatedAt" | "$updatedBy" => field.to_owned(),
+        "created_at" => "$createdAt".to_owned(),
+        "created_by" => "$createdBy".to_owned(),
+        "updated_at" => "$updatedAt".to_owned(),
+        "updated_by" => "$updatedBy".to_owned(),
+        // Nested records are public tree payloads rather than CurrentRow codec
+        // records, so their user columns retain the logical schema names.
+        _ => logical_user_column(field).to_owned(),
+    }
 }
 
 fn root_collect_context_graph(
@@ -5380,6 +6422,7 @@ fn lower_collect_slot_graphs(
         parent_source,
         resolved_sources,
         request,
+        false,
     )
     .map_err(single_gap_report)?
     .graph;
@@ -5462,7 +6505,17 @@ fn collect_flat_projection(
                     // fields are nullable. Preserve that descriptor on actual
                     // child rows as well, rather than making the union depend
                     // on whether this particular source column is nullable.
-                    ProjectField::nullable_flat(source, &field.input)
+                    if field.value_type == field.output_value_type {
+                        // A nullable application field needs a distinct outer
+                        // anchor wrapper when the current-row source does not
+                        // already carry one. CollectBy removes only that
+                        // wrapper, preserving an inner application NULL.
+                        ProjectField::nullable(source, &field.input)
+                    } else {
+                        // Current-row storage already carries the exact outer
+                        // wrapper required around the logical output type.
+                        ProjectField::nullable_flat(source, &field.input)
+                    }
                 }
             } else if inherited_flat_fields.contains(&field.input) {
                 ProjectField::renamed(left_field(&field.input), &field.input)
@@ -5536,20 +6589,28 @@ fn collect_slot_flat_field_names(slot: &CollectSlotLayout) -> BTreeSet<String> {
         .collect()
 }
 
-fn collect_slot_builder(slot: &CollectSlotLayout, parent_row_id: &str) -> CollectBySlotBuilder {
+fn collect_slot_builder(
+    slot: &CollectSlotLayout,
+    parent_row_id: &str,
+    route_fields: &BTreeSet<String>,
+) -> CollectBySlotBuilder {
     CollectBySlotBuilder::new(
-        [parent_row_id],
-        slot.fields
-            .iter()
-            .map(|field| CollectByField::renamed(&field.input, &field.output)),
+        std::iter::once(parent_row_id.to_owned()).chain(route_fields.iter().cloned()),
+        slot.fields.iter().map(|field| {
+            if field.is_row_id || field.value_type == field.output_value_type {
+                CollectByField::renamed(&field.input, &field.output)
+            } else {
+                CollectByField::renamed_unwrap_nullable(&field.input, &field.output)
+            }
+        }),
         &slot.collection_field,
         slot.children
             .iter()
-            .map(|child| collect_slot_builder(child, &slot.row_id_input)),
-        [TopByOrder::asc(&slot.row_id_input)],
-        [&slot.row_id_input],
-        0,
-        TopByLimit::Unbounded,
+            .map(|child| collect_slot_builder(child, &slot.row_id_input, route_fields)),
+        slot.order_cols.clone(),
+        slot.tie_cols.clone(),
+        slot.offset,
+        slot.limit,
     )
     .with_presence_col(&slot.presence_input)
 }
@@ -5558,7 +6619,8 @@ fn collect_output_descriptor(layout: &CollectLayout) -> CapabilityResult<RecordD
     let mut fields = layout
         .root_fields
         .iter()
-        .map(|field| (field.output.clone(), field.value_type.clone()))
+        .filter(|field| field.is_output)
+        .map(|field| (field.output.clone(), field.output_value_type.clone()))
         .collect::<Vec<_>>();
     fields.extend(
         layout
@@ -5583,7 +6645,7 @@ fn collect_slot_output_descriptor(slot: &CollectSlotLayout) -> CapabilityResult<
     let mut fields = slot
         .fields
         .iter()
-        .map(|field| (field.output.clone(), field.value_type.clone()))
+        .map(|field| (field.output.clone(), field.output_value_type.clone()))
         .collect::<Vec<_>>();
     fields.extend(
         slot.children
@@ -5748,6 +6810,7 @@ fn lower_closure_membership(
     root_source: &ResolvedSource,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
     route_fields: &BTreeSet<String>,
+    root_carrier_fields: &BTreeSet<String>,
 ) -> CapabilityResult<ClosureLowering> {
     let mut visible_root = root_graph;
     for path in &request.input.shape.closure_paths {
@@ -5763,7 +6826,7 @@ fn lower_closure_membership(
                 *root_gate,
                 root_source,
                 resolved_sources,
-                route_fields,
+                root_carrier_fields,
             )?;
         }
     }
@@ -6152,13 +7215,28 @@ fn closure_path_segments(path: &ClosurePath) -> Vec<&ClosurePathSegment> {
 }
 
 fn project_source_fields_from_prefix(source: &ResolvedSource, prefix: &str) -> Vec<ProjectField> {
+    project_source_fields_from_prefix_rewrapping_nullable(source, prefix, None)
+}
+
+fn project_source_fields_from_prefix_rewrapping_nullable(
+    source: &ResolvedSource,
+    prefix: &str,
+    nullable_field: Option<&str>,
+) -> Vec<ProjectField> {
     source
         .row_shape
         .descriptor
         .fields()
         .iter()
         .filter_map(|field| field.name.as_ref())
-        .map(|field| ProjectField::renamed(format!("{prefix}{field}"), field.clone()))
+        .map(|field| {
+            let source_field = format!("{prefix}{field}");
+            if nullable_field == Some(field.as_str()) {
+                ProjectField::nullable(source_field, field.clone())
+            } else {
+                ProjectField::renamed(source_field, field.clone())
+            }
+        })
         .collect()
 }
 
@@ -6226,16 +7304,26 @@ fn fact_output_with_terminal(
                 });
             }
             let version = version_witness_fields(&source.row_shape)?;
+            let occurrence_id_fields = result_occurrence_id_fields(plan, source, resolved_sources)?;
+            let occurrence_union_arm_fields =
+                result_occurrence_union_arm_fields(plan, source, resolved_sources)?;
+            let payload_fields = flat_join_payload_fields(plan);
+            let settle_position_field = payload_fields
+                .is_empty()
+                .then(|| settle_position_field(&source.row_shape))
+                .flatten();
             ProgramFactSchema::ResultMembership(ResultMembershipSchema {
                 table_field: "table_name".to_owned(),
                 row_field: source.row_shape.row_uuid_field.clone(),
-                occurrence_id_fields: vec![source.row_shape.row_uuid_field.clone()],
+                occurrence_id_fields,
+                occurrence_union_arm_fields,
+                payload_fields,
                 branch_or_prefix_field: version.branch_or_prefix_field.clone(),
                 version: ResultMembershipVersionSchema::Content(ContentVersionFields {
                     tx_time_field: "content_tx_time".to_owned(),
                     tx_node_field: "content_tx_node_id".to_owned(),
                 }),
-                settle_position_field: settle_position_field(&source.row_shape),
+                settle_position_field,
                 routing_param_fields,
             })
         }
@@ -6289,6 +7377,119 @@ fn fact_output_with_terminal(
         terminal,
         schema,
     })
+}
+
+fn result_occurrence_id_fields(
+    plan: &AnalyzedQueryPlan,
+    source: &ResolvedSource,
+    resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
+) -> CapabilityResult<Vec<String>> {
+    let mut fields = vec![source.row_shape.row_uuid_field.clone()];
+    if &source.row_shape.source != plan.root_source() {
+        return Ok(fields);
+    }
+    if let Some(LinearStep::Project(columns)) =
+        root_linear_steps(plan).and_then(|steps| steps.last())
+    {
+        fields.extend(columns.iter().filter_map(|column| {
+            column
+                .output
+                .name
+                .strip_prefix("__flat_join_row_")
+                .map(|_| column.output.name.clone())
+        }));
+    } else {
+        fields.extend(
+            root_join_occurrence_fields(plan, resolved_sources)?
+                .into_iter()
+                .filter_map(|(name, value_type)| (value_type == ValueType::Uuid).then_some(name)),
+        );
+    }
+    Ok(fields)
+}
+
+fn result_occurrence_union_arm_fields(
+    plan: &AnalyzedQueryPlan,
+    source: &ResolvedSource,
+    resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
+) -> CapabilityResult<BTreeMap<usize, String>> {
+    if &source.row_shape.source != plan.root_source() {
+        return Ok(BTreeMap::new());
+    }
+    let fields = root_join_occurrence_fields(plan, resolved_sources)?;
+    let mut joined_position = 0usize;
+    let mut pending_arm = None;
+    let mut arms = BTreeMap::new();
+    for (name, value_type) in fields {
+        match value_type {
+            ValueType::String => pending_arm = Some(name),
+            ValueType::Uuid => {
+                if let Some(arm) = pending_arm.take() {
+                    arms.insert(joined_position, arm);
+                }
+                joined_position += 1;
+            }
+            _ => {}
+        }
+    }
+    Ok(arms)
+}
+
+fn flat_join_payload_fields(plan: &AnalyzedQueryPlan) -> Vec<TypedOutputField> {
+    root_linear_steps(plan)
+        .and_then(|steps| match steps.last() {
+            Some(LinearStep::Project(columns))
+                if columns
+                    .iter()
+                    .any(|column| column.output.name.starts_with("__flat_join_row_")) =>
+            {
+                Some(columns)
+            }
+            _ => None,
+        })
+        .map(|columns| {
+            columns
+                .iter()
+                .filter(|column| column.output.name.contains('.'))
+                .map(|column| column.output.clone())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn projected_multisource_terminal(
+    plan: &AnalyzedQueryPlan,
+    root_source: &ResolvedSource,
+) -> Option<(SourceId, Vec<TypedOutputField>, bool)> {
+    let columns = root_linear_steps(plan).and_then(|steps| match steps.last() {
+        Some(LinearStep::Project(columns)) => Some(columns),
+        _ => None,
+    })?;
+    let output_source = columns.iter().find_map(|column| match &column.value {
+        NormalizedValueRef::RowId(RowIdRef::Source(source))
+            if column.output.name == root_source.row_shape.row_uuid_field =>
+        {
+            Some(source.clone())
+        }
+        _ => None,
+    })?;
+    let is_flat = columns
+        .iter()
+        .any(|column| column.output.name.starts_with("__flat_join_row_"));
+    is_flat.then(|| {
+        (
+            output_source,
+            columns.iter().map(|column| column.output.clone()).collect(),
+            true,
+        )
+    })
+}
+
+fn root_linear_steps(plan: &AnalyzedQueryPlan) -> Option<&[LinearStep]> {
+    match plan {
+        AnalyzedQueryPlan::Linear(plan) => Some(&plan.steps),
+        _ => None,
+    }
 }
 
 fn output_routing_fields(output: &ProgramFactOutput) -> BTreeSet<String> {
@@ -6382,13 +7583,42 @@ fn fact_terminal_graph(
         )),
         ProgramFactKey::ResultMembership => {
             if root_aggregate_step(plan).is_some() {
+                let graph = match root_aggregate_step(plan) {
+                    Some((group_by, outputs))
+                        if group_by.is_empty()
+                            && matches!(
+                                outputs,
+                                [AggregateExpr {
+                                    function: AggregateFunction::Count,
+                                    ..
+                                }]
+                            ) =>
+                    {
+                        graph.filter(GroovePredicateExpr::Neq {
+                            field: logical_user_column(&outputs[0].output.name).to_owned(),
+                            value: LiteralValue::U64(0),
+                        })
+                    }
+                    _ => graph,
+                };
                 return Ok(graph.project_fields(aggregate_result_membership_fields(
                     plan,
                     source,
                     routing_param_fields,
                 )?));
             }
-            Ok(graph.project_fields(result_membership_fields(source, routing_param_fields)?))
+            let mut occurrence_fields =
+                result_occurrence_id_fields(plan, source, resolved_sources)?;
+            occurrence_fields.extend(
+                result_occurrence_union_arm_fields(plan, source, resolved_sources)?.into_values(),
+            );
+            Ok(graph.project_fields(result_membership_fields(
+                source,
+                routing_param_fields,
+                &flat_join_payload_fields(plan),
+                &occurrence_fields,
+                flat_join_payload_fields(plan).is_empty(),
+            )?))
         }
         ProgramFactKey::VersionWitnesses => {
             content_version_witness_graph(source, "version_content")
@@ -6435,9 +7665,7 @@ fn route_literal_project_field(
         let literal = domain
             .claim_params
             .get(route_field)
-            .map(|claim| {
-                coerce_literal_for_value_type(value.clone().into(), &claim.ty.value_type())
-            })
+            .map(|claim| coerce_literal_for_value_type(value.clone().into(), &claim.ty.clone()))
             .unwrap_or_else(|| value.into());
         return Ok(ProjectField::literal(route_field.to_owned(), literal));
     }
@@ -6454,7 +7682,7 @@ fn route_literal_project_field(
     let literal = domain
         .user_params
         .get(param)
-        .map(|ty| coerce_literal_for_value_type(value.clone().into(), &ty.value_type()))
+        .map(|ty| coerce_literal_for_value_type(value.clone().into(), &ty.clone()))
         .unwrap_or_else(|| value.clone().into());
     Ok(ProjectField::literal(route_field.to_owned(), literal))
 }
@@ -6547,6 +7775,7 @@ fn correlated_relation_edge_graphs(
             target,
             resolved_sources,
             request,
+            true,
         )
         .map_err(|gap| {
             Box::new(CapabilityReport {
@@ -6678,9 +7907,14 @@ fn content_version_witness_graph(
 fn result_membership_fields(
     source: &ResolvedSource,
     routing_param_fields: BTreeSet<String>,
+    payload_fields: &[TypedOutputField],
+    occurrence_id_fields: &[String],
+    include_settle_position: bool,
 ) -> CapabilityResult<Vec<ProjectField>> {
     let version = version_witness_fields(&source.row_shape)?;
-    let settle_position = settle_position_field(&source.row_shape);
+    let settle_position = include_settle_position
+        .then(|| settle_position_field(&source.row_shape))
+        .flatten();
     let mut fields = vec![
         ProjectField::literal("event_kind", Value::String("result_current".to_owned())),
         ProjectField::literal(
@@ -6691,6 +7925,13 @@ fn result_membership_fields(
         ProjectField::renamed(version.tx_time_field, "content_tx_time"),
         ProjectField::renamed(version.tx_node_field, "content_tx_node_id"),
     ];
+    fields.extend(
+        occurrence_id_fields
+            .iter()
+            .filter(|field| **field != source.row_shape.row_uuid_field)
+            .cloned()
+            .map(ProjectField::named),
+    );
     if let Some(field) = settle_position {
         fields.push(ProjectField::renamed(field, "settle_position"));
     } else {
@@ -6700,6 +7941,11 @@ fn result_membership_fields(
         ));
     }
     fields.extend(routing_param_fields.into_iter().map(ProjectField::named));
+    fields.extend(
+        payload_fields
+            .iter()
+            .map(|field| ProjectField::named(field.name.clone())),
+    );
     Ok(fields)
 }
 
@@ -6763,7 +8009,7 @@ fn aggregate_result_schema(
         synthetic: SyntheticResultMembershipSchema {
             table_field: "table_name".to_owned(),
             row_field: "synthetic_row".to_owned(),
-            revision_field: "synthetic_revision".to_owned(),
+            replacement_field: "synthetic_replacement".to_owned(),
             routing_param_fields: routing_param_fields.clone(),
         },
         group_key_fields,
@@ -6796,9 +8042,12 @@ fn aggregate_result_membership_fields(
             explain: ExplainPlan::default(),
         }));
     }
+    // The synthetic table is only a protocol label. Aggregate identity is the
+    // group-key value below (or the fixed global token), never a source-table
+    // name or an aggregate value.
     let mut fields = vec![ProjectField::literal(
         "table_name",
-        Value::String(format!("{}_aggregate", source.table_schema.name)),
+        Value::String("aggregate_result".to_owned()),
     )];
     if let Some(group) = group_by.first() {
         fields.push(ProjectField::renamed(
@@ -6811,14 +8060,17 @@ fn aggregate_result_membership_fields(
             Value::String("global".to_owned()),
         ));
     }
+    // This runtime-only token pairs the aggregate operator's before/after
+    // records. It is wrapped as an opaque protocol type before it crosses the
+    // runtime boundary, so it cannot be mistaken for row version metadata.
     if let Some(first_output) = outputs.first() {
         fields.push(ProjectField::renamed(
             logical_user_column(&first_output.output.name),
-            "synthetic_revision",
+            "synthetic_replacement",
         ));
     } else {
         fields.push(ProjectField::literal(
-            "synthetic_revision",
+            "synthetic_replacement",
             Value::String("empty".to_owned()),
         ));
     }
@@ -6850,7 +8102,7 @@ fn aggregate_typed_group_field(
     })?;
     Ok(TypedOutputField {
         name: field,
-        ty: column_type_from_value_type(&value_type),
+        ty: value_type,
     })
 }
 
@@ -6860,7 +8112,7 @@ fn aggregate_typed_output_field(
 ) -> CapabilityResult<TypedOutputField> {
     Ok(TypedOutputField {
         name: logical_user_column(&output.output.name).to_owned(),
-        ty: column_type_from_value_type(&aggregate_output_value_type(output, source)?),
+        ty: aggregate_output_value_type(output, source)?,
     })
 }
 
@@ -6870,7 +8122,7 @@ fn aggregate_output_value_type(
 ) -> CapabilityResult<ValueType> {
     match output.function {
         AggregateFunction::Count => Ok(ValueType::U64),
-        AggregateFunction::Avg => Ok(ValueType::F64),
+        AggregateFunction::Avg => Ok(ValueType::Nullable(Box::new(ValueType::F64))),
         AggregateFunction::Sum | AggregateFunction::Min | AggregateFunction::Max => {
             let input = output.input.as_ref().ok_or_else(|| {
                 Box::new(CapabilityReport {
@@ -6881,13 +8133,17 @@ fn aggregate_output_value_type(
                 })
             })?;
             let field = aggregate_source_field_name(input, source)?;
-            source_field_type(source, &field).cloned().ok_or_else(|| {
+            let value_type = source_field_type(source, &field).cloned().ok_or_else(|| {
                 Box::new(CapabilityReport {
                     gaps: vec![UnsupportedReason::Runtime(format!(
                         "aggregate input field {field:?} is missing from resolved descriptor"
                     ))],
                     explain: ExplainPlan::default(),
                 })
+            })?;
+            Ok(match value_type {
+                ValueType::Nullable(inner) => ValueType::Nullable(inner),
+                value_type => ValueType::Nullable(Box::new(value_type)),
             })
         }
     }
@@ -6963,6 +8219,7 @@ fn prefixed_version_witness_fields_for_tagged_rows(
         ProjectField::renamed(format!("{prefix}tx_node_id"), "tx_node_id"),
         ProjectField::renamed(format!("{prefix}schema_version"), "schema_version"),
         ProjectField::renamed(format!("{prefix}parents"), "parents"),
+        ProjectField::renamed(format!("{prefix}authored_columns"), "authored_columns"),
         ProjectField::renamed(format!("{prefix}created_by"), "created_by"),
         ProjectField::renamed(format!("{prefix}created_at"), "created_at"),
         ProjectField::renamed(format!("{prefix}updated_by"), "updated_by"),
@@ -6996,6 +8253,7 @@ fn inline_version_witness_fields_for_tagged_rows(
         ProjectField::renamed(version.tx_node_field, "tx_node_id"),
         ProjectField::renamed(version.schema_version_field, "schema_version"),
         ProjectField::named("parents"),
+        ProjectField::named("authored_columns"),
         ProjectField::named("created_by"),
         ProjectField::named("created_at"),
         ProjectField::named("updated_by"),
@@ -7028,6 +8286,10 @@ fn deletion_witness_fields_for_tagged_rows(
         ProjectField::named("tx_node_id"),
         ProjectField::named("schema_version"),
         ProjectField::named("parents"),
+        ProjectField::null_typed(
+            "authored_columns",
+            ValueType::Nullable(Box::new(ValueType::Bytes)),
+        ),
         ProjectField::named("created_by"),
         ProjectField::named("created_at"),
         ProjectField::named("updated_by"),
@@ -7037,7 +8299,7 @@ fn deletion_witness_fields_for_tagged_rows(
     fields.extend(source.table_schema.columns.iter().map(|column| {
         ProjectField::null_typed(
             table_user_column_field(&source.table_schema.name, &column.name),
-            ValueType::Nullable(Box::new(column.column_type.clone().value_type())),
+            ValueType::Nullable(Box::new(column.column_type.clone())),
         )
     }));
     Ok(fields)
@@ -7234,6 +8496,7 @@ fn version_witness_schema(
         updated_by_field: "updated_by".to_owned(),
         updated_at_field: "updated_at".to_owned(),
         parents_field: "parents".to_owned(),
+        authored_columns_field: "authored_columns".to_owned(),
         deletion_field: "_deletion".to_owned(),
         user_fields: source
             .table_schema
@@ -7390,6 +8653,10 @@ pub(crate) struct QueryProgram {
 pub(crate) struct LoweredGraph {
     /// Executable named groove terminals emitted by this program.
     pub(crate) terminals: Vec<LoweredTerminal>,
+    /// Filtered current-row graph used only by synchronous one-shot
+    /// materializers. Public terminals have their own exact output shape and
+    /// must not be decoded as storage-backed current rows.
+    pub(crate) internal_app_rows_graph: Option<GraphBuilder>,
     /// Parameter domains expected by the graph.
     pub(crate) parameters: ParameterDomain,
     /// App row and fact schemas emitted by the graph.

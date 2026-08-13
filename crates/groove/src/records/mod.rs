@@ -92,6 +92,8 @@ use thiserror::Error;
 pub use macros::{FieldKind, RecordField, assert_record_field_layout};
 pub use values::{EnumSchema, Value, ValueType};
 
+pub const SCHEMA_VERSION_HEADER_LEN: usize = std::mem::size_of::<u64>();
+
 use values::{
     checked_add, decode_value, encode_fixed_value, encode_value, ensure_value_type, usize_to_u32,
     validate_schema_value_type, write_u32,
@@ -844,10 +846,22 @@ impl RecordDescriptor {
                         match nullable_present_payload(source_record, span, inner)? {
                             Some(payload) => RawProjectedBytes::Source(payload),
                             None => {
-                                output.truncate(start);
-                                scratch.variable_fields.clear();
-                                scratch.generated.clear();
-                                return Ok(None);
+                                if matches!(target_field.value_type, ValueType::Nullable(_)) {
+                                    let encoded = encode_value(
+                                        &Value::Nullable(None),
+                                        &target_field.value_type,
+                                    )?;
+                                    let generated_start = scratch.generated.len();
+                                    scratch.generated.extend_from_slice(&encoded);
+                                    RawProjectedBytes::Generated(
+                                        generated_start..scratch.generated.len(),
+                                    )
+                                } else {
+                                    output.truncate(start);
+                                    scratch.variable_fields.clear();
+                                    scratch.generated.clear();
+                                    return Ok(None);
+                                }
                             }
                         }
                     }
@@ -1574,6 +1588,93 @@ pub struct OwnedRecord {
     descriptor: RecordDescriptor,
 }
 
+/// An encoded row bound to the table-local schema version that describes it.
+///
+/// The version travels with the row through batching and is written as the
+/// stable eight-byte prefix of the stored value.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VersionedRecord {
+    schema_version: u64,
+    record: OwnedRecord,
+}
+
+impl VersionedRecord {
+    pub fn new(schema_version: u64, record: OwnedRecord) -> Self {
+        Self {
+            schema_version,
+            record,
+        }
+    }
+
+    pub fn schema_version(&self) -> u64 {
+        self.schema_version
+    }
+
+    pub fn create(
+        schema_version: u64,
+        descriptor: RecordDescriptor,
+        values: &[Value],
+    ) -> Result<Self, Error> {
+        let raw = descriptor.create(values)?;
+        Ok(Self::new(schema_version, OwnedRecord::new(raw, descriptor)))
+    }
+
+    pub fn record(&self) -> &OwnedRecord {
+        &self.record
+    }
+
+    pub fn descriptor(&self) -> &RecordDescriptor {
+        self.record.descriptor()
+    }
+
+    pub fn raw(&self) -> &[u8] {
+        self.record.raw()
+    }
+
+    pub fn borrowed(&self) -> BorrowedRecord<'_> {
+        self.record.borrowed()
+    }
+
+    pub fn get(&self, field_name: &str) -> Result<Value, Error> {
+        self.record.get(field_name)
+    }
+
+    pub fn get_idx(&self, field_idx: usize) -> Result<Value, Error> {
+        self.record.get_idx(field_idx)
+    }
+
+    pub fn to_values(&self) -> Result<Vec<Value>, Error> {
+        self.record.to_values()
+    }
+
+    pub fn into_record(self) -> OwnedRecord {
+        self.record
+    }
+
+    pub fn into_stored_bytes(self) -> Vec<u8> {
+        encode_versioned_record(self.schema_version, self.record.raw())
+    }
+}
+
+pub fn encode_versioned_record(schema_version: u64, payload: &[u8]) -> Vec<u8> {
+    let mut stored = Vec::with_capacity(SCHEMA_VERSION_HEADER_LEN + payload.len());
+    stored.extend_from_slice(&schema_version.to_le_bytes());
+    stored.extend_from_slice(payload);
+    stored
+}
+
+pub fn split_versioned_record(stored: &[u8]) -> Result<(u64, &[u8]), Error> {
+    let header = stored
+        .get(..SCHEMA_VERSION_HEADER_LEN)
+        .ok_or(Error::InvalidSchemaVersionHeader)?;
+    let schema_version = u64::from_le_bytes(
+        header
+            .try_into()
+            .expect("schema-version header has u64 width"),
+    );
+    Ok((schema_version, &stored[SCHEMA_VERSION_HEADER_LEN..]))
+}
+
 impl OwnedRecord {
     pub fn new(raw: Vec<u8>, descriptor: RecordDescriptor) -> Self {
         Self { raw, descriptor }
@@ -1725,6 +1826,8 @@ pub enum Error {
     UnknownEnumVariant { enum_name: String, variant: String },
     #[error("invalid offset")]
     InvalidOffset,
+    #[error("invalid schema-version header")]
+    InvalidSchemaVersionHeader,
     #[error("nested record bytes are not canonical")]
     NonCanonicalRecord,
     #[error("tuple members must be fixed-width, got {member_type:?}")]

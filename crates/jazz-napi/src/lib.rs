@@ -34,35 +34,114 @@ use napi_derive::napi;
 use serde::Deserialize;
 use serde_json::Value as JsonValue;
 use std::cell::RefCell;
+use std::collections::{BTreeMap, VecDeque};
 use std::rc::Rc;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use jazz::binding_support::{self as core_binding, WireQueues};
 use jazz::db::{
-    Db as CoreDb, MergeableTxOps, PeerConnection as CorePeerConnection,
-    PreparedQuery as PreparedQueryInner, QueryAttachment as CoreQueryAttachment,
-    ReadOpts as CoreReadOpts, RowCells as CoreRowCells, SubscriptionEvent, SubscriptionStream,
-    TickScheduler as CoreTickScheduler, TickUrgency as CoreTickUrgency,
-    WireTransportAdapter as CoreWireTransportAdapter, WriteHandle, block_on as core_block_on,
+    ConnectionSessionContext as CoreConnectionSessionContext, Db as CoreDb,
+    DbConfig as CoreDbConfig, DbIdentity as CoreDbIdentity, ExclusiveTxOps,
+    InitialSyncFlushCadence as CoreInitialSyncFlushCadence, LocalUpdates as CoreLocalUpdates,
+    MergeableTxOps, PeerConnection as CorePeerConnection, PreparedQuery as PreparedQueryInner,
+    Propagation as CorePropagation, QueryAttachment as CoreQueryAttachment,
+    ReadOpts as CoreReadOpts, RowCells as CoreRowCells, SeededRowIdSource as CoreSeededRowIdSource,
+    SubscriptionEvent, SubscriptionStream, TickScheduler as CoreTickScheduler,
+    TickUrgency as CoreTickUrgency, WireTransportAdapter as CoreWireTransportAdapter, WriteHandle,
+    block_on as core_block_on,
+};
+use jazz::groove::records::{
+    BorrowedRecord as CoreBorrowedRecord, RecordDescriptor, Value as CoreValue,
 };
 use jazz::groove::storage::{
     MemoryStorage as CoreMemoryStorage, OrderedKvStorage as CoreOrderedKvStorage,
     ReopenableStorage as CoreReopenableStorage, RocksDbStorage as CoreRocksDbStorage,
 };
-use jazz::ids::{AuthorId as CoreAuthorId, RowUuid as CoreRowUuid};
-use jazz::node::OpenTxId as CoreOpenTxId;
+use jazz::ids::{AuthorId as CoreAuthorId, NodeUuid as CoreNodeUuid, RowUuid as CoreRowUuid};
+use jazz::query::{
+    Query as CoreQuery, RelationExpr as CoreRelationExpr, RelationQuery as CoreRelationQuery,
+};
 use jazz::schema::JazzSchema;
-use jazz::tools::AppId;
+use jazz::tools::OpenBatchId as CoreOpenBatchId;
 use jazz::tools::identity;
 use jazz::tools::middleware::AuthConfig;
 use jazz::tools::server::{
     JazzServer as CoreJazzServer, ServerBuilder, ServerDataDir, StorageBackend,
     TestJwtIssuer as JazzTestJwtIssuer, TestJwtOptions,
 };
-use jazz::tx::{DurabilityTier as CoreDurabilityTier, TxId};
+use jazz::tools::{AppId, BatchId};
+use jazz::tx::{DurabilityTier as CoreDurabilityTier, Fate as CoreFate, TxId};
+use jazz::wire::{
+    TransportError, WireAuthorityEndpoint as CoreWireAuthorityEndpoint,
+    WireTransport as CoreWireTransport,
+};
+
+#[derive(Clone, Debug, Deserialize)]
+struct CoreOpenDbConfig {
+    identity: CoreOpenDbIdentity,
+    row_id_seed: Option<u64>,
+    history_complete: bool,
+    initial_sync_flush_every: Option<u32>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+struct CoreOpenDbIdentity {
+    node: CoreNodeUuid,
+    author: CoreAuthorId,
+}
+
+impl From<CoreOpenDbIdentity> for CoreDbIdentity {
+    fn from(identity: CoreOpenDbIdentity) -> Self {
+        Self {
+            node: identity.node,
+            author: identity.author,
+        }
+    }
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+struct CoreRowBatch<'a> {
+    table: &'a str,
+    descriptor: RecordDescriptor,
+    rows: Vec<CoreRow<'a>>,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+struct CoreRow<'a> {
+    row_id: CoreRowUuid,
+    deleted: bool,
+    raw: &'a [u8],
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+struct CoreRelationSnapshot<'a> {
+    root_count: u64,
+    rows: Vec<CoreRowBatch<'a>>,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+struct CoreSubscriptionDelta<'a> {
+    added: Vec<CoreRowBatch<'a>>,
+    updated: Vec<CoreRowBatch<'a>>,
+    removed: Vec<CoreRemovedRow>,
+    added_occurrence_keys: Vec<jazz::tools::ResultKey>,
+    updated_occurrence_keys: Vec<jazz::tools::ResultKey>,
+    removed_occurrence_keys: Vec<jazz::tools::ResultKey>,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+struct CoreRemovedRow {
+    table: String,
+    row_id: CoreRowUuid,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+struct WriteResult {
+    row_id: CoreRowUuid,
+    tx_id: TxId,
+}
 
 type NapiDbInner = Rc<RefCell<Option<NapiDbInnerStorage>>>;
 
@@ -82,6 +161,16 @@ enum NapiWrite {
     },
 }
 
+#[derive(Clone, Default)]
+struct WireQueues {
+    inbound: Rc<RefCell<VecDeque<Vec<u8>>>>,
+    outbound: Rc<RefCell<VecDeque<Vec<u8>>>>,
+}
+
+struct NapiWireTransport {
+    queues: WireQueues,
+}
+
 struct NapiTickScheduler {
     callback: ThreadsafeFunction<String, ()>,
 }
@@ -99,6 +188,17 @@ impl CoreTickScheduler for NapiTickScheduler {
     }
 }
 
+impl CoreWireTransport for NapiWireTransport {
+    fn send_frame(&mut self, frame: Vec<u8>) -> std::result::Result<(), TransportError> {
+        self.queues.outbound.borrow_mut().push_back(frame);
+        Ok(())
+    }
+
+    fn try_recv_frame(&mut self) -> Option<Vec<u8>> {
+        self.queues.inbound.borrow_mut().pop_front()
+    }
+}
+
 #[napi(js_name = "PreparedQuery")]
 pub struct PreparedQuery {
     inner: PreparedQueryInner,
@@ -112,6 +212,7 @@ pub struct QueryAttachment {
 #[napi(js_name = "Write")]
 pub struct Write {
     payload: Vec<u8>,
+    batch_id: BatchId,
     inner: Option<NapiWrite>,
 }
 
@@ -146,7 +247,15 @@ enum NapiSubscription {
 #[napi(js_name = "Tx")]
 pub struct Tx {
     db: NapiDbInnerStorage,
-    open_tx: Option<CoreOpenTxId>,
+    kind: NapiTxKind,
+    open_tx: Option<CoreOpenBatchId>,
+    owns_lifetime: bool,
+}
+
+#[derive(Clone, Copy)]
+enum NapiTxKind {
+    Mergeable,
+    Exclusive,
 }
 
 macro_rules! with_napi_mergeable_tx {
@@ -166,8 +275,30 @@ macro_rules! with_napi_mergeable_tx {
     }};
 }
 
+macro_rules! with_napi_exclusive_tx {
+    ($transaction:expr, |$tx:ident| $operation:expr) => {{
+        let open_tx = $transaction.open_tx()?;
+        match &$transaction.db {
+            NapiDbInnerStorage::Memory(db) => {
+                let $tx = db.exclusive_tx_ref(open_tx);
+                $operation
+            }
+            NapiDbInnerStorage::Persistent(db) => {
+                let $tx = db.exclusive_tx_ref(open_tx);
+                $operation
+            }
+        }
+        .map_err(|error: jazz::db::Error| napi::Error::from_reason(error.to_string()))
+    }};
+}
+
 #[napi]
 impl Write {
+    #[napi(getter, js_name = "batchId")]
+    pub fn batch_id(&self) -> String {
+        self.batch_id.to_string()
+    }
+
     #[napi(getter)]
     pub fn payload(&self) -> Uint8Array {
         Uint8Array::new(self.payload.clone())
@@ -237,22 +368,25 @@ impl Write {
 impl Transport {
     #[napi(js_name = "sendWireFrame")]
     pub fn send_wire_frame(&self, frame: Uint8Array) {
-        self.queues.push_inbound([frame.to_vec()]);
+        self.queues.inbound.borrow_mut().push_back(frame.to_vec());
     }
 
     #[napi(js_name = "sendWireFrames")]
     pub fn send_wire_frames(&self, frames: Vec<Uint8Array>) {
-        self.queues
-            .push_inbound(frames.into_iter().map(|frame| frame.to_vec()));
+        let mut inbound = self.queues.inbound.borrow_mut();
+        for frame in frames {
+            inbound.push_back(frame.to_vec());
+        }
     }
 
     #[napi(js_name = "recvWireFrames")]
     pub fn recv_wire_frames(&self) -> Vec<Uint8Array> {
-        self.queues
-            .drain_outbound()
-            .into_iter()
-            .map(Uint8Array::new)
-            .collect()
+        let mut frames = Vec::new();
+        let mut outbound = self.queues.outbound.borrow_mut();
+        while let Some(frame) = outbound.pop_front() {
+            frames.push(Uint8Array::new(frame));
+        }
+        frames
     }
 
     #[napi]
@@ -330,10 +464,15 @@ impl Tx {
         let row_id = core_row_uuid_from_bytes(&row_id)?;
         let cells = decode_core_cells(&cells)?;
         let now_ms = updated_at_ms.map(|value| value as u64);
-        with_napi_mergeable_tx!(self, |tx| match now_ms {
-            Some(now_ms) => tx.insert_with_id_at_ms(&table, row_id, cells, now_ms),
-            None => tx.insert_with_id(&table, row_id, cells),
-        })
+        match self.kind {
+            NapiTxKind::Mergeable => with_napi_mergeable_tx!(self, |tx| match now_ms {
+                Some(now_ms) => tx.insert_with_id_at_ms(&table, row_id, cells, now_ms),
+                None => tx.insert_with_id(&table, row_id, cells),
+            }),
+            NapiTxKind::Exclusive => {
+                with_napi_exclusive_tx!(self, |tx| tx.insert_with_id(&table, row_id, cells))
+            }
+        }
     }
 
     #[napi(js_name = "updateEncoded")]
@@ -347,10 +486,15 @@ impl Tx {
         let row_id = core_row_uuid_from_bytes(&row_id)?;
         let patch = decode_core_cells(&patch)?;
         let now_ms = updated_at_ms.map(|value| value as u64);
-        with_napi_mergeable_tx!(self, |tx| match now_ms {
-            Some(now_ms) => tx.update_at_ms(&table, row_id, patch, now_ms),
-            None => tx.update(&table, row_id, patch),
-        })
+        match self.kind {
+            NapiTxKind::Mergeable => with_napi_mergeable_tx!(self, |tx| match now_ms {
+                Some(now_ms) => tx.update_at_ms(&table, row_id, patch, now_ms),
+                None => tx.update(&table, row_id, patch),
+            }),
+            NapiTxKind::Exclusive => {
+                with_napi_exclusive_tx!(self, |tx| tx.update(&table, row_id, patch))
+            }
+        }
     }
 
     #[napi(js_name = "upsertEncoded")]
@@ -364,10 +508,15 @@ impl Tx {
         let row_id = core_row_uuid_from_bytes(&row_id)?;
         let cells = decode_core_cells(&cells)?;
         let now_ms = updated_at_ms.map(|value| value as u64);
-        with_napi_mergeable_tx!(self, |tx| match now_ms {
-            Some(now_ms) => tx.update_at_ms(&table, row_id, cells, now_ms),
-            None => tx.update(&table, row_id, cells),
-        })
+        match self.kind {
+            NapiTxKind::Mergeable => with_napi_mergeable_tx!(self, |tx| match now_ms {
+                Some(now_ms) => tx.update_at_ms(&table, row_id, cells, now_ms),
+                None => tx.update(&table, row_id, cells),
+            }),
+            NapiTxKind::Exclusive => {
+                with_napi_exclusive_tx!(self, |tx| tx.update(&table, row_id, cells))
+            }
+        }
     }
 
     #[napi(js_name = "delete")]
@@ -378,11 +527,16 @@ impl Tx {
         updated_at_ms: Option<f64>,
     ) -> napi::Result<()> {
         let row_id = core_row_uuid_from_bytes(&row_id)?;
-        match updated_at_ms.map(|value| value as u64) {
-            Some(now_ms) => {
-                with_napi_mergeable_tx!(self, |tx| tx.delete_at_ms(&table, row_id, now_ms))
+        match self.kind {
+            NapiTxKind::Mergeable => match updated_at_ms.map(|value| value as u64) {
+                Some(now_ms) => {
+                    with_napi_mergeable_tx!(self, |tx| tx.delete_at_ms(&table, row_id, now_ms))
+                }
+                None => with_napi_mergeable_tx!(self, |tx| tx.delete(&table, row_id)),
+            },
+            NapiTxKind::Exclusive => {
+                with_napi_exclusive_tx!(self, |tx| tx.delete(&table, row_id))
             }
-            None => with_napi_mergeable_tx!(self, |tx| tx.delete(&table, row_id)),
         }
     }
 
@@ -397,14 +551,24 @@ impl Tx {
         let row_id = core_row_uuid_from_bytes(&row_id)?;
         let cells = decode_core_cells(&cells)?;
         let now_ms = updated_at_ms.map(|value| value as u64);
-        with_napi_mergeable_tx!(self, |tx| match now_ms {
-            Some(now_ms) => tx.restore_at_ms(&table, row_id, cells, now_ms),
-            None => tx.restore(&table, row_id, cells),
-        })
+        match self.kind {
+            NapiTxKind::Mergeable => with_napi_mergeable_tx!(self, |tx| match now_ms {
+                Some(now_ms) => tx.restore_at_ms(&table, row_id, cells, now_ms),
+                None => tx.restore(&table, row_id, cells),
+            }),
+            NapiTxKind::Exclusive => {
+                with_napi_exclusive_tx!(self, |tx| tx.restore(&table, row_id, cells))
+            }
+        }
     }
 
     #[napi]
     pub fn commit(&mut self) -> napi::Result<Write> {
+        if !self.owns_lifetime {
+            return Err(napi::Error::from_reason(
+                "attached transaction views cannot commit the owner-wide batch",
+            ));
+        }
         let open_tx = self.open_tx()?;
         let write = match &self.db {
             NapiDbInnerStorage::Memory(db) => core_commit_tx_memory(db, open_tx),
@@ -416,6 +580,11 @@ impl Tx {
 
     #[napi]
     pub fn rollback(&mut self) -> napi::Result<()> {
+        if !self.owns_lifetime {
+            return Err(napi::Error::from_reason(
+                "attached transaction views cannot roll back the owner-wide batch",
+            ));
+        }
         let open_tx = self.open_tx()?;
         self.abandon(open_tx)?;
         self.open_tx.take();
@@ -424,12 +593,12 @@ impl Tx {
 }
 
 impl Tx {
-    fn open_tx(&self) -> napi::Result<CoreOpenTxId> {
+    fn open_tx(&self) -> napi::Result<CoreOpenBatchId> {
         self.open_tx
             .ok_or_else(|| napi::Error::from_reason("transaction is already closed"))
     }
 
-    fn abandon(&self, open_tx: CoreOpenTxId) -> napi::Result<()> {
+    fn abandon(&self, open_tx: CoreOpenBatchId) -> napi::Result<()> {
         match &self.db {
             NapiDbInnerStorage::Memory(db) => db.abandon_transaction_handle(open_tx),
             NapiDbInnerStorage::Persistent(db) => db.abandon_transaction_handle(open_tx),
@@ -440,6 +609,9 @@ impl Tx {
 
 impl Drop for Tx {
     fn drop(&mut self) {
+        if !self.owns_lifetime {
+            return;
+        }
         let Some(open_tx) = self.open_tx.take() else {
             return;
         };
@@ -450,6 +622,7 @@ impl Drop for Tx {
 #[napi(js_name = "NapiDb")]
 pub struct NapiDb {
     inner: NapiDbInner,
+    owns_runtime: bool,
 }
 
 #[napi]
@@ -463,6 +636,7 @@ impl NapiDb {
             .map_err(|error| napi::Error::from_reason(error.to_string()))?;
         Ok(Self {
             inner: Rc::new(RefCell::new(Some(NapiDbInnerStorage::Memory(Rc::new(db))))),
+            owns_runtime: true,
         })
     }
 
@@ -483,7 +657,174 @@ impl NapiDb {
             inner: Rc::new(RefCell::new(Some(NapiDbInnerStorage::Persistent(Rc::new(
                 db,
             ))))),
+            owns_runtime: true,
         })
+    }
+
+    /// Register and return a typed view backed by this same runtime owner.
+    #[napi(js_name = "registerSchema")]
+    pub fn register_schema(&self, schema: Uint8Array) -> napi::Result<Self> {
+        let schema: JazzSchema = postcard::from_bytes(&schema)
+            .map_err(|error| napi::Error::from_reason(format!("decode schema: {error}")))?;
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        let view = match db {
+            NapiDbInnerStorage::Memory(db) => NapiDbInnerStorage::Memory(Rc::new(
+                db.register_schema_view(schema)
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            )),
+            NapiDbInnerStorage::Persistent(db) => NapiDbInnerStorage::Persistent(Rc::new(
+                db.register_schema_view(schema)
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            )),
+        };
+        Ok(Self {
+            inner: Rc::new(RefCell::new(Some(view))),
+            owns_runtime: false,
+        })
+    }
+
+    /// Attach a schema view to an owner-wide mergeable batch without opening,
+    /// committing, or abandoning that batch.
+    #[napi(js_name = "attachMergeableTx")]
+    pub fn attach_mergeable_tx(&self, open_batch_id: String) -> napi::Result<Tx> {
+        let open_batch_id = open_batch_id
+            .parse::<CoreOpenBatchId>()
+            .map_err(napi::Error::from_reason)?;
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        Ok(Tx {
+            db: match db {
+                NapiDbInnerStorage::Memory(db) => NapiDbInnerStorage::Memory(Rc::clone(db)),
+                NapiDbInnerStorage::Persistent(db) => NapiDbInnerStorage::Persistent(Rc::clone(db)),
+            },
+            kind: NapiTxKind::Mergeable,
+            open_tx: Some(open_batch_id),
+            owns_lifetime: false,
+        })
+    }
+
+    /// Attach a schema view to an existing owner-wide exclusive batch.
+    #[napi(js_name = "attachExclusiveTx")]
+    pub fn attach_exclusive_tx(&self, open_batch_id: String) -> napi::Result<Tx> {
+        let open_batch_id = open_batch_id
+            .parse::<CoreOpenBatchId>()
+            .map_err(napi::Error::from_reason)?;
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        Ok(Tx {
+            db: match db {
+                NapiDbInnerStorage::Memory(db) => NapiDbInnerStorage::Memory(Rc::clone(db)),
+                NapiDbInnerStorage::Persistent(db) => NapiDbInnerStorage::Persistent(Rc::clone(db)),
+            },
+            kind: NapiTxKind::Exclusive,
+            open_tx: Some(open_batch_id),
+            owns_lifetime: false,
+        })
+    }
+
+    /// Begin one owner-wide batch without creating an owning per-schema Tx.
+    #[napi(js_name = "beginTransaction")]
+    pub fn begin_transaction(
+        &self,
+        open_batch_id: String,
+        kind: String,
+        author: Option<Uint8Array>,
+    ) -> napi::Result<()> {
+        let open_batch_id = open_batch_id
+            .parse::<CoreOpenBatchId>()
+            .map_err(napi::Error::from_reason)?;
+        let author = author
+            .as_deref()
+            .map(core_author_id_from_bytes)
+            .transpose()?;
+        if kind != "mergeable" && kind != "exclusive" {
+            return Err(napi::Error::from_reason(format!(
+                "unknown batch kind {kind}"
+            )));
+        }
+        if kind == "exclusive" && author.is_some() {
+            return Err(napi::Error::from_reason(
+                "exclusive batches do not accept an identity override",
+            ));
+        }
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        macro_rules! begin {
+            ($db:expr) => {
+                if kind == "mergeable" {
+                    match author {
+                        Some(author) => $db.begin_mergeable_for_identity(open_batch_id, author),
+                        None => $db.begin_mergeable(open_batch_id),
+                    }
+                } else {
+                    $db.begin_exclusive(open_batch_id)
+                }
+            };
+        }
+        match db {
+            NapiDbInnerStorage::Memory(db) => begin!(db),
+            NapiDbInnerStorage::Persistent(db) => begin!(db),
+        }
+        .map_err(|error| napi::Error::from_reason(error.to_string()))
+    }
+
+    /// Commit an owner-wide batch by id and optional kind.
+    #[napi(js_name = "commitTransaction")]
+    pub fn commit_transaction(
+        &self,
+        open_batch_id: String,
+        kind: Option<String>,
+    ) -> napi::Result<Write> {
+        let open_batch_id = open_batch_id
+            .parse::<CoreOpenBatchId>()
+            .map_err(napi::Error::from_reason)?;
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        match (db, kind.as_deref().unwrap_or("mergeable")) {
+            (NapiDbInnerStorage::Memory(db), "mergeable") => {
+                core_commit_tx_memory(db, open_batch_id)
+            }
+            (NapiDbInnerStorage::Persistent(db), "mergeable") => {
+                core_commit_tx_persistent(db, open_batch_id)
+            }
+            (NapiDbInnerStorage::Memory(db), "exclusive") => {
+                core_commit_exclusive_tx_memory(db, open_batch_id)
+            }
+            (NapiDbInnerStorage::Persistent(db), "exclusive") => {
+                core_commit_exclusive_tx_persistent(db, open_batch_id)
+            }
+            (_, kind) => Err(napi::Error::from_reason(format!(
+                "unknown batch kind {kind}"
+            ))),
+        }
+    }
+
+    /// Roll back an owner-wide open batch by id.
+    #[napi(js_name = "rollbackTransaction")]
+    pub fn rollback_transaction(&self, open_batch_id: String) -> napi::Result<()> {
+        let open_batch_id = open_batch_id
+            .parse::<CoreOpenBatchId>()
+            .map_err(napi::Error::from_reason)?;
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        match db {
+            NapiDbInnerStorage::Memory(db) => db.abandon_transaction_handle(open_batch_id),
+            NapiDbInnerStorage::Persistent(db) => db.abandon_transaction_handle(open_batch_id),
+        }
+        .map_err(|error| napi::Error::from_reason(error.to_string()))
     }
 
     #[napi(js_name = "setTickScheduler")]
@@ -502,7 +843,8 @@ impl NapiDb {
 
     #[napi(js_name = "prepareQuery")]
     pub fn prepare_query(&self, query: Uint8Array) -> napi::Result<PreparedQuery> {
-        let query = core_binding::decode_query(&query).map_err(binding_to_napi)?;
+        let query: CoreQuery = postcard::from_bytes(&query)
+            .map_err(|error| napi::Error::from_reason(format!("decode query: {error}")))?;
         let db = self.inner.borrow();
         let db = db
             .as_ref()
@@ -1299,7 +1641,78 @@ impl NapiDb {
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
         let queues = WireQueues::default();
-        let transport = Box::new(CoreWireTransportAdapter::current(queues.transport()));
+        // The JS WebSocket carrier has no authenticated endpoint context for
+        // scoped receipt/view frames. Keep this upstream transport aligned
+        // with its authority-unbound Hello until such a context is plumbed.
+        let transport = Box::new(CoreWireTransportAdapter::new(
+            NapiWireTransport {
+                queues: queues.clone(),
+            },
+            jazz::wire::WIRE_PROTOCOL_VERSION,
+            jazz::wire::current_wire_features()
+                & !(jazz::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
+                    | jazz::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS),
+            None,
+        ));
+        let inner = match db {
+            NapiDbInnerStorage::Memory(db) => NapiTransportInner::Memory {
+                db: Rc::clone(db),
+                connection: Some(db.connect_upstream(transport)),
+            },
+            NapiDbInnerStorage::Persistent(db) => NapiTransportInner::Persistent {
+                db: Rc::clone(db),
+                connection: Some(db.connect_upstream(transport)),
+            },
+        };
+        Ok(Transport { inner, queues })
+    }
+
+    #[napi(js_name = "connectUpstreamWithSession")]
+    pub fn connect_upstream_with_session(
+        &self,
+        protocol_version: u16,
+        features: u32,
+        remote_node: Buffer,
+        remote_epoch: BigInt,
+        local_node: Buffer,
+        local_epoch: BigInt,
+    ) -> napi::Result<Transport> {
+        let remote_node: [u8; 16] = remote_node.as_ref().try_into().map_err(|_| {
+            napi::Error::from_reason("server hello authority node must be 16 bytes")
+        })?;
+        let local_node: [u8; 16] = local_node
+            .as_ref()
+            .try_into()
+            .map_err(|_| napi::Error::from_reason("local peer identity must be 16 bytes"))?;
+        let remote_epoch =
+            authority_epoch_from_bigint(remote_epoch, "server hello authority epoch")?;
+        let local_epoch = authority_epoch_from_bigint(local_epoch, "local connection epoch")?;
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        let queues = WireQueues::default();
+        let session_context = CoreConnectionSessionContext {
+            local: CoreWireAuthorityEndpoint {
+                node: CoreNodeUuid::from_bytes(local_node),
+                epoch: local_epoch,
+            },
+            remote: CoreWireAuthorityEndpoint {
+                node: CoreNodeUuid::from_bytes(remote_node),
+                epoch: remote_epoch,
+            },
+            link_identity: CoreAuthorId::from_bytes(local_node),
+            negotiated_features: features as u64,
+        };
+        let transport = Box::new(CoreWireTransportAdapter::new_with_session_context(
+            NapiWireTransport {
+                queues: queues.clone(),
+            },
+            protocol_version,
+            features as u64,
+            None,
+            Some(session_context),
+        ));
         let inner = match db {
             NapiDbInnerStorage::Memory(db) => NapiTransportInner::Memory {
                 db: Rc::clone(db),
@@ -1314,7 +1727,10 @@ impl NapiDb {
     }
 
     #[napi(js_name = "mergeableTx")]
-    pub fn mergeable_tx(&self) -> napi::Result<Tx> {
+    pub fn mergeable_tx(&self, open_batch_id: String) -> napi::Result<Tx> {
+        let open_batch_id = open_batch_id
+            .parse::<CoreOpenBatchId>()
+            .map_err(napi::Error::from_reason)?;
         let db = self.inner.borrow();
         let db = db
             .as_ref()
@@ -1322,23 +1738,36 @@ impl NapiDb {
         match db {
             NapiDbInnerStorage::Memory(db) => Ok(Tx {
                 db: NapiDbInnerStorage::Memory(Rc::clone(db)),
-                open_tx: Some(
-                    db.begin_mergeable()
-                        .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-                ),
+                kind: NapiTxKind::Mergeable,
+                open_tx: Some({
+                    db.begin_mergeable(open_batch_id)
+                        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+                    open_batch_id
+                }),
+                owns_lifetime: true,
             }),
             NapiDbInnerStorage::Persistent(db) => Ok(Tx {
                 db: NapiDbInnerStorage::Persistent(Rc::clone(db)),
-                open_tx: Some(
-                    db.begin_mergeable()
-                        .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-                ),
+                kind: NapiTxKind::Mergeable,
+                open_tx: Some({
+                    db.begin_mergeable(open_batch_id)
+                        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+                    open_batch_id
+                }),
+                owns_lifetime: true,
             }),
         }
     }
 
     #[napi(js_name = "mergeableTxForIdentity")]
-    pub fn mergeable_tx_for_identity(&self, author: Uint8Array) -> napi::Result<Tx> {
+    pub fn mergeable_tx_for_identity(
+        &self,
+        open_batch_id: String,
+        author: Uint8Array,
+    ) -> napi::Result<Tx> {
+        let open_batch_id = open_batch_id
+            .parse::<CoreOpenBatchId>()
+            .map_err(napi::Error::from_reason)?;
         let author = core_author_id_from_bytes(&author)?;
         let db = self.inner.borrow();
         let db = db
@@ -1347,17 +1776,23 @@ impl NapiDb {
         match db {
             NapiDbInnerStorage::Memory(db) => Ok(Tx {
                 db: NapiDbInnerStorage::Memory(Rc::clone(db)),
-                open_tx: Some(
-                    db.begin_mergeable_for_identity(author)
-                        .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-                ),
+                kind: NapiTxKind::Mergeable,
+                open_tx: Some({
+                    db.begin_mergeable_for_identity(open_batch_id, author)
+                        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+                    open_batch_id
+                }),
+                owns_lifetime: true,
             }),
             NapiDbInnerStorage::Persistent(db) => Ok(Tx {
                 db: NapiDbInnerStorage::Persistent(Rc::clone(db)),
-                open_tx: Some(
-                    db.begin_mergeable_for_identity(author)
-                        .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-                ),
+                kind: NapiTxKind::Mergeable,
+                open_tx: Some({
+                    db.begin_mergeable_for_identity(open_batch_id, author)
+                        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+                    open_batch_id
+                }),
+                owns_lifetime: true,
             }),
         }
     }
@@ -1365,6 +1800,9 @@ impl NapiDb {
     #[napi]
     pub fn close(&self) -> napi::Result<()> {
         let inner = self.inner.borrow_mut().take();
+        if !self.owns_runtime {
+            return Ok(());
+        }
         if let Some(inner) = inner {
             match inner {
                 NapiDbInnerStorage::Memory(db) => db
@@ -1379,38 +1817,98 @@ impl NapiDb {
     }
 }
 
-fn binding_to_napi(error: core_binding::BindingError) -> napi::Error {
-    napi::Error::from_reason(error.to_string())
+fn authority_epoch_from_bigint(value: BigInt, label: &str) -> napi::Result<u64> {
+    let (negative, epoch, lossless) = value.get_u64();
+    if negative || !lossless {
+        return Err(napi::Error::from_reason(format!(
+            "{label} must be an unsigned 64-bit integer"
+        )));
+    }
+    Ok(epoch)
 }
 
 fn decode_core_open_args(
     schema: &[u8],
     config: &[u8],
-) -> napi::Result<(JazzSchema, core_binding::OpenDbConfig)> {
-    core_binding::decode_open_args(schema, config).map_err(binding_to_napi)
+) -> napi::Result<(JazzSchema, CoreOpenDbConfig)> {
+    let schema: JazzSchema = postcard::from_bytes(schema)
+        .map_err(|error| napi::Error::from_reason(format!("decode schema: {error}")))?;
+    let config: CoreOpenDbConfig = postcard::from_bytes(config)
+        .map_err(|error| napi::Error::from_reason(format!("decode open config: {error}")))?;
+    Ok((schema, config))
 }
 
 fn open_core_db<S>(
     schema: JazzSchema,
     storage: S,
-    config: core_binding::OpenDbConfig,
+    config: CoreOpenDbConfig,
 ) -> std::result::Result<CoreDb<S>, jazz::db::Error>
 where
     S: CoreOrderedKvStorage + CoreReopenableStorage + 'static,
 {
-    core_binding::open_db(schema, storage, config)
+    let mut db_config = CoreDbConfig::new(schema, storage, config.identity.into());
+    if let Some(seed) = config.row_id_seed {
+        db_config = db_config.with_id_source(CoreSeededRowIdSource::new(seed));
+    }
+    let initial_sync_flush_every = config.initial_sync_flush_every;
+    if config.history_complete {
+        let db = core_block_on(CoreDb::open_history_complete(db_config))?;
+        configure_initial_sync_flush_cadence(&db, initial_sync_flush_every)?;
+        Ok(db)
+    } else {
+        let db = core_block_on(CoreDb::open(db_config))?;
+        configure_initial_sync_flush_cadence(&db, initial_sync_flush_every)?;
+        Ok(db)
+    }
+}
+
+fn configure_initial_sync_flush_cadence<S>(
+    db: &CoreDb<S>,
+    every: Option<u32>,
+) -> std::result::Result<(), jazz::db::Error>
+where
+    S: CoreOrderedKvStorage + CoreReopenableStorage + 'static,
+{
+    let Some(every) = every else {
+        return Ok(());
+    };
+    let Some(every) = std::num::NonZeroUsize::new(every as usize) else {
+        return Ok(());
+    };
+    db.set_initial_sync_flush_cadence(CoreInitialSyncFlushCadence::every(every))
 }
 
 fn decode_core_cells(bytes: &[u8]) -> napi::Result<CoreRowCells> {
-    core_binding::decode_cells(bytes).map_err(binding_to_napi)
+    let (descriptor, raw): (RecordDescriptor, Vec<u8>) = postcard::from_bytes(bytes)
+        .map_err(|error| napi::Error::from_reason(format!("decode cells: {error}")))?;
+    let record = CoreBorrowedRecord::new(&raw, &descriptor);
+    let values = record
+        .to_values()
+        .map_err(|error| napi::Error::from_reason(format!("decode cell record: {error}")))?;
+    let mut cells = CoreRowCells::new();
+    for (field, value) in descriptor.fields().iter().zip(values) {
+        let Some(name) = &field.name else {
+            return Err(napi::Error::from_reason(
+                "encoded cells must use named fields",
+            ));
+        };
+        cells.insert(name.clone(), value);
+    }
+    Ok(cells)
 }
 
 fn core_row_uuid_from_bytes(bytes: &[u8]) -> napi::Result<CoreRowUuid> {
-    core_binding::row_uuid_from_bytes(bytes).map_err(binding_to_napi)
+    let bytes: [u8; 16] = bytes
+        .try_into()
+        .map_err(|_| napi::Error::from_reason("row id must be 16 bytes"))?;
+    Ok(CoreRowUuid::from_bytes(bytes))
 }
 
 fn core_author_id_from_bytes(bytes: &[u8]) -> napi::Result<CoreAuthorId> {
-    core_binding::author_id_from_bytes(bytes).map_err(binding_to_napi)
+    let bytes: [u8; 16] = bytes
+        .try_into()
+        .map_err(|_| napi::Error::from_reason("author id must be 16 bytes"))?;
+    Ok(CoreAuthorId::from_bytes(bytes))
 }
 
 fn core_write_memory(
@@ -1418,9 +1916,14 @@ fn core_write_memory(
     write: WriteHandle<CoreMemoryStorage>,
 ) -> napi::Result<Write> {
     let tx_id = write.mergeable_tx_id();
+    let result = WriteResult {
+        row_id: write.row_uuid(),
+        tx_id,
+    };
     Ok(Write {
-        payload: core_binding::encode_write_result(write.row_uuid(), tx_id)
-            .map_err(binding_to_napi)?,
+        payload: postcard::to_allocvec(&result)
+            .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+        batch_id: BatchId::from_committed_tx(tx_id),
         inner: Some(NapiWrite::Memory { db, tx_id }),
     })
 }
@@ -1430,9 +1933,14 @@ fn core_write_persistent(
     write: WriteHandle<CoreRocksDbStorage>,
 ) -> napi::Result<Write> {
     let tx_id = write.mergeable_tx_id();
+    let result = WriteResult {
+        row_id: write.row_uuid(),
+        tx_id,
+    };
     Ok(Write {
-        payload: core_binding::encode_write_result(write.row_uuid(), tx_id)
-            .map_err(binding_to_napi)?,
+        payload: postcard::to_allocvec(&result)
+            .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+        batch_id: BatchId::from_committed_tx(tx_id),
         inner: Some(NapiWrite::Persistent { db, tx_id }),
     })
 }
@@ -1440,14 +1948,69 @@ fn core_write_persistent(
 fn core_claims_from_json(
     author: CoreAuthorId,
     claims: Option<JsonValue>,
-) -> napi::Result<std::collections::BTreeMap<String, jazz::groove::records::Value>> {
-    core_binding::claims_from_json(author, claims).map_err(binding_to_napi)
+) -> napi::Result<BTreeMap<String, CoreValue>> {
+    let mut claims = match claims {
+        None | Some(JsonValue::Null) => BTreeMap::new(),
+        Some(JsonValue::Object(map)) => map
+            .into_iter()
+            .map(|(key, value)| Ok((key, core_claim_value_from_json(value)?)))
+            .collect::<napi::Result<BTreeMap<_, _>>>()?,
+        Some(_) => {
+            return Err(napi::Error::from_reason(
+                "identity claims must be an object",
+            ));
+        }
+    };
+    let subject = author.0.to_string();
+    claims
+        .entry("subject".to_owned())
+        .or_insert_with(|| CoreValue::String(subject.clone()));
+    claims
+        .entry("sub".to_owned())
+        .or_insert_with(|| CoreValue::String(subject.clone()));
+    claims
+        .entry("user_id".to_owned())
+        .or_insert_with(|| CoreValue::String(subject));
+    Ok(claims)
+}
+
+fn core_claim_value_from_json(value: JsonValue) -> napi::Result<CoreValue> {
+    Ok(match value {
+        JsonValue::Null => CoreValue::Nullable(None),
+        JsonValue::Bool(value) => CoreValue::Bool(value),
+        JsonValue::Number(value) => {
+            if let Some(value) = value.as_u64() {
+                CoreValue::U64(value)
+            } else if let Some(value) = value.as_f64() {
+                CoreValue::F64(value)
+            } else {
+                return Err(napi::Error::from_reason("unsupported numeric claim value"));
+            }
+        }
+        JsonValue::String(value) => CoreValue::String(value),
+        JsonValue::Array(values) => CoreValue::Array(
+            values
+                .into_iter()
+                .map(core_claim_value_from_json)
+                .collect::<napi::Result<Vec<_>>>()?,
+        ),
+        JsonValue::Object(_) => {
+            return Err(napi::Error::from_reason(
+                "nested object claims are not supported",
+            ));
+        }
+    })
 }
 
 fn core_tx_write(tx_id: TxId, inner: Option<NapiWrite>) -> napi::Result<Write> {
+    let result = WriteResult {
+        row_id: CoreRowUuid::from_bytes([0; 16]),
+        tx_id,
+    };
     Ok(Write {
-        payload: core_binding::encode_write_result(CoreRowUuid::from_bytes([0; 16]), tx_id)
-            .map_err(binding_to_napi)?,
+        payload: postcard::to_allocvec(&result)
+            .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+        batch_id: BatchId::from_committed_tx(tx_id),
         inner,
     })
 }
@@ -1472,11 +2035,35 @@ fn core_wait_for_tx<S>(db: &CoreDb<S>, tx_id: TxId, tier: CoreDurabilityTier) ->
 where
     S: CoreOrderedKvStorage + CoreReopenableStorage + 'static,
 {
-    core_binding::wait_for_tx(db, tx_id, tier).map_err(binding_to_napi)
+    if tier <= CoreDurabilityTier::Local {
+        return Ok(());
+    }
+    let state = db
+        .write_state(tx_id)
+        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+    match state.fate {
+        CoreFate::Rejected(reason) => {
+            return Err(napi::Error::from_reason(format!(
+                "transaction was rejected: {reason:?}"
+            )));
+        }
+        CoreFate::Pending if tier >= CoreDurabilityTier::Edge => {
+            return Err(napi::Error::from_reason(format!(
+                "transaction has not been accepted at requested tier {tier:?}"
+            )));
+        }
+        CoreFate::Pending | CoreFate::Accepted => {}
+    }
+    if state.durability >= tier {
+        return Ok(());
+    }
+    Err(napi::Error::from_reason(format!(
+        "transaction has not reached requested tier {tier:?}"
+    )))
 }
 
 fn core_write_state_to_json(state: &jazz::db::WriteState) -> serde_json::Value {
-    core_binding::write_state_to_json(state)
+    serde_json::to_value(state).unwrap_or_else(|_| serde_json::json!({}))
 }
 
 fn resolve_raw_promise(env: sys::napi_env, deferred: sys::napi_deferred) {
@@ -1487,7 +2074,7 @@ fn resolve_raw_promise(env: sys::napi_env, deferred: sys::napi_deferred) {
     }
 }
 
-fn core_commit_tx<S>(db: &CoreDb<S>, open_tx: CoreOpenTxId) -> napi::Result<TxId>
+fn core_commit_tx<S>(db: &CoreDb<S>, open_tx: CoreOpenBatchId) -> napi::Result<TxId>
 where
     S: CoreOrderedKvStorage + CoreReopenableStorage + 'static,
 {
@@ -1497,7 +2084,7 @@ where
 
 fn core_commit_tx_memory(
     db: &Rc<CoreDb<CoreMemoryStorage>>,
-    open_tx: CoreOpenTxId,
+    open_tx: CoreOpenBatchId,
 ) -> napi::Result<Write> {
     let tx_id = core_commit_tx(db, open_tx)?;
     core_tx_write(
@@ -1511,7 +2098,7 @@ fn core_commit_tx_memory(
 
 fn core_commit_tx_persistent(
     db: &Rc<CoreDb<CoreRocksDbStorage>>,
-    open_tx: CoreOpenTxId,
+    open_tx: CoreOpenBatchId,
 ) -> napi::Result<Write> {
     let tx_id = core_commit_tx(db, open_tx)?;
     core_tx_write(
@@ -1523,32 +2110,274 @@ fn core_commit_tx_persistent(
     )
 }
 
+fn core_commit_exclusive_tx_memory(
+    db: &Rc<CoreDb<CoreMemoryStorage>>,
+    open_tx: CoreOpenBatchId,
+) -> napi::Result<Write> {
+    let tx_id = db
+        .commit_exclusive_handle(open_tx)
+        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+    core_tx_write(
+        tx_id,
+        Some(NapiWrite::Memory {
+            db: Rc::clone(db),
+            tx_id,
+        }),
+    )
+}
+
+fn core_commit_exclusive_tx_persistent(
+    db: &Rc<CoreDb<CoreRocksDbStorage>>,
+    open_tx: CoreOpenBatchId,
+) -> napi::Result<Write> {
+    let tx_id = db
+        .commit_exclusive_handle(open_tx)
+        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+    core_tx_write(
+        tx_id,
+        Some(NapiWrite::Persistent {
+            db: Rc::clone(db),
+            tx_id,
+        }),
+    )
+}
+
 fn core_read_opts_from_json(value: Option<JsonValue>) -> napi::Result<CoreReadOpts> {
-    core_binding::read_opts_from_json(value).map_err(binding_to_napi)
+    let mut opts = CoreReadOpts::default();
+    let Some(value) = value else {
+        return Ok(opts);
+    };
+    if value.is_null() {
+        return Ok(opts);
+    }
+    if let Some(tier) = optional_json_string_prop(&value, "tier")? {
+        opts.tier = core_durability_tier_from_str(&tier)?;
+    }
+    if let Some(local_updates) = optional_json_string_prop(&value, "local_updates")? {
+        opts.local_updates = match local_updates.as_str() {
+            "Immediate" | "immediate" => CoreLocalUpdates::Immediate,
+            "Deferred" | "deferred" => CoreLocalUpdates::Deferred,
+            other => {
+                return Err(napi::Error::from_reason(format!(
+                    "unknown local_updates {other}"
+                )));
+            }
+        };
+    }
+    if optional_json_bool_prop(&value, "propagate")? == Some(false) {
+        opts.propagation = CorePropagation::LocalOnly;
+    }
+    if let Some(propagation) = optional_json_string_prop(&value, "propagation")? {
+        opts.propagation = match propagation.as_str() {
+            "Full" | "full" => CorePropagation::Full,
+            "LocalOnly" | "local_only" | "localOnly" | "local-only" => CorePropagation::LocalOnly,
+            other => {
+                return Err(napi::Error::from_reason(format!(
+                    "unknown propagation {other}"
+                )));
+            }
+        };
+    }
+    if let Some(include_deleted) = optional_json_bool_prop(&value, "include_deleted")? {
+        opts.include_deleted = include_deleted;
+    }
+    if value
+        .get("read_view")
+        .or_else(|| value.get("readView"))
+        .filter(|read_view| !read_view.is_null())
+        .is_some()
+    {
+        return Err(napi::Error::from_reason(
+            "non-default read_view is not supported yet",
+        ));
+    }
+    Ok(opts)
 }
 
 fn core_durability_tier_from_str(tier: &str) -> napi::Result<CoreDurabilityTier> {
-    core_binding::durability_tier_from_str(tier).map_err(binding_to_napi)
+    match tier {
+        "None" | "none" => Ok(CoreDurabilityTier::None),
+        "Local" | "local" => Ok(CoreDurabilityTier::Local),
+        "Edge" | "edge" => Ok(CoreDurabilityTier::Edge),
+        "Global" | "global" => Ok(CoreDurabilityTier::Global),
+        other => Err(napi::Error::from_reason(format!(
+            "unknown durability tier {other}"
+        ))),
+    }
+}
+
+fn optional_json_string_prop(value: &JsonValue, name: &str) -> napi::Result<Option<String>> {
+    match value.get(name) {
+        Some(JsonValue::String(value)) => Ok(Some(value.clone())),
+        Some(JsonValue::Null) | None => Ok(None),
+        Some(_) => Err(napi::Error::from_reason(format!("{name} must be a string"))),
+    }
+}
+
+fn optional_json_bool_prop(value: &JsonValue, name: &str) -> napi::Result<Option<bool>> {
+    match value.get(name) {
+        Some(JsonValue::Bool(value)) => Ok(Some(*value)),
+        Some(JsonValue::Null) | None => Ok(None),
+        Some(_) => Err(napi::Error::from_reason(format!(
+            "{name} must be a boolean"
+        ))),
+    }
 }
 
 fn encode_core_rows(
     rows: &[jazz::node::CurrentRow],
-) -> std::result::Result<Vec<u8>, core_binding::BindingError> {
-    core_binding::encode_rows(rows)
+) -> std::result::Result<Vec<u8>, postcard::Error> {
+    postcard::to_allocvec(&core_row_batches(rows))
 }
 
 fn encode_core_relation_snapshot(
     snapshot: &jazz::node::RelationSnapshot,
-) -> std::result::Result<Vec<u8>, core_binding::BindingError> {
-    core_binding::encode_relation_snapshot(snapshot)
+) -> std::result::Result<Vec<u8>, postcard::Error> {
+    postcard::to_allocvec(&CoreRelationSnapshot {
+        root_count: snapshot.root_count as u64,
+        rows: core_row_batches(&snapshot.rows),
+    })
+}
+
+fn encode_core_subscription_delta<'a>(
+    added: &'a [jazz::db::SubscriptionOutputRow],
+    updated: &'a [jazz::db::SubscriptionOutputRow],
+    removed: &[jazz::db::RemovedRow],
+) -> std::result::Result<Vec<u8>, postcard::Error> {
+    let added_rows = added.iter().map(|row| row.row.clone()).collect::<Vec<_>>();
+    let updated_rows = updated
+        .iter()
+        .map(|row| row.row.clone())
+        .collect::<Vec<_>>();
+    postcard::to_allocvec(&CoreSubscriptionDelta {
+        added: core_row_batches(&added_rows),
+        updated: core_row_batches(&updated_rows),
+        removed: removed
+            .iter()
+            .map(|row| CoreRemovedRow {
+                table: row.table.clone(),
+                row_id: row.row_uuid,
+            })
+            .collect(),
+        added_occurrence_keys: added
+            .iter()
+            .map(|row| jazz::tools::ResultKey::from_occurrence(row.occurrence_id.clone()))
+            .collect(),
+        updated_occurrence_keys: updated
+            .iter()
+            .map(|row| jazz::tools::ResultKey::from_occurrence(row.occurrence_id.clone()))
+            .collect(),
+        removed_occurrence_keys: removed
+            .iter()
+            .map(|row| jazz::tools::ResultKey::from_occurrence(row.occurrence_id.clone()))
+            .collect(),
+    })
+}
+
+fn core_row_batches(rows: &[jazz::node::CurrentRow]) -> Vec<CoreRowBatch<'_>> {
+    let mut batches: Vec<CoreRowBatch<'_>> = Vec::new();
+    for row in rows {
+        let (descriptor, raw) = row.encoded_record();
+        match batches.last_mut() {
+            Some(batch) if batch.table == row.table() && batch.descriptor == *descriptor => {
+                batch.rows.push(core_row(row, raw));
+            }
+            _ => batches.push(CoreRowBatch {
+                table: row.table(),
+                descriptor: *descriptor,
+                rows: vec![core_row(row, raw)],
+            }),
+        }
+    }
+    batches
+}
+
+fn core_row<'a>(row: &jazz::node::CurrentRow, raw: &'a [u8]) -> CoreRow<'a> {
+    CoreRow {
+        row_id: row.row_uuid(),
+        deleted: row.is_deleted(),
+        raw,
+    }
 }
 
 fn core_subscription_event_to_json(event: &SubscriptionEvent) -> napi::Result<serde_json::Value> {
-    core_binding::subscription_event_to_json(event).map_err(binding_to_napi)
+    match event {
+        SubscriptionEvent::Delta {
+            reset,
+            added,
+            updated,
+            removed,
+            terminal_operations,
+            settled,
+            tier,
+            ..
+        } => {
+            let added = terminal_operations.is_empty().then_some(added.as_slice());
+            let updated = terminal_operations.is_empty().then_some(updated.as_slice());
+            let empty_removed = Vec::new();
+            let delta = encode_core_subscription_delta(
+                added.unwrap_or_default(),
+                updated.unwrap_or_default(),
+                if terminal_operations.is_empty() {
+                    removed
+                } else {
+                    &empty_removed
+                },
+            )
+            .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+            let payload = serde_json::json!({
+                "type": "delta",
+                "reset": reset,
+                "delta": delta,
+                "terminalOperations": terminal_operations,
+                "settled": settled,
+                "tier": format!("{tier:?}"),
+            });
+            Ok(payload)
+        }
+        SubscriptionEvent::Rejected { reason } => {
+            let reason = match reason {
+                jazz::protocol::SubscribeRejectReason::UnsupportedShapeCapability { detail } => {
+                    serde_json::json!({
+                        "type": "UnsupportedShapeCapability",
+                        "detail": detail,
+                    })
+                }
+                // Transient: the shape is awaiting catalogue admission and may
+                // yet be served. Surfaced distinctly so a caller cannot mistake
+                // it for an unsupported capability, which is permanent — that
+                // conflation is the bug this variant was introduced to fix.
+                jazz::protocol::SubscribeRejectReason::ShapeRegistrationPendingCatalogueAdmission => {
+                    serde_json::json!({
+                        "type": "ShapeRegistrationPendingCatalogueAdmission",
+                    })
+                }
+                jazz::protocol::SubscribeRejectReason::ServerFailure { code } => {
+                    serde_json::json!({
+                        "type": "ServerFailure",
+                        "code": format!("{code:?}"),
+                    })
+                }
+            };
+            Ok(serde_json::json!({
+                "type": "rejected",
+                "reason": reason,
+            }))
+        }
+        SubscriptionEvent::Closed => Ok(serde_json::json!({ "type": "closed" })),
+    }
 }
 
-fn core_relation_query_from_json(query_json: &str) -> napi::Result<jazz::query::RelationQuery> {
-    core_binding::relation_query_from_json(query_json).map_err(binding_to_napi)
+fn core_relation_query_from_json(query_json: &str) -> napi::Result<CoreRelationQuery> {
+    let value: serde_json::Value = serde_json::from_str(query_json)
+        .map_err(|err| napi::Error::from_reason(format!("decode query json: {err}")))?;
+    let relation_ir = value
+        .get("relation_ir")
+        .ok_or_else(|| napi::Error::from_reason("relation query json is missing relation_ir"))?
+        .clone();
+    let rel: CoreRelationExpr = serde_json::from_value(relation_ir)
+        .map_err(|err| napi::Error::from_reason(format!("decode relation_ir: {err}")))?;
+    Ok(CoreRelationQuery { rel })
 }
 
 // ============================================================================
@@ -1918,10 +2747,120 @@ pub fn verify_local_first_identity_proof_napi(
 
 #[cfg(test)]
 mod tests {
-    use crate::core_read_opts_from_json;
-    use jazz::db::Propagation as CorePropagation;
+    use std::collections::BTreeMap;
+    use std::rc::Rc;
+
+    use crate::{
+        NapiDbInnerStorage, NapiTxKind, Tx, authority_epoch_from_bigint, core_block_on,
+        core_read_opts_from_json, core_subscription_event_to_json, encode_core_subscription_delta,
+    };
+    use jazz::db::{
+        Db as CoreDb, DbConfig as CoreDbConfig, DbIdentity as CoreDbIdentity, ExclusiveTxOps,
+        MergeableTxOps, Propagation as CorePropagation, SubscriptionEvent,
+    };
+    use jazz::groove::records::Value as CoreValue;
+    use jazz::groove::schema::ColumnType as GrooveColumnType;
+    use jazz::groove::storage::MemoryStorage as CoreMemoryStorage;
+    use jazz::ids::{AuthorId as CoreAuthorId, NodeUuid as CoreNodeUuid, RowUuid as CoreRowUuid};
+    use jazz::schema::{
+        ColumnSchema as CoreColumnSchema, JazzSchema, Policy, TableSchema as CoreTableSchema,
+    };
+    use jazz::tools::OpenBatchId as CoreOpenBatchId;
     use jazz::tools::{ColumnType, Schema, SchemaBuilder, TableName, TableSchema, Value};
+    use jazz::tx::DurabilityTier;
+    use napi::bindgen_prelude::BigInt;
     use serde_json::json;
+
+    #[test]
+    fn authority_epoch_bigint_rejects_lossy_values_and_preserves_u64() {
+        let above_u32 = BigInt {
+            sign_bit: false,
+            words: vec![u32::MAX as u64 + 1],
+        };
+        let near_safe_integer = BigInt {
+            sign_bit: false,
+            words: vec![9_007_199_254_740_993],
+        };
+        let maximum_u64 = BigInt {
+            sign_bit: false,
+            words: vec![u64::MAX],
+        };
+        assert_eq!(
+            authority_epoch_from_bigint(above_u32, "authority").unwrap(),
+            u32::MAX as u64 + 1
+        );
+        assert_eq!(
+            authority_epoch_from_bigint(near_safe_integer, "authority").unwrap(),
+            9_007_199_254_740_993
+        );
+        assert_eq!(
+            authority_epoch_from_bigint(maximum_u64, "authority").unwrap(),
+            u64::MAX
+        );
+        assert!(
+            authority_epoch_from_bigint(
+                BigInt {
+                    sign_bit: true,
+                    words: vec![1],
+                },
+                "authority",
+            )
+            .is_err()
+        );
+        assert!(
+            authority_epoch_from_bigint(
+                BigInt {
+                    sign_bit: false,
+                    words: vec![0, 1],
+                },
+                "authority",
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn native_delta_preserves_typed_union_occurrence_keys() {
+        #[derive(serde::Deserialize)]
+        struct DecodedRemoved {
+            #[allow(dead_code)]
+            table: String,
+            #[allow(dead_code)]
+            row_id: CoreRowUuid,
+        }
+        #[derive(serde::Deserialize)]
+        struct DecodedDelta {
+            added: Vec<serde::de::IgnoredAny>,
+            updated: Vec<serde::de::IgnoredAny>,
+            removed: Vec<DecodedRemoved>,
+            added_occurrence_keys: Vec<jazz::tools::ResultKey>,
+            updated_occurrence_keys: Vec<jazz::tools::ResultKey>,
+            removed_occurrence_keys: Vec<jazz::tools::ResultKey>,
+        }
+        let root = jazz::tools::ObjectId::from_uuid(uuid::Uuid::from_bytes([1; 16]));
+        let joined = jazz::tools::ObjectId::from_uuid(uuid::Uuid::from_bytes([2; 16]));
+        let occurrence = |label: &str| {
+            jazz::tools::ResultKey::from_union_occurrence(root, [joined], [(0, label.to_owned())])
+                .unwrap()
+        };
+        let removed = ["direct", "inherited"].map(|label| {
+            jazz::db::RemovedRow::from_result_key(
+                "todos".to_owned(),
+                CoreRowUuid::from_bytes([1; 16]),
+                occurrence(label),
+            )
+        });
+        let bytes = encode_core_subscription_delta(&[], &[], &removed).unwrap();
+        let decoded: DecodedDelta = postcard::from_bytes(&bytes).unwrap();
+        assert!(decoded.added.is_empty() && decoded.updated.is_empty());
+        assert_eq!(decoded.removed.len(), 2);
+        assert!(decoded.added_occurrence_keys.is_empty());
+        assert!(decoded.updated_occurrence_keys.is_empty());
+        assert_ne!(
+            decoded.removed_occurrence_keys[0],
+            decoded.removed_occurrence_keys[1]
+        );
+    }
 
     #[test]
     fn schema_json_roundtrip_preserves_enum_fk_and_defaults() {
@@ -1979,5 +2918,83 @@ mod tests {
             .expect("parse read opts");
 
         assert_eq!(opts.propagation, CorePropagation::LocalOnly);
+    }
+
+    #[test]
+    fn subscription_payload_exposes_only_terminal_rows() {
+        let payload = core_subscription_event_to_json(&SubscriptionEvent::Delta {
+            reset: false,
+            added: Vec::new(),
+            updated: Vec::new(),
+            removed: Vec::new(),
+            terminal_operations: Vec::new(),
+            settled: true,
+            tier: DurabilityTier::Local,
+        })
+        .expect("encode terminal delta");
+
+        assert!(payload.get("relation_delta").is_none());
+        assert!(payload.get("output_mode").is_none());
+    }
+    /// A short-lived NAPI schema attachment must not own or abandon the
+    /// owner-wide OpenBatch lifetime when its JS wrapper is collected.
+    #[test]
+    fn attached_tx_drop_preserves_owner_batch() {
+        let schema = JazzSchema::new([CoreTableSchema::new(
+            "items",
+            [CoreColumnSchema::new("label", GrooveColumnType::String)],
+        )
+        .with_read_policy(Policy::public())
+        .with_write_policy(Policy::public())]);
+        let refs = schema.column_families();
+        let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
+        let owner = Rc::new(
+            core_block_on(CoreDb::open(CoreDbConfig::new(
+                schema.clone(),
+                CoreMemoryStorage::new(&refs),
+                CoreDbIdentity {
+                    node: CoreNodeUuid::from_bytes([0x44; 16]),
+                    author: CoreAuthorId::from_bytes([0xa4; 16]),
+                },
+            )))
+            .unwrap(),
+        );
+        let view = Rc::new(owner.register_schema_view(schema).unwrap());
+        let batch = CoreOpenBatchId::new();
+        owner.begin_mergeable(batch).unwrap();
+        drop(Tx {
+            db: NapiDbInnerStorage::Memory(Rc::clone(&view)),
+            kind: NapiTxKind::Mergeable,
+            open_tx: Some(batch),
+            owns_lifetime: false,
+        });
+        view.mergeable_tx_ref(batch)
+            .insert_with_id(
+                "items",
+                CoreRowUuid::from_bytes([1; 16]),
+                BTreeMap::from([("label".to_owned(), CoreValue::String("kept".to_owned()))]),
+            )
+            .unwrap();
+        owner.commit_mergeable_handle(batch).unwrap();
+
+        let exclusive = CoreOpenBatchId::new();
+        owner.begin_exclusive(exclusive).unwrap();
+        drop(Tx {
+            db: NapiDbInnerStorage::Memory(Rc::clone(&view)),
+            kind: NapiTxKind::Exclusive,
+            open_tx: Some(exclusive),
+            owns_lifetime: false,
+        });
+        view.exclusive_tx_ref(exclusive)
+            .insert_with_id(
+                "items",
+                CoreRowUuid::from_bytes([2; 16]),
+                BTreeMap::from([(
+                    "label".to_owned(),
+                    CoreValue::String("exclusive-kept".to_owned()),
+                )]),
+            )
+            .unwrap();
+        owner.commit_exclusive_handle(exclusive).unwrap();
     }
 }

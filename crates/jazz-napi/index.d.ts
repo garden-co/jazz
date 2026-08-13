@@ -14,6 +14,21 @@ export declare class JazzServer {
 export declare class NapiDb {
   static openMemory(schema: Uint8Array, config: Uint8Array): NapiDb
   static openPersistent(dataPath: string, schema: Uint8Array, config: Uint8Array): NapiDb
+  /** Register and return a typed view backed by this same runtime owner. */
+  registerSchema(schema: Uint8Array): NapiDb
+  /**
+   * Attach a schema view to an owner-wide mergeable batch without opening,
+   * committing, or abandoning that batch.
+   */
+  attachMergeableTx(openBatchId: string): Tx
+  /** Attach a schema view to an existing owner-wide exclusive batch. */
+  attachExclusiveTx(openBatchId: string): Tx
+  /** Begin one owner-wide batch without creating an owning per-schema Tx. */
+  beginTransaction(openBatchId: string, kind: string, author?: Uint8Array | undefined | null): void
+  /** Commit an owner-wide batch by id and optional kind. */
+  commitTransaction(openBatchId: string, kind?: string | undefined | null): Write
+  /** Roll back an owner-wide open batch by id. */
+  rollbackTransaction(openBatchId: string): void
   setTickScheduler(callback: ((err: Error | null, arg: string) => void)): void
   prepareQuery(query: Uint8Array): PreparedQuery
   all(query: PreparedQuery, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array
@@ -44,8 +59,9 @@ export declare class NapiDb {
   restoreEncodedForIdentity(table: string, rowId: Uint8Array, cells: Uint8Array, author: Uint8Array, updatedAtMs?: number | undefined | null): Write
   tick(): void
   connectUpstream(): Transport
-  mergeableTx(): Tx
-  mergeableTxForIdentity(author: Uint8Array): Tx
+  connectUpstreamWithSession(protocolVersion: number, features: number, remoteNode: Buffer, remoteEpoch: bigint, localNode: Buffer, localEpoch: bigint): Transport
+  mergeableTx(openBatchId: string): Tx
+  mergeableTxForIdentity(openBatchId: string, author: Uint8Array): Tx
   close(): void
 }
 
@@ -89,6 +105,7 @@ export declare class Tx {
 }
 
 export declare class Write {
+  get batchId(): string
   get payload(): Uint8Array
   wait(tier: string): void
   writeState(): any

@@ -11,7 +11,7 @@ authorization, read narrowing, and policy composition. It builds on queries
 
 Invariant digest:
 
-- `INV-API-28`: Db::caninsert, canread, canupdate, and candelete MUST evaluate permissions under the current DbIdentity.author without committing writes, changing local rows, or using...
+- `INV-API-28`: Permission advice is a three-valued, authority-scoped dry run: only the serving authority may issue definitive Allowed/Denied; client-local, offline, incomplete, not-ready, and timed-out requests yield Unknown. Advice is non-mutating and does not reserve a later mutation; its authenticated request/response exchange exposes no policy evidence and is correlation-, cancellation-, replay-, and dedup-safe.
 - `INV-API-29`: A Db is a client: facade writes MUST keep permissionsubject == madeby, and a Db MUST reject any attempt to attribute a write to another author. Cross-author attributio...
 - `INV-BRANCH-15`: Branch overlay data MUST NOT ship to a session that cannot read the branch metadata row; branch readability gates overlay visibility before ordinary per-row policy che...
 - `INV-RLS-1`: A non-system commit unit MUST be rejected with Fate::Rejected(RejectionReason::AuthorizationDenied) and MUST NOT ingest accepted version rows when any version in the u...
@@ -39,6 +39,9 @@ Invariant digest:
 - `INV-RLS-20`: Reads performed to execute a write MUST satisfy the target row's
   read policy; partial updates and upserts therefore require read permission,
   while full-row writes and row-id deletes do not.
+- `INV-RLS-21`: A policy subplan MUST read its dependency tables as raw policy
+  evidence without recursively applying those tables' own read policies, while
+  still enforcing the complete outer policy under authenticated claims.
 
 ## Details
 
@@ -207,6 +210,37 @@ shapes. It composes the root table's read policy into the subscribed shape and
 client-supplied binding values**, so a client cannot widen its visibility by
 choosing a different claim binding (`INV-RLS-10`).
 
+#### Policy dependency authority
+
+An authorization subplan is one complete policy program, not a collection of
+user-visible reads. Every table source it inspects is policy evidence and is
+read under raw (`System`) authority. Jazz MUST NOT recursively apply a
+dependency table's own read policy while evaluating the outer policy. Doing so
+would silently change a declared policy `P` into `P AND dependency-policy`, make
+the result depend on unrelated policy declarations, and make mutually
+referential policy schemas cyclic.
+
+Raw dependency access does not bypass the outer policy. Jazz still evaluates
+every filter, join correlation, policy branch, inheritance edge, reachability
+seed and step, and other membership constraint declared by that policy. Claims
+are bound from the authenticated identity rather than client-supplied values.
+Only rows selected by that complete identity-bound program authorize the
+protected operation. Failure to compile, bind, or evaluate any required part of
+the policy remains fail-closed.
+
+This authority is scoped to policy evaluation. Ordinary queries and includes
+against a dependency table still apply that table's own read policy, and policy
+evidence does not become independently deliverable payload. Read and write
+policy subplans use the same rule.
+
+**INV-RLS-21.** A read or write policy subplan MUST suspend recursive policy
+application for all table sources it evaluates and read them as raw policy
+evidence. It MUST nevertheless enforce the complete evaluating policy,
+including all filters, joins, authenticated claims, policy branches,
+inheritance, and reachability constraints. Raw dependency rows MUST NOT become
+user-visible merely because they participated in a policy decision, and any
+unsupported or indeterminate policy evaluation MUST deny.
+
 Join policies extend that same identity-bound evaluation across relationships. A
 join policy passes when a matching global-current row in the joined table reaches
 the protected row and its filters hold under the same identity (`INV-RLS-9`).
@@ -336,12 +370,21 @@ client-supplied values must not widen those facts.
   checks are valid policy atoms, how to bound them, and how to lower them
   without creating accidental whole-table authority scans. Exposed by
   `world-tour`'s band-member policy.
-- ✅ **Permission introspection is a dry-run API, not magic columns.** `$can*`
-  columns cannot express _can-insert_ or richer probes; a dry-run is policy
-  evaluation _without ingest_ — the write-validation machinery applied
-  hypothetically, with local-preview semantics. The facade methods (`can_insert`,
-  `can_read`, `can_update`, `can_delete`, ch. 13) are implemented as dry-runs
-  (`INV-API-28`).
+- ✅ **Permission introspection is an authority dry-run API, not magic
+  columns.** `$can*` columns cannot express _can-insert_ or richer probes. The
+  facade methods (`can_insert`, `can_read`, `can_update`, `can_delete`, ch. 13)
+  produce `Allowed`, `Denied`, or `Unknown`; only the serving authority may
+  issue a definitive result. A local, offline, incomplete, not-ready, or timed
+  out client receives `Unknown`, never a local policy decision. Requests are
+  evaluated under the authenticated link identity and return only an opaque
+  correlation id plus the advice value, never supporting rows, policy reasons,
+  or hidden dependency facts. Advice is non-mutating and does not reserve or
+  authorize the ordinary optimistic write that may follow (`INV-API-28`).
+- 🔶 **Safe local permission fail-fast.** A future client-local `Denied` may be
+  added only when it is mechanically proven that every fact required for that
+  rejection is locally complete (for example, proposed-row or structural facts).
+  Missing policy support is never denial proof. Local `Allowed` remains
+  forbidden without the serving authority.
 - 🔶 **Principal authorship migration.** Decide the stable `AuthorId`/principal
   representation for commit authorship, how old self-authored commit encodings
   are rejected or migrated, and where backend attribution helpers are permitted.

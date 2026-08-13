@@ -14,7 +14,7 @@ crate-type = ["cdylib"]
 jazz = { path = "../jazz", default-features = false, features = ["test-utils", "otel-core"] }
 tokio = { version = "1", features = ["rt", "rt-multi-thread"] }
 base64 = "0.22"
-napi = { version = "3", features = ["napi5", "serde-json", "async"] }
+napi = { version = "3", features = ["napi6", "serde-json", "async"] }
 napi-derive = "3"
 opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"] }
 postcard = { version = "1.1", features = ["alloc"] }

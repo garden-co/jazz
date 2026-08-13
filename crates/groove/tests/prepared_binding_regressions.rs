@@ -29,7 +29,7 @@ fn edges_schema() -> DatabaseSchema {
 }
 
 fn binding_descriptor() -> RecordDescriptor {
-    RecordDescriptor::new([("src", ColumnType::U64.value_type())])
+    RecordDescriptor::new([("src", ColumnType::U64.clone())])
 }
 
 fn edges_by_src_shape_graph() -> GraphBuilder {

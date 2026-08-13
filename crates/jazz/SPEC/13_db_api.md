@@ -32,15 +32,19 @@ Invariant digest:
 - `INV-API-16`: `Transport` implementations MUST be non-blocking; `try_recv() == None` MUST mean no inbound message is currently staged and MUST NOT be interpreted by `Db` as disconnect.
 - `INV-API-17`: Db::connectupstream MUST make every already-registered facade subscription eligible for immediate upstream announcement without requiring re-registration.
 - `INV-API-18`: `Db::subscribe` MUST announce newly registered subscriptions to all existing upstream connections so query-driven sync can request remote completion on the next tick.
+- `INV-API-31`: `Db::disconnect` MUST mark the `Db` intentionally offline, disconnect every schema client from its server transport, and leave the local runtime and store alive; `Db::reconnect` MUST clear that marker and reconnect every schema client. A schema client created while intentionally offline MUST remain offline until `reconnect`.
+- `INV-API-32`: While a `Db` is intentionally offline, a read with `propagation = LocalOnly` MUST resolve from current local materialized state without waiting for an upstream coverage frontier: a locally committed pending write MUST be returned, and a row written remotely during the offline period MUST be absent until reconnect delivery reaches the local store. `LocalOnly` selects the local snapshot; it is not a request to wait for that snapshot to become complete relative to an unavailable upstream.
 - `INV-API-19`: Upstream announcement of a subscription MUST make its query definition available before the subscription that uses it, without re-announcing the same definition for that connection.
 - `INV-API-20`: An upstream connection MUST upload each locally-authored transaction at most once.
 - `INV-API-21`: A subscriber `PeerConnection::tick` MUST serve subscriptions under the `AuthorId` passed to `Node::accept_subscriber`, not under the serving node's own identity.
 - `INV-API-22`: Db::tick() MUST service every registered connection exactly once.
+- `INV-API-23`: A client binding tick driver MUST classify `Db::tick()` failures. A recoverable protocol condition MUST NOT terminate the driver; the driver MUST continue through its documented repair or reconnect path with bounded backoff. A fatal failure, or exhausted recovery, MUST stop the driver and be surfaced to the caller as an error rather than appearing as a stalled sync operation.
 - `INV-API-24`: The query builder exposed through Db::table MUST expose the schema-validated query construction capabilities defined in ch. 6.
 - `INV-API-25`: `TextEdit` operations MUST use byte offsets relative to the current local parent value for the column and MUST lower to `LargeValueEditOp::Insert`/`LargeValueEditOp::Delete`.
 - `INV-API-26`: `Db::mergeable_tx()` MUST group multiple facade writes under one mergeable `TxId`, and the produced commit unit MUST set `Transaction.n_total_writes` to the number of grouped versions.
 - `INV-API-27`: `Db::exclusive_tx()` MUST expose serializable exclusive transactions on the facade, preserving snapshot reads and returning `WriteRejected` when authority validation detects a conflict.
-- `INV-API-28`: `Db::can_insert`, `can_read`, `can_update`, and `can_delete` MUST evaluate permissions under the current `DbIdentity.author` without committing writes, changing local rows, or using caller-supplied identity.
+- `INV-API-28`: Permission advice is a three-valued, authority-scoped dry run: only the serving authority may issue definitive `Allowed`/`Denied`; client-local, offline, incomplete, not-ready, and timed-out requests yield `Unknown`. Advice is non-mutating and does not reserve a later mutation; its authenticated request/response exchange exposes no policy evidence and is correlation-, cancellation-, replay-, and dedup-safe.
+- `INV-API-33`: Ordinary `Db` reads and subscriptions MUST use client-local lowering: policy is enforced by the trusted upstream before emission and is never re-applied to received rows. Local/None reads scan locally available data; Edge/Global settled reads consume the identity-scoped settled view received upstream.
 - `INV-API-29`: A `Db` is a client: facade writes MUST keep `permission_subject == made_by`, and a `Db` MUST reject any attempt to attribute a write to another author. Cross-author attribution is a node-level concern on the ingest side (a trusted serving `Node`, `INV-RLS-18`, ch. 9), never a `Db` capability.
 - `INV-API-30`: Reopening persistent storage with the same `DbIdentity` MUST schedule every locally originated transaction that reached `Local` durability and has not reached terminal settlement for upstream delivery. Locally originated means `TxId.node == DbIdentity.node` and `Transaction.made_by == DbIdentity.author`; delivery is at-least-once by `TxId` and relies on idempotent authority handling.
 
@@ -268,9 +272,40 @@ empty data and lowers to content + `DeletionEvent::Restored`. `INV-API-25` —
 `TextEdit` uses byte offsets relative to the current parent, lowering to
 `LargeValueEditOp` (ch. 12).
 
-Dry-run permission probes (`can_insert`, `can_read`, `can_update`,
-`can_delete`) evaluate the same current-identity policy path as the corresponding
-operation without ingesting versions or changing local rows (`INV-API-28`, ch. 7).
+#### Permission advice dry runs
+
+Permission probes (`can_insert`, `can_read`, `can_update`, `can_delete`) return
+the three-valued `PermissionAdvice` result:
+
+- `Allowed` means the serving authority evaluated the hypothetical operation
+  under the authenticated link subject and allowed it at that point.
+- `Denied` means that same authority definitively rejected the hypothetical
+  operation at that point.
+- `Unknown` means no definitive authority decision is available. It is not a
+  denial, an allowance, or evidence about policy dependencies.
+
+Only the serving authority may produce `Allowed` or `Denied` today. The local
+client API deliberately returns `Unknown` rather than evaluating a replica that
+may be offline, incomplete, or not permissions-ready; a request that cannot
+reach a ready authority, including one that times out, also resolves to
+`Unknown`. A partial replica is never a permission-advice authority.
+
+Advice is a dry run, not a mutation precondition or reservation. It creates no
+row/version, changes no local or authority state, and does not alter the normal
+optimistic mutation path: an ordinary later write is still submitted and
+authorized independently, and may be rejected if the relevant state or policy
+has changed. The request carries only the hypothetical operation; the serving
+side uses the authenticated link identity as its subject rather than a
+client-provided identity. The response contains only the opaque request id and
+one advice value: no supporting rows, policy reasons, or hidden dependency facts
+cross the boundary.
+
+Each live link correlates a request and response with a fresh opaque id. Dropping
+or cancelling a request removes its waiter, so a late response is ignored;
+replayed responses cannot resolve another request, including after reopening.
+The serving side deduplicates responses by request id within a bounded cache, so
+retransmission neither repeats evaluation nor mutates state (`INV-API-28`, ch.
+7).
 
 ### 13.5 The sync/serve surface (binding-facing)
 
@@ -298,6 +333,16 @@ directions; relay/edge/core peer roles remain below the facade (ch. 9).
 (`RegisterShape` then `Subscribe`, `INV-API-19`), uploads each local commit
 once (`INV-API-20`), drains inbound messages, applies them, and refreshes
 registered subscriptions (ch. 8).
+
+Bindings that schedule `Db::tick()` in a background client driver own the
+driver's lifecycle. They classify a returned error before deciding whether to
+stop: bounded-queue backpressure retries, a missing content extent follows the
+content-repair path, and a closed upstream WebSocket detaches and reconnects.
+Other errors are terminal because no repair is defined for them. Recovery uses
+bounded exponential backoff; when it exhausts, the binding records a terminal
+sync error. Queries, hydration, and durability waits must observe that error
+promptly rather than waiting for ordinary coverage or settlement timeouts
+(`INV-API-23`).
 
 The binding-facing surface includes:
 
@@ -587,12 +632,38 @@ These are designed but not landed:
   a settled subscription result set for the binding (ch. 6), surfaced as a
   queryable `settled()` bit on the handle before the first gate. Neither the
   gating nor `settled()` is implemented yet.
+- 🔶 **Observable connection state, and cancelling a wait.** A wait at `Edge` or
+  `Global` tier while disconnected has no honest answer today: rejecting loses a
+  write's durability observation that would have resolved on reconnect, and
+  waiting indefinitely gives the caller no way to distinguish "offline, will
+  resolve later" from "something is broken". Neither carries a diagnosis.
+  The intended shape is that the **core waits indefinitely** and cancellation is
+  **caller policy**, because the core promises durability, not latency — only the
+  caller knows whether a wait backs a background sync or a user pressing Save. In
+  Rust this needs nothing new: `wait` is an `async fn`, so dropping the future
+  cancels and `tokio::time::timeout` composes. In TypeScript the idiomatic form is
+  an `AbortSignal` on the wait options, which yields timeouts via
+  `AbortSignal.timeout`, composition via `AbortSignal.any`, and component-lifecycle
+  cancellation for free; there is currently no `AbortSignal` anywhere in the
+  runtime API. Three details are load-bearing whenever this is built: cancelling a
+  _wait_ MUST NOT cancel the _write_, which is already committed and queued;
+  abort MUST reject with a distinct reason so "I gave up" is never mistaken for
+  "the write failed"; and abort MUST deregister the waiter, or an indefinite wait
+  becomes a slow leak on a long-lived client.
+  The missing complement is an **observable connection and pending state** — at
+  minimum whether the client is connected, and how many writes are outstanding at
+  each tier — so an application can render honestly rather than inferring from a
+  promise that has not settled. This is the more valuable half: a timeout tells
+  you only that time passed. A bulk import that hung on a global-tier wait was
+  undiagnosable for exactly this reason; the wait was unbounded, uncancellable,
+  and invisible, and the cause could only be found by instrumenting the core.
+  None of this is implemented.
 - 🔶 **Identity modes & admission.** `DbIdentity` is `{ node, author }` today;
   core-only attributed writes are callable, but the broader backend /
   no-identity-platform modes (ch. 9) and `accept_subscriber` admission policy are
   not yet represented.
 - 🔶 **Exclusive transaction handles in the binding ABI.** The binding ABI opens
-  real core `OpenTxId`/open-exclusive state through a small internal handle API
+  real core `OpenBatchId`/open-exclusive state through a small internal handle API
   for write-side exclusive transactions. They are not faked by replaying staged
   point writes at commit time. Tx reads, restore behavior, multi-row
   `WriteStarted` row ids, and rejected-write wait semantics for unmet higher
@@ -653,3 +724,25 @@ These are designed but not landed:
 - 🔶 **WASM teardown trap true fix.** The current mitigation hides inert
   teardown traps; the durable fix is an explicit async shutdown and transport
   lifecycle boundary that prevents callbacks into torn-down linear memory.
+
+### Intentional disconnect and local-only reads
+
+`Db::disconnect` marks the `Db` **intentionally offline**. It disconnects every
+schema client from its server transport and leaves the local runtime and store
+alive, so local reads and writes continue to work. `Db::reconnect` clears the
+marker and reconnects every schema client using the configured server URL and
+current auth configuration. A schema client created while the `Db` is
+intentionally offline remains offline until `reconnect` (`INV-API-31`).
+
+While intentionally offline, a read with `propagation = LocalOnly` resolves from
+the current local materialized state. It does not wait for an upstream coverage
+frontier and does not inspect the server (`INV-API-32`):
+
+- a locally committed, pending write is returned immediately;
+- a row written remotely during the offline period is absent — an empty result
+  for a query matching only that row — until reconnect delivery reaches the
+  local store.
+
+`LocalOnly` chooses the local snapshot. It is **not** a request to wait until
+that snapshot becomes complete relative to an upstream that is unavailable by
+construction. Convergence is asserted separately, after `reconnect`.

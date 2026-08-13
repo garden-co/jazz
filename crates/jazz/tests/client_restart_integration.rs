@@ -379,7 +379,10 @@ async fn jazz_tools_cli_existing_client_keeps_working_after_server_restart_witho
         )
         .expect("create before restart");
     client
-        .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
+        .wait_for_batch(
+            batch_id.expect("ordinary mutation commits immediately"),
+            DurabilityTier::EdgeServer,
+        )
         .await
         .expect("wait for create before restart");
 
@@ -423,7 +426,10 @@ async fn jazz_tools_cli_existing_client_keeps_working_after_server_restart_witho
         )
         .expect("create after restart");
     client
-        .wait_for_batch(batch_id, DurabilityTier::EdgeServer)
+        .wait_for_batch(
+            batch_id.expect("ordinary mutation commits immediately"),
+            DurabilityTier::EdgeServer,
+        )
         .await
         .expect("wait for create after restart");
 

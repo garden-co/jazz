@@ -9,6 +9,7 @@ import {
   skipIds,
 } from "./ci_benchmarks.mjs";
 import {
+  benchmarkTimeoutSeconds,
   buildJazzSimCommand,
   buildNativeCriterionCommand,
   buildNativeExampleBaseCommand,
@@ -40,6 +41,8 @@ test("native benchmark catalog defines RocksDB and SQLite variants for each nati
   assert.ok(ids.has("native-criterion:sqlite:r11_byte_wire_resume"));
   assert.ok(ids.has("native-criterion:rocksdb:r12_recursive_permissions"));
   assert.ok(ids.has("native-criterion:sqlite:r12_recursive_permissions"));
+  assert.ok(ids.has("native-criterion:rocksdb:r13_permission_filtered_resume"));
+  assert.ok(ids.has("native-criterion:sqlite:r13_permission_filtered_resume"));
 });
 
 test("native benchmark catalog targets storage-backed engine-specific Criterion groups", () => {
@@ -108,7 +111,7 @@ test("native example command opts into the RocksDB storage backend", () => {
     "run",
     "--release",
     "-p",
-    "jazz-tools",
+    "jazz",
     "--features",
     "client,rocksdb",
     "--example",
@@ -126,7 +129,7 @@ test("native example command opts into the SQLite storage backend", () => {
     "run",
     "--release",
     "-p",
-    "jazz-tools",
+    "jazz",
     "--features",
     "client,sqlite",
     "--example",
@@ -145,7 +148,7 @@ test("native Criterion command opts into the RocksDB storage backend", () => {
     "cargo",
     "bench",
     "-p",
-    "jazz-tools",
+    "jazz",
     "--features",
     "rocksdb",
     "--bench",
@@ -160,6 +163,7 @@ test("native Criterion command opts into the SQLite storage backend", () => {
     (entry) => entry.id === "native-criterion:sqlite:r2_reads",
   );
   assert.ok(benchmark, "expected a SQLite native Criterion benchmark");
+  assert.equal(benchmarkTimeoutSeconds(benchmark, 60), 60);
 
   const command = buildNativeCriterionCommand(benchmark);
   assert.equal(NATIVE_CRITERION_FEATURES_BY_ENGINE.sqlite, "sqlite");
@@ -167,13 +171,35 @@ test("native Criterion command opts into the SQLite storage backend", () => {
     "cargo",
     "bench",
     "-p",
-    "jazz-tools",
+    "jazz",
     "--features",
     "sqlite",
     "--bench",
     "realistic_phase1",
     "--",
     "realistic_phase1/r2_reads",
+  ]);
+});
+
+test("native Criterion command runs the R13 assertion-bearing benchmark", () => {
+  const benchmark = NATIVE_BENCHMARKS.find(
+    (entry) => entry.id === "native-criterion:sqlite:r13_permission_filtered_resume",
+  );
+  assert.ok(benchmark, "expected the SQLite R13 native Criterion benchmark");
+  assert.equal(benchmark.timeout_seconds, 90);
+  assert.equal(benchmarkTimeoutSeconds(benchmark, 60), 90);
+
+  assert.deepEqual(buildNativeCriterionCommand(benchmark), [
+    "cargo",
+    "bench",
+    "-p",
+    "jazz",
+    "--features",
+    "sqlite",
+    "--bench",
+    "realistic_phase1",
+    "--",
+    "realistic_phase1/r13_permission_filtered_resume",
   ]);
 });
 
@@ -185,20 +211,18 @@ test("benchmark workflow prebuilds the RocksDB-backed and SQLite-backed native b
 
   assert.match(
     workflow,
-    /cargo build --release -p jazz-tools --features client,rocksdb --example realistic_bench/,
+    /cargo build --release -p jazz --features client,rocksdb --example realistic_bench/,
   );
   assert.match(
     workflow,
-    /cargo build --release -p jazz-tools --features client,sqlite --example realistic_bench/,
+    /cargo build --release -p jazz --features client,sqlite --example realistic_bench/,
   );
   assert.match(
     workflow,
-    /cargo bench -p jazz-tools --features rocksdb --bench realistic_phase1 --no-run/,
+    /cargo bench -p jazz --features rocksdb --bench realistic_phase1 --no-run/,
   );
-  assert.match(
-    workflow,
-    /cargo bench -p jazz-tools --features sqlite --bench realistic_phase1 --no-run/,
-  );
+  assert.match(workflow, /cargo bench -p jazz --features sqlite --bench realistic_phase1 --no-run/);
+  assert.doesNotMatch(workflow, /-p jazz-tools\b/);
 });
 
 test("benchmark workflow runs the jazz-sim benchmark suite", () => {

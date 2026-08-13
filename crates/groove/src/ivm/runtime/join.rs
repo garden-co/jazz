@@ -26,6 +26,18 @@ pub(super) type JoinKey = SmallVec<[u8; 64]>;
 type JoinBucket = HashMap<Bytes, i64>;
 type JoinIndex = HashMap<JoinKey, JoinBucket>;
 
+pub(super) fn touched_join_keys(
+    descriptor: &RecordDescriptor,
+    fields: &[String],
+    deltas: &[RecordDelta],
+    comparison: ValueComparison,
+) -> Result<Vec<Vec<u8>>, IvmRuntimeError> {
+    Ok(keyed_join_deltas(descriptor, fields, deltas, comparison)?
+        .into_iter()
+        .map(|delta| delta.key.into_vec())
+        .collect())
+}
+
 #[derive(Clone, Debug, Default)]
 pub(super) struct JoinState;
 
@@ -438,6 +450,32 @@ impl AntiJoinState {
 }
 
 impl ArrangementState {
+    pub(super) fn clone_keys<'a>(&self, keys: impl IntoIterator<Item = &'a Vec<u8>>) -> Self {
+        let mut index = HashMap::default();
+        for key in keys {
+            let key = JoinKey::from_slice(key);
+            if let Some(bucket) = self.index.get(&key) {
+                index.insert(key, bucket.clone());
+            }
+        }
+        Self { index }
+    }
+
+    pub(super) fn replace_keys<'a>(
+        &mut self,
+        keys: impl IntoIterator<Item = &'a Vec<u8>>,
+        mut replacement: Self,
+    ) {
+        for key in keys {
+            let key = JoinKey::from_slice(key);
+            if let Some(bucket) = replacement.index.remove(&key) {
+                self.index.insert(key, bucket);
+            } else {
+                self.index.remove(&key);
+            }
+        }
+    }
+
     pub(super) fn row_count(&self) -> usize {
         self.index
             .values()

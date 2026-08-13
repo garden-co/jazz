@@ -9,6 +9,7 @@ use jazz::peer::{PeerRole, PeerState};
 use jazz::protocol::{SubscriptionKey, SyncMessage, VersionBundle};
 use jazz::query::{Query, claim, col, eq, param};
 use jazz::schema::{JazzSchema, Policy, TableSchema};
+use jazz::tools::OpenBatchId;
 use jazz::tx::{DeletionEvent, DurabilityTier, Fate, RejectionReason, TxId};
 
 fn node(byte: u8) -> NodeUuid {
@@ -318,7 +319,8 @@ fn four_tier_topology_relays_pending_units_and_core_fates() {
     refresh(&mut edge, &mut worker, &mut edge_to_worker);
     refresh(&mut worker, &mut ui, &mut worker_to_ui);
 
-    let tx_id = ui.open_exclusive().unwrap();
+    let tx_id = OpenBatchId::new();
+    ui.open_exclusive(tx_id).unwrap();
     assert_eq!(
         ui.tx_read(tx_id, "todos", exclusive_row).unwrap(),
         Some(cells("exclusive base", ui_owner))
@@ -1180,6 +1182,7 @@ fn edge_accepted_mergeable_is_final_at_core_after_policy_revocation() {
         peer_payload_inventory: PeerPayloadInventory::default(),
         result_member_adds: Vec::new(),
         result_member_removes: Vec::new(),
+        terminal_operations: Vec::new(),
         program_fact_adds: Vec::new(),
         program_fact_removes: Vec::new(),
     })

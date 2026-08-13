@@ -19,8 +19,24 @@ describe("ReactNativeRuntimeSource", () => {
         appId: "chat/app",
         dataDirectory: "/var/mobile/Documents/",
       }),
-    ).toBe("/var/mobile/Documents/chat_app.db");
-    expect(sanitizeReactNativeDbName("a b/c.d:_-Z9")).toBe("a_b_c_d__-Z9");
+    ).toBe("/var/mobile/Documents/~chat_app-8dbbe60f.db");
+    expect(sanitizeReactNativeDbName("a b/c.d:_-Z9")).toBe("~a_b_c_d__-Z9-1819b009");
+    expect(sanitizeReactNativeDbName("already_safe-9")).toBe("already_safe-9");
+    expect(sanitizeReactNativeDbName("my.app")).toBe("~my_app-619d1e02");
+    expect(sanitizeReactNativeDbName("my:app")).toBe("~my_app-dcea976e");
+  });
+
+  it("keeps safe and transformed database names in disjoint namespaces", () => {
+    const safeCollisionCandidate = "my_app-619d1e02";
+
+    expect(sanitizeReactNativeDbName(safeCollisionCandidate)).toBe(safeCollisionCandidate);
+    expect(sanitizeReactNativeDbName("my.app")).not.toBe(
+      sanitizeReactNativeDbName(safeCollisionCandidate),
+    );
+  });
+
+  it("sanitizes and hashes Unicode by code point", () => {
+    expect(sanitizeReactNativeDbName("a😀b")).toBe("~a_b-4e6351d2");
   });
 
   it("requires an absolute data directory only for persistent opens", () => {

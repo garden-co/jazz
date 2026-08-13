@@ -26,18 +26,26 @@ For ordinary Rust/core work, the full gate set is:
   backend in the exact feature shape jazz-rn builds; added with M1 of
   `dev/RN_BINDING_REWRITE_DESIGN.md`)
 - `cargo test -p jazz --no-default-features --features test` (matches `crates/jazz/TESTING_GUIDELINES.md`).
-  This replaces the former `cargo test -p jazz-tools --features test`: `jazz-tools`
-  and `jazz-server` are now part of `jazz`, so their suites run here. Note it also
-  runs `jazz-tools`' library unit and doc tests, which its old `[lib] test = false`
-  had suppressed.
-- `cargo test -p jazz --bin jazz-server`
-
+  This replaces the former `cargo test -p jazz-tools --features test` **and
+  `cargo test -p jazz-server`**: `jazz-tools` and `jazz-server` are now part of
+  `jazz`, so their suites run here. Neither is a workspace member any more —
+  `cargo test -p jazz-server` fails with `package ID specification did not match
+any packages`, so do not add it back. Note this also runs `jazz-tools`' library
+  unit and doc tests, which its old `[lib] test = false` had suppressed.
+- `cargo test -p jazz --bin jazz-server` (the bin target still resolves through
+  `jazz`; this is not the removed `-p jazz-server` package form above)
 - `cargo check -p jazz-sim --benches` (always; it is cheap enough and catches bench API rot)
 - `dev/gates/ts-wire-codec.sh` for TypeScript/native-runtime wire-codec coverage
   (Anselm-approved 2026-07-07)
 - `dev/gates/rn-bindings-fresh.sh` after any `jazz-rn` UniFFI surface change;
   it rebuilds the host library and verifies both committed TypeScript binding
   files match fresh UniFFI output.
+- `dev/gates/invariant-registry.sh` parses both invariant registries and fails on
+  a malformed row, a duplicate id within one registry, a cited test that does not
+  exist, or a `✓`-covered invariant citing no test. `now` + `untested` is reported
+  but does not fail — that is documented debt the registry deliberately keeps
+  visible. Both registries escape literal `|` inside table cells as `\|`; an
+  unescaped pipe silently shreds a row.
 - `JAZZ_SEED_COUNT=300 cargo test -p jazz m3_maintained_one_shot_differential_oracle`
   for maintained-vs-one-shot equivalence coverage (Anselm-approved 2026-07-08)
 - `cargo test -p jazz --test incremental_delivery_canary maintained_relation_include_single_row_changes_are_scale_independent -- --exact`

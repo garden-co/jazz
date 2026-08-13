@@ -2478,24 +2478,26 @@ fn deletion_read_policy_requires_visible_global_content_winner() {
     let shape = Query::from("todos").validate(&core.catalogue.schema).unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
     let owner_rows = core
-        .query_rows_including_deleted_for_identity(
+        .query_rows_including_deleted_in_authorization_mode(
             &shape,
             &binding,
             DurabilityTier::Global,
             None,
             owner,
+            QueryAuthorizationMode::TrustedServing,
         )
         .unwrap();
     assert_eq!(owner_rows.len(), 1);
     assert_eq!(owner_rows[0].row_uuid(), row_uuid);
     assert!(owner_rows[0].is_deleted());
     assert!(
-        core.query_rows_including_deleted_for_identity(
+        core.query_rows_including_deleted_in_authorization_mode(
             &shape,
             &binding,
             DurabilityTier::Global,
             None,
             other,
+            QueryAuthorizationMode::TrustedServing,
         )
         .unwrap()
         .is_empty()
@@ -2515,12 +2517,13 @@ fn deletion_read_policy_requires_visible_global_content_winner() {
     )
     .unwrap();
     assert!(
-        core.query_rows_including_deleted_for_identity(
+        core.query_rows_including_deleted_in_authorization_mode(
             &shape,
             &binding,
             DurabilityTier::Global,
             None,
             owner,
+            QueryAuthorizationMode::TrustedServing,
         )
         .unwrap()
         .into_iter()
@@ -5190,7 +5193,14 @@ fn content_extent_visibility_requires_referencing_readable_version_row() {
 
     let unreferenced = core
         .content_store()
-        .append(owner, row_uuid, "body", b"not referenced")
+        .append(
+            schema.version_id(),
+            "docs",
+            owner,
+            row_uuid,
+            "body",
+            b"not referenced",
+        )
         .unwrap();
     assert!(matches!(
         owner_peer.serve_content_extents(&mut core, row_uuid, [unreferenced]),

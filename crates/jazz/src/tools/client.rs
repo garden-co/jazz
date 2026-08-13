@@ -10,8 +10,8 @@ use std::time::Duration;
 
 use crate::db::{
     Db as CoreDb, DbConfig as CoreDbConfig, DbIdentity as CoreDbIdentity, Error as CoreDbError,
-    ExclusiveTxOps, LocalUpdates as CoreLocalUpdates, PeerConnection as CorePeerConnection,
-    Propagation as CorePropagation, ReadOpts as CoreReadOpts,
+    ErrorCode as CoreDbErrorCode, ExclusiveTxOps, LocalUpdates as CoreLocalUpdates,
+    PeerConnection as CorePeerConnection, Propagation as CorePropagation, ReadOpts as CoreReadOpts,
     SubscriptionEvent as CoreSubscriptionEvent, SubscriptionOutputRow as CoreSubscriptionOutputRow,
     TextEdit as CoreTextEdit, TickScheduler, TickUrgency, Transport as CoreTransport,
     WireTransportAdapter,
@@ -21,17 +21,22 @@ use crate::groove::storage::MemoryStorage as CoreMemoryStorage;
 #[cfg(feature = "rocksdb")]
 use crate::groove::storage::RocksDbStorage as CoreRocksDbStorage;
 use crate::ids::{AuthorId as CoreAuthorId, NodeUuid as CoreNodeUuid, RowUuid as CoreRowUuid};
-use crate::node::OpenTxId as CoreOpenTxId;
+use crate::protocol::{
+    ReadViewSourceSpec as CoreReadViewSourceSpec, ReadViewSpec as CoreReadViewSpec,
+};
+use crate::tools::OpenBatchId;
 use crate::tools::public_api::query::{
     Condition as PublicCondition, SortDirection as PublicSortDirection,
 };
-use crate::tools::public_api::types::{OrderedAdded, OrderedRemoved, OrderedUpdated};
+use crate::tools::public_api::types::{
+    OrderedAdded, OrderedRemoved, OrderedUpdated, QueryResultField,
+};
 use crate::tools::public_schema::Schema;
 use crate::tools::public_schema::TableName;
 use crate::tools::public_schema::{
     ColumnType, LargeValueHandle, Query, Session, TableSchema, Value, WriteContext,
 };
-use crate::tools::public_schema::{OrderedRowDelta, Row};
+use crate::tools::public_schema::{OrderedRowDelta, QueryResult, Row};
 use crate::tools::server::core_websocket_transport::WebSocketTransport;
 use crate::tools::server::public_schema_convert::convert_public_schema;
 #[cfg(feature = "test-utils")]
@@ -40,8 +45,8 @@ use crate::tools::sync::DurabilityTier;
 use crate::tools::transaction::BatchId;
 use crate::tools::websocket_prelude_auth::AuthConfig as WsAuthConfig;
 use crate::tx::{
-    DeletionEvent as CoreDeletionEvent, DurabilityTier as CoreDurabilityTier, Fate as CoreFate,
-    RejectionReason as CoreRejectionReason, TxId as CoreTxId,
+    DurabilityTier as CoreDurabilityTier, Fate as CoreFate, RejectionReason as CoreRejectionReason,
+    TxId as CoreTxId,
 };
 use base64::Engine;
 use serde::{Deserialize, Deserializer};
@@ -51,7 +56,7 @@ use uuid::Uuid;
 #[cfg(feature = "rocksdb")]
 use crate::tools::ClientStorage;
 use crate::tools::{
-    AppContext, JazzError, ObjectId, OutputOccurrenceId, Result, SubscriptionHandle,
+    AppContext, JazzError, ObjectId, OutputOccurrenceId, Result, ResultKey, SubscriptionHandle,
     SubscriptionRejectReason, SubscriptionServerFailureCode, SubscriptionStream,
     SubscriptionStreamItem,
 };
@@ -69,6 +74,9 @@ enum BackendConnection {
 const QUERY_COVERAGE_TIMEOUT: Duration = Duration::from_secs(5);
 const DEFAULT_TEST_WAIT_TIMEOUT_MULTIPLIER: u32 = 8;
 const LARGE_VALUE_HANDLE_MAGIC: &[u8] = b"JLVH1";
+const MAX_TICK_DRIVER_RECOVERY_ATTEMPTS: u32 = 12;
+const TICK_DRIVER_RETRY_BASE_DELAY: Duration = Duration::from_millis(50);
+const TICK_DRIVER_RETRY_MAX_DELAY: Duration = Duration::from_secs(2);
 
 fn load_tolerant_test_timeout(timeout: Duration) -> Duration {
     let multiplier = std::env::var("JAZZ_TOOLS_TEST_WAIT_TIMEOUT_MULTIPLIER")
@@ -147,8 +155,72 @@ struct ClientDbInner {
     upstream: Option<BackendConnection>,
     write_map: HashMap<BatchId, CoreTxId>,
     row_tables: HashMap<ObjectId, String>,
-    transactions: HashMap<BatchId, ExclusiveTransactionState>,
-    closed_transactions: HashMap<BatchId, ClosedTransactionState>,
+    transactions: HashMap<OpenBatchId, ExclusiveTransactionState>,
+    closed_transactions: HashMap<OpenBatchId, ClosedTransactionState>,
+    tick_driver_error: Option<String>,
+    tick_driver_error_notify: Arc<tokio::sync::Notify>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TickDriverErrorClass {
+    Retry,
+    Reconnect,
+    Fatal,
+}
+
+fn classify_tick_driver_error(error: &CoreDbError) -> TickDriverErrorClass {
+    match error.code {
+        CoreDbErrorCode::Backpressure => TickDriverErrorClass::Retry,
+        CoreDbErrorCode::Protocol if error.message.starts_with("missing content extent:") => {
+            TickDriverErrorClass::Retry
+        }
+        CoreDbErrorCode::Protocol if error.message == "websocket pump is closed" => {
+            TickDriverErrorClass::Reconnect
+        }
+        _ => TickDriverErrorClass::Fatal,
+    }
+}
+
+fn tick_driver_retry_delay(attempt: u32) -> Duration {
+    let multiplier = 1u32 << attempt.saturating_sub(1).min(5);
+    TICK_DRIVER_RETRY_BASE_DELAY
+        .checked_mul(multiplier)
+        .unwrap_or(TICK_DRIVER_RETRY_MAX_DELAY)
+        .min(TICK_DRIVER_RETRY_MAX_DELAY)
+}
+
+async fn recover_tick_driver_error(
+    inner: &Rc<RefCell<ClientDbInner>>,
+    scheduler: &TickSchedulerImpl,
+    class: TickDriverErrorClass,
+    error: &CoreDbError,
+    attempts: &mut u32,
+) -> bool {
+    *attempts = attempts.saturating_add(1);
+    if *attempts > MAX_TICK_DRIVER_RECOVERY_ATTEMPTS {
+        inner.borrow_mut().record_tick_driver_failure(format!(
+            "recovery exhausted after {MAX_TICK_DRIVER_RECOVERY_ATTEMPTS} attempts for {error}"
+        ));
+        return false;
+    }
+
+    #[cfg(feature = "sync-autopsy")]
+    crate::db::sync_autopsy::record(format!(
+        "client tick driver retrying {class:?} error attempt {attempts}: {error}"
+    ));
+    tokio::time::sleep(tick_driver_retry_delay(*attempts)).await;
+
+    if class == TickDriverErrorClass::Reconnect {
+        inner.borrow_mut().disconnect_upstream();
+        if let Err(reconnect_error) = ClientDbInner::reconnect_upstream(inner).await {
+            #[cfg(feature = "sync-autopsy")]
+            crate::db::sync_autopsy::record(format!(
+                "client tick driver reconnect attempt {attempts} failed: {reconnect_error}"
+            ));
+        }
+    }
+    scheduler.wake(TickUrgency::Immediate);
+    true
 }
 
 #[derive(Clone)]
@@ -418,9 +490,9 @@ impl Backend {
         query: &crate::query::Query,
     ) -> std::result::Result<crate::db::PreparedQuery, CoreDbError> {
         match self {
-            Self::Memory(db) => db.prepare_query(query),
+            Self::Memory(db) => db.prepare_query_for_open_schema(query),
             #[cfg(feature = "rocksdb")]
-            Self::RocksDb(db) => db.prepare_query(query),
+            Self::RocksDb(db) => db.prepare_query_for_open_schema(query),
         }
     }
 
@@ -475,6 +547,20 @@ impl Backend {
         }
     }
 
+    fn transaction_all_for_identity(
+        &self,
+        tx_id: OpenBatchId,
+        prepared: &crate::db::PreparedQuery,
+        author: CoreAuthorId,
+        opts: CoreReadOpts,
+    ) -> std::result::Result<Vec<crate::node::CurrentRow>, CoreDbError> {
+        match self {
+            Self::Memory(db) => db.transaction_all_for_identity(tx_id, prepared, author, opts),
+            #[cfg(feature = "rocksdb")]
+            Self::RocksDb(db) => db.transaction_all_for_identity(tx_id, prepared, author, opts),
+        }
+    }
+
     async fn subscribe(
         &self,
         prepared: &crate::db::PreparedQuery,
@@ -506,17 +592,17 @@ impl Backend {
         }
     }
 
-    fn begin_exclusive(&self) -> std::result::Result<CoreOpenTxId, CoreDbError> {
+    fn begin_exclusive(&self, id: OpenBatchId) -> std::result::Result<(), CoreDbError> {
         match self {
-            Self::Memory(db) => db.begin_exclusive(),
+            Self::Memory(db) => db.begin_exclusive(id),
             #[cfg(feature = "rocksdb")]
-            Self::RocksDb(db) => db.begin_exclusive(),
+            Self::RocksDb(db) => db.begin_exclusive(id),
         }
     }
 
     fn exclusive_write(
         &self,
-        tx_id: CoreOpenTxId,
+        tx_id: OpenBatchId,
         table: &str,
         row_id: CoreRowUuid,
         cells: crate::db::RowCells,
@@ -534,7 +620,7 @@ impl Backend {
 
     fn exclusive_update(
         &self,
-        tx_id: CoreOpenTxId,
+        tx_id: OpenBatchId,
         table: &str,
         row_id: CoreRowUuid,
         cells: crate::db::RowCells,
@@ -548,7 +634,7 @@ impl Backend {
 
     fn exclusive_delete(
         &self,
-        tx_id: CoreOpenTxId,
+        tx_id: OpenBatchId,
         table: &str,
         row_id: CoreRowUuid,
     ) -> std::result::Result<(), CoreDbError> {
@@ -561,7 +647,7 @@ impl Backend {
 
     fn commit_exclusive_handle(
         &self,
-        tx_id: CoreOpenTxId,
+        tx_id: OpenBatchId,
     ) -> std::result::Result<CoreTxId, CoreDbError> {
         match self {
             Self::Memory(db) => db.commit_exclusive_handle(tx_id),
@@ -572,15 +658,12 @@ impl Backend {
 }
 
 struct ExclusiveTransactionState {
-    tx_id: CoreOpenTxId,
     writes: Vec<ExclusiveTransactionWrite>,
 }
 
 struct ExclusiveTransactionWrite {
     table: String,
     row_id: ObjectId,
-    cells: crate::db::RowCells,
-    deletion: Option<CoreDeletionEvent>,
 }
 
 #[derive(Default)]
@@ -661,7 +744,35 @@ impl ClientDb {
         table: String,
         wait_for_coverage: bool,
     ) -> Result<Vec<crate::node::CurrentRow>> {
+        self.ensure_tick_driver_running()?;
         ClientDbInner::handle_query(&self.inner, query, opts, table, wait_for_coverage).await
+    }
+
+    fn query_transaction_rows(
+        &self,
+        query: crate::query::Query,
+        opts: CoreReadOpts,
+        batch_id: OpenBatchId,
+        table: String,
+        author: CoreAuthorId,
+    ) -> Result<Vec<crate::node::CurrentRow>> {
+        let prepared = {
+            let inner = self.inner.borrow();
+            inner
+                .db
+                .prepare_query(&query)
+                .map_err(|error| JazzError::Query(error.to_string()))?
+        };
+        let rows = {
+            let inner = self.inner.borrow();
+            inner.ensure_transaction_open(batch_id)?;
+            inner
+                .db
+                .transaction_all_for_identity(batch_id, &prepared, author, opts)
+                .map_err(|error| JazzError::Query(error.to_string()))?
+        };
+        self.inner.borrow_mut().remember_rows(&table, &rows);
+        Ok(rows)
     }
 
     async fn subscribe(
@@ -671,6 +782,7 @@ impl ClientDb {
         table: String,
         tx: mpsc::UnboundedSender<SubscriptionStreamItem>,
     ) -> Result<()> {
+        self.ensure_tick_driver_running()?;
         ClientDbInner::handle_subscribe(&self.inner, query, opts, table, tx).await
     }
 
@@ -716,7 +828,7 @@ impl ClientDb {
 
     fn stage_insert(
         &self,
-        batch_id: BatchId,
+        batch_id: OpenBatchId,
         table: String,
         row_id: Option<Uuid>,
         cells: crate::db::RowCells,
@@ -724,11 +836,7 @@ impl ClientDb {
         let mut inner = self.inner.borrow_mut();
         let row_id = ObjectId::from_uuid(row_id.unwrap_or_else(Uuid::now_v7));
         inner.ensure_transaction_open(batch_id)?;
-        let tx_id = inner
-            .transactions
-            .get(&batch_id)
-            .expect("transaction open checked above")
-            .tx_id;
+        let tx_id = batch_id;
         inner
             .db
             .exclusive_write(tx_id, &table, CoreRowUuid(*row_id.uuid()), cells.clone())
@@ -740,8 +848,6 @@ impl ClientDb {
         tx.writes.push(ExclusiveTransactionWrite {
             table: table.clone(),
             row_id,
-            cells,
-            deletion: None,
         });
         inner.row_tables.insert(row_id, table);
         Ok(row_id)
@@ -773,7 +879,7 @@ impl ClientDb {
 
     fn stage_upsert(
         &self,
-        batch_id: BatchId,
+        batch_id: OpenBatchId,
         table: String,
         row_id: Uuid,
         cells: crate::db::RowCells,
@@ -781,11 +887,7 @@ impl ClientDb {
         let mut inner = self.inner.borrow_mut();
         let object_id = ObjectId::from_uuid(row_id);
         inner.ensure_transaction_open(batch_id)?;
-        let tx_id = inner
-            .transactions
-            .get(&batch_id)
-            .expect("transaction open checked above")
-            .tx_id;
+        let tx_id = batch_id;
         inner
             .db
             .exclusive_write(tx_id, &table, CoreRowUuid(row_id), cells.clone())
@@ -797,8 +899,6 @@ impl ClientDb {
         tx.writes.push(ExclusiveTransactionWrite {
             table: table.clone(),
             row_id: object_id,
-            cells,
-            deletion: None,
         });
         inner.row_tables.insert(object_id, table);
         Ok(())
@@ -846,7 +946,7 @@ impl ClientDb {
 
     fn stage_update(
         &self,
-        batch_id: BatchId,
+        batch_id: OpenBatchId,
         row_id: ObjectId,
         cells: crate::db::RowCells,
     ) -> Result<()> {
@@ -855,11 +955,7 @@ impl ClientDb {
             JazzError::Write("update requires a row created or observed by this client".to_string())
         })?;
         inner.ensure_transaction_open(batch_id)?;
-        let tx_id = inner
-            .transactions
-            .get(&batch_id)
-            .expect("transaction open checked above")
-            .tx_id;
+        let tx_id = batch_id;
         inner
             .db
             .exclusive_update(tx_id, &table, CoreRowUuid(*row_id.uuid()), cells.clone())
@@ -868,12 +964,7 @@ impl ClientDb {
             .transactions
             .get_mut(&batch_id)
             .expect("transaction open checked above");
-        tx.writes.push(ExclusiveTransactionWrite {
-            table,
-            row_id,
-            cells,
-            deletion: None,
-        });
+        tx.writes.push(ExclusiveTransactionWrite { table, row_id });
         Ok(())
     }
 
@@ -897,17 +988,13 @@ impl ClientDb {
         Ok(tx_id)
     }
 
-    fn stage_delete(&self, batch_id: BatchId, row_id: ObjectId) -> Result<()> {
+    fn stage_delete(&self, batch_id: OpenBatchId, row_id: ObjectId) -> Result<()> {
         let mut inner = self.inner.borrow_mut();
         let table = inner.row_tables.get(&row_id).cloned().ok_or_else(|| {
             JazzError::Write("delete requires a row created or observed by this client".to_string())
         })?;
         inner.ensure_transaction_open(batch_id)?;
-        let tx_id = inner
-            .transactions
-            .get(&batch_id)
-            .expect("transaction open checked above")
-            .tx_id;
+        let tx_id = batch_id;
         inner
             .db
             .exclusive_delete(tx_id, &table, CoreRowUuid(*row_id.uuid()))
@@ -916,35 +1003,25 @@ impl ClientDb {
             .transactions
             .get_mut(&batch_id)
             .expect("transaction open checked above");
-        tx.writes.push(ExclusiveTransactionWrite {
-            table,
-            row_id,
-            cells: crate::db::RowCells::new(),
-            deletion: Some(CoreDeletionEvent::Deleted),
-        });
+        tx.writes.push(ExclusiveTransactionWrite { table, row_id });
         Ok(())
     }
 
-    fn begin_transaction(&self) -> Result<BatchId> {
+    fn begin_transaction(&self) -> Result<OpenBatchId> {
         let mut inner = self.inner.borrow_mut();
-        let mut batch_id = BatchId::new();
+        let mut batch_id = OpenBatchId::new();
         while inner.transactions.contains_key(&batch_id)
             || inner.closed_transactions.contains_key(&batch_id)
-            || inner.write_map.contains_key(&batch_id)
         {
-            batch_id = BatchId::new();
+            batch_id = OpenBatchId::new();
         }
-        let tx_id = inner
+        inner
             .db
-            .begin_exclusive()
+            .begin_exclusive(batch_id)
             .map_err(|error| JazzError::Write(error.to_string()))?;
-        inner.transactions.insert(
-            batch_id,
-            ExclusiveTransactionState {
-                tx_id,
-                writes: Vec::new(),
-            },
-        );
+        inner
+            .transactions
+            .insert(batch_id, ExclusiveTransactionState { writes: Vec::new() });
         Ok(batch_id)
     }
 
@@ -956,7 +1033,7 @@ impl ClientDb {
             .map_err(|error| JazzError::Query(error.to_string()))
     }
 
-    fn commit_transaction(&self, batch_id: BatchId) -> Result<()> {
+    fn commit_transaction(&self, batch_id: OpenBatchId) -> Result<BatchId> {
         let mut inner = self.inner.borrow_mut();
         inner.ensure_transaction_open(batch_id)?;
         if inner
@@ -976,20 +1053,20 @@ impl ClientDb {
             .expect("transaction open checked above");
         let tx_id = inner
             .db
-            .commit_exclusive_handle(state.tx_id)
+            .commit_exclusive_handle(batch_id)
             .map_err(|error| JazzError::Write(error.to_string()))?;
-        inner.write_map.insert(batch_id, tx_id);
-        inner.write_map.insert(core_batch_id(tx_id), tx_id);
+        let committed_id = core_batch_id(tx_id);
+        inner.write_map.insert(committed_id, tx_id);
         for write in state.writes {
             inner.row_tables.insert(write.row_id, write.table);
         }
         inner
             .closed_transactions
             .insert(batch_id, ClosedTransactionState::Committed);
-        Ok(())
+        Ok(committed_id)
     }
 
-    fn rollback_transaction(&self, batch_id: BatchId) -> Result<bool> {
+    fn rollback_transaction(&self, batch_id: OpenBatchId) -> Result<bool> {
         let mut inner = self.inner.borrow_mut();
         inner.ensure_transaction_open(batch_id)?;
         let removed = inner.transactions.remove(&batch_id).is_some();
@@ -1002,19 +1079,20 @@ impl ClientDb {
     }
 
     async fn wait_for_batch(&self, batch_id: BatchId, tier: DurabilityTier) -> Result<()> {
+        self.ensure_tick_driver_running()?;
         ClientDbInner::handle_wait_for_batch(&self.inner, batch_id, tier).await
     }
 
     fn disconnect_upstream(&self) -> bool {
-        let mut inner = self.inner.borrow_mut();
-        let Some(connection) = inner.upstream.take() else {
-            return false;
-        };
-        inner.db.detach_connection(&connection)
+        self.inner.borrow_mut().disconnect_upstream()
     }
 
     async fn reconnect_upstream(&self) -> Result<bool> {
         ClientDbInner::reconnect_upstream(&self.inner).await
+    }
+
+    fn ensure_tick_driver_running(&self) -> Result<()> {
+        self.inner.borrow().ensure_tick_driver_running()
     }
 
     fn spawn_local_tick_driver(
@@ -1023,6 +1101,7 @@ impl ClientDb {
     ) {
         let state = scheduler.wake_handle();
         tokio::task::spawn_local(async move {
+            let mut recovery_attempts = 0;
             loop {
                 state.notify.notified().await;
                 while let Some(urgency) = scheduler.take() {
@@ -1032,12 +1111,34 @@ impl ClientDb {
                     if urgency == TickUrgency::Deferred {
                         tokio::time::sleep(Duration::from_millis(1)).await;
                     }
-                    if let Err(error) = inner.borrow().db.tick() {
-                        #[cfg(feature = "sync-autopsy")]
-                        crate::db::sync_autopsy::record(format!(
-                            "client tick driver exited after db.tick error: {error}"
-                        ));
-                        return;
+                    let tick_result = { inner.borrow().db.tick() };
+                    match tick_result {
+                        Ok(()) => recovery_attempts = 0,
+                        Err(error) => {
+                            let class = classify_tick_driver_error(&error);
+                            let should_exit = if class == TickDriverErrorClass::Fatal {
+                                inner
+                                    .borrow_mut()
+                                    .record_tick_driver_failure(error.to_string());
+                                true
+                            } else {
+                                !recover_tick_driver_error(
+                                    &inner,
+                                    &scheduler,
+                                    class,
+                                    &error,
+                                    &mut recovery_attempts,
+                                )
+                                .await
+                            };
+                            if should_exit {
+                                #[cfg(feature = "sync-autopsy")]
+                                crate::db::sync_autopsy::record(format!(
+                                    "client tick driver exited after db.tick error: {error}"
+                                ));
+                                return;
+                            }
+                        }
                     }
                 }
             }
@@ -1046,6 +1147,27 @@ impl ClientDb {
 }
 
 impl ClientDbInner {
+    fn disconnect_upstream(&mut self) -> bool {
+        let Some(connection) = self.upstream.take() else {
+            return false;
+        };
+        self.db.detach_connection(&connection)
+    }
+
+    fn ensure_tick_driver_running(&self) -> Result<()> {
+        match &self.tick_driver_error {
+            Some(error) => Err(JazzError::Sync(format!(
+                "client tick driver stopped: {error}"
+            ))),
+            None => Ok(()),
+        }
+    }
+
+    fn record_tick_driver_failure(&mut self, error: String) {
+        self.tick_driver_error = Some(error);
+        self.tick_driver_error_notify.notify_waiters();
+    }
+
     async fn open(
         schema: crate::schema::JazzSchema,
         storage: StorageBundle,
@@ -1079,6 +1201,8 @@ impl ClientDbInner {
             row_tables: HashMap::new(),
             transactions: HashMap::new(),
             closed_transactions: HashMap::new(),
+            tick_driver_error: None,
+            tick_driver_error_notify: Arc::new(tokio::sync::Notify::new()),
         };
         inner.connect_upstream_transport().await?;
         Ok(inner)
@@ -1142,10 +1266,20 @@ impl ClientDbInner {
         )
         .await
         .map_err(|error| JazzError::Connection(error.to_string()))?;
-        Ok(db.connect_upstream(Box::new(WireTransportAdapter::current(transport))))
+        let (protocol_version, features, session_context) =
+            transport.negotiated_transport_metadata();
+        Ok(
+            db.connect_upstream(Box::new(WireTransportAdapter::new_with_session_context(
+                transport,
+                protocol_version,
+                features,
+                None,
+                session_context,
+            ))),
+        )
     }
 
-    fn ensure_transaction_open(&self, batch_id: BatchId) -> Result<()> {
+    fn ensure_transaction_open(&self, batch_id: OpenBatchId) -> Result<()> {
         if self.transactions.contains_key(&batch_id) {
             return Ok(());
         }
@@ -1159,7 +1293,7 @@ impl ClientDbInner {
         )))
     }
 
-    fn closed_transaction_message(batch_id: BatchId, state: ClosedTransactionState) -> String {
+    fn closed_transaction_message(batch_id: OpenBatchId, state: ClosedTransactionState) -> String {
         match state {
             ClosedTransactionState::Committed => {
                 format!("transaction {batch_id} already committed")
@@ -1220,6 +1354,7 @@ impl ClientDbInner {
         let deadline =
             tokio::time::Instant::now() + load_tolerant_test_timeout(QUERY_COVERAGE_TIMEOUT);
         loop {
+            inner.borrow().ensure_tick_driver_running()?;
             if inner.borrow().db.query_attachment_is_covered(attachment) {
                 return Ok(());
             }
@@ -1255,6 +1390,11 @@ impl ClientDbInner {
         tokio::task::spawn_local(async move {
             let mut stream = stream;
             let mut current_rows: Vec<CoreSubscriptionOutputRow> = Vec::new();
+            // A fresh subscription may be hydrated by consecutive reset
+            // frames. They replace the still-initial result set until core
+            // sends a delta-shaped update for a tracked occurrence. That is
+            // attach framing, not a replacement snapshot.
+            let mut initial_hydration = true;
             while let Some(event) = stream.next_event().await {
                 match event {
                     CoreSubscriptionEvent::Delta {
@@ -1268,11 +1408,40 @@ impl ClientDbInner {
                             .iter()
                             .map(|row| row.occurrence_id.clone())
                             .collect();
+                        let reset_updates_tracked_row = updated.iter().any(|updated| {
+                            current_rows
+                                .iter()
+                                .any(|current| current.occurrence_id == updated.occurrence_id)
+                        });
+                        let reset_replaces_initial_view =
+                            initial_hydration && reset && !reset_updates_tracked_row;
+                        if reset_replaces_initial_view {
+                            current_rows.clear();
+                        }
+                        // A local aggregate snapshot may retract while the
+                        // relay concurrently publishes its replacement.  The
+                        // relay correctly calls that replacement an update,
+                        // but it is an add relative to this facade's already
+                        // retracted snapshot. Normalize at this boundary so a
+                        // public stream never emits an update for an unknown
+                        // row.
+                        let surviving_rows = current_rows
+                            .iter()
+                            .filter(|row| {
+                                !removed
+                                    .iter()
+                                    .any(|removed| removed.occurrence_id == row.occurrence_id)
+                            })
+                            .map(|row| row.occurrence_id.clone())
+                            .collect::<std::collections::BTreeSet<_>>();
+                        let (effective_added, effective_updated) =
+                            normalize_subscription_updates(surviving_rows, added, updated, |row| {
+                                &row.occurrence_id
+                            });
                         JazzClient::apply_core_subscription_rows(
                             &mut current_rows,
-                            reset,
-                            &added,
-                            &updated,
+                            &effective_added,
+                            &effective_updated,
                             &removed,
                         );
                         let rows_for_cache = current_rows
@@ -1280,7 +1449,7 @@ impl ClientDbInner {
                             .map(|row| row.row.clone())
                             .collect::<Vec<_>>();
                         inner.borrow_mut().remember_rows(&table, &rows_for_cache);
-                        let delta = if reset {
+                        let delta = if reset_replaces_initial_view {
                             JazzClient::core_subscription_reset_delta(
                                 &db,
                                 &previous_rows,
@@ -1290,11 +1459,14 @@ impl ClientDbInner {
                             JazzClient::core_subscription_change_delta(
                                 &db,
                                 &current_rows,
-                                &added,
-                                &updated,
+                                &effective_added,
+                                &effective_updated,
                                 &removed,
                             )
                         };
+                        if !reset_replaces_initial_view {
+                            initial_hydration = false;
+                        }
                         let Ok(delta) = delta else {
                             break;
                         };
@@ -1350,19 +1522,11 @@ impl ClientDbInner {
         let desired = core_tier(tier);
         let deadline = tokio::time::Instant::now() + Duration::from_secs(25);
         loop {
+            inner.borrow().ensure_tick_driver_running()?;
             let tx_id = {
                 let borrowed = inner.borrow();
                 if let Some(tx_id) = borrowed.write_map.get(&batch_id).copied() {
                     tx_id
-                } else if borrowed.transactions.contains_key(&batch_id) {
-                    drop(borrowed);
-                    if tokio::time::Instant::now() >= deadline {
-                        return Err(JazzError::Sync(format!(
-                            "timed out waiting for batch {batch_id}"
-                        )));
-                    }
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                    continue;
                 } else {
                     return Err(JazzError::Sync(format!("unknown batch {batch_id}")));
                 }
@@ -1389,14 +1553,23 @@ impl ClientDbInner {
             if state.durability >= desired {
                 return Ok(());
             }
-            let db = inner.borrow().db.clone();
-            if tokio::time::timeout_at(deadline, db.next_write_state_change(tx_id))
-                .await
-                .is_err()
-            {
-                return Err(JazzError::Sync(format!(
-                    "timed out waiting for batch to reach {tier:?}"
-                )));
+            let (db, tick_driver_error_notify) = {
+                let inner = inner.borrow();
+                (
+                    inner.db.clone(),
+                    Arc::clone(&inner.tick_driver_error_notify),
+                )
+            };
+            let tick_driver_failure = tick_driver_error_notify.notified();
+            tokio::select! {
+                state_change = tokio::time::timeout_at(deadline, db.next_write_state_change(tx_id)) => {
+                    if state_change.is_err() {
+                        return Err(JazzError::Sync(format!(
+                            "timed out waiting for batch to reach {tier:?}"
+                        )));
+                    }
+                }
+                _ = tick_driver_failure => inner.borrow().ensure_tick_driver_running()?,
             }
         }
     }
@@ -1414,19 +1587,39 @@ impl ClientDbInner {
     }
 }
 
+/// Convert updates against members absent after this delta's removals into
+/// additions. A relay replacement may cross a locally retracted aggregate
+/// member, so public streams may never observe that as an update.
+fn normalize_subscription_updates<T>(
+    surviving: std::collections::BTreeSet<OutputOccurrenceId>,
+    mut added: Vec<T>,
+    updated: Vec<T>,
+    occurrence_id: impl Fn(&T) -> &OutputOccurrenceId,
+) -> (Vec<T>, Vec<T>) {
+    let mut effective_updated = Vec::new();
+    for row in updated {
+        if surviving.contains(occurrence_id(&row)) {
+            effective_updated.push(row);
+        } else {
+            added.push(row);
+        }
+    }
+    (added, effective_updated)
+}
+
 /// Transaction-scoped Jazz client handle.
 ///
 /// Mutations issued through this handle are staged in the transaction returned
 /// by [`JazzClient::begin_transaction`]. The handle dereferences to the scoped
 /// [`JazzClient`] so regular client methods can be used directly.
 pub struct JazzTransaction {
-    batch_id: BatchId,
+    batch_id: OpenBatchId,
     client: JazzClient,
 }
 
 impl JazzTransaction {
     /// Logical batch id backing this transaction.
-    pub fn batch_id(&self) -> BatchId {
+    pub fn open_batch_id(&self) -> OpenBatchId {
         self.batch_id
     }
 
@@ -1440,8 +1633,7 @@ impl JazzTransaction {
     /// Returns the transaction batch id so callers can wait for durability with
     /// [`JazzClient::wait_for_batch`] if needed.
     pub fn commit(self) -> Result<BatchId> {
-        self.client.commit_transaction(self.batch_id)?;
-        Ok(self.batch_id)
+        self.client.commit_transaction(self.batch_id)
     }
 
     /// Roll back this transaction locally.
@@ -1645,6 +1837,27 @@ fn core_to_public_value(value: CoreValue) -> Result<Value> {
             .map(core_to_public_value)
             .collect::<Result<Vec<_>>>()
             .map(Value::Array),
+        CoreValue::Record(record) => {
+            let identity_index = ["row_uuid", "id"]
+                .into_iter()
+                .find_map(|name| record.descriptor().field_index(name))
+                .filter(|index| {
+                    record.descriptor().fields()[*index].name.as_deref() == Some("row_uuid")
+                });
+            let id = identity_index.and_then(|index| match record.get_idx(index) {
+                Ok(CoreValue::Uuid(id)) => Some(ObjectId::from_uuid(id)),
+                _ => None,
+            });
+            let values = record
+                .to_values()
+                .map_err(|error| JazzError::Query(error.to_string()))?
+                .into_iter()
+                .enumerate()
+                .filter(|(index, _)| Some(*index) != identity_index)
+                .map(|(_, value)| core_to_public_value(value))
+                .collect::<Result<Vec<_>>>()?;
+            Ok(Value::Row { id, values })
+        }
         other => Err(JazzError::Query(format!(
             "client does not support core value {other:?}"
         ))),
@@ -1726,9 +1939,9 @@ fn core_row_provenance_to_public(
 ) -> crate::tools::metadata::RowProvenance {
     crate::tools::metadata::RowProvenance {
         created_by: provenance.created_by.0.to_string(),
-        created_at: provenance.created_at.physical_ms(),
+        created_at: provenance.created_at.0,
         updated_by: provenance.updated_by.0.to_string(),
-        updated_at: provenance.updated_at.physical_ms(),
+        updated_at: provenance.updated_at.0,
     }
 }
 
@@ -1931,9 +2144,7 @@ fn aggregate_public_values(
 }
 
 fn core_batch_id(tx_id: CoreTxId) -> BatchId {
-    let mut bytes = *tx_id.node.0.as_bytes();
-    bytes[..8].copy_from_slice(&tx_id.time.0.to_be_bytes());
-    BatchId(bytes)
+    BatchId::from_committed_tx(tx_id)
 }
 
 fn core_tier(tier: DurabilityTier) -> CoreDurabilityTier {
@@ -1954,6 +2165,70 @@ fn core_rejection_reason_label(reason: &CoreRejectionReason) -> String {
     }
 }
 
+fn core_array_subquery(
+    subquery: &crate::tools::public_api::query::ArraySubquerySpec,
+    schema: &Schema,
+) -> Result<crate::query::ArraySubquery> {
+    fn local_column(column: &str) -> &str {
+        column.rsplit_once('.').map_or(column, |(_, local)| local)
+    }
+    if !subquery.joins.is_empty() {
+        return Err(JazzError::Query(format!(
+            "array relation {} contains joins, which are not supported",
+            subquery.column_name
+        )));
+    }
+    let table = schema.get(&subquery.table).ok_or_else(|| {
+        JazzError::Query(format!("unknown array relation table {}", subquery.table))
+    })?;
+    let mut filters = Vec::new();
+    for condition in &subquery.filters {
+        filters.extend(core_query_condition(condition, table)?);
+    }
+    let order_by = subquery
+        .order_by
+        .iter()
+        .map(|(column, direction)| crate::query::OrderBy {
+            column: column.clone(),
+            direction: match direction {
+                PublicSortDirection::Ascending => crate::query::OrderDirection::Asc,
+                PublicSortDirection::Descending => crate::query::OrderDirection::Desc,
+            },
+        })
+        .collect();
+    let requirement = match subquery.requirement {
+        crate::tools::public_api::query::ArraySubqueryRequirement::Optional => {
+            crate::query::ArraySubqueryRequirement::Optional
+        }
+        crate::tools::public_api::query::ArraySubqueryRequirement::AtLeastOne => {
+            crate::query::ArraySubqueryRequirement::AtLeastOne
+        }
+        crate::tools::public_api::query::ArraySubqueryRequirement::MatchCorrelationCardinality => {
+            crate::query::ArraySubqueryRequirement::MatchCorrelationCardinality
+        }
+    };
+    Ok(crate::query::ArraySubquery {
+        column_name: subquery.column_name.clone(),
+        table: subquery.table.as_str().to_owned(),
+        // The public builder retains table qualification to make correlation
+        // intent explicit. Core array scopes are already typed by their parent
+        // and child tables, so their column references must be scope-local.
+        inner_column: local_column(&subquery.inner_column).to_owned(),
+        outer_column: local_column(&subquery.outer_column).to_owned(),
+        filters,
+        select: subquery.select_columns.clone(),
+        order_by,
+        limit: subquery.limit,
+        offset: subquery.offset,
+        requirement,
+        nested_arrays: subquery
+            .nested_arrays
+            .iter()
+            .map(|nested| core_array_subquery(nested, schema))
+            .collect::<Result<Vec<_>>>()?,
+    })
+}
+
 impl JazzClient {
     fn write_identity(&self) -> Option<CoreAuthorId> {
         self.write_context
@@ -1972,36 +2247,85 @@ impl JazzClient {
         }
         Ok(())
     }
-    fn core_read_opts(durability_tier: Option<DurabilityTier>) -> CoreReadOpts {
-        CoreReadOpts {
+    fn core_read_opts(
+        query: &Query,
+        durability_tier: Option<DurabilityTier>,
+    ) -> Result<CoreReadOpts> {
+        let read_view = match query.branches.as_slice() {
+            // Existing public callers did not have to name the root before the
+            // branch facade existed. Keep that spelling (and the documented
+            // `main` spelling) as the ordinary current view.
+            [] => CoreReadViewSpec::default(),
+            [branch] if branch == "main" => CoreReadViewSpec::default(),
+            [branch] => {
+                let branch = uuid::Uuid::parse_str(branch).map_err(|_| {
+                    JazzError::Query(format!("branch {branch:?} must be `main` or a branch UUID"))
+                })?;
+                CoreReadViewSpec {
+                    source: CoreReadViewSourceSpec::Branch { branch },
+                    ..CoreReadViewSpec::default()
+                }
+            }
+            branches => {
+                // Public QueryBuilder retains its historical plural syntax,
+                // but v1's core serving contract transports exactly one branch
+                // metadata prerequisite. Do not lower this to an unsupported
+                // MergedBranches read view and fail later/opaqely.
+                return Err(JazzError::Query(format!(
+                    "multi-branch read views are not supported yet (requested {} branches)",
+                    branches.len()
+                )));
+            }
+        };
+        Ok(CoreReadOpts {
             tier: durability_tier
                 .map(core_tier)
                 .unwrap_or(CoreDurabilityTier::Local),
             local_updates: CoreLocalUpdates::Immediate,
             propagation: CorePropagation::Full,
-            include_deleted: false,
-            ..CoreReadOpts::default()
-        }
+            include_deleted: query.include_deleted,
+            read_view,
+        })
     }
     fn core_query(&self, query: &Query) -> Result<crate::query::Query> {
-        if !query.joins.is_empty() {
-            return Err(JazzError::Query(
-                "flat joined output requires complete OutputOccurrenceId source tuples; a root row id alone is unsafe"
-                    .to_string(),
-            ));
-        }
         if query.disjuncts.len() != 1
-            || !query.array_subqueries.is_empty()
             || query.recursive.is_some()
-            || query.include_deleted
             || query.result_element_index.is_some()
             || (query.aggregate.is_some() && query.select_columns.is_some())
+            || (!query.joins.is_empty()
+                && (query.select_columns.is_some()
+                    || !query.order_by.is_empty()
+                    || query.limit.is_some()
+                    || query.offset != 0
+                    || query.aggregate.is_some()))
         {
             return Err(JazzError::Query(
                 "JazzClient currently supports simple table queries only".to_string(),
             ));
         }
         let mut core_query = crate::query::Query::from(query.table.as_str());
+        if !query.joins.is_empty() {
+            core_query.flat_join = Some(crate::query::FlatJoin {
+                root_alias: query.alias.clone(),
+                sources: query
+                    .joins
+                    .iter()
+                    .map(|join| {
+                        let (left, right) = join.on.clone().ok_or_else(|| {
+                            JazzError::Query(format!(
+                                "flat join {} is missing an ON equality",
+                                join.effective_name()
+                            ))
+                        })?;
+                        Ok(crate::query::FlatJoinSource {
+                            table: join.table.as_str().to_owned(),
+                            alias: join.alias.clone(),
+                            on: crate::query::FlatJoinOn { left, right },
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?,
+            });
+        }
         let schema = self.schema()?;
         let table_schema = schema
             .get(&TableName::new(query.table.as_str()))
@@ -2011,6 +2335,11 @@ impl JazzClient {
                 core_query = core_query.filter(predicate);
             }
         }
+        core_query.array_subqueries = query
+            .array_subqueries
+            .iter()
+            .map(|subquery| core_array_subquery(subquery, &schema))
+            .collect::<Result<Vec<_>>>()?;
         if let Some(aggregate) = &query.aggregate {
             let outputs = aggregate
                 .outputs
@@ -2094,6 +2423,44 @@ impl JazzClient {
                 })
                 .collect();
         }
+        if !query.joins.is_empty() {
+            let mut output_columns = Vec::new();
+            let mut sources = vec![(query.effective_name().to_owned(), query.table.clone())];
+            sources.extend(
+                query
+                    .joins
+                    .iter()
+                    .map(|join| (join.effective_name().to_owned(), join.table.clone())),
+            );
+            for (source, table) in sources {
+                let table_schema = schema
+                    .get(&table)
+                    .ok_or_else(|| JazzError::Query(format!("unknown flat join table {table}")))?;
+                for column in &table_schema.columns.columns {
+                    output_columns.push((
+                        format!("{source}.{}", column.name),
+                        column.column_type.clone(),
+                    ));
+                }
+            }
+            return rows
+                .into_iter()
+                .map(|row| {
+                    let row_id = ObjectId::from_uuid(row.row_uuid().0);
+                    let values = output_columns
+                        .iter()
+                        .map(|(field, ty)| {
+                            row.raw_field(field)
+                                .ok_or_else(|| {
+                                    JazzError::Query(format!("flat join row missing {field}"))
+                                })
+                                .and_then(|value| core_to_public_value_for_column_type(value, ty))
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+                    Ok((row_id, values))
+                })
+                .collect();
+        }
         let columns = query.select_columns.clone().unwrap_or_else(|| {
             table_schema
                 .columns
@@ -2130,11 +2497,104 @@ impl JazzClient {
                                 )
                             })
                     })
+                    .chain(query.array_subqueries.iter().map(|subquery| {
+                        row.raw_field(&subquery.column_name)
+                            .ok_or_else(|| {
+                                JazzError::Query(format!(
+                                    "row missing array relation {}",
+                                    subquery.column_name
+                                ))
+                            })
+                            .and_then(core_to_public_value)
+                    }))
                     .collect::<Result<Vec<_>>>()?;
                 Ok((row_id, values))
             })
             .collect::<Result<Vec<_>>>()?;
         Ok(rows)
+    }
+
+    fn core_rows_to_query_results(
+        &self,
+        query: &Query,
+        rows: Vec<crate::node::CurrentRow>,
+    ) -> Result<Vec<QueryResult>> {
+        let keys = rows
+            .iter()
+            .map(|row| ResultKey::from_occurrence(crate::db::subscription_row_occurrence_id(row)))
+            .collect::<Vec<_>>();
+        let names = self.query_result_column_names(query)?;
+        let values = self.core_rows_to_public(query, rows)?;
+        keys.into_iter()
+            .zip(values)
+            .map(|(key, (_, values))| {
+                if names.len() != values.len() {
+                    return Err(JazzError::Query(format!(
+                        "query result descriptor has {} fields but row has {} values",
+                        names.len(),
+                        values.len()
+                    )));
+                }
+                let fields = names
+                    .iter()
+                    .cloned()
+                    .zip(values)
+                    .map(|(name, value)| QueryResultField { name, value })
+                    .collect();
+                Ok(QueryResult::new(key, fields))
+            })
+            .collect()
+    }
+
+    fn query_result_column_names(&self, query: &Query) -> Result<Vec<String>> {
+        let schema = self.schema()?;
+        let table = query.table.as_str();
+        let table_schema = schema
+            .get(&TableName::new(table))
+            .ok_or_else(|| JazzError::Query(format!("unknown table {table}")))?;
+        if let Some(aggregate) = &query.aggregate {
+            let mut names = aggregate.group_by.iter().cloned().collect::<Vec<_>>();
+            names.extend(aggregate.outputs.iter().map(aggregate_output_name));
+            return Ok(names);
+        }
+        if !query.joins.is_empty() {
+            let mut names = Vec::new();
+            let mut sources = vec![(query.effective_name().to_owned(), query.table.clone())];
+            sources.extend(
+                query
+                    .joins
+                    .iter()
+                    .map(|join| (join.effective_name().to_owned(), join.table.clone())),
+            );
+            for (source, table) in sources {
+                let source_schema = schema
+                    .get(&table)
+                    .ok_or_else(|| JazzError::Query(format!("unknown flat join table {table}")))?;
+                names.extend(
+                    source_schema
+                        .columns
+                        .columns
+                        .iter()
+                        .map(|column| format!("{source}.{}", column.name)),
+                );
+            }
+            return Ok(names);
+        }
+        let mut names = query.select_columns.clone().unwrap_or_else(|| {
+            table_schema
+                .columns
+                .columns
+                .iter()
+                .map(|column| column.name.as_str().to_owned())
+                .collect()
+        });
+        names.extend(
+            query
+                .array_subqueries
+                .iter()
+                .map(|subquery| subquery.column_name.clone()),
+        );
+        Ok(names)
     }
 
     fn core_subscription_row_to_public(
@@ -2150,7 +2610,7 @@ impl JazzClient {
                 crate::tools::metadata::RowProvenance::for_insert("jazz:unknown", 0)
             });
         Ok(Row::new(
-            row.occurrence_id.clone(),
+            ResultKey::from_occurrence(row.occurrence_id.clone()),
             encoded.to_vec(),
             BatchId([0; 16]),
             provenance,
@@ -2188,7 +2648,10 @@ impl JazzClient {
             .iter()
             .cloned()
             .enumerate()
-            .map(|(index, id)| OrderedRemoved { id, index })
+            .map(|(index, id)| OrderedRemoved {
+                id: ResultKey::from_occurrence(id),
+                index,
+            })
             .collect();
         let mut delta = Self::core_subscription_snapshot_delta(db, rows)?;
         delta.removed = removed;
@@ -2197,14 +2660,10 @@ impl JazzClient {
 
     fn apply_core_subscription_rows(
         current_rows: &mut Vec<CoreSubscriptionOutputRow>,
-        reset: bool,
         added_rows: &[CoreSubscriptionOutputRow],
         updated_rows: &[CoreSubscriptionOutputRow],
         removed_rows: &[crate::db::RemovedRow],
     ) {
-        if reset {
-            current_rows.clear();
-        }
         current_rows.retain(|row| {
             !removed_rows
                 .iter()
@@ -2247,7 +2706,7 @@ impl JazzClient {
             .iter()
             .map(|row| {
                 let public = Self::core_subscription_row_to_public(db, row)?;
-                let index = index_of(&public.id);
+                let index = index_of(public.id.as_occurrence());
                 Ok(OrderedAdded {
                     id: public.id.clone(),
                     index,
@@ -2259,7 +2718,7 @@ impl JazzClient {
             .iter()
             .map(|row| {
                 let public = Self::core_subscription_row_to_public(db, row)?;
-                let index = index_of(&public.id);
+                let index = index_of(public.id.as_occurrence());
                 Ok(OrderedUpdated {
                     id: public.id.clone(),
                     old_index: index,
@@ -2272,7 +2731,7 @@ impl JazzClient {
             .iter()
             .enumerate()
             .map(|(index, row)| OrderedRemoved {
-                id: row.occurrence_id.clone(),
+                id: ResultKey::from_occurrence(row.occurrence_id.clone()),
                 index,
             })
             .collect();
@@ -2311,8 +2770,8 @@ impl JazzClient {
                     )));
                 };
                 match column {
-                    "$createdAt" => Value::Timestamp(provenance.created_at.physical_ms()),
-                    "$updatedAt" => Value::Timestamp(provenance.updated_at.physical_ms()),
+                    "$createdAt" => Value::Timestamp(provenance.created_at.0),
+                    "$updatedAt" => Value::Timestamp(provenance.updated_at.0),
                     "$createdBy" => Value::Text(provenance.created_by.0.to_string()),
                     "$updatedBy" => Value::Text(provenance.updated_by.0.to_string()),
                     _ => unreachable!("matched provenance magic column"),
@@ -2368,64 +2827,6 @@ impl JazzClient {
             })
             .collect()
     }
-    fn apply_core_transaction_overlay(
-        &self,
-        query: &Query,
-        batch_id: BatchId,
-        rows: &mut Vec<(ObjectId, Vec<Value>)>,
-    ) -> Result<()> {
-        let table = query.table.as_str();
-        let schema = self.schema()?;
-        let table_schema = schema
-            .get(&TableName::new(table))
-            .ok_or_else(|| JazzError::Query(format!("unknown table {table}")))?;
-        let columns = query.select_columns.clone().unwrap_or_else(|| {
-            table_schema
-                .columns
-                .columns
-                .iter()
-                .map(|column| column.name.as_str().to_string())
-                .collect()
-        });
-
-        let inner = self.db.inner.borrow();
-        let tx = inner.transactions.get(&batch_id).ok_or_else(|| {
-            let message = inner
-                .closed_transactions
-                .get(&batch_id)
-                .copied()
-                .map(|state| ClientDbInner::closed_transaction_message(batch_id, state))
-                .unwrap_or_else(|| format!("transaction {batch_id} is not open"));
-            JazzError::Query(message)
-        })?;
-
-        for write in tx.writes.iter().filter(|write| write.table == table) {
-            if write.deletion == Some(CoreDeletionEvent::Deleted) {
-                rows.retain(|(row_id, _)| *row_id != write.row_id);
-                continue;
-            }
-
-            let existing_position = rows.iter().position(|(row_id, _)| *row_id == write.row_id);
-            let mut values = existing_position
-                .map(|position| rows[position].1.clone())
-                .unwrap_or_else(|| vec![Value::Null; columns.len()]);
-
-            for (column, value) in &write.cells {
-                if let Some(position) = columns.iter().position(|candidate| candidate == column) {
-                    values[position] = core_to_public_value(value.clone())?;
-                }
-            }
-
-            if let Some(position) = existing_position {
-                rows[position].1 = values;
-            } else {
-                rows.push((write.row_id, values));
-            }
-        }
-
-        Ok(())
-    }
-
     /// Connect to Jazz with the given configuration.
     pub async fn connect(context: AppContext) -> Result<Self> {
         Self::connect_inner(context).await
@@ -2486,7 +2887,7 @@ impl JazzClient {
             self.db
                 .subscribe(
                     core_query,
-                    Self::core_read_opts(Some(DurabilityTier::EdgeServer)),
+                    Self::core_read_opts(&query, Some(DurabilityTier::EdgeServer))?,
                     query.table.as_str().to_string(),
                     tx,
                 )
@@ -2504,24 +2905,63 @@ impl JazzClient {
         durability_tier: Option<DurabilityTier>,
     ) -> Result<Vec<(ObjectId, Vec<Value>)>> {
         {
-            let opts = Self::core_read_opts(durability_tier);
-            let rows = self
-                .db
-                .query_rows(
-                    self.core_query(&query)?,
-                    opts,
-                    query.table.as_str().to_string(),
-                    matches!(
-                        durability_tier,
-                        Some(DurabilityTier::EdgeServer | DurabilityTier::GlobalServer)
-                    ),
-                )
-                .await?;
-            let mut rows = self.core_rows_to_public(&query, rows)?;
-            if let Some(batch_id) = self.write_context.as_ref().and_then(|ctx| ctx.batch_id) {
-                self.apply_core_transaction_overlay(&query, batch_id, &mut rows)?;
+            if !query.joins.is_empty() {
+                return Err(JazzError::Query(
+                    "joined results require query_results(), which returns stable ResultKey values"
+                        .to_owned(),
+                ));
             }
-            Ok(rows)
+            let results = self.query_results(query, durability_tier).await?;
+            results
+                .into_iter()
+                .map(|result| {
+                    let row_id = result.key.row_id().ok_or_else(|| {
+                        JazzError::Query(
+                            "joined result cannot be represented by the legacy row-id query API"
+                                .to_owned(),
+                        )
+                    })?;
+                    Ok((row_id, result.into_values()))
+                })
+                .collect()
+        }
+    }
+
+    /// One-shot query with a stable key for every result, including flat joins.
+    pub async fn query_results(
+        &self,
+        query: Query,
+        durability_tier: Option<DurabilityTier>,
+    ) -> Result<Vec<QueryResult>> {
+        {
+            let core_query = self.core_query(&query)?;
+            let table = query.table.as_str().to_string();
+            let rows =
+                if let Some(batch_id) = self.write_context.as_ref().and_then(|ctx| ctx.batch_id) {
+                    let author = self
+                        .write_identity()
+                        .unwrap_or_else(|| self.db.inner.borrow().identity.author);
+                    self.db.query_transaction_rows(
+                        core_query,
+                        Self::core_read_opts(&query, durability_tier)?,
+                        batch_id,
+                        table,
+                        author,
+                    )?
+                } else {
+                    self.db
+                        .query_rows(
+                            core_query,
+                            Self::core_read_opts(&query, durability_tier)?,
+                            table,
+                            matches!(
+                                durability_tier,
+                                Some(DurabilityTier::EdgeServer | DurabilityTier::GlobalServer)
+                            ),
+                        )
+                        .await?
+                };
+            self.core_rows_to_query_results(&query, rows)
         }
     }
 
@@ -2530,7 +2970,7 @@ impl JazzClient {
         &self,
         table: &str,
         values: HashMap<String, Value>,
-    ) -> Result<(ObjectId, Vec<Value>, BatchId)> {
+    ) -> Result<(ObjectId, Vec<Value>, Option<BatchId>)> {
         self.insert_with_id(table, Option::<Uuid>::None, values)
     }
 
@@ -2540,7 +2980,7 @@ impl JazzClient {
         table: &str,
         object_id: impl Into<Option<Uuid>>,
         values: HashMap<String, Value>,
-    ) -> Result<(ObjectId, Vec<Value>, BatchId)> {
+    ) -> Result<(ObjectId, Vec<Value>, Option<BatchId>)> {
         {
             let row_values = self.core_ordered_values(table, &values)?;
             let cells = self.core_cells(table, values)?;
@@ -2548,7 +2988,7 @@ impl JazzClient {
                 let row_id =
                     self.db
                         .stage_insert(batch_id, table.to_string(), object_id.into(), cells)?;
-                Ok((row_id, row_values, batch_id))
+                Ok((row_id, row_values, None))
             } else {
                 let (row_id, tx_id) = self.db.insert(
                     table.to_string(),
@@ -2557,7 +2997,7 @@ impl JazzClient {
                     self.write_identity(),
                 )?;
                 let batch_id = core_batch_id(tx_id);
-                Ok((row_id, row_values, batch_id))
+                Ok((row_id, row_values, Some(batch_id)))
             }
         }
     }
@@ -2568,24 +3008,28 @@ impl JazzClient {
         table: &str,
         object_id: Uuid,
         values: HashMap<String, Value>,
-    ) -> Result<BatchId> {
+    ) -> Result<Option<BatchId>> {
         {
             let cells = self.core_cells(table, values)?;
             if let Some(batch_id) = self.write_context.as_ref().and_then(|ctx| ctx.batch_id) {
                 self.db
                     .stage_upsert(batch_id, table.to_string(), object_id, cells)?;
-                Ok(batch_id)
+                Ok(None)
             } else {
                 let tx_id =
                     self.db
                         .upsert(table.to_string(), object_id, cells, self.write_identity())?;
-                Ok(core_batch_id(tx_id))
+                Ok(Some(core_batch_id(tx_id)))
             }
         }
     }
 
     /// Update a row.
-    pub fn update(&self, object_id: ObjectId, updates: Vec<(String, Value)>) -> Result<BatchId> {
+    pub fn update(
+        &self,
+        object_id: ObjectId,
+        updates: Vec<(String, Value)>,
+    ) -> Result<Option<BatchId>> {
         {
             let table = self
                 .db
@@ -2602,10 +3046,10 @@ impl JazzClient {
             let cells = self.core_cells(&table, updates.into_iter().collect())?;
             if let Some(batch_id) = self.write_context.as_ref().and_then(|ctx| ctx.batch_id) {
                 self.db.stage_update(batch_id, object_id, cells)?;
-                Ok(batch_id)
+                Ok(None)
             } else {
                 let tx_id = self.db.update(object_id, cells, self.write_identity())?;
-                Ok(core_batch_id(tx_id))
+                Ok(Some(core_batch_id(tx_id)))
             }
         }
     }
@@ -2632,14 +3076,14 @@ impl JazzClient {
     }
 
     /// Delete a row.
-    pub fn delete(&self, object_id: ObjectId) -> Result<BatchId> {
+    pub fn delete(&self, object_id: ObjectId) -> Result<Option<BatchId>> {
         {
             if let Some(batch_id) = self.write_context.as_ref().and_then(|ctx| ctx.batch_id) {
                 self.db.stage_delete(batch_id, object_id)?;
-                Ok(batch_id)
+                Ok(None)
             } else {
                 let tx_id = self.db.delete(object_id, self.write_identity())?;
-                Ok(core_batch_id(tx_id))
+                Ok(Some(core_batch_id(tx_id)))
             }
         }
     }
@@ -2658,14 +3102,14 @@ impl JazzClient {
     }
 
     /// Commit an open transaction by batch id.
-    pub fn commit_transaction(&self, batch_id: BatchId) -> Result<()> {
+    pub fn commit_transaction(&self, batch_id: OpenBatchId) -> Result<BatchId> {
         self.db.commit_transaction(batch_id)
     }
 
     /// Roll back an open transaction by batch id.
     ///
     /// Returns whether a local batch record existed for the transaction.
-    pub fn rollback_transaction(&self, batch_id: BatchId) -> Result<bool> {
+    pub fn rollback_transaction(&self, batch_id: OpenBatchId) -> Result<bool> {
         self.db.rollback_transaction(batch_id)
     }
 
@@ -2675,8 +3119,10 @@ impl JazzClient {
 
     /// Fetch and materialize the bytes behind a large-value handle returned by a query.
     pub async fn hydrate_large_value(&self, handle: &LargeValueHandle) -> Result<Vec<u8>> {
+        self.db.ensure_tick_driver_running()?;
         let deadline = tokio::time::Instant::now() + QUERY_COVERAGE_TIMEOUT;
         loop {
+            self.db.ensure_tick_driver_running()?;
             match self.db.hydrate_large_value_handle(handle) {
                 Ok(bytes) => return Ok(bytes),
                 Err(error) => {
@@ -2763,7 +3209,7 @@ mod tests {
     use super::*;
     use crate::tools::AppId;
     use crate::tools::public_schema::Schema;
-    use crate::tools::{ClientStorage, ColumnType, SchemaBuilder, TableSchema};
+    use crate::tools::{ClientStorage, ColumnType, QueryBuilder, SchemaBuilder, TableSchema};
     use serde_json::json;
     use tempfile::TempDir;
 
@@ -2775,6 +3221,22 @@ mod tests {
                     .column("completed", ColumnType::Boolean),
             )
             .build()
+    }
+
+    #[test]
+    fn multi_branch_facade_query_fails_loudly_until_merged_view_transport_exists() {
+        let query = QueryBuilder::new("todos")
+            .branches(&[
+                "00000000-0000-0000-0000-000000000001",
+                "00000000-0000-0000-0000-000000000002",
+            ])
+            .build();
+        let error = JazzClient::core_read_opts(&query, None)
+            .expect_err("v1 must not lower plural branches to unsupported MergedBranches");
+        assert!(
+            matches!(error, JazzError::Query(ref message) if message.contains("multi-branch read views are not supported")),
+            "unexpected multi-branch capability error: {error}"
+        );
     }
 
     fn make_offline_context(
@@ -2844,6 +3306,34 @@ mod tests {
         );
     }
 
+    // This narrow internal test is necessary because the wire crossing is an
+    // impossible state to inject through the public client API: it requires a
+    // local aggregate retraction racing a relay replacement. The public
+    // aggregate subscription tests cover ordinary delivery around it.
+    #[test]
+    fn aggregate_replacement_for_absent_member_is_normalized_to_an_add() {
+        let held = OutputOccurrenceId::single_source(ObjectId::from_uuid(Uuid::from_u128(1)));
+        let crossed = OutputOccurrenceId::single_source(ObjectId::from_uuid(Uuid::from_u128(2)));
+        let (added, updated) = normalize_subscription_updates(
+            std::collections::BTreeSet::from([held.clone()]),
+            Vec::<OutputOccurrenceId>::new(),
+            vec![crossed.clone()],
+            |id| id,
+        );
+
+        assert_eq!(added, vec![crossed]);
+        assert!(updated.is_empty());
+
+        let (added, updated) = normalize_subscription_updates(
+            std::collections::BTreeSet::from([held.clone()]),
+            Vec::<OutputOccurrenceId>::new(),
+            vec![held.clone()],
+            |id| id,
+        );
+        assert!(added.is_empty());
+        assert_eq!(updated, vec![held]);
+    }
+
     #[test]
     fn default_session_from_context_uses_jwt_claims_for_user_clients() {
         let app_id = AppId::from_name("client-jwt-session");
@@ -2898,6 +3388,46 @@ mod tests {
             "backend/admin clients should keep using explicit session scopes"
         );
     }
+
+    // This is an internal fault-injection test because a real fatal tick error
+    // means corrupt local state; creating that through the public API would
+    // require deliberately corrupting a storage backend. The assertion itself
+    // is public: a normal `JazzClient::query` must report the stopped driver.
+    #[tokio::test(flavor = "current_thread")]
+    async fn fatal_tick_driver_failure_is_reported_to_callers() {
+        let client = JazzClient::connect(make_offline_context(
+            AppId::from_name("fatal-tick-driver-error"),
+            TempDir::new().expect("tempdir").keep(),
+            declared_todo_schema(),
+        ))
+        .await
+        .expect("connect offline client");
+        let error = CoreDbError {
+            code: CoreDbErrorCode::Storage,
+            message: "simulated local storage corruption".to_string(),
+        };
+
+        assert_eq!(
+            classify_tick_driver_error(&error),
+            TickDriverErrorClass::Fatal,
+            "storage faults must not enter the retry loop"
+        );
+        client
+            .db
+            .inner
+            .borrow_mut()
+            .record_tick_driver_failure(error.to_string());
+
+        let error = client
+            .query(Query::new("todos"), Some(DurabilityTier::Local))
+            .await
+            .expect_err("a stopped tick driver must be visible to the caller");
+        assert!(
+            matches!(error, JazzError::Sync(ref message) if message.contains("client tick driver stopped") && message.contains("local storage corruption")),
+            "unexpected fatal tick-driver error: {error}"
+        );
+    }
+
     #[cfg(feature = "rocksdb")]
     #[tokio::test]
     async fn offline_persistent_client_rehydrates_rows_from_core_storage() {
@@ -2920,7 +3450,10 @@ mod tests {
             )
             .expect("insert offline persistent row");
         client
-            .wait_for_batch(batch_id, DurabilityTier::Local)
+            .wait_for_batch(
+                batch_id.expect("ordinary mutation commits immediately"),
+                DurabilityTier::Local,
+            )
             .await
             .expect("wait for local durability");
         drop(client);
@@ -2964,7 +3497,10 @@ mod tests {
             )
             .expect("insert offline memory row");
         client
-            .wait_for_batch(batch_id, DurabilityTier::Local)
+            .wait_for_batch(
+                batch_id.expect("ordinary mutation commits immediately"),
+                DurabilityTier::Local,
+            )
             .await
             .expect("wait for local durability");
         drop(client);

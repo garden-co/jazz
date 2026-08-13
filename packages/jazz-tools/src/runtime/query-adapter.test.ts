@@ -50,4 +50,49 @@ describe("translateQuery", () => {
     expect(translated.relation_ir).toBeDefined();
     expect(translated.conditions).toBeUndefined();
   });
+
+  it("treats an omitted include limit as unbounded", () => {
+    const translated = JSON.parse(
+      translateQuery(app.users.include({ todosViaOwner: app.todos })._build(), app.wasmSchema),
+    );
+
+    expect(translated.array_subqueries).toMatchObject([
+      { column_name: "todosViaOwner", limit: null },
+    ]);
+  });
+
+  it("preserves an omitted limit across subsequent query-builder clones", () => {
+    const translated = JSON.parse(
+      translateQuery(
+        app.users
+          .include({
+            todosViaOwner: app.todos.select("title").orderBy("title"),
+          })
+          ._build(),
+        app.wasmSchema,
+      ),
+    );
+
+    expect(translated.array_subqueries).toMatchObject([
+      { column_name: "todosViaOwner", limit: null },
+    ]);
+  });
+
+  it("treats an omitted forward-relation limit as unbounded", () => {
+    const translated = JSON.parse(
+      translateQuery(app.todos.include({ owner: app.users })._build(), app.wasmSchema),
+    );
+
+    expect(translated.array_subqueries).toMatchObject([{ column_name: "owner", limit: null }]);
+  });
+
+  it("treats include shorthand as an explicit whole-relation request", () => {
+    const translated = JSON.parse(
+      translateQuery(app.users.include({ todosViaOwner: true })._build(), app.wasmSchema),
+    );
+
+    expect(translated.array_subqueries).toMatchObject([
+      { column_name: "todosViaOwner", limit: null },
+    ]);
+  });
 });

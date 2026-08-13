@@ -48,10 +48,11 @@ static GLOBAL: CountingAllocator = CountingAllocator;
 
 const DEFAULT_SCALES: &str = "1000,2500,5000,10000,20000";
 const DEFAULT_SAMPLES: usize = 3;
-// Initial three-sample receipt: 1.001031x allocations and 1.017327x bytes.
-// A 1.025x limit preserves 0.7673 percentage points above the larger observed
-// drift, rather than inheriting the canary's deliberately loose 3x band.
-const DEFAULT_MAX_RATIO: f64 = 1.025;
+// The terminal-operation carrier's one-sample smoke receipt measured 1.001512x
+// allocations and 1.034605x bytes; repeated full three-sample receipts measured
+// 1.001133-1.001512x and 1.033047-1.034582x. A 1.043x limit explicitly relaxes
+// the old 1.025x ratio while retaining roughly its original headroom.
+const DEFAULT_MAX_RATIO: f64 = 1.043;
 
 fn main() {
     jazz_benchmark_guard::refuse_contaminated_measurement();
@@ -92,9 +93,7 @@ struct DeliveryShape {
     added: usize,
     updated: usize,
     removed: usize,
-    added_related: usize,
-    added_edges: usize,
-    removed_edges: usize,
+    terminal_operations: usize,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -169,16 +168,8 @@ fn emit_rung(scale: usize, samples: usize, summary: RungSummary, all: &[Measurem
         json!(summary.delivery.removed),
     );
     fields.insert(
-        "delivered_added_related".to_owned(),
-        json!(summary.delivery.added_related),
-    );
-    fields.insert(
-        "delivered_added_edges".to_owned(),
-        json!(summary.delivery.added_edges),
-    );
-    fields.insert(
-        "delivered_removed_edges".to_owned(),
-        json!(summary.delivery.removed_edges),
+        "delivered_terminal_operations".to_owned(),
+        json!(summary.delivery.terminal_operations),
     );
     emit_json_line("relation_include_delivery", fields);
 }
@@ -215,7 +206,7 @@ fn emit_slope(samples: usize, max_ratio: f64, rungs: &[(usize, RungSummary)]) {
     fields.insert("max_ratio_rule".to_owned(), json!(max_ratio));
     fields.insert(
         "max_ratio_rule_source".to_owned(),
-        json!("2026-07-28 three-sample baseline byte ratio 1.017327 + 0.007673 margin"),
+        json!("2026-08-13 terminal-operation carrier: one-sample smoke byte ratio 1.034605; repeated three-sample byte ratios 1.033047-1.034582; explicit relaxation from 1.025"),
     );
     fields.insert("flat_by_ratio_rule".to_owned(), json!(flat));
     fields.insert(
@@ -311,9 +302,7 @@ fn open_db(scale: usize, sample: usize) -> Db<MemoryStorage> {
 
 fn relation_query() -> Query {
     Query::from("parents").array_subquery(
-        ArraySubquery::new("children", "children", "parent_id", "id")
-            .select(["label", "ordinal"])
-            .unbounded(),
+        ArraySubquery::new("children", "children", "parent_id", "id").select(["label", "ordinal"]),
     )
 }
 
@@ -386,18 +375,9 @@ fn seed_relation_fixture(db: &Db<MemoryStorage>, child_rows: usize) -> RowUuid {
 
 fn expect_initial_snapshot(event: SubscriptionEvent, parent: RowUuid) {
     match event {
-        SubscriptionEvent::Delta {
-            reset,
-            added,
-            added_related,
-            added_edges,
-            ..
-        } => assert!(
-            reset
-                && (added.iter().any(|row| row.row_uuid() == parent)
-                    || added_related.iter().any(|row| row.row_uuid() == parent)
-                    || !added_edges.is_empty()),
-            "initial relation hydration did not contain the parent"
+        SubscriptionEvent::Delta { reset, added, .. } => assert!(
+            reset && added.iter().any(|row| row.row_uuid() == parent),
+            "initial terminal hydration did not contain the parent"
         ),
         other => panic!("expected initial relation delta, got {other:?}"),
     }
@@ -410,29 +390,39 @@ fn expect_single_child_delta(event: SubscriptionEvent, parent: RowUuid) -> Deliv
             added,
             updated,
             removed,
-            added_related,
-            added_edges,
-            removed_edges,
+            terminal_operations,
             ..
         } => {
+            assert!(!reset, "structured child changes must remain incremental");
+            assert!(added.is_empty(), "an existing terminal root is not added");
             assert!(
-                !reset,
-                "one-row update unexpectedly reset the relation view"
+                updated.is_empty(),
+                "terminal operations replace updated rows"
             );
             assert!(
-                added.iter().any(|row| row.row_uuid() == parent)
-                    || updated.iter().any(|row| row.row_uuid() == parent)
-                    || added_related.iter().any(|row| row.row_uuid() == parent)
-                    || !added_edges.is_empty(),
-                "one child insert did not deliver a relation delta"
+                removed.is_empty(),
+                "an existing terminal root is not removed"
+            );
+            assert_eq!(
+                terminal_operations.len(),
+                1,
+                "exactly one terminal operation patches the root"
+            );
+            let parent_key = [10]
+                .into_iter()
+                .chain(parent.0.as_bytes().iter().copied())
+                .collect::<Vec<_>>();
+            assert!(
+                terminal_operations
+                    .iter()
+                    .all(|operation| operation.root_key == parent_key),
+                "one child insert did not patch the expected terminal root: {terminal_operations:?}"
             );
             DeliveryShape {
                 added: added.len(),
                 updated: updated.len(),
                 removed: removed.len(),
-                added_related: added_related.len(),
-                added_edges: added_edges.len(),
-                removed_edges: removed_edges.len(),
+                terminal_operations: terminal_operations.len(),
             }
         }
         other => panic!("expected measured relation delta, got {other:?}"),

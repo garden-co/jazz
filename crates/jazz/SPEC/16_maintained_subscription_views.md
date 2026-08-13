@@ -251,6 +251,33 @@ with semantic full-recompute repairs.
 
 Implementation status for `array_subqueries`:
 
+### Structured terminal patch contract
+
+A maintained structured terminal does not publish a freshly encoded nested
+root for every descendant change. Its incremental output is a typed structural
+patch addressed by the public root `ResultKey` and an alternating path of
+collection-field names and descendant `ResultKey`s. The operation vocabulary
+is deliberately about terminal values, not relations:
+
+- insert, update, and remove a root or descendant value;
+- move an existing value to an explicit position in its ordered collection;
+- replace a window by the equivalent ordered insert/remove/move operations;
+- reset only for initial hydration, reconnect/resubscription, or an explicitly
+  advertised loss of incremental continuity.
+
+Groove owns the selected ordered keys and scalar payload for every collection
+slot. It emits the smallest affected path operations without re-encoding an
+unmodified ancestor. One-shot reads and initial hydration still render complete
+terminal rows from that state. The transport carries this generic terminal
+operation vocabulary unchanged; a client applies it to its hydrated terminal
+tree and performs no joins, relation-edge interpretation, or query assembly.
+
+This split is required by `INV-INC-1`: replacing a parent containing 20,000
+children after one child insert is observably correct but still performs work
+proportional to accumulated state. Root-addressing alone is insufficient unless
+the changed descendant path is preserved through Groove evaluation and the
+subscription carrier.
+
 - Subscription opening: direct `array_subqueries` are accepted at the `Db` facade
   and sync registration surfaces, covered by
   `array_subquery_live_subscription_tracks_child_edges` and
@@ -335,9 +362,28 @@ replacement witness information for the peer state machine to emit the same net
 Aggregate functions are capability-gated by groove support. Maintained Jazz
 subscriptions should initially accept only deterministic, retractable summaries
 such as count, numeric sum, min, and max, with deterministic witness ties owned
-by groove. User-defined aggregates, approximate aggregates, and
-empty-global-row SQL compatibility stay outside the maintained subscription
-surface until their replay semantics and payload shape are specified.
+by groove. User-defined aggregates and approximate aggregates stay outside the
+maintained subscription surface until their replay semantics and payload shape
+are specified.
+
+Decision, Anselm 2026-08-07: the empty global aggregate row is **inside** the
+maintained surface, and follows SQL. A scalar global aggregate over no input
+rows delivers a present row reporting `0` for `count` and `NULL` for `sum`,
+`avg`, `min` and `max` — the same result a one-shot read produces, as ch. 6
+§6.4.2 requires. This chapter previously excluded it, which could not hold once
+`groove/SPEC/3_queries_operators.md` specified the one-shot behaviour: a
+one-shot read would return a row where a subscription over the same query
+returned nothing.
+
+Its identity is the one already required by ch. 6 §6.4.3 `INV-QUERY-30`: a
+scalar global aggregate lowers to one fixed synthetic identity. That identity
+does not depend on a group key, so the empty case needs no special derivation —
+which is what makes the empty global row expressible at all. The empty row is
+therefore present from attach, and the transition when the first input row
+arrives is a value replacement of an existing member, not an add. Its
+disappearance is likewise a value replacement back to the empty values, never a
+member removal: a scalar global aggregate's member is present for the lifetime
+of the subscription.
 
 Floating-point accumulation IS inside the maintained surface, under a weaker
 agreement guarantee than the exact one above. Incremental maintenance sums in

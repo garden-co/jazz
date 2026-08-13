@@ -63,6 +63,18 @@ impl SchemaVersionId {
 )]
 pub struct SchemaVersionAlias(pub u64);
 
+/// Node-local identity for one shared physical table lineage.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
+)]
+pub struct PhysicalTableId(pub u64);
+
+/// Node-local identity for one physical column epoch.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
+)]
+pub struct PhysicalColumnId(pub u64);
+
 /// Content-addressed migration-lens identity.
 #[derive(
     Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
@@ -80,6 +92,19 @@ impl MigrationLensId {
         self.0.as_bytes().to_vec()
     }
 
+    /// Borrow the UUID bytes in wire order.
+    pub fn as_bytes(&self) -> &[u8; 16] {
+        self.0.as_bytes()
+    }
+}
+
+/// Content-addressed atomic schema-lineage publication identity.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
+)]
+pub struct SchemaLineagePublicationId(pub uuid::Uuid);
+
+impl SchemaLineagePublicationId {
     /// Borrow the UUID bytes in wire order.
     pub fn as_bytes(&self) -> &[u8; 16] {
         self.0.as_bytes()

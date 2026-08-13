@@ -56,7 +56,8 @@ fn mergeable_open_commit_matches_replayed_mergeable_batch_with_intervening_write
     }
 
     let author = user(0x71);
-    let open_tx = actual.open_mergeable(author, Some(author)).unwrap();
+    let open_tx = OpenBatchId::new();
+    actual.open_mergeable(open_tx, author, Some(author)).unwrap();
     actual
         .tx_write_mergeable(
             open_tx,
@@ -213,6 +214,7 @@ fn mergeable_open_commit_matches_replayed_mergeable_batch_with_intervening_write
         MergeableCommit::new("todos", updated, 103)
             .made_by(author)
             .permission_subject(author)
+            .authored_columns(BTreeSet::from(["title".to_owned()]))
             .cells(mergeable_open_cells("pending", "external-note")),
         MergeableCommit::new("todos", deleted, 104)
             .made_by(author)
@@ -252,10 +254,47 @@ fn mergeable_open_commit_matches_replayed_mergeable_batch_with_intervening_write
 }
 
 #[test]
+fn mergeable_open_patch_commit_uses_point_reads_not_table_scans() {
+    let (_dir, mut core) = open_node_with_schema(node(0x62), mergeable_open_test_schema());
+    for ordinal in 0_u16..256 {
+        core.commit_mergeable(
+            MergeableCommit::new("todos", row(ordinal as u8), ordinal as u64 + 1)
+                .cells(mergeable_open_cells(format!("title-{ordinal}"), "note")),
+        )
+        .unwrap();
+    }
+
+    let batch = OpenBatchId::new();
+    core.open_mergeable(batch, user(0x72), None).unwrap();
+    for ordinal in 0_u8..32 {
+        core.tx_patch_mergeable(
+            batch,
+            "todos",
+            row(ordinal),
+            BTreeMap::from([(
+                "note".to_owned(),
+                Value::String(format!("patched-{ordinal}")),
+            )]),
+            Some(1_000 + ordinal as u64),
+        )
+        .unwrap();
+    }
+
+    core.reset_storage_read_metrics();
+    core.commit_mergeable_open(batch, || 2_000).unwrap();
+    let reads = core.take_storage_read_metrics();
+    assert!(
+        reads.total.reads < 256,
+        "32 point patches must not read the 256-row table: {reads:?}"
+    );
+}
+
+#[test]
 fn abandoning_mergeable_open_transaction_discards_its_only_staged_representation() {
     let (_temp_dir, mut core) = open_node();
     let staged = row(0x31);
-    let open_tx = core.open_mergeable(AuthorId::SYSTEM, None).unwrap();
+    let open_tx = OpenBatchId::new();
+    core.open_mergeable(open_tx, AuthorId::SYSTEM, None).unwrap();
     core.tx_write_mergeable(
         open_tx,
         "todos",
@@ -281,6 +320,6 @@ fn abandoning_mergeable_open_transaction_discards_its_only_staged_representation
     );
     assert!(matches!(
         core.commit_mergeable_open(open_tx, || 51).unwrap_err(),
-        Error::MissingOpenTx(missing) if missing == open_tx
+        Error::MissingOpenBatch(missing) if missing == open_tx
     ));
 }

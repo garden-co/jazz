@@ -52,7 +52,10 @@ async fn persistent_restart_replays_pending_write_with_valid_token_impl() {
         )
         .expect("create offline todo");
     offline
-        .wait_for_batch(batch_id, DurabilityTier::Local)
+        .wait_for_batch(
+            batch_id.expect("ordinary mutation commits immediately"),
+            DurabilityTier::Local,
+        )
         .await
         .expect("offline todo reaches local durability");
     offline.shutdown().await.expect("shutdown offline client");

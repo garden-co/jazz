@@ -8,11 +8,20 @@
 import type {
   ColumnDescriptor,
   NativeRowDelta,
+  NativeTerminalOperation,
   SubscriptionWireDelta,
+  Value,
   WasmRow,
   RowDelta as WireRowDelta,
 } from "../drivers/types.js";
-import { decodeNativeRow } from "./native-runtime/native-row-codec.js";
+import { HIDDEN_INCLUDE_COLUMN_PREFIX } from "./select-projection.js";
+import {
+  decodeNativeRow,
+  decodeNativeTerminalRow,
+  logicalStorageColumns,
+} from "./native-runtime/native-row-codec.js";
+
+const fatalUtf8Decoder = new TextDecoder("utf-8", { fatal: true });
 
 export const RowChangeKind = {
   Added: 0 as const,
@@ -43,6 +52,14 @@ export type SubscriptionDelta<T> =
       /** True when this delta replaces all previously observed state. */
       reset: true;
     };
+
+type SubscriptionManagerSnapshot<T> = {
+  currentResults: Map<string, T>;
+  terminalRows: Map<string, WasmRow>;
+  terminalOccurrenceAddresses: Map<string, string>;
+  orderedIds: string[];
+  orderedIdIndex: Map<string, number>;
+};
 
 /**
  * Canonical reducer for subscription streams. Consumers own the materialized
@@ -83,7 +100,7 @@ function applySubscriptionDeltaSequentially<T extends { id: string }>(
         removeById(current, change.id);
         break;
       case RowChangeKind.Updated: {
-        const existing = current.find((item) => item.id === change.id);
+        const existing = current.find((item) => resultIdentity(item) === change.id);
         removeById(current, change.id);
         const next = change.item ?? existing;
         if (next) {
@@ -103,8 +120,8 @@ function applyBulkSubscriptionDelta<T extends { id: string }>(
 ): T[] {
   delta = normalizeRowDelta(delta);
   const changedIds = new Set(delta.map((change) => change.id));
-  const existingById = new Map(current.map((item) => [item.id, item]));
-  const base = current.filter((item) => !changedIds.has(item.id));
+  const existingById = new Map(current.map((item) => [resultIdentity(item), item]));
+  const base = current.filter((item) => !changedIds.has(resultIdentity(item)));
   const placements: Array<{ id: string; index: number; item: T }> = [];
 
   for (const change of delta) {
@@ -186,8 +203,23 @@ function mergeIndexedPlacements<T>(base: T[], placements: Array<{ index: number;
 }
 
 function removeById<T extends { id: string }>(current: T[], id: string): void {
-  const index = current.findIndex((item) => item.id === id);
+  const index = current.findIndex((item) => resultIdentity(item) === id);
   if (index !== -1) current.splice(index, 1);
+}
+
+const RESULT_KEY_PROPERTY = "__jazzResultKey";
+
+function withResultIdentity<T extends { id: string }>(item: T, key: string): T {
+  Object.defineProperty(item, RESULT_KEY_PROPERTY, {
+    value: key,
+    enumerable: false,
+    configurable: true,
+  });
+  return item;
+}
+
+function resultIdentity(item: { id: string }): string {
+  return (item as { __jazzResultKey?: string }).__jazzResultKey ?? item.id;
 }
 
 /**
@@ -200,6 +232,9 @@ function removeById<T extends { id: string }>(current: T[], id: string): void {
  */
 export class SubscriptionManager<T extends { id: string }> {
   private currentResults = new Map<string, T>();
+  private terminalRows = new Map<string, WasmRow>();
+  /** Exact ordered Groove root key -> opaque v2 occurrence sidecar address. */
+  private terminalOccurrenceAddresses = new Map<string, string>();
   private orderedIds: string[] = [];
   private orderedIdIndex = new Map<string, number>();
 
@@ -240,13 +275,233 @@ export class SubscriptionManager<T extends { id: string }> {
       if (!nativeColumns) {
         throw new Error("Native subscription delta requires output columns for decoding");
       }
-      if (reset) {
-        this.clear();
+      const snapshot = this.snapshot(nativeColumns);
+      try {
+        if (reset) {
+          this.clear();
+        }
+        for (const key of [
+          ...(delta.addedOccurrenceKeys ?? []),
+          ...(delta.updatedOccurrenceKeys ?? []),
+          ...(delta.removedOccurrenceKeys ?? []),
+        ]) {
+          const orderedKey = orderedTerminalKeyForTypedOccurrence(key);
+          if (orderedKey) {
+            this.registerTerminalOccurrenceAddress(orderedKey, publicResultKey(key));
+          } else if (key[0] === 2) {
+            throw new Error("malformed or noncanonical typed terminal occurrence key");
+          }
+        }
+        // Packed row deltas have already been normalized to the public logical
+        // record layout. Only Groove terminal edit payloads retain the outer
+        // sparse current-row carrier described by `sparse`.
+        const decoded = decodeNativeDelta(delta, logicalStorageColumns(nativeColumns));
+        for (const change of decoded) {
+          if (change.kind === RowChangeKind.Removed) {
+            this.terminalRows.delete(change.id);
+          } else if (change.row) {
+            // The plain native decoder exposes both positional values and a
+            // name map, but decodes them independently. Terminal edits mutate
+            // the positional tree, so normalize the retained terminal copy to
+            // one shared value graph before accepting descendant operations.
+            this.terminalRows.set(change.id, cloneTerminalRow(change.row, nativeColumns));
+          }
+        }
+        const wireResult = this.handleWireDelta(decoded, transform, reset);
+        if (delta.terminalOperations && delta.terminalOperations.length > 0) {
+          const terminalResult = this.handleTerminalOperations(
+            delta.terminalOperations,
+            transform,
+            nativeColumns,
+          );
+          return reset
+            ? { delta: terminalResult.delta, all: terminalResult.all ?? this.all(), reset: true }
+            : terminalResult;
+        }
+        return wireResult;
+      } catch (error) {
+        this.restore(snapshot);
+        throw error;
       }
-      return this.handleWireDelta(decodeNativeDelta(delta, nativeColumns), transform, reset);
     }
 
     return this.handleWireDelta(delta, transform);
+  }
+
+  private snapshot(columns: readonly ColumnDescriptor[]): SubscriptionManagerSnapshot<T> {
+    return {
+      currentResults: new Map(this.currentResults),
+      terminalRows: new Map(
+        Array.from(this.terminalRows, ([id, row]) => [id, cloneTerminalRow(row, columns)]),
+      ),
+      terminalOccurrenceAddresses: new Map(this.terminalOccurrenceAddresses),
+      orderedIds: [...this.orderedIds],
+      orderedIdIndex: new Map(this.orderedIdIndex),
+    };
+  }
+
+  private restore(snapshot: SubscriptionManagerSnapshot<T>): void {
+    this.currentResults = snapshot.currentResults;
+    this.terminalRows = snapshot.terminalRows;
+    this.terminalOccurrenceAddresses = snapshot.terminalOccurrenceAddresses;
+    this.orderedIds = snapshot.orderedIds;
+    this.orderedIdIndex = snapshot.orderedIdIndex;
+  }
+
+  private handleTerminalOperations(
+    operations: NativeTerminalOperation[],
+    transform: (row: WasmRow) => T,
+    rootColumns: readonly ColumnDescriptor[],
+  ): SubscriptionDelta<T> {
+    const beforeIndices = new Map(this.orderedIdIndex);
+    const affectedRoots = new Set<string>();
+    const rootInserts = operations.filter(
+      (operation) => operation.path.length === 0 && "Insert" in operation.edit,
+    );
+
+    // Pre-establish only newly inserted root payloads so child-before-root
+    // batches are addressable. Positional insertion remains in producer order:
+    // applying its index before an earlier root Remove makes the outcome depend
+    // on operation-key ordering.
+    for (const operation of rootInserts) {
+      const rootId = this.terminalAddress(operation.root_key);
+      const rootRowId = terminalPayloadRowId(operation.root_key);
+      const edit = operation.edit;
+      assertTerminalRootEditKey(operation.root_key, edit);
+      if (!("Insert" in edit)) throw new Error("terminal root insert partition is invalid");
+      this.terminalRows.set(
+        rootId,
+        decodeNativeTerminalRow(rootRowId, rootColumns, Uint8Array.from(edit.Insert.value)),
+      );
+    }
+
+    for (const operation of operations) {
+      const rootId = this.terminalRootId(operation.root_key);
+      const edit = operation.edit;
+      if (operation.path.length === 0) {
+        assertTerminalRootEditKey(operation.root_key, edit);
+        if ("Insert" in edit) {
+          if (!this.terminalRows.has(rootId)) {
+            throw new Error(`terminal root insert payload is missing for ${rootId}`);
+          }
+          this.removeId(rootId);
+          this.insertIdAt(rootId, edit.Insert.index);
+        } else if ("Update" in edit) {
+          if (!this.terminalRows.has(rootId)) {
+            if (isUuidOnlyTerminalKey(operation.root_key)) continue;
+            throw new Error(`terminal root update addressed missing root ${rootId}`);
+          }
+          this.terminalRows.set(
+            rootId,
+            decodeNativeTerminalRow(
+              terminalPayloadRowId(operation.root_key),
+              rootColumns,
+              Uint8Array.from(edit.Update.value),
+            ),
+          );
+        } else if ("Remove" in edit) {
+          if (!this.terminalRows.delete(rootId)) {
+            if (isUuidOnlyTerminalKey(operation.root_key)) continue;
+            throw new Error(`terminal root removal addressed missing root ${rootId}`);
+          }
+          this.currentResults.delete(rootId);
+          this.removeId(rootId);
+        } else if ("Move" in edit) {
+          if (!this.terminalRows.has(rootId)) {
+            throw new Error(`terminal root move addressed missing root ${rootId}`);
+          }
+          this.removeId(rootId);
+          this.insertIdAt(rootId, edit.Move.index);
+        }
+        affectedRoots.add(rootId);
+        continue;
+      }
+
+      const root = this.terminalRows.get(rootId);
+      if (!root) throw new Error(`terminal child edit addressed missing root ${rootId}`);
+      assertTerminalPathEditKey(operation.path, edit);
+      const target = terminalCollection(root, rootColumns, operation.path);
+      if (!target) throw new Error(`terminal child edit addressed an unresolved path on ${rootId}`);
+      const { values, columns } = target;
+      if ("Insert" in edit) {
+        const id = terminalPayloadRowId(edit.Insert.key);
+        const row = decodeNativeTerminalRow(id, columns, Uint8Array.from(edit.Insert.value));
+        const value: Value = { type: "Row", value: { id, values: row.values } };
+        removeTerminalValue(values, id);
+        values.splice(Math.max(0, Math.min(edit.Insert.index, values.length)), 0, value);
+      } else if ("Update" in edit) {
+        const id = terminalPayloadRowId(edit.Update.key);
+        const index = terminalValueIndex(values, id);
+        if (index === -1) throw new Error(`terminal child update addressed missing key ${id}`);
+        const row = decodeNativeTerminalRow(id, columns, Uint8Array.from(edit.Update.value));
+        values[index] = { type: "Row", value: { id, values: row.values } };
+      } else if ("Remove" in edit) {
+        const id = terminalPayloadRowId(edit.Remove.key);
+        if (!removeTerminalValue(values, id)) {
+          throw new Error(`terminal child removal addressed missing key ${id}`);
+        }
+      } else if ("Move" in edit) {
+        const id = terminalPayloadRowId(edit.Move.key);
+        const index = terminalValueIndex(values, id);
+        if (index === -1) throw new Error(`terminal child move addressed missing key ${id}`);
+        const [value] = values.splice(index, 1);
+        values.splice(Math.max(0, Math.min(edit.Move.index, values.length)), 0, value!);
+      }
+      affectedRoots.add(rootId);
+    }
+
+    const delta = Array.from(affectedRoots).flatMap<RowDelta<T>>((id) => {
+      const beforeIndex = beforeIndices.get(id);
+      const index = this.orderedIdIndex.get(id);
+      const row = this.terminalRows.get(id);
+      if (beforeIndex !== undefined && (index === undefined || row === undefined)) {
+        return [{ kind: RowChangeKind.Removed, id, index: beforeIndex }];
+      }
+      if (index === undefined || row === undefined) return [];
+      const item = transform(row);
+      this.currentResults.set(id, withResultIdentity(item, id));
+      return [
+        beforeIndex === undefined
+          ? { kind: RowChangeKind.Added, id, index, item }
+          : { kind: RowChangeKind.Updated, id, index, item },
+      ];
+    });
+    return { delta, all: this.all() } as SubscriptionDelta<T>;
+  }
+
+  /**
+   * Snapshots predating occurrence sidecars seed terminal state by physical
+   * row UUID. Prefer the full ResultKey address, but bridge that legacy
+   * snapshot only when exactly one retained root has the addressed UUID.
+   */
+  private terminalRootId(encoded: readonly number[]): string {
+    const address = this.terminalAddress(encoded);
+    if (this.terminalRows.has(address)) return address;
+    // Only UUID-only legacy composite keys have a lossless correspondence to
+    // an occurrence sidecar. Typed values and v2 identities must remain
+    // opaque: matching either by physical UUID would erase a discriminator.
+    if (!address.startsWith("result:01")) return address;
+    const physicalId = terminalPayloadRowId(encoded);
+    const matches = Array.from(this.terminalRows, ([id, row]) =>
+      row.id === physicalId && !id.startsWith("result:") ? id : null,
+    ).filter((id): id is string => id !== null);
+    return matches.length === 1 ? matches[0]! : address;
+  }
+
+  private terminalAddress(encoded: readonly number[]): string {
+    return this.terminalOccurrenceAddresses.get(bytesKey(encoded)) ?? terminalKeyId(encoded);
+  }
+
+  private registerTerminalOccurrenceAddress(
+    orderedKey: Uint8Array,
+    occurrenceAddress: string,
+  ): void {
+    const address = bytesKey(orderedKey);
+    const existing = this.terminalOccurrenceAddresses.get(address);
+    if (existing !== undefined && existing !== occurrenceAddress) {
+      throw new Error("conflicting typed terminal occurrence keys share an ordered root key");
+    }
+    this.terminalOccurrenceAddresses.set(address, occurrenceAddress);
   }
 
   seed(rows: T[]): SubscriptionDelta<T> {
@@ -268,22 +523,26 @@ export class SubscriptionManager<T extends { id: string }> {
     return this.handleTypedDelta(
       delta.map((change) => {
         switch (change.kind) {
-          case RowChangeKind.Added:
+          case RowChangeKind.Added: {
+            const addedItem = transform(change.row);
             return {
               kind: RowChangeKind.Added,
               id: change.id,
               index: change.index,
-              item: transform(change.row),
+              item: withResultIdentity(addedItem, change.id),
             };
+          }
           case RowChangeKind.Removed:
             return change;
-          case RowChangeKind.Updated:
+          case RowChangeKind.Updated: {
+            const updatedItem = change.row ? transform(change.row) : undefined;
             return {
               kind: RowChangeKind.Updated,
               id: change.id,
               index: change.index,
-              item: change.row ? transform(change.row) : undefined,
+              item: updatedItem ? withResultIdentity(updatedItem, change.id) : undefined,
             };
+          }
         }
       }),
       reset,
@@ -399,6 +658,8 @@ export class SubscriptionManager<T extends { id: string }> {
    */
   clear(): void {
     this.currentResults.clear();
+    this.terminalRows.clear();
+    this.terminalOccurrenceAddresses.clear();
     this.orderedIds = [];
     this.orderedIdIndex.clear();
   }
@@ -419,6 +680,233 @@ export class SubscriptionManager<T extends { id: string }> {
 
 export function isNativeRowDelta(delta: SubscriptionWireDelta): delta is NativeRowDelta {
   return !Array.isArray(delta) && delta.__jazzNativeRowDelta === true;
+}
+
+/**
+ * Reconstruct the exact Groove ordered root key from a typed ResultKey v2.
+ * This is metadata-driven: a terminal key is accepted as typed only when it
+ * byte-for-byte matches the sidecar's root, joined UUIDs, and union-arm
+ * discriminators. It intentionally does not infer meaning from a string in an
+ * arbitrary ordered key.
+ */
+function orderedTerminalKeyForTypedOccurrence(sidecar: Uint8Array): Uint8Array | undefined {
+  if (sidecar[0] !== 2 || sidecar.byteLength < 25) return undefined;
+  let cursor = 1;
+  const root = sidecar.subarray(cursor, (cursor += 16));
+  const joinedCount = readU32Be(sidecar, cursor);
+  cursor += 4;
+  if (joinedCount > 256 || cursor + joinedCount * 16 + 4 > sidecar.byteLength) return undefined;
+  const joined = Array.from({ length: joinedCount }, () => {
+    const value = sidecar.subarray(cursor, (cursor += 16));
+    return value;
+  });
+  const discriminatorCount = readU32Be(sidecar, cursor);
+  cursor += 4;
+  // ResultKey v2 exists only for union-discriminated output. Allowing no arms
+  // aliases the UUID-only v1 ordered key, so it is deliberately noncanonical.
+  if (discriminatorCount === 0 || discriminatorCount > joinedCount) return undefined;
+  const arms = new Map<number, Uint8Array>();
+  let previousPosition = -1;
+  for (let index = 0; index < discriminatorCount; index += 1) {
+    if (cursor + 8 > sidecar.byteLength) return undefined;
+    const position = readU32Be(sidecar, cursor);
+    const length = readU32Be(sidecar, cursor + 4);
+    cursor += 8;
+    if (
+      position >= joinedCount ||
+      position <= previousPosition ||
+      length === 0 ||
+      length > 4096 ||
+      cursor + length > sidecar.byteLength ||
+      !isValidUtf8(sidecar.subarray(cursor, cursor + length)) ||
+      arms.has(position)
+    ) {
+      return undefined;
+    }
+    previousPosition = position;
+    arms.set(position, sidecar.subarray(cursor, (cursor += length)));
+  }
+  if (cursor !== sidecar.byteLength) return undefined;
+
+  const ordered: number[] = [10, ...root];
+  for (const [index, uuid] of joined.entries()) {
+    const arm = arms.get(index);
+    if (arm) {
+      ordered.push(6, ...orderedBytes(arm));
+    }
+    ordered.push(10, ...uuid);
+  }
+  return Uint8Array.from(ordered);
+}
+
+function readU32Be(bytes: Uint8Array, offset: number): number {
+  return (
+    (((bytes[offset] ?? 0) << 24) |
+      ((bytes[offset + 1] ?? 0) << 16) |
+      ((bytes[offset + 2] ?? 0) << 8) |
+      (bytes[offset + 3] ?? 0)) >>>
+    0
+  );
+}
+
+function orderedBytes(value: Uint8Array): number[] {
+  const encoded: number[] = [];
+  for (const byte of value) {
+    if (byte === 0) encoded.push(0, 0xff);
+    else encoded.push(byte);
+  }
+  encoded.push(0, 0);
+  return encoded;
+}
+
+function isValidUtf8(bytes: Uint8Array): boolean {
+  try {
+    fatalUtf8Decoder.decode(bytes);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function bytesKey(bytes: ArrayLike<number>): string {
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function terminalKeyId(encoded: readonly number[]): string {
+  const bytes = Uint8Array.from(encoded);
+  if (bytes.length === 17 && bytes[0] === 10) {
+    return readUuid(bytes, 1);
+  }
+  // Groove terminal operations address roots by an ordered Record key. A
+  // multi-source row is therefore `Uuid, Uuid, …`, while the packed stream's
+  // occurrence sidecar uses the equivalent v1 ResultKey (`1, uuid, uuid,
+  // …`). Normalize only this exact physical form so terminal patches meet the
+  // same full occurrence identity that seeded the subscription state.
+  if (bytes.length > 17 && isUuidOnlyTerminalKey(bytes)) {
+    const occurrence = [1];
+    for (let offset = 0; offset < bytes.length; offset += 17) {
+      if (bytes[offset] !== 10) {
+        return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+      }
+      occurrence.push(...bytes.subarray(offset + 1, offset + 17));
+    }
+    return publicResultKey(Uint8Array.from(occurrence));
+  }
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function isUuidOnlyTerminalKey(encoded: ArrayLike<number>): boolean {
+  const bytes = Uint8Array.from(encoded);
+  return (
+    bytes.length >= 17 &&
+    bytes.length % 17 === 0 &&
+    Array.from({ length: bytes.length / 17 }, (_, index) => bytes[index * 17] === 10).every(Boolean)
+  );
+}
+
+/** Decode the leading UUID key field from Groove's ordered record-key carrier. */
+function terminalPayloadRowId(encoded: readonly number[]): string {
+  const bytes = Uint8Array.from(encoded);
+  if (bytes.length < 17 || bytes[0] !== 10) {
+    throw new Error("terminal key must begin with a UUID row key");
+  }
+  return readUuid(bytes, 1);
+}
+
+function assertTerminalRootEditKey(
+  rootKey: readonly number[],
+  edit: NativeTerminalOperation["edit"],
+): void {
+  const editKey =
+    "Insert" in edit
+      ? edit.Insert.key
+      : "Update" in edit
+        ? edit.Update.key
+        : "Remove" in edit
+          ? edit.Remove.key
+          : edit.Move.key;
+  if (rootKey.length !== editKey.length || rootKey.some((byte, index) => byte !== editKey[index])) {
+    throw new Error("terminal root edit key does not match its addressed root key");
+  }
+}
+
+function assertTerminalPathEditKey(
+  path: NativeTerminalOperation["path"],
+  edit: NativeTerminalOperation["edit"],
+): void {
+  const last = path.at(-1);
+  if (!last || !("Key" in last)) return;
+  const editKey = terminalEditKey(edit);
+  if (
+    last.Key.length !== editKey.length ||
+    last.Key.some((byte, index) => byte !== editKey[index])
+  ) {
+    throw new Error("terminal path key does not match its edit key");
+  }
+}
+
+function terminalEditKey(edit: NativeTerminalOperation["edit"]): readonly number[] {
+  return "Insert" in edit
+    ? edit.Insert.key
+    : "Update" in edit
+      ? edit.Update.key
+      : "Remove" in edit
+        ? edit.Remove.key
+        : edit.Move.key;
+}
+
+function terminalValueIndex(values: Value[], id: string): number {
+  return values.findIndex((value) => value.type === "Row" && value.value.id === id);
+}
+
+function cloneTerminalRow(row: WasmRow, columns: readonly ColumnDescriptor[]): WasmRow {
+  const values = structuredClone(row.values) as Value[];
+  const clone = { id: row.id, values };
+  Object.defineProperty(clone, "valuesByColumn", {
+    value: new Map(columns.map((column, index) => [column.name, values[index]!])),
+  });
+  return clone;
+}
+
+function removeTerminalValue(values: Value[], id: string): boolean {
+  const index = terminalValueIndex(values, id);
+  if (index === -1) return false;
+  values.splice(index, 1);
+  return true;
+}
+
+function terminalCollection(
+  root: WasmRow,
+  rootColumns: readonly ColumnDescriptor[],
+  path: NativeTerminalOperation["path"],
+): { values: Value[]; columns: readonly ColumnDescriptor[] } | undefined {
+  let ownerValues = root.values;
+  let columns = rootColumns;
+  for (let index = 0; index < path.length; index += 1) {
+    const segment = path[index]!;
+    if (!("Collection" in segment)) return undefined;
+    const collectionName = segment.Collection.startsWith(HIDDEN_INCLUDE_COLUMN_PREFIX)
+      ? segment.Collection.slice(HIDDEN_INCLUDE_COLUMN_PREFIX.length)
+      : segment.Collection;
+    const columnIndex = columns.findIndex((candidate) => candidate.name === collectionName);
+    const column = columns[columnIndex];
+    const columnType = column?.column_type;
+    if (columnType?.type !== "Array" || columnType.element.type !== "Row") return undefined;
+    const collection = ownerValues[columnIndex];
+    if (collection?.type !== "Array") return undefined;
+    const values = collection.value;
+    const childColumns = columnType.element.columns;
+    if (index === path.length - 1) return { values, columns: childColumns };
+    const keySegment = path[++index];
+    if (!keySegment || !("Key" in keySegment)) return undefined;
+    const childId = terminalPayloadRowId(keySegment.Key);
+    if (index === path.length - 1) return { values, columns: childColumns };
+    const child = values.find((value) => value.type === "Row" && value.value.id === childId);
+    if (child?.type !== "Row") return undefined;
+    ownerValues = child.value.values;
+    columns = childColumns;
+  }
+  return undefined;
 }
 
 function readUuid(bytes: Uint8Array, offset: number): string {
@@ -442,7 +930,10 @@ export function decodeNativeDelta(
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     let offset = 0;
     for (let i = 0; i < native.updatedCount; i++) {
-      const id = readUuid(bytes, offset);
+      const sourceId = readUuid(bytes, offset);
+      const id = native.updatedOccurrenceKeys?.[i]
+        ? publicResultKey(native.updatedOccurrenceKeys[i]!)
+        : sourceId;
       offset += 16;
       const index = view.getUint32(offset, true);
       offset += 4;
@@ -457,7 +948,7 @@ export function decodeNativeDelta(
           kind: RowChangeKind.Updated,
           id,
           index,
-          row: decodeNativeRow(id, columns, data),
+          row: decodeNativeRow(sourceId, columns, data),
         });
       } else {
         delta.push({ kind: RowChangeKind.Updated, id, index });
@@ -470,7 +961,10 @@ export function decodeNativeDelta(
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     let offset = 0;
     for (let i = 0; i < native.addedCount; i++) {
-      const id = readUuid(bytes, offset);
+      const sourceId = readUuid(bytes, offset);
+      const id = native.addedOccurrenceKeys?.[i]
+        ? publicResultKey(native.addedOccurrenceKeys[i]!)
+        : sourceId;
       offset += 16;
       const index = view.getUint32(offset, true);
       offset += 4;
@@ -482,7 +976,7 @@ export function decodeNativeDelta(
         kind: RowChangeKind.Added,
         id,
         index,
-        row: decodeNativeRow(id, columns, data),
+        row: decodeNativeRow(sourceId, columns, data),
       });
     }
   }
@@ -492,7 +986,10 @@ export function decodeNativeDelta(
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     let offset = 0;
     for (let i = 0; i < native.removedCount; i++) {
-      const id = readUuid(bytes, offset);
+      const sourceId = readUuid(bytes, offset);
+      const id = native.removedOccurrenceKeys?.[i]
+        ? publicResultKey(native.removedOccurrenceKeys[i]!)
+        : sourceId;
       offset += 16;
       const index = view.getUint32(offset, true);
       offset += 4;
@@ -501,4 +998,9 @@ export function decodeNativeDelta(
   }
 
   return delta;
+}
+
+function publicResultKey(bytes: Uint8Array): string {
+  if (bytes.length === 17 && bytes[0] === 1) return readUuid(bytes, 1);
+  return `result:${Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
 }

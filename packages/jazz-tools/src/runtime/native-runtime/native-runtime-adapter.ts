@@ -4,12 +4,21 @@ import type {
   ColumnType,
   InsertValues,
   NativeRowDelta,
+  NativeTerminalOperation,
   TablePolicies,
   Value,
   WasmSchema,
 } from "../../drivers/types.js";
 import { serializeRuntimeSchema } from "../../drivers/schema-wire.js";
-import type { InsertResult, MutationResult, Runtime, TransactionKind } from "../client.js";
+import type {
+  BatchId,
+  InsertResult,
+  MutationResult,
+  OpenBatchId,
+  PermissionAdvice,
+  Runtime,
+  TransactionKind,
+} from "../client.js";
 import type { Session } from "../context.js";
 import { SYSTEM_AUTHOR_ID } from "../system-identity.js";
 import {
@@ -18,15 +27,11 @@ import {
   openConfig,
   queryWithPredicates,
   readNativeRowBatch,
-  readNativeRelationSubscriptionDelta,
   readNativeRelationSubscriptionSnapshot,
   readNativeSubscriptionDelta,
-  type NativeSubscriptionDelta,
   type NativeRelationSubscriptionSnapshot,
-  type NativeRelationSubscriptionDelta,
-  type NativeRelationSubscriptionEdge,
   type NativeRowBatch,
-  type NativeRemovedRow,
+  type NativeSubscriptionDelta,
   type QueryArraySubquery,
   type DescriptorField,
   type QueryLiteral,
@@ -36,16 +41,18 @@ import {
   type ValueType,
 } from "./native-codec.js";
 import { encodeSchema } from "./schema-codec.js";
-import { WebSocketCarrier, wireAuthFailureReason } from "./websocket.js";
+import { WebSocketCarrier, type WebSocketNegotiation, wireAuthFailureReason } from "./websocket.js";
 import {
   createNativeRowValueEncoder,
   createRecord,
   createRecordValueDecoder,
+  decodeNativeRowValues,
+  logicalStorageColumns,
   storageColumnTypeToValueType,
   storageColumnValueType,
   writeDescriptor,
 } from "./native-row-codec.js";
-import { HIDDEN_INCLUDE_COLUMN_PREFIX, hiddenIncludeColumnName } from "../select-projection.js";
+import { HIDDEN_INCLUDE_COLUMN_PREFIX } from "../select-projection.js";
 import {
   isPermissionIntrospectionColumn,
   isProvenanceMagicColumn,
@@ -56,12 +63,20 @@ export { encodeSchema } from "./schema-codec.js";
 
 const SERVER_PUMP_DEBOUNCE_MS = 16;
 
+type ReadAuthorizationHost = "client-local" | "trusted-serving";
+
 export type NativeDbConstructor = {
   openMemory(schema: Uint8Array, config: Uint8Array): NativeDb;
   openPersistent?(dataPath: string, schema: Uint8Array, config: Uint8Array): NativeDb;
 };
 
 export type NativeDb = {
+  registerSchema(schema: Uint8Array): NativeDb;
+  beginTransaction(openBatchId: string, kind: TransactionKind, author?: Uint8Array): void;
+  commitTransaction(openBatchId: string, kind?: TransactionKind): Write;
+  rollbackTransaction(openBatchId: string): void;
+  attachMergeableTx(openBatchId: string): Tx;
+  attachExclusiveTx?(openBatchId: string): Tx;
   all(query: PreparedQuery, opts: unknown): Uint8Array;
   allForIdentity(query: PreparedQuery, author: Uint8Array, opts: unknown): Uint8Array;
   allRelationQuery?(queryJson: string, opts: unknown): Uint8Array;
@@ -153,19 +168,20 @@ export type NativeDb = {
     author: Uint8Array,
     updatedAtMs?: number | null,
   ): Write;
-  canInsertEncoded?(table: string, cells: Uint8Array): boolean;
-  canInsertEncodedForIdentity?(table: string, cells: Uint8Array, author: Uint8Array): boolean;
-  canReadForIdentity?(table: string, rowId: Uint8Array, author: Uint8Array): boolean;
-  canUpdateEncodedForIdentity?(
+  requestInsertPermissionAdviceEncoded?(
+    table: string,
+    cells: Uint8Array,
+  ): NativePermissionAdviceRequest;
+  requestReadPermissionAdvice?(table: string, rowId: Uint8Array): NativePermissionAdviceRequest;
+  requestUpdatePermissionAdviceEncoded?(
     table: string,
     rowId: Uint8Array,
     patch: Uint8Array,
-    author: Uint8Array,
-  ): boolean;
-  canDeleteForIdentity?(table: string, rowId: Uint8Array, author: Uint8Array): boolean;
-  mergeableTx(): Tx;
-  mergeableTxForIdentity?(author: Uint8Array): Tx;
-  exclusiveTx?(): Tx;
+  ): NativePermissionAdviceRequest;
+  requestDeletePermissionAdvice?(table: string, rowId: Uint8Array): NativePermissionAdviceRequest;
+  mergeableTx(openBatchId: OpenBatchId): Tx;
+  mergeableTxForIdentity?(openBatchId: OpenBatchId, author: Uint8Array): Tx;
+  exclusiveTx?(openBatchId: OpenBatchId): Tx;
   allInTransaction?(query: PreparedQuery, tx: Tx, opts: unknown): Uint8Array;
   allInTransactionForIdentity?(
     query: PreparedQuery,
@@ -179,9 +195,22 @@ export type NativeDb = {
       | ((error: Error | null, urgency: string) => void),
   ): void;
   connectUpstream(): Transport;
+  connectUpstreamWithSession?(
+    protocolVersion: number,
+    features: number,
+    remoteNode: Uint8Array,
+    remoteEpoch: bigint,
+    localNode: Uint8Array,
+    localEpoch: bigint,
+  ): Transport;
   tick(): void;
   close?(): void;
   free?(): void;
+};
+
+type NativePermissionAdviceRequest = {
+  readonly promise: Promise<PermissionAdvice>;
+  cancel(): void;
 };
 
 export type PreparedQuery = object;
@@ -193,6 +222,7 @@ export type Subscription = {
 };
 
 export type Write = {
+  readonly batchId: string;
   payload: Uint8Array;
   wait(tier: string): void;
   writeState(): unknown;
@@ -239,8 +269,9 @@ export type Transport = {
 };
 
 type PendingTx = {
+  id: OpenBatchId;
   kind: TransactionKind;
-  tx?: Tx;
+  txByView: Map<NativeRuntimeAdapter, Tx>;
   identity?: Uint8Array;
   writes: PendingTxWrite[];
 };
@@ -248,7 +279,6 @@ type PendingTx = {
 type PendingTxWrite = {
   table: string;
   rowId: Uint8Array;
-  baseRow?: RowState;
   row?: RowState;
   deleted?: boolean;
 };
@@ -258,9 +288,20 @@ type CompletedTx = {
   state: "committed" | "rolled_back";
 };
 
+type TransactionOwnerState = {
+  pendingTxs: Map<string, PendingTx>;
+  completedTxs: Map<string, CompletedTx>;
+  writes: Map<string, Write>;
+};
+
 type ServerTransportErrorWaiter = {
   active: boolean;
   reject: (error: Error) => void;
+};
+
+type ServerTransportWorkWaiter = {
+  active: boolean;
+  resolve: () => void;
 };
 
 type RuntimeSession = {
@@ -280,18 +321,14 @@ type SubscriptionState = {
   packedResetRows: NativeRowDelta | null;
   visibleRows: RowState[];
   visiblePackedResetRows: NativeRowDelta | null;
-  relationRows: RowState[];
-  relationRootCount: number;
-  relationEdges: NativeRelationSubscriptionEdge[];
-  relationMaterialization: RelationMaterializationSpec;
   outputColumns: SubscriptionOutputColumns | null;
-  snapshotRefresh: boolean;
   session: RuntimeSession | null;
   opts: unknown;
   opened: boolean;
   visibleOpened: boolean;
   deferredVisiblePublication: boolean;
   deferredVisibleReset: boolean;
+  deferredTerminalOperations: NativeTerminalOperation[];
   callback?: Function;
   cancelled: boolean;
 };
@@ -301,29 +338,25 @@ type SubscriptionOutputColumns = {
   rootColumns: readonly ColumnDescriptor[];
 };
 
-type RelationMaterializationSpec = {
-  rootTable: string | null;
-  arraySubqueries: QueryArraySubquery[];
-  clientLimit: number | null;
-  clientOffset: number;
-};
-
 type SubscriptionSourceState = {
   source: ReadableStreamDefaultReader<unknown> | Subscription;
   reading: boolean;
 };
 
-type RowState = {
+export type RowState = {
   table: string;
   id: string;
   values: Value[];
   valuesByColumn?: Map<string, Value>;
+  resultKey?: string;
+  resultKeyBytes?: Uint8Array;
 };
 
 type NativeRowFieldPlan = {
   name: string;
   index: number;
   type?: ColumnType;
+  storageType: ValueType;
   includeInValues: boolean;
 };
 
@@ -351,9 +384,12 @@ export class NativeRuntimeAdapter implements Runtime {
   private readonly peerIdentity: Uint8Array;
   private readonly schemaHash: string;
   private readonly preparedQueries = new Map<string, PreparedQuery>();
-  private readonly pendingTxs = new Map<string, PendingTx>();
-  private readonly completedTxs = new Map<string, CompletedTx>();
-  private readonly writes = new Map<string, Write>();
+  private readonly transactionOwner: TransactionOwnerState;
+  private readonly pendingTxs: Map<string, PendingTx>;
+  private readonly completedTxs: Map<string, CompletedTx>;
+  private readonly writes: Map<string, Write>;
+  private readonly ownerRuntime: NativeRuntimeAdapter;
+  private readonly readAuthorizationHost: ReadAuthorizationHost;
   private readonly serverPumpObservedWrites = new WeakSet<Write>();
   private readonly subscriptions = new Map<number, SubscriptionState>();
   private authFailureCallback: ((reason: string) => void) | null = null;
@@ -362,6 +398,9 @@ export class NativeRuntimeAdapter implements Runtime {
   private serverCarrierPromise: Promise<WebSocketCarrier> | null = null;
   private serverTransportError: Error | null = null;
   private serverTransportErrorWaiters: ServerTransportErrorWaiter[] = [];
+  private serverTransportWorkEpoch = 0;
+  private serverTransportWorkWaiters: ServerTransportWorkWaiter[] = [];
+  private nextServerConnectionEpoch = 1n;
   private serverEndpointUrl: string | null = null;
   private readonly queuedServerFrames: Uint8Array[] = [];
   private readonly pendingInboundServerFrames: Uint8Array[] = [];
@@ -371,7 +410,6 @@ export class NativeRuntimeAdapter implements Runtime {
   private serverPumpScheduled = false;
   private serverPumpAgain = false;
   private closed = false;
-  private nextTransactionId = 1;
   private nextSubscriptionId = 1;
 
   static fromDb(
@@ -385,15 +423,39 @@ export class NativeRuntimeAdapter implements Runtime {
     return new NativeRuntimeAdapter(null, schema, node, author, sourceId, historyComplete, { db });
   }
 
+  registerSchemaView(schema: WasmSchema): NativeRuntimeAdapter {
+    return new NativeRuntimeAdapter(null, schema, this.node, this.peerIdentity, 1, true, {
+      db: this.db.registerSchema(encodeSchema(schema)),
+      owner: this,
+    });
+  }
+
   constructor(
     Runtime: NativeDbConstructor | null,
     private readonly schema: WasmSchema,
-    node: Uint8Array,
+    private readonly node: Uint8Array,
     author: Uint8Array,
     sourceId: number,
     historyComplete: boolean,
-    opts?: { persistentPath?: string; db?: NativeDb; initialSyncFlushEvery?: number },
+    opts?: {
+      persistentPath?: string;
+      db?: NativeDb;
+      initialSyncFlushEvery?: number;
+      readAuthorizationHost?: ReadAuthorizationHost;
+      owner?: NativeRuntimeAdapter;
+    },
   ) {
+    this.ownerRuntime = opts?.owner?.ownerRuntime ?? this;
+    this.readAuthorizationHost =
+      opts?.owner?.readAuthorizationHost ?? opts?.readAuthorizationHost ?? "client-local";
+    this.transactionOwner = opts?.owner?.transactionOwner ?? {
+      pendingTxs: new Map(),
+      completedTxs: new Map(),
+      writes: new Map(),
+    };
+    this.pendingTxs = this.transactionOwner.pendingTxs;
+    this.completedTxs = this.transactionOwner.completedTxs;
+    this.writes = this.transactionOwner.writes;
     this.schemaBytes = encodeSchema(schema);
     this.configBytes = openConfig(
       node,
@@ -417,6 +479,7 @@ export class NativeRuntimeAdapter implements Runtime {
       }
       this.db = Runtime.openMemory(this.schemaBytes, this.configBytes);
     }
+    if (opts?.owner) return;
     if (typeof this.db.setTickScheduler !== "function") {
       throw new Error("Native runtime requires db.setTickScheduler");
     }
@@ -433,11 +496,17 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   close(): void {
+    if (this.closed) return;
     this.closed = true;
     for (const subscription of this.subscriptions.values()) {
       for (const source of subscription.sources) {
         closeSubscriptionSource(source.source);
       }
+    }
+    if (this !== this.ownerRuntime) {
+      this.subscriptions.clear();
+      this.db.free?.();
+      return;
     }
     for (const write of this.writes.values()) {
       write.close?.();
@@ -447,6 +516,7 @@ export class NativeRuntimeAdapter implements Runtime {
     this.completedTxs.clear();
     this.writes.clear();
     this.clearServerTransportErrorWaiters();
+    this.resolveServerTransportWorkWaiters();
     this.queuedServerFrames.length = 0;
     this.pendingInboundServerFrames.length = 0;
     this.serverTransport?.close();
@@ -467,18 +537,18 @@ export class NativeRuntimeAdapter implements Runtime {
     const cells = encodeCellsForRow(this.table(table), values);
     const writeSession = sessionFromWriteContext(_writeContext);
     this.applySessionClaims(writeSession);
-    const writeIdentity = writeSession?.identity;
+    const writeIdentity = this.trustedWriteIdentity(writeSession);
     const updatedAtMs = effectiveUpdatedAtMs(_writeContext);
     const tx = this.currentTx(_writeContext, "Insert");
     if (tx) {
-      const baseRow = this.baseRowForExclusiveWrite(tx, table, rowId, writeIdentity);
       this.txForWrite(tx, writeIdentity).insertWithIdEncoded(table, rowId, cells, updatedAtMs);
       const row = this.rowStateFromValues(table, rowId, values);
-      tx.writes.push({ table, rowId, baseRow, row });
+      tx.writes.push({ table, rowId, row });
       return {
         id: row.id,
         values: row.values,
-        transactionId: txIdFromContext(_writeContext) ?? "",
+        kind: "staged",
+        openBatchId: txIdFromContext(_writeContext)!,
       };
     }
     const write = writeOrNormalizeRejection("Insert", () =>
@@ -499,15 +569,19 @@ export class NativeRuntimeAdapter implements Runtime {
     const cells = encodeCellsForRow(this.table(table), values);
     const writeSession = sessionFromWriteContext(writeContext);
     this.applySessionClaims(writeSession);
-    const writeIdentity = writeSession?.identity;
+    const writeIdentity = this.trustedWriteIdentity(writeSession);
     const updatedAtMs = effectiveUpdatedAtMs(writeContext);
     const tx = this.currentTx(writeContext, "Restore");
     if (tx) {
-      const baseRow = this.baseRowForExclusiveWrite(tx, table, rowId, writeIdentity);
       this.txForWrite(tx, writeIdentity).restoreEncoded(table, rowId, cells, updatedAtMs);
       const row = this.rowStateFromValues(table, rowId, values);
-      tx.writes.push({ table, rowId, baseRow, row });
-      return { id: row.id, values: row.values, transactionId: txIdFromContext(writeContext) ?? "" };
+      tx.writes.push({ table, rowId, row });
+      return {
+        id: row.id,
+        values: row.values,
+        kind: "staged",
+        openBatchId: txIdFromContext(writeContext)!,
+      };
     }
     const write = writeOrNormalizeRejection("Restore", () =>
       writeIdentity
@@ -527,19 +601,17 @@ export class NativeRuntimeAdapter implements Runtime {
     const patch = encodeCellsForPatch(this.table(table), values);
     const writeSession = sessionFromWriteContext(writeContext);
     this.applySessionClaims(writeSession);
-    const writeIdentity = writeSession?.identity;
+    const writeIdentity = this.trustedWriteIdentity(writeSession);
     const updatedAtMs = effectiveUpdatedAtMs(writeContext);
     const tx = this.currentTx(writeContext, "Update");
     if (tx) {
-      const baseRow = this.baseRowForExclusiveWrite(tx, table, rowId, writeIdentity);
       this.txForWrite(tx, writeIdentity).updateEncoded(table, rowId, patch, updatedAtMs);
       tx.writes.push({
         table,
         rowId,
-        baseRow,
         row: this.mergeRowState(table, rowId, values, tx, writeIdentity),
       });
-      return { transactionId: txIdFromContext(writeContext) ?? "" };
+      return { kind: "staged", openBatchId: txIdFromContext(writeContext)! };
     }
     const write = writeOrNormalizeRejection("Update", () =>
       writeIdentity
@@ -559,7 +631,7 @@ export class NativeRuntimeAdapter implements Runtime {
     const definition = this.table(table);
     const writeSession = sessionFromWriteContext(writeContext);
     this.applySessionClaims(writeSession);
-    const writeIdentity = writeSession?.identity;
+    const writeIdentity = this.trustedWriteIdentity(writeSession);
     const updatedAtMs = effectiveUpdatedAtMs(writeContext);
     const tx = this.currentTx(writeContext, "Upsert");
     const existing = tx
@@ -574,17 +646,15 @@ export class NativeRuntimeAdapter implements Runtime {
       throw writeError("Upsert", normalizeWriteSetupMessage(errorMessage(error)));
     }
     if (tx) {
-      const baseRow = this.baseRowForExclusiveWrite(tx, table, rowId, writeIdentity);
       this.txForWrite(tx, writeIdentity).upsertEncoded(table, rowId, cells, updatedAtMs);
       tx.writes.push({
         table,
         rowId,
-        baseRow,
         row: existing
           ? this.mergeRowState(table, rowId, values, tx, writeIdentity)
           : this.rowStateFromValues(table, rowId, values),
       });
-      return { transactionId: txIdFromContext(writeContext) ?? "" };
+      return { kind: "staged", openBatchId: txIdFromContext(writeContext)! };
     }
     const write = writeOrNormalizeRejection("Upsert", () =>
       writeIdentity
@@ -599,14 +669,13 @@ export class NativeRuntimeAdapter implements Runtime {
     const rowId = parseUuid(objectId);
     const writeSession = sessionFromWriteContext(writeContext);
     this.applySessionClaims(writeSession);
-    const writeIdentity = writeSession?.identity;
+    const writeIdentity = this.trustedWriteIdentity(writeSession);
     const updatedAtMs = effectiveUpdatedAtMs(writeContext);
     const tx = this.currentTx(writeContext, "Delete");
     if (tx) {
-      const baseRow = this.baseRowForExclusiveWrite(tx, table, rowId, writeIdentity);
       this.txForWrite(tx, writeIdentity).delete(table, rowId, updatedAtMs);
-      tx.writes.push({ table, rowId, baseRow, deleted: true });
-      return { transactionId: txIdFromContext(writeContext) ?? "" };
+      tx.writes.push({ table, rowId, deleted: true });
+      return { kind: "staged", openBatchId: txIdFromContext(writeContext)! };
     }
     const write = writeOrNormalizeRejection("Delete", () =>
       writeIdentity
@@ -616,88 +685,134 @@ export class NativeRuntimeAdapter implements Runtime {
     return this.finishMutation(write);
   }
 
-  canInsert(table: string, values: InsertValues, session?: Session): boolean {
-    const cells = encodeCellsForRow(this.table(table), values, table);
-    const runtimeSession = runtimeSessionFromPublicSession(session);
-    this.applySessionClaims(runtimeSession);
-    const identity = runtimeSession?.identity ?? this.peerIdentity ?? parseUuid(SYSTEM_AUTHOR_ID);
-    if (this.db.canInsertEncodedForIdentity) {
-      return this.db.canInsertEncodedForIdentity(table, cells, identity);
-    }
-    if (!runtimeSession && this.db.canInsertEncoded) {
-      return this.db.canInsertEncoded(table, cells);
-    }
-    throw new Error("Runtime does not support write-policy dry-run insert checks.");
+  canInsertLocally(table: string, values: InsertValues, session?: Session): PermissionAdvice {
+    void table;
+    void values;
+    void session;
+    return "unknown";
   }
 
-  canRead(table: string, objectId: string, session?: Session): boolean {
-    this.table(table);
-    const rowId = parseUuid(objectId);
-    const runtimeSession = runtimeSessionFromPublicSession(session);
-    this.applySessionClaims(runtimeSession);
-    const identity = runtimeSession?.identity ?? this.peerIdentity ?? parseUuid(SYSTEM_AUTHOR_ID);
-    if (!this.db.canReadForIdentity) {
-      throw new Error("Runtime does not support read-policy dry-run checks.");
-    }
-    return this.db.canReadForIdentity(table, rowId, identity);
+  canReadLocally(table: string, objectId: string, session?: Session): PermissionAdvice {
+    void table;
+    void objectId;
+    void session;
+    return "unknown";
   }
 
-  canUpdate(
+  canUpdateLocally(
     table: string,
     objectId: string,
     values: Record<string, Value>,
     session?: Session,
-  ): boolean {
-    const rowId = parseUuid(objectId);
+  ): PermissionAdvice {
+    void table;
+    void objectId;
+    void values;
+    void session;
+    return "unknown";
+  }
+
+  canDeleteLocally(table: string, objectId: string, session?: Session): PermissionAdvice {
+    void table;
+    void objectId;
+    void session;
+    return "unknown";
+  }
+
+  requestInsertPermissionAdvice(
+    table: string,
+    values: InsertValues,
+    _session?: Session,
+  ): Promise<PermissionAdvice> {
+    const request = this.db.requestInsertPermissionAdviceEncoded;
+    if (!request) return Promise.resolve("unknown");
+    const cells = encodeCellsForRow(this.table(table), values, table);
+    return this.withPermissionAdviceTimeout(() => request.call(this.db, table, cells));
+  }
+
+  requestReadPermissionAdvice(
+    table: string,
+    objectId: string,
+    _session?: Session,
+  ): Promise<PermissionAdvice> {
+    const request = this.db.requestReadPermissionAdvice;
+    if (!request) return Promise.resolve("unknown");
+    return this.withPermissionAdviceTimeout(() =>
+      request.call(this.db, table, parseUuid(objectId)),
+    );
+  }
+
+  requestUpdatePermissionAdvice(
+    table: string,
+    objectId: string,
+    values: Record<string, Value>,
+    _session?: Session,
+  ): Promise<PermissionAdvice> {
+    const request = this.db.requestUpdatePermissionAdviceEncoded;
+    if (!request) return Promise.resolve("unknown");
     const patch = encodeCellsForPatch(this.table(table), values);
-    const runtimeSession = runtimeSessionFromPublicSession(session);
-    this.applySessionClaims(runtimeSession);
-    const identity = runtimeSession?.identity ?? this.peerIdentity ?? parseUuid(SYSTEM_AUTHOR_ID);
-    if (!this.db.canUpdateEncodedForIdentity) {
-      throw new Error("Runtime does not support write-policy dry-run update checks.");
-    }
-    return this.db.canUpdateEncodedForIdentity(table, rowId, patch, identity);
+    return this.withPermissionAdviceTimeout(() =>
+      request.call(this.db, table, parseUuid(objectId), patch),
+    );
   }
 
-  canDelete(table: string, objectId: string, session?: Session): boolean {
-    this.table(table);
-    const rowId = parseUuid(objectId);
-    const runtimeSession = runtimeSessionFromPublicSession(session);
-    this.applySessionClaims(runtimeSession);
-    const identity = runtimeSession?.identity ?? this.peerIdentity ?? parseUuid(SYSTEM_AUTHOR_ID);
-    if (!this.db.canDeleteForIdentity) {
-      throw new Error("Runtime does not support write-policy dry-run delete checks.");
-    }
-    return this.db.canDeleteForIdentity(table, rowId, identity);
+  requestDeletePermissionAdvice(
+    table: string,
+    objectId: string,
+    _session?: Session,
+  ): Promise<PermissionAdvice> {
+    const request = this.db.requestDeletePermissionAdvice;
+    if (!request) return Promise.resolve("unknown");
+    return this.withPermissionAdviceTimeout(() =>
+      request.call(this.db, table, parseUuid(objectId)),
+    );
   }
 
-  beginTransaction(kind: TransactionKind): string {
-    const id = `tx-${this.nextTransactionId++}`;
-    this.pendingTxs.set(id, { kind, writes: [] });
+  beginTransaction(
+    kind: TransactionKind,
+    id: OpenBatchId,
+    sessionJson?: string | null,
+  ): OpenBatchId {
+    if (this !== this.ownerRuntime) {
+      return this.ownerRuntime.beginTransaction(kind, id, sessionJson);
+    }
+    if (this.pendingTxs.has(id) || this.completedTxs.has(id)) {
+      throw new Error(`Begin transaction failed: batch ${id} has already been opened`);
+    }
+    const session = sessionFromWriteContext(sessionJson);
+    this.applySessionClaims(session);
+    const identity = kind === "mergeable" ? this.trustedWriteIdentity(session) : undefined;
+    this.db.beginTransaction(id, kind, identity);
+    this.pendingTxs.set(id, { id, kind, identity, writes: [], txByView: new Map() });
     return id;
   }
 
-  commitTransaction(transactionId: string): void {
-    const pending = this.pendingTxs.get(transactionId);
+  commitTransaction(openBatchId: OpenBatchId): Promise<BatchId> {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.commitTransaction(openBatchId);
+    const pending = this.pendingTxs.get(openBatchId);
     if (!pending) {
-      throw new Error(commitTransactionMessage(transactionId, this.completedTxs));
+      throw new Error(commitTransactionMessage(openBatchId, this.completedTxs));
     }
-    this.pendingTxs.delete(transactionId);
-    this.completedTxs.set(transactionId, { kind: pending.kind, state: "committed" });
-    if (!pending.tx) {
-      this.pumpSubscriptions();
-      return;
+    if (pending.writes.length === 0 && pending.kind === "mergeable") {
+      throw new Error(
+        "Commit transaction failed: empty mergeable batch has no committed unit; roll it back instead",
+      );
     }
-    this.rejectMovedExclusiveParents(pending);
-    const write = pending.tx.commit();
-    this.writes.set(transactionId, write);
+    const write = this.db.commitTransaction(openBatchId, pending.kind);
+    this.pendingTxs.delete(openBatchId);
+    this.completedTxs.set(openBatchId, { kind: pending.kind, state: "committed" });
     this.pumpSubscriptions();
     this.observeWriteForBoundaryEffects(write);
+    return Promise.resolve(recordWrite(write, this.writes));
   }
 
-  async waitForTransaction(transactionId: string, tier: string): Promise<void> {
-    const write = this.writes.get(transactionId);
-    if (!write) return;
+  async waitForTransaction(batchId: BatchId | Promise<BatchId>, tier: string): Promise<void> {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.waitForTransaction(batchId, tier);
+    batchId = await batchId;
+    const write = this.writes.get(batchId);
+    if (!write) {
+      throw new Error(`Wait for batch failed: unknown batch ${batchId}`);
+    }
     for (;;) {
       this.throwServerTransportErrorForTier(tier);
       try {
@@ -705,45 +820,50 @@ export class NativeRuntimeAdapter implements Runtime {
         this.throwServerTransportErrorForTier(tier);
         write.wait(tier);
         this.pumpSubscriptions();
-        this.refreshOpenedPlainSubscriptions();
         return;
       } catch (error) {
-        const rejected = rejectedWaitError(transactionId, error);
+        const rejected = rejectedWaitError(batchId, error);
         if (rejected) throw rejected;
         if (!isPendingWaitError(error)) throw error;
         this.pumpSubscriptions();
         const change = write.nextWriteStateChange();
+        const observedServerWorkEpoch = this.serverTransportWorkEpoch;
         try {
           this.pumpServerTransport();
           this.throwServerTransportErrorForTier(tier);
           write.wait(tier);
           this.pumpSubscriptions();
-          this.refreshOpenedPlainSubscriptions();
           return;
         } catch (secondError) {
-          const secondRejected = rejectedWaitError(transactionId, secondError);
+          const secondRejected = rejectedWaitError(batchId, secondError);
           if (secondRejected) throw secondRejected;
           if (!isPendingWaitError(secondError)) throw secondError;
         }
         const transportError = this.waitForServerTransportError(tier);
+        const transportWork = this.waitForServerTransportWork(tier, observedServerWorkEpoch);
         try {
-          await (transportError ? Promise.race([change, transportError.promise]) : change);
+          const wakes: Promise<unknown>[] = [change];
+          if (transportError) wakes.push(transportError.promise);
+          if (transportWork) wakes.push(transportWork.promise);
+          await Promise.race(wakes);
         } finally {
           transportError?.cancel();
+          transportWork?.cancel();
         }
       }
     }
   }
 
-  rollbackTransaction(transactionId: string): boolean {
-    const pending = this.pendingTxs.get(transactionId);
+  rollbackTransaction(openBatchId: OpenBatchId): Promise<boolean> {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.rollbackTransaction(openBatchId);
+    const pending = this.pendingTxs.get(openBatchId);
     if (!pending) {
-      throw new Error(rollbackTransactionMessage(transactionId, this.completedTxs));
+      throw new Error(rollbackTransactionMessage(openBatchId, this.completedTxs));
     }
-    pending.tx?.rollback();
-    this.pendingTxs.delete(transactionId);
-    this.completedTxs.set(transactionId, { kind: pending.kind, state: "rolled_back" });
-    return true;
+    this.db.rollbackTransaction(openBatchId);
+    this.pendingTxs.delete(openBatchId);
+    this.completedTxs.set(openBatchId, { kind: pending.kind, state: "rolled_back" });
+    return Promise.resolve(true);
   }
 
   async query(
@@ -760,11 +880,15 @@ export class NativeRuntimeAdapter implements Runtime {
     const coreQueryJson = addNestedOuterColumns(queryJson);
     const opts = readOptions(tier, queryIncludesDeleted(coreQueryJson), optionsJson);
     if (queryUsesNativeRelationApi(coreQueryJson)) {
-      if (session) {
+      if (this.readAuthorizationHost === "trusted-serving") {
         if (!this.db.allRelationQueryForIdentity) {
-          throw new Error("Native runtime does not support session-scoped relation queries");
+          throw new Error("Native runtime does not support trusted-serving relation queries");
         }
-        const payload = this.db.allRelationQueryForIdentity(coreQueryJson, session.identity, opts);
+        const payload = this.db.allRelationQueryForIdentity(
+          coreQueryJson,
+          session?.identity ?? this.peerIdentity,
+          opts,
+        );
         return rowsFromBatches(readRowBatches(payload), this.schema);
       }
       if (!this.db.allRelationQuery) {
@@ -778,15 +902,19 @@ export class NativeRuntimeAdapter implements Runtime {
     this.attachLocalReadCoverageInBackground(tier, optionsJson, query, session);
     try {
       if (queryHasArraySubqueries(coreQueryJson)) {
-        if (session) {
+        if (this.readAuthorizationHost === "trusted-serving") {
           if (!this.db.allRelationSnapshotForIdentity) {
-            throw new Error("Native runtime does not support session-scoped relation snapshots");
+            throw new Error("Native runtime does not support trusted-serving relation snapshots");
           }
-          const payload = this.db.allRelationSnapshotForIdentity(query, session.identity, opts);
+          const payload = this.db.allRelationSnapshotForIdentity(
+            query,
+            session?.identity ?? this.peerIdentity,
+            opts,
+          );
           return rowsFromRelationSnapshot(
             readRelationSnapshot(payload),
             this.schema,
-            relationMaterializationSpec(coreQueryJson, this.schema),
+            subscriptionOutputColumns(coreQueryJson, this.schema).rootColumns,
           );
         }
         if (!this.db.allRelationSnapshot) {
@@ -796,7 +924,7 @@ export class NativeRuntimeAdapter implements Runtime {
         return rowsFromRelationSnapshot(
           readRelationSnapshot(payload),
           this.schema,
-          relationMaterializationSpec(coreQueryJson, this.schema),
+          subscriptionOutputColumns(coreQueryJson, this.schema).rootColumns,
         );
       }
       const pendingTx = pendingTxFromOptions(optionsJson, this.pendingTxs);
@@ -831,16 +959,21 @@ export class NativeRuntimeAdapter implements Runtime {
       if (!this.db.subscribeRelationQuery) {
         throw new Error("Native runtime does not support relation query subscriptions");
       }
-      if (session && !this.db.subscribeRelationQueryForIdentity) {
-        throw new Error(
-          "Native runtime does not support session-scoped relation query subscriptions",
-        );
+      if (
+        this.readAuthorizationHost === "trusted-serving" &&
+        !this.db.subscribeRelationQueryForIdentity
+      ) {
+        throw new Error("Native runtime does not support trusted-serving relation subscriptions");
       }
     } else if (!this.db.subscribe) {
       throw new Error("Native runtime does not support subscriptions");
     }
-    if (!usesNativeRelationApi && session && !this.db.subscribeForIdentity) {
-      throw new Error("Native runtime does not support session-scoped subscriptions");
+    if (
+      this.readAuthorizationHost === "trusted-serving" &&
+      !usesNativeRelationApi &&
+      !this.db.subscribeForIdentity
+    ) {
+      throw new Error("Native runtime does not support trusted-serving subscriptions");
     }
     const handle = this.nextSubscriptionId++;
     const opts = readOptions(tier, false, optionsJson);
@@ -849,15 +982,21 @@ export class NativeRuntimeAdapter implements Runtime {
     let preparedQuery: PreparedQuery | null = null;
     try {
       if (usesNativeRelationApi) {
-        nativeSubscription = identity
-          ? this.db.subscribeRelationQueryForIdentity!(queryJson, identity, opts)
-          : this.db.subscribeRelationQuery!(queryJson, opts);
+        nativeSubscription =
+          this.readAuthorizationHost === "trusted-serving"
+            ? this.db.subscribeRelationQueryForIdentity!(
+                queryJson,
+                identity ?? this.peerIdentity,
+                opts,
+              )
+            : this.db.subscribeRelationQuery!(queryJson, opts);
       } else {
         const query = this.prepareQuery(queryJson);
         preparedQuery = query;
-        nativeSubscription = identity
-          ? this.db.subscribeForIdentity!(query, identity, opts)
-          : this.db.subscribe!(query, opts);
+        nativeSubscription =
+          this.readAuthorizationHost === "trusted-serving"
+            ? this.db.subscribeForIdentity!(query, identity ?? this.peerIdentity, opts)
+            : this.db.subscribe!(query, opts);
       }
     } catch (error) {
       const nativeStack = error instanceof Error ? error.stack : undefined;
@@ -865,7 +1004,6 @@ export class NativeRuntimeAdapter implements Runtime {
         `Core subscribe failed for ${queryJson}: ${errorMessage(error)}${nativeStack ? `\n${nativeStack}` : ""}`,
       );
     }
-    const snapshotRefresh = !usesNativeRelationApi && typeof this.db.all === "function";
     this.subscriptions.set(handle, {
       sources: [{ source: subscriptionSource(nativeSubscription), reading: false }],
       queryJson,
@@ -877,22 +1015,16 @@ export class NativeRuntimeAdapter implements Runtime {
       packedResetRows: null,
       visibleRows: [],
       visiblePackedResetRows: null,
-      relationRows: [],
-      relationRootCount: 0,
-      relationEdges: [],
-      relationMaterialization: usesNativeRelationApi
-        ? emptyRelationMaterializationSpec()
-        : relationMaterializationSpec(queryJson, this.schema),
       outputColumns: usesNativeRelationApi
         ? null
         : subscriptionOutputColumns(queryJson, this.schema),
-      snapshotRefresh,
       session,
       opts,
       opened: false,
       visibleOpened: false,
       deferredVisiblePublication: false,
       deferredVisibleReset: false,
+      deferredTerminalOperations: [],
       cancelled: false,
     });
     return handle;
@@ -926,17 +1058,20 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   connect(url: string, authJson: string): void {
-    this.disconnect();
+    if (this !== this.ownerRuntime) return this.ownerRuntime.connect(url, authJson);
+    // A new transport replaces the old one during a temporary reconnect. Server-tier
+    // waits are still meaningful across that transition, so only an explicit runtime
+    // shutdown is allowed to reject them.
+    void this.disconnect({ rejectWaiters: false });
     this.serverTransportError = null;
     this.serverEndpointUrl = url;
-    const transport = this.db.connectUpstream();
-    this.serverTransport = transport;
     const carrier = new WebSocketCarrier({
       endpointUrl: url,
       peerIdentity: this.peerIdentity,
       authJson,
       onFrame: (frame) => {
         this.pendingInboundServerFrames.push(frame);
+        this.notifyServerTransportWork();
         this.scheduleServerPump();
       },
       onError: (error) => {
@@ -946,18 +1081,37 @@ export class NativeRuntimeAdapter implements Runtime {
       },
     });
     this.serverCarrier = carrier;
-    this.serverCarrierPromise = carrier.ready().then(() => {
+    this.serverCarrierPromise = carrier.ready().then((negotiation) => {
+      const transport = this.connectNegotiatedUpstream(negotiation);
+      this.serverTransport = transport;
       this.flushQueuedServerFrames(carrier);
       this.pumpServerTransport();
+      this.pumpSubscriptions();
       return carrier;
     });
     this.serverCarrierPromise.catch((error) => {
       this.handleServerTransportError(error);
     });
-    this.scheduleServerPump();
   }
 
-  disconnect(options: { rejectWaiters?: boolean } = {}): void {
+  private connectNegotiatedUpstream(negotiation: WebSocketNegotiation): Transport {
+    const authority = negotiation.authority;
+    const connectWithSession = this.db.connectUpstreamWithSession;
+    if (!authority || !connectWithSession) return this.db.connectUpstream();
+    const localEpoch = this.nextServerConnectionEpoch++;
+    return connectWithSession.call(
+      this.db,
+      negotiation.protocolVersion,
+      negotiation.features,
+      authority.node,
+      authority.epoch,
+      this.peerIdentity,
+      localEpoch,
+    );
+  }
+
+  disconnect(options: { rejectWaiters?: boolean } = {}): Promise<void> {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.disconnect(options);
     this.serverCarrier?.close();
     this.serverCarrier = null;
     this.serverCarrierPromise = null;
@@ -967,6 +1121,7 @@ export class NativeRuntimeAdapter implements Runtime {
     } else {
       this.clearServerTransportErrorWaiters();
     }
+    this.resolveServerTransportWorkWaiters();
     this.serverTransport?.close();
     this.serverTransport = null;
     this.serverEndpointUrl = null;
@@ -974,14 +1129,17 @@ export class NativeRuntimeAdapter implements Runtime {
     this.pendingInboundServerFrames.length = 0;
     this.serverPumpScheduled = false;
     this.serverPumpAgain = false;
+    return Promise.resolve();
   }
 
   updateAuth(authJson: string): Promise<void> | void {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.updateAuth(authJson);
     if (!this.serverEndpointUrl) return;
     return this.connect(this.serverEndpointUrl, authJson);
   }
 
   onAuthFailure(callback: (reason: string) => void): void {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.onAuthFailure(callback);
     this.authFailureCallback = callback;
   }
 
@@ -991,18 +1149,18 @@ export class NativeRuntimeAdapter implements Runtime {
     values: InsertValues,
     write: Write,
   ): InsertResult {
-    const transactionId = writeId(write, this.writes);
+    const batchId = recordWrite(write, this.writes);
     this.pumpSubscriptions();
     this.observeWriteForBoundaryEffects(write);
     const row = this.rowStateFromValues(table, rowId, values);
-    return { id: row.id, values: row.values, transactionId };
+    return { id: row.id, values: row.values, kind: "committed", batchId };
   }
 
   private finishMutation(write: Write): MutationResult {
-    const transactionId = writeId(write, this.writes);
+    const batchId = recordWrite(write, this.writes);
     this.pumpSubscriptions();
     this.observeWriteForBoundaryEffects(write);
-    return { transactionId };
+    return { kind: "committed", batchId };
   }
 
   private observeWriteForBoundaryEffects(write: Write): void {
@@ -1016,7 +1174,6 @@ export class NativeRuntimeAdapter implements Runtime {
         try {
           write.wait("local");
           this.pumpSubscriptions();
-          this.refreshOpenedPlainSubscriptions();
           return;
         } catch (error) {
           if (!isPendingWaitError(error)) return;
@@ -1052,7 +1209,6 @@ export class NativeRuntimeAdapter implements Runtime {
         // the write handle. Keep subscription pumping paired with the server
         // pump here so write acks are not the only path that drains changes.
         this.pumpSubscriptions();
-        this.refreshOpenedPlainSubscriptions();
         this.scheduleServerPump();
       }
     };
@@ -1064,17 +1220,17 @@ export class NativeRuntimeAdapter implements Runtime {
   private resultForRow(
     table: string,
     rowId: Uint8Array,
-    transactionId: string,
+    receipt: { kind: "committed"; batchId: BatchId } | { kind: "staged"; openBatchId: OpenBatchId },
     identity?: Uint8Array,
   ): InsertResult {
     const row = this.readRow(table, rowId, identity);
-    return { id: formatUuid(rowId), values: row?.values ?? [], transactionId };
+    return { id: formatUuid(rowId), values: row?.values ?? [], ...receipt };
   }
 
   private readRow(table: string, rowId: Uint8Array, identity?: Uint8Array): RowState | undefined {
     if (!identity) return this.readRowForWriteMerge(table, rowId);
     const query = this.prepareQuery(JSON.stringify({ table }));
-    const rows = this.db.allForIdentity(query, identity, readOptions());
+    const rows = this.readRowsForHost(query, readOptions(), identity);
     return rowsFromBatches(readRowBatches(rows), this.schema).find(
       (row) => row.table === table && row.id === formatUuid(rowId),
     );
@@ -1104,7 +1260,7 @@ export class NativeRuntimeAdapter implements Runtime {
     values: Record<string, Value>,
   ): RowState {
     const visibleColumns = this.table(table).columns.filter(
-      (column) => !isInternalField(column.name) && !isHiddenIncludeColumn(column.name),
+      (column) => !isHiddenIncludeColumn(column.name),
     );
     const valuesByColumn = new Map<string, Value>();
     for (const column of visibleColumns) {
@@ -1146,21 +1302,43 @@ export class NativeRuntimeAdapter implements Runtime {
     session: RuntimeSession | undefined,
     pendingTx: PendingTx | undefined,
   ): Uint8Array {
-    if (!pendingTx?.tx) {
-      return session
-        ? this.db.allForIdentity(query, session.identity, opts)
-        : this.db.all(query, opts);
-    }
-    if (session) {
+    if (!pendingTx) return this.readRowsForHost(query, opts, session?.identity);
+    if (this.readAuthorizationHost === "trusted-serving") {
       if (!this.db.allInTransactionForIdentity) {
-        throw new Error("Native runtime does not support session-scoped transaction reads");
+        throw new Error("Native runtime does not support trusted-serving transaction reads");
       }
-      return this.db.allInTransactionForIdentity(query, pendingTx.tx, session.identity, opts);
+      return this.db.allInTransactionForIdentity(
+        query,
+        this.txForRead(pendingTx),
+        session?.identity ?? this.peerIdentity,
+        opts,
+      );
     }
     if (!this.db.allInTransaction) {
       throw new Error("Native runtime does not support transaction reads");
     }
-    return this.db.allInTransaction(query, pendingTx.tx, opts);
+    return this.db.allInTransaction(query, this.txForRead(pendingTx), opts);
+  }
+
+  /**
+   * Client runtimes consume server-scoped settled data locally. Only an
+   * explicitly configured serving host may select the policy-enforcing entry
+   * point, with a request session supplying its subject when present.
+   */
+  private readRowsForHost(query: PreparedQuery, opts: unknown, identity?: Uint8Array): Uint8Array {
+    return this.readAuthorizationHost === "trusted-serving"
+      ? this.db.allForIdentity(query, identity ?? this.peerIdentity, opts)
+      : this.db.all(query, opts);
+  }
+
+  /**
+   * A session supplies the subject for a trusted-serving host; it never turns
+   * an ordinary client mutation into a policy-enforcing local admission.
+   */
+  private trustedWriteIdentity(session: RuntimeSession | null | undefined): Uint8Array | undefined {
+    return this.readAuthorizationHost === "trusted-serving"
+      ? (session?.identity ?? this.peerIdentity)
+      : undefined;
   }
 
   private stagedRowForWriteMerge(
@@ -1175,38 +1353,6 @@ export class NativeRuntimeAdapter implements Runtime {
       return write.deleted ? undefined : write.row;
     }
     return undefined;
-  }
-
-  private refreshOpenedPlainSubscriptions(): void {
-    for (const subscription of this.subscriptions.values()) {
-      if (subscription.cancelled || !subscription.opened || !subscription.callback) continue;
-
-      const previousRows = subscription.rows;
-      const nextRows =
-        subscription.query === null
-          ? this.refreshNativeRelationSubscriptionRows(subscription)
-          : subscription.relationMaterialization.arraySubqueries.length > 0
-            ? this.refreshRelationSubscriptionRows(subscription)
-            : this.refreshPlainSubscriptionRows(subscription);
-      const delta = nativeDeltaFromRows(
-        nextRows,
-        previousRows,
-        this.schema,
-        subscription.outputColumns,
-      );
-      if (!nativeDeltaHasChanges(delta)) continue;
-      subscription.rows = nextRows;
-      subscription.rowIndexByKey = indexRowsByKey(subscription.rows);
-      subscription.callback(delta);
-    }
-  }
-
-  private refreshPlainSubscriptionRows(subscription: SubscriptionState): RowState[] {
-    if (!subscription.query) return [];
-    const rowsBytes = subscription.identity
-      ? this.db.allForIdentity(subscription.query, subscription.identity, subscription.opts)
-      : this.db.all(subscription.query, subscription.opts);
-    return rowsFromBatches(readRowBatches(rowsBytes), this.schema);
   }
 
   private warnedOnce = new Set<string>();
@@ -1236,59 +1382,11 @@ export class NativeRuntimeAdapter implements Runtime {
       try {
         attachment = await this.attachQueryIfNeeded("edge", null, query, session);
         const opts = readOptions("edge", false, null);
-        if (session) {
-          this.db.allForIdentity(query, session.identity, opts);
-        } else {
-          this.db.all(query, opts);
-        }
+        this.readRowsForHost(query, opts, session?.identity);
       } finally {
         if (attachment !== undefined) this.db.detachQuery?.(attachment);
       }
     }
-  }
-
-  private refreshNativeRelationSubscriptionRows(subscription: SubscriptionState): RowState[] {
-    if (
-      !this.db.allRelationQuery ||
-      (subscription.identity && !this.db.allRelationQueryForIdentity)
-    ) {
-      return [];
-    }
-    const rowsBytes = subscription.identity
-      ? this.db.allRelationQueryForIdentity!(
-          subscription.queryJson,
-          subscription.identity,
-          subscription.opts,
-        )
-      : this.db.allRelationQuery(subscription.queryJson, subscription.opts);
-    return rowsFromBatches(readRowBatches(rowsBytes), this.schema);
-  }
-
-  private refreshRelationSubscriptionRows(subscription: SubscriptionState): RowState[] {
-    if (!subscription.query) return [];
-    if (
-      !this.db.allRelationSnapshot ||
-      (subscription.identity && !this.db.allRelationSnapshotForIdentity)
-    ) {
-      return this.refreshPlainSubscriptionRows(subscription);
-    }
-    const payload = subscription.identity
-      ? this.db.allRelationSnapshotForIdentity!(
-          subscription.query,
-          subscription.identity,
-          subscription.opts,
-        )
-      : this.db.allRelationSnapshot(subscription.query, subscription.opts);
-    const snapshot = readRelationSnapshot(payload);
-    subscription.relationRows = rowsFromBatches(snapshot.rows, this.schema);
-    subscription.relationRootCount = snapshot.rootCount;
-    subscription.relationEdges = snapshot.edges;
-    return materializeRelationRows(
-      subscription.relationRows,
-      subscription.relationEdges,
-      subscription.relationRootCount,
-      subscription.relationMaterialization,
-    );
   }
 
   private prepareQuery(queryJson: string): PreparedQuery {
@@ -1319,11 +1417,15 @@ export class NativeRuntimeAdapter implements Runtime {
     if (!this.db.attachQuery) return;
     const opts = readOptions(tier, false, optionsJson);
     let attachment: unknown;
-    if (session) {
+    if (this.readAuthorizationHost === "trusted-serving") {
       if (!this.db.attachQueryForIdentity) {
-        throw new Error("Native runtime does not support session-scoped query coverage");
+        throw new Error("Native runtime does not support trusted-serving query coverage");
       }
-      attachment = this.db.attachQueryForIdentity(query, session.identity, opts);
+      attachment = this.db.attachQueryForIdentity(
+        query,
+        session?.identity ?? this.peerIdentity,
+        opts,
+      );
     } else {
       attachment = this.db.attachQuery(query, opts);
     }
@@ -1384,11 +1486,7 @@ export class NativeRuntimeAdapter implements Runtime {
         if (this.db.queryAttachmentIsCovered(attachment)) return;
       }
       try {
-        if (identity) {
-          this.db.allForIdentity(query, identity, opts);
-        } else {
-          this.db.all(query, opts);
-        }
+        this.readRowsForHost(query, opts, identity);
         if (!this.db.queryAttachmentIsCovered) return;
       } catch (error) {
         if (!isPendingCoverageError(error)) throw error;
@@ -1429,81 +1527,77 @@ export class NativeRuntimeAdapter implements Runtime {
             "the native runtime exclusive transaction API has no identity-aware staging methods.",
         );
       }
-      if (!pending.tx) {
-        pending.tx = this.exclusiveTx();
-      }
-      return pending.tx;
+      return this.txForRead(pending);
     }
     if (pending.identity && (!identity || !sameBytes(pending.identity, identity))) {
       throw new Error("Native runtime mergeable transaction cannot mix write identities");
     }
-    if (identity && pending.tx && !pending.identity) {
+    if (identity && !pending.identity) {
       throw new Error("Native runtime mergeable transaction cannot mix write identities");
     }
-    if (!pending.tx) {
-      pending.identity = identity;
-      pending.tx = identity ? this.mergeableTxForIdentity(identity) : this.db.mergeableTx();
-    }
-    return pending.tx;
+    return this.txForRead(pending);
   }
 
-  private baseRowForExclusiveWrite(
-    tx: PendingTx,
-    table: string,
-    rowId: Uint8Array,
-    identity: Uint8Array | undefined,
-  ): RowState | undefined {
-    if (tx.kind !== "exclusive") return undefined;
-    const id = formatUuid(rowId);
-    for (const write of tx.writes) {
-      if (write.table === table && formatUuid(write.rowId) === id) {
-        return write.baseRow;
-      }
-    }
-    return this.readRow(table, rowId, identity);
+  private txForRead(pending: PendingTx): Tx {
+    const existing = pending.txByView.get(this);
+    if (existing) return existing;
+    const tx =
+      pending.kind === "mergeable"
+        ? this.db.attachMergeableTx(pending.id)
+        : this.db.attachExclusiveTx?.(pending.id);
+    if (!tx) throw new Error("Native runtime does not support attached exclusive batches");
+    pending.txByView.set(this, tx);
+    return tx;
   }
 
-  private rejectMovedExclusiveParents(tx: PendingTx): void {
-    if (tx.kind !== "exclusive") return;
-    for (const write of tx.writes) {
-      const current = this.readRowForWriteMerge(write.table, write.rowId);
-      if (rowsMatchForExclusiveParent(this.schema, write.table, current, write.baseRow)) {
-        continue;
-      }
-      throw new Error(
-        "(transaction_conflict): row visible parent changed since transaction write was staged",
-      );
-    }
-  }
-
-  private txForKind(kind: TransactionKind): Tx {
-    return kind === "exclusive" ? this.exclusiveTx() : this.db.mergeableTx();
-  }
-
-  private exclusiveTx(): Tx {
+  private exclusiveTx(id: OpenBatchId): Tx {
     if (!this.db.exclusiveTx) {
       throw new Error(
         "Native runtime cannot perform exclusive transaction writes: " +
           "the native runtime exclusive transaction API is unavailable.",
       );
     }
-    return this.db.exclusiveTx();
+    return this.db.exclusiveTx(id);
   }
 
-  private mergeableTxForIdentity(identity: Uint8Array): Tx {
+  private mergeableTxForIdentity(id: OpenBatchId, identity: Uint8Array): Tx {
     if (!this.db.mergeableTxForIdentity) {
       throw new Error(
         "Native runtime cannot perform session-scoped transaction writes: " +
           "the native runtime mergeable transaction API has no identity-aware staging methods.",
       );
     }
-    return this.db.mergeableTxForIdentity(identity);
+    return this.db.mergeableTxForIdentity(id, identity);
   }
 
   private pumpSubscriptions(): void {
     for (const [handle, subscription] of this.subscriptions) {
       this.startSubscriptionReader(handle, subscription);
     }
+  }
+
+  private withPermissionAdviceTimeout(
+    start: () => NativePermissionAdviceRequest,
+  ): Promise<PermissionAdvice> {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.withPermissionAdviceTimeout(start);
+    if (this.closed || !this.serverTransport || !this.serverCarrier) {
+      return Promise.resolve("unknown");
+    }
+    const request = start();
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = (advice: PermissionAdvice) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        resolve(advice);
+      };
+      const timeout = setTimeout(() => {
+        request.cancel();
+        finish("unknown");
+      }, 2_000);
+      request.promise.then(finish, () => finish("unknown"));
+    });
   }
 
   private scheduleCoreWake(urgency: "immediate" | "deferred"): void {
@@ -1618,14 +1712,11 @@ export class NativeRuntimeAdapter implements Runtime {
     if (chunk.type === "snapshot") {
       const previousRows = subscription.rows;
       const wasOpened = subscription.opened;
-      subscription.relationRows = rowsFromBatches(chunk.snapshot.rows, this.schema);
-      subscription.relationRootCount = chunk.snapshot.rootCount;
-      subscription.relationEdges = chunk.snapshot.edges;
-      subscription.rows = materializeRelationRows(
-        subscription.relationRows,
-        subscription.relationEdges,
-        subscription.relationRootCount,
-        subscription.relationMaterialization,
+      subscription.rows = rowsFromRelationSnapshot(
+        chunk.snapshot,
+        this.schema,
+        subscription.outputColumns?.rootColumns,
+        "full-record",
       );
       subscription.rowIndexByKey = indexRowsByKey(subscription.rows);
       subscription.opened = true;
@@ -1642,32 +1733,6 @@ export class NativeRuntimeAdapter implements Runtime {
         chunk.settled,
         !wasOpened,
       );
-    } else if (
-      chunk.relationSnapshot &&
-      subscription.relationMaterialization.arraySubqueries.length > 0
-    ) {
-      const previousRows = subscription.rows;
-      subscription.relationRows = rowsFromBatches(chunk.relationSnapshot.rows, this.schema);
-      subscription.relationRootCount = chunk.relationSnapshot.rootCount;
-      subscription.relationEdges = chunk.relationSnapshot.edges;
-      subscription.rows = materializeRelationRows(
-        subscription.relationRows,
-        subscription.relationEdges,
-        subscription.relationRootCount,
-        subscription.relationMaterialization,
-      );
-      subscription.rowIndexByKey = indexRowsByKey(subscription.rows);
-      this.publishSubscriptionRows(
-        subscription,
-        nativeDeltaFromRows(
-          subscription.rows,
-          previousRows,
-          this.schema,
-          subscription.outputColumns,
-        ),
-        chunk.settled,
-        false,
-      );
     } else {
       if (chunk.reset) {
         subscription.rows = [];
@@ -1675,33 +1740,7 @@ export class NativeRuntimeAdapter implements Runtime {
         subscription.packedResetBatches = null;
         subscription.packedResetRows = null;
       }
-      if (chunk.relationDelta && subscription.relationMaterialization.arraySubqueries.length > 0) {
-        const previousRows = subscription.rows;
-        applyRelationSubscriptionDelta(
-          subscription,
-          chunk.delta,
-          chunk.relationDelta,
-          this.schema,
-          chunk.reset === true,
-        );
-        subscription.rows = materializeRelationRows(
-          subscription.relationRows,
-          subscription.relationEdges,
-          subscription.relationRootCount,
-          subscription.relationMaterialization,
-        );
-        subscription.rowIndexByKey = indexRowsByKey(subscription.rows);
-        subscription.opened = true;
-        const wireDelta = chunk.reset
-          ? nativeResetDeltaFromRows(subscription.rows, this.schema, subscription.outputColumns)
-          : nativeDeltaFromRows(
-              subscription.rows,
-              previousRows,
-              this.schema,
-              subscription.outputColumns,
-            );
-        this.publishSubscriptionRows(subscription, wireDelta, chunk.settled, chunk.reset === true);
-      } else if (plainResetChunkCanStayPacked(subscription, chunk, this.schema)) {
+      if (plainResetChunkCanStayPacked(subscription, chunk, this.schema)) {
         const packedResetRows = nativeResetDeltaFromBatches(
           chunk.delta.added,
           subscription.outputColumns,
@@ -1712,44 +1751,6 @@ export class NativeRuntimeAdapter implements Runtime {
         subscription.packedResetRows = packedResetRows;
         subscription.opened = true;
         this.publishSubscriptionRows(subscription, packedResetRows, chunk.settled, true);
-      } else if (subscription.snapshotRefresh) {
-        materializePackedResetRows(subscription, this.schema);
-        const previousRows = subscription.rows;
-        // Guarded so the argument never evaluates without a server transport:
-        // memory-backed chunks carry a different updated-payload shape and the
-        // callers swallow rejections, which silently killed delivery. The
-        // refresh is an optimization: any failure (including payload-shape
-        // decode errors on individual subscriptions) must degrade to a plain
-        // snapshot refresh, never kill delivery for that subscription.
-        // Scope: post-open update convergence only. During initial ingest
-        // (reset chunks / not-yet-opened subscriptions) the refresh would fire
-        // per-row edge queries across the whole snapshot — a multi-second cold
-        // open tax with no correctness benefit.
-        if (this.serverTransport && subscription.opened && !chunk.reset) {
-          try {
-            await this.refreshRowsFromEdge(
-              subscription.session,
-              rowsFromBatches(chunk.delta.updated, this.schema),
-            );
-          } catch (error) {
-            this.warnOnce(
-              "edge-refresh-decode",
-              `edge refresh skipped for a subscription chunk: ${String(error)}`,
-            );
-          }
-        }
-        subscription.rows = this.refreshPlainSubscriptionRows(subscription);
-        subscription.rowIndexByKey = indexRowsByKey(subscription.rows);
-        subscription.opened = true;
-        const wireDelta = chunk.reset
-          ? nativeResetDeltaFromRows(subscription.rows, this.schema, subscription.outputColumns)
-          : nativeDeltaFromRows(
-              subscription.rows,
-              previousRows,
-              this.schema,
-              subscription.outputColumns,
-            );
-        this.publishSubscriptionRows(subscription, wireDelta, chunk.settled, chunk.reset === true);
       } else {
         materializePackedResetRows(subscription, this.schema);
         const applied = applySubscriptionDeltaWithWireDelta(
@@ -1758,10 +1759,12 @@ export class NativeRuntimeAdapter implements Runtime {
           chunk.delta,
           this.schema,
           chunk.reset === true,
+          subscription.outputColumns,
         );
         subscription.rows = applied.rows;
         subscription.rowIndexByKey = applied.rowIndexByKey;
         subscription.opened = true;
+        applied.wireDelta.terminalOperations = chunk.terminalOperations;
         this.publishSubscriptionRows(
           subscription,
           applied.wireDelta,
@@ -1781,6 +1784,7 @@ export class NativeRuntimeAdapter implements Runtime {
     if (this.subscriptionCallbacksAreSettledGated(subscription) && settled === false) {
       subscription.deferredVisiblePublication = true;
       subscription.deferredVisibleReset ||= reset;
+      subscription.deferredTerminalOperations.push(...(wireDelta.terminalOperations ?? []));
       return;
     }
 
@@ -1809,6 +1813,12 @@ export class NativeRuntimeAdapter implements Runtime {
       }
     }
 
+    const terminalOperations = [
+      ...subscription.deferredTerminalOperations,
+      ...(wireDelta.terminalOperations ?? []),
+    ];
+    if (terminalOperations.length > 0) visibleDelta.terminalOperations = terminalOperations;
+
     subscription.callback?.(visibleDelta);
     if (visibleDelta === subscription.packedResetRows) {
       subscription.visibleRows = [];
@@ -1820,6 +1830,7 @@ export class NativeRuntimeAdapter implements Runtime {
     subscription.visibleOpened = true;
     subscription.deferredVisiblePublication = false;
     subscription.deferredVisibleReset = false;
+    subscription.deferredTerminalOperations = [];
   }
 
   private subscriptionCallbacksAreSettledGated(subscription: SubscriptionState): boolean {
@@ -1944,7 +1955,10 @@ export class NativeRuntimeAdapter implements Runtime {
     return {
       promise,
       cancel: () => {
+        if (!waiter.active) return;
         waiter.active = false;
+        const index = this.serverTransportErrorWaiters.indexOf(waiter);
+        if (index >= 0) this.serverTransportErrorWaiters.splice(index, 1);
       },
     };
   }
@@ -1962,6 +1976,48 @@ export class NativeRuntimeAdapter implements Runtime {
     }
     this.serverTransportErrorWaiters.length = 0;
   }
+
+  private waitForServerTransportWork(
+    tier: string,
+    observedEpoch: number,
+  ): { promise: Promise<void>; cancel: () => void } | null {
+    if (tier !== "edge" && tier !== "global") return null;
+    if (
+      this.serverTransportWorkEpoch !== observedEpoch ||
+      this.pendingInboundServerFrames.length > 0
+    ) {
+      return { promise: Promise.resolve(), cancel: () => {} };
+    }
+    const waiter: ServerTransportWorkWaiter = {
+      active: true,
+      resolve: () => {},
+    };
+    const promise = new Promise<void>((resolve) => {
+      waiter.resolve = resolve;
+    });
+    this.serverTransportWorkWaiters.push(waiter);
+    return {
+      promise,
+      cancel: () => {
+        if (!waiter.active) return;
+        waiter.active = false;
+        const index = this.serverTransportWorkWaiters.indexOf(waiter);
+        if (index >= 0) this.serverTransportWorkWaiters.splice(index, 1);
+      },
+    };
+  }
+
+  private notifyServerTransportWork(): void {
+    this.serverTransportWorkEpoch += 1;
+    this.resolveServerTransportWorkWaiters();
+  }
+
+  private resolveServerTransportWorkWaiters(): void {
+    const waiters = this.serverTransportWorkWaiters.splice(0);
+    for (const waiter of waiters) {
+      if (waiter.active) waiter.resolve();
+    }
+  }
 }
 
 function normalizeTransportFrames(frames: unknown[]): Uint8Array[] {
@@ -1971,17 +2027,17 @@ function normalizeTransportFrames(frames: unknown[]): Uint8Array[] {
   );
 }
 
-function writeId(write: Write, writes: Map<string, Write>): string {
-  const id = `tx-${writes.size + 1}`;
+function recordWrite(write: Write, writes: Map<string, Write>): BatchId {
+  const id = write.batchId as BatchId;
   writes.set(id, write);
-  return id;
+  return id as BatchId;
 }
 
-function txIdFromContext(writeContext?: string | null): string | undefined {
+function txIdFromContext(writeContext?: string | null): OpenBatchId | undefined {
   if (!writeContext) return undefined;
   try {
     const parsed = JSON.parse(writeContext) as { batch_id?: unknown };
-    return typeof parsed.batch_id === "string" ? parsed.batch_id : undefined;
+    return typeof parsed.batch_id === "string" ? (parsed.batch_id as OpenBatchId) : undefined;
   } catch {
     return undefined;
   }
@@ -2026,30 +2082,30 @@ function effectiveUpdatedAtMs(writeContext?: string | null): number | null {
   return updatedAtMsFromWriteContext(writeContext) ?? Date.now();
 }
 
-function txStateMessage(transactionId: string, completedTxs: Map<string, CompletedTx>): string {
-  const completed = completedTxs.get(transactionId);
+function txStateMessage(openBatchId: string, completedBatches: Map<string, CompletedTx>): string {
+  const completed = completedBatches.get(openBatchId);
   if (completed?.state === "committed") {
-    return `transaction ${transactionId} is already committed`;
+    return `open batch ${openBatchId} is already committed`;
   }
-  return `transaction ${transactionId} has already been completed or was never opened`;
+  return `open batch ${openBatchId} has already been completed or was never opened`;
 }
 
 function commitTransactionMessage(
-  transactionId: string,
-  completedTxs: Map<string, CompletedTx>,
+  openBatchId: string,
+  completedBatches: Map<string, CompletedTx>,
 ): string {
-  const message = txStateMessage(transactionId, completedTxs);
-  return completedTxs.get(transactionId)?.state === "committed"
+  const message = txStateMessage(openBatchId, completedBatches);
+  return completedBatches.get(openBatchId)?.state === "committed"
     ? `Write error: ${message}`
     : `Commit transaction failed: Write error: ${message}`;
 }
 
 function rollbackTransactionMessage(
-  transactionId: string,
-  completedTxs: Map<string, CompletedTx>,
+  openBatchId: string,
+  completedBatches: Map<string, CompletedTx>,
 ): string {
-  const message = txStateMessage(transactionId, completedTxs);
-  return completedTxs.get(transactionId)?.state === "committed"
+  const message = txStateMessage(openBatchId, completedBatches);
+  return completedBatches.get(openBatchId)?.state === "committed"
     ? `Write error: ${message}`
     : `Rollback transaction failed: Write error: ${message}`;
 }
@@ -2059,27 +2115,25 @@ function assertTransactionReadOpen(
   pendingTxs: Map<string, PendingTx>,
   completedTxs: Map<string, CompletedTx>,
 ): void {
-  const transactionId = txIdFromOptions(optionsJson);
-  if (!transactionId || pendingTxs.has(transactionId)) return;
-  throw new Error(
-    `Query setup failed: Write error: ${txStateMessage(transactionId, completedTxs)}`,
-  );
+  const openBatchId = openBatchIdFromOptions(optionsJson);
+  if (!openBatchId || pendingTxs.has(openBatchId)) return;
+  throw new Error(`Query setup failed: Write error: ${txStateMessage(openBatchId, completedTxs)}`);
 }
 
 function pendingTxFromOptions(
   optionsJson: string | null | undefined,
   pendingTxs: Map<string, PendingTx>,
 ): PendingTx | undefined {
-  const transactionId = txIdFromOptions(optionsJson);
-  return transactionId ? pendingTxs.get(transactionId) : undefined;
+  const openBatchId = openBatchIdFromOptions(optionsJson);
+  return openBatchId ? pendingTxs.get(openBatchId) : undefined;
 }
 
-function txIdFromOptions(optionsJson?: string | null): string | undefined {
+function openBatchIdFromOptions(optionsJson?: string | null): OpenBatchId | undefined {
   if (!optionsJson) return undefined;
   try {
     const parsed = JSON.parse(optionsJson) as { transaction_batch_id?: unknown };
     return typeof parsed.transaction_batch_id === "string"
-      ? parsed.transaction_batch_id
+      ? (parsed.transaction_batch_id as OpenBatchId)
       : undefined;
   } catch {
     return undefined;
@@ -2346,36 +2400,6 @@ function unqualifiedColumn(column: string): string {
   return column.split(".").at(-1) ?? column;
 }
 
-function emptyRelationMaterializationSpec(): RelationMaterializationSpec {
-  return {
-    rootTable: null,
-    arraySubqueries: [],
-    clientLimit: null,
-    clientOffset: 0,
-  };
-}
-
-function relationMaterializationSpec(
-  queryJson: string,
-  schema: WasmSchema,
-): RelationMaterializationSpec {
-  const parsed = JSON.parse(queryJson) as {
-    table?: unknown;
-    array_subqueries?: unknown;
-    __jazz_client_limit?: unknown;
-    __jazz_client_offset?: unknown;
-  };
-  if (typeof parsed.table !== "string") {
-    return emptyRelationMaterializationSpec();
-  }
-  return {
-    rootTable: parsed.table,
-    arraySubqueries: readQueryArraySubqueries(parsed.array_subqueries, parsed.table, schema) ?? [],
-    clientLimit: parsed.__jazz_client_limit == null ? null : readLimit(parsed.__jazz_client_limit),
-    clientOffset: parsed.__jazz_client_offset == null ? 0 : readOffset(parsed.__jazz_client_offset),
-  };
-}
-
 function subscriptionOutputColumns(
   queryJson: string,
   schema: WasmSchema,
@@ -2406,12 +2430,21 @@ function outputColumnsForTable(
   schema: WasmSchema,
   select: string[] | undefined,
   arraySubqueries: readonly QueryArraySubquery[],
+  rootTerminal = true,
 ): ColumnDescriptor[] {
   const tableSchema = schema[table];
   if (!tableSchema) throw new Error(`missing schema for subscription table ${table}`);
+  const wildcard = select === undefined;
   const selected = select ?? tableSchema.columns.map((column) => column.name);
   const columns = selected
-    .map((columnName) => tableSchema.columns.find((column) => column.name === columnName))
+    .map((columnName) => {
+      const declared = tableSchema.columns.find((column) => column.name === columnName);
+      if (declared) return wildcard && rootTerminal ? { ...declared, sparse: true } : declared;
+      const magicType = magicColumnType(columnName);
+      return magicType
+        ? ({ name: columnName, column_type: magicType, nullable: false } satisfies ColumnDescriptor)
+        : undefined;
+    })
     .filter((column): column is ColumnDescriptor => column !== undefined);
 
   for (const subquery of arraySubqueries) {
@@ -2420,6 +2453,7 @@ function outputColumnsForTable(
       schema,
       subquery.select,
       subquery.nestedArrays ?? [],
+      false,
     );
     columns.push({
       name: subquery.columnName,
@@ -2486,14 +2520,14 @@ function isPendingCoverageError(error: unknown): boolean {
 }
 
 function rejectedWaitError(
-  transactionId: string,
+  batchId: BatchId,
   error: unknown,
-): { kind: "rejected"; transactionId: string; code: string; reason: string } | null {
+): { kind: "rejected"; batchId: BatchId; code: string; reason: string } | null {
   const message = errorMessage(error);
   if (!message.includes("WriteRejected")) return null;
   return {
     kind: "rejected",
-    transactionId,
+    batchId,
     code: rejectionCode(message),
     reason: rejectionReason(message),
   };
@@ -2546,29 +2580,6 @@ function errorMessage(error: unknown): string {
 
 function schemaHasPolicies(schema: WasmSchema): boolean {
   return Object.values(schema).some((table) => table.policies !== undefined);
-}
-
-function rowsMatchForExclusiveParent(
-  schema: WasmSchema,
-  table: string,
-  current: RowState | undefined,
-  base: RowState | undefined,
-): boolean {
-  if (!current || !base) return current === base;
-  if (current.id !== base.id || current.table !== base.table) return false;
-  const columns = schema[table]?.columns ?? [];
-  for (const column of columns) {
-    if (isInternalField(column.name) || isHiddenIncludeColumn(column.name)) continue;
-    if (
-      !valueEqual(
-        current.valuesByColumn?.get(column.name) ?? { type: "Null" },
-        base.valuesByColumn?.get(column.name) ?? { type: "Null" },
-      )
-    ) {
-      return false;
-    }
-  }
-  return true;
 }
 
 function rejectionCode(message: string): string {
@@ -2907,6 +2918,7 @@ function readQueryArraySubquery(
     select_columns?: unknown;
     order_by?: unknown;
     limit?: unknown;
+    offset?: unknown;
     requirement?: unknown;
     nested_arrays?: unknown;
   };
@@ -2934,6 +2946,7 @@ function readQueryArraySubquery(
     select,
     orderBy,
     limit: record.limit == null ? null : readLimit(record.limit),
+    offset: readOffset(record.offset),
     requirement: readArraySubqueryRequirement(record.requirement),
     nestedArrays,
   };
@@ -3428,14 +3441,13 @@ function encodeNonNullValue(type: ColumnType, value: Value): Uint8Array {
     case "Boolean":
       return Uint8Array.of(value.type === "Boolean" && value.value ? 1 : 0);
     case "Integer":
-      view.setUint32(0, encodeSignedI32ForStorage(expectI32(value, "Integer")), true);
+      view.setInt32(0, expectI32(value, "Integer"), true);
       return new Uint8Array(view.buffer, 0, 4);
     case "Timestamp":
       view.setBigUint64(0, BigInt(expectNumber(value, type.type)), true);
       return new Uint8Array(view.buffer);
     case "BigInt":
-      if (value.type !== "BigInt") throw new Error("expected BigInt value");
-      view.setBigUint64(0, encodeSignedI64ForStorage(BigInt(value.value)), true);
+      view.setBigInt64(0, expectI64(value, "BigInt"), true);
       return new Uint8Array(view.buffer);
     case "Double":
       view.setFloat64(0, expectNumber(value, "Double"), true);
@@ -3485,21 +3497,21 @@ function encodeNullValue(valueType: ValueType): Uint8Array {
 function fixedValueSize(valueType: ValueType): number | undefined {
   switch (valueType.tag) {
     case 0:
-    case 5:
-    case 9:
+    case 7:
+    case 11:
       return 1;
     case 1:
       return 2;
     case 2:
-    case 15:
+    case 4:
       return 4;
     case 3:
-    case 14:
-    case 4:
+    case 5:
+    case 6:
       return 8;
-    case 8:
+    case 10:
       return 16;
-    case 10: {
+    case 12: {
       const members = valueType.members ?? (valueType.inner ? [valueType.inner] : []);
       return members.reduce<number | undefined>((total, member) => {
         if (total == null) return undefined;
@@ -3507,7 +3519,7 @@ function fixedValueSize(valueType: ValueType): number | undefined {
         return memberSize == null ? undefined : total + memberSize;
       }, 0);
     }
-    case 12: {
+    case 14: {
       const innerSize = valueType.inner ? fixedValueSize(valueType.inner) : undefined;
       return innerSize == null ? undefined : innerSize + 1;
     }
@@ -3534,20 +3546,13 @@ function expectI32(value: Value, type: string): number {
   return number;
 }
 
-function encodeSignedI32ForStorage(value: number): number {
-  return (value ^ 0x80000000) >>> 0;
-}
-
-function decodeSignedI32FromStorage(value: number): number {
-  return (value ^ 0x80000000) | 0;
-}
-
-function encodeSignedI64ForStorage(value: bigint): bigint {
-  return BigInt.asUintN(64, value) ^ (1n << 63n);
-}
-
-function decodeSignedI64FromStorage(value: bigint): bigint {
-  return BigInt.asIntN(64, value ^ (1n << 63n));
+function expectI64(value: Value, type: string): bigint {
+  if (value.type !== "BigInt") throw new Error(`expected ${type} value`);
+  const number = BigInt(value.value);
+  if (number < -(1n << 63n) || number > (1n << 63n) - 1n) {
+    throw new Error(`${type} value must be a signed 64-bit integer`);
+  }
+  return number;
 }
 
 function expectString(value: Value, type: string): string {
@@ -3565,17 +3570,22 @@ function readRelationSnapshot(payload: Uint8Array): NativeRelationSubscriptionSn
   return readNativeRelationSubscriptionSnapshot(new PostcardReader(payload));
 }
 
-function rowsFromBatches(batches: NativeRowBatch[], schema: WasmSchema): RowState[] {
+function rowsFromBatches(
+  batches: NativeRowBatch[],
+  schema: WasmSchema,
+  projectedColumns?: readonly ColumnDescriptor[],
+  nestedRowCarrier: NestedRowCarrier = "full-record",
+): RowState[] {
   const rows: RowState[] = [];
   for (const batch of batches) {
-    const fieldPlans = nativeRowFieldPlans(batch, schema);
+    const fieldPlans = nativeRowFieldPlans(batch, schema, projectedColumns);
     const decodeRecord = createRecordValueDecoder(batch.descriptor);
     for (const row of batch.rows) {
       const values: Value[] = [];
       const valuesByColumn = new Map<string, Value>();
 
       for (const field of fieldPlans) {
-        const value = decodePlannedField(field, decodeRecord, row.raw);
+        const value = decodePlannedField(field, decodeRecord, row.raw, nestedRowCarrier);
         valuesByColumn.set(field.name, value);
         if (field.includeInValues) {
           values.push(value);
@@ -3597,17 +3607,21 @@ function rowsFromBatches(batches: NativeRowBatch[], schema: WasmSchema): RowStat
   return rows;
 }
 
-function nativeRowFieldPlans(batch: NativeRowBatch, schema: WasmSchema): NativeRowFieldPlan[] {
+function nativeRowFieldPlans(
+  batch: NativeRowBatch,
+  schema: WasmSchema,
+  projectedColumns?: readonly ColumnDescriptor[],
+): NativeRowFieldPlan[] {
   let cache = nativeRowFieldPlanCache.get(schema);
   if (!cache) {
     cache = new Map();
     nativeRowFieldPlanCache.set(schema, cache);
   }
   const cacheKey = nativeRowFieldPlanCacheKey(batch);
-  const cached = cache.get(cacheKey);
+  const cached = projectedColumns ? undefined : cache.get(cacheKey);
   if (cached) return cached;
 
-  const columns = schema[batch.table]?.columns ?? [];
+  const columns = projectedColumns ?? schema[batch.table]?.columns ?? [];
   const columnsByName = new Map(columns.map((column) => [column.name, column]));
   const plans: NativeRowFieldPlan[] = [];
 
@@ -3624,11 +3638,12 @@ function nativeRowFieldPlans(batch: NativeRowBatch, schema: WasmSchema): NativeR
       name,
       index,
       type,
+      storageType: batch.descriptor[index]!.valueType,
       includeInValues: !isHiddenIncludeColumn(name) && !isProvenanceMagicColumn(name),
     });
   }
 
-  cache.set(cacheKey, plans);
+  if (!projectedColumns) cache.set(cacheKey, plans);
   return plans;
 }
 
@@ -3647,10 +3662,14 @@ function valueTypeCacheKey(type: ValueType): string {
 function rowsFromRelationSnapshot(
   snapshot: NativeRelationSubscriptionSnapshot,
   schema: WasmSchema,
-  materialization: RelationMaterializationSpec,
+  projectedColumns?: readonly ColumnDescriptor[],
+  nestedRowCarrier: NestedRowCarrier = "full-record",
 ): RowState[] {
-  const rows = stripRelationSnapshotMetadata(rowsFromBatches(snapshot.rows, schema), schema);
-  return materializeRelationRows(rows, snapshot.edges, snapshot.rootCount, materialization);
+  const rows = stripRelationSnapshotMetadata(
+    rowsFromBatches(snapshot.rows, schema, projectedColumns, nestedRowCarrier),
+    schema,
+  );
+  return rows.slice(0, snapshot.rootCount);
 }
 
 const RELATION_SNAPSHOT_METADATA_FIELDS = new Set([
@@ -3688,172 +3707,6 @@ function stripRelationSnapshotMetadata(rows: RowState[], schema: WasmSchema): Ro
   });
 }
 
-function materializeRelationRows(
-  rows: RowState[],
-  edges: NativeRelationSubscriptionEdge[],
-  rootCount: number,
-  materialization: RelationMaterializationSpec,
-): RowState[] {
-  const rowsByKey = new Map(rows.map((row) => [rowKey(row.table, row.id), row]));
-  const childRowsBySourceAndRelation = new Map<string, RowState[]>();
-  for (const edge of edges) {
-    const targetKey = rowKey(edge.targetTable, formatUuid(edge.targetRowId));
-    const child = rowsByKey.get(targetKey);
-    if (!child) continue;
-    const key = relationKey(edge.sourceTable, formatUuid(edge.sourceRowId), edge.relation);
-    const children = childRowsBySourceAndRelation.get(key) ?? [];
-    children.push(child);
-    childRowsBySourceAndRelation.set(key, children);
-  }
-  const materialized = new Map<string, RowState>();
-  const rootCandidates =
-    materialization.rootTable === null
-      ? rows.slice(0, rootCount)
-      : rows.filter((row) => row.table === materialization.rootTable).slice(0, rootCount);
-  let roots = rootCandidates
-    .map((row) =>
-      materializeRelationRow(
-        row,
-        materialization.arraySubqueries,
-        childRowsBySourceAndRelation,
-        materialized,
-      ),
-    )
-    .filter((result) => result.satisfiesRequirements)
-    .map((result) => result.row);
-  if (materialization.clientOffset > 0 || materialization.clientLimit !== null) {
-    const offset = materialization.clientOffset;
-    const limit = materialization.clientLimit ?? roots.length;
-    roots = roots.slice(offset, offset + limit);
-  }
-  return roots;
-}
-
-function materializeRelationRow(
-  row: RowState,
-  subqueries: readonly QueryArraySubquery[],
-  childRowsBySourceAndRelation: Map<string, RowState[]>,
-  materialized: Map<string, RowState>,
-): { row: RowState; satisfiesRequirements: boolean } {
-  const rowKeyValue = rowKey(row.table, row.id);
-  const cached = materialized.get(rowKeyValue);
-  if (cached) return { row: cached, satisfiesRequirements: true };
-  materialized.set(rowKeyValue, row);
-  const valuesByColumn = new Map(row.valuesByColumn ?? []);
-  const relationValues: Value[] = [];
-  const relationPayloadValues = new Set<Value>();
-  let satisfiesRequirements = true;
-  for (const subquery of subqueries) {
-    const key = relationKey(row.table, row.id, subquery.columnName);
-    const children = childRowsBySourceAndRelation.get(key) ?? [];
-    const childResults = children.map((child) =>
-      materializeRelationRow(
-        child,
-        subquery.nestedArrays ?? [],
-        childRowsBySourceAndRelation,
-        materialized,
-      ),
-    );
-    const materializedChildren = childResults
-      .filter((child) => child.satisfiesRequirements)
-      .map((child) => child.row);
-    if (!arraySubqueryRequirementSatisfied(row, subquery, materializedChildren.length)) {
-      satisfiesRequirements = false;
-    }
-    const value: Value = {
-      type: "Array",
-      value: materializedChildren.map((child) => ({
-        type: "Row",
-        value: rowValueWithValuesByColumn(child),
-      })),
-    } as Value;
-    const publicRelation = publicIncludeRelationName(subquery.columnName);
-    const hiddenRelation = hiddenIncludeColumnName(publicRelation);
-    for (const name of [subquery.columnName, publicRelation, hiddenRelation]) {
-      const payload = valuesByColumn.get(name);
-      if (payload) relationPayloadValues.add(payload);
-    }
-    valuesByColumn.set(subquery.columnName, value);
-    if (publicRelation !== subquery.columnName) {
-      valuesByColumn.set(publicRelation, value);
-    }
-    valuesByColumn.set(hiddenRelation, value);
-    relationValues.push(value);
-  }
-  const baseValues =
-    relationPayloadValues.size === 0
-      ? row.values
-      : row.values.filter((value) => !relationPayloadValues.has(value));
-  const next = withValuesByColumn(
-    {
-      ...row,
-      values: baseValues.concat(relationValues),
-    },
-    valuesByColumn,
-  );
-  materialized.set(rowKeyValue, next);
-  return { row: next, satisfiesRequirements };
-}
-
-function arraySubqueryRequirementSatisfied(
-  row: RowState,
-  subquery: QueryArraySubquery,
-  childCount: number,
-): boolean {
-  switch (subquery.requirement ?? "Optional") {
-    case "Optional":
-      return true;
-    case "AtLeastOne":
-      return childCount > 0;
-    case "MatchCorrelationCardinality":
-      return childCount === correlationCardinality(row, subquery.outerColumn);
-  }
-}
-
-function correlationCardinality(row: RowState, column: string): number {
-  const valuesByColumn = row.valuesByColumn ?? new Map<string, Value>();
-  const value = valuesByColumn.get(stripParentQualifier(column, row.table));
-  if (!value) return 0;
-  if (value.type === "Array") return value.value.length;
-  if (value.type === "Null") return 0;
-  return 1;
-}
-
-function publicIncludeRelationName(relation: string): string {
-  return relation.startsWith(HIDDEN_INCLUDE_COLUMN_PREFIX)
-    ? relation.slice(HIDDEN_INCLUDE_COLUMN_PREFIX.length)
-    : relation;
-}
-
-function rowValueWithValuesByColumn(row: RowState): {
-  id: string;
-  values: Value[];
-  valuesByColumn?: Map<string, Value>;
-} {
-  const value: {
-    id: string;
-    values: Value[];
-    valuesByColumn?: Map<string, Value>;
-    table?: string;
-  } = {
-    id: row.id,
-    values: row.values,
-  };
-  Object.defineProperty(value, "table", {
-    value: row.table,
-    enumerable: false,
-    configurable: true,
-  });
-  if (row.valuesByColumn) {
-    Object.defineProperty(value, "valuesByColumn", {
-      value: row.valuesByColumn,
-      enumerable: false,
-      configurable: true,
-    });
-  }
-  return value;
-}
-
 function withValuesByColumn(row: RowState, valuesByColumn: Map<string, Value>): RowState {
   Object.defineProperty(row, "valuesByColumn", {
     value: valuesByColumn,
@@ -3863,29 +3716,37 @@ function withValuesByColumn(row: RowState, valuesByColumn: Map<string, Value>): 
   return row;
 }
 
-function applySubscriptionDeltaWithWireDelta(
+export function applySubscriptionDeltaWithWireDelta(
   currentRows: RowState[],
   currentIndexByKey: Map<string, number>,
-  delta: { added: NativeRowBatch[]; updated: NativeRowBatch[]; removed: NativeRemovedRow[] },
+  delta: NativeSubscriptionDelta,
   schema: WasmSchema,
   reset = false,
+  outputColumns: SubscriptionOutputColumns | null = null,
 ): { rows: RowState[]; rowIndexByKey: Map<string, number>; wireDelta: NativeRowDelta } {
   const rowsByKey = reset
     ? new Map<string, RowState>()
-    : new Map(currentRows.map((row) => [rowKey(row.table, row.id), row]));
-  const removedEntries: Array<{ id: string; index: number }> = [];
+    : new Map(currentRows.map((row) => [rowStateKey(row), row]));
+  const removedEntries: Array<{ id: string; index: number; resultKeyBytes?: Uint8Array }> = [];
 
-  for (const removed of delta.removed) {
+  for (const [removedIndex, removed] of delta.removed.entries()) {
     const id = formatUuid(removed.rowId);
-    const key = rowKey(removed.table, id);
-    removedEntries.push({ id, index: currentIndexByKey.get(key) ?? 0 });
+    const resultKeyBytes = delta.removedOccurrenceKeys[removedIndex];
+    const key = resultKeyBytes
+      ? occurrenceStateKey(resultKeyBytes, removed.table, id)
+      : rowKey(removed.table, id);
+    removedEntries.push({ id, index: currentIndexByKey.get(key) ?? 0, resultKeyBytes });
     rowsByKey.delete(key);
   }
 
-  const addedRows = rowsFromBatches(delta.added, schema);
-  const updatedRows = rowsFromBatches(delta.updated, schema);
+  const projectedColumns = outputColumns?.rootColumns;
+  const nestedRowCarrier: NestedRowCarrier = "full-record";
+  const addedRows = rowsFromBatches(delta.added, schema, projectedColumns, nestedRowCarrier);
+  const updatedRows = rowsFromBatches(delta.updated, schema, projectedColumns, nestedRowCarrier);
+  attachOccurrenceKeys(addedRows, delta.addedOccurrenceKeys);
+  attachOccurrenceKeys(updatedRows, delta.updatedOccurrenceKeys);
   for (const row of addedRows.concat(updatedRows)) {
-    rowsByKey.set(rowKey(row.table, row.id), row);
+    rowsByKey.set(rowStateKey(row), row);
   }
 
   const rows = Array.from(rowsByKey.values());
@@ -3894,158 +3755,90 @@ function applySubscriptionDeltaWithWireDelta(
     rows,
     rowIndexByKey,
     wireDelta: {
-      ...nativeDeltaFromChanges(addedRows, updatedRows, removedEntries, rowIndexByKey, schema),
+      ...nativeDeltaFromChanges(
+        addedRows,
+        updatedRows,
+        removedEntries,
+        rowIndexByKey,
+        schema,
+        outputColumns,
+      ),
       ...(reset ? { reset: true } : {}),
     },
   };
 }
 
-function applyRelationSubscriptionDelta(
-  subscription: SubscriptionState,
-  rootDelta: NativeSubscriptionDelta,
-  relationDelta: NativeRelationSubscriptionDelta,
-  schema: WasmSchema,
-  reset: boolean,
-): void {
-  if (reset) {
-    subscription.relationRows = [];
-    subscription.relationEdges = [];
-    subscription.relationRootCount = 0;
-  }
-
-  const rootRemoved = new Set(
-    rootDelta.removed.map((row) => rowKey(row.table, formatUuid(row.rowId))),
-  );
-  if (rootRemoved.size > 0) {
-    let index = 0;
-    while (index < subscription.relationRootCount) {
-      const row = subscription.relationRows[index];
-      if (row && rootRemoved.has(rowKey(row.table, row.id))) {
-        subscription.relationRows.splice(index, 1);
-        subscription.relationRootCount -= 1;
-      } else {
-        index += 1;
-      }
-    }
-  }
-
-  const relatedRemoved = new Set(
-    relationDelta.removed.map((row) => rowKey(row.table, formatUuid(row.rowId))),
-  );
-  if (relatedRemoved.size > 0) {
-    subscription.relationRows = subscription.relationRows.filter((row, index) => {
-      if (index < subscription.relationRootCount) return true;
-      return !relatedRemoved.has(rowKey(row.table, row.id));
-    });
-  }
-
-  const rootUpdates = rowsFromBatches(rootDelta.updated, schema);
-  for (const row of rootUpdates) {
-    const position = subscription.relationRows
-      .slice(0, subscription.relationRootCount)
-      .findIndex((current) => rowKey(current.table, current.id) === rowKey(row.table, row.id));
-    if (position >= 0) {
-      subscription.relationRows[position] = row;
-    }
-  }
-
-  const rootAdds = rowsFromBatches(rootDelta.added, schema);
-  for (const row of rootAdds) {
-    const existing = subscription.relationRows
-      .slice(0, subscription.relationRootCount)
-      .findIndex((current) => rowKey(current.table, current.id) === rowKey(row.table, row.id));
-    if (existing >= 0) {
-      subscription.relationRows[existing] = row;
-    } else {
-      subscription.relationRows.splice(subscription.relationRootCount, 0, row);
-      subscription.relationRootCount += 1;
-    }
-  }
-
-  const relationRows = rowsFromBatches(relationDelta.added, schema).concat(
-    rowsFromBatches(relationDelta.updated, schema),
-  );
-  for (const row of relationRows) {
-    const key = rowKey(row.table, row.id);
-    const rootPosition = subscription.relationRows
-      .slice(0, subscription.relationRootCount)
-      .findIndex((current) => rowKey(current.table, current.id) === key);
-    if (rootPosition >= 0) {
-      subscription.relationRows[rootPosition] = row;
-      continue;
-    }
-    const relatedPosition = subscription.relationRows
-      .slice(subscription.relationRootCount)
-      .findIndex((current) => rowKey(current.table, current.id) === key);
-    if (relatedPosition >= 0) {
-      subscription.relationRows[subscription.relationRootCount + relatedPosition] = row;
-    } else {
-      subscription.relationRows.push(row);
-    }
-  }
-
-  const removedEdges = new Set(relationDelta.removedEdges.map(relationEdgeKey));
-  subscription.relationEdges = subscription.relationEdges.filter(
-    (edge) => !removedEdges.has(relationEdgeKey(edge)),
-  );
-  for (const edge of relationDelta.addedEdges) {
-    const key = relationEdgeKey(edge);
-    if (!subscription.relationEdges.some((current) => relationEdgeKey(current) === key)) {
-      subscription.relationEdges.push(edge);
-    }
-  }
-
-  const referenced = new Set(
-    subscription.relationEdges.map((edge) =>
-      rowKey(edge.targetTable, formatUuid(edge.targetRowId)),
-    ),
-  );
-  subscription.relationRows = subscription.relationRows.filter((row, index) => {
-    if (index < subscription.relationRootCount) return true;
-    return referenced.has(rowKey(row.table, row.id));
-  });
-}
-
 function indexRowsByKey(rows: RowState[]): Map<string, number> {
   const index = new Map<string, number>();
   rows.forEach((row, rowIndex) => {
-    index.set(rowKey(row.table, row.id), rowIndex);
+    index.set(rowStateKey(row), rowIndex);
   });
   return index;
+}
+
+function attachOccurrenceKeys(rows: RowState[], keys: Uint8Array[]): void {
+  if (rows.length !== keys.length)
+    throw new Error("subscription occurrence sidecar length mismatch");
+  rows.forEach((row, index) => {
+    const bytes = keys[index]!;
+    row.resultKeyBytes = bytes;
+    row.resultKey = publicResultKey(bytes);
+  });
+}
+
+function occurrenceStateKey(bytes: Uint8Array, table?: string, sourceId?: string): string {
+  if (bytes.length === 17 && bytes[0] === 1 && table && sourceId) return rowKey(table, sourceId);
+  return `result\0${Array.from(bytes, (byte) => byteHex[byte]).join("")}`;
+}
+
+function publicResultKey(bytes: Uint8Array): string {
+  if (bytes.length === 17 && bytes[0] === 1) return formatUuid(bytes.subarray(1));
+  return `result:${Array.from(bytes, (byte) => byteHex[byte]).join("")}`;
+}
+
+function rowStateKey(row: RowState): string {
+  return row.resultKeyBytes
+    ? occurrenceStateKey(row.resultKeyBytes, row.table, row.id)
+    : rowKey(row.table, row.id);
 }
 
 function rowKey(table: string, id: string): string {
   return `${table}\0${id}`;
 }
 
-function relationKey(table: string, id: string, relation: string): string {
-  return `${table}\0${id}\0${relation}`;
-}
-
-function relationEdgeKey(edge: NativeRelationSubscriptionEdge): string {
-  return `${edge.sourceTable}\0${formatUuid(edge.sourceRowId)}\0${edge.relation}\0${edge.targetTable}\0${formatUuid(edge.targetRowId)}`;
-}
-
 function decodePlannedField(
   field: NativeRowFieldPlan,
   decodeRecord: (raw: Uint8Array, logicalIndex: number) => Uint8Array | null,
   raw: Uint8Array,
+  nestedRowCarrier: NestedRowCarrier,
 ): Value {
   const bytes = decodeRecord(raw, field.index);
   if (bytes == null) return { type: "Null" };
   if (!field.type) return { type: "Bytea", value: bytes };
-  return decodeBytes(field.type, bytes, field.name);
+  try {
+    return decodeBytes(field.type, bytes, field.name, field.storageType, nestedRowCarrier);
+  } catch (error) {
+    throw new Error(
+      `${String(error)} while decoding ${field.name} as ${field.type.type} from storage tag ${field.storageType.tag} (${bytes.byteLength} bytes)`,
+    );
+  }
 }
 
-function decodeBytes(type: ColumnType, bytes: Uint8Array, fieldName?: string): Value {
+function decodeBytes(
+  type: ColumnType,
+  bytes: Uint8Array,
+  fieldName?: string,
+  storageType?: ValueType,
+  nestedRowCarrier: NestedRowCarrier = "full-record",
+): Value {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   switch (type.type) {
     case "Boolean":
       return { type: "Boolean", value: bytes[0] !== 0 };
     case "Integer":
-      return { type: "Integer", value: decodeSignedI32FromStorage(view.getUint32(0, true)) };
+      return { type: "Integer", value: view.getInt32(0, true) };
     case "BigInt":
-      return { type: "BigInt", value: decodeSignedI64FromStorage(view.getBigUint64(0, true)) };
+      return { type: "BigInt", value: view.getBigInt64(0, true) };
     case "Double":
       return { type: "Double", value: view.getFloat64(0, true) };
     case "Timestamp":
@@ -4064,14 +3857,129 @@ function decodeBytes(type: ColumnType, bytes: Uint8Array, fieldName?: string): V
     case "Bytea":
       return { type: "Bytea", value: bytes.slice() };
     case "Array":
-      return { type: "Array", value: decodeArrayBytes(type.element, bytes) };
+      return {
+        type: "Array",
+        value: decodeArrayBytes(
+          type.element,
+          bytes,
+          arrayElementStorageType(storageType),
+          nestedRowCarrier,
+        ),
+      };
     case "Row":
-      return { type: "Bytea", value: bytes.slice() };
+      return {
+        type: "Row",
+        value: decodeNestedRowBytes(
+          type.columns,
+          bytes,
+          recordStorageDescriptor(storageType),
+          nestedRowCarrier,
+        ),
+      };
   }
 }
 
-function decodeArrayBytes(elementType: ColumnType, bytes: Uint8Array): Value[] {
-  const elementWidth = fixedValueSize(storageColumnTypeToValueType(elementType));
+function nonNullableStorageType(storageType?: ValueType): ValueType | undefined {
+  let current = storageType;
+  while (current?.tag === 14) current = current.inner;
+  return current;
+}
+
+function arrayElementStorageType(storageType?: ValueType): ValueType | undefined {
+  const array = nonNullableStorageType(storageType);
+  return array?.tag === 13 ? array.inner : undefined;
+}
+
+function recordStorageDescriptor(storageType?: ValueType): DescriptorField[] | undefined {
+  const record = nonNullableStorageType(storageType);
+  return record?.tag === 15 ? record.record : undefined;
+}
+
+export type NestedRowCarrier = "full-record" | "keyed-terminal";
+
+export function decodeNestedRowBytes(
+  columns: readonly ColumnDescriptor[],
+  bytes: Uint8Array,
+  descriptor?: DescriptorField[],
+  carrier: NestedRowCarrier = "full-record",
+): { id?: string; values: Value[]; valuesByColumn?: Map<string, Value> } {
+  if (descriptor) {
+    const keyed = carrier === "keyed-terminal";
+    if (keyed && descriptor[0]?.name !== "row_uuid") {
+      throw new Error("keyed terminal nested row descriptor must start with row_uuid");
+    }
+    if (keyed && bytes.byteLength < 16) throw new Error("terminal nested row is missing its key");
+    const payloadDescriptor = keyed ? descriptor.slice(1) : descriptor;
+    const payload = keyed ? bytes.subarray(16) : bytes;
+    const decodeRecord = createRecordValueDecoder(payloadDescriptor);
+    const columnsByName = new Map(columns.map((column) => [column.name, column]));
+    const valuesByColumn = new Map<string, Value>();
+    let id = keyed ? formatUuid(bytes.subarray(0, 16)) : undefined;
+    for (let index = 0; index < payloadDescriptor.length; index += 1) {
+      const name = payloadDescriptor[index]?.name;
+      if (!name) continue;
+      const valueBytes = decodeRecord(payload, index);
+      if (!keyed && name === "row_uuid" && valueBytes) {
+        id = formatUuid(valueBytes);
+        continue;
+      }
+      const column = columnsByName.get(name);
+      if (!column) continue;
+      valuesByColumn.set(
+        name,
+        valueBytes == null
+          ? { type: "Null" }
+          : decodeBytes(
+              column.column_type,
+              valueBytes,
+              name,
+              payloadDescriptor[index]?.valueType,
+              carrier,
+            ),
+      );
+    }
+    const row: { id?: string; values: Value[]; valuesByColumn?: Map<string, Value> } = {
+      id,
+      values: columns.map(
+        (column) =>
+          valuesByColumn.get(column.name) ??
+          (column.column_type.type === "Array"
+            ? ({ type: "Array", value: [] } satisfies Value)
+            : ({ type: "Null" } satisfies Value)),
+      ),
+    };
+    Object.defineProperty(row, "valuesByColumn", {
+      value: valuesByColumn,
+      enumerable: false,
+      configurable: true,
+    });
+    return row;
+  }
+  if (bytes.byteLength < 5) throw new Error("invalid nested row value");
+  const hasId = bytes[0] === 1;
+  let offset = 1;
+  let id: string | undefined;
+  if (hasId) {
+    if (bytes.byteLength < 21) throw new Error("invalid nested row id");
+    id = formatUuid(bytes.subarray(offset, offset + 16));
+    offset += 16;
+  }
+  const length = readU32Le(bytes, offset);
+  offset += 4;
+  const raw = bytes.subarray(offset, offset + length);
+  if (raw.byteLength !== length) throw new Error("invalid nested row value length");
+  return { id, values: decodeNativeRowValues(columns, raw) };
+}
+
+function decodeArrayBytes(
+  elementType: ColumnType,
+  bytes: Uint8Array,
+  storageElementType?: ValueType,
+  nestedRowCarrier: NestedRowCarrier = "full-record",
+): Value[] {
+  const elementWidth = fixedValueSize(
+    storageElementType ?? storageColumnTypeToValueType(elementType),
+  );
   if (elementWidth != null) {
     if (elementWidth === 0) return [];
     if (bytes.length % elementWidth !== 0) {
@@ -4079,7 +3987,15 @@ function decodeArrayBytes(elementType: ColumnType, bytes: Uint8Array): Value[] {
     }
     const values: Value[] = [];
     for (let offset = 0; offset < bytes.length; offset += elementWidth) {
-      values.push(decodeBytes(elementType, bytes.subarray(offset, offset + elementWidth)));
+      values.push(
+        decodeBytes(
+          elementType,
+          bytes.subarray(offset, offset + elementWidth),
+          undefined,
+          storageElementType,
+          nestedRowCarrier,
+        ),
+      );
     }
     return values;
   }
@@ -4101,7 +4017,15 @@ function decodeArrayBytes(elementType: ColumnType, bytes: Uint8Array): Value[] {
     if (start > end || end > bytes.length) {
       throw new Error("invalid variable-width array element offset");
     }
-    values.push(decodeBytes(elementType, bytes.subarray(start, end)));
+    values.push(
+      decodeBytes(
+        elementType,
+        bytes.subarray(start, end),
+        undefined,
+        storageElementType,
+        nestedRowCarrier,
+      ),
+    );
   }
   return values;
 }
@@ -4111,9 +4035,8 @@ function normalizeSubscriptionChunk(chunk: unknown):
   | {
       type: "delta";
       reset?: boolean;
-      delta: { added: NativeRowBatch[]; updated: NativeRowBatch[]; removed: NativeRemovedRow[] };
-      relationDelta?: NativeRelationSubscriptionDelta;
-      relationSnapshot?: NativeRelationSubscriptionSnapshot;
+      delta: NativeSubscriptionDelta;
+      terminalOperations?: NativeTerminalOperation[];
       settled?: boolean;
     }
   | {
@@ -4129,11 +4052,10 @@ function normalizeSubscriptionChunk(chunk: unknown):
     type?: unknown;
     rows?: unknown;
     delta?: unknown;
-    relation_delta?: unknown;
-    relation_snapshot?: unknown;
     reason?: unknown;
     reset?: unknown;
     settled?: unknown;
+    terminalOperations?: unknown;
   };
   if (record.type === "closed" || record.type === "Closed") {
     return { type: "closed" };
@@ -4152,18 +4074,9 @@ function normalizeSubscriptionChunk(chunk: unknown):
       delta: readNativeSubscriptionDelta(
         new PostcardReader(assertBytes(record.delta, "subscription delta")),
       ),
-      relationDelta:
-        record.relation_delta === undefined
-          ? undefined
-          : readNativeRelationSubscriptionDelta(
-              new PostcardReader(assertBytes(record.relation_delta, "relation subscription delta")),
-            ),
-      relationSnapshot:
-        record.relation_snapshot === undefined
-          ? undefined
-          : readRelationSnapshot(
-              assertBytes(record.relation_snapshot, "relation subscription snapshot"),
-            ),
+      terminalOperations: Array.isArray(record.terminalOperations)
+        ? (record.terminalOperations as NativeTerminalOperation[])
+        : undefined,
       settled: typeof record.settled === "boolean" ? record.settled : undefined,
     };
   }
@@ -4236,16 +4149,16 @@ function nativeDeltaFromRows(
   outputColumns: SubscriptionOutputColumns | null = null,
 ): NativeRowDelta {
   const previousByKey = new Map(
-    previousRows.map((row, index) => [rowKey(row.table, row.id), { row, index }]),
+    previousRows.map((row, index) => [rowStateKey(row), { row, index }]),
   );
   const nextKeys = new Set<string>();
   const added: RowState[] = [];
   const updated: RowState[] = [];
-  const removed: Array<{ id: string; index: number }> = [];
+  const removed: Array<{ id: string; index: number; resultKeyBytes?: Uint8Array }> = [];
   const rowIndexByKey = indexRowsByKey(rows);
 
   rows.forEach((row, index) => {
-    const key = rowKey(row.table, row.id);
+    const key = rowStateKey(row);
     nextKeys.add(key);
     const previous = previousByKey.get(key);
     if (!previous) {
@@ -4258,8 +4171,8 @@ function nativeDeltaFromRows(
   });
 
   previousRows.forEach((row, index) => {
-    if (!nextKeys.has(rowKey(row.table, row.id))) {
-      removed.push({ id: row.id, index });
+    if (!nextKeys.has(rowStateKey(row))) {
+      removed.push({ id: row.id, index, resultKeyBytes: row.resultKeyBytes });
     }
   });
 
@@ -4285,7 +4198,9 @@ function nativeResetDeltaFromBatches(
   const chunks: Uint8Array[] = [];
   for (const batch of batches) {
     const frameColumns =
-      outputColumns && batch.table === outputColumns.rootTable ? outputColumns.rootColumns : null;
+      outputColumns && batch.table === outputColumns.rootTable
+        ? logicalStorageColumns(outputColumns.rootColumns)
+        : null;
     const encodeFrameRow = frameColumns
       ? createRawNativeFrameRowEncoder(batch.descriptor, frameColumns)
       : (raw: Uint8Array) => raw;
@@ -4311,30 +4226,21 @@ function plainResetChunkCanStayPacked(
   subscription: SubscriptionState,
   chunk: {
     reset?: boolean;
-    delta: { added: NativeRowBatch[]; updated: NativeRowBatch[]; removed: NativeRemovedRow[] };
-    relationDelta?: NativeRelationSubscriptionDelta;
-    relationSnapshot?: NativeRelationSubscriptionSnapshot;
+    delta: NativeSubscriptionDelta;
   },
   schema: WasmSchema,
 ): boolean {
   const reset = chunk.reset === true;
   const noUpdated = chunk.delta.updated.length === 0;
   const noRemoved = chunk.delta.removed.length === 0;
-  const noArraySubqueries = subscription.relationMaterialization.arraySubqueries.length === 0;
-  const noRelevantRelationDelta = !chunk.relationDelta || noArraySubqueries;
-  const noRelationSnapshot = !chunk.relationSnapshot;
   const identityProjection = subscriptionOutputColumnsAreIdentityProjection(
     subscription.outputColumns,
     schema,
   );
-  const canStayPacked =
-    reset &&
-    noUpdated &&
-    noRemoved &&
-    noRelevantRelationDelta &&
-    noRelationSnapshot &&
-    noArraySubqueries &&
-    identityProjection;
+  const sourceRowKeysOnly = chunk.delta.addedOccurrenceKeys.every(
+    (key) => key.length === 17 && key[0] === 1,
+  );
+  const canStayPacked = reset && noUpdated && noRemoved && identityProjection && sourceRowKeysOnly;
   return canStayPacked;
 }
 
@@ -4349,9 +4255,7 @@ function subscriptionOutputColumnsAreIdentityProjection(
 }
 
 function publicTableColumns(columns: readonly ColumnDescriptor[]): ColumnDescriptor[] {
-  return columns.filter(
-    (column) => !isInternalField(column.name) && !isHiddenIncludeColumn(column.name),
-  );
+  return columns.filter((column) => !isHiddenIncludeColumn(column.name));
 }
 
 function createRawNativeFrameRowEncoder(
@@ -4387,7 +4291,7 @@ function createRawNativeFrameRowEncoder(
 }
 
 function encodeFrameColumnValue(decoded: Uint8Array, outputValueType: ValueType): Uint8Array {
-  if (outputValueType.tag !== 12) return decoded;
+  if (outputValueType.tag !== 14) return decoded;
   const output = new Uint8Array(decoded.length + 1);
   output[0] = 1;
   output.set(decoded, 1);
@@ -4410,7 +4314,12 @@ function nativeDescriptorMatchesColumns(
 
 function materializePackedResetRows(subscription: SubscriptionState, schema: WasmSchema): void {
   if (!subscription.packedResetBatches) return;
-  subscription.rows = rowsFromBatches(subscription.packedResetBatches, schema);
+  subscription.rows = rowsFromBatches(
+    subscription.packedResetBatches,
+    schema,
+    subscription.outputColumns?.rootColumns,
+    "full-record",
+  );
   subscription.rowIndexByKey = indexRowsByKey(subscription.rows);
   subscription.packedResetBatches = null;
   subscription.packedResetRows = null;
@@ -4419,7 +4328,7 @@ function materializePackedResetRows(subscription: SubscriptionState, schema: Was
 function nativeDeltaFromChanges(
   added: RowState[],
   updated: RowState[],
-  removed: Array<{ id: string; index: number }>,
+  removed: Array<{ id: string; index: number; resultKeyBytes?: Uint8Array }>,
   rowIndexByKey: Map<string, number>,
   schema?: WasmSchema,
   outputColumns: SubscriptionOutputColumns | null = null,
@@ -4432,11 +4341,10 @@ function nativeDeltaFromChanges(
     addedCount: added.length,
     removedCount: removed.length,
     updatedCount: updated.length,
+    addedOccurrenceKeys: added.map((row) => row.resultKeyBytes ?? legacyResultKey(row.id)),
+    updatedOccurrenceKeys: updated.map((row) => row.resultKeyBytes ?? legacyResultKey(row.id)),
+    removedOccurrenceKeys: removed.map((row) => row.resultKeyBytes ?? legacyResultKey(row.id)),
   };
-}
-
-function nativeDeltaHasChanges(delta: NativeRowDelta): boolean {
-  return delta.addedCount > 0 || delta.updatedCount > 0 || delta.removedCount > 0;
 }
 
 function encodeNativeRows(
@@ -4452,10 +4360,11 @@ function encodeNativeRows(
     (values: readonly Value[]) => Uint8Array
   >();
   for (const row of rows) {
-    const columns =
+    const physicalColumns =
       outputColumns && row.table === outputColumns.rootTable
         ? outputColumns.rootColumns
         : schema?.[row.table]?.columns;
+    const columns = physicalColumns ? logicalStorageColumns(physicalColumns) : undefined;
     if (!columns) {
       throw new Error(`missing schema for subscription row table ${row.table}`);
     }
@@ -4464,11 +4373,16 @@ function encodeNativeRows(
       encodeRow = createNativeRowValueEncoder(columns);
       encodersByColumns.set(columns, encodeRow);
     }
-    const raw = encodeRow(valuesForNativeFrame(row, columns));
-    chunks.push(
-      requiredUuidBytes(row.id),
-      u32Le(rowIndexByKey.get(rowKey(row.table, row.id)) ?? 0),
-    );
+    const frameValues = valuesForNativeFrame(row, columns);
+    let raw: Uint8Array;
+    try {
+      raw = encodeRow(frameValues);
+    } catch (error) {
+      throw new Error(
+        `${String(error)} while encoding ${row.table}: ${columns.map((column, index) => `${column.name}:${column.column_type.type}=${frameValues[index]?.type}`).join(", ")}`,
+      );
+    }
+    chunks.push(requiredUuidBytes(row.id), u32Le(rowIndexByKey.get(rowStateKey(row)) ?? 0));
     if (updated) chunks.push(Uint8Array.of(1));
     chunks.push(u32Le(raw.byteLength), raw);
   }
@@ -4492,6 +4406,10 @@ function valuesForNativeFrame(row: RowState, columns: readonly ColumnDescriptor[
 
 function encodeNativeRemoves(removed: Array<{ id: string; index: number }>): Uint8Array {
   return concatBytes(removed.flatMap((row) => [requiredUuidBytes(row.id), u32Le(row.index)]));
+}
+
+function legacyResultKey(id: string): Uint8Array {
+  return Uint8Array.from([1, ...requiredUuidBytes(id)]);
 }
 
 function requiredUuidBytes(id: string): Uint8Array {
@@ -4610,7 +4528,14 @@ function publicFieldName(name: string): string {
 }
 
 function isInternalField(name?: string): boolean {
-  return name === "row_uuid" || name === "tx_node_id" || name === "tx_time";
+  return (
+    name === "row_uuid" ||
+    name === "tx_node_id" ||
+    name === "tx_time" ||
+    name === "schema_version" ||
+    name === "parents" ||
+    name === "authored_columns"
+  );
 }
 
 function isHiddenIncludeColumn(name: string): boolean {

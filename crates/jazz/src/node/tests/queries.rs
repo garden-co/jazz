@@ -135,6 +135,151 @@ fn parameterized_one_shot_index_read_does_not_fall_back_to_cached_full_scan() {
 }
 
 #[test]
+fn physical_index_backfills_existing_rows_and_read_cost_ignores_schema_variant_count() {
+    // This is intentionally an internal receipt: schema evolution and query
+    // results use the public protocol/query APIs, while physical read counts
+    // and index names are implementation details with no public equivalent.
+    let base = JazzSchema::new([TableSchema::new(
+        "todos",
+        [ColumnSchema::new("title", ColumnType::String)],
+    )]);
+    let indexed = SchemaVersion::new(JazzSchema::new([
+        TableSchema::new(
+            "todos",
+            [ColumnSchema::new("title", ColumnType::String)],
+        )
+        .with_indexed_column("title"),
+    ]));
+    let extended = SchemaVersion::new(JazzSchema::new([
+        TableSchema::new(
+            "todos",
+            [
+                ColumnSchema::new("title", ColumnType::String),
+                ColumnSchema::new("body", ColumnType::String),
+            ],
+        )
+        .with_indexed_column("title"),
+    ]));
+    let (_writer_dir, mut writer) = open_node_with_schema(node(0xb1), base.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(0xb2), base.clone());
+    let existing = row(0xb3);
+    commit_mergeable_global(
+        &mut writer,
+        &mut core,
+        MergeableCommit::new("todos", existing, 10).cells(title_cells("before-index")),
+    );
+
+    assert_eq!(
+        indexed.id,
+        base.version_id(),
+        "physical indexes are deliberately outside content-addressed schema identity"
+    );
+    core.apply_trusted_catalogue_message(SyncMessage::PublishSchema {
+        author: AuthorId::SYSTEM,
+        schema: Box::new(indexed.clone()),
+    })
+    .unwrap();
+
+    let indexed_mapping = core.catalogue.physical_mappings[&indexed.id].tables["todos"].clone();
+    let physical_table = physical_global_current_table_name(indexed_mapping.table_id);
+    let physical_index = physical_current_index_name(indexed_mapping.columns["title"]);
+    assert!(
+        core.database
+            .table_schema(&physical_table)
+            .unwrap()
+            .indices
+            .iter()
+            .any(|index| index.name == physical_index),
+        "publishing the indexed variant must register its physical index"
+    );
+
+    let query = Query::from("todos").filter(eq(col("title"), lit("before-index")));
+    let shape = query.validate(&core.catalogue.schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    core.reset_storage_read_metrics();
+    let rows = core
+        .query_rows_for_link(
+            &shape,
+            &binding,
+            DurabilityTier::Global,
+            AuthorId::SYSTEM,
+        )
+        .unwrap();
+    let indexed_reads = core.take_storage_read_metrics();
+    assert_eq!(
+        rows.into_iter()
+            .map(|row| row.row_uuid())
+            .collect::<Vec<_>>(),
+        vec![existing],
+        "the live index must backfill the row written before it existed"
+    );
+    assert_eq!(indexed_reads.global_current_indexes.reads, 1);
+    assert_eq!(indexed_reads.global_current_rows.reads, 1);
+
+    publish_schema_lineage(
+        &mut core,
+        extended.clone(),
+        MigrationLens::new(
+            indexed.id,
+            extended.id,
+            vec![TableLens {
+                source_table: "todos".to_owned(),
+                target_table: "todos".to_owned(),
+                ops: vec![LensOp::AddColumn {
+                    column: "body".to_owned(),
+                    default: Value::String(String::new()),
+                }],
+            }],
+        ),
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
+    .unwrap();
+    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+        author: AuthorId::SYSTEM,
+        pointer: CurrentWriteSchema {
+            revision: 2,
+            schema: extended.id,
+        },
+    })
+    .unwrap();
+
+    assert_eq!(
+        core.catalogue.physical_mappings[&extended.id].tables["todos"].table_id,
+        indexed_mapping.table_id
+    );
+    let shape = query.validate(&core.catalogue.schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    core.reset_storage_read_metrics();
+    let rows = core
+        .query_rows_for_link(
+            &shape,
+            &binding,
+            DurabilityTier::Global,
+            AuthorId::SYSTEM,
+        )
+        .unwrap();
+    let three_variant_reads = core.take_storage_read_metrics();
+
+    assert_eq!(
+        rows.into_iter()
+            .map(|row| row.row_uuid())
+            .collect::<Vec<_>>(),
+        vec![existing]
+    );
+    assert_eq!(
+        three_variant_reads.global_current_indexes,
+        indexed_reads.global_current_indexes,
+        "adding a schema variant must not add an index source"
+    );
+    assert_eq!(
+        three_variant_reads.global_current_rows,
+        indexed_reads.global_current_rows,
+        "adding a schema variant must not add a current-row source"
+    );
+}
+
+#[test]
 fn one_shot_filtered_read_keeps_residual_filters_after_pushdown() {
     let schema = access_path_schema();
     let (_writer_dir, mut writer) = open_node_with_schema(node(8), schema.clone());
@@ -409,7 +554,8 @@ fn filterless_shape_and_degenerate_predicate_validation_agree() {
     let binding = shape.bind(BTreeMap::new()).unwrap();
     register_shape_binding(&mut core, &shape, &binding);
 
-    let tx_id = client.open_exclusive().unwrap();
+    let tx_id = OpenBatchId::new();
+    client.open_exclusive(tx_id).unwrap();
     assert!(client.tx_query(tx_id, &shape, &binding).unwrap().is_empty());
     commit_mergeable_global(
         &mut other,
@@ -996,13 +1142,13 @@ fn array_subquery_match_correlation_cardinality_requires_every_referenced_member
         .array_subquery(
             ArraySubquery::new("memberRows", "profiles", "id", "members")
                 .requirement(crate::query::ArraySubqueryRequirement::MatchCorrelationCardinality)
-                .unbounded(),
+                ,
         )
         .validate(&schema)
         .unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
     let snapshot = node
-        .query_relation_snapshot_for_link(&shape, &binding, DurabilityTier::Local, AuthorId::SYSTEM)
+        .query_relation_snapshot_for_serving(&shape, &binding, DurabilityTier::Local, AuthorId::SYSTEM)
         .unwrap();
 
     assert_eq!(
@@ -1014,14 +1160,15 @@ fn array_subquery_match_correlation_cardinality_requires_every_referenced_member
             .collect::<BTreeSet<_>>(),
         BTreeSet::from([complete, empty])
     );
-    assert_eq!(
-        snapshot
-            .edges
-            .iter()
-            .filter(|edge| edge.source_row == complete)
-            .count(),
-        2
-    );
+    let complete = snapshot
+        .rows
+        .iter()
+        .find(|row| row.row_uuid() == complete)
+        .expect("complete group terminal row");
+    let Value::Array(members) = complete.raw_field("memberRows").expect("memberRows") else {
+        panic!("expected memberRows array");
+    };
+    assert_eq!(members.len(), 2);
 }
 
 #[test]
@@ -1077,7 +1224,7 @@ fn rows_skipped_by_require_includes_affect_limit_offset_pagination() {
         .array_subquery(
             ArraySubquery::new("memberRows", "profiles", "id", "members")
                 .requirement(crate::query::ArraySubqueryRequirement::MatchCorrelationCardinality)
-                .unbounded(),
+                ,
         )
         .order_by("name", crate::query::OrderDirection::Asc)
         .offset(1)
@@ -1086,7 +1233,7 @@ fn rows_skipped_by_require_includes_affect_limit_offset_pagination() {
         .unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
     let snapshot = node
-        .query_relation_snapshot_for_link(&shape, &binding, DurabilityTier::Local, AuthorId::SYSTEM)
+        .query_relation_snapshot_for_serving(&shape, &binding, DurabilityTier::Local, AuthorId::SYSTEM)
         .unwrap();
 
     assert_eq!(
@@ -1137,33 +1284,26 @@ fn relation_snapshot_single_level_array_uses_query_engine_edges() {
 
     let shape = Query::from("users")
         .filter(eq(col("id"), lit(Value::Uuid(alice.0))))
-        .array_subquery(ArraySubquery::new("todosViaOwner", "todos", "owner_id", "id").unbounded())
+        .array_subquery(ArraySubquery::new("todosViaOwner", "todos", "owner_id", "id"))
         .validate(&schema)
         .unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
 
     let snapshot = node
-        .query_relation_snapshot_for_link(&shape, &binding, DurabilityTier::Local, AuthorId::SYSTEM)
+        .query_relation_snapshot_for_serving(&shape, &binding, DurabilityTier::Local, AuthorId::SYSTEM)
         .unwrap();
 
-    assert_eq!(
-        snapshot
-            .rows
-            .iter()
-            .map(|row| (row.table().to_owned(), row.row_uuid()))
-            .collect::<BTreeSet<_>>(),
-        BTreeSet::from([("users".to_owned(), alice), ("todos".to_owned(), todo_a)])
-    );
-    assert_eq!(
-        snapshot.edges.into_iter().collect::<BTreeSet<_>>(),
-        BTreeSet::from([RelationEdge {
-            source_table: "users".to_owned(),
-            source_row: alice,
-            relation: "todosViaOwner".to_owned(),
-            target_table: "todos".to_owned(),
-            target_row: todo_a,
-        }])
-    );
+    assert_eq!(snapshot.rows.len(), 1);
+    assert_eq!(snapshot.rows[0].row_uuid(), alice);
+    assert!(snapshot.edges.is_empty());
+    let (descriptor, raw) = snapshot.rows[0].encoded_record();
+    let Value::Array(todos) = descriptor.bind(raw).get("todosViaOwner").unwrap() else {
+        panic!("expected terminal todo array")
+    };
+    let Value::Record(todo) = &todos[0] else {
+        panic!("expected terminal todo record")
+    };
+    assert_eq!(todo.get("row_uuid"), Ok(Value::Uuid(todo_a.0)));
 }
 
 #[test]
@@ -1216,48 +1356,34 @@ fn relation_snapshot_materializes_reverse_array_edges() {
         .filter(eq(col("id"), lit(Value::Uuid(alice.0))))
         .array_subquery(
             ArraySubquery::new("todosViaOwner", "todos", "owner_id", "id")
-                .unbounded()
-                .nested(ArraySubquery::new("commentsViaTodo", "comments", "todo_id", "id").unbounded()),
+                .nested(ArraySubquery::new("commentsViaTodo", "comments", "todo_id", "id")),
         )
         .validate(&schema)
         .unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
 
     let snapshot = node
-        .query_relation_snapshot_for_link(&shape, &binding, DurabilityTier::Local, AuthorId::SYSTEM)
+        .query_relation_snapshot_for_serving(&shape, &binding, DurabilityTier::Local, AuthorId::SYSTEM)
         .unwrap();
 
-    assert_eq!(
-        snapshot
-            .rows
-            .iter()
-            .map(|row| (row.table().to_owned(), row.row_uuid()))
-            .collect::<BTreeSet<_>>(),
-        BTreeSet::from([
-            ("users".to_owned(), alice),
-            ("todos".to_owned(), todo_a),
-            ("comments".to_owned(), comment),
-        ])
-    );
-    assert_eq!(
-        snapshot.edges.into_iter().collect::<BTreeSet<_>>(),
-        BTreeSet::from([
-            RelationEdge {
-                source_table: "users".to_owned(),
-                source_row: alice,
-                relation: "todosViaOwner".to_owned(),
-                target_table: "todos".to_owned(),
-                target_row: todo_a,
-            },
-            RelationEdge {
-                source_table: "todos".to_owned(),
-                source_row: todo_a,
-                relation: "commentsViaTodo".to_owned(),
-                target_table: "comments".to_owned(),
-                target_row: comment,
-            },
-        ])
-    );
+    assert_eq!(snapshot.rows.len(), 1);
+    assert_eq!(snapshot.rows[0].row_uuid(), alice);
+    assert!(snapshot.edges.is_empty());
+    let (descriptor, raw) = snapshot.rows[0].encoded_record();
+    let Value::Array(todos) = descriptor.bind(raw).get("todosViaOwner").unwrap() else {
+        panic!("expected terminal todo array")
+    };
+    let Value::Record(todo) = &todos[0] else {
+        panic!("expected terminal todo record")
+    };
+    assert_eq!(todo.get("row_uuid"), Ok(Value::Uuid(todo_a.0)));
+    let Value::Array(comments) = todo.get("commentsViaTodo").unwrap() else {
+        panic!("expected terminal comment array")
+    };
+    let Value::Record(comment_row) = &comments[0] else {
+        panic!("expected terminal comment record")
+    };
+    assert_eq!(comment_row.get("row_uuid"), Ok(Value::Uuid(comment.0)));
 }
 
 #[test]
@@ -1303,7 +1429,7 @@ fn relation_snapshot_array_subquery_filters_use_parent_binding_params() {
             ArraySubquery::new("todosViaOwner", "todos", "owner_id", "id")
                 .filter(eq(col("title"), param("wanted")))
                 .requirement(crate::query::ArraySubqueryRequirement::AtLeastOne)
-                .unbounded(),
+                ,
         )
         .validate(&schema)
         .unwrap();
@@ -1315,7 +1441,7 @@ fn relation_snapshot_array_subquery_filters_use_parent_binding_params() {
         .unwrap();
 
     let snapshot = node
-        .query_relation_snapshot_for_link(&shape, &binding, DurabilityTier::Local, AuthorId::SYSTEM)
+        .query_relation_snapshot_for_serving(&shape, &binding, DurabilityTier::Local, AuthorId::SYSTEM)
         .unwrap();
 
     assert_eq!(
@@ -1324,21 +1450,19 @@ fn relation_snapshot_array_subquery_filters_use_parent_binding_params() {
             .iter()
             .map(|row| (row.table().to_owned(), row.row_uuid()))
             .collect::<BTreeSet<_>>(),
-        BTreeSet::from([
-            ("users".to_owned(), alice),
-            ("todos".to_owned(), matching_todo),
-        ])
+        BTreeSet::from([("users".to_owned(), alice)])
     );
-    assert_eq!(
-        snapshot.edges.into_iter().collect::<BTreeSet<_>>(),
-        BTreeSet::from([RelationEdge {
-            source_table: "users".to_owned(),
-            source_row: alice,
-            relation: "todosViaOwner".to_owned(),
-            target_table: "todos".to_owned(),
-            target_row: matching_todo,
-        }])
-    );
+    let Value::Array(todos) = snapshot.rows[0]
+        .raw_field("todosViaOwner")
+        .expect("todosViaOwner")
+    else {
+        panic!("expected todosViaOwner array");
+    };
+    assert_eq!(todos.len(), 1);
+    let Value::Record(todo) = &todos[0] else {
+        panic!("expected nested todo record");
+    };
+    assert_eq!(todo.get_idx(0), Ok(Value::Uuid(matching_todo.0)));
 }
 
 #[test]
@@ -1366,13 +1490,13 @@ fn relation_snapshot_filters_unreadable_children_and_required_parents() {
     .unwrap();
 
     let optional_shape = Query::from("users")
-        .array_subquery(ArraySubquery::new("todosViaOwner", "todos", "owner_id", "id").unbounded())
+        .array_subquery(ArraySubquery::new("todosViaOwner", "todos", "owner_id", "id"))
         .validate(&schema)
         .unwrap();
     let optional_binding = optional_shape.bind(BTreeMap::new()).unwrap();
 
     let optional = node
-        .query_relation_snapshot_for_link(
+        .query_relation_snapshot_for_serving(
             &optional_shape,
             &optional_binding,
             DurabilityTier::Local,
@@ -1393,14 +1517,14 @@ fn relation_snapshot_filters_unreadable_children_and_required_parents() {
         .array_subquery(
             ArraySubquery::new("todosViaOwner", "todos", "owner_id", "id")
                 .requirement(crate::query::ArraySubqueryRequirement::AtLeastOne)
-                .unbounded(),
+                ,
         )
         .validate(&schema)
         .unwrap();
     let required_binding = required_shape.bind(BTreeMap::new()).unwrap();
 
     let required = node
-        .query_relation_snapshot_for_link(
+        .query_relation_snapshot_for_serving(
             &required_shape,
             &required_binding,
             DurabilityTier::Local,
@@ -1458,11 +1582,10 @@ fn maintained_array_collector_retains_authorized_parent_trees_incrementally() {
         .array_subquery(
             ArraySubquery::new("todosViaOwner", "todos", "owner_id", "id")
                 .select(["title"])
-                .unbounded()
                 .nested(
                     ArraySubquery::new("commentsViaTodo", "comments", "todo_id", "id")
                         .select(["body"])
-                        .unbounded(),
+                        ,
                 ),
         )
         .validate(&schema)
@@ -1587,12 +1710,13 @@ fn include_deleted_one_shot_read_uses_lowered_literal_filters() {
     let binding = shape.bind(BTreeMap::new()).unwrap();
 
     let rows = node
-        .query_rows_including_deleted_for_identity(
+        .query_rows_including_deleted_in_authorization_mode(
             &shape,
             &binding,
             DurabilityTier::Local,
             None,
             AuthorId::SYSTEM,
+            QueryAuthorizationMode::TrustedServing,
         )
         .unwrap();
 
@@ -1630,12 +1754,13 @@ fn include_deleted_one_shot_read_uses_lowered_param_filters() {
         .unwrap();
 
     let rows = node
-        .query_rows_including_deleted_for_identity(
+        .query_rows_including_deleted_in_authorization_mode(
             &shape,
             &binding,
             DurabilityTier::Local,
             None,
             AuthorId::SYSTEM,
+            QueryAuthorizationMode::TrustedServing,
         )
         .unwrap();
 
@@ -1686,12 +1811,13 @@ fn include_deleted_one_shot_read_join_matches_visible_join_rows() {
     let binding = shape.bind(BTreeMap::new()).unwrap();
 
     let rows = node
-        .query_rows_including_deleted_for_identity(
+        .query_rows_including_deleted_in_authorization_mode(
             &shape,
             &binding,
             DurabilityTier::Local,
             None,
             AuthorId::SYSTEM,
+            QueryAuthorizationMode::TrustedServing,
         )
         .unwrap();
 
@@ -1733,12 +1859,13 @@ fn include_deleted_one_shot_read_join_ignores_deleted_join_rows() {
     let binding = shape.bind(BTreeMap::new()).unwrap();
 
     let rows = node
-        .query_rows_including_deleted_for_identity(
+        .query_rows_including_deleted_in_authorization_mode(
             &shape,
             &binding,
             DurabilityTier::Local,
             None,
             AuthorId::SYSTEM,
+            QueryAuthorizationMode::TrustedServing,
         )
         .unwrap();
 
@@ -1832,12 +1959,13 @@ fn include_deleted_one_shot_read_reachable_matches_deleted_roots_through_visible
     let binding = shape.bind(BTreeMap::new()).unwrap();
 
     let rows = node
-        .query_rows_including_deleted_for_identity(
+        .query_rows_including_deleted_in_authorization_mode(
             &shape,
             &binding,
             DurabilityTier::Local,
             None,
             AuthorId::SYSTEM,
+            QueryAuthorizationMode::TrustedServing,
         )
         .unwrap();
 
@@ -1895,12 +2023,13 @@ fn include_deleted_one_shot_read_reachable_ignores_deleted_edge_rows() {
     let binding = shape.bind(BTreeMap::new()).unwrap();
 
     let rows = node
-        .query_rows_including_deleted_for_identity(
+        .query_rows_including_deleted_in_authorization_mode(
             &shape,
             &binding,
             DurabilityTier::Local,
             None,
             AuthorId::SYSTEM,
+            QueryAuthorizationMode::TrustedServing,
         )
         .unwrap();
 

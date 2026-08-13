@@ -7,12 +7,7 @@
 
 use super::query_engine::{left_field, user_column_field};
 use super::*;
-use crate::schema::{
-    ColumnSchema, branch_partition_history_table_name, branch_partition_register_table_name,
-    partition_ahead_current_table_name, partition_global_current_table_name,
-    partition_history_table_name, partition_register_ahead_current_table_name,
-    partition_register_global_current_table_name, partition_register_table_name,
-};
+use crate::schema::ColumnSchema;
 
 use groove::schema::TableSchema as GrooveTableSchema;
 
@@ -80,7 +75,7 @@ groove::define_record! {
 
 groove::define_record! {
     pub(super) struct GlobalChangeRowRecord {
-        0 => table_name: Vec<u8>,
+        0 => physical_table_id: u64,
         1 => row_uuid: RowUuid,
         2 => layer: Vec<u8>,
         3 => global_seq: GlobalSeq,
@@ -211,15 +206,16 @@ groove::define_record! {
         7 => absent_read_set: Option<Value>,
         8 => predicate_read_set: Option<Value>,
         9 => user_metadata: Option<String>,
-        10 => source_branch: Option<BranchId>,
-        11 => permission_subject: Option<AuthorId>,
-        12 => merge_strategy: Option<String>,
-        13 => fate: FateTag,
-        14 => global_seq: Option<GlobalSeq>,
-        15 => rejection_reason: Option<RejectionReasonTag>,
-        16 => cascade_root: Option<Value>,
-        17 => reason_detail: Option<String>,
-        18 => durability: DurabilityTier,
+        10 => target_lineage: Vec<u8>,
+        11 => branch_merge: Option<Vec<u8>>,
+        12 => permission_subject: Option<AuthorId>,
+        13 => merge_strategy: Option<String>,
+        14 => fate: FateTag,
+        15 => global_seq: Option<GlobalSeq>,
+        16 => rejection_reason: Option<RejectionReasonTag>,
+        17 => cascade_root: Option<Value>,
+        18 => reason_detail: Option<String>,
+        19 => durability: DurabilityTier,
     }
 }
 
@@ -234,6 +230,7 @@ groove::define_record! {
     pub(super) struct SchemaVersionAliasRowRecord {
         0 => id: SchemaVersionAlias,
         1 => uuid: SchemaVersionId,
+        2 => physical_mapping: Vec<u8>,
     }
 }
 
@@ -253,17 +250,9 @@ groove::define_record! {
 }
 
 groove::define_record! {
-    pub(super) struct PartitionRowRecord {
-        0 => table_name: Vec<u8>,
-        1 => schema_version: SchemaVersionId,
-    }
-}
-
-groove::define_record! {
     pub(super) struct BranchPartitionRowRecord {
-        0 => table_name: Vec<u8>,
-        1 => schema_version: SchemaVersionId,
-        2 => branch_id: BranchId,
+        0 => physical_table_id: u64,
+        1 => branch_id: BranchId,
     }
 }
 
@@ -283,9 +272,11 @@ groove::impl_record_field_enum!(BranchState {
 groove::define_record! {
     pub(super) struct BranchRowRecord {
         0 => branch_id: BranchId,
-        1 => parent: Option<BranchId>,
-        2 => base_global: Option<GlobalSeq>,
-        3 => state: BranchState,
+        1 => created_by: AuthorId,
+        2 => parent: Option<BranchId>,
+        3 => base_snapshot: Option<Value>,
+        4 => state: BranchState,
+        5 => metadata_pending: bool,
     }
 }
 
@@ -342,6 +333,7 @@ impl VersionRecord {
             &positional,
             commit.deletion,
         )
+        .map(|record| record.with_authored_columns(commit.authored_columns.clone()))
         .map_err(Error::from)
     }
 
@@ -358,6 +350,7 @@ impl VersionRecord {
             .iter()
             .map(|column| stored.cell(table, &column.name))
             .collect::<Result<Vec<_>, _>>()?;
+        let authored_columns = stored.authored_columns(table)?;
         VersionRecord::encode(
             table,
             schema_version,
@@ -370,6 +363,7 @@ impl VersionRecord {
             &cells,
             stored.deletion(),
         )
+        .map(|record| record.with_authored_columns(authored_columns))
         .map_err(Error::from)
     }
 }
@@ -410,6 +404,12 @@ pub(super) fn debug_assert_lowered_layouts(schema: &JazzSchema) {
             .record_schema();
         SchemaVersionAliasRowRecord::assert_layout(&schema_version_descriptor);
 
+        let branch_partition_descriptor = groove_schema
+            .table("jazz_branch_partitions")
+            .expect("branch partitions table")
+            .record_schema();
+        BranchPartitionRowRecord::assert_layout(&branch_partition_descriptor);
+
         let rejected_tx_descriptor = groove_schema
             .table("jazz_rejected_transactions")
             .expect("rejected transactions table")
@@ -422,11 +422,15 @@ pub(super) fn debug_assert_lowered_layouts(schema: &JazzSchema) {
             .record_schema();
         PendingEdgeRowRecord::assert_layout(&pending_edge_descriptor);
 
+        let global_change_descriptor = groove_schema
+            .table("jazz_global_changes")
+            .expect("global changes table")
+            .record_schema();
+        GlobalChangeRowRecord::assert_layout(&global_change_descriptor);
+
         for table in &schema.tables {
-            let rejected_version_descriptor = groove_schema
-                .table(&rejected_versions_table_name(&table.name))
-                .expect("rejected versions table")
-                .record_schema();
+            let rejected_version_descriptor =
+                table.rejected_versions_storage_table().record_schema();
             RejectedVersionRowRecord::assert_layout(&rejected_version_descriptor);
         }
 
@@ -493,7 +497,8 @@ impl StoredTransaction {
             global_seq: self.global_seq,
             durability: self.durability,
             user_metadata_json: self.tx.user_metadata_json.clone(),
-            source_branch: self.tx.source_branch,
+            target_lineage: self.tx.target_lineage,
+            branch_merge: self.tx.branch_merge.clone(),
         }
     }
 }
@@ -516,6 +521,7 @@ pub(super) struct VersionRowParts {
     pub(super) updated_by: AuthorId,
     pub(super) updated_at: TxTime,
     pub(super) cells: BTreeMap<String, Value>,
+    pub(super) authored_columns: Option<BTreeSet<String>>,
     pub(super) deletion: Option<DeletionEvent>,
 }
 
@@ -523,20 +529,16 @@ impl VersionRow {
     pub(super) fn from_parts_with_schema_version(
         table: &TableSchema,
         parts: VersionRowParts,
-        storage_schema_version: Option<SchemaVersionId>,
+        _storage_schema_version: Option<SchemaVersionId>,
     ) -> Result<Self, Error> {
         let (storage_table, values) = if parts.deletion.is_some() {
             (
-                storage_schema_version
-                    .map(|version| table.register_partition_storage_table(version))
-                    .unwrap_or_else(|| table.register_storage_table()),
+                table.register_storage_table(),
                 register_values_from_parts(&parts)?,
             )
         } else {
             (
-                storage_schema_version
-                    .map(|version| table.history_partition_storage_table(version))
-                    .unwrap_or_else(|| table.history_storage_table()),
+                table.history_storage_table(),
                 history_values_from_parts(table, &parts)?,
             )
         };
@@ -552,13 +554,11 @@ impl VersionRow {
         tx_node_alias: NodeAlias,
         schema_version_alias: SchemaVersionAlias,
         tx_time: TxTime,
-        storage_schema_version: Option<SchemaVersionId>,
+        _storage_schema_version: Option<SchemaVersionId>,
     ) -> Result<Self, Error> {
         let (storage_table, values) = if let Some(deletion) = version.deletion() {
             (
-                storage_schema_version
-                    .map(|version| table.register_partition_storage_table(version))
-                    .unwrap_or_else(|| table.register_storage_table()),
+                table.register_storage_table(),
                 register_values_from_wire(
                     version,
                     tx_node_alias,
@@ -569,9 +569,7 @@ impl VersionRow {
             )
         } else {
             (
-                storage_schema_version
-                    .map(|version| table.history_partition_storage_table(version))
-                    .unwrap_or_else(|| table.history_storage_table()),
+                table.history_storage_table(),
                 history_values_from_wire(
                     table,
                     version,
@@ -708,6 +706,20 @@ impl VersionRow {
         )
     }
 
+    /// Bind this row's encoded payload to the schema version already stored in
+    /// its Jazz metadata before handing it to Groove.
+    pub(super) fn groove_record(&self) -> groove::records::VersionedRecord {
+        self.bind_groove_record(self.record.clone())
+    }
+
+    /// Bind a derived storage row to the same schema version as this version.
+    pub(super) fn bind_groove_record(
+        &self,
+        record: OwnedRecord,
+    ) -> groove::records::VersionedRecord {
+        groove::records::VersionedRecord::new(self.schema_version_alias().0, record)
+    }
+
     pub(super) fn deletion(&self) -> Option<DeletionEvent> {
         if !self.is_register_record() {
             return None;
@@ -755,24 +767,27 @@ impl VersionRow {
         nullable_value(self.record.borrowed().get_idx(field)?)
     }
 
-    pub(super) fn peek_cell(
+    /// `None` is the deliberate legacy/lens fallback: every present cell is
+    /// treated as authored by merge code.
+    pub(super) fn authored_columns(
         &self,
         table: &TableSchema,
-        column: &str,
-    ) -> Result<Option<Value>, Error> {
+    ) -> Result<Option<BTreeSet<String>>, Error> {
         if self.is_register_record() {
             return Ok(None);
         }
-        let field = HistoryRowRecord::USER_CELLS
-            + table
-                .columns
-                .iter()
-                .position(|candidate| candidate.name == column)
-                .ok_or(Error::InvalidStoredValue("missing user column field"))?;
+        let field = HistoryRowRecord::USER_CELLS + table.columns.len();
         if field >= self.record.descriptor().fields().len() {
             return Ok(None);
         }
-        nullable_value(self.record.borrowed().get_idx(field)?)
+        let value = nullable_value(self.record.borrowed().get_idx(field)?)?;
+        value
+            .map(|value| match value {
+                Value::Bytes(bytes) => serde_json::from_slice(&bytes)
+                    .map_err(|_| Error::InvalidStoredValue("invalid authored columns")),
+                _ => Err(Error::InvalidStoredValue("authored columns must be bytes")),
+            })
+            .transpose()
     }
 
     pub(super) fn is_register_record(&self) -> bool {
@@ -797,7 +812,8 @@ impl VersionRow {
                 global_seq: tx.global_seq,
                 durability: tx.durability,
                 user_metadata_json: tx.tx.user_metadata_json.clone(),
-                source_branch: tx.tx.source_branch,
+                target_lineage: tx.tx.target_lineage,
+                branch_merge: tx.tx.branch_merge.clone(),
             },
             is_locally_current,
             is_globally_current,
@@ -821,14 +837,33 @@ pub(super) fn owned_record_from_storage_values_with_descriptor(
     Ok(OwnedRecord::new(raw, descriptor))
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ParkedIngressRole {
+    Relay,
+    EdgeAuthority,
+    Authority,
+    EdgeAccepted,
+}
+
+impl ParkedIngressRole {
+    pub(super) fn strongest(self, other: Self) -> Self {
+        use ParkedIngressRole::{Authority, EdgeAccepted, EdgeAuthority, Relay};
+        match (self, other) {
+            (EdgeAccepted, _) | (_, EdgeAccepted) => EdgeAccepted,
+            (Authority, _) | (_, Authority) => Authority,
+            (EdgeAuthority, _) | (_, EdgeAuthority) => EdgeAuthority,
+            (Relay, Relay) => Relay,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct ParkedCommitUnit {
     pub(super) tx: Transaction,
     pub(super) versions: Vec<VersionRecord>,
     pub(super) now_ms: u64,
     pub(super) ingest_context: Option<CommitUnitIngestContext>,
-    pub(super) edge_authority_mergeable: bool,
-    pub(super) edge_accepted_mergeable: bool,
+    pub(super) ingress_role: ParkedIngressRole,
 }
 
 pub(super) fn current_version_index(
@@ -987,7 +1022,14 @@ pub(super) fn transaction_values(
                 .clone()
                 .map(|value| Box::new(Value::String(value))),
         ),
-        Value::Nullable(tx.source_branch.map(|id| Box::new(Value::Uuid(id.0)))),
+        Value::Bytes(
+            serde_json::to_vec(&tx.target_lineage).expect("target lineage is serializable"),
+        ),
+        Value::Nullable(tx.branch_merge.as_ref().map(|provenance| {
+            Box::new(Value::Bytes(
+                serde_json::to_vec(provenance).expect("branch merge provenance is serializable"),
+            ))
+        })),
         Value::Nullable(tx.permission_subject.map(|id| Box::new(Value::Uuid(id.0)))),
         Value::Nullable(
             tx.merge_strategy
@@ -1283,6 +1325,17 @@ pub(super) fn history_values_from_parts(
             version.cells.get(&column.name).cloned().map(Box::new),
         ));
     }
+    values.push(Value::Nullable(
+        version
+            .authored_columns
+            .as_ref()
+            .map(|columns| {
+                serde_json::to_vec(columns)
+                    .expect("serializing an ordered set of strings cannot fail")
+            })
+            .map(Box::new)
+            .map(|bytes| Box::new(Value::Bytes(*bytes))),
+    ));
     Ok(values)
 }
 
@@ -1316,6 +1369,12 @@ fn history_values_from_wire(
         }
         values.push(Value::Nullable(value.map(Box::new)));
     }
+    values.push(Value::Nullable(
+        version
+            .authored_columns()
+            .map(|columns| serde_json::to_vec(columns).expect("serializing authored columns"))
+            .map(|bytes| Box::new(Value::Bytes(bytes))),
+    ));
     Ok(values)
 }
 
@@ -1424,6 +1483,12 @@ pub(super) fn global_current_values(
             nullable_value(version.record.borrowed().get_idx(field)?)?.map(Box::new),
         ));
     }
+    values.push(Value::Nullable(
+        version
+            .authored_columns(table)?
+            .map(|columns| serde_json::to_vec(&columns).expect("serializing authored columns"))
+            .map(|bytes| Box::new(Value::Bytes(bytes))),
+    ));
     Ok(values)
 }
 
@@ -1443,9 +1508,13 @@ pub(super) fn register_global_current_values(
     values
 }
 
-pub(super) fn global_change_values(version: &VersionRow, global_seq: GlobalSeq) -> Vec<Value> {
+pub(super) fn global_change_values(
+    table_id: PhysicalTableId,
+    version: &VersionRow,
+    global_seq: GlobalSeq,
+) -> Vec<Value> {
     vec![
-        Value::Bytes(version.table().as_bytes().to_vec()),
+        Value::U64(table_id.0),
         Value::Uuid(version.row_uuid().0),
         Value::Bytes(version_layer_string(version.layer()).into_bytes()),
         Value::U64(global_seq.0),
@@ -1457,6 +1526,22 @@ pub(super) fn global_change_values(version: &VersionRow, global_seq: GlobalSeq) 
                 .map(|deletion| Box::new(deletion_event_value(deletion))),
         ),
     ]
+}
+
+#[allow(dead_code)]
+pub(super) fn global_change_primary_key_from_record(
+    record: &BorrowedRecord<'_>,
+) -> Result<PrimaryKeyValue, Error> {
+    Ok(PrimaryKeyValue::Composite(vec![
+        PrimaryKeyValue::U64(record.get_u64(GlobalChangeRowRecord::FIELD_PHYSICAL_TABLE_ID_IDX)?),
+        PrimaryKeyValue::Uuid(record.get_uuid(GlobalChangeRowRecord::FIELD_ROW_UUID_IDX)?),
+        PrimaryKeyValue::Bytes(
+            record
+                .get_bytes(GlobalChangeRowRecord::FIELD_LAYER_IDX)?
+                .to_vec(),
+        ),
+        PrimaryKeyValue::U64(record.get_u64(GlobalChangeRowRecord::FIELD_GLOBAL_SEQ_IDX)?),
+    ]))
 }
 
 pub(super) fn rejected_transaction_primary_key(alias: NodeAlias, tx_id: TxId) -> PrimaryKeyValue {
@@ -1607,25 +1692,6 @@ pub(super) fn visible_current_graph(table: &TableSchema, settled: DurabilityTier
         )
 }
 
-pub(super) fn current_row_graphs(
-    schema: &JazzSchema,
-) -> BTreeMap<(String, DurabilityTier), GraphBuilder> {
-    let mut graphs = BTreeMap::new();
-    for table in &schema.tables {
-        for tier in [
-            DurabilityTier::None,
-            DurabilityTier::Local,
-            DurabilityTier::Global,
-        ] {
-            graphs.insert(
-                (table.name.clone(), tier),
-                visible_current_graph(table, tier),
-            );
-        }
-    }
-    graphs
-}
-
 pub(super) fn decode_current_row(
     table: &TableSchema,
     record: BorrowedRecord<'_>,
@@ -1688,6 +1754,23 @@ pub(super) fn current_row_from_materialized_cells_with_provenance(
     provenance: &VersionRow,
     cells: &BTreeMap<String, Value>,
 ) -> Result<CurrentRow, Error> {
+    current_row_from_materialized_cells_with_layer_provenance(
+        table, content, provenance, provenance, cells,
+    )
+}
+
+/// Build a current row whose application cells and creation provenance come
+/// from the content winner while its update provenance comes from the winner
+/// of the layer that most recently changed the logical row. Deletion and
+/// restoration records carry no user cells, but they still update the row's
+/// public `$updatedBy`/`$updatedAt` identity.
+pub(super) fn current_row_from_materialized_cells_with_layer_provenance(
+    table: &TableSchema,
+    content: &VersionRow,
+    created: &VersionRow,
+    updated: &VersionRow,
+    cells: &BTreeMap<String, Value>,
+) -> Result<CurrentRow, Error> {
     let descriptor = current_row_descriptor(table);
     let mut values = Vec::with_capacity(table.columns.len() + 7);
     values.push(Value::Uuid(content.row_uuid().0));
@@ -1696,7 +1779,41 @@ pub(super) fn current_row_from_materialized_cells_with_provenance(
             cells.get(&column.name).cloned().map(Box::new),
         ));
     }
-    append_current_row_provenance(&mut values, provenance);
+    values.push(Value::Uuid(created.created_by().0));
+    values.push(Value::U64(created.created_at().0));
+    values.push(Value::Uuid(updated.updated_by().0));
+    values.push(Value::U64(updated.updated_at().0));
+    values.push(Value::U64(updated.tx_time().0));
+    values.push(Value::U64(updated.tx_node_alias().0));
+    let raw = descriptor.create(&values)?;
+    Ok(CurrentRow::new(
+        table.name.clone(),
+        OwnedRecord::new(raw, descriptor),
+    ))
+}
+
+pub(super) fn current_row_from_cells_with_explicit_provenance(
+    table: &TableSchema,
+    row_uuid: RowUuid,
+    cells: &BTreeMap<String, Value>,
+    provenance: RowProvenance,
+    projected_tx: Option<(TxTime, NodeAlias)>,
+) -> Result<CurrentRow, Error> {
+    let descriptor = current_row_descriptor(table);
+    let mut values = Vec::with_capacity(table.columns.len() + 7);
+    values.push(Value::Uuid(row_uuid.0));
+    for column in &table.columns {
+        values.push(Value::Nullable(
+            cells.get(&column.name).cloned().map(Box::new),
+        ));
+    }
+    values.push(Value::Uuid(provenance.created_by.0));
+    values.push(Value::U64(provenance.created_at.0));
+    values.push(Value::Uuid(provenance.updated_by.0));
+    values.push(Value::U64(provenance.updated_at.0));
+    let (tx_time, tx_node_alias) = projected_tx.unwrap_or((TxTime(0), NodeAlias(0)));
+    values.push(Value::U64(tx_time.0));
+    values.push(Value::U64(tx_node_alias.0));
     let raw = descriptor.create(&values)?;
     Ok(CurrentRow::new(
         table.name.clone(),
@@ -1787,7 +1904,7 @@ fn build_current_row_descriptor(table: &TableSchema) -> records::RecordDescripto
             .chain(table.columns.iter().map(|column| {
                 (
                     user_column_field(&column.name),
-                    records::ValueType::Nullable(Box::new(column.column_type.clone().value_type())),
+                    records::ValueType::Nullable(Box::new(column.column_type.clone())),
                 )
             }))
             .chain([
@@ -1811,7 +1928,7 @@ pub(super) fn current_row_from_positional_cells(
             table.columns.iter().map(|column| {
                 (
                     column.name.clone(),
-                    records::ValueType::Nullable(Box::new(column.column_type.clone().value_type())),
+                    records::ValueType::Nullable(Box::new(column.column_type.clone())),
                 )
             }),
         ),
@@ -1884,7 +2001,7 @@ pub(super) fn nullable_value(value: Value) -> Result<Option<Value>, Error> {
 }
 
 pub(super) fn validate_cell_value(column: &ColumnSchema, value: &Value) -> Result<(), Error> {
-    records::RecordDescriptor::new([("cell", column.column_type.clone().value_type())])
+    records::RecordDescriptor::new([("cell", column.column_type.clone())])
         .create(std::slice::from_ref(value))?;
     Ok(())
 }
@@ -2034,156 +2151,6 @@ pub(super) fn tx_id_value(tx_id: TxId) -> Value {
     Value::Tuple(vec![Value::U64(tx_id.time.0), Value::Uuid(tx_id.node.0)])
 }
 
-pub(super) fn history_table_name(table: &str) -> String {
-    format!("jazz_{table}_history")
-}
-
-pub(super) fn rejected_versions_table_name(table: &str) -> String {
-    format!("jazz_{table}_rejected_versions")
-}
-
-pub(super) fn register_table_name(table: &str) -> String {
-    format!("jazz_{table}_register")
-}
-
-pub(super) fn version_storage_table_name(table: &str, layer: VersionLayer) -> String {
-    match layer {
-        VersionLayer::Content => history_table_name(table),
-        VersionLayer::Deletion => register_table_name(table),
-    }
-}
-
-pub(super) fn version_storage_table_name_for_schema(
-    table: &str,
-    layer: VersionLayer,
-    schema_version: SchemaVersionId,
-    base_schema_version: SchemaVersionId,
-) -> String {
-    if schema_version == base_schema_version {
-        return version_storage_table_name(table, layer);
-    }
-    match layer {
-        VersionLayer::Content => partition_history_table_name(table, schema_version),
-        VersionLayer::Deletion => partition_register_table_name(table, schema_version),
-    }
-}
-
-impl<S> NodeState<S>
-where
-    S: OrderedKvStorage,
-{
-    pub(super) fn cached_version_storage_table_name_for_schema(
-        &mut self,
-        table: &str,
-        layer: VersionLayer,
-        schema_version: SchemaVersionId,
-        base_schema_version: SchemaVersionId,
-    ) -> groove::Intern<String> {
-        self.cached_physical_table_name(
-            table,
-            PhysicalTableClass::VersionStorage(layer),
-            schema_version,
-            base_schema_version,
-            |table| {
-                version_storage_table_name_for_schema(
-                    table,
-                    layer,
-                    schema_version,
-                    base_schema_version,
-                )
-            },
-        )
-    }
-
-    pub(super) fn cached_global_current_table_name_for_schema(
-        &mut self,
-        table: &str,
-        layer: VersionLayer,
-        schema_version: SchemaVersionId,
-        base_schema_version: SchemaVersionId,
-    ) -> groove::Intern<String> {
-        self.cached_physical_table_name(
-            table,
-            PhysicalTableClass::GlobalCurrent(layer),
-            schema_version,
-            base_schema_version,
-            |table| match layer {
-                VersionLayer::Content => {
-                    global_current_table_name_for_schema(table, schema_version, base_schema_version)
-                }
-                VersionLayer::Deletion => register_global_current_table_name_for_schema(
-                    table,
-                    schema_version,
-                    base_schema_version,
-                ),
-            },
-        )
-    }
-
-    pub(super) fn cached_ahead_current_table_name_for_schema(
-        &mut self,
-        table: &str,
-        layer: VersionLayer,
-        schema_version: SchemaVersionId,
-        base_schema_version: SchemaVersionId,
-    ) -> groove::Intern<String> {
-        self.cached_physical_table_name(
-            table,
-            PhysicalTableClass::AheadCurrent(layer),
-            schema_version,
-            base_schema_version,
-            |table| match layer {
-                VersionLayer::Content => {
-                    ahead_current_table_name_for_schema(table, schema_version, base_schema_version)
-                }
-                VersionLayer::Deletion => register_ahead_current_table_name_for_schema(
-                    table,
-                    schema_version,
-                    base_schema_version,
-                ),
-            },
-        )
-    }
-
-    fn cached_physical_table_name(
-        &mut self,
-        table: &str,
-        class: PhysicalTableClass,
-        schema_version: SchemaVersionId,
-        base_schema_version: SchemaVersionId,
-        build: impl FnOnce(&str) -> String,
-    ) -> groove::Intern<String> {
-        let key = PhysicalTableNameKey {
-            table: table.to_owned(),
-            class,
-            schema_version,
-            base_schema_version,
-        };
-        if let Some(name) = self.query.physical_table_name_cache.get(&key) {
-            return *name;
-        }
-        let name = groove::Intern::new(build(table));
-        self.query.physical_table_name_cache.insert(key, name);
-        name
-    }
-}
-
-pub(super) fn branch_version_storage_table_name(
-    table: &str,
-    layer: VersionLayer,
-    schema_version: SchemaVersionId,
-    branch_id: BranchId,
-) -> String {
-    match layer {
-        VersionLayer::Content => {
-            branch_partition_history_table_name(table, schema_version, branch_id)
-        }
-        VersionLayer::Deletion => {
-            branch_partition_register_table_name(table, schema_version, branch_id)
-        }
-    }
-}
-
 pub(super) fn global_current_table_name(table: &str) -> String {
     format!("jazz_{table}_global_current")
 }
@@ -2198,54 +2165,6 @@ pub(super) fn ahead_current_table_name(table: &str) -> String {
 
 pub(super) fn register_ahead_current_table_name(table: &str) -> String {
     format!("jazz_{table}_register_ahead_current")
-}
-
-pub(super) fn global_current_table_name_for_schema(
-    table: &str,
-    schema_version: SchemaVersionId,
-    base_schema_version: SchemaVersionId,
-) -> String {
-    if schema_version == base_schema_version {
-        global_current_table_name(table)
-    } else {
-        partition_global_current_table_name(table, schema_version)
-    }
-}
-
-pub(super) fn register_global_current_table_name_for_schema(
-    table: &str,
-    schema_version: SchemaVersionId,
-    base_schema_version: SchemaVersionId,
-) -> String {
-    if schema_version == base_schema_version {
-        register_global_current_table_name(table)
-    } else {
-        partition_register_global_current_table_name(table, schema_version)
-    }
-}
-
-pub(super) fn ahead_current_table_name_for_schema(
-    table: &str,
-    schema_version: SchemaVersionId,
-    base_schema_version: SchemaVersionId,
-) -> String {
-    if schema_version == base_schema_version {
-        ahead_current_table_name(table)
-    } else {
-        partition_ahead_current_table_name(table, schema_version)
-    }
-}
-
-pub(super) fn register_ahead_current_table_name_for_schema(
-    table: &str,
-    schema_version: SchemaVersionId,
-    base_schema_version: SchemaVersionId,
-) -> String {
-    if schema_version == base_schema_version {
-        register_ahead_current_table_name(table)
-    } else {
-        partition_register_ahead_current_table_name(table, schema_version)
-    }
 }
 
 pub(super) fn version_layer_string(layer: VersionLayer) -> String {

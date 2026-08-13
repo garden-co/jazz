@@ -301,7 +301,8 @@ fn edge_authority_rejects_exclusive_and_catalogue_writes_loudly() {
         absent_read_set: None,
         predicate_read_set: None,
         user_metadata_json: None,
-        source_branch: None,
+        target_lineage: crate::tx::BranchLineage::Root,
+        branch_merge: None,
         merge_strategy: None,
     };
     assert!(matches!(
@@ -321,11 +322,36 @@ fn edge_authority_rejects_exclusive_and_catalogue_writes_loudly() {
     ));
 
     let evolved = SchemaVersion::new(catalogue_evolved_schema());
+    let publication = SchemaLineagePublication::new(
+        evolved.clone(),
+        MigrationLens::new(
+            schema().version_id(),
+            evolved.id,
+            vec![TableLens {
+                source_table: "todos".to_owned(),
+                target_table: "todos".to_owned(),
+                ops: vec![LensOp::AddColumn {
+                    column: "body".to_owned(),
+                    default: Value::String(String::new()),
+                }],
+            }],
+        ),
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    );
     assert!(matches!(
-        edge.apply_sync_message(SyncMessage::PublishSchema {
+        edge.apply_sync_message(SyncMessage::PublishSchemaWithLens {
             author: user(0xee),
-            schema: Box::new(evolved),
+            catalogue_seq: 1,
+            publication: Box::new(publication.clone()),
         }),
         Err(Error::UnauthorizedCatalogueUpdate)
     ));
+    edge.apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
+        author: AuthorId::SYSTEM,
+        catalogue_seq: 1,
+        publication: Box::new(publication),
+    })
+    .unwrap();
+    assert!(edge.catalogue_schemas().contains_key(&evolved.id));
 }

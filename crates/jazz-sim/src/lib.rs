@@ -5,6 +5,7 @@ pub mod fixture;
 pub mod mem;
 pub mod policy_graph_fixture;
 pub mod profiling;
+pub mod view_accounting;
 
 use hdrhistogram::Histogram;
 use jazz::protocol::SyncMessage;
@@ -932,7 +933,9 @@ pub fn loopback_transport_message(
                 Some(frame_bytes) => {
                     match decode_frame(&frame_bytes).expect("simulator frame decode") {
                         WireFrame::Message(envelope) => envelope.payload,
-                        WireFrame::Hello(_) | WireFrame::Error(_) => {
+                        WireFrame::Hello(_)
+                        | WireFrame::Error(_)
+                        | WireFrame::MessageFragment(_) => {
                             panic!("simulator frame decode returned non-message frame")
                         }
                     }

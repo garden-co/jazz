@@ -698,9 +698,9 @@ describe.each(readModes)("TS Query API (%s reads)", (readMode: ReadMode) => {
         db.delete(app.users, deletedUser.id);
 
         const result = await readOne(
-          app.users
-            .where({ id: { eq: alice.id } })
-            .include({ friends: app.users.include({ friends: true }).requireIncludes() }),
+          app.users.where({ id: { eq: alice.id } }).include({
+            friends: app.users.include({ friends: true }).requireIncludes(),
+          }),
         );
 
         assert(result, "Result is not defined");

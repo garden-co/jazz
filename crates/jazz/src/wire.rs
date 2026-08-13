@@ -6,23 +6,21 @@
 //! server shells can adopt the envelope before the full [`crate::protocol::SyncMessage`]
 //! encoder is frozen.
 
-#[cfg(feature = "transport-compression-lz4")]
-use std::io::Read;
-#[cfg(any(
-    feature = "transport-compression-lz4",
-    feature = "transport-compression-zstd"
+#[cfg(all(
+    not(feature = "transport-compression-zstd"),
+    feature = "transport-compression-ruzstd"
 ))]
-use std::io::Write;
+use ruzstd::io::Read;
 
 use postcard::{from_bytes, to_allocvec};
 use serde::{Deserialize, Serialize};
 
-use crate::ids::AuthorId;
+use crate::ids::{AuthorId, NodeUuid};
 use crate::protocol::SyncMessage;
-use crate::protocol_limits::{validate_sync_message_len, validate_wire_frame_len};
+use crate::protocol_limits::{validate_logical_message_len, validate_wire_frame_len};
 
 /// Current Jazz wire protocol version.
-pub const WIRE_PROTOCOL_VERSION: u16 = 4;
+pub const WIRE_PROTOCOL_VERSION: u16 = 6;
 
 /// No optional features.
 pub const FEATURE_NONE: WireFeatures = 0;
@@ -36,6 +34,17 @@ pub const FEATURE_STRUCTURED_ERRORS: WireFeatures = 1 << 2;
 pub const FEATURE_PAYLOAD_LZ4: WireFeatures = 1 << 3;
 /// Message frame payloads may be Zstandard-compressed at the transport frame seam.
 pub const FEATURE_PAYLOAD_ZSTD: WireFeatures = 1 << 4;
+/// Logical sync messages may be decomposed into bounded physical frames.
+pub const FEATURE_MESSAGE_FRAGMENTATION: WireFeatures = 1 << 5;
+/// Semantic frames may carry authorization-support purposes and receipts.
+///
+/// This feature is deliberately separate from framing: an older peer can
+/// still exchange every pre-existing sync message, but must never be asked to
+/// deserialize the new semantic enum variants or extension fields.
+pub const FEATURE_AUTHORIZATION_SCOPE_RECEIPTS: WireFeatures = 1 << 6;
+/// Authority-owned authorization scope hydration.  Unlike the first receipt
+/// experiment this never accepts caller supplied support query identities.
+pub const FEATURE_AUTHORIZATION_SCOPE_VIEWS: WireFeatures = 1 << 7;
 
 const FEATURE_PAYLOAD_COMPRESSION_MASK: WireFeatures = FEATURE_PAYLOAD_LZ4 | FEATURE_PAYLOAD_ZSTD;
 
@@ -51,6 +60,29 @@ pub enum WireFrame {
     Message(WireEnvelope),
     /// Structured protocol/session error.
     Error(WireError),
+    /// One physical extent of an encoded logical sync message.
+    MessageFragment(WireMessageFragment),
+}
+
+/// A bounded physical extent of one encoded logical message.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WireMessageFragment {
+    /// Negotiated protocol version used by the logical message.
+    pub protocol_version: u16,
+    /// Optional features active for the encoded logical message.
+    pub features: WireFeatures,
+    /// Optional authenticated/resumable session metadata.
+    pub session: Option<WireSession>,
+    /// Monotone identity within this connection direction.
+    pub message_id: u64,
+    /// Integrity digest of the complete encoded payload.
+    pub message_digest: [u8; 32],
+    /// Exact encoded payload length before fragmentation.
+    pub total_len: u64,
+    /// Byte offset of this extent in the encoded payload.
+    pub offset: u64,
+    /// Bytes at `offset`.
+    pub payload: Vec<u8>,
 }
 
 /// Link role advertised during handshake.
@@ -78,6 +110,23 @@ pub struct WireHello {
     pub features: WireFeatures,
     /// Runtime/link role for topology and admission decisions.
     pub role: WirePeerRole,
+    /// Authority endpoint bound by the authenticated handshake when the
+    /// authorization-scope receipt feature is offered.  Semantic sync frames
+    /// never self-assert this identity.
+    #[serde(default)]
+    pub authority: Option<WireAuthorityEndpoint>,
+}
+
+/// Fresh, authenticated authority endpoint identity for one negotiated link.
+///
+/// The session/admission layer allocates this nonce before constructing the
+/// eventual sync connection; receipts use it to reject reconnect replay.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WireAuthorityEndpoint {
+    /// Stable authority node identity authenticated by the transport.
+    pub node: NodeUuid,
+    /// Fresh non-resumable epoch for this accepted connection.
+    pub epoch: u64,
 }
 
 impl WireHello {
@@ -88,7 +137,14 @@ impl WireHello {
             max_protocol_version: WIRE_PROTOCOL_VERSION,
             features,
             role,
+            authority: None,
         }
+    }
+
+    /// Attach the endpoint allocated by authenticated session admission.
+    pub fn with_authority(mut self, node: NodeUuid, epoch: u64) -> Self {
+        self.authority = Some(WireAuthorityEndpoint { node, epoch });
+        self
     }
 }
 
@@ -250,9 +306,30 @@ pub fn encode_sync_message(message: &SyncMessage) -> Result<Vec<u8>, postcard::E
     to_allocvec(message)
 }
 
+/// Serialize a semantic message only when its required capabilities were
+/// negotiated for this link.
+///
+/// Keep this check immediately adjacent to the canonical codec.  Postcard
+/// encodes Rust enums by ordinal, so allowing an unsupported variant past this
+/// seam would make an older peer decode a different message (or fail after it
+/// has already accepted a semantic frame).
+pub fn encode_sync_message_for_features(
+    message: &SyncMessage,
+    negotiated_features: WireFeatures,
+) -> Result<Vec<u8>, WireError> {
+    ensure_sync_message_features(message, negotiated_features)?;
+    encode_sync_message(message).map_err(|error| {
+        WireError::new(
+            WireErrorCode::MalformedFrame,
+            WireRetry::Never,
+            format!("failed to encode sync message payload: {error}"),
+        )
+    })
+}
+
 /// Decode a semantic sync message serialized by [`encode_sync_message`].
 pub fn decode_sync_message(bytes: &[u8]) -> Result<SyncMessage, postcard::Error> {
-    if validate_sync_message_len(bytes.len()).is_err() {
+    if validate_logical_message_len(bytes.len()).is_err() {
         return Err(postcard::Error::DeserializeUnexpectedEnd);
     }
     let message: SyncMessage = from_bytes(bytes)?;
@@ -262,9 +339,43 @@ pub fn decode_sync_message(bytes: &[u8]) -> Result<SyncMessage, postcard::Error>
     Ok(message)
 }
 
+/// Decode a semantic message only when its required capabilities were
+/// negotiated for this link.
+pub fn decode_sync_message_for_features(
+    bytes: &[u8],
+    negotiated_features: WireFeatures,
+) -> Result<SyncMessage, WireError> {
+    let message = decode_sync_message(bytes).map_err(|error| {
+        WireError::new(
+            WireErrorCode::MalformedFrame,
+            WireRetry::Never,
+            format!("failed to decode sync message payload: {error}"),
+        )
+    })?;
+    ensure_sync_message_features(&message, negotiated_features)?;
+    Ok(message)
+}
+
 /// Decode a semantic sync message for receiver apply.
 pub fn decode_sync_message_for_receive(bytes: &[u8]) -> Result<SyncMessage, postcard::Error> {
     decode_sync_message(bytes)
+}
+
+/// Reject semantic extensions that this connection did not negotiate.
+pub fn ensure_sync_message_features(
+    message: &SyncMessage,
+    negotiated_features: WireFeatures,
+) -> Result<(), WireError> {
+    let required = message.required_wire_features();
+    let missing = required & !negotiated_features;
+    if missing == 0 {
+        return Ok(());
+    }
+    Err(WireError::new(
+        WireErrorCode::UnsupportedFeature,
+        WireRetry::AfterResume,
+        format!("sync message requires unnegotiated features {missing:#x}"),
+    ))
 }
 
 /// Optional transport compression features enabled for this process.
@@ -314,6 +425,9 @@ fn default_transport_compression_features() -> WireFeatures {
 pub fn current_wire_features() -> WireFeatures {
     FEATURE_SYNC_MESSAGE_PAYLOAD
         | FEATURE_STRUCTURED_ERRORS
+        | FEATURE_MESSAGE_FRAGMENTATION
+        | FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
+        | FEATURE_AUTHORIZATION_SCOPE_VIEWS
         | runtime_transport_compression_features()
 }
 
@@ -341,9 +455,8 @@ fn cfg_zstd_feature() -> WireFeatures {
 
 /// Compress a sync payload for one message envelope.
 ///
-/// This remains available for measurement compatibility. Production peer links
-/// use [`WireStreamEncoder`] so the dictionary/window lives for the whole
-/// negotiated connection direction and resets only on reconnect.
+/// Production peer links use the same per-message encoding through
+/// [`WireStreamEncoder`], allowing decompression to enforce an output cap.
 pub fn compress_sync_payload(
     payload: Vec<u8>,
     negotiated_features: WireFeatures,
@@ -386,8 +499,17 @@ fn compress_lz4(_payload: &[u8]) -> Result<Vec<u8>, String> {
 
 #[cfg(feature = "transport-compression-lz4")]
 fn decompress_lz4(payload: &[u8]) -> Result<Vec<u8>, String> {
-    lz4_flex::decompress_size_prepended(payload)
-        .map_err(|error| format!("failed to decompress lz4 payload: {error}"))
+    let advertised = payload
+        .get(..4)
+        .and_then(|bytes| bytes.try_into().ok())
+        .map(u32::from_le_bytes)
+        .ok_or_else(|| "lz4 payload is missing its decoded-length prefix".to_owned())?
+        as usize;
+    validate_logical_message_len(advertised)?;
+    let decoded = lz4_flex::decompress_size_prepended(payload)
+        .map_err(|error| format!("failed to decompress lz4 payload: {error}"))?;
+    validate_logical_message_len(decoded.len())?;
+    Ok(decoded)
 }
 
 #[cfg(not(feature = "transport-compression-lz4"))]
@@ -413,7 +535,7 @@ fn compress_zstd(_payload: &[u8]) -> Result<Vec<u8>, String> {
 fn decompress_zstd(payload: &[u8]) -> Result<Vec<u8>, String> {
     #[cfg(feature = "transport-compression-zstd")]
     {
-        zstd::bulk::decompress(payload, crate::protocol_limits::MAX_SYNC_MESSAGE_BYTES)
+        zstd::bulk::decompress(payload, crate::protocol_limits::MAX_LOGICAL_MESSAGE_BYTES)
             .map_err(|error| format!("failed to decompress zstd payload: {error}"))
     }
     #[cfg(all(
@@ -421,11 +543,14 @@ fn decompress_zstd(payload: &[u8]) -> Result<Vec<u8>, String> {
         feature = "transport-compression-ruzstd"
     ))]
     {
-        let mut decoder = ruzstd::decoding::FrameDecoder::new();
-        let mut output = Vec::with_capacity(crate::protocol_limits::MAX_SYNC_MESSAGE_BYTES);
+        let decoder = ruzstd::decoding::StreamingDecoder::new(payload)
+            .map_err(|error| format!("failed to initialize ruzstd payload: {error}"))?;
+        let mut output = Vec::new();
         decoder
-            .decode_all_to_vec(payload, &mut output)
+            .take((crate::protocol_limits::MAX_LOGICAL_MESSAGE_BYTES + 1) as u64)
+            .read_to_end(&mut output)
             .map_err(|error| format!("failed to decompress ruzstd payload: {error}"))?;
+        validate_logical_message_len(output.len())?;
         Ok(output)
     }
 }
@@ -438,35 +563,26 @@ fn decompress_zstd(_payload: &[u8]) -> Result<Vec<u8>, String> {
     Err("zstd transport compression feature is not compiled in".to_owned())
 }
 
-/// Connection-direction compression state for sync message payloads.
-///
-/// Compressed links write `u32 little-endian length || sync_payload` records into
-/// one codec stream. The state is intentionally per connection direction:
-/// reconnect creates a fresh stream context, and known-state redelivery makes
-/// that reset protocol-safe.
+/// Negotiated per-message compression for sync payloads.
 pub struct WireStreamEncoder {
     codec: WireCompression,
-    inner: WireStreamEncoderInner,
-}
-
-enum WireStreamEncoderInner {
-    None,
-    #[cfg(feature = "transport-compression-lz4")]
-    Lz4(lz4_flex::frame::FrameEncoder<Vec<u8>>),
-    #[cfg(feature = "transport-compression-zstd")]
-    Zstd(zstd::stream::write::Encoder<'static, Vec<u8>>),
 }
 
 impl WireStreamEncoder {
     /// Create encoder state for one outbound connection direction.
     pub fn new(features: WireFeatures) -> Result<Self, String> {
         let codec = outbound_wire_compression_from_features(features);
-        let inner = match codec {
-            WireCompression::None => WireStreamEncoderInner::None,
-            WireCompression::Lz4 => new_lz4_stream_encoder()?,
-            WireCompression::Zstd => new_zstd_stream_encoder()?,
-        };
-        Ok(Self { codec, inner })
+        match codec {
+            WireCompression::None => {}
+            WireCompression::Lz4 if cfg_lz4_feature() == FEATURE_NONE => {
+                return Err("lz4 transport compression feature is not compiled in".to_owned());
+            }
+            WireCompression::Zstd if !cfg_can_encode_zstd() => {
+                return Err("zstd transport compression feature is not compiled in".to_owned());
+            }
+            _ => {}
+        }
+        Ok(Self { codec })
     }
 
     /// Active feature bit carried by message envelopes for this stream.
@@ -477,26 +593,10 @@ impl WireStreamEncoder {
     /// Encode one sync payload into the connection stream and return the bytes
     /// newly emitted by this message.
     pub fn encode_message(&mut self, payload: &[u8]) -> Result<Vec<u8>, String> {
-        match &mut self.inner {
-            WireStreamEncoderInner::None => Ok(payload.to_vec()),
-            #[cfg(feature = "transport-compression-lz4")]
-            WireStreamEncoderInner::Lz4(encoder) => {
-                let start = encoder.get_ref().len();
-                write_length_prefixed_payload(encoder, payload)?;
-                encoder
-                    .flush()
-                    .map_err(|error| format!("failed to flush lz4 stream: {error}"))?;
-                Ok(encoder.get_ref()[start..].to_vec())
-            }
-            #[cfg(feature = "transport-compression-zstd")]
-            WireStreamEncoderInner::Zstd(encoder) => {
-                let start = encoder.get_ref().len();
-                write_length_prefixed_payload(encoder, payload)?;
-                encoder
-                    .flush()
-                    .map_err(|error| format!("failed to flush zstd stream: {error}"))?;
-                Ok(encoder.get_ref()[start..].to_vec())
-            }
+        match self.codec {
+            WireCompression::None => Ok(payload.to_vec()),
+            WireCompression::Lz4 => compress_lz4(payload),
+            WireCompression::Zstd => compress_zstd(payload),
         }
     }
 }
@@ -512,82 +612,16 @@ fn cfg_can_encode_zstd() -> bool {
     cfg!(feature = "transport-compression-zstd")
 }
 
-#[cfg(any(
-    feature = "transport-compression-lz4",
-    feature = "transport-compression-zstd"
-))]
-fn write_length_prefixed_payload(writer: &mut impl Write, payload: &[u8]) -> Result<(), String> {
-    let len = u32::try_from(payload.len())
-        .map_err(|_| "sync payload is too large for transport stream frame".to_owned())?;
-    writer
-        .write_all(&len.to_le_bytes())
-        .and_then(|_| writer.write_all(payload))
-        .map_err(|error| format!("failed to write transport stream payload: {error}"))
-}
-
-#[cfg(feature = "transport-compression-lz4")]
-fn new_lz4_stream_encoder() -> Result<WireStreamEncoderInner, String> {
-    Ok(WireStreamEncoderInner::Lz4(
-        lz4_flex::frame::FrameEncoder::new(Vec::new()),
-    ))
-}
-
-#[cfg(not(feature = "transport-compression-lz4"))]
-fn new_lz4_stream_encoder() -> Result<WireStreamEncoderInner, String> {
-    Err("lz4 transport compression feature is not compiled in".to_owned())
-}
-
-#[cfg(feature = "transport-compression-zstd")]
-fn new_zstd_stream_encoder() -> Result<WireStreamEncoderInner, String> {
-    zstd::stream::write::Encoder::new(Vec::new(), 3)
-        .map(WireStreamEncoderInner::Zstd)
-        .map_err(|error| format!("failed to create zstd stream encoder: {error}"))
-}
-
-#[cfg(not(feature = "transport-compression-zstd"))]
-fn new_zstd_stream_encoder() -> Result<WireStreamEncoderInner, String> {
-    Err("zstd transport compression feature is not compiled in".to_owned())
-}
-
-/// Connection-direction decompression state for sync message payloads.
+/// Negotiated per-message decompression for sync payloads.
 pub struct WireStreamDecoder {
     codec: WireCompression,
-    inner: WireStreamDecoderInner,
-}
-
-enum WireStreamDecoderInner {
-    None,
-    #[cfg(feature = "transport-compression-lz4")]
-    Lz4 {
-        compressed: Vec<u8>,
-        plain_consumed: usize,
-    },
-    #[cfg(feature = "transport-compression-zstd")]
-    Zstd {
-        decoder: zstd::stream::write::Decoder<'static, Vec<u8>>,
-        plain_consumed: usize,
-    },
-    #[cfg(all(
-        not(feature = "transport-compression-zstd"),
-        feature = "transport-compression-ruzstd"
-    ))]
-    ZstdRuzstd {
-        compressed: Vec<u8>,
-        plain: Vec<u8>,
-        plain_consumed: usize,
-    },
 }
 
 impl WireStreamDecoder {
     /// Create decoder state for one inbound connection direction.
     pub fn new(features: WireFeatures) -> Result<Self, String> {
         let codec = WireCompression::from_features(features);
-        let inner = match codec {
-            WireCompression::None => WireStreamDecoderInner::None,
-            WireCompression::Lz4 => new_lz4_stream_decoder()?,
-            WireCompression::Zstd => new_zstd_stream_decoder()?,
-        };
-        Ok(Self { codec, inner })
+        Ok(Self { codec })
     }
 
     /// Decode one message's stream chunk into one semantic sync payload.
@@ -606,125 +640,12 @@ impl WireStreamDecoder {
         if WireCompression::from_features(active) != self.codec {
             return Err("wire frame compression codec changed within one connection".to_owned());
         }
-        match &mut self.inner {
-            WireStreamDecoderInner::None => Ok(payload.to_vec()),
-            #[cfg(feature = "transport-compression-lz4")]
-            WireStreamDecoderInner::Lz4 {
-                compressed,
-                plain_consumed,
-            } => {
-                compressed.extend_from_slice(payload);
-                let mut decoder = lz4_flex::frame::FrameDecoder::new(&compressed[..]);
-                let mut plain = Vec::new();
-                decoder
-                    .read_to_end(&mut plain)
-                    .map_err(|error| format!("failed to decompress lz4 stream: {error}"))?;
-                read_next_stream_payload(&plain, plain_consumed)
-            }
-            #[cfg(feature = "transport-compression-zstd")]
-            WireStreamDecoderInner::Zstd {
-                decoder,
-                plain_consumed,
-            } => {
-                decoder
-                    .write_all(payload)
-                    .and_then(|_| decoder.flush())
-                    .map_err(|error| format!("failed to decompress zstd stream: {error}"))?;
-                read_next_stream_payload(decoder.get_ref(), plain_consumed)
-            }
-            #[cfg(all(
-                not(feature = "transport-compression-zstd"),
-                feature = "transport-compression-ruzstd"
-            ))]
-            WireStreamDecoderInner::ZstdRuzstd {
-                compressed,
-                plain,
-                plain_consumed,
-            } => {
-                compressed.extend_from_slice(payload);
-                let mut decoder = ruzstd::decoding::FrameDecoder::new();
-                plain.clear();
-                plain.reserve(crate::protocol_limits::MAX_SYNC_MESSAGE_BYTES);
-                decoder
-                    .decode_all_to_vec(compressed, plain)
-                    .map_err(|error| format!("failed to decompress ruzstd stream: {error}"))?;
-                read_next_stream_payload(plain, plain_consumed)
-            }
+        let decoded = decompress_sync_payload(payload, active)?;
+        if decoded.len() > crate::protocol_limits::MAX_LOGICAL_MESSAGE_BYTES {
+            return Err("decompressed logical message exceeds receiver budget".to_owned());
         }
+        Ok(decoded)
     }
-}
-
-#[cfg(any(
-    feature = "transport-compression-lz4",
-    feature = "transport-compression-zstd",
-    feature = "transport-compression-ruzstd"
-))]
-fn read_next_stream_payload(plain: &[u8], plain_consumed: &mut usize) -> Result<Vec<u8>, String> {
-    let remaining = plain
-        .get(*plain_consumed..)
-        .ok_or_else(|| "transport stream consumed past available bytes".to_owned())?;
-    let len_bytes: [u8; 4] = remaining
-        .get(..4)
-        .ok_or_else(|| "transport stream did not produce a complete length prefix".to_owned())?
-        .try_into()
-        .expect("slice length checked");
-    let len = u32::from_le_bytes(len_bytes) as usize;
-    if len > crate::protocol_limits::MAX_SYNC_MESSAGE_BYTES {
-        return Err(format!(
-            "transport stream payload exceeds max sync message bytes: {len}"
-        ));
-    }
-    let start = *plain_consumed + 4;
-    let end = start + len;
-    let payload = plain
-        .get(start..end)
-        .ok_or_else(|| "transport stream did not produce a complete message".to_owned())?
-        .to_vec();
-    *plain_consumed = end;
-    Ok(payload)
-}
-
-#[cfg(feature = "transport-compression-lz4")]
-fn new_lz4_stream_decoder() -> Result<WireStreamDecoderInner, String> {
-    Ok(WireStreamDecoderInner::Lz4 {
-        compressed: Vec::new(),
-        plain_consumed: 0,
-    })
-}
-
-#[cfg(not(feature = "transport-compression-lz4"))]
-fn new_lz4_stream_decoder() -> Result<WireStreamDecoderInner, String> {
-    Err("lz4 transport compression feature is not compiled in".to_owned())
-}
-
-#[cfg(feature = "transport-compression-zstd")]
-fn new_zstd_stream_decoder() -> Result<WireStreamDecoderInner, String> {
-    zstd::stream::write::Decoder::new(Vec::new())
-        .map(|decoder| WireStreamDecoderInner::Zstd {
-            decoder,
-            plain_consumed: 0,
-        })
-        .map_err(|error| format!("failed to create zstd stream decoder: {error}"))
-}
-
-#[cfg(all(
-    not(feature = "transport-compression-zstd"),
-    feature = "transport-compression-ruzstd"
-))]
-fn new_zstd_stream_decoder() -> Result<WireStreamDecoderInner, String> {
-    Ok(WireStreamDecoderInner::ZstdRuzstd {
-        compressed: Vec::new(),
-        plain: Vec::new(),
-        plain_consumed: 0,
-    })
-}
-
-#[cfg(not(any(
-    feature = "transport-compression-zstd",
-    feature = "transport-compression-ruzstd"
-)))]
-fn new_zstd_stream_decoder() -> Result<WireStreamDecoderInner, String> {
-    Err("zstd transport compression feature is not compiled in".to_owned())
 }
 
 /// Binding-supplied byte transport for one wire-framed peer link.
@@ -770,9 +691,10 @@ pub fn negotiate_wire(
             ),
         ));
     }
+    let features = remote.features & local_features;
     Ok(WireNegotiated {
         protocol_version: max,
-        features: remote.features & local_features,
+        features,
     })
 }
 
@@ -788,11 +710,12 @@ mod tests {
     use crate::ids::SchemaVersionId;
     use crate::ids::{NodeUuid, RowUuid};
     use crate::protocol::{
-        RegisterShapeOptions, ResultRowEntry, ShapeAst, Subscribe, SubscribeRejectReason,
-        SubscriptionKey, VersionBundle, VersionBundleRun, VersionBundleRunError, VersionCarrier,
-        VersionRecord, build_version_bundle_runs_from_singletons,
+        AuthorizationScopePurpose, PermissionAdviceAction, RegisterShapeOptions, ResultRowEntry,
+        ShapeAst, Subscribe, SubscribeRejectReason, SubscriptionKey, VersionBundle,
+        VersionBundleRun, VersionBundleRunError, VersionCarrier, VersionRecord,
+        build_version_bundle_runs_from_singletons,
     };
-    use crate::protocol_limits::{MAX_SYNC_MESSAGE_BYTES, MAX_WIRE_FRAME_BYTES};
+    use crate::protocol_limits::MAX_WIRE_FRAME_BYTES;
     use crate::query::{BindingId, Query, ShapeId};
     use crate::schema::{ColumnSchema, TableSchema};
     use crate::time::{GlobalSeq, TxTime};
@@ -809,10 +732,11 @@ mod tests {
             serde_json::to_value(frame).unwrap(),
             json!({
                 "Hello": {
-                "min_protocol_version": 4,
-                "max_protocol_version": 4,
+                    "min_protocol_version": 6,
+                    "max_protocol_version": 6,
                     "features": 5,
-                    "role": "client"
+                    "role": "client",
+                    "authority": null
                 }
             })
         );
@@ -860,13 +784,6 @@ mod tests {
         let oversized = vec![0_u8; MAX_WIRE_FRAME_BYTES + 1];
 
         assert!(decode_frame(&oversized).is_err());
-    }
-
-    #[test]
-    fn oversized_sync_payload_rejects_before_message_decode() {
-        let oversized = vec![0_u8; MAX_SYNC_MESSAGE_BYTES + 1];
-
-        assert!(decode_sync_message(&oversized).is_err());
     }
 
     #[test]
@@ -1012,6 +929,7 @@ mod tests {
             peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
             result_member_adds: Vec::new(),
             result_member_removes: Vec::new(),
+            terminal_operations: Vec::new(),
             program_fact_adds: Vec::new(),
             program_fact_removes: Vec::new(),
         }
@@ -1037,7 +955,8 @@ mod tests {
                         absent_read_set: None,
                         predicate_read_set: None,
                         user_metadata_json: None,
-                        source_branch: None,
+                        target_lineage: crate::tx::BranchLineage::Root,
+                        branch_merge: None,
                         merge_strategy: None,
                     },
                     versions: vec![
@@ -1285,22 +1204,7 @@ mod tests {
                 },
                 result_member_adds: Vec::new(),
                 result_member_removes: Vec::new(),
-                program_fact_adds: Vec::new(),
-                program_fact_removes: Vec::new(),
-            },
-            SyncMessage::ViewUpdateChunk {
-                subscription,
-                settled_through: GlobalSeq(7),
-                reset_result_set: true,
-                final_chunk: true,
-                version_carriers: Vec::new(),
-                version_bundles: Vec::new(),
-                peer_payload_inventory: crate::protocol::PeerPayloadInventory {
-                    complete_tx_payloads: vec![tx_id],
-                    authorization_progress: None,
-                },
-                result_member_adds: Vec::new(),
-                result_member_removes: Vec::new(),
+                terminal_operations: Vec::new(),
                 program_fact_adds: Vec::new(),
                 program_fact_removes: Vec::new(),
             },
@@ -1316,7 +1220,8 @@ mod tests {
                     absent_read_set: None,
                     predicate_read_set: None,
                     user_metadata_json: None,
-                    source_branch: None,
+                    target_lineage: crate::tx::BranchLineage::Root,
+                    branch_merge: None,
                     merge_strategy: None,
                 },
                 versions: Vec::new(),
@@ -1377,6 +1282,7 @@ mod tests {
             },
             result_member_adds: vec![entry.into()],
             result_member_removes: Vec::new(),
+            terminal_operations: Vec::new(),
             program_fact_adds: Vec::new(),
             program_fact_removes: Vec::new(),
         };
@@ -1394,6 +1300,7 @@ mod tests {
             max_protocol_version: 3,
             features: FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_SESSION_FRAME,
             role: WirePeerRole::Relay,
+            authority: None,
         };
 
         let negotiated = negotiate_wire(
@@ -1420,11 +1327,86 @@ mod tests {
             max_protocol_version: 1,
             features: FEATURE_NONE,
             role: WirePeerRole::Core,
+            authority: None,
         };
 
         let err = negotiate_wire(&remote, 2, 2, FEATURE_NONE).unwrap_err();
 
         assert_eq!(err.code, WireErrorCode::UnsupportedProtocolVersion);
         assert_eq!(err.retry, WireRetry::Never);
+    }
+
+    #[test]
+    fn negotiation_keeps_directional_scope_capability_without_remote_authority() {
+        let feature = FEATURE_AUTHORIZATION_SCOPE_RECEIPTS;
+        let unbound = WireHello::current(WirePeerRole::Core, feature);
+        assert_eq!(
+            negotiate_wire(
+                &unbound,
+                WIRE_PROTOCOL_VERSION,
+                WIRE_PROTOCOL_VERSION,
+                feature
+            )
+            .unwrap()
+            .features
+                & feature,
+            feature
+        );
+        let accepted = WireHello::current(WirePeerRole::Core, feature)
+            .with_authority(NodeUuid::from_bytes([0x71; 16]), 9);
+        assert_ne!(
+            negotiate_wire(
+                &accepted,
+                WIRE_PROTOCOL_VERSION,
+                WIRE_PROTOCOL_VERSION,
+                feature,
+            )
+            .unwrap()
+            .features
+                & feature,
+            0
+        );
+    }
+
+    #[test]
+    fn authorization_scope_semantics_fail_closed_without_negotiated_feature() {
+        let subscription = SubscriptionKey {
+            shape_id: ShapeId(uuid::Uuid::from_bytes([1; 16])),
+            binding_id: BindingId(uuid::Uuid::from_bytes([2; 16])),
+            read_view: Default::default(),
+        };
+        let message = SyncMessage::AuthorizationScopeSubscribe {
+            subscribe: Subscribe {
+                shape_id: subscription.shape_id,
+                subscription,
+                values: Vec::new(),
+                known_state: None,
+            },
+            purpose: AuthorizationScopePurpose {
+                action: PermissionAdviceAction::Read {
+                    table: "todos".to_owned(),
+                    row: RowUuid::from_bytes([7; 16]),
+                },
+            },
+        };
+        let old_features = FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS;
+        assert_eq!(
+            encode_sync_message_for_features(&message, old_features)
+                .unwrap_err()
+                .code,
+            WireErrorCode::UnsupportedFeature
+        );
+
+        let encoded = encode_sync_message_for_features(
+            &message,
+            old_features | FEATURE_AUTHORIZATION_SCOPE_RECEIPTS,
+        )
+        .unwrap();
+        assert_eq!(
+            decode_sync_message_for_features(&encoded, old_features)
+                .unwrap_err()
+                .code,
+            WireErrorCode::UnsupportedFeature
+        );
     }
 }

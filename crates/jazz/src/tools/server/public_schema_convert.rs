@@ -534,6 +534,8 @@ fn convert_column_default(
     if matches!(value, Value::Null) {
         return Ok(GrooveValue::Nullable(None));
     }
+    // Record cells carry logical signed values. Groove applies its separate
+    // order-preserving transform only when those values become ordered keys.
     let default =
         convert_default_for_column_type(table, column.name.as_str(), &column.column_type, value)?;
     if column.nullable {
@@ -621,9 +623,14 @@ fn convert_merge_strategy(
 ) -> Result<MergeStrategy, SchemaConversionError> {
     match strategy {
         ColumnMergeStrategy::Counter => Ok(MergeStrategy::Counter),
+        ColumnMergeStrategy::GSet
+            if !column.nullable && matches!(column.column_type, ColumnType::Array { .. }) =>
+        {
+            Ok(MergeStrategy::GSet)
+        }
         ColumnMergeStrategy::GSet => Err(err(
             format!("$.{}.{}", table.as_str(), column.name.as_str()),
-            "GSet merge strategy is not supported by core schema conversion yet",
+            "GSet merge strategy requires a non-nullable ARRAY column",
         )),
     }
 }

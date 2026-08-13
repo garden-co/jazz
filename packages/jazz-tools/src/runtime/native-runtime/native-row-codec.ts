@@ -2,6 +2,7 @@ import type { ColumnDescriptor, ColumnType, Value, WasmRow } from "../../drivers
 import { isProvenanceMagicTimestampColumn } from "../../magic-columns.js";
 
 const textDecoder = new TextDecoder();
+const fatalUtf8Decoder = new TextDecoder("utf-8", { fatal: true });
 
 export type ValueType = {
   tag: number;
@@ -19,28 +20,13 @@ export type NativeSubscriptionDelta = {
   added: NativeRowBatch[];
   updated: NativeRowBatch[];
   removed: NativeRemovedRow[];
-};
-export type NativeRelationSubscriptionEdge = {
-  sourceTable: string;
-  sourceRowId: Uint8Array;
-  relation: string;
-  targetTable: string;
-  targetRowId: Uint8Array;
+  addedOccurrenceKeys: Uint8Array[];
+  updatedOccurrenceKeys: Uint8Array[];
+  removedOccurrenceKeys: Uint8Array[];
 };
 export type NativeRelationSubscriptionSnapshot = {
-  cursor: number;
   rootCount: number;
   rows: NativeRowBatch[];
-  edges: NativeRelationSubscriptionEdge[];
-};
-export type NativeRelationSubscriptionDelta = {
-  baseCursor?: number;
-  cursor: number;
-  added: NativeRowBatch[];
-  updated: NativeRowBatch[];
-  removed: NativeRemovedRow[];
-  addedEdges: NativeRelationSubscriptionEdge[];
-  removedEdges: NativeRelationSubscriptionEdge[];
 };
 
 type PostcardReaderLike = {
@@ -75,36 +61,93 @@ export function readNativeRowBatch(reader: PostcardReaderLike): NativeRowBatch {
 }
 
 export function readNativeSubscriptionDelta(reader: PostcardReaderLike): NativeSubscriptionDelta {
-  return {
+  const delta = {
     added: reader.readVec(readNativeRowBatch),
     updated: reader.readVec(readNativeRowBatch),
     removed: reader.readVec(readNativeRemovedRow),
+    addedOccurrenceKeys: reader.readVec((keyReader) => readResultKey(keyReader)),
+    updatedOccurrenceKeys: reader.readVec((keyReader) => readResultKey(keyReader)),
+    removedOccurrenceKeys: reader.readVec((keyReader) => readResultKey(keyReader)),
   };
+  const rowCount = (batches: NativeRowBatch[]) =>
+    batches.reduce((count, batch) => count + batch.rows.length, 0);
+  if (
+    delta.addedOccurrenceKeys.length !== rowCount(delta.added) ||
+    delta.updatedOccurrenceKeys.length !== rowCount(delta.updated) ||
+    delta.removedOccurrenceKeys.length !== delta.removed.length
+  ) {
+    throw new Error("subscription occurrence sidecar length mismatch");
+  }
+  return delta;
+}
+
+function readResultKey(reader: PostcardReaderLike): Uint8Array {
+  const key = reader.bytes();
+  if (key[0] === 1) {
+    if (key.length <= 1 || (key.length - 1) % 16 !== 0) throw new Error("malformed v1 ResultKey");
+    return key;
+  }
+  if (key[0] !== 2 || !validTypedResultKey(key.subarray(1))) {
+    throw new Error("malformed v2 ResultKey");
+  }
+  return key;
+}
+
+function validTypedResultKey(bytes: Uint8Array): boolean {
+  const readU32 = (offset: number) =>
+    ((bytes[offset]! << 24) |
+      (bytes[offset + 1]! << 16) |
+      (bytes[offset + 2]! << 8) |
+      bytes[offset + 3]!) >>>
+    0;
+  if (bytes.length < 24) return false;
+  let cursor = 16;
+  const joined = readU32(cursor);
+  cursor += 4;
+  if (joined > 256 || cursor + joined * 16 + 4 > bytes.length) return false;
+  cursor += joined * 16;
+  const discriminators = readU32(cursor);
+  cursor += 4;
+  // v2 is reserved for typed union occurrences. A zero-arm v2 value would
+  // normalize to the same ordered UUID key as a v1 occurrence.
+  if (discriminators === 0 || discriminators > joined) return false;
+  let previousPosition = -1;
+  for (let index = 0; index < discriminators; index++) {
+    if (cursor + 8 > bytes.length) return false;
+    const position = readU32(cursor);
+    const length = readU32(cursor + 4);
+    cursor += 8;
+    if (
+      position >= joined ||
+      position <= previousPosition ||
+      length === 0 ||
+      length > 4096 ||
+      cursor + length > bytes.length ||
+      !isValidUtf8(bytes.subarray(cursor, cursor + length))
+    ) {
+      return false;
+    }
+    previousPosition = position;
+    cursor += length;
+  }
+  return cursor === bytes.length;
+}
+
+function isValidUtf8(bytes: Uint8Array): boolean {
+  try {
+    fatalUtf8Decoder.decode(bytes);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function readNativeRelationSubscriptionSnapshot(
   reader: PostcardReaderLike,
 ): NativeRelationSubscriptionSnapshot {
-  return {
-    cursor: reader.u64(),
-    rootCount: reader.u64(),
-    rows: reader.readVec(readNativeRowBatch),
-    edges: reader.readVec(readNativeRelationSubscriptionEdge),
-  };
-}
-
-export function readNativeRelationSubscriptionDelta(
-  reader: PostcardReaderLike,
-): NativeRelationSubscriptionDelta {
-  return {
-    baseCursor: reader.option((value) => value.u64()),
-    cursor: reader.u64(),
-    added: reader.readVec(readNativeRowBatch),
-    updated: reader.readVec(readNativeRowBatch),
-    removed: reader.readVec(readNativeRemovedRow),
-    addedEdges: reader.readVec(readNativeRelationSubscriptionEdge),
-    removedEdges: reader.readVec(readNativeRelationSubscriptionEdge),
-  };
+  const rootCount = reader.u64();
+  const rows = reader.readVec(readNativeRowBatch);
+  return { rootCount, rows };
 }
 
 export function readNativeRemovedRow(reader: PostcardReaderLike): NativeRemovedRow {
@@ -114,72 +157,24 @@ export function readNativeRemovedRow(reader: PostcardReaderLike): NativeRemovedR
   };
 }
 
-export function readNativeRelationSubscriptionEdge(
-  reader: PostcardReaderLike,
-): NativeRelationSubscriptionEdge {
-  return {
-    sourceTable: reader.string(),
-    sourceRowId: reader.bytes(),
-    relation: reader.string(),
-    targetTable: reader.string(),
-    targetRowId: reader.bytes(),
-  };
-}
-
 export function writeDescriptor(writer: PostcardWriterLike, descriptor: DescriptorField[]): void {
   writer.vec((field, index) => {
     field.some((nameWriter) => nameWriter.string(descriptor[index].name ?? ""));
-    writeGrooveValueType(field, descriptor[index].valueType);
+    writeValueType(field, descriptor[index].valueType);
   }, descriptor.length);
 }
 
 export function readDescriptor(reader: PostcardReaderLike): DescriptorField[] {
   return reader.readVec((fieldReader) => ({
     name: fieldReader.option((nameReader) => nameReader.string()),
-    valueType: readGrooveValueType(fieldReader),
+    valueType: readValueType(fieldReader),
   }));
 }
 
 export function writeValueType(writer: PostcardWriterLike, valueType: ValueType): void {
   writer.enumUnit(valueType.tag);
-  if (valueType.tag === 10) {
-    const members = valueType.members ?? (valueType.inner ? [valueType.inner] : []);
-    writer.vec(
-      (memberWriter, index) => writeValueType(memberWriter, members[index]),
-      members.length,
-    );
-    return;
-  }
-  if (valueType.tag === 11 || valueType.tag === 12) {
-    if (!valueType.inner) throw new Error(`missing inner value type for tag ${valueType.tag}`);
-    writeValueType(writer, valueType.inner);
-    return;
-  }
-  if (valueType.tag === 13) {
-    if (!valueType.record) throw new Error("missing inline record descriptor for tag 13");
-    writeDescriptor(writer, valueType.record);
-  }
-}
-
-export function readValueType(reader: PostcardReaderLike): ValueType {
-  const tag = reader.u64();
-  if (tag === 11 || tag === 12) {
-    return { tag, inner: readValueType(reader) };
-  }
-  if (tag === 10) {
-    const members = reader.readVec(readValueType);
-    return { tag, members, inner: members[0] };
-  }
-  if (tag === 13) {
-    return { tag, record: readDescriptor(reader) };
-  }
-  return { tag };
-}
-
-function writeGrooveValueType(writer: PostcardWriterLike, valueType: ValueType): void {
-  writer.enumUnit(valueType.tag);
-  if (valueType.tag === 9) {
-    if (!valueType.enumSchema) throw new Error("missing enum schema for Groove ValueType::Enum");
+  if (valueType.tag === 11) {
+    if (!valueType.enumSchema) throw new Error("missing enum schema for ValueType::Enum");
     writer.string(valueType.enumSchema.name);
     writer.vec(
       (variantWriter, index) => variantWriter.string(valueType.enumSchema!.variants[index]!),
@@ -187,29 +182,28 @@ function writeGrooveValueType(writer: PostcardWriterLike, valueType: ValueType):
     );
     return;
   }
-  if (valueType.tag === 10) {
+  if (valueType.tag === 12) {
     const members = valueType.members ?? (valueType.inner ? [valueType.inner] : []);
     writer.vec(
-      (memberWriter, index) => writeGrooveValueType(memberWriter, members[index]!),
+      (memberWriter, index) => writeValueType(memberWriter, members[index]),
       members.length,
     );
     return;
   }
-  if (valueType.tag === 11 || valueType.tag === 12) {
+  if (valueType.tag === 13 || valueType.tag === 14) {
     if (!valueType.inner) throw new Error(`missing inner value type for tag ${valueType.tag}`);
-    writeGrooveValueType(writer, valueType.inner);
+    writeValueType(writer, valueType.inner);
     return;
   }
-  if (valueType.tag === 13) {
-    if (!valueType.record)
-      throw new Error("missing inline record descriptor for Groove ValueType::Record");
+  if (valueType.tag === 15) {
+    if (!valueType.record) throw new Error("missing inline record descriptor for tag 15");
     writeDescriptor(writer, valueType.record);
   }
 }
 
-function readGrooveValueType(reader: PostcardReaderLike): ValueType {
+export function readValueType(reader: PostcardReaderLike): ValueType {
   const tag = reader.u64();
-  if (tag === 9) {
+  if (tag === 11) {
     return {
       tag,
       enumSchema: {
@@ -218,14 +212,14 @@ function readGrooveValueType(reader: PostcardReaderLike): ValueType {
       },
     };
   }
-  if (tag === 11 || tag === 12) {
-    return { tag, inner: readGrooveValueType(reader) };
+  if (tag === 13 || tag === 14) {
+    return { tag, inner: readValueType(reader) };
   }
-  if (tag === 10) {
-    const members = reader.readVec(readGrooveValueType);
+  if (tag === 12) {
+    const members = reader.readVec(readValueType);
     return { tag, members, inner: members[0] };
   }
-  if (tag === 13) {
+  if (tag === 15) {
     return { tag, record: readDescriptor(reader) };
   }
   return { tag };
@@ -346,6 +340,76 @@ export function decodeNativeRow(
   return row;
 }
 
+const terminalRowKeyColumn: ColumnDescriptor = {
+  name: "__jazz_terminal_row_key",
+  column_type: { type: "Uuid" },
+  nullable: false,
+};
+
+/** Decode a Groove terminal record, whose first physical field is its row key. */
+export function decodeNativeTerminalRow(
+  id: string,
+  columns: readonly ColumnDescriptor[],
+  raw: Uint8Array,
+): WasmRow {
+  const terminalColumns = [terminalRowKeyColumn, ...columns];
+  const decoded = decodeNativeTerminalRowValues(terminalColumns, raw);
+  const embeddedKey = decoded[0];
+  if (embeddedKey?.type !== "Uuid" || embeddedKey.value !== id) {
+    throw new Error(
+      `terminal record key ${embeddedKey?.type === "Uuid" ? embeddedKey.value : "<non-uuid>"} does not match addressed key ${id}`,
+    );
+  }
+  const values = decoded.slice(1);
+  const valuesByColumn = new Map(columns.map((column, index) => [column.name, values[index]!]));
+  const row = { id, values };
+  Object.defineProperty(row, "valuesByColumn", {
+    value: valuesByColumn,
+    enumerable: false,
+    configurable: true,
+  });
+  return row;
+}
+
+/**
+ * Groove terminal payloads retain `Record` values for nested relation rows.
+ * Ordinary packed transport deliberately represents those rows as byte arrays
+ * with an id/length envelope instead. Both outer records have the same layout,
+ * but decoding a terminal tree through the ordinary path makes the first UUID
+ * of a child look like that envelope's flag and length.
+ */
+function decodeNativeTerminalRowValues(
+  columns: readonly ColumnDescriptor[],
+  raw: Uint8Array,
+): Value[] {
+  const descriptor = descriptorFromColumns(columns);
+  return columns.map((column, index) => {
+    const bytes = decodeRecordValue(descriptor, raw, index);
+    if (bytes == null) return { type: "Null" };
+    return decodeTerminalBytes(column.column_type, bytes);
+  });
+}
+
+function decodeTerminalBytes(type: ColumnType, bytes: Uint8Array): Value {
+  switch (type.type) {
+    case "Array":
+      return { type: "Array", value: decodeTerminalArray(type.element, bytes) };
+    case "Row": {
+      if (bytes.byteLength < 16) throw new Error("terminal nested row is missing its physical key");
+      const id = formatUuid(bytes.subarray(0, 16));
+      return { type: "Row", value: decodeNativeTerminalRow(id, type.columns, bytes) };
+    }
+    default:
+      return decodeBytes(type, bytes);
+  }
+}
+
+function decodeTerminalArray(elementType: ColumnType, bytes: Uint8Array): Value[] {
+  return decodeArrayElements(elementType, bytes, (element) =>
+    decodeTerminalBytes(elementType, element),
+  );
+}
+
 export function encodeNativeRowValues(
   columns: readonly ColumnDescriptor[],
   values: readonly Value[],
@@ -449,15 +513,15 @@ function decodeRecordValueWithLayout(
 }
 
 function unwrapValue(value: Uint8Array, valueType: ValueType): Uint8Array | null {
-  if (valueType.tag !== 12) return value;
+  if (valueType.tag !== 14) return value;
   const unwrapped = unwrapNullable(value);
   if (unwrapped == null) return null;
   return valueType.inner ? unwrapValue(unwrapped, valueType.inner) : unwrapped;
 }
 
 function formatValueType(valueType: ValueType): string {
-  if (valueType.tag === 11 || valueType.tag === 12) {
-    return `${valueType.tag === 11 ? "Array" : "Nullable"}<${valueType.inner ? formatValueType(valueType.inner) : "?"}>`;
+  if (valueType.tag === 13 || valueType.tag === 14) {
+    return `${valueType.tag === 13 ? "Array" : "Nullable"}<${valueType.inner ? formatValueType(valueType.inner) : "?"}>`;
   }
   return valueTypeName(valueType.tag);
 }
@@ -473,29 +537,29 @@ function valueTypeName(tag: number): string {
     case 3:
       return "U64";
     case 4:
-      return "F64";
-    case 5:
-      return "Bool";
-    case 6:
-      return "String";
-    case 7:
-      return "Bytes";
-    case 8:
-      return "Uuid";
-    case 9:
-      return "Enum";
-    case 10:
-      return "Tuple";
-    case 11:
-      return "Array";
-    case 12:
-      return "Nullable";
-    case 13:
-      return "Record";
-    case 14:
-      return "I64";
-    case 15:
       return "I32";
+    case 5:
+      return "I64";
+    case 6:
+      return "F64";
+    case 7:
+      return "Bool";
+    case 8:
+      return "String";
+    case 9:
+      return "Bytes";
+    case 10:
+      return "Uuid";
+    case 11:
+      return "Enum";
+    case 12:
+      return "Tuple";
+    case 13:
+      return "Array";
+    case 14:
+      return "Nullable";
+    case 15:
+      return "Record";
     default:
       return `unknown(${tag})`;
   }
@@ -515,16 +579,29 @@ function descriptorFromColumns(columns: readonly ColumnDescriptor[]): Descriptor
 }
 
 function encodeValueForColumn(column: ColumnDescriptor, value: Value | undefined): Uint8Array {
-  if (!value || value.type === "Null") {
+  const logicalType = storageColumnTypeToValueType(column.column_type);
+  const nullableType: ValueType = column.nullable ? { tag: 14, inner: logicalType } : logicalType;
+
+  if (!value) {
+    if (column.sparse) return encodeNullValue({ tag: 14, inner: nullableType });
     if (!column.nullable) {
       throw new Error(`missing non-nullable value for ${column.name}`);
     }
-    return encodeNullValue(storageColumnValueType(column));
+    return encodeNullValue(nullableType);
   }
-  const encoded = encodeNonNullValue(column.column_type, value);
-  if (!column.nullable) return encoded;
-  const valueType = storageColumnValueType(column);
-  const inner = valueType.inner ?? storageColumnTypeToValueType(column.column_type);
+  if (value.type === "Null") {
+    if (!column.nullable) {
+      throw new Error(`missing non-nullable value for ${column.name}`);
+    }
+    const encodedNull = encodeNullValue(nullableType);
+    return column.sparse ? encodePresentValue(encodedNull, nullableType) : encodedNull;
+  }
+  let encoded = encodeNonNullValue(column.column_type, value);
+  if (column.nullable) encoded = encodePresentValue(encoded, logicalType);
+  return column.sparse ? encodePresentValue(encoded, nullableType) : encoded;
+}
+
+function encodePresentValue(encoded: Uint8Array, inner: ValueType): Uint8Array {
   if (fixedSize(inner) == null) {
     return concatBytes([Uint8Array.of(1), encoded]);
   }
@@ -545,11 +622,9 @@ function encodeNonNullValue(type: ColumnType, value: Value): Uint8Array {
       if (value.type !== "Boolean") throw new Error("expected Boolean value");
       return Uint8Array.of(value.value ? 1 : 0);
     case "Integer": {
-      if (value.type !== "Integer" || !Number.isSafeInteger(value.value)) {
-        throw new Error("expected Integer value");
-      }
+      const integer = expectSignedI32(value);
       const bytes = new Uint8Array(4);
-      new DataView(bytes.buffer).setUint32(0, encodeSignedI32ForStorage(value.value), true);
+      new DataView(bytes.buffer).setInt32(0, integer, true);
       return bytes;
     }
     case "Timestamp": {
@@ -561,13 +636,9 @@ function encodeNonNullValue(type: ColumnType, value: Value): Uint8Array {
       return bytes;
     }
     case "BigInt": {
-      if (value.type !== "BigInt") throw new Error("expected BigInt value");
+      const integer = expectSignedI64(value);
       const bytes = new Uint8Array(8);
-      new DataView(bytes.buffer).setBigUint64(
-        0,
-        encodeSignedI64ForStorage(BigInt(value.value)),
-        true,
-      );
+      new DataView(bytes.buffer).setBigInt64(0, integer, true);
       return bytes;
     }
     case "Double": {
@@ -649,34 +720,60 @@ function parseUuid(value: string): Uint8Array {
 }
 
 export function storageColumnValueType(column: ColumnDescriptor): ValueType {
-  const valueType = storageColumnTypeToValueType(column.column_type);
-  return column.nullable ? { tag: 12, inner: valueType } : valueType;
+  let valueType = storageColumnTypeToValueType(column.column_type);
+  if (column.nullable) valueType = { tag: 14, inner: valueType };
+  return column.sparse ? { tag: 14, inner: valueType } : valueType;
+}
+
+/** Strip physical sparse-carrier metadata for public packed row transport. */
+export function logicalStorageColumns(
+  columns: readonly ColumnDescriptor[],
+): readonly ColumnDescriptor[] {
+  return columns.map((column) => ({
+    ...column,
+    sparse: undefined,
+    column_type:
+      column.column_type.type === "Row"
+        ? {
+            ...column.column_type,
+            columns: [...logicalStorageColumns(column.column_type.columns)],
+          }
+        : column.column_type.type === "Array" && column.column_type.element.type === "Row"
+          ? {
+              ...column.column_type,
+              element: {
+                ...column.column_type.element,
+                columns: [...logicalStorageColumns(column.column_type.element.columns)],
+              },
+            }
+          : column.column_type,
+  }));
 }
 
 export function storageColumnTypeToValueType(type: ColumnType): ValueType {
   switch (type.type) {
     case "Boolean":
-      return { tag: 5 };
+      return { tag: 7 };
     case "Integer":
-      return { tag: 15 };
+      return { tag: 4 };
     case "BigInt":
-      return { tag: 14 };
+      return { tag: 5 };
     case "Timestamp":
       return { tag: 3 };
     case "Double":
-      return { tag: 4 };
+      return { tag: 6 };
     case "Text":
     case "Json":
     case "Enum":
-      return { tag: 6 };
-    case "Bytea":
-      return { tag: 7 };
-    case "Uuid":
       return { tag: 8 };
+    case "Bytea":
+      return { tag: 9 };
+    case "Uuid":
+      return { tag: 10 };
     case "Array":
-      return { tag: 11, inner: storageColumnTypeToValueType(type.element) };
+      return { tag: 13, inner: storageColumnTypeToValueType(type.element) };
     case "Row":
-      return { tag: 7 };
+      return { tag: 9 };
   }
 }
 
@@ -686,9 +783,9 @@ function decodeBytes(type: ColumnType, bytes: Uint8Array): Value {
     case "Boolean":
       return { type: "Boolean", value: bytes[0] !== 0 };
     case "Integer":
-      return { type: "Integer", value: decodeSignedI32FromStorage(view.getUint32(0, true)) };
+      return { type: "Integer", value: view.getInt32(0, true) };
     case "BigInt":
-      return { type: "BigInt", value: decodeSignedI64FromStorage(view.getBigUint64(0, true)) };
+      return { type: "BigInt", value: view.getBigInt64(0, true) };
     case "Double":
       return { type: "Double", value: view.getFloat64(0, true) };
     case "Timestamp":
@@ -711,7 +808,7 @@ function decodeBytes(type: ColumnType, bytes: Uint8Array): Value {
 function decodeRowValue(
   columns: readonly ColumnDescriptor[],
   bytes: Uint8Array,
-): { id?: string; values: Value[] } {
+): { id?: string; values: Value[]; valuesByColumn?: Map<string, Value> } {
   if (bytes.byteLength < 5) throw new Error("invalid nested row value");
   const hasId = bytes[0] === 1;
   let offset = 1;
@@ -725,7 +822,16 @@ function decodeRowValue(
   offset += 4;
   const raw = bytes.subarray(offset, offset + len);
   if (raw.byteLength !== len) throw new Error("invalid nested row value length");
-  return { id, values: decodeNativeRowValues(columns, raw) };
+  const row: { id?: string; values: Value[]; valuesByColumn?: Map<string, Value> } = {
+    id,
+    values: decodeNativeRowValues(columns, raw),
+  };
+  Object.defineProperty(row, "valuesByColumn", {
+    value: decodeNativeRowValuesByColumn(columns, raw),
+    enumerable: false,
+    configurable: true,
+  });
+  return row;
 }
 
 function decodePlainValue(type: ColumnType, bytes: Uint8Array, columnName?: string): unknown {
@@ -821,21 +927,21 @@ function formatUuid(bytes: Uint8Array): string {
 function fixedSize(valueType: ValueType): number | undefined {
   switch (valueType.tag) {
     case 0:
-    case 5:
-    case 9:
+    case 7:
+    case 11:
       return 1;
     case 1:
       return 2;
     case 2:
-    case 15:
+    case 4:
       return 4;
     case 3:
-    case 14:
-    case 4:
+    case 5:
+    case 6:
       return 8;
-    case 8:
+    case 10:
       return 16;
-    case 10: {
+    case 12: {
       const members = valueType.members ?? (valueType.inner ? [valueType.inner] : []);
       return members.reduce<number | undefined>((total, member) => {
         if (total == null) return undefined;
@@ -843,9 +949,9 @@ function fixedSize(valueType: ValueType): number | undefined {
         return memberSize == null ? undefined : total + memberSize;
       }, 0);
     }
-    case 11:
+    case 13:
       return undefined;
-    case 12: {
+    case 14: {
       const innerSize = valueType.inner ? fixedSize(valueType.inner) : undefined;
       return innerSize == null ? undefined : innerSize + 1;
     }
@@ -908,20 +1014,25 @@ function readU32Le(bytes: Uint8Array, offset: number): number {
   );
 }
 
-function encodeSignedI32ForStorage(value: number): number {
-  return (value ^ 0x80000000) >>> 0;
+function expectSignedI32(value: Value): number {
+  if (
+    value.type !== "Integer" ||
+    !Number.isSafeInteger(value.value) ||
+    value.value < -0x80000000 ||
+    value.value > 0x7fffffff
+  ) {
+    throw new Error("Integer value must be a signed 32-bit integer");
+  }
+  return value.value;
 }
 
-function decodeSignedI32FromStorage(value: number): number {
-  return (value ^ 0x80000000) | 0;
-}
-
-function encodeSignedI64ForStorage(value: bigint): bigint {
-  return BigInt.asUintN(64, value) ^ (1n << 63n);
-}
-
-function decodeSignedI64FromStorage(value: bigint): bigint {
-  return BigInt.asIntN(64, value ^ (1n << 63n));
+function expectSignedI64(value: Value): bigint {
+  if (value.type !== "BigInt") throw new Error("expected BigInt value");
+  const integer = BigInt(value.value);
+  if (integer < -(1n << 63n) || integer > (1n << 63n) - 1n) {
+    throw new Error("BigInt value must be a signed 64-bit integer");
+  }
+  return integer;
 }
 
 function concatBytes(chunks: Uint8Array[]): Uint8Array {

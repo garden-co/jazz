@@ -10,13 +10,14 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::db::CommitUnitTrust;
+use crate::db::{CommitUnitTrust, ConnectionSessionContext};
 use crate::groove::records::Value as CoreValue;
-use crate::ids::AuthorId;
+use crate::ids::{AuthorId, NodeUuid};
 use crate::protocol_limits::{MAX_WIRE_FRAME_BYTES, validate_wire_frame_len};
 use crate::wire::{
-    FEATURE_SYNC_MESSAGE_PAYLOAD, WIRE_PROTOCOL_VERSION, WireError, WireErrorCode, WireFrame,
-    WireHello, WirePeerRole, WireRetry, current_wire_features, encode_frame, negotiate_wire,
+    FEATURE_SYNC_MESSAGE_PAYLOAD, WIRE_PROTOCOL_VERSION, WireAuthorityEndpoint, WireError,
+    WireErrorCode, WireFrame, WireHello, WirePeerRole, WireRetry, current_wire_features,
+    encode_frame, negotiate_wire,
 };
 use axum::{
     extract::State,
@@ -37,6 +38,7 @@ const WS_MAX_FRAME_BYTES: usize = 1 << 20;
 const WS_MAX_MESSAGE_BYTES: usize = WS_MAX_FRAME_BYTES;
 
 static WS_NEXT_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
+static WS_NEXT_CONNECTION_EPOCH: AtomicU64 = AtomicU64::new(1);
 static WS_ADMISSIONS: OnceLock<std::sync::Mutex<WebSocketAdmissionRegistry>> = OnceLock::new();
 
 /// Jazz WebSocket endpoint.
@@ -542,6 +544,11 @@ async fn handle_ws_connection(
             return;
         }
     };
+    // A downstream browser may be authority-unbound while still accepting the
+    // server's authenticated authority in its response Hello.  The server
+    // never installs scoped authority semantics without an admitted remote
+    // endpoint (below), so this directional capability advertisement does not
+    // turn a client self-assertion into authority proof.
 
     let Some(core_server_shell) = state.core_server_shell() else {
         send_ws_error(
@@ -556,8 +563,37 @@ async fn handle_ws_connection(
         let _ = socket.close().await;
         return;
     };
+    // Every admitted server link receives a fresh server endpoint. A browser
+    // client need not (and must not) self-assert one merely to learn which
+    // authority issued its downstream fates.
+    let server_endpoint = WireAuthorityEndpoint {
+        node: NodeUuid::from_bytes([0x5e; 16]),
+        epoch: WS_NEXT_CONNECTION_EPOCH.fetch_add(1, Ordering::Relaxed),
+    };
+    let session_context = if negotiated.features
+        & (crate::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
+            | crate::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS)
+        != 0
+    {
+        remote_hello
+            .authority
+            .map(|remote| ConnectionSessionContext {
+                local: server_endpoint,
+                remote,
+                link_identity: admission.identity,
+                negotiated_features: negotiated.features,
+            })
+    } else {
+        None
+    };
     let session = match core_server_shell
-        .open(admission.identity, admission.claims, admission.trust)
+        .open_with_session_context(
+            admission.identity,
+            admission.claims,
+            admission.trust,
+            negotiated.features,
+            session_context,
+        )
         .await
     {
         Ok(session) => session,
@@ -571,8 +607,10 @@ async fn handle_ws_connection(
             return;
         }
     };
-    let server_hello =
-        WireFrame::Hello(WireHello::current(WirePeerRole::Core, negotiated.features));
+    let server_hello = WireFrame::Hello(
+        WireHello::current(WirePeerRole::Core, negotiated.features)
+            .with_authority(server_endpoint.node, server_endpoint.epoch),
+    );
     let server_hello = match encode_frame(&server_hello) {
         Ok(frame) => frame,
         Err(error) => {
@@ -1179,6 +1217,14 @@ mod tests {
         )
         .await
         .expect("websocket helper should negotiate server hello");
+        let (protocol_version, features, session_context) =
+            transport.negotiated_transport_metadata();
+        let context = session_context.expect("receipt-capable route admission context");
+        assert_eq!(context.link_identity, AuthorId::from_bytes([0x41; 16]));
+        assert_eq!(context.local.node, NodeUuid::from_bytes([0x41; 16]));
+        assert_eq!(context.remote.node, NodeUuid::from_bytes([0x5e; 16]));
+        assert_ne!(context.local.epoch, 0);
+        assert_ne!(context.remote.epoch, 0);
 
         let schema = ws_public_schema_convert();
         let column_families = schema.column_families();
@@ -1199,7 +1245,13 @@ mod tests {
         )
         .await
         .expect("open client helper client db");
-        db.connect_upstream(Box::new(WireTransportAdapter::current(transport)));
+        db.connect_upstream(Box::new(WireTransportAdapter::new_with_session_context(
+            transport,
+            protocol_version,
+            features,
+            None,
+            Some(context),
+        )));
         db.tick()
             .expect("client helper transport should accept db upstream frames");
     }
@@ -1328,6 +1380,10 @@ mod tests {
             panic!("expected server hello");
         };
         assert_eq!(server_hello.role, WirePeerRole::Core);
+        assert!(
+            server_hello.authority.is_some(),
+            "an admitted server must bind its own downstream authority endpoint"
+        );
         ws
     }
 
@@ -1355,7 +1411,7 @@ mod tests {
                         SyncMessage::FateUpdate { tx_id, .. } => Some(tx_id),
                         _ => None,
                     }),
-                WireFrame::Hello(_) | WireFrame::Error(_) => None,
+                WireFrame::Hello(_) | WireFrame::Error(_) | WireFrame::MessageFragment(_) => None,
             })
             .collect()
     }
@@ -1419,7 +1475,16 @@ mod tests {
             .await
             .expect("open client db");
             let transport = TestWireTransport::default();
-            db.connect_upstream(Box::new(WireTransportAdapter::current(transport.clone())));
+            // Match the authority-unbound test hello's negotiated features.
+            // Scoped semantics are not installed without an admitted remote
+            // endpoint, even though a browser may accept the server endpoint
+            // from its response Hello.
+            db.connect_upstream(Box::new(WireTransportAdapter::new(
+                transport.clone(),
+                WIRE_PROTOCOL_VERSION,
+                FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS,
+                None,
+            )));
             Self {
                 db,
                 transport,
@@ -1771,8 +1836,6 @@ mod tests {
             client_b.edge_todo_titles(&client_b_todos).await.is_empty(),
             "reader should settle the initial covered result as empty"
         );
-        client_b.detach_query(client_b_todos_attachment);
-
         let client_a = TestClient::new(schema, 0xa1, 0xa100).await;
         let mut ws_a = open_negotiated_ws(addr, &state, AuthorId::from_bytes([0xa1; 16])).await;
         let _inserted = client_a.insert_todo("after empty coverage");
@@ -1802,6 +1865,7 @@ mod tests {
             client_b.edge_todo_titles(&client_b_todos).await,
             vec!["after empty coverage".to_owned()]
         );
+        client_b.detach_query(client_b_todos_attachment);
     }
 
     #[tokio::test(flavor = "current_thread")]

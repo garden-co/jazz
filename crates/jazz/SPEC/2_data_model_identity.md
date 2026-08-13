@@ -29,7 +29,7 @@ Invariant digest:
 - `INV-DATA-14`: History storage MUST preserve each content version's row identity, transaction identity, schema identity, parent set, and user cells.
 - `INV-DATA-15`: Deletion-register storage MUST preserve each deletion version's row identity, transaction identity, schema identity, parent set, and deletion event.
 - `INV-DATA-16`: The wire row descriptor for replicated row payloads MUST include only `row_uuid`, `parents`, nullable `_deletion`, and nullable `user_{col}` cells; receiver-local currentness and authority-state columns MUST be excluded.
-- `INV-DATA-17`: A stored row version MUST belong to exactly one layer: content versions in `jazz_{table}_history` with user cells, deletion-register versions in `jazz_{table}_register` with `_deletion` and no user cells.
+- `INV-DATA-17`: A stored row version MUST belong to exactly one physical layer: content with user cells or deletion-register state with `_deletion` and no user cells.
 - `INV-DATA-18`: Derived global-current storage MUST identify the per-layer winner by row and preserve the content fields needed for global current reads.
 - `INV-DATA-19`: The global change stream MUST retain enough table, row, layer, and sequence information to reconstruct global as-of reads.
 - `INV-DATA-20`: Schema lowering MUST provide storage for metadata, transaction outcomes, row-version layers, globally accepted current state and change history, and large-value content.
@@ -59,9 +59,9 @@ node-local derived state is never shipped.
 These three classes cover stored _columns_. A `text`/`blob` column cell is an
 ordinary replicated-immutable column (§2.3). Its large _content bytes_ are not a
 fourth column class; they are an out-of-band **auxiliary content payload**,
-carried on a separate content channel and stored in the raw `jazz_content`
-store. Chapter 12 owns that content channel and defines the term "auxiliary
-content payload".
+carried on a separate content channel and stored in direct content extent,
+metadata, and checkpoint stores below the IVM layer. Chapter 12 owns that
+content channel and defines the term "auxiliary content payload".
 
 ### 2.2 Identity types
 
@@ -138,9 +138,10 @@ Rows have stable identity across history. A `RowUuid` names the logical row and
 is shared by every historical version of that row. A **row version** is
 identified by the row, the writing transaction, and the layer; versions form a
 DAG through `parents` (ch. 4 specifies domination and merging). A stored version
-belongs to exactly one layer (`INV-DATA-17`): _content_ versions live in
-`jazz_{table}_history` and carry the user cells; _deletion-register_ versions
-live in `jazz_{table}_register` and carry a non-null `_deletion` and no user
+belongs to exactly one layer (`INV-DATA-17`). Content versions live in the
+resolved `PhysicalTableId`'s history table and carry user cells under their
+`SchemaVersionAlias` descriptor. Deletion-register versions live in the same
+lineage's stable register table and carry a non-null `_deletion` with no user
 cells.
 
 The replicated wire payload for a version (`VersionRecord`) is exactly the
@@ -155,16 +156,13 @@ descriptors is not yet a settled contract; see the open question below.
 
 ### 2.6 Storage lowering
 
-Storage lowering gives the logical schema a fixed groove representation
-(`JazzSchema::lower_to_groove()`, `INV-DATA-20`). The lowered schema consists of
-node/schema/catalogue/partition **metadata**, **transaction/audit** tables,
-per-application-table **layer tables**, the append-only
-**`jazz_global_changes`** change stream, and the raw **`jazz_content`** store
-for large-value bytes (ch. 12). For each application table, the layers are
-`jazz_{table}_history` for content versions and `jazz_{table}_register` for
-deletion events, plus per-layer `…_global_current` winner tables. Those winner
-tables are node-local derived state (§2.1): they are maintained from accepted
-fates and never shipped. The exact table set, primary keys, and indexes are the
+Storage lowering gives catalogue and system state a fixed Groove representation
+(`JazzSchema::lower_to_groove()`, `INV-DATA-20`). Durable schema-version mappings
+then add one set of application layer tables per `PhysicalTableId`, with Groove
+schema variants selected by `SchemaVersionAlias`. The fixed schema includes
+node/schema/catalogue metadata, transaction/audit tables, the append-only
+`jazz_global_changes` stream, and direct record stores for large values and
+maintained-query state. The exact table set, primary keys, and indexes are the
 reference in §2.7.
 
 ### 2.7 Reference implementation: identity encoding & storage lowering
@@ -183,22 +181,22 @@ from those tables on recovery.
 
 **Lowered tables.** `lower_to_groove()` produces:
 
-- _metadata_ — `jazz_nodes`, `jazz_schema_versions`, `jazz_catalogue`,
-  `jazz_catalogue_pointer`, `jazz_partitions`, and the branch-scaffolding
-  `jazz_branches` / `jazz_branch_partitions` (behavior in ch. 11);
+- _metadata_ — `jazz_nodes`, `jazz_schema_versions` (including durable physical
+  mappings), `jazz_catalogue`, `jazz_catalogue_pointer`, and the branch
+  scaffolding `jazz_branches` / `jazz_branch_partitions` (behavior in ch. 11);
 - _transaction/audit_ — `jazz_transactions` keyed `(time, node_id)`,
   `jazz_rejected_transactions`;
-- _per application table_ — `jazz_{table}_history` and `jazz_{table}_register`,
-  each PK `(row_uuid, tx_time, tx_node_id)` with index `by_tx(tx_time,
-tx_node_id, row_uuid)`; history adds `schema_version` + `parents` + nullable
-  `user_{col}`, register adds a non-null `_deletion` (`INV-DATA-14`,
-  `INV-DATA-15`). Per-layer `…_global_current` winner tables are keyed by
-  `row_uuid`; the content table carries all user columns and indexes only
-  references plus explicitly indexed columns (`INV-DATA-18`);
+- _per physical lineage_ — `jazz_physical_{id}_history` and
+  `jazz_physical_{id}_register`, each keyed by
+  `(row_uuid, tx_time, tx_node_id)`; shared global-current, ahead-current, and
+  rejected-version tables; and optional branch overlay tables. Content rows use
+  `schema_version` as a Groove descriptor discriminator, while register rows use
+  a stable system descriptor (`INV-DATA-14`, `INV-DATA-15`, `INV-DATA-18`);
 - _change stream_ — the append-only `jazz_global_changes`, keyed
-  `(table_name, row_uuid, layer, global_seq)` with index
-  `by_global_seq(global_seq, table_name, row_uuid, layer)` (`INV-DATA-19`);
-- _content_ — the raw ordered KV store `jazz_content` (ch. 12).
+  `(physical_table_id, row_uuid, layer, global_seq)` with physical-table and
+  global-sequence indexes (`INV-DATA-19`);
+- _large values_ — direct extent, stream-tail, and checkpoint record stores
+  (ch. 12).
 
 ### 2.14 Subsumed table-first row-history notes
 
