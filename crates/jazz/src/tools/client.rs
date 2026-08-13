@@ -21,6 +21,7 @@ use crate::groove::storage::MemoryStorage as CoreMemoryStorage;
 #[cfg(feature = "rocksdb")]
 use crate::groove::storage::RocksDbStorage as CoreRocksDbStorage;
 use crate::ids::{AuthorId as CoreAuthorId, NodeUuid as CoreNodeUuid, RowUuid as CoreRowUuid};
+use crate::node::LARGE_VALUE_HANDLE_MAGIC;
 use crate::protocol::{
     ReadViewSourceSpec as CoreReadViewSourceSpec, ReadViewSpec as CoreReadViewSpec,
 };
@@ -73,7 +74,6 @@ enum BackendConnection {
 
 const QUERY_COVERAGE_TIMEOUT: Duration = Duration::from_secs(5);
 const DEFAULT_TEST_WAIT_TIMEOUT_MULTIPLIER: u32 = 8;
-const LARGE_VALUE_HANDLE_MAGIC: &[u8] = b"JLVH1";
 const MAX_TICK_DRIVER_RECOVERY_ATTEMPTS: u32 = 12;
 const TICK_DRIVER_RETRY_BASE_DELAY: Duration = Duration::from_millis(50);
 const TICK_DRIVER_RETRY_MAX_DELAY: Duration = Duration::from_secs(2);

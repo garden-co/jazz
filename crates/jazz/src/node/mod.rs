@@ -56,7 +56,8 @@ use crate::tx::{
 };
 
 const TEXT_EXTENT_OPS_MAGIC: &[u8] = b"JTXTREF1";
-const LARGE_VALUE_HANDLE_MAGIC: &[u8] = b"JLVH2";
+/// Version discriminator for the canonical large-value handles emitted by the core.
+pub(crate) const LARGE_VALUE_HANDLE_MAGIC: &[u8] = b"JLVH2";
 const CLEAN_CLOSE_MARKER_NAME: &str = "node-clean-close";
 const CLEAN_CLOSE_MARKER_VERSION: u64 = 1;
 const STORAGE_CONSISTENCY_MARKER_NAME: &str = "settled-ahead-current-clean-through";

@@ -73,10 +73,9 @@ fn user_client_context(
 /// ```text
 /// alice   --insert blob asset--> server --row policy--> alice sees handle, then hydrates
 /// bob     --query assets-------> server --row policy--x empty
-/// mallory --spoof owner-------> server --row policy--x rejected
+/// mallory --spoof owner--> local preview --server row policy--x rejected and removed
 /// ```
 #[tokio::test(flavor = "current_thread")]
-#[ignore = "known red; tracked in TEST_BURNDOWN.md"]
 async fn large_blob_values_follow_ordinary_row_permissions() {
     tokio::task::LocalSet::new()
         .run_until(async {
@@ -142,7 +141,10 @@ async fn large_blob_values_follow_ordinary_row_permissions() {
                 )
                 .expect("alice creates blob asset");
             alice
-                .wait_for_batch(alice_batch_id.expect("ordinary mutation commits immediately"), DurabilityTier::EdgeServer)
+                .wait_for_batch(
+                    alice_batch_id.expect("ordinary mutation commits immediately"),
+                    DurabilityTier::EdgeServer,
+                )
                 .await
                 .expect("alice blob asset reaches edge");
 
@@ -182,15 +184,49 @@ async fn large_blob_values_follow_ordinary_row_permissions() {
                 "Bob should not see Alice's blob asset without row SELECT permission"
             );
 
-            mallory
+            let (mallory_row_id, _, mallory_batch_id) = mallory
                 .for_session(Session::new(mallory_user_id))
                 .insert(
                     "assets",
                     asset_values(alice_owner_id, "spoofed.bin", b"spoofed".to_vec()),
                 )
-                .expect_err(
-                    "mallory spoofed blob asset should be rejected immediately by row INSERT permission",
-                );
+                .expect("mallory's optimistic blob write reaches the authority");
+            let mallory_preview = wait_for_query(
+                &mallory,
+                QueryBuilder::new("assets").build(),
+                Some(DurabilityTier::Local),
+                Duration::from_secs(3),
+                "mallory sees the optimistic local blob row before authority rejection",
+                |rows| {
+                    rows.iter()
+                        .any(|(row_id, _)| *row_id == mallory_row_id)
+                        .then_some(rows)
+                },
+            )
+            .await;
+            assert!(
+                mallory_preview
+                    .iter()
+                    .any(|(row_id, _)| *row_id == mallory_row_id),
+                "mallory's optimistic local row must exist before the authority rejects it"
+            );
+            mallory
+                .wait_for_batch(
+                    mallory_batch_id.expect("ordinary mutation commits immediately"),
+                    DurabilityTier::EdgeServer,
+                )
+                .await
+                .expect_err("authority rejects mallory's spoofed blob row through INSERT policy");
+            let mallory_rows = wait_for_query(
+                &mallory,
+                QueryBuilder::new("assets").build(),
+                Some(DurabilityTier::EdgeServer),
+                Duration::from_secs(25),
+                "mallory's rejected blob row is removed from the local preview",
+                |rows| rows.is_empty().then_some(rows),
+            )
+            .await;
+            assert!(mallory_rows.is_empty());
 
             alice.shutdown().await.expect("shutdown alice");
             bob.shutdown().await.expect("shutdown bob");

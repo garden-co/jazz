@@ -176,20 +176,15 @@ the value. Handle-plus-hydration is a **materialization optimization, not a
 permission boundary** — it MUST NOT become a side channel reaching bytes the row
 policy would deny (`INV-LVAL-15`, ch. 7).
 
-> **Implementation status — this property is currently unverified.**
-> A test named `large_blob_values_follow_ordinary_row_permissions` was written to
-> pin it end to end, asserting four things: (1) an authorized owner reading a
+> **Implementation status (2026-08-13).**
+> `large_blob_values_follow_ordinary_row_permissions` pins this end to end,
+> asserting four things: (1) an authorized owner reading a
 > large-value column gets `Value::LargeValue(handle)`, and hydrating that handle
 > returns exactly the bytes written; (2) large values materialize as handles
 > rather than inline cells; (3) a peer without row `SELECT` permission sees no
 > row at all, and so never reaches the blob; (4) a peer without row `INSERT`
-> permission cannot author a row spoofing another user's ownership.
->
-> That test was born red at `e03780d70`, and additionally lived in
-> `crates/jazz-tools/tests/catalogue_sync_integration.rs` — a target that was
-> unregistered, so never compiled and never run, for months. It was removed
-> rather than kept as a permanently-red fixture. The paragraph above is the
-> contract it was reaching for; re-establishing coverage is outstanding work.
+> permission is rejected by the authority when it attempts a row spoofing
+> another user's ownership.
 
 _Further invariants._ `INV-LVAL-7` — re-ingesting an extent with identical bytes
 is idempotent; conflicting bytes for the same extent are rejected. `INV-LVAL-8` —
