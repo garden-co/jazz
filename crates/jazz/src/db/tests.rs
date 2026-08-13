@@ -567,7 +567,7 @@ fn payload_enum_match_filters_one_shot_and_maintained_case_transitions() {
 
     let prepared_query = prepared(&db, &query);
     let mut subscription = prepared_subscribe(&db, &query, ReadOpts::default()).unwrap();
-    let initial = snapshot_from_event(block_on(subscription.next_event()).unwrap());
+    let initial = snapshot_from_event(block_on(subscription.next_raw()).unwrap());
     assert_eq!(row_ids(&initial.rows), vec![matching]);
 
     db.update(
@@ -576,7 +576,7 @@ fn payload_enum_match_filters_one_shot_and_maintained_case_transitions() {
         BTreeMap::from([("event".to_owned(), payload_closed(2))]),
     )
     .unwrap();
-    let (added, updated, removed) = delta_rows(block_on(subscription.next_event()).unwrap());
+    let (added, updated, removed) = delta_rows(block_on(subscription.next_raw()).unwrap());
     assert!(added.is_empty());
     assert!(updated.is_empty());
     assert_eq!(
@@ -594,7 +594,7 @@ fn payload_enum_match_filters_one_shot_and_maintained_case_transitions() {
         BTreeMap::from([("event".to_owned(), payload_message(2))]),
     )
     .unwrap();
-    let (added, updated, removed) = delta_rows(block_on(subscription.next_event()).unwrap());
+    let (added, updated, removed) = delta_rows(block_on(subscription.next_raw()).unwrap());
     assert_eq!(row_ids(&added), vec![other_case]);
     assert!(updated.is_empty());
     assert!(removed.is_empty());
@@ -1809,18 +1809,18 @@ fn local_subscription_emits_removed_row_for_fire_and_forget_delete() {
     let db = open_db(0x31, owner, &schema);
     let query = Query::from("todos");
     let mut subscription = prepared_subscribe(&db, &query, ReadOpts::default()).unwrap();
-    assert!(opened_rows(block_on(subscription.next_event()).unwrap()).is_empty());
+    assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
 
     let row_id = row(0x31);
     db.insert_with_id("todos", row_id, cells("delete me", false, owner))
         .unwrap();
-    let (added, updated, removed) = delta_rows(block_on(subscription.next_event()).unwrap());
+    let (added, updated, removed) = delta_rows(block_on(subscription.next_raw()).unwrap());
     assert_eq!(row_ids(&added), vec![row_id]);
     assert!(updated.is_empty());
     assert!(removed.is_empty());
 
     db.delete("todos", row_id).unwrap();
-    let (added, updated, removed) = delta_rows(block_on(subscription.next_event()).unwrap());
+    let (added, updated, removed) = delta_rows(block_on(subscription.next_raw()).unwrap());
     assert!(added.is_empty());
     assert!(updated.is_empty());
     assert_eq!(
@@ -1847,7 +1847,7 @@ fn one_shot_and_subscription_rows_keep_identical_record_descriptors() {
     let db = open_db(0x32, owner, &schema);
     let query = Query::from("todos");
     let mut subscription = prepared_subscribe(&db, &query, ReadOpts::default()).unwrap();
-    let _ = block_on(subscription.next_event()).unwrap();
+    let _ = block_on(subscription.next_raw()).unwrap();
 
     let row_id = row(0x32);
     db.insert_with_id(
@@ -1862,7 +1862,7 @@ fn one_shot_and_subscription_rows_keep_identical_record_descriptors() {
         ]),
     )
     .unwrap();
-    let (added, _, _) = delta_rows(block_on(subscription.next_event()).unwrap());
+    let (added, _, _) = delta_rows(block_on(subscription.next_raw()).unwrap());
     let one_shot = prepared_all(&db, &query, ReadOpts::default());
     assert_eq!(added.len(), 1);
     assert_eq!(one_shot.len(), 1);
@@ -1889,7 +1889,7 @@ fn session_scoped_subscription_emits_removed_row_for_owned_delete() {
     let prepared = prepared(&db, &query);
     let mut subscription =
         block_on(db.subscribe_for_identity(&prepared, ReadOpts::default(), author)).unwrap();
-    assert!(opened_rows(block_on(subscription.next_event()).unwrap()).is_empty());
+    assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
 
     let row_id = row(0x32);
     db.insert_with_id_for_identity(
@@ -1902,13 +1902,13 @@ fn session_scoped_subscription_emits_removed_row_for_owned_delete() {
         ]),
     )
     .unwrap();
-    let (added, updated, removed) = delta_rows(block_on(subscription.next_event()).unwrap());
+    let (added, updated, removed) = delta_rows(block_on(subscription.next_raw()).unwrap());
     assert_eq!(row_ids(&added), vec![row_id]);
     assert!(updated.is_empty());
     assert!(removed.is_empty());
 
     db.delete_for_identity(author, "messages", row_id).unwrap();
-    let (added, updated, removed) = delta_rows(block_on(subscription.next_event()).unwrap());
+    let (added, updated, removed) = delta_rows(block_on(subscription.next_raw()).unwrap());
     assert!(added.is_empty());
     assert!(updated.is_empty());
     assert_eq!(
@@ -3198,8 +3198,7 @@ fn relation_snapshot_reverse_array_skips_deleted_children_with_camel_case_ref() 
     let joined_query = Query::from("users").join_via_column("todos", "ownerId", "id", []);
     let prepared_join = prepared(&db, &joined_query);
     let mut subscription = block_on(db.subscribe(&prepared_join, ReadOpts::default())).unwrap();
-    let SubscriptionEvent::Delta { added, .. } = block_on(subscription.next_event()).unwrap()
-    else {
+    let SubscriptionEvent::Delta { added, .. } = block_on(subscription.next_raw()).unwrap() else {
         panic!("joined subscription must start with a delta");
     };
     assert_eq!(added.len(), 2);
@@ -3222,7 +3221,7 @@ fn relation_snapshot_reverse_array_skips_deleted_children_with_camel_case_ref() 
     );
     db.delete("todos", row(0x11)).unwrap();
     db.tick().unwrap();
-    let SubscriptionEvent::Delta { removed, .. } = block_on(subscription.next_event()).unwrap()
+    let SubscriptionEvent::Delta { removed, .. } = block_on(subscription.next_raw()).unwrap()
     else {
         panic!("joined occurrence removal must emit a delta");
     };
@@ -3849,7 +3848,7 @@ fn array_subquery_live_subscription_publishes_only_terminal_root_rows() {
     let prepared_query = prepared(&db, &query);
     let mut subscription = block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
 
-    let opened = block_on(subscription.next_event()).unwrap();
+    let opened = block_on(subscription.next_raw()).unwrap();
     let SubscriptionEvent::Delta { .. } = &opened else {
         panic!("expected terminal reset")
     };
@@ -3871,7 +3870,7 @@ fn array_subquery_live_subscription_publishes_only_terminal_root_rows() {
     )
     .unwrap();
     db.tick().unwrap();
-    let mut child_added = block_on(subscription.next_event()).unwrap();
+    let mut child_added = block_on(subscription.next_raw()).unwrap();
     while let Some(next) = subscription.try_next_event() {
         child_added = next;
     }
@@ -3906,7 +3905,7 @@ fn array_subquery_live_subscription_publishes_only_terminal_root_rows() {
         BTreeMap::from([("owner_id".to_owned(), Value::Uuid(row(0xb1).0))]),
     )
     .unwrap();
-    let removed_child = block_on(subscription.next_event()).unwrap();
+    let removed_child = block_on(subscription.next_raw()).unwrap();
     assert!(matches!(
         removed_child,
         SubscriptionEvent::Delta { terminal_operations, .. }
@@ -3919,7 +3918,7 @@ fn array_subquery_live_subscription_publishes_only_terminal_root_rows() {
         BTreeMap::from([("owner_id".to_owned(), Value::Uuid(row(0xa1).0))]),
     )
     .unwrap();
-    let restored_child = block_on(subscription.next_event()).unwrap();
+    let restored_child = block_on(subscription.next_raw()).unwrap();
     assert!(matches!(
         restored_child,
         SubscriptionEvent::Delta { terminal_operations, .. }
@@ -3948,7 +3947,7 @@ fn structured_subscription_splices_in_terminal_root_order_after_insert() {
         ));
     let prepared_query = prepared(&db, &query);
     let mut subscription = block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
-    let initial = block_on(subscription.next_event()).unwrap();
+    let initial = block_on(subscription.next_raw()).unwrap();
     let snapshot = snapshot_from_event(initial);
     assert_eq!(row_ids(&snapshot.rows), vec![row(0xa1)]);
 
@@ -3959,7 +3958,7 @@ fn structured_subscription_splices_in_terminal_root_order_after_insert() {
     )
     .unwrap();
     db.tick().unwrap();
-    let reordered = block_on(subscription.next_event()).unwrap();
+    let reordered = block_on(subscription.next_raw()).unwrap();
     let SubscriptionEvent::Delta {
         reset,
         added,
@@ -3999,7 +3998,7 @@ fn structured_subscription_splices_in_terminal_root_order_after_insert() {
             GlobalSeq(0),
         );
     assert_eq!(db.refresh_subscriptions().unwrap(), 1);
-    let reset = block_on(subscription.next_event()).unwrap();
+    let reset = block_on(subscription.next_raw()).unwrap();
     assert!(matches!(
         reset,
         SubscriptionEvent::Delta {
@@ -4016,7 +4015,7 @@ fn structured_subscription_splices_in_terminal_root_order_after_insert() {
     )
     .unwrap();
     db.tick().unwrap();
-    let updated = block_on(subscription.next_event()).unwrap();
+    let updated = block_on(subscription.next_raw()).unwrap();
     let SubscriptionEvent::Delta {
         reset,
         added,
@@ -4048,7 +4047,7 @@ fn structured_subscription_splices_in_terminal_root_order_after_insert() {
 
     db.delete("users", row(0xa1)).unwrap();
     db.tick().unwrap();
-    let removed = block_on(subscription.next_event()).unwrap();
+    let removed = block_on(subscription.next_raw()).unwrap();
     let SubscriptionEvent::Delta { reset, .. } = &removed else {
         panic!("expected removal splice")
     };
@@ -4466,7 +4465,7 @@ fn flat_subscription_hydrates_in_declared_root_order() {
     let query = Query::from("users").order_by("name", OrderDirection::Desc);
     let prepared_query = prepared(&db, &query);
     let mut subscription = block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
-    let initial = snapshot_from_event(block_on(subscription.next_event()).unwrap());
+    let initial = snapshot_from_event(block_on(subscription.next_raw()).unwrap());
 
     assert_eq!(row_ids(&initial.rows), vec![row(0xa1), row(0xb1)]);
 }
@@ -4486,7 +4485,7 @@ fn flat_subscription_hydrates_in_default_row_id_order() {
 
     let prepared_query = prepared(&db, &Query::from("users"));
     let mut subscription = block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
-    let initial = snapshot_from_event(block_on(subscription.next_event()).unwrap());
+    let initial = snapshot_from_event(block_on(subscription.next_raw()).unwrap());
 
     assert_eq!(row_ids(&initial.rows), vec![row(0xa1), row(0xb1)]);
 }
@@ -4498,7 +4497,7 @@ fn flat_subscription_inserts_at_declared_root_position() {
     let query = Query::from("users").order_by("name", OrderDirection::Desc);
     let prepared_query = prepared(&db, &query);
     let mut subscription = block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
-    let _initial = block_on(subscription.next_event()).unwrap();
+    let _initial = block_on(subscription.next_raw()).unwrap();
 
     for (id, name) in [(0xa1, "zulu"), (0xb1, "zzzz")] {
         db.insert_with_id(
@@ -4508,7 +4507,7 @@ fn flat_subscription_inserts_at_declared_root_position() {
         )
         .unwrap();
         db.tick().unwrap();
-        let event = block_on(subscription.next_event()).unwrap();
+        let event = block_on(subscription.next_raw()).unwrap();
         if id == 0xb1 {
             assert!(
                 matches!(
@@ -4535,7 +4534,7 @@ fn flat_subscription_inserts_at_declared_root_position() {
     )
     .unwrap();
     db.tick().unwrap();
-    let event = block_on(subscription.next_event()).unwrap();
+    let event = block_on(subscription.next_raw()).unwrap();
     assert!(matches!(
         event,
         SubscriptionEvent::Delta { terminal_operations, .. }
@@ -4573,7 +4572,7 @@ fn flat_subscription_updates_with_nullable_sort_payload() {
     let query = Query::from("users").order_by("rank", OrderDirection::Asc);
     let prepared_query = prepared(&db, &query);
     let mut subscription = block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
-    let _initial = block_on(subscription.next_event()).unwrap();
+    let _initial = block_on(subscription.next_raw()).unwrap();
 
     db.update(
         "users",
@@ -4582,7 +4581,7 @@ fn flat_subscription_updates_with_nullable_sort_payload() {
     )
     .unwrap();
     db.tick().unwrap();
-    let event = block_on(subscription.next_event()).unwrap();
+    let event = block_on(subscription.next_raw()).unwrap();
     assert!(matches!(
         event,
         SubscriptionEvent::Delta { terminal_operations, .. }
@@ -4608,12 +4607,12 @@ fn flat_subscription_shifts_offset_window_when_leading_row_is_deleted() {
         .limit(2);
     let prepared_query = prepared(&db, &query);
     let mut subscription = block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
-    let initial = snapshot_from_event(block_on(subscription.next_event()).unwrap());
+    let initial = snapshot_from_event(block_on(subscription.next_raw()).unwrap());
     assert_eq!(row_ids(&initial.rows), vec![row(0xb1), row(0xc1)]);
 
     db.delete("users", row(0xa1)).unwrap();
     db.tick().unwrap();
-    let event = block_on(subscription.next_event()).unwrap();
+    let event = block_on(subscription.next_raw()).unwrap();
     assert!(matches!(
         event,
         SubscriptionEvent::Delta { terminal_operations, .. }
@@ -4640,7 +4639,7 @@ fn array_subquery_subscription_reflects_child_mutations_and_parent_removal() {
     let prepared_query = prepared(&db, &query);
     let mut subscription = block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
 
-    let snapshot = snapshot_from_event(block_on(subscription.next_event()).unwrap());
+    let snapshot = snapshot_from_event(block_on(subscription.next_raw()).unwrap());
     assert_eq!(
         terminal_nested_text_values(&snapshot, row(0x21), "comments", "body"),
         Vec::<String>::new()
@@ -4656,7 +4655,7 @@ fn array_subquery_subscription_reflects_child_mutations_and_parent_removal() {
     )
     .unwrap();
     assert!(matches!(
-        block_on(subscription.next_event()).unwrap(),
+        block_on(subscription.next_raw()).unwrap(),
         SubscriptionEvent::Delta { terminal_operations, .. }
             if terminal_operations.iter().any(|operation| matches!(
                 operation.edit,
@@ -4673,7 +4672,7 @@ fn array_subquery_subscription_reflects_child_mutations_and_parent_removal() {
     let SubscriptionEvent::Delta {
         terminal_operations,
         ..
-    } = block_on(subscription.next_event()).unwrap()
+    } = block_on(subscription.next_raw()).unwrap()
     else {
         panic!("child update must emit a terminal delta");
     };
@@ -4700,7 +4699,7 @@ fn array_subquery_subscription_reflects_child_mutations_and_parent_removal() {
 
     db.delete("comments", row(0xc1)).unwrap();
     assert!(matches!(
-        block_on(subscription.next_event()).unwrap(),
+        block_on(subscription.next_raw()).unwrap(),
         SubscriptionEvent::Delta { terminal_operations, .. }
             if terminal_operations.iter().any(|operation| matches!(
                 operation.edit,
@@ -4718,7 +4717,7 @@ fn array_subquery_subscription_reflects_child_mutations_and_parent_removal() {
     )
     .unwrap();
     assert!(matches!(
-        block_on(subscription.next_event()).unwrap(),
+        block_on(subscription.next_raw()).unwrap(),
         SubscriptionEvent::Delta { terminal_operations, .. }
             if terminal_operations.iter().any(|operation| matches!(
                 operation.edit,
@@ -4728,7 +4727,7 @@ fn array_subquery_subscription_reflects_child_mutations_and_parent_removal() {
 
     db.delete("todos", row(0x21)).unwrap();
     assert!(matches!(
-        block_on(subscription.next_event()).unwrap(),
+        block_on(subscription.next_raw()).unwrap(),
         SubscriptionEvent::Delta { terminal_operations, .. }
             if terminal_operations.iter().any(|operation| operation.path.is_empty() && matches!(
                 operation.edit,
@@ -4759,7 +4758,7 @@ fn array_subquery_subscription_updates_child_order_limit_boundary() {
     let prepared_query = prepared(&db, &query);
     let mut subscription = block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
 
-    let snapshot = snapshot_from_event(block_on(subscription.next_event()).unwrap());
+    let snapshot = snapshot_from_event(block_on(subscription.next_raw()).unwrap());
     assert_eq!(
         terminal_nested_text_values(&snapshot, row(0x31), "comments", "body"),
         Vec::<String>::new()
@@ -4811,7 +4810,7 @@ fn array_subquery_subscription_updates_child_order_limit_boundary() {
         })),
         other => panic!("expected terminal patch event, got {other:?}"),
     };
-    expect_inserted_child(block_on(subscription.next_event()).unwrap(), row(0xd2));
+    expect_inserted_child(block_on(subscription.next_raw()).unwrap(), row(0xd2));
 
     db.insert_with_id(
         "comments",
@@ -4823,7 +4822,7 @@ fn array_subquery_subscription_updates_child_order_limit_boundary() {
     )
     .unwrap();
     db.tick().unwrap();
-    expect_inserted_child(block_on(subscription.next_event()).unwrap(), row(0xd1));
+    expect_inserted_child(block_on(subscription.next_raw()).unwrap(), row(0xd1));
 
     db.update(
         "comments",
@@ -4832,7 +4831,7 @@ fn array_subquery_subscription_updates_child_order_limit_boundary() {
     )
     .unwrap();
     db.tick().unwrap();
-    expect_inserted_child(block_on(subscription.next_event()).unwrap(), row(0xd2));
+    expect_inserted_child(block_on(subscription.next_raw()).unwrap(), row(0xd2));
 }
 
 #[test]
@@ -4930,7 +4929,7 @@ fn array_subquery_one_shot_and_maintained_subscription_are_equivalent() {
     let one_shot =
         block_on(db.all_relation_snapshot(&prepared_query, ReadOpts::default())).unwrap();
     let mut subscription = block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
-    let maintained = snapshot_from_event(block_on(subscription.next_event()).unwrap());
+    let maintained = snapshot_from_event(block_on(subscription.next_raw()).unwrap());
 
     assert_eq!(
         terminal_nested_text_values(&maintained, row(0x51), "comments", "body"),
@@ -4953,7 +4952,7 @@ fn array_subquery_subscription_projects_late_root_and_existing_forward_target() 
         .array_subquery(ArraySubquery::new("owner", "users", "id", "owner_id").select(["name"]));
     let prepared_query = prepared(&db, &query);
     let mut subscription = block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
-    let opened = snapshot_from_event(block_on(subscription.next_event()).unwrap());
+    let opened = snapshot_from_event(block_on(subscription.next_raw()).unwrap());
     assert!(opened.rows.is_empty());
 
     db.insert_with_id(
@@ -4966,7 +4965,7 @@ fn array_subquery_subscription_projects_late_root_and_existing_forward_target() 
     )
     .unwrap();
     assert!(matches!(
-        block_on(subscription.next_event()).unwrap(),
+        block_on(subscription.next_raw()).unwrap(),
         SubscriptionEvent::Delta { terminal_operations, .. }
             if terminal_operations.iter().any(|operation| operation.path.is_empty() && matches!(
                 operation.edit,
@@ -4990,7 +4989,7 @@ fn array_subquery_subscription_projects_late_camel_case_root_and_existing_forwar
     );
     let prepared_query = prepared(&db, &query);
     let mut subscription = block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
-    let opened = snapshot_from_event(block_on(subscription.next_event()).unwrap());
+    let opened = snapshot_from_event(block_on(subscription.next_raw()).unwrap());
     assert!(opened.rows.is_empty());
 
     db.insert_with_id(
@@ -5008,7 +5007,7 @@ fn array_subquery_subscription_projects_late_camel_case_root_and_existing_forwar
     )
     .unwrap();
     assert!(matches!(
-        block_on(subscription.next_event()).unwrap(),
+        block_on(subscription.next_raw()).unwrap(),
         SubscriptionEvent::Delta { terminal_operations, .. }
             if terminal_operations.iter().any(|operation| operation.path.is_empty() && matches!(
                 operation.edit,
@@ -5034,7 +5033,7 @@ fn array_subquery_remote_subscription_hydrates_edge_referenced_child_rows() {
         "id",
     ));
     let mut subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
-    let opened = snapshot_from_event(block_on(subscription.next_event()).unwrap());
+    let opened = snapshot_from_event(block_on(subscription.next_raw()).unwrap());
     assert!(opened.rows.is_empty());
 
     server
@@ -5151,7 +5150,7 @@ fn client_initial_sync_flush_cadence_preserves_public_snapshot_delivery() {
     let _subscriber = server.accept_subscriber(server_transport, client_author);
     let query = client.table("todos");
     let mut subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
-    let _ = block_on(subscription.next_event()).unwrap();
+    let _ = block_on(subscription.next_raw()).unwrap();
 
     for _ in 0..20 {
         client.tick().unwrap();
@@ -5820,7 +5819,7 @@ fn db_facade_local_subscription_reports_initial_and_changed_results() {
     ))
     .unwrap();
 
-    assert!(opened_rows(doctest_support::block_on(subscription.next_event()).unwrap()).is_empty());
+    assert!(opened_rows(doctest_support::block_on(subscription.next_raw()).unwrap()).is_empty());
 
     let todo = RowUuid::from_bytes([0x44; 16]);
     db.seed_settled_mergeable_for_bootstrap(
@@ -5832,7 +5831,7 @@ fn db_facade_local_subscription_reports_initial_and_changed_results() {
     .unwrap();
 
     let (added, updated, removed) =
-        delta_rows(doctest_support::block_on(subscription.next_event()).unwrap());
+        delta_rows(doctest_support::block_on(subscription.next_raw()).unwrap());
     assert!(updated.is_empty());
     assert!(removed.is_empty());
     assert_eq!(row_ids(&added), vec![todo]);
@@ -5860,7 +5859,7 @@ fn db_facade_subscription_refresh_preserves_read_tier() {
     ))
     .unwrap();
 
-    assert!(opened_rows(doctest_support::block_on(subscription.next_event()).unwrap()).is_empty());
+    assert!(opened_rows(doctest_support::block_on(subscription.next_raw()).unwrap()).is_empty());
 
     db.insert(
         "todos",
@@ -5882,7 +5881,7 @@ fn db_facade_subscription_accepts_local_tier_for_alpha_style_live_reads() {
     let mut subscription =
         doctest_support::block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
     assert_eq!(scheduler.take(), vec![TickUrgency::Immediate]);
-    let opened = doctest_support::block_on(subscription.next_event()).unwrap();
+    let opened = doctest_support::block_on(subscription.next_raw()).unwrap();
     assert_eq!(opened_rows(opened), Vec::<CurrentRow>::new());
 
     db.insert(
@@ -5890,7 +5889,7 @@ fn db_facade_subscription_accepts_local_tier_for_alpha_style_live_reads() {
         doctest_support::todo_cells("local callback", false),
     )
     .unwrap();
-    let changed = doctest_support::block_on(subscription.next_event()).unwrap();
+    let changed = doctest_support::block_on(subscription.next_raw()).unwrap();
     let SubscriptionEvent::Delta { added, tier, .. } = changed else {
         panic!("expected local subscription delta");
     };
@@ -5928,7 +5927,7 @@ fn local_write_notifies_subscription_synchronously_without_running_tick() {
     let mut subscription =
         doctest_support::block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
     assert_eq!(scheduler.take(), vec![TickUrgency::Immediate]);
-    assert!(opened_rows(doctest_support::block_on(subscription.next_event()).unwrap()).is_empty());
+    assert!(opened_rows(doctest_support::block_on(subscription.next_raw()).unwrap()).is_empty());
 
     db.insert(
         "todos",
@@ -5937,7 +5936,7 @@ fn local_write_notifies_subscription_synchronously_without_running_tick() {
     .unwrap();
 
     let (added, updated, removed) =
-        delta_rows(doctest_support::block_on(subscription.next_event()).unwrap());
+        delta_rows(doctest_support::block_on(subscription.next_raw()).unwrap());
     assert_eq!(added.len(), 1);
     assert!(updated.is_empty());
     assert!(removed.is_empty());
@@ -5987,7 +5986,7 @@ fn db_facade_local_only_subscription_does_not_register_upstream_coverage() {
     ))
     .unwrap();
 
-    assert!(opened_rows(doctest_support::block_on(subscription.next_event()).unwrap()).is_empty());
+    assert!(opened_rows(doctest_support::block_on(subscription.next_raw()).unwrap()).is_empty());
     assert_eq!(scheduler.take(), Vec::<TickUrgency>::new());
     assert!(db.node.upstream_subscriptions.borrow().is_empty());
 }
@@ -6007,11 +6006,11 @@ fn propagated_subscriptions_refcount_upstream_coverage_by_shape() {
     };
 
     let mut first = doctest_support::block_on(db.subscribe(&prepared_query, opts.clone())).unwrap();
-    let _ = doctest_support::block_on(first.next_event()).unwrap();
+    let _ = doctest_support::block_on(first.next_raw()).unwrap();
     assert_eq!(pending_upstream_subscribe_count(&db), 1);
 
     let mut second = doctest_support::block_on(db.subscribe(&prepared_query, opts)).unwrap();
-    let _ = doctest_support::block_on(second.next_event()).unwrap();
+    let _ = doctest_support::block_on(second.next_raw()).unwrap();
     assert_eq!(
         db.runtime_stats_for_test().active_subscriptions,
         baseline + 2
@@ -6056,7 +6055,7 @@ fn local_only_subscription_is_not_forwarded_on_late_upstream_connect() {
         },
     ))
     .unwrap();
-    let _ = doctest_support::block_on(inspector.next_event()).unwrap();
+    let _ = doctest_support::block_on(inspector.next_raw()).unwrap();
 
     let (client_transport, _server_transport) = duplex();
     let upstream = db.connect_upstream(client_transport);
@@ -6097,7 +6096,7 @@ fn upstream_inbound_application_schedules_immediate_tick() {
 
     let query = client.table("todos");
     let mut subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
-    assert!(opened_rows(block_on(subscription.next_event()).unwrap()).is_empty());
+    assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
     scheduler.take();
 
     client.tick().unwrap();
@@ -6116,7 +6115,7 @@ fn mergeable_tx_emits_one_subscription_delta_for_many_writes() {
     let prepared_query = prepared(&db, &query);
     let mut subscription =
         doctest_support::block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
-    assert!(opened_rows(doctest_support::block_on(subscription.next_event()).unwrap()).is_empty());
+    assert!(opened_rows(doctest_support::block_on(subscription.next_raw()).unwrap()).is_empty());
 
     let tx = db.mergeable_tx().unwrap();
     for index in 0..100u8 {
@@ -6130,7 +6129,7 @@ fn mergeable_tx_emits_one_subscription_delta_for_many_writes() {
     tx.commit().unwrap();
 
     let (added, updated, removed) =
-        delta_rows(doctest_support::block_on(subscription.next_event()).unwrap());
+        delta_rows(doctest_support::block_on(subscription.next_raw()).unwrap());
     assert_eq!(added.len(), 100);
     assert!(updated.is_empty());
     assert!(removed.is_empty());
@@ -8349,7 +8348,7 @@ fn live_subscription_rebuilds_after_shared_current_descriptor_widens() {
     )
     .unwrap();
     assert_eq!(
-        opened_rows(block_on(subscription.next_event()).unwrap()).len(),
+        opened_rows(block_on(subscription.next_raw()).unwrap()).len(),
         1
     );
 
@@ -8463,7 +8462,7 @@ fn old_enum_subscription_rebuilds_across_registry_and_layout_growth() {
     )
     .unwrap();
     assert_eq!(
-        opened_rows(block_on(subscription.next_event()).unwrap()).len(),
+        opened_rows(block_on(subscription.next_raw()).unwrap()).len(),
         1
     );
 
@@ -8659,7 +8658,7 @@ fn live_subscription_rebuilds_when_non_genesis_permissions_head_changes() {
     ))
     .unwrap();
     assert_eq!(
-        row_ids(&opened_rows(block_on(subscription.next_event()).unwrap())),
+        row_ids(&opened_rows(block_on(subscription.next_raw()).unwrap())),
         vec![first]
     );
 
@@ -8799,7 +8798,7 @@ fn local_subscribe_uses_prepared_non_simple_plan() {
     .unwrap();
 
     assert_eq!(
-        row_ids(&opened_rows(block_on(subscription.next_event()).unwrap())),
+        row_ids(&opened_rows(block_on(subscription.next_raw()).unwrap())),
         vec![row(1)]
     );
     assert!(
@@ -8844,7 +8843,7 @@ fn subscription_reset_preserves_ordered_window_rank() {
     .unwrap();
 
     assert_eq!(
-        row_ids(&opened_rows(block_on(subscription.next_event()).unwrap())),
+        row_ids(&opened_rows(block_on(subscription.next_raw()).unwrap())),
         vec![row(1), row(3)],
         "reset rows must retain the selected ordered window rather than member-key order"
     );
@@ -9367,7 +9366,7 @@ fn db_sync_surface_round_trips_subscription_to_client() {
 
     let query = Query::from("todos");
     let mut subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
-    let opened = block_on(subscription.next_event()).unwrap();
+    let opened = block_on(subscription.next_raw()).unwrap();
     assert!(!event_settled(&opened));
     assert!(opened_rows(opened).is_empty());
 
@@ -9383,7 +9382,7 @@ fn db_sync_surface_round_trips_subscription_to_client() {
         rows[0].cell(table, "title"),
         Some(Value::String("from server".to_owned()))
     );
-    let (added, updated, removed) = delta_rows(block_on(subscription.next_event()).unwrap());
+    let (added, updated, removed) = delta_rows(block_on(subscription.next_raw()).unwrap());
     assert_eq!(added.len(), 1);
     assert!(updated.is_empty());
     assert!(removed.is_empty());
@@ -9418,7 +9417,7 @@ fn large_logical_snapshot_crosses_byte_peer_transport_and_settles() {
 
     let query = Query::from("todos");
     let mut subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
-    let opened = block_on(subscription.next_event()).unwrap();
+    let opened = block_on(subscription.next_raw()).unwrap();
     assert!(!event_settled(&opened));
     assert!(opened_rows(opened).is_empty());
 
@@ -10373,7 +10372,7 @@ fn db_subscription_stream_surfaces_upstream_rejection_after_open() {
     let mut subscription = block_on(db.subscribe(&prepared, ReadOpts::default()))
         .expect("local subscription should open before upstream response");
     assert!(matches!(
-        block_on(subscription.next_event()),
+        block_on(subscription.next_raw()),
         Some(SubscriptionEvent::Delta { reset: true, .. })
     ));
 
@@ -10396,7 +10395,7 @@ fn db_subscription_stream_surfaces_upstream_rejection_after_open() {
         .unwrap();
     upstream.borrow_mut().tick().unwrap();
 
-    match block_on(subscription.next_event()) {
+    match block_on(subscription.next_raw()) {
         Some(SubscriptionEvent::Rejected {
             reason: SubscribeRejectReason::UnsupportedShapeCapability { detail },
         }) => assert_eq!(detail, "server does not support this maintained shape"),
@@ -10914,7 +10913,7 @@ fn local_live_subscription_requests_global_upstream_coverage() {
 
     let query = Query::from("todos");
     let mut subscription = prepared_subscribe(&client, &query, ReadOpts::default()).unwrap();
-    assert!(opened_rows(block_on(subscription.next_event()).unwrap()).is_empty());
+    assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
     client.tick().unwrap();
     server.tick().unwrap();
 
@@ -10946,7 +10945,7 @@ fn edge_live_subscription_requests_global_upstream_coverage() {
 
     let query = Query::from("todos");
     let mut subscription = prepared_subscribe(&client, &query, edge_subscribe_opts()).unwrap();
-    assert!(opened_rows(block_on(subscription.next_event()).unwrap()).is_empty());
+    assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
 
     client.tick().unwrap();
     server.tick().unwrap();
@@ -11169,7 +11168,7 @@ fn subscription_emits_when_remote_coverage_settles_without_row_changes() {
 
     let query = Query::from("todos");
     let mut subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
-    let opened = block_on(subscription.next_event()).unwrap();
+    let opened = block_on(subscription.next_raw()).unwrap();
     assert!(!event_settled(&opened));
     assert!(opened_rows(opened).is_empty());
 
@@ -11177,7 +11176,7 @@ fn subscription_emits_when_remote_coverage_settles_without_row_changes() {
     server.tick().unwrap();
     client.tick().unwrap();
 
-    let settled = block_on(subscription.next_event()).unwrap();
+    let settled = block_on(subscription.next_raw()).unwrap();
     assert!(event_settled(&settled));
     let (added, updated, removed) = delta_rows(settled);
     assert!(added.is_empty());
@@ -11326,6 +11325,246 @@ fn subscriber_connection_groups_duplicate_usage_subscriptions_by_coverage_key() 
 }
 
 #[test]
+fn subscription_opening_publication_follows_upstream_coverage_lifecycle() {
+    let schema = schema();
+    let owner = AuthorId::from_bytes([0xa1; 16]);
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let client = open_db(0xc1, client_author, &schema);
+    let seeded = seed(&server, "todos", cells("first", false, owner));
+    let (client_transport, server_transport) = duplex();
+    let _upstream = client.connect_upstream(client_transport);
+    let _subscriber = server.accept_subscriber(server_transport, client_author);
+    let query = Query::from("todos");
+
+    let mut first = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
+    // NAPI drains subscriptions through try_next_event, so protect that exact
+    // host path before any authority response exists.
+    assert!(
+        first.try_next_event().is_none(),
+        "new remote coverage must not publish its provisional local opening"
+    );
+    let mut duplicate_before_authority =
+        prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
+    assert!(
+        duplicate_before_authority.try_next_event().is_none(),
+        "shared coverage must remain provisional until its first authority response"
+    );
+
+    // WASM erases SubscriptionStream behind dyn Stream, so separately protect
+    // the poll_next path with a different newly-created coverage key.
+    let empty_query = Query::from("todos").filter(eq(col("done"), lit(true)));
+    let mut wasm_path = prepared_subscribe(&client, &empty_query, global_subscribe_opts()).unwrap();
+    let waker = Waker::noop();
+    let mut cx = Context::from_waker(waker);
+    assert!(matches!(
+        Pin::new(&mut wasm_path).poll_next(&mut cx),
+        Poll::Pending
+    ));
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+    assert_eq!(
+        row_ids(&opened_rows(block_on(first.next_raw()).unwrap())),
+        vec![seeded]
+    );
+    assert_eq!(
+        row_ids(&opened_rows(
+            block_on(duplicate_before_authority.next_raw()).unwrap()
+        )),
+        vec![seeded],
+        "the first authority reset must reach every owner of shared coverage"
+    );
+    assert!(
+        opened_rows(match Pin::new(&mut wasm_path).poll_next(&mut cx) {
+            Poll::Ready(Some(event)) => event,
+            other => panic!("authority must publish the settled empty opening: {other:?}"),
+        })
+        .is_empty()
+    );
+
+    let mut duplicate = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
+    assert_eq!(
+        row_ids(&opened_rows(duplicate.try_next_event().expect(
+            "coverage-sharing subscription must publish its current local snapshot immediately"
+        ))),
+        vec![seeded]
+    );
+
+    let mut local = prepared_subscribe(
+        &client,
+        &query,
+        ReadOpts {
+            propagation: Propagation::LocalOnly,
+            ..ReadOpts::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        row_ids(&opened_rows(local.try_next_event().expect(
+            "LocalOnly subscription must always publish its local opening immediately"
+        ))),
+        vec![seeded]
+    );
+}
+
+#[test]
+fn malformed_authority_opening_keeps_shared_coverage_provisional() {
+    let schema = schema();
+    let client = open_db(0xc1, AuthorId::from_bytes([0xc1; 16]), &schema);
+    let (client_transport, mut authority_transport) = duplex();
+    let _upstream = client.connect_upstream(client_transport);
+    let query = Query::from("todos");
+    let mut first = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
+    client.tick().unwrap();
+    let subscription = loop {
+        match authority_transport.try_recv().unwrap() {
+            SyncMessage::Subscribe(subscribe) => break subscribe.subscription,
+            _ => continue,
+        }
+    };
+    let update = |version_bundles| SyncMessage::ViewUpdate {
+        subscription,
+        settled_through: GlobalSeq(1),
+        reset_result_set: true,
+        version_carriers: Vec::new(),
+        version_bundles,
+        peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
+        result_member_adds: Vec::new(),
+        result_member_removes: Vec::new(),
+        terminal_operations: Vec::new(),
+        program_fact_adds: Vec::new(),
+        program_fact_removes: Vec::new(),
+    };
+    authority_transport
+        .send(update(vec![crate::protocol::VersionBundle {
+            tx: crate::tx::Transaction {
+                tx_id: TxId::new(TxTime::from(44), NodeUuid::from_bytes([0x44; 16])),
+                kind: crate::tx::TxKind::Mergeable,
+                n_total_writes: 0,
+                made_by: AuthorId::SYSTEM,
+                permission_subject: None,
+                base_snapshot: None,
+                row_read_set: None,
+                absent_read_set: None,
+                predicate_read_set: None,
+                user_metadata_json: None,
+                target_lineage: crate::tx::BranchLineage::Root,
+                branch_merge: None,
+                merge_strategy: None,
+            },
+            versions: Vec::new(),
+            fate: crate::tx::Fate::Accepted,
+            global_seq: Some(GlobalSeq(44)),
+            durability: DurabilityTier::Edge,
+        }]))
+        .unwrap();
+    assert!(
+        client.tick().is_err(),
+        "missing payload must reject the update"
+    );
+
+    let mut duplicate = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
+    assert!(
+        duplicate.try_next_event().is_none(),
+        "a rejected authority opening must not make shared coverage publishable"
+    );
+
+    authority_transport.send(update(Vec::new())).unwrap();
+    client.tick().unwrap();
+    assert!(opened_rows(block_on(first.next_raw()).unwrap()).is_empty());
+    assert!(opened_rows(block_on(duplicate.next_raw()).unwrap()).is_empty());
+    let mut after_success = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
+    assert!(
+        opened_rows(
+            after_success
+                .try_next_event()
+                .expect("valid clear publishes coverage")
+        )
+        .is_empty()
+    );
+}
+
+#[test]
+fn parked_branch_opening_is_not_cleared_by_unrelated_applied_view() {
+    let schema = schema();
+    let client = open_db(0xc1, AuthorId::from_bytes([0xc1; 16]), &schema);
+    let (client_transport, mut authority_transport) = duplex();
+    let upstream = client.connect_upstream(client_transport);
+    let parked_query = Query::from("todos");
+    let valid_query = Query::from("todos").filter(eq(col("done"), lit(true)));
+    let branch = BranchId::from_bytes([0x42; 16]);
+    let mut branch_stream =
+        prepared_subscribe(&client, &parked_query, global_subscribe_opts()).unwrap();
+    let mut global_stream =
+        prepared_subscribe(&client, &valid_query, global_subscribe_opts()).unwrap();
+    client.tick().unwrap();
+    let mut subscriptions = Vec::new();
+    while let Some(message) = authority_transport.try_recv() {
+        if let SyncMessage::Subscribe(subscribe) = message {
+            subscriptions.push(subscribe.subscription);
+        }
+    }
+    assert_eq!(subscriptions.len(), 2);
+    let branch_subscription = subscriptions[0];
+    let global_subscription = subscriptions[1];
+    {
+        let mut upstream = upstream.borrow_mut();
+        let ConnectionLink::Upstream { branch_views, .. } = &mut upstream.link else {
+            unreachable!()
+        };
+        branch_views.insert(branch_subscription, branch);
+    }
+    let empty_update = |subscription| SyncMessage::ViewUpdate {
+        subscription,
+        settled_through: GlobalSeq(1),
+        reset_result_set: true,
+        version_carriers: Vec::new(),
+        version_bundles: Vec::new(),
+        peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
+        result_member_adds: Vec::new(),
+        result_member_removes: Vec::new(),
+        terminal_operations: Vec::new(),
+        program_fact_adds: Vec::new(),
+        program_fact_removes: Vec::new(),
+    };
+    authority_transport
+        .send(empty_update(branch_subscription))
+        .unwrap();
+    authority_transport
+        .send(empty_update(global_subscription))
+        .unwrap();
+    client.tick().unwrap();
+    assert!(opened_rows(block_on(global_stream.next_raw()).unwrap()).is_empty());
+    let mut branch_duplicate =
+        prepared_subscribe(&client, &parked_query, global_subscribe_opts()).unwrap();
+    assert!(branch_duplicate.try_next_event().is_none());
+
+    authority_transport
+        .send(SyncMessage::BranchMetadata(BranchMetadata {
+            branch_id: branch,
+            created_by: AuthorId::SYSTEM,
+            parent: None,
+            base: None,
+            open: true,
+        }))
+        .unwrap();
+    client.tick().unwrap();
+    assert!(opened_rows(block_on(branch_stream.next_raw()).unwrap()).is_empty());
+    assert!(opened_rows(block_on(branch_duplicate.next_raw()).unwrap()).is_empty());
+    let mut after_repair =
+        prepared_subscribe(&client, &parked_query, global_subscribe_opts()).unwrap();
+    assert!(
+        opened_rows(
+            after_repair
+                .try_next_event()
+                .expect("branch repair clears coverage")
+        )
+        .is_empty()
+    );
+}
+
+#[test]
 fn dropping_live_subscriptions_detaches_usage_subscriptions() {
     let schema = schema();
     let owner = AuthorId::from_bytes([0xa1; 16]);
@@ -11334,7 +11573,7 @@ fn dropping_live_subscriptions_detaches_usage_subscriptions() {
     let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
     let client = open_db(0xc1, client_author, &schema);
 
-    seed(&server, "todos", cells("first", false, owner));
+    let seeded = seed(&server, "todos", cells("first", false, owner));
 
     let (client_transport, server_transport) = duplex();
     let _upstream = client.connect_upstream(client_transport);
@@ -11345,12 +11584,18 @@ fn dropping_live_subscriptions_detaches_usage_subscriptions() {
         prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
     let mut second_subscription =
         prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
-    assert!(opened_rows(block_on(first_subscription.next_event()).unwrap()).is_empty());
-    assert!(opened_rows(block_on(second_subscription.next_event()).unwrap()).is_empty());
+    assert!(first_subscription.try_next_event().is_none());
+    assert!(opened_rows(block_on(second_subscription.next_raw()).unwrap()).is_empty());
 
     client.tick().unwrap();
     server.tick().unwrap();
     client.tick().unwrap();
+    assert_eq!(
+        row_ids(&opened_rows(
+            block_on(first_subscription.next_raw()).unwrap()
+        )),
+        vec![seeded]
+    );
 
     let subscriber_ref = subscriber.borrow();
     let ConnectionLink::Subscriber {
@@ -11624,12 +11869,11 @@ fn edge_subscription_with_claim_bound_policy_emits_later_matching_server_write()
 
     let query = Query::from("chats");
     let mut subscription = prepared_subscribe(&client, &query, edge_subscribe_opts()).unwrap();
-    assert!(opened_rows(block_on(subscription.next_event()).unwrap()).is_empty());
+    assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
     client.tick().unwrap();
     server.tick().unwrap();
     client.tick().unwrap();
-    let SubscriptionEvent::Delta { added, .. } = block_on(subscription.next_event()).unwrap()
-    else {
+    let SubscriptionEvent::Delta { added, .. } = block_on(subscription.next_raw()).unwrap() else {
         panic!("expected subscription delta after upstream coverage");
     };
     assert_eq!(added.len(), 1);
@@ -11653,7 +11897,7 @@ fn server_reset_subscription_materializes_without_local_snapshot_eval() {
 
     let query = Query::from("todos");
     let mut subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
-    assert!(opened_rows(block_on(subscription.next_event()).unwrap()).is_empty());
+    assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
 
     client.tick().unwrap();
     server.tick().unwrap();
@@ -11674,7 +11918,7 @@ fn server_reset_subscription_materializes_without_local_snapshot_eval() {
         "authoritative server reset should not re-run the subscription query locally"
     );
 
-    let event = block_on(subscription.next_event()).unwrap();
+    let event = block_on(subscription.next_raw()).unwrap();
     let SubscriptionEvent::Delta {
         reset,
         added,
@@ -11717,8 +11961,7 @@ fn authoritative_reset_rebuilds_occurrence_sidecar_after_order_and_count_change(
     let prepared = prepared(&client, &query);
     let opts = ReadOpts::default();
     let mut subscription = block_on(client.subscribe(&prepared, opts.clone())).unwrap();
-    let SubscriptionEvent::Delta { added, .. } = block_on(subscription.next_event()).unwrap()
-    else {
+    let SubscriptionEvent::Delta { added, .. } = block_on(subscription.next_raw()).unwrap() else {
         panic!("expected opening subscription delta");
     };
     assert_eq!(
@@ -11764,11 +12007,11 @@ fn authoritative_reset_rebuilds_occurrence_sidecar_after_order_and_count_change(
         );
 
     assert_eq!(client.refresh_subscriptions().unwrap(), 1);
-    let event = block_on(subscription.next_event()).unwrap();
+    let event = block_on(subscription.next_raw()).unwrap();
     let reset = if matches!(event, SubscriptionEvent::Delta { reset: true, .. }) {
         event
     } else {
-        block_on(subscription.next_event()).unwrap()
+        block_on(subscription.next_raw()).unwrap()
     };
     assert!(matches!(
         reset,
@@ -11828,7 +12071,7 @@ fn authoritative_reset_with_missing_payload_falls_back_to_refresh() {
     let prepared = prepared(&client, &query);
     let opts = global_subscribe_opts();
     let mut subscription = block_on(client.subscribe(&prepared, opts.clone())).unwrap();
-    assert!(opened_rows(block_on(subscription.next_event()).unwrap()).is_empty());
+    assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
 
     let missing_tx = TxId::new(
         TxTime(116_898_697_390_129_152),
@@ -11889,7 +12132,7 @@ fn authoritative_reset_skips_stale_member_without_falling_back() {
     let prepared = prepared(&client, &query);
     let opts = global_subscribe_opts();
     let mut subscription = block_on(client.subscribe(&prepared, opts.clone())).unwrap();
-    assert!(opened_rows(block_on(subscription.next_event()).unwrap()).is_empty());
+    assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
 
     let live_row = row(0x7a);
     let stale_row = row(0x7b);
@@ -11943,7 +12186,7 @@ fn authoritative_reset_skips_stale_member_without_falling_back() {
         0,
         "stale members with present tx metadata must not force local query fallback"
     );
-    let event = block_on(subscription.next_event()).unwrap();
+    let event = block_on(subscription.next_raw()).unwrap();
     let SubscriptionEvent::Delta {
         reset,
         added,
@@ -12113,14 +12356,12 @@ fn client_tier_routing_scans_local_overlay_but_uses_global_settled_members_at_ed
     db.detach_query(reattached);
     let mut edge_subscription =
         block_on(db.subscribe(&prepared, edge_subscribe_opts())).expect("open edge subscription");
-    assert!(opened_rows(block_on(edge_subscription.next_event()).unwrap()).is_empty());
+    assert!(opened_rows(block_on(edge_subscription.next_raw()).unwrap()).is_empty());
     db.tick().unwrap();
     server.tick().unwrap();
     db.tick().unwrap();
     assert_eq!(
-        ids(opened_rows(
-            block_on(edge_subscription.next_event()).unwrap()
-        )),
+        ids(opened_rows(block_on(edge_subscription.next_raw()).unwrap())),
         BTreeSet::from([published]),
         "Edge maintained facades consume Global result members instead of raw local rows"
     );
@@ -12240,7 +12481,7 @@ fn propagated_authoritative_reset_uses_delivered_binding_view() {
         ..ReadOpts::default()
     };
     let mut subscription = block_on(client.subscribe(&prepared, opts.clone())).unwrap();
-    assert!(opened_rows(block_on(subscription.next_event()).unwrap()).is_empty());
+    assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
 
     let live_row = row(0x7c);
     let tx_id = client
@@ -12293,7 +12534,7 @@ fn propagated_authoritative_reset_uses_delivered_binding_view() {
         0,
         "propagated resets are delivered under the app subscription binding view, not the upstream global coverage key"
     );
-    let event = block_on(subscription.next_event()).unwrap();
+    let event = block_on(subscription.next_raw()).unwrap();
     let SubscriptionEvent::Delta {
         reset,
         added,
@@ -12381,13 +12622,13 @@ fn db_sync_surface_round_trips_blob_large_value_to_reader() {
     let _reader_subscriber = server.accept_subscriber(server_reader_transport, reader_author);
     let query = Query::from("files");
     let mut subscription = prepared_subscribe(&reader, &query, global_subscribe_opts()).unwrap();
-    assert!(opened_rows(block_on(subscription.next_event()).unwrap()).is_empty());
+    assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
     reader.tick().unwrap();
     server.tick().unwrap();
     reader.tick().unwrap();
 
     let table = &schema.tables[0];
-    let (added, updated, removed) = delta_rows(block_on(subscription.next_event()).unwrap());
+    let (added, updated, removed) = delta_rows(block_on(subscription.next_raw()).unwrap());
     assert_eq!(added.len(), 1);
     assert!(updated.is_empty());
     assert!(removed.is_empty());
@@ -12563,7 +12804,7 @@ fn db_sync_surface_blob_values_follow_ordinary_row_permissions() {
     let _bob_upstream = bob_db.connect_upstream(bob_transport);
     let _bob_subscriber = server.accept_subscriber(server_bob_transport, bob);
     let mut subscription = prepared_subscribe(&bob_db, &query, edge_subscribe_opts()).unwrap();
-    assert!(opened_rows(block_on(subscription.next_event()).unwrap()).is_empty());
+    assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
     assert!(prepared_all(&bob_db, &query, edge_subscribe_opts()).is_empty());
 
     let (observer_transport, server_observer_transport) = duplex();
@@ -12571,12 +12812,11 @@ fn db_sync_surface_blob_values_follow_ordinary_row_permissions() {
     let _observer_subscriber = server.accept_subscriber(server_observer_transport, alice);
     let mut observer_subscription =
         prepared_subscribe(&alice_observer_db, &query, edge_subscribe_opts()).unwrap();
-    assert!(opened_rows(block_on(observer_subscription.next_event()).unwrap()).is_empty());
+    assert!(opened_rows(block_on(observer_subscription.next_raw()).unwrap()).is_empty());
     alice_observer_db.tick().unwrap();
     server.tick().unwrap();
     alice_observer_db.tick().unwrap();
-    let (added, updated, removed) =
-        delta_rows(block_on(observer_subscription.next_event()).unwrap());
+    let (added, updated, removed) = delta_rows(block_on(observer_subscription.next_raw()).unwrap());
     assert_eq!(row_ids(&added), vec![asset]);
     assert!(updated.is_empty());
     assert!(removed.is_empty());
@@ -12648,7 +12888,7 @@ fn db_sync_surface_edge_session_read_policy_filters_private_table_query() {
     );
     let query = Query::from("messages");
     let mut subscription = prepared_subscribe(&reader, &query, edge_subscribe_opts()).unwrap();
-    assert!(opened_rows(block_on(subscription.next_event()).unwrap()).is_empty());
+    assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
     assert!(prepared_all(&reader, &query, edge_subscribe_opts()).is_empty());
 }
 
@@ -12797,11 +13037,11 @@ fn db_sync_surface_edge_session_read_policy_filters_after_runtime_schema_publish
     let query = Query::from("messages");
     let mut alice_subscription =
         prepared_subscribe(&alice_reader, &query, edge_subscribe_opts()).unwrap();
-    assert!(opened_rows(block_on(alice_subscription.next_event()).unwrap()).is_empty());
+    assert!(opened_rows(block_on(alice_subscription.next_raw()).unwrap()).is_empty());
     alice_reader.tick().unwrap();
     server.tick().unwrap();
     alice_reader.tick().unwrap();
-    let (added, updated, removed) = delta_rows(block_on(alice_subscription.next_event()).unwrap());
+    let (added, updated, removed) = delta_rows(block_on(alice_subscription.next_raw()).unwrap());
     assert_eq!(
         added.len(),
         1,
@@ -12822,7 +13062,7 @@ fn db_sync_surface_edge_session_read_policy_filters_after_runtime_schema_publish
         BTreeMap::from([("user_id".to_owned(), Value::String(bob.0.to_string()))]),
     );
     let mut subscription = prepared_subscribe(&reader, &query, edge_subscribe_opts()).unwrap();
-    assert!(opened_rows(block_on(subscription.next_event()).unwrap()).is_empty());
+    assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
 
     assert!(prepared_all(&reader, &query, edge_subscribe_opts()).is_empty());
 }
@@ -12844,7 +13084,7 @@ fn detached_subscriber_is_not_served_on_server_tick() {
 
     let query = Query::from("todos");
     let mut subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
-    assert!(opened_rows(block_on(subscription.next_event()).unwrap()).is_empty());
+    assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
     client.tick().unwrap();
 
     assert!(server.server.detach_connection(&subscriber));
@@ -12875,7 +13115,7 @@ fn byte_wire_round_trips_subscription_to_client() {
 
     let query = Query::from("todos");
     let mut subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
-    assert!(opened_rows(block_on(subscription.next_event()).unwrap()).is_empty());
+    assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
 
     client.tick().unwrap();
     {
@@ -12910,7 +13150,7 @@ fn byte_wire_round_trips_subscription_to_client() {
         rows[0].cell(table, "title"),
         Some(Value::String("from server".to_owned()))
     );
-    let (added, updated, removed) = delta_rows(block_on(subscription.next_event()).unwrap());
+    let (added, updated, removed) = delta_rows(block_on(subscription.next_raw()).unwrap());
     assert_eq!(added.len(), 1);
     assert!(updated.is_empty());
     assert!(removed.is_empty());
@@ -12954,8 +13194,8 @@ fn single_upstream_tick_applies_multiple_subscription_updates() {
         prepared_subscribe(&client, &projects, global_subscribe_opts()).unwrap();
     let mut issue_subscription =
         prepared_subscribe(&client, &issues, global_subscribe_opts()).unwrap();
-    assert!(opened_rows(block_on(project_subscription.next_event()).unwrap()).is_empty());
-    assert!(opened_rows(block_on(issue_subscription.next_event()).unwrap()).is_empty());
+    assert!(opened_rows(block_on(project_subscription.next_raw()).unwrap()).is_empty());
+    assert!(opened_rows(block_on(issue_subscription.next_raw()).unwrap()).is_empty());
 
     client.tick().unwrap();
     server.tick().unwrap();
@@ -12965,13 +13205,13 @@ fn single_upstream_tick_applies_multiple_subscription_updates() {
     assert_eq!(prepared_read(&client, &issues).len(), 1);
     assert_eq!(stats.subscription_events, 2);
     assert_eq!(
-        delta_rows(block_on(project_subscription.next_event()).unwrap())
+        delta_rows(block_on(project_subscription.next_raw()).unwrap())
             .0
             .len(),
         1
     );
     assert_eq!(
-        delta_rows(block_on(issue_subscription.next_event()).unwrap())
+        delta_rows(block_on(issue_subscription.next_raw()).unwrap())
             .0
             .len(),
         1
@@ -12995,7 +13235,7 @@ fn subscriber_connection_serves_current_rows_and_resumes_from_cursor() {
     let subscriber = server.accept_subscriber(server_transport, client_author);
     let query = Query::from("todos");
     let mut subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
-    assert!(opened_rows(block_on(subscription.next_event()).unwrap()).is_empty());
+    assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
 
     // The subscriber registers the whole-table query shape; explicit
     // current-row serving then sends the facade-level initial snapshot.
@@ -13003,7 +13243,7 @@ fn subscriber_connection_serves_current_rows_and_resumes_from_cursor() {
     subscriber.borrow_mut().serve_current_rows("todos").unwrap();
     client.tick().unwrap();
 
-    let (added, updated, removed) = delta_rows(block_on(subscription.next_event()).unwrap());
+    let (added, updated, removed) = delta_rows(block_on(subscription.next_raw()).unwrap());
     assert_eq!(added.len(), 2);
     assert!(updated.is_empty());
     assert!(removed.is_empty());
@@ -13061,13 +13301,13 @@ fn byte_wire_subscriber_connection_serves_current_rows_and_resumes_from_cursor()
     let subscriber = server.accept_subscriber(server_transport, client_author);
     let query = Query::from("todos");
     let mut subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
-    assert!(opened_rows(block_on(subscription.next_event()).unwrap()).is_empty());
+    assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
 
     client.tick().unwrap();
     subscriber.borrow_mut().serve_current_rows("todos").unwrap();
     client.tick().unwrap();
 
-    let (added, updated, removed) = delta_rows(block_on(subscription.next_event()).unwrap());
+    let (added, updated, removed) = delta_rows(block_on(subscription.next_raw()).unwrap());
     assert_eq!(added.len(), 2);
     assert!(updated.is_empty());
     assert!(removed.is_empty());
@@ -13430,13 +13670,13 @@ fn accepted_subscriber_is_served_under_subscriber_author_identity() {
     let _subscriber = server.accept_subscriber(server_transport, subscriber_author);
     let query = Query::from("todos");
     let mut subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
-    assert!(opened_rows(block_on(subscription.next_event()).unwrap()).is_empty());
+    assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
 
     client.tick().unwrap();
     server.tick().unwrap();
     client.tick().unwrap();
 
-    let (rows, updated, removed) = delta_rows(block_on(subscription.next_event()).unwrap());
+    let (rows, updated, removed) = delta_rows(block_on(subscription.next_raw()).unwrap());
     assert!(updated.is_empty());
     assert!(removed.is_empty());
     assert_eq!(row_ids(&rows), vec![visible]);
@@ -13455,7 +13695,7 @@ fn maintained_subscription_emits_created_by_scoped_insert_after_empty_seed() {
     let prepared = prepared(&db, &query);
     let mut subscription = block_on(db.subscribe(&prepared, ReadOpts::default())).unwrap();
 
-    assert!(opened_rows(block_on(subscription.next_event()).unwrap()).is_empty());
+    assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
 
     let write = db
         .insert(
@@ -13474,7 +13714,7 @@ fn maintained_subscription_emits_created_by_scoped_insert_after_empty_seed() {
     let one_shot = prepared_all(&db, &query, ReadOpts::default());
     assert_eq!(row_ids(&one_shot), vec![write.row_uuid()]);
 
-    let (added, updated, removed) = delta_rows(block_on(subscription.next_event()).unwrap());
+    let (added, updated, removed) = delta_rows(block_on(subscription.next_raw()).unwrap());
     assert_eq!(row_ids(&added), vec![write.row_uuid()]);
     assert!(updated.is_empty());
     assert!(removed.is_empty());
@@ -13523,7 +13763,7 @@ fn dropping_local_stream_releases_groove_subscription_without_a_write() {
     };
 
     let mut subscription = block_on(db.subscribe(&prepared, opts)).unwrap();
-    assert!(opened_rows(block_on(subscription.next_event()).unwrap()).is_empty());
+    assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
     assert_eq!(
         db.runtime_stats_for_test().active_subscriptions,
         baseline + 1
@@ -13554,8 +13794,8 @@ fn dropping_one_local_stream_preserves_a_sibling_on_the_same_binding() {
     };
     let mut first = block_on(db.subscribe(&prepared, opts.clone())).unwrap();
     let mut survivor = block_on(db.subscribe(&prepared, opts)).unwrap();
-    assert!(opened_rows(block_on(first.next_event()).unwrap()).is_empty());
-    assert!(opened_rows(block_on(survivor.next_event()).unwrap()).is_empty());
+    assert!(opened_rows(block_on(first.next_raw()).unwrap()).is_empty());
+    assert!(opened_rows(block_on(survivor.next_raw()).unwrap()).is_empty());
     assert_eq!(
         db.runtime_stats_for_test().active_subscriptions,
         baseline + 2
@@ -13570,7 +13810,7 @@ fn dropping_one_local_stream_preserves_a_sibling_on_the_same_binding() {
     let write = db
         .insert("todos", doctest_support::todo_cells("match", false))
         .unwrap();
-    let (added, updated, removed) = delta_rows(block_on(survivor.next_event()).unwrap());
+    let (added, updated, removed) = delta_rows(block_on(survivor.next_raw()).unwrap());
     assert_eq!(row_ids(&added), vec![write.row_uuid()]);
     assert!(updated.is_empty());
     assert!(removed.is_empty());
@@ -13586,7 +13826,7 @@ fn maintained_subscription_emits_created_by_scoped_insert_for_explicit_identity(
     let mut subscription =
         block_on(db.subscribe_for_identity(&prepared, ReadOpts::default(), alice)).unwrap();
 
-    assert!(opened_rows(block_on(subscription.next_event()).unwrap()).is_empty());
+    assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
 
     let write = db
         .insert(
@@ -13605,7 +13845,7 @@ fn maintained_subscription_emits_created_by_scoped_insert_for_explicit_identity(
     let one_shot = block_on(db.all_for_identity(&prepared, ReadOpts::default(), alice)).unwrap();
     assert_eq!(row_ids(&one_shot), vec![write.row_uuid()]);
 
-    let (added, updated, removed) = delta_rows(block_on(subscription.next_event()).unwrap());
+    let (added, updated, removed) = delta_rows(block_on(subscription.next_raw()).unwrap());
     assert_eq!(row_ids(&added), vec![write.row_uuid()]);
     assert!(updated.is_empty());
     assert!(removed.is_empty());
@@ -13623,7 +13863,7 @@ fn local_propagating_subscription_emits_created_by_scoped_insert_after_empty_see
     let query = Query::from("todos");
     let mut subscription = prepared_subscribe(&client, &query, ReadOpts::default()).unwrap();
 
-    assert!(opened_rows(block_on(subscription.next_event()).unwrap()).is_empty());
+    assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
     client.tick().unwrap();
     server.tick().unwrap();
     client.tick().unwrap();
@@ -13653,7 +13893,7 @@ fn local_propagating_subscription_emits_created_by_scoped_insert_after_empty_see
     let one_shot = prepared_all(&client, &query, ReadOpts::default());
     assert_eq!(row_ids(&one_shot), vec![write.row_uuid()]);
 
-    let (added, updated, removed) = delta_rows(block_on(subscription.next_event()).unwrap());
+    let (added, updated, removed) = delta_rows(block_on(subscription.next_raw()).unwrap());
     assert_eq!(row_ids(&added), vec![write.row_uuid()]);
     assert!(updated.is_empty());
     assert!(removed.is_empty());
@@ -13673,7 +13913,7 @@ fn local_propagating_subscription_coerces_user_id_claim_for_created_by() {
     let query = Query::from("todos");
     let mut subscription = prepared_subscribe(&client, &query, ReadOpts::default()).unwrap();
 
-    assert!(opened_rows(block_on(subscription.next_event()).unwrap()).is_empty());
+    assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
     client.tick().unwrap();
     server.tick().unwrap();
     client.tick().unwrap();
@@ -13691,7 +13931,7 @@ fn local_propagating_subscription_coerces_user_id_claim_for_created_by() {
 
     let one_shot = prepared_all(&client, &query, ReadOpts::default());
     assert_eq!(row_ids(&one_shot), vec![write.row_uuid()]);
-    let (added, updated, removed) = delta_rows(block_on(subscription.next_event()).unwrap());
+    let (added, updated, removed) = delta_rows(block_on(subscription.next_raw()).unwrap());
     assert_eq!(row_ids(&added), vec![write.row_uuid()]);
     assert!(updated.is_empty());
     assert!(removed.is_empty());
@@ -14094,7 +14334,7 @@ fn direct_multi_identity_subscribe_reuses_shared_seeded_fragments_without_leakin
         block_on(db.subscribe_for_identity(&prepared, opts.clone(), member)).unwrap();
     assert_eq!(
         row_ids(&opened_rows(
-            block_on(member_subscription.next_event()).unwrap()
+            block_on(member_subscription.next_raw()).unwrap()
         )),
         vec![direct, transitive]
     );
@@ -14109,7 +14349,7 @@ fn direct_multi_identity_subscribe_reuses_shared_seeded_fragments_without_leakin
         block_on(db.subscribe_for_identity(&prepared, opts.clone(), other)).unwrap();
     assert_eq!(
         row_ids(&opened_rows(
-            block_on(other_subscription.next_event()).unwrap()
+            block_on(other_subscription.next_raw()).unwrap()
         )),
         vec![hidden]
     );
@@ -14117,7 +14357,7 @@ fn direct_multi_identity_subscribe_reuses_shared_seeded_fragments_without_leakin
 
     db.node.node.borrow().reset_storage_read_metrics();
     let mut spy_subscription = block_on(db.subscribe_for_identity(&prepared, opts, spy)).unwrap();
-    assert!(opened_rows(block_on(spy_subscription.next_event()).unwrap()).is_empty());
+    assert!(opened_rows(block_on(spy_subscription.next_raw()).unwrap()).is_empty());
     let spy_reads = db.node.node.borrow().take_storage_read_metrics();
 
     assert!(
@@ -14207,7 +14447,7 @@ fn direct_same_identity_subscribe_reuses_shared_seeded_fragments_across_shapes()
     db.node.node.borrow().reset_storage_read_metrics();
     let mut first = block_on(db.subscribe_for_identity(&res_i, opts.clone(), member)).unwrap();
     assert_eq!(
-        row_ids(&opened_rows(block_on(first.next_event()).unwrap())),
+        row_ids(&opened_rows(block_on(first.next_raw()).unwrap())),
         vec![res_i_direct, res_i_transitive]
     );
     let first_reads = db.node.node.borrow().take_storage_read_metrics();
@@ -14215,7 +14455,7 @@ fn direct_same_identity_subscribe_reuses_shared_seeded_fragments_across_shapes()
     db.node.node.borrow().reset_storage_read_metrics();
     let mut second = block_on(db.subscribe_for_identity(&res_j, opts, member)).unwrap();
     assert_eq!(
-        row_ids(&opened_rows(block_on(second.next_event()).unwrap())),
+        row_ids(&opened_rows(block_on(second.next_raw()).unwrap())),
         vec![res_j_direct, res_j_transitive]
     );
     let second_reads = db.node.node.borrow().take_storage_read_metrics();
@@ -14258,7 +14498,7 @@ fn seeded_membership_grant_and_revoke_propagate_incrementally() {
     let _subscriber = server.accept_subscriber(server_transport, member);
     let mut subscription =
         prepared_subscribe(&client, &Query::from("res_i"), ReadOpts::default()).unwrap();
-    assert!(opened_rows(block_on(subscription.next_event()).unwrap()).is_empty());
+    assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
 
     client.tick().unwrap();
     server.tick().unwrap();
@@ -14287,7 +14527,7 @@ fn seeded_membership_grant_and_revoke_propagate_incrementally() {
     client.tick().unwrap();
     server.tick().unwrap();
     client.tick().unwrap();
-    let (added, updated, removed) = delta_rows(block_on(subscription.next_event()).unwrap());
+    let (added, updated, removed) = delta_rows(block_on(subscription.next_raw()).unwrap());
     assert_eq!(row_ids(&added), vec![resource]);
     assert!(updated.is_empty());
     assert!(removed.is_empty());
@@ -14302,7 +14542,7 @@ fn seeded_membership_grant_and_revoke_propagate_incrementally() {
     client.tick().unwrap();
     server.tick().unwrap();
     client.tick().unwrap();
-    let (added, updated, removed) = delta_rows(block_on(subscription.next_event()).unwrap());
+    let (added, updated, removed) = delta_rows(block_on(subscription.next_raw()).unwrap());
     assert!(added.is_empty());
     assert!(updated.is_empty());
     assert_eq!(
@@ -14412,7 +14652,7 @@ fn same_table_seeded_membership_identity_key_update_propagates_incrementally() {
     let _subscriber = server.accept_subscriber(server_transport, member);
     let mut subscription =
         prepared_subscribe(&client, &Query::from("resources"), ReadOpts::default()).unwrap();
-    assert!(opened_rows(block_on(subscription.next_event()).unwrap()).is_empty());
+    assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
 
     client.tick().unwrap();
     server.tick().unwrap();
@@ -14552,12 +14792,12 @@ fn inherited_child_policy_parent_revocation_propagates_incrementally() {
     let _subscriber = server.accept_subscriber(server_transport, member);
     let mut subscription =
         prepared_subscribe(&client, &Query::from("res_i_child"), ReadOpts::default()).unwrap();
-    assert!(opened_rows(block_on(subscription.next_event()).unwrap()).is_empty());
+    assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
 
     client.tick().unwrap();
     server.tick().unwrap();
     client.tick().unwrap();
-    let (added, updated, removed) = delta_rows(block_on(subscription.next_event()).unwrap());
+    let (added, updated, removed) = delta_rows(block_on(subscription.next_raw()).unwrap());
     assert_eq!(row_ids(&added), vec![child]);
     assert!(updated.is_empty());
     assert!(removed.is_empty());
@@ -14572,7 +14812,7 @@ fn inherited_child_policy_parent_revocation_propagates_incrementally() {
     client.tick().unwrap();
     server.tick().unwrap();
     client.tick().unwrap();
-    let (added, updated, removed) = delta_rows(block_on(subscription.next_event()).unwrap());
+    let (added, updated, removed) = delta_rows(block_on(subscription.next_raw()).unwrap());
     assert!(added.is_empty());
     assert!(updated.is_empty());
     assert_eq!(
@@ -15109,7 +15349,7 @@ fn served_subscription_rows_for_author(
     let _subscriber = server.accept_subscriber(server_transport, author);
     let query = Query::from(table);
     let mut subscription = prepared_subscribe(&client, &query, ReadOpts::default()).unwrap();
-    assert!(opened_rows(block_on(subscription.next_event()).unwrap()).is_empty());
+    assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
     let mut rows = BTreeSet::new();
 
     for _ in 0..8 {
@@ -15154,7 +15394,7 @@ fn served_many_subscription_rows_for_author(
     for table in tables {
         let query = Query::from(*table);
         let mut subscription = prepared_subscribe(&client, &query, ReadOpts::default()).unwrap();
-        assert!(opened_rows(block_on(subscription.next_event()).unwrap()).is_empty());
+        assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
         subscriptions.push(((*table).to_owned(), subscription));
     }
 
@@ -15165,8 +15405,7 @@ fn served_many_subscription_rows_for_author(
     subscriptions
         .into_iter()
         .map(|(table, mut subscription)| {
-            let (added, updated, removed) =
-                delta_rows(block_on(subscription.next_event()).unwrap());
+            let (added, updated, removed) = delta_rows(block_on(subscription.next_raw()).unwrap());
             assert!(updated.is_empty());
             assert!(removed.is_empty());
             (table, row_ids(&added))
@@ -15190,7 +15429,7 @@ fn served_group_entry_rows_via_relay(
 
     let query = Query::from("group_entry");
     let mut subscription = prepared_subscribe(&client, &query, ReadOpts::default()).unwrap();
-    assert!(opened_rows(block_on(subscription.next_event()).unwrap()).is_empty());
+    assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
     let mut rows = BTreeSet::new();
     for _ in 0..20 {
         server.server.tick().unwrap();
@@ -17138,4 +17377,102 @@ fn legacy_authorization_scope_subscribe_rejects_every_read_view() {
 
 fn row_ids(rows: &[CurrentRow]) -> Vec<RowUuid> {
     rows.iter().map(CurrentRow::row_uuid).collect()
+}
+
+#[test]
+fn subscriber_cannot_spoof_authority_view_updates() {
+    let schema = schema();
+    let edge = open_db(0x7a, AuthorId::SYSTEM, &schema);
+    let (edge_transport, mut authority_transport) = duplex();
+    let _upstream = edge.connect_upstream(edge_transport);
+    let query = Query::from("todos");
+    let _stream = prepared_subscribe(&edge, &query, global_subscribe_opts()).unwrap();
+    edge.tick().unwrap();
+    let subscription = loop {
+        match authority_transport
+            .try_recv()
+            .expect("opening remote coverage must send an upstream subscription")
+        {
+            SyncMessage::Subscribe(subscribe) => break subscribe.subscription,
+            _ => continue,
+        }
+    };
+    let view_update = |opening_pending, settled_through| SyncMessage::ViewUpdate {
+        subscription,
+        settled_through: GlobalSeq(settled_through),
+        reset_result_set: true,
+        version_carriers: Vec::new(),
+        version_bundles: Vec::new(),
+        peer_payload_inventory: crate::protocol::PeerPayloadInventory {
+            opening_pending,
+            ..Default::default()
+        },
+        result_member_adds: Vec::new(),
+        result_member_removes: Vec::new(),
+        terminal_operations: Vec::new(),
+        program_fact_adds: Vec::new(),
+        program_fact_removes: Vec::new(),
+    };
+    authority_transport.send(view_update(true, 1)).unwrap();
+    edge.tick().unwrap();
+    let binding_view = edge
+        .node
+        .node
+        .borrow()
+        .binding_view_key_for_subscription(subscription)
+        .unwrap();
+    assert!(
+        edge.node
+            .node
+            .borrow()
+            .opening_pending_for_binding_view(binding_view),
+        "normal authority opening must install the pending marker"
+    );
+    let before_generation = edge
+        .node
+        .node
+        .borrow()
+        .applied_view_update_generation(binding_view);
+    let before_watermark = edge.node.node.borrow().applied_global_watermark();
+    let before_drops = edge
+        .node
+        .node
+        .borrow()
+        .sync_metrics()
+        .dropped_peer_request_messages;
+    let (mut client_transport, server_transport) = duplex();
+    let subscriber = edge.accept_subscriber(server_transport, AuthorId::from_bytes([0x7b; 16]));
+
+    client_transport.send(view_update(false, 100)).unwrap();
+    subscriber.borrow_mut().tick().unwrap();
+
+    let node = Rc::clone(&edge.node.node);
+    let node = node.borrow();
+    assert_eq!(node.applied_global_watermark(), before_watermark);
+    assert_eq!(
+        node.applied_view_update_generation(binding_view),
+        before_generation,
+        "subscriber spoof must not mutate the maintained view"
+    );
+    assert!(
+        node.opening_pending_for_binding_view(binding_view),
+        "subscriber spoof must not clear authority-owned opening state"
+    );
+    assert_eq!(
+        node.sync_metrics().dropped_peer_request_messages,
+        before_drops + 1,
+        "the subscriber frame must be rejected before NodeState dispatch"
+    );
+    drop(node);
+
+    authority_transport.send(view_update(false, 2)).unwrap();
+    edge.tick().unwrap();
+    let node = Rc::clone(&edge.node.node);
+    let node = node.borrow();
+    assert_eq!(
+        node.applied_view_update_generation(binding_view),
+        before_generation + 1,
+        "the same message class must remain admitted from an authority link"
+    );
+    assert!(!node.opening_pending_for_binding_view(binding_view));
 }

@@ -7375,7 +7375,20 @@ fn required_closure_parent_graph_from_segment(
     )
     .project_fields(covered_fields);
     if root_gate == ClosureRootGate::Inner && !matches!(required_key_type, ValueType::Array(_)) {
-        return Ok(covered.project_fields(project_source_fields_with_routes(
+        // Matching an optional reference requires temporarily unwrapping its
+        // nullable source cell. That unwrapped copy is only a predicate
+        // witness: publishing it as the root would change the whole-row
+        // terminal descriptor. Select the authoritative parent rows through
+        // their stable identity so the prepared and incremental layouts keep
+        // the source carrier exactly.
+        let covered_roots = covered.project_fields([ProjectField::named(parent_row_uuid.clone())]);
+        return Ok(GraphBuilder::semi_join(
+            parent_graph,
+            covered_roots,
+            [parent_row_uuid.clone()],
+            [parent_row_uuid],
+        )
+        .project_fields(project_source_fields_with_routes(
             parent_source,
             route_fields,
         )));

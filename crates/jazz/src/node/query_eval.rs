@@ -5440,6 +5440,9 @@ where
             self.query
                 .initial_hydration_binding_views
                 .remove(&binding_view_key);
+            self.query
+                .pending_opening_binding_views
+                .remove(&binding_view_key);
         }
     }
 
@@ -5546,6 +5549,15 @@ where
     ) -> bool {
         self.query
             .deferred_publication_binding_views
+            .contains(&binding_view_key)
+    }
+
+    pub(crate) fn opening_pending_for_binding_view(
+        &self,
+        binding_view_key: BindingViewKey,
+    ) -> bool {
+        self.query
+            .pending_opening_binding_views
             .contains(&binding_view_key)
     }
 

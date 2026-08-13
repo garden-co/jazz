@@ -289,6 +289,7 @@ type SubscriptionList = Rc<RefCell<Vec<Weak<RefCell<SubscriptionState>>>>>;
 type PendingUpstreamCommands = Rc<RefCell<Vec<PendingUpstreamCommand>>>;
 type LatestCoverageSubscriptions = Rc<RefCell<BTreeMap<CoverageKey, SubscriptionKey>>>;
 type UpstreamCoverageRefCounts = Rc<RefCell<BTreeMap<CoverageKey, usize>>>;
+type AwaitingInitialAuthorityCoverage = Rc<RefCell<BTreeSet<CoverageKey>>>;
 type CoverageRefreshGenerations = Rc<RefCell<BTreeMap<CoverageKey, u64>>>;
 type UpstreamSubscriptionOwners =
     Rc<RefCell<BTreeMap<SubscriptionKey, Vec<Weak<RefCell<SubscriptionState>>>>>>;
@@ -511,6 +512,11 @@ struct PendingUpstreamSubscription {
 struct UpstreamCoverageHandle {
     coverage: CoverageKey,
     subscription: SubscriptionKey,
+}
+
+struct OpenedUpstreamCoverage {
+    handles: Vec<UpstreamCoverageHandle>,
+    awaits_initial_authority_response: bool,
 }
 
 struct CoverageGroup {
@@ -1871,6 +1877,7 @@ where
             .iter()
             .all(|(binding_view, required_after)| {
                 node.applied_view_update_generation(*binding_view) > *required_after
+                    && !node.opening_pending_for_binding_view(*binding_view)
             });
         drop(node);
         if covered {
@@ -1968,6 +1975,7 @@ where
         let mut state_binding = local_binding;
         let mut remote_read_tier = None;
         let mut upstream_subscription_handles = Vec::new();
+        let mut suppress_provisional_opening = false;
         let propagates_upstream = opts.propagation == Propagation::Full;
         if opts.propagation == Propagation::Full {
             let upstream_opts =
@@ -1991,13 +1999,17 @@ where
             state_shape = shape.clone();
             state_binding = binding.clone();
             remote_read_tier = Some(upstream_opts.tier);
-            upstream_subscription_handles = self.open_subscription_upstream_coverage(
+            let opened = self.open_subscription_upstream_coverage(
                 &shape,
                 &binding,
                 upstream_opts,
                 author,
                 authorization_mode,
             )?;
+            upstream_subscription_handles = opened.handles;
+            suppress_provisional_opening = authorization_mode
+                == QueryAuthorizationMode::ClientLocal
+                && opened.awaits_initial_authority_response;
         }
         let settled_tier = remote_read_tier.unwrap_or(read_tier);
         if authorization_mode == QueryAuthorizationMode::ClientLocal
@@ -2067,6 +2079,7 @@ where
             .sender
             .unbounded_send(SubscriptionEvent::Delta {
                 reset: true,
+                publishable: !suppress_provisional_opening,
                 added: initial_outputs,
                 updated: Vec::new(),
                 removed: Vec::new(),
@@ -2137,7 +2150,7 @@ where
         opts: RegisterShapeOptions,
         identity: AuthorId,
         authorization_mode: QueryAuthorizationMode,
-    ) -> Result<Vec<UpstreamCoverageHandle>, Error> {
+    ) -> Result<OpenedUpstreamCoverage, Error> {
         self.node
             .node
             .borrow_mut()
@@ -2169,10 +2182,18 @@ where
                     .borrow_mut()
                     .entry(coverage.clone())
                     .or_insert(0) += 1;
-                return Ok(vec![UpstreamCoverageHandle {
-                    coverage,
-                    subscription,
-                }]);
+                let awaits_initial_authority_response = self
+                    .node
+                    .awaiting_initial_authority_coverage
+                    .borrow()
+                    .contains(&coverage);
+                return Ok(OpenedUpstreamCoverage {
+                    handles: vec![UpstreamCoverageHandle {
+                        coverage,
+                        subscription,
+                    }],
+                    awaits_initial_authority_response,
+                });
             }
         }
         let subscription =
@@ -2181,10 +2202,23 @@ where
             .upstream_coverage_refcounts
             .borrow_mut()
             .insert(coverage.clone(), 1);
-        Ok(vec![UpstreamCoverageHandle {
-            coverage,
-            subscription,
-        }])
+        let has_live_upstream =
+            self.node.connections.borrow().iter().any(|connection| {
+                matches!(&connection.borrow().link, ConnectionLink::Upstream { .. })
+            });
+        if has_live_upstream {
+            self.node
+                .awaiting_initial_authority_coverage
+                .borrow_mut()
+                .insert(coverage.clone());
+        }
+        Ok(OpenedUpstreamCoverage {
+            handles: vec![UpstreamCoverageHandle {
+                coverage,
+                subscription,
+            }],
+            awaits_initial_authority_response: has_live_upstream,
+        })
     }
 
     fn upstream_subscription_cleanup(
@@ -2195,6 +2229,8 @@ where
         let node = Rc::clone(&self.node.node);
         let latest_coverage_subscriptions = Rc::clone(&self.node.latest_coverage_subscriptions);
         let upstream_coverage_refcounts = Rc::clone(&self.node.upstream_coverage_refcounts);
+        let awaiting_initial_authority_coverage =
+            Rc::clone(&self.node.awaiting_initial_authority_coverage);
         let upstream_subscription_owners = Rc::clone(&self.node.upstream_subscription_owners);
         let pending_upstream_subscriptions = Rc::clone(&self.node.upstream_subscriptions);
         let scheduler = Rc::clone(&self.node.scheduler);
@@ -2214,6 +2250,9 @@ where
                     continue;
                 }
                 refcounts.remove(&handle.coverage);
+                awaiting_initial_authority_coverage
+                    .borrow_mut()
+                    .remove(&handle.coverage);
                 drop(refcounts);
                 let upstream_subscription = handle.subscription;
                 node.borrow_mut().apply_unsubscribe(upstream_subscription);
@@ -4760,6 +4799,7 @@ where
     upstream_subscriptions: PendingUpstreamCommands,
     latest_coverage_subscriptions: LatestCoverageSubscriptions,
     upstream_coverage_refcounts: UpstreamCoverageRefCounts,
+    awaiting_initial_authority_coverage: AwaitingInitialAuthorityCoverage,
     coverage_refresh_generations: CoverageRefreshGenerations,
     upstream_subscription_owners: UpstreamSubscriptionOwners,
     connections: RefCell<Vec<Rc<RefCell<PeerConnection<S>>>>>,
@@ -4797,6 +4837,7 @@ where
             upstream_subscriptions: Rc::new(RefCell::new(Vec::new())),
             latest_coverage_subscriptions: Rc::new(RefCell::new(BTreeMap::new())),
             upstream_coverage_refcounts: Rc::new(RefCell::new(BTreeMap::new())),
+            awaiting_initial_authority_coverage: Rc::new(RefCell::new(BTreeSet::new())),
             coverage_refresh_generations: Rc::new(RefCell::new(BTreeMap::new())),
             upstream_subscription_owners: Rc::new(RefCell::new(BTreeMap::new())),
             connections: RefCell::new(Vec::new()),
@@ -5201,6 +5242,10 @@ where
             node: Rc::clone(&self.node),
             subscriptions: Rc::clone(&self.subscriptions),
             upstream_subscription_owners: Rc::clone(&self.upstream_subscription_owners),
+            latest_coverage_subscriptions: Rc::clone(&self.latest_coverage_subscriptions),
+            awaiting_initial_authority_coverage: Rc::clone(
+                &self.awaiting_initial_authority_coverage,
+            ),
             scheduler: Rc::clone(&self.scheduler),
             write_state_waiters: Rc::clone(&self.write_state_waiters),
             permission_advice_waiters: Rc::clone(&self.permission_advice_waiters),
@@ -5400,6 +5445,10 @@ where
             node: Rc::clone(&self.node),
             subscriptions: Rc::clone(&self.subscriptions),
             upstream_subscription_owners: Rc::clone(&self.upstream_subscription_owners),
+            latest_coverage_subscriptions: Rc::clone(&self.latest_coverage_subscriptions),
+            awaiting_initial_authority_coverage: Rc::clone(
+                &self.awaiting_initial_authority_coverage,
+            ),
             scheduler: Rc::clone(&self.scheduler),
             write_state_waiters: Rc::clone(&self.write_state_waiters),
             permission_advice_waiters: Rc::clone(&self.permission_advice_waiters),
@@ -5783,6 +5832,7 @@ where
             );
             let event = SubscriptionEvent::Delta {
                 reset: true,
+                publishable: true,
                 added: reset_outputs,
                 updated: Vec::new(),
                 removed,
@@ -6056,6 +6106,7 @@ where
                             let state_ref = &mut *state_ref;
                             let event = SubscriptionEvent::Delta {
                                 reset: false,
+                                publishable: true,
                                 added: Vec::new(),
                                 updated: Vec::new(),
                                 removed: Vec::new(),
@@ -6111,6 +6162,7 @@ where
                                     let state_ref = &mut *state_ref;
                                     let event = SubscriptionEvent::Delta {
                                         reset: false,
+                                        publishable: true,
                                         added: Vec::new(),
                                         updated: Vec::new(),
                                         removed: Vec::new(),
@@ -6484,6 +6536,8 @@ where
     node: Rc<RefCell<NodeState<S>>>,
     subscriptions: SubscriptionList,
     upstream_subscription_owners: UpstreamSubscriptionOwners,
+    latest_coverage_subscriptions: LatestCoverageSubscriptions,
+    awaiting_initial_authority_coverage: AwaitingInitialAuthorityCoverage,
     scheduler: SharedTickScheduler,
     write_state_waiters: WriteStateWaiters,
     permission_advice_waiters: PermissionAdviceWaiters,
@@ -7234,6 +7288,7 @@ where
                 }
                 let mut applied = false;
                 let mut pending_view_updates = Vec::<ViewUpdateParts>::new();
+                let mut pending_initial_coverage_clears = BTreeSet::<CoverageKey>::new();
                 while let Some(message) = self.transport.try_recv() {
                     let write_state_tx_id = write_state_update_tx_id(&message);
                     #[cfg(feature = "sync-autopsy")]
@@ -7244,8 +7299,11 @@ where
                     match message {
                         SyncMessage::CatalogueSnapshot(snapshot) => {
                             if !pending_view_updates.is_empty() {
-                                self.node.borrow_mut().apply_view_updates_in_batch(
-                                    std::mem::take(&mut pending_view_updates),
+                                apply_pending_authority_view_updates(
+                                    &self.node,
+                                    &mut pending_view_updates,
+                                    &self.awaiting_initial_authority_coverage,
+                                    &mut pending_initial_coverage_clears,
                                 )?;
                             }
                             self.node
@@ -7254,8 +7312,11 @@ where
                         }
                         SyncMessage::RowVersionPayloads { version_bundles } => {
                             if !pending_view_updates.is_empty() {
-                                self.node.borrow_mut().apply_view_updates_in_batch(
-                                    std::mem::take(&mut pending_view_updates),
+                                apply_pending_authority_view_updates(
+                                    &self.node,
+                                    &mut pending_view_updates,
+                                    &self.awaiting_initial_authority_coverage,
+                                    &mut pending_initial_coverage_clears,
                                 )?;
                             }
                             let Some(repair) = pending_row_version_repairs.pop_front() else {
@@ -7277,6 +7338,11 @@ where
                                 } => (*subscription, *settled_through),
                                 _ => unreachable!("row-version repair must retain a view update"),
                             };
+                            stage_initial_coverage_clear_for_update(
+                                &repair.update,
+                                &self.latest_coverage_subscriptions,
+                                &mut pending_initial_coverage_clears,
+                            );
                             push_view_update_message_for_receiver(
                                 &mut pending_view_updates,
                                 repair.update,
@@ -7315,6 +7381,11 @@ where
                                 node.missing_known_state_row_version_refs(&message)?
                             };
                             if missing.is_empty() {
+                                stage_initial_coverage_clear_for_update(
+                                    &message,
+                                    &self.latest_coverage_subscriptions,
+                                    &mut pending_initial_coverage_clears,
+                                );
                                 push_view_update_message_for_receiver(
                                     &mut pending_view_updates,
                                     message,
@@ -7468,8 +7539,11 @@ where
                             // follows the views, but apply the queued views now
                             // so receipt admission is never merely queued.
                             if !pending_view_updates.is_empty() {
-                                self.node.borrow_mut().apply_view_updates_in_batch(
-                                    std::mem::take(&mut pending_view_updates),
+                                apply_pending_authority_view_updates(
+                                    &self.node,
+                                    &mut pending_view_updates,
+                                    &self.awaiting_initial_authority_coverage,
+                                    &mut pending_initial_coverage_clears,
                                 )?;
                             }
                             let Some(expected) = expected_scope_authority.as_mut() else {
@@ -7686,6 +7760,11 @@ where
                                             unreachable!("branch parking retains only view updates")
                                         }
                                     };
+                                    stage_initial_coverage_clear_for_update(
+                                        &update,
+                                        &self.latest_coverage_subscriptions,
+                                        &mut pending_initial_coverage_clears,
+                                    );
                                     push_view_update_message_for_receiver(
                                         &mut pending_view_updates,
                                         update,
@@ -7735,8 +7814,11 @@ where
                                 }
                             }
                             if !pending_view_updates.is_empty() {
-                                self.node.borrow_mut().apply_view_updates_in_batch(
-                                    std::mem::take(&mut pending_view_updates),
+                                apply_pending_authority_view_updates(
+                                    &self.node,
+                                    &mut pending_view_updates,
+                                    &self.awaiting_initial_authority_coverage,
+                                    &mut pending_initial_coverage_clears,
                                 )?;
                             }
                             self.node
@@ -7778,9 +7860,12 @@ where
                     applied = true;
                 }
                 if !pending_view_updates.is_empty() {
-                    self.node
-                        .borrow_mut()
-                        .apply_view_updates_in_batch(pending_view_updates)?;
+                    apply_pending_authority_view_updates(
+                        &self.node,
+                        &mut pending_view_updates,
+                        &self.awaiting_initial_authority_coverage,
+                        &mut pending_initial_coverage_clears,
+                    )?;
                 }
                 if applied {
                     stats.subscription_events +=
@@ -7864,6 +7949,11 @@ where
                     // A subscriber must never be able to smuggle a support
                     // purpose alongside its own shape/binding subscription.
                     let scope_purpose: Option<crate::protocol::AuthorizationScopePurpose> = None;
+                    if subscriber_inbound_message_is_authority_only(&message, ingest_context.trust)
+                    {
+                        drop_peer_request(&self.node);
+                        continue;
+                    }
                     applied_inbound = true;
                     let admitted_metadata = match &message {
                         SyncMessage::BranchMetadata(metadata) => Some(metadata.branch_id),
@@ -8260,7 +8350,22 @@ where
                                 ingest_context.trust,
                             );
                             let update = if !permissions_ready {
-                                None
+                                Some(SyncMessage::ViewUpdate {
+                                    subscription,
+                                    settled_through: self.node.borrow().applied_global_watermark(),
+                                    reset_result_set: true,
+                                    version_carriers: Vec::new(),
+                                    version_bundles: Vec::new(),
+                                    peer_payload_inventory: crate::protocol::PeerPayloadInventory {
+                                        opening_pending: true,
+                                        ..Default::default()
+                                    },
+                                    result_member_adds: Vec::new(),
+                                    result_member_removes: Vec::new(),
+                                    terminal_operations: Vec::new(),
+                                    program_fact_adds: Vec::new(),
+                                    program_fact_removes: Vec::new(),
+                                })
                             } else if first_subscriber {
                                 peer.declare_known_state(group_subscription, known_state.clone());
                                 let mut node = self.node.borrow_mut();
@@ -8988,6 +9093,7 @@ fn view_update_parts_from_message(message: SyncMessage) -> ViewUpdateParts {
             version_bundles,
             peer_complete_tx_payload_refs: peer_payload_inventory.complete_tx_payloads,
             authorization_progress: peer_payload_inventory.authorization_progress,
+            opening_pending: peer_payload_inventory.opening_pending,
             result_member_adds,
             result_member_removes,
             terminal_operations,
@@ -9003,6 +9109,51 @@ fn push_view_update_message_for_receiver(
     message: SyncMessage,
 ) -> Result<(), Error> {
     ready.push(view_update_parts_from_message(message));
+    Ok(())
+}
+
+fn stage_initial_coverage_clear_for_update(
+    update: &SyncMessage,
+    latest: &LatestCoverageSubscriptions,
+    clears: &mut BTreeSet<CoverageKey>,
+) {
+    let SyncMessage::ViewUpdate {
+        subscription,
+        peer_payload_inventory,
+        ..
+    } = update
+    else {
+        return;
+    };
+    if peer_payload_inventory.opening_pending {
+        return;
+    }
+    if let Some(coverage) = latest
+        .borrow()
+        .iter()
+        .find_map(|(coverage, current)| (*current == *subscription).then(|| coverage.clone()))
+    {
+        clears.insert(coverage);
+    }
+}
+
+fn apply_pending_authority_view_updates<S>(
+    node: &Rc<RefCell<NodeState<S>>>,
+    pending: &mut Vec<ViewUpdateParts>,
+    awaiting: &AwaitingInitialAuthorityCoverage,
+    clears: &mut BTreeSet<CoverageKey>,
+) -> Result<(), Error>
+where
+    S: OrderedKvStorage + ReopenableStorage + 'static,
+{
+    node.borrow_mut()
+        .apply_view_updates_in_batch(std::mem::take(pending))?;
+    if !clears.is_empty() {
+        let mut awaiting = awaiting.borrow_mut();
+        for coverage in std::mem::take(clears) {
+            awaiting.remove(&coverage);
+        }
+    }
     Ok(())
 }
 
@@ -10474,6 +10625,31 @@ fn subscriber_permissions_ready(permissions_ready: bool, trust: CommitUnitTrust)
     trust == CommitUnitTrust::TrustedBackend || permissions_ready
 }
 
+/// Messages whose semantics assert downstream authority state must never be
+/// accepted from a subscriber transport. Keep this admission check ahead of
+/// `NodeState::apply_sync_message`: validation inside the node cannot recover
+/// the direction or authenticated link role after dispatch.
+fn subscriber_inbound_message_is_authority_only(
+    message: &SyncMessage,
+    trust: CommitUnitTrust,
+) -> bool {
+    matches!(
+        message,
+        SyncMessage::FateUpdate { .. }
+            | SyncMessage::SubscribeRejected { .. }
+            | SyncMessage::CatalogueAck(_)
+            | SyncMessage::ViewUpdate { .. }
+            | SyncMessage::RowVersionPayloads { .. }
+            | SyncMessage::CatalogueSnapshot(_)
+            | SyncMessage::PermissionAdviceResponse { .. }
+            | SyncMessage::AuthorizationScopeReceipt { .. }
+            | SyncMessage::AuthorizationScopeView { .. }
+            | SyncMessage::AuthorizationScopeAggregateReceipt { .. }
+            | SyncMessage::AuthorizationScopeUnavailable { .. }
+            | SyncMessage::AuthorizationScopeDecision { .. }
+    ) || (trust == CommitUnitTrust::Session && matches!(message, SyncMessage::SessionClaims { .. }))
+}
+
 fn subscriber_permission_subject(ingest: CommitUnitIngestContext) -> AuthorId {
     match ingest.trust {
         CommitUnitTrust::Session => ingest.identity,
@@ -11336,6 +11512,10 @@ pub enum SubscriptionEvent {
         ///
         /// Fresh subscriptions start with a reset delta from the empty result.
         reset: bool,
+        /// Whether this event represents an authority-backed observation.
+        /// A locally constructed opening frame is provisional until an
+        /// authority publishes the corresponding reset.
+        publishable: bool,
         /// Rows newly visible to the subscription.
         added: Vec<SubscriptionOutputRow>,
         /// Rows still visible with changed projected cells.
@@ -11395,14 +11575,30 @@ impl Drop for CleanupGuard {
 }
 
 impl SubscriptionStream {
+    #[cfg(test)]
+    async fn next_raw(&mut self) -> Option<SubscriptionEvent> {
+        std::future::poll_fn(|cx| Pin::new(&mut self.receiver).poll_next(cx)).await
+    }
+
     /// Await the next materialized subscription event.
     pub async fn next_event(&mut self) -> Option<SubscriptionEvent> {
-        std::future::poll_fn(|cx| Pin::new(&mut self.receiver).poll_next(cx)).await
+        loop {
+            let event =
+                std::future::poll_fn(|cx| Pin::new(&mut self.receiver).poll_next(cx)).await?;
+            if subscription_event_is_publishable(&event) {
+                return Some(event);
+            }
+        }
     }
 
     /// Return the next queued materialized subscription event without waiting.
     pub fn try_next_event(&mut self) -> Option<SubscriptionEvent> {
-        self.receiver.try_recv().ok()
+        loop {
+            let event = self.receiver.try_recv().ok()?;
+            if subscription_event_is_publishable(&event) {
+                return Some(event);
+            }
+        }
     }
 
     #[cfg(test)]
@@ -11418,12 +11614,31 @@ impl SubscriptionStream {
     }
 }
 
+fn subscription_event_is_publishable(event: &SubscriptionEvent) -> bool {
+    !matches!(
+        event,
+        SubscriptionEvent::Delta {
+            publishable: false,
+            ..
+        }
+    )
+}
+
 impl Stream for SubscriptionStream {
     type Item = SubscriptionEvent;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
-        Pin::new(&mut this.receiver).poll_next(cx)
+        loop {
+            match Pin::new(&mut this.receiver).poll_next(cx) {
+                Poll::Ready(Some(event)) if subscription_event_is_publishable(&event) => {
+                    return Poll::Ready(Some(event));
+                }
+                Poll::Ready(Some(_)) => continue,
+                Poll::Ready(None) => return Poll::Ready(None),
+                Poll::Pending => return Poll::Pending,
+            }
+        }
     }
 }
 
@@ -11539,6 +11754,7 @@ fn subscription_terminal_delta_event(
 
     SubscriptionEvent::Delta {
         reset: false,
+        publishable: true,
         added,
         updated,
         removed,
@@ -11593,6 +11809,7 @@ fn subscription_delta_event_with_reset(
 
     SubscriptionEvent::Delta {
         reset,
+        publishable: true,
         added,
         updated,
         removed,
@@ -11639,6 +11856,7 @@ fn apply_maintained_update_to_snapshot(
                 .collect();
             return SubscriptionEvent::Delta {
                 reset: false,
+                publishable: true,
                 added: update_added
                     .into_iter()
                     .map(|(occurrence_id, row)| SubscriptionOutputRow { occurrence_id, row })
@@ -11690,6 +11908,7 @@ fn apply_maintained_update_to_snapshot(
 
         return SubscriptionEvent::Delta {
             reset: false,
+            publishable: true,
             added: event_added
                 .into_iter()
                 .map(|(occurrence_id, row)| SubscriptionOutputRow { occurrence_id, row })
@@ -11822,6 +12041,7 @@ fn apply_maintained_update_to_snapshot(
 
     SubscriptionEvent::Delta {
         reset: false,
+        publishable: true,
         added,
         updated,
         removed,
@@ -11860,11 +12080,13 @@ where
     if tier <= DurabilityTier::Local {
         return true;
     }
-    node.has_settled_result_set(BindingViewKey {
+    let binding_view_key = BindingViewKey {
         shape_id: shape.shape_id(),
         binding_id: binding.binding_id(),
         read_view: RegisterShapeOptions { tier, read_view }.read_view_key(),
-    })
+    };
+    node.has_settled_result_set(binding_view_key)
+        && !node.opening_pending_for_binding_view(binding_view_key)
 }
 
 pub(crate) fn subscription_row_occurrence_id(row: &CurrentRow) -> OutputOccurrenceId {

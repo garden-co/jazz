@@ -216,7 +216,7 @@ test("Rust CI does not rerun differential integration binaries selected by the w
 
   assert.match(
     rust,
-    /run-rust-tests\.mjs --timeout-seconds 780 -- --workspace --lib --bins --tests --features test/,
+    /run-rust-tests\.mjs --timeout-seconds 780 --nextest-profile jazz-ci -- --workspace --lib --bins --tests --features test/,
   );
   for (const testTarget of [
     "incremental_delivery_canary",
@@ -228,6 +228,24 @@ test("Rust CI does not rerun differential integration binaries selected by the w
   assert.match(
     rust,
     /JAZZ_SEED_COUNT=50 cargo test -p jazz m3_maintained_one_shot_differential_oracle/,
+  );
+});
+
+test("Rust CI uses a contention-tolerant but finite Nextest watchdog", () => {
+  const nextest = fs.readFileSync(path.join(root, ".config/nextest.toml"), "utf8");
+  const localProfile = nextest.match(/\[profile\.jazz\]([\s\S]*?)(?=\n\[|$)/)?.[1] ?? "";
+  const ciProfile = nextest.match(/\[profile\.jazz-ci\]([\s\S]*?)(?=\n\[|$)/)?.[1] ?? "";
+
+  assert.match(localProfile, /slow-timeout = \{ period = "60s", terminate-after = 1 \}/);
+  assert.match(ciProfile, /fail-fast = false/);
+  assert.match(ciProfile, /slow-timeout = \{ period = "180s", terminate-after = 1 \}/);
+  assert.throws(
+    () =>
+      assert.match(
+        ciProfile.replace("terminate-after = 1", "terminate-after = 0"),
+        /terminate-after = 1/,
+      ),
+    /terminate-after = 1/,
   );
 });
 

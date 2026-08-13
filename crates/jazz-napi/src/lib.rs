@@ -3336,6 +3336,7 @@ mod tests {
         let payload = core_subscription_event_to_napi(
             &CoreSubscriptionEvent::Delta {
                 reset: false,
+                publishable: true,
                 added: Vec::new(),
                 updated: Vec::new(),
                 removed: Vec::new(),
@@ -3421,6 +3422,7 @@ mod tests {
         let payload = core_subscription_event_to_napi(
             &CoreSubscriptionEvent::Delta {
                 reset: false,
+                publishable: true,
                 added: Vec::new(),
                 updated: Vec::new(),
                 removed: Vec::new(),

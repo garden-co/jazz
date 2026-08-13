@@ -1108,7 +1108,6 @@ fn message_read_policy_allows_public_chat_or_membership_join() {
 }
 
 #[test]
-#[ignore = "known red; tracked in TEST_BURNDOWN.md"]
 fn camel_case_message_read_policy_incrementally_adds_member_message() {
     let alice = user(0xa1);
     let bob = user(0xb2);
@@ -2994,7 +2993,6 @@ fn maintained_subscription_view_multi_segment_inner_include_payload_references_v
 }
 
 #[test]
-#[ignore = "known red; tracked in TEST_BURNDOWN.md"]
 fn prepared_subscription_multi_segment_forward_include_keeps_root_delta() {
     let schema = multi_segment_required_include_rls_schema();
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
