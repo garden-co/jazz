@@ -11,6 +11,14 @@ const setupBuildAction = fs.readFileSync(
   path.join(root, ".github/actions/setup-build/action.yml"),
   "utf8",
 );
+const installRustTool = fs.readFileSync(
+  path.join(root, ".github/actions/install-rust-tool/action.yml"),
+  "utf8",
+);
+const packageBuild = fs.readFileSync(
+  path.join(root, ".github/workflows/build-jazz-packages.yml"),
+  "utf8",
+);
 const packageJson = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
 const jobs = (() => {
   const jobsStart = workflow.indexOf("\njobs:\n");
@@ -94,6 +102,27 @@ test("build setup scopes mutable pnpm and sccache state to the agent temp direct
     setupBuildAction,
     /\$\{HOME\}\/(?:setup-pnpm|\.cache\/sccache)/,
     "shared HOME must not hold mutable pnpm or sccache state",
+  );
+});
+
+test("Rust tool installation is isolated from shared self-hosted runner state", () => {
+  const installAction = "taiki-e/install-action@3235f8901fd37ffed0052b276cec25a362fb82e9";
+  assert.match(installRustTool, new RegExp(`uses: ${installAction}`));
+  assert.match(installRustTool, /HOME: \$\{\{ runner\.temp \}\}\/jazz-install-action/);
+  assert.match(installRustTool, /CARGO_HOME: \$\{\{ runner\.temp \}\}\/jazz-install-action\/cargo/);
+  for (const caller of [workflow, setupBuildAction, packageBuild]) {
+    assert.doesNotMatch(caller, new RegExp(installAction));
+  }
+  assert.throws(
+    () =>
+      assert.match(
+        installRustTool.replace(
+          "        CARGO_HOME: ${{ runner.temp }}/jazz-install-action/cargo\n",
+          "",
+        ),
+        /CARGO_HOME: \$\{\{ runner\.temp \}\}\/jazz-install-action\/cargo/,
+      ),
+    /CARGO_HOME/,
   );
 });
 

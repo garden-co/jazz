@@ -48,7 +48,7 @@ jobs:
           sccache: "true"
 
       - name: Install bounded Rust test runner
-        uses: taiki-e/install-action@3235f8901fd37ffed0052b276cec25a362fb82e9 # v2
+        uses: ./.github/actions/install-rust-tool
         with:
           # Download the release asset rather than compiling the runner in
           # every job. Keep this explicit so test selection is reproducible.
@@ -104,7 +104,7 @@ jobs:
       - name: Install WASM packager
         # Only this job builds jazz-wasm. Other Rust jobs receive their target
         # through setup-build but do not pay to install the packager.
-        uses: taiki-e/install-action@3235f8901fd37ffed0052b276cec25a362fb82e9 # v2
+        uses: ./.github/actions/install-rust-tool
         with:
           tool: wasm-pack@0.13.1
 

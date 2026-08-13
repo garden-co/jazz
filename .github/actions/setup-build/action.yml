@@ -107,7 +107,7 @@ runs:
 
     - name: Install sccache
       if: inputs.sccache == 'true' && runner.os == 'Linux'
-      uses: taiki-e/install-action@3235f8901fd37ffed0052b276cec25a362fb82e9 # v2
+      uses: ./.github/actions/install-rust-tool
       with:
         tool: sccache
 
