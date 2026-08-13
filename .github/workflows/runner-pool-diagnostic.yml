@@ -1,0 +1,60 @@
+name: Runner pool diagnostic
+
+on:
+  workflow_dispatch:
+    inputs:
+      hold_seconds:
+        description: Seconds to remain active for concurrency/cancellation checks
+        required: false
+        default: "60"
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: jazz-ci
+    timeout-minutes: 10
+    env:
+      RUNNER_NAME: ${{ runner.name }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Verify isolated paths and shared sccache
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "${RUNNER_TEMP}" in
+            /var/lib/github-actions*/_temp) ;;
+            *) echo "Unexpected RUNNER_TEMP: ${RUNNER_TEMP}" >&2; exit 1 ;;
+          esac
+          test "${SCCACHE_DIR}" = "/var/cache/jazz-sccache"
+          test "${SCCACHE_SERVER_PORT}" = "4226"
+
+          cargo_target="${RUNNER_TEMP}/cargo-target"
+          turbo_cache="${GITHUB_WORKSPACE}/.turbo/cache"
+          generated="${GITHUB_WORKSPACE}/.runner-diagnostic/generated"
+          mkdir -p "${cargo_target}" "${turbo_cache}" "${generated}"
+
+          source_file="${RUNNER_TEMP}/sccache-probe.rs"
+          printf 'pub fn runner_pool_probe() -> u64 { 42 }\n' > "${source_file}"
+          sccache rustc --crate-name runner_pool_probe --crate-type lib \
+            "${source_file}" -o "${cargo_target}/lib_runner_pool_probe.rlib"
+          sccache rustc --crate-name runner_pool_probe --crate-type lib \
+            "${source_file}" -o "${cargo_target}/lib_runner_pool_probe_second.rlib"
+
+          printf '%s\n' \
+            "runner=${RUNNER_NAME}" \
+            "workspace=${GITHUB_WORKSPACE}" \
+            "temp=${RUNNER_TEMP}" \
+            "cargo_target=${cargo_target}" \
+            "turbo_cache=${turbo_cache}" \
+            "generated=${generated}" \
+            "sccache_dir=${SCCACHE_DIR}" \
+            "sccache_port=${SCCACHE_SERVER_PORT}"
+          sccache --show-stats
+
+      - name: Hold runner for concurrency check
+        env:
+          HOLD_SECONDS: ${{ inputs.hold_seconds }}
+        run: sleep "${HOLD_SECONDS}"
