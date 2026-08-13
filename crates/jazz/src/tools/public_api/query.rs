@@ -590,52 +590,145 @@ pub struct RecursiveSpec {
 }
 
 /// A query specification (DNF: disjunction of conjunctions).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Query {
     pub table: TableName,
     /// Optional table alias (for self-joins).
-    #[serde(default)]
     pub alias: Option<String>,
     /// Branches to query (required - at least one must be specified).
     /// For multi-branch queries, results are combined with LWW merge for same ObjectId.
-    #[serde(default)]
     pub branches: Vec<String>,
     /// Joined tables.
-    #[serde(default)]
     pub joins: Vec<JoinSpec>,
     /// OR groups (disjunction of conjunctions).
-    #[serde(default = "default_disjuncts")]
     pub disjuncts: Vec<Conjunction>,
     /// Order by specification.
-    #[serde(default)]
     pub order_by: Vec<(String, SortDirection)>,
     /// Limit.
-    #[serde(default)]
     pub limit: Option<usize>,
     /// Offset.
-    #[serde(default)]
     pub offset: usize,
     /// If true, also scan _id_deleted to include soft-deleted rows.
-    #[serde(default)]
     pub include_deleted: bool,
     /// Columns to select (None = all columns).
-    #[serde(default)]
     pub select_columns: Option<Vec<String>>,
     /// Array subqueries (correlated subqueries producing array columns).
-    #[serde(default)]
     pub array_subqueries: Vec<ArraySubquerySpec>,
     /// Optional recursive relation expansion.
-    #[serde(default)]
     pub recursive: Option<RecursiveSpec>,
     /// Optional output tuple element index for join queries.
     ///
     /// When set, join query output is projected to this tuple element
     /// instead of returning flattened combined rows.
-    #[serde(default)]
     pub result_element_index: Option<usize>,
     /// Optional scalar/grouped aggregate output.
+    pub aggregate: Option<AggregateSpec>,
+}
+
+/// Human-readable serde representation for the public query API.
+///
+/// Binary query preparation uses the native query codec rather than generic
+/// postcard serialization of this host-facing structure.
+#[derive(Serialize, Deserialize)]
+struct QueryHuman {
+    pub table: TableName,
+    #[serde(default)]
+    pub alias: Option<String>,
+    #[serde(default)]
+    pub branches: Vec<String>,
+    #[serde(default)]
+    pub joins: Vec<JoinSpec>,
+    #[serde(default = "default_disjuncts")]
+    pub disjuncts: Vec<Conjunction>,
+    #[serde(default)]
+    pub order_by: Vec<(String, SortDirection)>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+    #[serde(default)]
+    pub offset: usize,
+    #[serde(default)]
+    pub include_deleted: bool,
+    #[serde(default)]
+    pub select_columns: Option<Vec<String>>,
+    #[serde(default)]
+    pub array_subqueries: Vec<ArraySubquerySpec>,
+    #[serde(default)]
+    pub recursive: Option<RecursiveSpec>,
+    #[serde(default)]
+    pub result_element_index: Option<usize>,
     #[serde(default)]
     pub aggregate: Option<AggregateSpec>,
+}
+
+const NON_HUMAN_QUERY_CODEC_ERROR: &str =
+    "public Query does not support non-human serde codecs; use the native query codec";
+
+impl From<&Query> for QueryHuman {
+    fn from(query: &Query) -> Self {
+        Self {
+            table: query.table.clone(),
+            alias: query.alias.clone(),
+            branches: query.branches.clone(),
+            joins: query.joins.clone(),
+            disjuncts: query.disjuncts.clone(),
+            order_by: query.order_by.clone(),
+            limit: query.limit,
+            offset: query.offset,
+            include_deleted: query.include_deleted,
+            select_columns: query.select_columns.clone(),
+            array_subqueries: query.array_subqueries.clone(),
+            recursive: query.recursive.clone(),
+            result_element_index: query.result_element_index,
+            aggregate: query.aggregate.clone(),
+        }
+    }
+}
+
+impl From<QueryHuman> for Query {
+    fn from(query: QueryHuman) -> Self {
+        Self {
+            table: query.table,
+            alias: query.alias,
+            branches: query.branches,
+            joins: query.joins,
+            disjuncts: query.disjuncts,
+            order_by: query.order_by,
+            limit: query.limit,
+            offset: query.offset,
+            include_deleted: query.include_deleted,
+            select_columns: query.select_columns,
+            array_subqueries: query.array_subqueries,
+            recursive: query.recursive,
+            result_element_index: query.result_element_index,
+            aggregate: query.aggregate,
+        }
+    }
+}
+
+impl Serialize for Query {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        if serializer.is_human_readable() {
+            QueryHuman::from(self).serialize(serializer)
+        } else {
+            Err(serde::ser::Error::custom(NON_HUMAN_QUERY_CODEC_ERROR))
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Query {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        if deserializer.is_human_readable() {
+            QueryHuman::deserialize(deserializer).map(Query::from)
+        } else {
+            Err(serde::de::Error::custom(NON_HUMAN_QUERY_CODEC_ERROR))
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2131,7 +2224,7 @@ mod tests {
     }
 
     #[test]
-    fn query_round_trip_binary_serialization() {
+    fn query_binary_serialization_is_unsupported_when_it_contains_public_values() {
         let query = QueryBuilder::new("users")
             .filter_eq("org_id", Value::Integer(42))
             .filter_ge("score", Value::Integer(50))
@@ -2140,10 +2233,14 @@ mod tests {
             .limit(10)
             .build();
 
-        let bytes = postcard::to_allocvec(&query).expect("serialize query postcard");
-        let decoded: Query = postcard::from_bytes(&bytes).expect("deserialize query postcard");
-
-        assert_eq!(query, decoded);
+        assert_eq!(
+            postcard::to_allocvec(&query).unwrap_err(),
+            postcard::Error::SerdeSerCustom
+        );
+        assert_eq!(
+            postcard::from_bytes::<Query>(&[]).unwrap_err(),
+            postcard::Error::SerdeDeCustom
+        );
     }
 
     #[test]
@@ -2163,7 +2260,7 @@ mod tests {
     }
 
     #[test]
-    fn query_with_join_binary_serialization() {
+    fn query_with_join_binary_serialization_is_unsupported() {
         let query = QueryBuilder::new("users")
             .alias("u")
             .join("posts")
@@ -2172,10 +2269,10 @@ mod tests {
             .branch("main")
             .build();
 
-        let bytes = postcard::to_allocvec(&query).expect("serialize query postcard");
-        let decoded: Query = postcard::from_bytes(&bytes).expect("deserialize query postcard");
-
-        assert_eq!(query, decoded);
+        assert_eq!(
+            postcard::to_allocvec(&query).unwrap_err(),
+            postcard::Error::SerdeSerCustom
+        );
     }
 
     #[test]
@@ -2192,16 +2289,16 @@ mod tests {
     }
 
     #[test]
-    fn query_with_array_subquery_binary_serialization() {
+    fn query_with_array_subquery_binary_serialization_is_unsupported() {
         let query = QueryBuilder::new("orgs")
             .branch("main")
             .with_array("users", |b| b.from("users").correlate("id", "org_id"))
             .build();
 
-        let bytes = postcard::to_allocvec(&query).expect("serialize query postcard");
-        let decoded: Query = postcard::from_bytes(&bytes).expect("deserialize query postcard");
-
-        assert_eq!(query, decoded);
+        assert_eq!(
+            postcard::to_allocvec(&query).unwrap_err(),
+            postcard::Error::SerdeSerCustom
+        );
     }
 
     #[test]
@@ -2239,7 +2336,7 @@ mod tests {
     }
 
     #[test]
-    fn query_with_recursive_binary_serialization() {
+    fn query_with_recursive_binary_serialization_is_unsupported() {
         let query = QueryBuilder::new("teams")
             .select(&["team_id"])
             .with_recursive(|r| {
@@ -2251,10 +2348,10 @@ mod tests {
             .branch("main")
             .build();
 
-        let bytes = postcard::to_allocvec(&query).expect("serialize query postcard");
-        let decoded: Query = postcard::from_bytes(&bytes).expect("deserialize query postcard");
-
-        assert_eq!(query, decoded);
+        assert_eq!(
+            postcard::to_allocvec(&query).unwrap_err(),
+            postcard::Error::SerdeSerCustom
+        );
     }
 
     #[test]
@@ -2274,7 +2371,7 @@ mod tests {
     }
 
     #[test]
-    fn query_disjunction_binary_serialization() {
+    fn query_disjunction_binary_serialization_is_unsupported() {
         let query = QueryBuilder::new("users")
             .filter_eq("status", Value::Text("active".into()))
             .or()
@@ -2282,10 +2379,9 @@ mod tests {
             .branch("main")
             .build();
 
-        let bytes = postcard::to_allocvec(&query).expect("serialize query postcard");
-        let decoded: Query = postcard::from_bytes(&bytes).expect("deserialize query postcard");
-
-        assert_eq!(query, decoded);
-        assert_eq!(decoded.disjuncts.len(), 2);
+        assert_eq!(
+            postcard::to_allocvec(&query).unwrap_err(),
+            postcard::Error::SerdeSerCustom
+        );
     }
 }
