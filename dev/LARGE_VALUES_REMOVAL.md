@@ -72,6 +72,31 @@ file, stream, rope, content-store, or compatibility layer.
 4. Remove dependent tests, benchmarks, examples, docs, invariants, and stale
    dependencies; run broad verification.
 
+## Mechanical cut map
+
+The legacy feature is not confined to one crate or a single value enum. These
+are the source-owning boundaries to remove together, in dependency order:
+
+1. `crates/jazz/src/schema.rs`, `protocol.rs`, `protocol_limits.rs`,
+   `node/{content_store,text_oplog}.rs`, `text_merge.rs`, `merge_strategy.rs`,
+   `json_merge.rs`, and `markdown_strategy.rs` define the feature vocabulary.
+2. `node/mod.rs`, `node/ingest.rs`, `node/query_eval.rs`,
+   `node/query_engine/{input,output,schemas}.rs`, `node/physical.rs`,
+   `node/views.rs`, `peer.rs`, and `db.rs` consume that vocabulary on the core
+   read/write/sync paths. The cut must preserve their ordinary row path rather
+   than merely deleting imports.
+3. `tools/{client,public_schema,admin_catalogue_payload_codec,server/**}.rs`,
+   `crates/jazz-napi`, `crates/jazz-wasm`, and `packages/jazz-tools/**` expose
+   it through bindings, schema DSL/codegen, and browser/native file helpers.
+4. `SPEC/**`, `INVARIANTS.md`, sim/bench targets, examples, fixtures, and
+   generated wire frames document or test it and must be removed after the
+   compiler has no feature consumer left.
+
+The current cut cannot safely be made by deleting the owning files first:
+legacy materialization helpers are interleaved with ordinary catalogue, cache,
+and subscription methods in `node/mod.rs`; ingestion has the same shape. Use
+compiler-driven, function-bounded edits and a compile gate after each boundary.
+
 ## Intentional non-goals
 
 - No migration path for serialized large values: this branch intentionally breaks
