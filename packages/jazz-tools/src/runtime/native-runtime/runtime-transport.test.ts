@@ -185,9 +185,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(transportTicks).toBe(2);
   });
 
-  // TEST_BURNDOWN_TS: NativeRuntimeAdapter server transport > retries a pending edge wait when a websocket frame arrives without a native callback
-  // known red; tracked in TEST_BURNDOWN.md — websocket frame does not schedule the required second native transport tick.
-  it.skip("retries a pending edge wait when a websocket frame arrives without a native callback", async () => {
+  it("retries a pending edge wait when a websocket frame arrives without a native callback", async () => {
     let settled = false;
     let transportTicks = 0;
     const sockets: FakeWebSocket[] = [];
