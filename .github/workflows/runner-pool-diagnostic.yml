@@ -15,8 +15,6 @@ jobs:
   probe:
     runs-on: jazz-ci
     timeout-minutes: 10
-    env:
-      RUNNER_NAME: ${{ runner.name }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
