@@ -930,6 +930,37 @@ fn relation_snapshot_policy_schema() -> JazzSchema {
     ])
 }
 
+fn routed_nested_collector_schema() -> JazzSchema {
+    JazzSchema::new([
+        TableSchema::new("users", [ColumnSchema::new("name", ColumnType::String)]),
+        TableSchema::new(
+            "todos",
+            [
+                ColumnSchema::new("title", ColumnType::String),
+                ColumnSchema::new("owner_id", ColumnType::Uuid),
+            ],
+        )
+        .with_reference("owner_id", "users")
+        .with_read_policy(Policy::owner_only("todos", "owner_id")),
+        TableSchema::new(
+            "comments",
+            [
+                ColumnSchema::new("body", ColumnType::String),
+                ColumnSchema::new("todo_id", ColumnType::Uuid),
+            ],
+        )
+        .with_reference("todo_id", "todos"),
+        TableSchema::new(
+            "attachments",
+            [
+                ColumnSchema::new("name", ColumnType::String),
+                ColumnSchema::new("todo_id", ColumnType::Uuid),
+            ],
+        )
+        .with_reference("todo_id", "todos"),
+    ])
+}
+
 fn forward_include_schema() -> JazzSchema {
     JazzSchema::new([
         TableSchema::new(
@@ -1684,6 +1715,151 @@ fn maintained_array_collector_retains_authorized_parent_trees_incrementally() {
         bob_before,
         "unaffected parent tree is retained byte-for-byte"
     );
+    node.unsubscribe_groove_subscription(subscription.id());
+}
+
+#[test]
+fn maintained_nested_collector_keeps_two_route_keys_internal_across_sibling_arrays() {
+    // The root filter and owner policy contribute independent route keys. The
+    // nested siblings deliberately share the same routed todo so this covers
+    // lowering and maintained runtime, not only a hand-built Groove graph.
+    let schema = routed_nested_collector_schema();
+    let (_temp_dir, mut node) = open_node_with_schema(node(0x47), schema.clone());
+    let alice = user(0xa1);
+    let parent = row(0xa1);
+    let todo_row = row(0x11);
+    let comment = row(0x21);
+    let attachment = row(0x31);
+
+    node.commit_mergeable(
+        MergeableCommit::new("users", parent, 10)
+            .cells(BTreeMap::from([("name".to_owned(), v("alice"))])),
+    )
+    .unwrap();
+    node.commit_mergeable(
+        MergeableCommit::new("todos", todo_row, 11).cells(BTreeMap::from([
+            ("title".to_owned(), v("owned")),
+            ("owner_id".to_owned(), Value::Uuid(alice.0)),
+        ])),
+    )
+    .unwrap();
+    node.commit_mergeable(
+        MergeableCommit::new("comments", comment, 12).cells(BTreeMap::from([
+            ("body".to_owned(), v("first comment")),
+            ("todo_id".to_owned(), Value::Uuid(todo_row.0)),
+        ])),
+    )
+    .unwrap();
+    node.commit_mergeable(
+        MergeableCommit::new("attachments", attachment, 13).cells(BTreeMap::from([
+            ("name".to_owned(), v("first attachment")),
+            ("todo_id".to_owned(), Value::Uuid(todo_row.0)),
+        ])),
+    )
+    .unwrap();
+
+    let shape = Query::from("users")
+        .filter(eq(col("name"), param("rootName")))
+        .array_subquery(
+            ArraySubquery::new("todosViaOwner", "todos", "owner_id", "id")
+                .select(["title"])
+                .nested(
+                    ArraySubquery::new("commentsViaTodo", "comments", "todo_id", "id")
+                        .select(["body"]),
+                )
+                .nested(
+                    ArraySubquery::new(
+                        "attachmentsViaTodo",
+                        "attachments",
+                        "todo_id",
+                        "id",
+                    )
+                    .select(["name"]),
+                ),
+        )
+        .validate(&schema)
+        .unwrap();
+    let binding = shape
+        .bind(BTreeMap::from([("rootName".to_owned(), v("alice"))]))
+        .unwrap();
+    let (subscription, mut maintained, terminal_schemas, transitions, tables) = node
+        .open_seeded_maintained_subscription_view(
+            &shape,
+            &binding,
+            alice,
+            DurabilityTier::Local,
+            &crate::protocol::ReadViewSpec::default(),
+        )
+        .unwrap();
+    assert_eq!(transitions.structured_app_row_changes, BTreeSet::from([parent]));
+
+    let root = maintained
+        .structured_app_row(parent)
+        .expect("collector retained routed root");
+    let Value::Array(todos) = root.get("todosViaOwner").unwrap() else {
+        panic!("todos must be an array");
+    };
+    let Value::Record(todo) = &todos[0] else {
+        panic!("todos must contain records");
+    };
+    assert_eq!(
+        todo.descriptor()
+            .fields()
+            .iter()
+            .map(|field| field.name.as_deref())
+            .collect::<Vec<_>>(),
+        vec![
+            Some("row_uuid"),
+            Some("title"),
+            Some("commentsViaTodo"),
+            Some("attachmentsViaTodo"),
+        ],
+        "route keys must remain lowering/runtime metadata, not nested app fields"
+    );
+    for field in ["commentsViaTodo", "attachmentsViaTodo"] {
+        let Value::Array(children) = todo.get(field).unwrap() else {
+            panic!("{field} must be an array");
+        };
+        assert_eq!(children.len(), 1, "each sibling array retains its own child");
+    }
+
+    // A new comment changes only that sibling content, preserving the
+    // attachment subtree and the one rendered parent identity.
+    node.commit_mergeable(
+        MergeableCommit::new("comments", row(0x22), 14).cells(BTreeMap::from([
+            ("body".to_owned(), v("second comment")),
+            ("todo_id".to_owned(), Value::Uuid(todo_row.0)),
+        ])),
+    )
+    .unwrap();
+    node.flush_query_runtime().unwrap();
+    let mut changed_roots = BTreeSet::new();
+    while let Ok(deltas) = subscription.try_recv() {
+        changed_roots.extend(
+            maintained
+                .apply_multisink_deltas(deltas, &terminal_schemas, &tables, &node.node_aliases)
+                .unwrap()
+                .structured_app_row_changes,
+        );
+    }
+    assert_eq!(changed_roots, BTreeSet::from([parent]));
+    let root = maintained
+        .structured_app_row(parent)
+        .expect("updated routed root remains retained");
+    let Value::Array(todos) = root.get("todosViaOwner").unwrap() else {
+        panic!("todos must be an array");
+    };
+    let Value::Record(todo) = &todos[0] else {
+        panic!("todos must contain records");
+    };
+    let Value::Array(comments) = todo.get("commentsViaTodo").unwrap() else {
+        panic!("comments must be an array");
+    };
+    let Value::Array(attachments) = todo.get("attachmentsViaTodo").unwrap() else {
+        panic!("attachments must be an array");
+    };
+    assert_eq!(comments.len(), 2);
+    assert_eq!(attachments.len(), 1, "sibling route grouping remains isolated");
     node.unsubscribe_groove_subscription(subscription.id());
 }
 

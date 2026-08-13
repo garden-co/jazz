@@ -225,6 +225,22 @@ fn collect_tree_schema() -> DatabaseSchema {
     .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))])
 }
 
+fn routed_collect_tree_schema() -> DatabaseSchema {
+    DatabaseSchema::new([TableSchema::new(
+        "routed_tree",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("root", ColumnType::U64),
+            ColumnSchema::new("route", ColumnType::U64),
+            ColumnSchema::new("child", ColumnType::U64),
+            ColumnSchema::new("child_order", ColumnType::U64),
+            ColumnSchema::new("grandchild", ColumnType::U64),
+            ColumnSchema::new("grandchild_order", ColumnType::U64),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))])
+}
+
 fn collect_tree_values(
     [
         id,
@@ -298,6 +314,34 @@ fn collect_tree_graph() -> GraphBuilder {
                 TopByLimit::Finite(1),
             ),
         ],
+    )
+}
+
+fn routed_collect_tree_graph() -> GraphBuilder {
+    GraphBuilder::collect_by_tree(
+        GraphBuilder::table("routed_tree"),
+        ["root", "route"],
+        [CollectByField::named("root")],
+        [CollectBySlotBuilder::new(
+            ["root", "route"],
+            [CollectByField::named("child")],
+            "children",
+            [CollectBySlotBuilder::new(
+                ["child", "route"],
+                [CollectByField::named("grandchild")],
+                "grandchildren",
+                [],
+                [TopByOrder::asc("grandchild_order")],
+                ["grandchild"],
+                0,
+                TopByLimit::Unbounded,
+            )],
+            [TopByOrder::asc("child_order")],
+            ["child"],
+            0,
+            TopByLimit::Unbounded,
+        )
+        .with_owner_key_cols(["route"])],
     )
 }
 
@@ -5456,6 +5500,103 @@ fn collect_by_tree_renders_sibling_slots_and_grandchildren_with_independent_wind
             expected
         );
     }
+}
+
+#[test]
+fn collect_by_tree_keeps_routed_owner_keys_internal_and_isolated() {
+    let storage = MemoryStorage::new(&["routed_tree"]);
+    let mut database = Database::new(routed_collect_tree_schema(), storage).unwrap();
+    let subscription = database
+        .subscribe_one_sink(routed_collect_tree_graph())
+        .unwrap();
+    assert!(subscription.recv().unwrap().is_empty());
+
+    // Two bindings deliberately share rendered root and child identities. The
+    // route must still keep their grandchildren isolated, while staying out
+    // of every rendered record descriptor.
+    let mut batch = database.open_batch();
+    batch.insert(
+        "routed_tree",
+        vec![
+            Value::U64(1),
+            Value::U64(10),
+            Value::U64(1),
+            Value::U64(20),
+            Value::U64(1),
+            Value::U64(100),
+            Value::U64(1),
+        ],
+    );
+    batch.insert(
+        "routed_tree",
+        vec![
+            Value::U64(2),
+            Value::U64(10),
+            Value::U64(2),
+            Value::U64(20),
+            Value::U64(1),
+            Value::U64(200),
+            Value::U64(1),
+        ],
+    );
+    database.commit_batch(batch).unwrap();
+    let rows = subscription.recv().unwrap().to_values().unwrap();
+    assert_eq!(rows.len(), 2);
+
+    let grandchildren = rows
+        .iter()
+        .map(|(root, weight)| {
+            assert_eq!(*weight, 1);
+            assert_eq!(root.len(), 2, "route must not be a root output field");
+            let Value::Array(children) = &root[1] else {
+                panic!("children must be an array");
+            };
+            assert_eq!(children.len(), 1);
+            let Value::Record(child) = &children[0] else {
+                panic!("children must contain records");
+            };
+            let child = child.to_values().unwrap();
+            assert_eq!(child.len(), 2, "route must not be a child output field");
+            let Value::Array(grandchildren) = &child[1] else {
+                panic!("grandchildren must be an array");
+            };
+            let Value::Record(grandchild) = &grandchildren[0] else {
+                panic!("grandchildren must contain records");
+            };
+            assert_eq!(grandchild.to_values().unwrap().len(), 1);
+            grandchild.to_values().unwrap()[0].clone()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(grandchildren, vec![Value::U64(100), Value::U64(200)]);
+}
+
+#[test]
+fn collect_by_tree_rejects_non_grouping_internal_owner_key() {
+    let graph = GraphBuilder::collect_by_tree(
+        GraphBuilder::table("routed_tree"),
+        ["root", "route"],
+        [CollectByField::named("root")],
+        [CollectBySlotBuilder::new(
+            ["root", "route"],
+            [CollectByField::named("child")],
+            "children",
+            [],
+            [TopByOrder::asc("child_order")],
+            ["child"],
+            0,
+            TopByLimit::Unbounded,
+        )
+        // A non-grouping raw input is not stable owner metadata and must not
+        // become an implicit hidden channel.
+        .with_owner_key_cols(["grandchild"])],
+    );
+    let storage = MemoryStorage::new(&["routed_tree"]);
+    let mut database = Database::new(routed_collect_tree_schema(), storage).unwrap();
+    assert!(matches!(
+        database.subscribe_one_sink(graph),
+        Err(Error::IvmRuntime(IvmRuntimeError::InvalidCollectBy(message)))
+            if message == "a slot owner key must also be a grouping field"
+    ));
 }
 
 #[test]

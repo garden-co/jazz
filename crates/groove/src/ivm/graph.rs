@@ -266,6 +266,14 @@ pub struct CollectByBuilder {
 pub struct CollectBySlotBuilder {
     /// Source fields identifying the parent record that owns this slot.
     pub group_cols: Vec<FieldRef>,
+    /// Additional source fields carried with a child solely so nested slots
+    /// can address that child. These fields are intentionally not part of the
+    /// child projection or its rendered descriptor.
+    ///
+    /// Every owner-key field must also be a grouping field for this slot. That
+    /// makes it stable for the child record it accompanies and prevents this
+    /// metadata channel from changing the observable collection shape.
+    pub owner_key_cols: Vec<FieldRef>,
     pub child_fields: Vec<CollectByField>,
     pub collection_field: String,
     pub slots: Vec<CollectBySlotBuilder>,
@@ -298,6 +306,7 @@ impl CollectBySlotBuilder {
     ) -> Self {
         Self {
             group_cols: group_cols.into_iter().map(FieldRef::name).collect(),
+            owner_key_cols: Vec::new(),
             child_fields: child_fields.into_iter().collect(),
             collection_field: collection_field.into(),
             slots: slots.into_iter().collect(),
@@ -313,6 +322,18 @@ impl CollectBySlotBuilder {
     /// this slot. Unmarked records still may serve as parent anchors.
     pub fn with_presence_col(mut self, presence_col: impl Into<String>) -> Self {
         self.presence_col = Some(FieldRef::name(presence_col));
+        self
+    }
+
+    /// Carry non-rendered grouping fields to nested slots.
+    ///
+    /// This is for execution metadata such as a maintained query's route key;
+    /// it deliberately does not alter the child record descriptor.
+    pub fn with_owner_key_cols(
+        mut self,
+        owner_key_cols: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.owner_key_cols = owner_key_cols.into_iter().map(FieldRef::name).collect();
         self
     }
 }

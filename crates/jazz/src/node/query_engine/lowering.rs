@@ -6761,6 +6761,11 @@ fn collect_slot_builder(
         slot.offset,
         slot.limit,
     )
+    // Route fields identify a maintained binding, but are not application
+    // fields on nested records. Carry them only as execution owner keys so a
+    // grandchild can still group by the same binding without exposing them in
+    // the nested descriptor.
+    .with_owner_key_cols(route_fields.iter().cloned())
     .with_presence_col(&slot.presence_input)
 }
 

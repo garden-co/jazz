@@ -9065,7 +9065,25 @@ fn collect_by_slots(
                 .iter()
                 .map(|field| field.field_idx)
                 .collect::<Vec<_>>();
-            let slots = collect_by_slots(input, &builder.slots, &child_indices, depth + 1)?;
+            // Nested slots address the raw input record selected for this
+            // child, not its rendered descriptor. Most owner keys are child
+            // projection fields, but maintained routing keys must remain
+            // internal: carrying them through the app descriptor would leak
+            // binding metadata. `owner_key_cols` is the explicit internal
+            // channel for those stable grouping keys.
+            let mut owner_indices = child_indices.clone();
+            for owner_key in &builder.owner_key_cols {
+                let owner_key_index = resolve_field_ref(input, owner_key)?;
+                if !group_field_indices.contains(&owner_key_index) {
+                    return Err(IvmRuntimeError::InvalidCollectBy(
+                        "a slot owner key must also be a grouping field".into(),
+                    ));
+                }
+                if !owner_indices.contains(&owner_key_index) {
+                    owner_indices.push(owner_key_index);
+                }
+            }
+            let slots = collect_by_slots(input, &builder.slots, &owner_indices, depth + 1)?;
             Ok(CollectBySlot {
                 group_fields: group_field_indices
                     .iter()
