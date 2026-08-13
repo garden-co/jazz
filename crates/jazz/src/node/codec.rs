@@ -41,6 +41,27 @@ groove::define_record! {
     }
 }
 
+// Fixed physical carrier for the shared deletion-history relation. The logical
+// `VersionRow` remains a `RegisterRowRecord`; this wrapper exists only at the
+// storage boundary where lineage/table routing is attached.
+groove::define_record! {
+    pub(super) struct SharedDeletionHistoryRowRecord {
+        0 => branch_kind: u8,
+        1 => branch_id: uuid::Uuid,
+        2 => physical_table_id: u64,
+        3 => row_uuid: RowUuid,
+        4 => tx_time: TxTime,
+        5 => tx_node_id: NodeAlias,
+        6 => schema_version: SchemaVersionAlias,
+        7 => parents: ParentRefs,
+        8 => created_by: AuthorId,
+        9 => created_at: TxTime,
+        10 => updated_by: AuthorId,
+        11 => updated_at: TxTime,
+        12 => _deletion: DeletionEvent,
+    }
+}
+
 groove::define_record! {
     pub(super) struct GlobalCurrentRowRecord {
         0 => row_uuid: RowUuid,

@@ -1358,6 +1358,22 @@ fn physical_deletion_register_spans_renamed_schemas_and_reopens() {
             .count(),
         2
     );
+    // Recovery must include the shared deletion history in HLC reconstruction:
+    // a post-reopen deletion is a new version, not a stale-key collision.
+    reopened
+        .commit_mergeable(
+            MergeableCommit::new("tasks", row_uuid, 13).deletion(DeletionEvent::Deleted),
+        )
+        .unwrap();
+    assert_eq!(
+        reopened
+            .query_table_versions("tasks")
+            .unwrap()
+            .into_iter()
+            .filter(|version| version.layer() == VersionLayer::Deletion)
+            .count(),
+        3
+    );
 }
 
 #[test]
