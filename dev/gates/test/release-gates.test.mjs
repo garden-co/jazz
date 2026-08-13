@@ -70,3 +70,16 @@ test("release starter gate exercises packaged artifacts through create-jazz-e2e"
   assert.match(e2e, /--tarball-dir "\$GITHUB_WORKSPACE\/_e2e-state\/tarballs"/);
   assert.match(e2e, /--verbose --keep/);
 });
+
+test("release starter gate reuses its pnpm store across the prepare and matrix jobs", () => {
+  const expectedCache =
+    /name: Cache pnpm store[\s\S]*path: \$\{\{ steps\.pnpm-store\.outputs\.path \}\}[\s\S]*key: starters-e2e-pnpm-\$\{\{ runner\.os \}\}-\$\{\{ hashFiles\('pnpm-lock\.yaml'\) \}\}/;
+  for (const source of [job("prepare", "e2e"), job("e2e")]) {
+    assert.match(source, /name: Get pnpm store directory/);
+    assert.match(source, expectedCache);
+    assert.ok(
+      source.indexOf("name: Cache pnpm store") < source.indexOf("pnpm install --frozen-lockfile"),
+      "restore the pnpm store before installing dependencies",
+    );
+  }
+});

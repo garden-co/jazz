@@ -70,9 +70,9 @@ jobs:
       # count. Builds reuse the workspace test build above.
       - name: Differential gates
         run: |
-          cargo test -p jazz --test incremental_delivery_canary
-          cargo test -p jazz --test shared_coverage_differential
-          cargo test -p jazz --test warm_reopen_differential
+          # The three integration-test binaries above are already selected by
+          # the workspace runner's `--tests` argument. Keep the M3 oracle
+          # separate: its CI seed count is wider than the default test run.
           JAZZ_SEED_COUNT=50 cargo test -p jazz m3_maintained_one_shot_differential_oracle
 
   test-ts:

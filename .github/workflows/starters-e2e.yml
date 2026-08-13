@@ -54,6 +54,19 @@ jobs:
           node-version-file: .nvmrc
 
       - run: corepack enable
+
+      - name: Get pnpm store directory
+        id: pnpm-store
+        run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache pnpm store
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: starters-e2e-pnpm-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: |
+            starters-e2e-pnpm-${{ runner.os }}-
+
       - run: pnpm install --frozen-lockfile
 
       - name: Install Rust prerequisites
@@ -136,6 +149,19 @@ jobs:
           node-version-file: .nvmrc
 
       - run: corepack enable
+
+      - name: Get pnpm store directory
+        id: pnpm-store
+        run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache pnpm store
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: starters-e2e-pnpm-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: |
+            starters-e2e-pnpm-${{ runner.os }}-
+
       - run: pnpm install --frozen-lockfile
 
       - name: Restore prebuilt artifacts
