@@ -20,6 +20,10 @@ const packageBuild = fs.readFileSync(
   "utf8",
 );
 const packageJson = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
+const toolBundleValidator = fs.readFileSync(
+  path.join(root, "dev/ci/validate-tool-bundle.mjs"),
+  "utf8",
+);
 const jobs = (() => {
   const jobsStart = workflow.indexOf("\njobs:\n");
   assert.notEqual(jobsStart, -1, "missing jobs section");
@@ -107,7 +111,13 @@ test("build setup scopes mutable pnpm and sccache state to the agent temp direct
   assert.match(setupBuildAction, serverSocketExport);
   const stickyMount = setupBuildAction.indexOf("name: Mount sccache sticky disk");
   const serverStart = setupBuildAction.indexOf("sccache --start-server");
-  const environmentExport = setupBuildAction.indexOf('echo "RUSTC_WRAPPER=sccache"');
+  const fallbackBranch = setupBuildAction.slice(
+    setupBuildAction.indexOf("else\n          # Hosted jobs"),
+  );
+  const environmentExport = setupBuildAction.indexOf(
+    'echo "RUSTC_WRAPPER=sccache"',
+    setupBuildAction.indexOf("else\n          # Hosted jobs"),
+  );
   assert.ok(stickyMount !== -1 && serverStart !== -1 && environmentExport !== -1);
   assert.ok(
     stickyMount < serverStart && serverStart < environmentExport,
@@ -175,6 +185,32 @@ test("Rust tool installation is isolated from shared self-hosted runner state", 
   );
 });
 
+test("trusted runners consume the validated immutable tool bundle", () => {
+  const fallbackBranch = setupBuildAction.slice(
+    setupBuildAction.indexOf("else\n          # Hosted jobs"),
+  );
+  assert.match(setupBuildAction, /node dev\/ci\/validate-tool-bundle\.mjs/);
+  assert.match(setupBuildAction, /steps\.provisioned-tools\.outputs\.active != 'true'/);
+  assert.match(installRustTool, /steps\.provisioned-tool\.outputs\.active != 'true'/);
+  assert.match(toolBundleValidator, /BUNDLE_ROOT = "\/opt\/jazz-ci\/toolchains\/v1"/);
+  for (const value of ["1.93.1", "0.15.0", "0.9.143", "0.13.1", "0.2.117"]) {
+    assert.match(toolBundleValidator, new RegExp(value.replaceAll(".", "\\.")));
+  }
+  assert.match(setupBuildAction, /sccache --show-stats/);
+  assert.match(
+    setupBuildAction,
+    /echo "RUSTC=\/opt\/jazz-ci\/toolchains\/v1\/rustup\/toolchains\/1\.93\.1-x86_64-unknown-linux-gnu\/bin\/rustc" >> "\$\{GITHUB_ENV\}"/,
+  );
+  assert.match(setupBuildAction, /Jobs are clients only/);
+  assert.doesNotMatch(
+    setupBuildAction.match(
+      /if \[\[ '\$\{\{ steps\.provisioned-tools\.outputs\.active \}\}' == 'true' \]\]; then[\s\S]*?else/,
+    )?.[0] ?? "",
+    /sccache --(?:start|stop)-server/,
+  );
+  assert.match(fallbackBranch, /sccache --start-server/);
+});
+
 test("Rust CI does not rerun differential integration binaries selected by the workspace test gate", () => {
   const rust = job("test-rust", "test-ts");
 
@@ -197,6 +233,11 @@ test("Rust CI does not rerun differential integration binaries selected by the w
 
 test("the TypeScript CI job checks the integration workspace before TypeScript artifacts", () => {
   const typescript = job("test-ts");
+
+  assert.match(
+    setupBuildAction,
+    /echo "JAZZ_TEST_ARTIFACT_LOCK_PATH=\$\{RUNNER_TEMP\}\/jazz-test-artifacts\.lock" >> "\$\{GITHUB_ENV\}"/,
+  );
 
   // Keeping these phases together avoids a separate checkout/setup phase.
   assert.doesNotMatch(workflow, /^  build-integration:/m);
@@ -307,7 +348,7 @@ test("CI runs the workflow contract test through its package script", () => {
   const lint = job("lint");
   assert.equal(
     packageJson.scripts["test:ci-workflow"],
-    "node --test dev/gates/test/ci-rust-throughput.test.mjs dev/gates/test/test-artifact-pipeline.test.mjs dev/gates/test/release-gates.test.mjs",
+    "node --test dev/gates/test/ci-rust-throughput.test.mjs dev/gates/test/ci-tool-bundle.test.mjs dev/gates/test/test-artifact-pipeline.test.mjs dev/gates/test/release-gates.test.mjs && node dev/gates/test-burndown-ts.mjs",
   );
   assert.match(lint, /run: pnpm test:ci-workflow/);
 });

@@ -9,11 +9,30 @@ inputs:
 runs:
   using: composite
   steps:
+    - name: Detect provisioned Rust tool
+      id: provisioned-tool
+      shell: bash
+      run: |
+        if [[ -f /opt/jazz-ci/toolchains/v1/manifest.json ]]; then
+          node dev/ci/validate-tool-bundle.mjs >/dev/null
+          case '${{ inputs.tool }}' in
+            sccache|cargo-nextest@0.9.143|wasm-pack@0.13.1)
+              echo "active=true" >> "${GITHUB_OUTPUT}"
+              ;;
+            *)
+              echo "active=false" >> "${GITHUB_OUTPUT}"
+              ;;
+          esac
+        else
+          echo "active=false" >> "${GITHUB_OUTPUT}"
+        fi
+
     # install-action stages downloads under $HOME/.install-action and can use
     # $CARGO_HOME/bin for Cargo-crate fallback. Self-hosted runner agents can
     # share HOME/CARGO_HOME, so isolate both mutable roots to this job. These
     # step-scoped variables do not change later Cargo registry/cache use.
-    - uses: taiki-e/install-action@3235f8901fd37ffed0052b276cec25a362fb82e9 # v2
+    - if: steps.provisioned-tool.outputs.active != 'true'
+      uses: taiki-e/install-action@3235f8901fd37ffed0052b276cec25a362fb82e9 # v2
       with:
         tool: ${{ inputs.tool }}
       env:

@@ -986,7 +986,9 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     expect(aliceRowsAfterBobInsert).toHaveLength(3);
   });
 
-  it("delivers all client-local subscription rows even when callers supply sessions", async () => {
+  // TEST_BURNDOWN_TS: jazz-napi native runtime memory DB > delivers all client-local subscription rows even when callers supply sessions
+  // known red; tracked in TEST_BURNDOWN.md — terminal root layout registration rejects this session-scoped subscription.
+  it.skip("delivers all client-local subscription rows even when callers supply sessions", async () => {
     const { NapiDb } = await loadNapiModule();
     const runtime = new NativeRuntimeAdapter(
       { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },

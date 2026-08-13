@@ -1,4 +1,4 @@
-# TEST BURNDOWN — QUARANTINED RUST REDS
+# TEST BURNDOWN — QUARANTINED KNOWN REDS
 
 Measured on `e707640a6` by CI-equivalent cargo-nextest: **34 failures, 10 timeouts, 7 pre-existing ignores**.
 
@@ -13,9 +13,9 @@ Receipts remain local test artifacts rather than committed bulk output. The fina
 
 ## Exit rule
 
-A future fix must remove both the matching `#[ignore = "known red; tracked in TEST_BURNDOWN.md"]` and this entry, then include a focused green receipt. Never delete or weaken the test. New known reds require both an annotation and one row. The executable gate enforces the active annotation/entry bijection.
+A future fix must remove both the matching visible skip marker and this entry, then include a focused green receipt. Never delete or weaken the test. New known reds require both a source annotation and one row. Executable gates enforce the active annotation/entry bijection.
 
-## Active quarantine (44)
+## Active Rust quarantine (44)
 
 | Test                                                                                                                     | Definition                                            | Status        | Category                    | Theory                                                        | Owner  |
 | ------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------- | ------------- | --------------------------- | ------------------------------------------------------------- | ------ |
@@ -64,7 +64,7 @@ A future fix must remove both the matching `#[ignore = "known red; tracked in TE
 | `jazz::catalogue_sync_integration::table_rename_new_client_can_read_old_rows`                                            | `crates/jazz/tests/catalogue_sync_integration.rs`     | TIMEOUT (60s) | Schema/lens evolution       | Lens translation or historical coverage is non-settling.      | Anselm |
 | `jazz::catalogue_sync_integration::table_rename_update_and_delete_copy_on_write`                                         | `crates/jazz/tests/catalogue_sync_integration.rs`     | TIMEOUT (60s) | Schema/lens evolution       | Lens translation or historical coverage is non-settling.      | Anselm |
 
-## Pre-existing/dormant ignores (7; separately registered)
+## Pre-existing/dormant Rust ignores (7; separately registered)
 
 | Test                                                                                             | Definition                                    | Existing reason            |
 | ------------------------------------------------------------------------------------------------ | --------------------------------------------- | -------------------------- |
@@ -75,3 +75,20 @@ A future fix must remove both the matching `#[ignore = "known red; tracked in TE
 | `jazz::sync_telemetry_otel::sync_layers_emit_otel_spans`                                         | `crates/jazz/tests/sync_telemetry_otel.rs`    | needs OTLP collector       |
 | `groove::db::tests::indexed_batch_commit_timing_receipt_20k_and_single_row`                      | `crates/groove/src/db/tests.rs`               | timing receipt             |
 | `jazz::node::tests::harness::policy_graph_perf_dropdown_entry_reset_ingest_timing_receipt`       | `crates/jazz/src/node/tests/sync.rs`          | timing receipt             |
+
+## Active TypeScript/browser quarantine (10)
+
+Measured on CI run `31669333671` at `30dc070e1`: 8 Node test failures and 2 Chromium failures. The two unrelated load flakes observed in the same run (the artifact-lock timing test and the Rust teardown abort) are deliberately not quarantined here.
+
+| Test                                                                                                                           | Definition                                                              | Status  | Category                     | Failure signature / theory                                                                                    | Owner  |
+| ------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------- | ------- | ---------------------------- | ------------------------------------------------------------------------------------------------------------- | ------ |
+| `jazz-napi native runtime memory DB > delivers all client-local subscription rows even when callers supply sessions`           | `packages/jazz-tools/src/runtime/napi.core.test.ts`                     | FAIL    | Native terminal layout       | `terminal operation references unknown root layout`; session-scoped terminal layout registration diverges.    | Anselm |
+| `createPolicyTestApp > creates a test app from an app definition and compiled permissions`                                     | `packages/jazz-tools/src/testing/index.test.ts`                         | FAIL    | Native schema decoding       | `Found an Option discriminant that wasn't 0 or 1`; compiled policy fixture decoding diverges.                 | Anselm |
+| `createPolicyTestApp > exposes expectAllowed and expectDenied on session-scoped test dbs`                                      | `packages/jazz-tools/src/testing/index.test.ts`                         | FAIL    | Native schema decoding       | `Found an Option discriminant that wasn't 0 or 1`; compiled policy fixture decoding diverges.                 | Anselm |
+| `deep-include reactivity > fires when a depth-1 via dependency is inserted (baseline)`                                         | `packages/jazz-tools/tests/ts-dsl/deep-include-reactivity.test.ts`      | FAIL    | Nested subscription delivery | Times out waiting for fresh `user_checks`; depth-1 include update is not delivered.                           | Anselm |
+| `TS Query API (direct reads) > select > subscribeAll preserves projected root columns with includes`                           | `packages/jazz-tools/tests/ts-dsl/query-api.test.ts`                    | TIMEOUT | Projected-root subscription  | Times out after 5s; include subscription does not settle.                                                     | Anselm |
+| `TS Query API (mergeable-tx reads) > select > subscribeAll preserves projected root columns with includes`                     | `packages/jazz-tools/tests/ts-dsl/query-api.test.ts`                    | TIMEOUT | Projected-root subscription  | Times out after 5s; include subscription does not settle.                                                     | Anselm |
+| `TS Query API (exclusive-tx reads) > select > subscribeAll preserves projected root columns with includes`                     | `packages/jazz-tools/tests/ts-dsl/query-api.test.ts`                    | TIMEOUT | Projected-root subscription  | Times out after 5s; include subscription does not settle.                                                     | Anselm |
+| `NativeRuntimeAdapter server transport > retries a pending edge wait when a websocket frame arrives without a native callback` | `packages/jazz-tools/src/runtime/native-runtime/runtime.test.ts`        | FAIL    | Native transport wake        | Expected 2 transport ticks before the frame but observed 1; frame does not schedule the retry.                | Anselm |
+| `chromium > raw websocket private read gate > converts a private chat invite code into normal membership visibility`           | `packages/jazz-tools/tests/browser/db.private-read-gate.server.test.ts` | FAIL    | Browser private invite       | `Bob should subscribe to private seed messages through normal membership` times out after 15s; `lastRows=[]`. | Anselm |
+| `chromium > History & Conflict Management > fresh db sees converged state`                                                     | `packages/jazz-tools/tests/browser/history-conflict.test.ts`            | TIMEOUT | Browser conflict convergence | `Charlie sees converged title` times out after 20s; fresh peer lacks the converged conflicting row.           | Anselm |
