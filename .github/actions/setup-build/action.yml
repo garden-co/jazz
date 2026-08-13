@@ -64,6 +64,9 @@ runs:
       with:
         version: 10.14.0
         run_install: false
+        # Self-hosted runner agents may share HOME. Keep action-setup's
+        # mutable installation directory scoped to this job's temporary dir.
+        dest: ${{ runner.temp }}/setup-pnpm
 
     - name: Set up Node.js
       if: inputs.setup-node == 'true'
@@ -118,14 +121,10 @@ runs:
     - name: Export sccache environment
       if: inputs.sccache == 'true' && runner.os == 'Linux'
       shell: bash
-      env:
-        SCCACHE_STICKY_DISK: ${{ inputs.sccache-sticky-disk }}
       run: |
-        if [[ "${SCCACHE_STICKY_DISK}" == "true" ]]; then
-          sccache_dir="${RUNNER_TEMP}/sccache"
-        else
-          sccache_dir="${HOME}/.cache/sccache"
-        fi
+        # SCCACHE_DIR also owns the local daemon/socket state. RUNNER_TEMP is
+        # unique to an agent; HOME may be shared by concurrent agents.
+        sccache_dir="${RUNNER_TEMP}/sccache"
         mkdir -p "${sccache_dir}"
         echo "RUSTC_WRAPPER=sccache" >> "${GITHUB_ENV}"
         echo "SCCACHE_DIR=${sccache_dir}" >> "${GITHUB_ENV}"

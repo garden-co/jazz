@@ -7,14 +7,51 @@ import test from "node:test";
 
 const root = path.resolve(import.meta.dirname, "../../..");
 const workflow = fs.readFileSync(path.join(root, ".github/workflows/ci.yml"), "utf8");
+const setupBuildAction = fs.readFileSync(
+  path.join(root, ".github/actions/setup-build/action.yml"),
+  "utf8",
+);
 const packageJson = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
-const job = (name, nextName) => {
-  const start = workflow.indexOf(`  ${name}:`);
-  const end = nextName ? workflow.indexOf(`  ${nextName}:`, start + 1) : workflow.length;
-  assert.notEqual(start, -1, `missing ${name} job`);
-  assert.notEqual(end, -1, `missing boundary after ${name} job`);
-  return workflow.slice(start, end);
+const jobs = (() => {
+  const jobsStart = workflow.indexOf("\njobs:\n");
+  assert.notEqual(jobsStart, -1, "missing jobs section");
+  const matches = [...workflow.slice(jobsStart).matchAll(/^  ([A-Za-z0-9_-]+):\s*$/gm)];
+  assert.ok(matches.length > 0, "CI workflow must define at least one job");
+  return new Map(
+    matches.map((match, index) => [
+      match[1],
+      workflow.slice(
+        jobsStart + match.index,
+        index + 1 < matches.length ? jobsStart + matches[index + 1].index : workflow.length,
+      ),
+    ]),
+  );
+})();
+const job = (name) => {
+  const source = jobs.get(name);
+  assert.notEqual(source, undefined, `missing ${name} job`);
+  return source;
 };
+const trustedRunnerExpression =
+  "${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || github.event.pull_request.user.login == 'dependabot[bot]') && 'blacksmith-4vcpu-ubuntu-2404' || 'jazz-ci' }}";
+const untrustedPullRequestPredicate =
+  "github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || github.event.pull_request.user.login == 'dependabot[bot]')";
+const assertUsesTrustedRunnerPool = (jobName, jobSource) => {
+  assert.ok(
+    jobSource.includes(`runs-on: ${trustedRunnerExpression}`),
+    `${jobName} must use jazz-ci for pushes and trusted PRs, while fork PRs use Blacksmith`,
+  );
+  assert.doesNotMatch(
+    jobSource,
+    /^    runs-on: jazz-ci$/m,
+    `${jobName} must not run fork or Dependabot PRs unconditionally on jazz-ci`,
+  );
+};
+const expectedRunner = ({ eventName, headRepository, repository, pullRequestUser }) =>
+  eventName === "pull_request" &&
+  (headRepository !== repository || pullRequestUser === "dependabot[bot]")
+    ? "blacksmith-4vcpu-ubuntu-2404"
+    : "jazz-ci";
 const integrationCheckStep = (typescriptJob) => {
   const start = typescriptJob.indexOf("name: Check integration workspace");
   assert.notEqual(start, -1, "missing integration workspace check");
@@ -38,8 +75,8 @@ const assertIntegrationCheckIsGating = (typescriptJob) => {
 };
 
 test("Rust CI uses pinned prebuilt tools without charging Rust-only jobs for wasm-pack", () => {
-  const lint = job("lint", "test-rust");
-  const rust = job("test-rust", "test-ts");
+  const lint = job("lint");
+  const rust = job("test-rust");
   const typescript = job("test-ts");
 
   assert.doesNotMatch(workflow, /cargo install cargo-nextest/);
@@ -50,11 +87,20 @@ test("Rust CI uses pinned prebuilt tools without charging Rust-only jobs for was
   assert.match(typescript, /tool: wasm-pack@0\.13\.1/);
 });
 
-test("the single trusted-runner job checks the integration workspace before TypeScript artifacts", () => {
+test("build setup scopes mutable pnpm and sccache state to the agent temp directory", () => {
+  assert.match(setupBuildAction, /dest: \$\{\{ runner\.temp \}\}\/setup-pnpm/);
+  assert.match(setupBuildAction, /sccache_dir="\$\{RUNNER_TEMP\}\/sccache"/);
+  assert.doesNotMatch(
+    setupBuildAction,
+    /\$\{HOME\}\/(?:setup-pnpm|\.cache\/sccache)/,
+    "shared HOME must not hold mutable pnpm or sccache state",
+  );
+});
+
+test("the TypeScript CI job checks the integration workspace before TypeScript artifacts", () => {
   const typescript = job("test-ts");
 
-  // The dedicated jazz-ci runner has one worker. Splitting these phases into
-  // jobs serializes their checkout/setup work in GitHub's runner queue.
+  // Keeping these phases together avoids a separate checkout/setup phase.
   assert.doesNotMatch(workflow, /^  build-integration:/m);
   assert.match(
     typescript,
@@ -66,7 +112,67 @@ test("the single trusted-runner job checks the integration workspace before Type
       typescript.indexOf("name: Build correctness-test artifacts"),
     "workspace check must fail before the expensive correctness artifact build",
   );
-  assert.match(typescript, /runs-on: \$\{\{ github\.event_name == 'pull_request'.*'jazz-ci' \}\}/);
+  assertUsesTrustedRunnerPool("test-ts", typescript);
+});
+
+test("every CI job uses jazz-ci only for trusted work and Blacksmith for untrusted PRs", () => {
+  for (const [name, source] of jobs) {
+    assertUsesTrustedRunnerPool(name, source);
+  }
+});
+
+test("trusted-runner policy keeps forks and same-repository Dependabot PRs hosted", () => {
+  const repository = "gardencmp/jazz";
+  assert.equal(expectedRunner({ eventName: "push", repository }), "jazz-ci");
+  assert.equal(
+    expectedRunner({ eventName: "pull_request", headRepository: repository, repository }),
+    "jazz-ci",
+  );
+  assert.equal(
+    expectedRunner({ eventName: "pull_request", headRepository: "fork/jazz", repository }),
+    "blacksmith-4vcpu-ubuntu-2404",
+  );
+  assert.equal(
+    expectedRunner({
+      eventName: "pull_request",
+      headRepository: repository,
+      repository,
+      pullRequestUser: "dependabot[bot]",
+    }),
+    "blacksmith-4vcpu-ubuntu-2404",
+  );
+  assert.match(workflow, /github\.event\.pull_request\.user\.login == 'dependabot\[bot\]'/);
+  assert.doesNotMatch(workflow, /github\.actor/);
+});
+
+test("TypeScript cache mounts use the same untrusted-PR predicate as the runner", () => {
+  const typescript = job("test-ts");
+  assert.ok(
+    typescript.includes(
+      `sccache-sticky-disk: \${{ ${untrustedPullRequestPredicate} && 'true' || 'false' }}`,
+    ),
+  );
+  assert.equal(
+    typescript.split(`if: ${untrustedPullRequestPredicate}`).length - 1,
+    2,
+    "Turbo and Playwright sticky-disk mounts must both follow the runner trust boundary",
+  );
+});
+
+test("trusted-runner contract rejects planted unsafe runner changes", () => {
+  const lint = job("lint");
+  assert.throws(
+    () => assertUsesTrustedRunnerPool("lint", lint.replace(trustedRunnerExpression, "jazz-ci")),
+    /must use jazz-ci for pushes and trusted PRs, while fork PRs use Blacksmith/,
+  );
+  assert.throws(
+    () =>
+      assertUsesTrustedRunnerPool(
+        "lint",
+        lint.replace(" || github.event.pull_request.user.login == 'dependabot[bot]'", ""),
+      ),
+    /must use jazz-ci for pushes and trusted PRs, while fork PRs use Blacksmith/,
+  );
 });
 
 test("integration workspace check contract rejects planted failure suppression", () => {
@@ -94,13 +200,13 @@ test("integration workspace check contract rejects planted failure suppression",
 });
 
 test("lint keeps its one workspace Clippy invocation inside pnpm lint", () => {
-  const lint = job("lint", "test-rust");
+  const lint = job("lint");
   assert.match(lint, /run: pnpm lint/);
   assert.doesNotMatch(lint, /^\s*- run: cargo clippy/m);
 });
 
 test("CI runs the workflow contract test through its package script", () => {
-  const lint = job("lint", "test-rust");
+  const lint = job("lint");
   assert.equal(
     packageJson.scripts["test:ci-workflow"],
     "node --test dev/gates/test/ci-rust-throughput.test.mjs dev/gates/test/test-artifact-pipeline.test.mjs dev/gates/test/release-gates.test.mjs",
