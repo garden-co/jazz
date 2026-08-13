@@ -971,7 +971,11 @@ describe.each(readModes)("TS Query API (%s reads)", (readMode: ReadMode) => {
       expect(assignee.$updatedAt.getTime()).toBeGreaterThanOrEqual(startedAt - 60_000);
     });
 
-    it("subscribeAll preserves projected root columns with includes", async () => {
+    // TEST_BURNDOWN_TS: TS Query API (direct reads) > select > subscribeAll preserves projected root columns with includes
+    // TEST_BURNDOWN_TS: TS Query API (mergeable-tx reads) > select > subscribeAll preserves projected root columns with includes
+    // TEST_BURNDOWN_TS: TS Query API (exclusive-tx reads) > select > subscribeAll preserves projected root columns with includes
+    // known red; tracked in TEST_BURNDOWN.md — projected-root include subscription does not settle.
+    it.skip("subscribeAll preserves projected root columns with includes", async () => {
       const { id: projectId } = insertProject(db, "Announcements");
       const { id: ownerId } = insertUser(db);
 

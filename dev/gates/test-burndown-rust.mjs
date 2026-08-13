@@ -11,10 +11,13 @@ function rows(section) {
   );
 }
 function parse(doc) {
-  const activeEnd = doc.indexOf("## Pre-existing");
-  if (activeEnd < 0) fail("missing dormant section");
-  const active = rows(doc.slice(doc.indexOf("## Active quarantine"), activeEnd));
-  const dormant = rows(doc.slice(activeEnd));
+  const activeStart = doc.indexOf("## Active Rust quarantine");
+  const dormantStart = doc.indexOf("## Pre-existing/dormant Rust ignores");
+  const tsStart = doc.indexOf("## Active TypeScript/browser quarantine");
+  if (activeStart < 0 || dormantStart < 0 || tsStart < 0)
+    fail("missing Rust or TypeScript quarantine section");
+  const active = rows(doc.slice(activeStart, dormantStart));
+  const dormant = rows(doc.slice(dormantStart, tsStart));
   const all = [...active, ...dormant];
   const seen = new Set();
   for (const row of all) {
@@ -74,7 +77,8 @@ function verifyMarkers(active) {
     fail("marker bijection failed: source=" + total + " documented=" + active.length);
 }
 function selfTest() {
-  const base = "## Active quarantine\n| `a` | `x.rs` |\n## Pre-existing\n| `b` | `y.rs` |\n";
+  const base =
+    "## Active Rust quarantine\n| `a` | `x.rs` |\n## Pre-existing/dormant Rust ignores\n| `b` | `y.rs` |\n## Active TypeScript/browser quarantine\n";
   if (parse(base).all.length !== 2) fail("self-test base");
   for (const [label, mutation] of [
     ["duplicate doc FQN", base.replace("`b`", "`a`")],
