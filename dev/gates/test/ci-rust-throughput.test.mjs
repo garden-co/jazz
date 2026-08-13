@@ -175,6 +175,26 @@ test("Rust tool installation is isolated from shared self-hosted runner state", 
   );
 });
 
+test("Rust CI does not rerun differential integration binaries selected by the workspace test gate", () => {
+  const rust = job("test-rust", "test-ts");
+
+  assert.match(
+    rust,
+    /run-rust-tests\.mjs --timeout-seconds 780 -- --workspace --lib --bins --tests --features test/,
+  );
+  for (const testTarget of [
+    "incremental_delivery_canary",
+    "shared_coverage_differential",
+    "warm_reopen_differential",
+  ]) {
+    assert.doesNotMatch(rust, new RegExp(`cargo test -p jazz --test ${testTarget}`));
+  }
+  assert.match(
+    rust,
+    /JAZZ_SEED_COUNT=50 cargo test -p jazz m3_maintained_one_shot_differential_oracle/,
+  );
+});
+
 test("the TypeScript CI job checks the integration workspace before TypeScript artifacts", () => {
   const typescript = job("test-ts");
 
