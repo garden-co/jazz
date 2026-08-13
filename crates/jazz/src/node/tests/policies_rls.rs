@@ -2918,6 +2918,31 @@ fn inner_multi_segment_include_missing_or_unreadable_second_hop_drops_parent() {
     );
 }
 
+/// A title-only root projection still retains its hidden `project` join key
+/// long enough to gate the nested `project.org` include.
+///
+/// alice ──reads title──► root.project ──requires──► project.org
+#[test]
+fn sparse_root_projection_preserves_multisegment_inner_include_join_key() {
+    let schema = multi_segment_required_include_rls_schema();
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    let reader = user(0xa1);
+    seed_multi_segment_include_fixture(&mut core, reader);
+    let shape = Query::from("roots")
+        .select(["title"])
+        .include_with(Include::new("project.org"))
+        .validate(&core.catalogue.schema)
+        .unwrap();
+
+    let rows = required_include_rows(&mut core, &shape, reader);
+    assert_eq!(
+        rows.into_iter()
+            .map(|row| row.row_uuid())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([row(0xd2)])
+    );
+}
+
 #[test]
 fn maintained_subscription_view_multi_segment_inner_include_payload_references_visible_path() {
     let schema = multi_segment_required_include_rls_schema();
