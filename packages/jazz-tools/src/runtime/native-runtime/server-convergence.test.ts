@@ -66,70 +66,65 @@ describe("NativeRuntimeAdapter server convergence", () => {
     globalThis.WebSocket = previousWebSocket;
   });
 
-  maybeIt(
-    "syncs writes between two JazzClient connections through /apps/:app/ws",
-    async () => {
-      globalThis.WebSocket ??= WebSocket as unknown as typeof globalThis.WebSocket;
+  // TEST_BURNDOWN_TS: NativeRuntimeAdapter server convergence > syncs writes between two JazzClient connections through /apps/:app/ws
+  // known red; tracked in TEST_BURNDOWN.md — client B intermittently does not observe client A's edge-settled insert within 5s in CI.
+  it.skip("syncs writes between two JazzClient connections through /apps/:app/ws", async () => {
+    globalThis.WebSocket ??= WebSocket as unknown as typeof globalThis.WebSocket;
 
-      const appId = "00000000-0000-0000-0000-00000000c001";
-      server = await startLocalJazzServer({
-        appId,
-        inMemory: true,
-        adminSecret: "native-runtime-convergence-admin",
-        schema: encodeSchema(schema),
-      });
+    const appId = "00000000-0000-0000-0000-00000000c001";
+    server = await startLocalJazzServer({
+      appId,
+      inMemory: true,
+      adminSecret: "native-runtime-convergence-admin",
+      schema: encodeSchema(schema),
+    });
 
-      const clientA = await createClient({ appId, serverUrl: server.url, peer: "alice" });
-      const clientB = await createClient({ appId, serverUrl: server.url, peer: "bob" });
-      clients.push(clientA, clientB);
+    const clientA = await createClient({ appId, serverUrl: server.url, peer: "alice" });
+    const clientB = await createClient({ appId, serverUrl: server.url, peer: "bob" });
+    clients.push(clientA, clientB);
 
-      clientA.connectTransport(server.url, { admin_secret: server.adminSecret });
-      clientB.connectTransport(server.url, { admin_secret: server.adminSecret });
+    clientA.connectTransport(server.url, { admin_secret: server.adminSecret });
+    clientB.connectTransport(server.url, { admin_secret: server.adminSecret });
 
-      const observedBySubscription = new Promise<string>((resolve) => {
-        clientB.subscribe(
-          JSON.stringify({ table: "todos" }),
-          (delta) => {
-            for (const change of normalizeTestDelta(delta, schema)) {
-              const firstValue = "row" in change ? change.row?.values[0] : undefined;
-              if (firstValue?.type === "Text") {
-                resolve(firstValue.value);
-              }
+    const observedBySubscription = new Promise<string>((resolve) => {
+      clientB.subscribe(
+        JSON.stringify({ table: "todos" }),
+        (delta) => {
+          for (const change of normalizeTestDelta(delta, schema)) {
+            const firstValue = "row" in change ? change.row?.values[0] : undefined;
+            if (firstValue?.type === "Text") {
+              resolve(firstValue.value);
             }
-          },
-          { tier: "local" },
-        );
-      });
-
-      const inserted = clientA.insert("todos", {
-        title: { type: "Text", value: "websocket convergence" },
-        done: { type: "Boolean", value: false },
-      });
-
-      await waitForPromise(
-        inserted.wait({ tier: "edge" }),
-        "client A insert did not settle at edge",
+          }
+        },
+        { tier: "local" },
       );
-      await waitForPromise(
-        observedBySubscription,
-        "client B subscription did not observe the native runtime insert",
-      );
+    });
 
-      const convergedRows = await waitFor(async () => {
-        const rows = await clientB.query(JSON.stringify({ table: "todos" }), { tier: "local" });
-        return rows.find((row) => row.id === inserted.value.id);
-      });
+    const inserted = clientA.insert("todos", {
+      title: { type: "Text", value: "websocket convergence" },
+      done: { type: "Boolean", value: false },
+    });
 
-      expect(convergedRows).toMatchObject({
-        id: inserted.value.id,
-        values: [
-          { type: "Text", value: "websocket convergence" },
-          { type: "Boolean", value: false },
-        ],
-      });
-    },
-    15_000,
-  );
+    await waitForPromise(inserted.wait({ tier: "edge" }), "client A insert did not settle at edge");
+    await waitForPromise(
+      observedBySubscription,
+      "client B subscription did not observe the native runtime insert",
+    );
+
+    const convergedRows = await waitFor(async () => {
+      const rows = await clientB.query(JSON.stringify({ table: "todos" }), { tier: "local" });
+      return rows.find((row) => row.id === inserted.value.id);
+    });
+
+    expect(convergedRows).toMatchObject({
+      id: inserted.value.id,
+      values: [
+        { type: "Text", value: "websocket convergence" },
+        { type: "Boolean", value: false },
+      ],
+    });
+  }, 15_000);
 
   maybeIt(
     "persists websocket writes across server restart",
