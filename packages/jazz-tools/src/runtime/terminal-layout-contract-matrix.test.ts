@@ -18,6 +18,8 @@ import type {
   ColumnDescriptor,
   NativeRowDelta,
   NativeTerminalRootLayout,
+  Value,
+  WasmRow,
 } from "../drivers/types.js";
 import { SubscriptionManager } from "./subscription-manager.js";
 import {
@@ -36,6 +38,21 @@ const ROOT_ID = "00000000-0000-4000-8000-000000000001";
 
 type Carrier = "Logical" | "CurrentRow";
 type Shape = "scalar" | "array" | "row" | "nested-nullable";
+type Include =
+  | "plain"
+  | "forward"
+  | "reverse"
+  | "multi-hop"
+  | "nested-collector"
+  | "sibling-collectors";
+
+interface MatrixCase {
+  carrier: Carrier;
+  nullable: boolean;
+  sparse: boolean;
+  projection: "collect-all" | "explicit";
+  include: Include;
+}
 
 const shapes: Record<Shape, ColumnDescriptor> = {
   scalar: { name: "title", column_type: { type: "Text" }, nullable: false },
@@ -136,13 +153,20 @@ function emptyDelta(layouts: NativeTerminalRootLayout[]): NativeRowDelta {
 // 2 carriers * nullable * sparse * projection * include family = 96 real
 // packed root records. Include families add logical slots; explicit projection
 // aliases the scalar physical slot rather than only changing an ID.
-const cases = (["Logical", "CurrentRow"] as const).flatMap((carrier) =>
-  [false, true].flatMap((nullable) =>
-    [false, true].flatMap((sparse) =>
-      ["collect-all", "explicit"].flatMap((projection) =>
-        ["plain", "forward", "reverse", "multi-hop", "nested-collector", "sibling-collectors"].map(
-          (include) => ({ carrier, nullable, sparse, projection, include }),
-        ),
+const cases: MatrixCase[] = (["Logical", "CurrentRow"] as const).flatMap((carrier) =>
+  ([false, true] as const).flatMap((nullable) =>
+    ([false, true] as const).flatMap((sparse) =>
+      (["collect-all", "explicit"] as const).flatMap((projection) =>
+        (
+          [
+            "plain",
+            "forward",
+            "reverse",
+            "multi-hop",
+            "nested-collector",
+            "sibling-collectors",
+          ] as const
+        ).map((include): MatrixCase => ({ carrier, nullable, sparse, projection, include })),
       ),
     ),
   ),
@@ -177,7 +201,7 @@ describe("TerminalRootLayout encoding contract matrix", () => {
         ];
         const carriers: Carrier[] = [
           entry.carrier,
-          ...Array.from({ length: includeCount }, () => "Logical"),
+          ...Array.from({ length: includeCount }, (): Carrier => "Logical"),
         ];
         const layout = layoutFor(
           columns,
@@ -235,7 +259,7 @@ describe("TerminalRootLayout encoding contract matrix", () => {
         entry.projection === "explicit" ? "projected_title" : "user_title",
         ...includes.map((include) => include.name),
       ];
-      const carriers: Carrier[] = [entry.carrier, ...includes.map(() => "Logical")];
+      const carriers: Carrier[] = [entry.carrier, ...includes.map((): Carrier => "Logical")];
       const layout = layoutFor(columns, physicalNames, carriers, entry.carrier, `matrix-${index}`);
       const descriptor = readDescriptor(new PostcardReader(Uint8Array.from(layout.rootDescriptor)));
       const raw = createRecord(descriptor, [
@@ -279,7 +303,9 @@ describe("TerminalRootLayout encoding contract matrix", () => {
           (row) => ({
             id: row.id,
             values: row.values.map((value) => (value as { type: "Text"; value: string }).value),
-            names: [...row.valuesByColumn.keys()],
+            names: [
+              ...(row as WasmRow & { valuesByColumn: Map<string, Value> }).valuesByColumn.keys(),
+            ],
           }),
           columns,
         ).all,
