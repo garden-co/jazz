@@ -38,6 +38,18 @@ fn nullable_metrics_schema() -> Schema {
         .build()
 }
 
+fn aggregate_alias_collision_schema() -> Schema {
+    SchemaBuilder::new()
+        .table(
+            TableSchema::builder("metrics")
+                // This is a valid public column name which happens to match
+                // the public label for SUM(score).
+                .column("sum_score", ColumnType::Text)
+                .nullable_column("score", ColumnType::BigInt),
+        )
+        .build()
+}
+
 fn bigint_metrics_schema() -> Schema {
     SchemaBuilder::new()
         .table(
@@ -1372,6 +1384,73 @@ async fn aggregate_sum_bigint_survives_public_client_boundary() {
                 sum_query,
                 vec![vec![Value::BigInt(2)]],
                 "bigint sum decodes exact signed public value",
+            )
+            .await;
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn aggregate_outputs_do_not_collide_with_grouped_public_column_names() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = aggregate_alias_collision_schema();
+            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let client = JazzClient::connect(
+                server.make_client_context_for_user(schema, "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaa6"),
+            )
+            .await
+            .expect("connect client");
+
+            let (_, _, batch) = client
+                .insert(
+                    "metrics",
+                    row_input!(
+                        "sum_score" => "negative",
+                        "score" => Value::BigInt(-3)
+                    ),
+                )
+                .expect("insert signed aggregate value");
+            client
+                .wait_for_batch(
+                    batch.expect("ordinary mutation commits immediately"),
+                    DurabilityTier::Local,
+                )
+                .await
+                .expect("signed aggregate value settles");
+            let (_, _, batch) = client
+                .insert(
+                    "metrics",
+                    row_input!(
+                        "sum_score" => "negative",
+                        "score" => Value::Null
+                    ),
+                )
+                .expect("insert nullable aggregate value");
+            client
+                .wait_for_batch(
+                    batch.expect("ordinary mutation commits immediately"),
+                    DurabilityTier::Local,
+                )
+                .await
+                .expect("nullable aggregate value settles");
+
+            let grouped = QueryBuilder::new("metrics")
+                .group_by("sum_score")
+                .sum("score")
+                .build();
+            wait_for_values(
+                &client,
+                grouped,
+                vec![vec![Value::Text("negative".to_owned()), Value::BigInt(-3)]],
+                "grouped public field and aggregate output stay distinct",
+            )
+            .await;
+            wait_for_values(
+                &client,
+                QueryBuilder::new("metrics").sum("score").build(),
+                vec![vec![Value::BigInt(-3)]],
+                "non-grouped signed nullable aggregate remains public",
             )
             .await;
         })

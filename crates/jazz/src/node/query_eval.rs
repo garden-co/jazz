@@ -41,8 +41,9 @@ use super::query_engine::{
     SourceId, SourceMetadataFields, SourceMetadataRequirement, SourcePath, SourceRequest,
     SourceRequirements, SourceResolutionError, SourceResolver, SourceRole, SourceRowShape,
     StorageSchemaSelection, TypedOutputField, UnionInput, ValueSourceColumn, ValueSourceMode,
-    VersionIdentityFields, VersionedRowRefSchema, claim_param_field, claim_path_from_param_field,
-    left_field, logical_user_column, lower_query_program, right_field, route_param_field,
+    VersionIdentityFields, VersionedRowRefSchema, aggregate_output_app_field,
+    aggregate_output_column, aggregate_output_field, claim_param_field,
+    claim_path_from_param_field, left_field, lower_query_program, right_field, route_param_field,
     user_column_field,
 };
 use crate::protocol::{
@@ -3316,7 +3317,7 @@ fn normalized_aggregate_outputs(
         .map(|aggregate| {
             Ok(NormalizedAggregateExpr {
                 output: typed_output_field(
-                    user_column_field(&aggregate.alias),
+                    aggregate_output_field(&aggregate.alias),
                     normalized_aggregate_output_type(aggregate),
                 ),
                 function: normalized_aggregate_function(aggregate.function),
@@ -8158,35 +8159,15 @@ where
     fn materialize_aggregate_query_rows(
         &mut self,
         query: &crate::query::Query,
-        table: &TableSchema,
+        _table: &TableSchema,
         deltas: groove::ivm::RecordDeltas,
     ) -> Result<Vec<CurrentRow>, Error> {
         let mut rows = Vec::new();
         for (record, _weight) in deltas.iter().filter(|(_, weight)| *weight > 0) {
-            let mut cells = BTreeMap::new();
-            for field in record.descriptor().fields() {
-                let Some(name) = field.name.as_deref() else {
-                    continue;
-                };
-                let logical_name = logical_user_column(name);
-                if let Some(column) = table
-                    .columns
-                    .iter()
-                    .find(|column| column.name == logical_name)
-                {
-                    let value =
-                        record.get_idx(record.descriptor().field_index(name).ok_or(
-                            Error::InvalidStoredValue("aggregate record field missing"),
-                        )?)?;
-                    if let Some(value) = aggregate_payload_cell_value(query, &column.name, value) {
-                        cells.insert(column.name.clone(), value);
-                    }
-                }
-            }
-            rows.push(current_row_from_cells(
-                table,
+            rows.push(aggregate_current_row_from_record(
+                &query.table,
                 aggregate_query_row_uuid(query, &record)?,
-                &cells,
+                &record,
             )?);
         }
         Ok(rows)
@@ -9603,8 +9584,6 @@ where
         member: &ResultMemberEntry,
         payload: &ResultMemberPayloadEntry,
     ) -> Result<CurrentRow, Error> {
-        let source_table = self.table(query.table.as_str())?.clone();
-        let table = aggregate_result_table(query, &source_table)?;
         let fields: Vec<(Option<String>, ValueType)> = postcard::from_bytes(&payload.descriptor)
             .map_err(|_| Error::InvalidStoredValue("result payload descriptor is invalid"))?;
         let payload_descriptor = RecordDescriptor::new(
@@ -9619,21 +9598,11 @@ where
                 .collect::<Result<Vec<_>, _>>()?,
         );
         let payload_record = BorrowedRecord::new(&payload.record, &payload_descriptor);
-        let mut cells = BTreeMap::new();
-        for column in &table.columns {
-            let field = user_column_field(&column.name);
-            let index = payload_descriptor
-                .field_index(&field)
-                .or_else(|| payload_descriptor.field_index(&column.name))
-                .ok_or(Error::InvalidStoredValue(
-                    "aggregate result payload is missing an output column",
-                ))?;
-            let value = payload_record.get_idx(index)?;
-            if let Some(value) = aggregate_payload_cell_value(query, &column.name, value) {
-                cells.insert(column.name.clone(), value);
-            }
-        }
-        current_row_from_cells(&table, aggregate_result_member_row_uuid(member)?, &cells)
+        aggregate_current_row_from_record(
+            query.table.as_str(),
+            aggregate_result_member_row_uuid(member)?,
+            &payload_record,
+        )
     }
 
     fn current_row_from_result_payload(
@@ -10309,8 +10278,8 @@ where
                 |(left_row, left_occurrence), (right_row, right_occurrence)| {
                     for order in &query.order_by {
                         let ordering = compare_optional_values(
-                            aggregate_row_cell(left_row, &order.column),
-                            aggregate_row_cell(right_row, &order.column),
+                            aggregate_row_cell(left_row, query, &order.column),
+                            aggregate_row_cell(right_row, query, &order.column),
                         );
                         let ordering = match order.direction {
                             OrderDirection::Asc => ordering,
@@ -10378,8 +10347,8 @@ where
             rows.sort_by(|left, right| {
                 for order in &query.order_by {
                     let ordering = compare_optional_values(
-                        aggregate_row_cell(left, &order.column),
-                        aggregate_row_cell(right, &order.column),
+                        aggregate_row_cell(left, query, &order.column),
+                        aggregate_row_cell(right, query, &order.column),
                     );
                     let ordering = match order.direction {
                         OrderDirection::Asc => ordering,
@@ -11580,6 +11549,35 @@ where
     }
 }
 
+/// Wrap a compiler aggregate record in the minimal [`CurrentRow`] envelope.
+///
+/// Aggregate result fields deliberately retain their compiler names here: a
+/// grouped public column can have the same logical label as an aggregate
+/// output, and collapsing either into a table-schema cell map loses one of
+/// them. Consumers with a public aggregate query translate those names through
+/// the centralized helpers at their boundary.
+fn aggregate_current_row_from_record(
+    table: &str,
+    row_uuid: RowUuid,
+    record: &BorrowedRecord<'_>,
+) -> Result<CurrentRow, Error> {
+    let mut fields = vec![("row_uuid".to_owned(), ValueType::Uuid)];
+    let mut values = vec![Value::Uuid(row_uuid.0)];
+    for (index, field) in record.descriptor().fields().iter().enumerate() {
+        let name = field.name.clone().ok_or(Error::InvalidStoredValue(
+            "aggregate record field must be named",
+        ))?;
+        fields.push((name, field.value_type.clone()));
+        values.push(record.get_idx(index)?);
+    }
+    let descriptor = RecordDescriptor::new(fields);
+    let raw = descriptor.create(&values)?;
+    Ok(CurrentRow::new(
+        table.to_owned(),
+        OwnedRecord::new(raw, descriptor),
+    ))
+}
+
 #[cfg_attr(not(test), allow(dead_code))]
 fn compile_permission_scope_policy(
     mut query: JazzQuery,
@@ -11949,33 +11947,6 @@ mod authorization_scope_compiler_tests {
         );
         assert_ne!(insert.key, update.key);
         assert_ne!(update.key, delete.key);
-    }
-}
-
-/// Flatten the nullable aggregate-result representation into a current-row
-/// cell.  A non-count aggregate payload uses `Nullable(None)` for SQL NULL;
-/// the current row's outer nullable envelope represents that public NULL.
-/// This is deliberately called only after a [`ResultMemberPayloadEntry`] has
-/// been found, preserving the distinction between a present NULL and a
-/// genuinely missing payload.
-fn aggregate_payload_cell_value(
-    query: &crate::query::Query,
-    column: &str,
-    value: Value,
-) -> Option<Value> {
-    let aggregate = query.aggregate.as_ref().and_then(|aggregate| {
-        aggregate
-            .aggregates
-            .iter()
-            .find(|aggregate| aggregate.alias == column)
-    });
-    match aggregate {
-        Some(aggregate) if aggregate.function != AggregateFunction::Count => match value {
-            Value::Nullable(None) => None,
-            Value::Nullable(Some(value)) => Some(*value),
-            value => Some(value),
-        },
-        _ => Some(value),
     }
 }
 
@@ -13372,11 +13343,29 @@ fn default_query_row_order(left: &CurrentRow, right: &CurrentRow) -> Ordering {
         .then_with(|| left.record.raw().cmp(right.record.raw()))
 }
 
-fn aggregate_row_cell(row: &CurrentRow, column: &str) -> Option<Value> {
-    let user_name = user_column_field(column);
-    let idx = row.record.descriptor().fields().iter().position(|field| {
-        field.name.as_deref() == Some(user_name.as_str()) || field.name.as_deref() == Some(column)
-    })?;
+fn aggregate_row_cell(
+    row: &CurrentRow,
+    query: &crate::query::Query,
+    column: &str,
+) -> Option<Value> {
+    let field = if query
+        .aggregate
+        .as_ref()
+        .and_then(|aggregate| aggregate.group_by.as_deref())
+        == Some(column)
+    {
+        user_column_field(column)
+    } else if query.aggregate.as_ref().is_some_and(|aggregate| {
+        aggregate
+            .aggregates
+            .iter()
+            .any(|aggregate| aggregate.alias == column)
+    }) {
+        aggregate_output_app_field(column)
+    } else {
+        user_column_field(column)
+    };
+    let idx = row.record.descriptor().field_index(&field)?;
     nullable_value(row.record.borrowed().get_idx(idx).ok()?).ok()?
 }
 
@@ -13398,7 +13387,7 @@ fn aggregate_result_table(
     }
     for aggregate in &aggregate.aggregates {
         columns.push(ColumnSchema::new(
-            &aggregate.alias,
+            aggregate_output_column(&aggregate.alias),
             aggregate_result_column_type(aggregate, source_table)?,
         ));
     }
@@ -17544,6 +17533,31 @@ mod tests {
         assert_eq!(cells["avg_score"], Value::F64(-0.5));
         assert_eq!(cells["min_score"], Value::I64(-3));
         assert_eq!(cells["max_score"], Value::I64(2));
+    }
+
+    #[test]
+    fn aggregate_explicit_user_prefix_alias_remains_a_logical_name() {
+        let schema = signed_metric_schema();
+        let (_dir, mut node) =
+            open_node_with_uuid(NodeUuid::from_bytes([0xb6; 16]), schema.clone());
+        commit_signed_metric(&mut node, 0x12, "a", -3);
+        commit_signed_metric(&mut node, 0x13, "a", 2);
+        let shape = Query::from("metrics")
+            .aggregate([Aggregate::sum("score").alias("user_total")])
+            .validate(&schema)
+            .expect("explicit user-prefix aggregate alias is valid");
+        let rows = node
+            .query_rows(
+                &shape,
+                &shape.bind(BTreeMap::new()).unwrap(),
+                DurabilityTier::Local,
+            )
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].test_cells_by_descriptor()["user_total"],
+            Value::I64(-1),
+        );
     }
 
     #[test]

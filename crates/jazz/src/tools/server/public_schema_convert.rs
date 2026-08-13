@@ -25,6 +25,7 @@ use crate::tools::public_schema::{
 
 const DIRECT_USER_ID_CLAIM: &str = "user_id";
 const PUBLIC_USER_ID_SESSION_PATHS: &[&str] = &["user_id", "userId"];
+const RESERVED_AGGREGATE_OUTPUT_PREFIX: &str = "__jazz_aggregate_";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SchemaConversionError {
@@ -430,6 +431,16 @@ fn convert_table(
     let mut columns = Vec::with_capacity(table.columns.columns.len());
     let mut merge_strategies = BTreeMap::new();
     for column in &table.columns.columns {
+        if column
+            .name
+            .as_str()
+            .starts_with(RESERVED_AGGREGATE_OUTPUT_PREFIX)
+        {
+            return Err(err(
+                format!("$.{}.columns.{}", name.as_str(), column.name.as_str()),
+                "column name uses the reserved aggregate-output namespace",
+            ));
+        }
         let converted = convert_column(name, column)?;
         if let Some(reference) = &column.references {
             references.insert(
@@ -2184,6 +2195,23 @@ mod tests {
         PredicateExpr as RelPredicateExpr, RecursionBound as RelRecursionBound,
         RelExpr as PublicRelExpr, RowIdRef as RelRowIdRef, ValueRef as RelValueRef,
     };
+
+    #[test]
+    fn rejects_user_columns_in_the_compiler_aggregate_namespace() {
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("metrics")
+                    .column("__jazz_aggregate_sum_score", ColumnType::Integer),
+            )
+            .build();
+        let error =
+            convert_public_schema(&schema).expect_err("reserved column must fail conversion");
+        assert!(
+            error
+                .to_string()
+                .contains("reserved aggregate-output namespace")
+        );
+    }
     use crate::tools::public_api::types::TableSchemaBuilder;
     use crate::tools::public_schema::{
         ColumnDescriptor, ColumnType, LargeValueKind, PolicyExpr, RowDescriptor, Schema,
