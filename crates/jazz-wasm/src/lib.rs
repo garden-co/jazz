@@ -182,42 +182,6 @@ impl From<WasmDbIdentity> for DbIdentity {
 }
 
 #[derive(Clone, Debug, Serialize)]
-struct WasmRowBatch<'a> {
-    table: &'a str,
-    descriptor: RecordDescriptor,
-    rows: Vec<WasmRow<'a>>,
-}
-
-#[derive(Clone, Debug, Serialize)]
-struct WasmRow<'a> {
-    row_id: RowUuid,
-    deleted: bool,
-    raw: &'a [u8],
-}
-
-#[derive(Clone, Debug, Serialize)]
-struct WasmRelationSnapshot<'a> {
-    root_count: u64,
-    rows: Vec<WasmRowBatch<'a>>,
-}
-
-#[derive(Clone, Debug, Serialize)]
-struct WasmSubscriptionDelta<'a> {
-    added: Vec<WasmRowBatch<'a>>,
-    updated: Vec<WasmRowBatch<'a>>,
-    removed: Vec<WasmRemovedRow>,
-    added_occurrence_keys: Vec<jazz::tools::ResultKey>,
-    updated_occurrence_keys: Vec<jazz::tools::ResultKey>,
-    removed_occurrence_keys: Vec<jazz::tools::ResultKey>,
-}
-
-#[derive(Clone, Debug, Serialize)]
-struct WasmRemovedRow {
-    table: String,
-    row_id: RowUuid,
-}
-
-#[derive(Clone, Debug, Serialize)]
 pub struct WasmWriteResult {
     row_id: RowUuid,
     tx_id: jazz::tx::TxId,
@@ -2644,16 +2608,13 @@ fn optional_bool_prop(value: &JsValue, name: &str) -> Result<Option<bool>, JsVal
 }
 
 fn encode_rows(rows: &[jazz::node::CurrentRow]) -> Result<Vec<u8>, postcard::Error> {
-    postcard::to_allocvec(&row_batches(rows))
+    jazz::binding_codec::encode_rows(rows)
 }
 
 fn encode_relation_snapshot(
     snapshot: &jazz::node::RelationSnapshot,
 ) -> Result<Vec<u8>, postcard::Error> {
-    postcard::to_allocvec(&WasmRelationSnapshot {
-        root_count: snapshot.root_count as u64,
-        rows: row_batches(&snapshot.rows),
-    })
+    jazz::binding_codec::encode_relation_snapshot(snapshot)
 }
 
 fn encode_subscription_delta<'a>(
@@ -2661,60 +2622,7 @@ fn encode_subscription_delta<'a>(
     updated: &'a [jazz::db::SubscriptionOutputRow],
     removed: &[jazz::db::RemovedRow],
 ) -> Result<Vec<u8>, postcard::Error> {
-    let added_rows = added.iter().map(|row| row.row.clone()).collect::<Vec<_>>();
-    let updated_rows = updated
-        .iter()
-        .map(|row| row.row.clone())
-        .collect::<Vec<_>>();
-    postcard::to_allocvec(&WasmSubscriptionDelta {
-        added: row_batches(&added_rows),
-        updated: row_batches(&updated_rows),
-        removed: removed
-            .iter()
-            .map(|row| WasmRemovedRow {
-                table: row.table.clone(),
-                row_id: row.row_uuid,
-            })
-            .collect(),
-        added_occurrence_keys: added
-            .iter()
-            .map(|row| jazz::tools::ResultKey::from_occurrence(row.occurrence_id.clone()))
-            .collect(),
-        updated_occurrence_keys: updated
-            .iter()
-            .map(|row| jazz::tools::ResultKey::from_occurrence(row.occurrence_id.clone()))
-            .collect(),
-        removed_occurrence_keys: removed
-            .iter()
-            .map(|row| jazz::tools::ResultKey::from_occurrence(row.occurrence_id.clone()))
-            .collect(),
-    })
-}
-
-fn row_batches(rows: &[jazz::node::CurrentRow]) -> Vec<WasmRowBatch<'_>> {
-    let mut batches: Vec<WasmRowBatch<'_>> = Vec::new();
-    for row in rows {
-        let (descriptor, raw) = row.encoded_record();
-        match batches.last_mut() {
-            Some(batch) if batch.table == row.table() && batch.descriptor == *descriptor => {
-                batch.rows.push(wasm_row(row, raw));
-            }
-            _ => batches.push(WasmRowBatch {
-                table: row.table(),
-                descriptor: *descriptor,
-                rows: vec![wasm_row(row, raw)],
-            }),
-        }
-    }
-    batches
-}
-
-fn wasm_row<'a>(row: &jazz::node::CurrentRow, raw: &'a [u8]) -> WasmRow<'a> {
-    WasmRow {
-        row_id: row.row_uuid(),
-        deleted: row.is_deleted(),
-        raw,
-    }
+    jazz::binding_codec::encode_subscription_delta(added, updated, removed)
 }
 
 fn subscription_stream_to_js(
@@ -2759,6 +2667,19 @@ fn subscription_chunk_to_js(
                     ));
                 }
             }
+            let terminal_layout_id = if terminal_operations.is_empty() {
+                ""
+            } else {
+                terminal_layout
+                    .as_ref()
+                    .ok_or_else(|| {
+                        JsValue::from_str(
+                            "terminal operation arrived without a prepared root layout",
+                        )
+                    })?
+                    .id
+                    .as_str()
+            };
             set_prop(&object, "type", JsValue::from_str("delta"))?;
             set_prop(
                 &object,
@@ -2768,10 +2689,11 @@ fn subscription_chunk_to_js(
             set_prop(
                 &object,
                 "terminalOperations",
-                terminal_operations_to_json(
+                jazz::binding_codec::terminal_operations_to_json(
                     &terminal_operations,
-                    terminal_layout.as_ref().map(|layout| layout.id.as_str()),
-                )?
+                    terminal_layout_id,
+                )
+                .map_err(to_js_error)?
                 .serialize(&serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true))
                 .map_err(to_js_error)?,
             )?;
@@ -2783,7 +2705,9 @@ fn subscription_chunk_to_js(
                 })?;
                 published_terminal_layouts
                     .insert(layout.id.clone())
-                    .then(|| terminal_layout_to_json(layout))
+                    .then(|| {
+                        jazz::binding_codec::terminal_layout_to_json(layout).map_err(to_js_error)
+                    })
                     .transpose()?
                     .into_iter()
                     .collect()
@@ -2840,62 +2764,6 @@ fn subscription_chunk_to_js(
         }
     };
     Ok(object.into())
-}
-
-/// Encode each terminal operation with the exact descriptor of its root
-/// payload.  Terminal bytes may be either logical output rows or nullable
-/// CurrentRow carriers, so consumers must not reconstruct this layout from a
-/// query projection.
-fn terminal_operations_to_json(
-    operations: &[jazz::groove::ivm::TerminalOperation],
-    root_layout_id: Option<&str>,
-) -> Result<serde_json::Value, JsValue> {
-    let mut encoded = serde_json::to_value(operations).map_err(to_js_error)?;
-    if operations.is_empty() {
-        return Ok(encoded);
-    }
-    let root_layout_id = root_layout_id.ok_or_else(|| {
-        JsValue::from_str("terminal operation arrived without a prepared root layout")
-    })?;
-    let encoded_operations = encoded
-        .as_array_mut()
-        .expect("terminal operations serialize as an array");
-    for wire in encoded_operations {
-        let serde_json::Value::Object(wire) = wire else {
-            unreachable!("terminal operation serializes as an object");
-        };
-        wire.remove("root_descriptor");
-        wire.insert(
-            "rootLayoutId".to_owned(),
-            serde_json::Value::String(root_layout_id.to_owned()),
-        );
-    }
-    Ok(encoded)
-}
-
-fn terminal_layout_to_json(
-    layout: &jazz::db::TerminalRootLayout,
-) -> Result<serde_json::Value, JsValue> {
-    let descriptor = postcard::to_allocvec(&layout.root_descriptor).map_err(to_js_error)?;
-    Ok(serde_json::json!({
-        "id": layout.id,
-        "rootDescriptor": descriptor,
-        "rootKeySlot": layout.root_key_slot,
-        "rootKeyFieldName": layout.root_key_field_name,
-        "publicFields": layout.public_fields.iter().map(|field| serde_json::json!({
-            "name": field.name,
-            "descriptorFieldName": field.descriptor_field_name,
-            "slot": field.slot,
-            "carrier": match field.carrier {
-                jazz::db::TerminalRootCarrier::CurrentRow => "CurrentRow",
-                jazz::db::TerminalRootCarrier::Logical => "Logical",
-            },
-        })).collect::<Vec<_>>(),
-        "carrier": match layout.carrier {
-            jazz::db::TerminalRootCarrier::CurrentRow => "CurrentRow",
-            jazz::db::TerminalRootCarrier::Logical => "Logical",
-        },
-    }))
 }
 
 fn set_prop(object: &js_sys::Object, name: &str, value: JsValue) -> Result<(), JsValue> {

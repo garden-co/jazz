@@ -99,6 +99,8 @@ pub use groove;
 
 /// Shared, fail-closed state for authority-issued authorization-scope receipts.
 pub mod authorization_scope;
+/// Shared binary row payload contract for the NAPI and WASM bindings.
+pub mod binding_codec;
 
 /// Disabled-by-default counters used by the native cold-settle attribution bench.
 #[cfg(feature = "cold-settle-attribution")]
