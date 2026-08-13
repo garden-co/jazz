@@ -21,14 +21,11 @@ For `jazz2-docs` (repository root):
 node dev/scripts/skip-new-core-vercel-preview.mjs
 ```
 
-Also add `VERCEL_GITHUB_READ_TOKEN` as an encrypted Vercel environment
-variable for **Preview only**. It must be a fine-grained GitHub token restricted
-to `garden-co/jazz` with **Pull requests: Read-only** permission.
 Vercel must have **Automatically expose System Environment Variables** enabled
 so `VERCEL_GIT_REPO_OWNER`, `VERCEL_GIT_REPO_SLUG`, and
-`VERCEL_GIT_PULL_REQUEST_ID` are available. The helper logs neither its token
-nor the GitHub response. Keep Vercel **Git Fork Protection** enabled and never
-authorize an untrusted fork deployment while this token is configured.
+`VERCEL_GIT_PULL_REQUEST_ID` are available. The repository is public, so the
+helper uses GitHub's unauthenticated pull-request endpoint and does not require
+or expose a credential. Keep Vercel **Git Fork Protection** enabled.
 
 The command exits `0` only after GitHub positively reports the exact new-core
 base branch within five seconds; Vercel interprets `0` as skip and `1` as

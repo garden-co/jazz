@@ -8,7 +8,6 @@ const requiredEnv = {
   VERCEL_GIT_REPO_OWNER: "garden-co",
   VERCEL_GIT_REPO_SLUG: "jazz",
   VERCEL_GIT_PULL_REQUEST_ID: "1398",
-  VERCEL_GITHUB_READ_TOKEN: "read_only_token",
 };
 
 function jsonResponse(body, init = {}) {
@@ -36,7 +35,7 @@ test("skips only a PR targeting the new-core integration branch", async () => {
   assert.equal(requests.length, 1);
   assert.equal(requests[0].url, "https://api.github.com/repos/garden-co/jazz/pulls/1398");
   assert.equal(requests[0].headers.Accept, "application/vnd.github+json");
-  assert.equal(requests[0].headers.Authorization, "Bearer read_only_token");
+  assert.equal("Authorization" in requests[0].headers, false);
   assert.equal(requests[0].headers["X-GitHub-Api-Version"], "2022-11-28");
 });
 
@@ -67,13 +66,12 @@ test("builds PRs targeting every other branch", async () => {
   assert.equal(skip, false);
 });
 
-test("fails open outside preview or without a Vercel PR id, repository coordinates, or token", async () => {
+test("fails open outside preview or without a Vercel PR id or repository coordinates", async () => {
   for (const missing of [
     "VERCEL_ENV",
     "VERCEL_GIT_PULL_REQUEST_ID",
     "VERCEL_GIT_REPO_OWNER",
     "VERCEL_GIT_REPO_SLUG",
-    "VERCEL_GITHUB_READ_TOKEN",
   ]) {
     const env = { ...requiredEnv };
     delete env[missing];
