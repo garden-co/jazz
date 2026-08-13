@@ -77,6 +77,20 @@ test("dirty source changes invalidate the manifest", () => {
   );
 });
 
+test("WASM provenance covers generated glue and declarations, not only the binary", () => {
+  const root = fixture();
+  for (const file of [
+    "jazz_wasm_bg.wasm",
+    "jazz_wasm.js",
+    "jazz_wasm.d.ts",
+    "jazz_wasm_bg.wasm.d.ts",
+  ])
+    writeFileSync(join(root, "crates/jazz-wasm/pkg", file), "current");
+  writeManifest(root, "wasm", "fast");
+  writeFileSync(join(root, "crates/jazz-wasm/pkg/jazz_wasm.js"), "stale glue");
+  assert.match(verifyManifest(root, "wasm", "fast"), /artifacts differs/);
+});
+
 test("provenance rejects tool and root-package configuration drift", () => {
   const root = fixture();
   writeManifest(root, "wasm", "release");
