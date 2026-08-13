@@ -322,8 +322,8 @@ describe("websocket frame carrier", () => {
     );
 
     expect(manifest.protocol_version).toBe(WIRE_PROTOCOL_VERSION);
+    expect(fixture?.name).toBe("view_update_mixed_version_carrier_runs");
     expect(fixture?.message_family).toBe("ViewUpdate");
-    expect(fixture?.decoded_debug).toContain("VersionBundleRun");
 
     const frame = hexToBytes(fixture!.frame_hex);
     expect(isWireMessage(frame)).toBe(true);
@@ -347,7 +347,6 @@ type RustWireFixtureManifest = {
     name: string;
     message_family: string;
     frame_hex: string;
-    decoded_debug: string;
   }>;
 };
 

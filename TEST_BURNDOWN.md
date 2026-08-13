@@ -15,7 +15,7 @@ Receipts remain local test artifacts rather than committed bulk output. The fina
 
 A future fix must remove both the matching visible skip marker and this entry, then include a focused green receipt. Never delete or weaken the test. New known reds require both a source annotation and one row. Executable gates enforce the active annotation/entry bijection.
 
-## Active Rust quarantine (44)
+## Active Rust quarantine (43)
 
 | Test                                                                                                                     | Definition                                            | Status        | Category                    | Theory                                                        | Owner  |
 | ------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------- | ------------- | --------------------------- | ------------------------------------------------------------- | ------ |
@@ -40,7 +40,6 @@ A future fix must remove both the matching visible skip marker and this entry, t
 | `jazz::rename_write_authorization::renamed_table_update_policy_uses_projected_parent_version`                            | `crates/jazz/tests/rename_write_authorization.rs`     | FAIL          | Authorization/claims        | Policy-scoped maintained result differs or fails to settle.   | Anselm |
 | `jazz::prepared_claim_routing::rebuilt_subscription_drop_releases_rehydrated_handle_without_touching_peer`               | `crates/jazz/tests/prepared_claim_routing.rs`         | FAIL          | Authorization/claims        | Policy-scoped maintained result differs or fails to settle.   | Anselm |
 | `jazz::subscription_initial_hydration::fresh_subscription_first_delivery_reduces_from_empty_to_initial_view`             | `crates/jazz/tests/subscription_initial_hydration.rs` | FAIL          | Initial hydration           | First subscription delivery does not reduce from empty.       | Anselm |
-| `jazz::wire_fixtures::wire_message_frame_fixtures_are_current`                                                           | `crates/jazz/tests/wire_fixtures.rs`                  | FAIL          | Wire fixture drift          | Wire fixture no longer matches the current codec.             | Anselm |
 | `jazz-sim::scenario_smoke::s1_saas_db_surface_smoke`                                                                     | `crates/jazz-sim/tests/scenario_smoke.rs`             | FAIL          | Simulation deterministic    | Scenario contract diverges under the engine swap.             | Anselm |
 | `jazz-sim::scenario_smoke::s7_migrations_smoke`                                                                          | `crates/jazz-sim/tests/scenario_smoke.rs`             | FAIL          | Simulation deterministic    | Scenario contract diverges under the engine swap.             | Anselm |
 | `jazz-sim::scenario_smoke::s1_saas_smoke`                                                                                | `crates/jazz-sim/tests/scenario_smoke.rs`             | FAIL          | Simulation deterministic    | Scenario contract diverges under the engine swap.             | Anselm |

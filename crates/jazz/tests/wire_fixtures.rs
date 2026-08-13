@@ -38,7 +38,7 @@ const NATIVE_QUERY_CODEC_FIXTURE_PATH: &str = concat!(
     "/fixtures/native_query_codec.json"
 );
 
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
 struct Manifest {
     fixture_set: &'static str,
     codec: &'static str,
@@ -47,14 +47,13 @@ struct Manifest {
     fixtures: Vec<Fixture>,
 }
 
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
 struct Fixture {
     name: &'static str,
     message_family: &'static str,
     frame_hex: String,
     frame_base64: String,
     payload_hex: String,
-    decoded_debug: String,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -549,15 +548,12 @@ fn fixture_manifest() -> Manifest {
                 payload.clone(),
             ));
             let frame_bytes = encode_frame(&frame).expect("wire frame encodes");
-            let decoded = decode_sync_message(&payload).expect("fixture payload decodes");
-
             Fixture {
                 name,
                 message_family,
                 frame_hex: hex(&frame_bytes),
                 frame_base64: base64(&frame_bytes),
                 payload_hex: hex(&payload),
-                decoded_debug: format!("{decoded:?}"),
             }
         })
         .collect();
@@ -572,7 +568,6 @@ fn fixture_manifest() -> Manifest {
 }
 
 #[test]
-#[ignore = "known red; tracked in TEST_BURNDOWN.md"]
 fn wire_message_frame_fixtures_are_current() {
     let actual = serde_json::to_string_pretty(&fixture_manifest())
         .expect("fixture manifest serializes")
@@ -593,12 +588,19 @@ fn wire_message_frame_fixtures_are_current() {
 
 #[test]
 fn wire_message_frame_fixtures_decode_to_expected_messages() {
-    for (fixture, (_, _, expected)) in fixture_manifest()
+    let fixture_manifest: Manifest =
+        serde_json::from_str(include_str!("../fixtures/wire_message_frames.json"))
+            .expect("wire fixture manifest deserializes");
+
+    for (fixture, (name, message_family, expected)) in fixture_manifest
         .fixtures
         .into_iter()
         .zip(wire_fixture_messages())
     {
+        assert_eq!(fixture.name, name);
+        assert_eq!(fixture.message_family, message_family);
         let frame_bytes = parse_hex(&fixture.frame_hex);
+        assert_eq!(base64(&frame_bytes), fixture.frame_base64);
         let WireFrame::Message(envelope) =
             jazz::wire::decode_frame(&frame_bytes).expect("fixture frame decodes")
         else {
@@ -608,6 +610,7 @@ fn wire_message_frame_fixtures_decode_to_expected_messages() {
         assert_eq!(envelope.protocol_version, WIRE_PROTOCOL_VERSION);
         assert_eq!(envelope.features, FEATURE_SYNC_MESSAGE_PAYLOAD);
         assert_eq!(envelope.session, None);
+        assert_eq!(hex(&envelope.payload), fixture.payload_hex);
         assert_eq!(decode_sync_message(&envelope.payload).unwrap(), expected);
     }
 }
