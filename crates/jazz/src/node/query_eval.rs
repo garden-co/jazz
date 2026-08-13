@@ -6135,10 +6135,10 @@ where
                 binding,
                 query_binding_source_shape_for_parts_if_needed(
                     shape.params(),
-                    &binding_claim_params_for_shape(&input_shape),
+                    &binding_claim_params_for_shape(&input_shape, shape.params()),
                 ),
                 BTreeMap::new(),
-                binding_claim_params_for_shape(&input_shape),
+                binding_claim_params_for_shape(&input_shape, shape.params()),
             ),
             shape: input_shape,
         };
@@ -6167,10 +6167,10 @@ where
                 binding,
                 query_binding_source_shape_for_parts_if_needed(
                     shape.params(),
-                    &binding_claim_params_for_shape(&input_shape),
+                    &binding_claim_params_for_shape(&input_shape, shape.params()),
                 ),
                 BTreeMap::new(),
-                binding_claim_params_for_shape(&input_shape),
+                binding_claim_params_for_shape(&input_shape, shape.params()),
             ),
             shape: input_shape,
         };
@@ -6224,10 +6224,10 @@ where
                 &binding,
                 query_binding_source_shape_for_parts_if_needed(
                     lowered_shape.params(),
-                    &binding_claim_params_for_shape(&input_shape),
+                    &binding_claim_params_for_shape(&input_shape, lowered_shape.params()),
                 ),
                 BTreeMap::new(),
-                binding_claim_params_for_shape(&input_shape),
+                binding_claim_params_for_shape(&input_shape, lowered_shape.params()),
             ),
             shape: input_shape,
         };
@@ -6270,10 +6270,10 @@ where
                 &binding,
                 query_binding_source_shape_for_parts_if_needed(
                     lowered_shape.params(),
-                    &binding_claim_params_for_shape(&input_shape),
+                    &binding_claim_params_for_shape(&input_shape, lowered_shape.params()),
                 ),
                 BTreeMap::new(),
-                binding_claim_params_for_shape(&input_shape),
+                binding_claim_params_for_shape(&input_shape, lowered_shape.params()),
             ),
             shape: input_shape,
         };
@@ -6506,7 +6506,7 @@ where
                 &binding,
                 None,
                 BTreeMap::new(),
-                binding_claim_params_for_shape(&input_shape),
+                binding_claim_params_for_shape(&input_shape, policy_shape.params()),
             ),
             shape: input_shape,
         };
@@ -6627,7 +6627,7 @@ where
             shape.schema_version(),
             &input_shape,
         );
-        let mut binding_claim_params = binding_claim_params_for_shape(&input_shape);
+        let mut binding_claim_params = binding_claim_params_for_shape(&input_shape, shape.params());
         if use_prepared_binding_source {
             let policy_schema = self
                 .catalogue
@@ -7141,7 +7141,7 @@ where
             reachable_contributions,
             nodes,
         };
-        let claim_params = binding_claim_params_for_shape(&normalized);
+        let claim_params = binding_claim_params_for_shape(&normalized, shape.params());
         let binding_source_shape =
             query_binding_source_shape_for_parts(shape.params(), &claim_params);
         retarget_binding_value_sources(&mut normalized, &binding_source_shape);
@@ -7317,10 +7317,10 @@ where
                 &binding,
                 query_binding_source_shape_for_parts_if_needed(
                     policy_shape.params(),
-                    &binding_claim_params_for_shape(&input_shape),
+                    &binding_claim_params_for_shape(&input_shape, policy_shape.params()),
                 ),
                 BTreeMap::new(),
-                binding_claim_params_for_shape(&input_shape),
+                binding_claim_params_for_shape(&input_shape, policy_shape.params()),
             ),
             shape: input_shape,
         };
@@ -11245,7 +11245,10 @@ where
         let binding = policy_shape.bind(BTreeMap::new())?;
         let mut input_shape = self.normalized_row_set_shape(&policy_shape, &binding)?;
         let mut claim_params = binding_claim_params;
-        claim_params.extend(binding_claim_params_for_shape(&input_shape));
+        claim_params.extend(binding_claim_params_for_shape(
+            &input_shape,
+            policy_shape.params(),
+        ));
         collect_reachable_seed_claim_params(
             policy_schema,
             policy_shape.query(),
@@ -11425,7 +11428,10 @@ where
             self.normalized_row_set_shape(&policy_shape, &binding)?
         };
         let mut claim_params = binding_claim_params;
-        claim_params.extend(binding_claim_params_for_shape(&input_shape));
+        claim_params.extend(binding_claim_params_for_shape(
+            &input_shape,
+            policy_shape.params(),
+        ));
         claim_params.extend(declared_claim_params);
         collect_reachable_seed_claim_params(
             policy_schema,
@@ -11508,7 +11514,10 @@ where
         let binding = policy_shape.bind(BTreeMap::new())?;
         let mut input_shape = self.normalized_row_set_shape(&policy_shape, &binding)?;
         let mut claim_params = binding_claim_params;
-        claim_params.extend(binding_claim_params_for_shape(&input_shape));
+        claim_params.extend(binding_claim_params_for_shape(
+            &input_shape,
+            policy_shape.params(),
+        ));
         collect_reachable_seed_claim_params(
             &self.catalogue.schema,
             policy_shape.query(),
@@ -11802,6 +11811,7 @@ fn compile_permission_scope_policy(
     let mut values = BTreeMap::new();
     bind_scope_claim_operands(&mut query, claim_values, &mut values);
     let shape = query.validate(schema)?;
+    coerce_binding_values_for_shape(&shape, &mut values);
     let binding = shape.bind(values)?;
     Ok((shape, binding))
 }
@@ -12772,6 +12782,7 @@ fn retarget_binding_value_sources(shape: &mut NormalizedRowSetShape, binding_sou
 
 fn binding_claim_params_for_shape(
     shape: &NormalizedRowSetShape,
+    param_types: &BTreeMap<String, ColumnType>,
 ) -> BTreeMap<String, ProgramClaimParam> {
     let mut params = BTreeMap::new();
     for node in shape.nodes.values() {
@@ -12794,7 +12805,7 @@ fn binding_claim_params_for_shape(
                 );
             }
         }
-        collect_claim_field_params_from_node(node, &mut params);
+        collect_claim_field_params_from_node(node, param_types, &mut params);
     }
     params
 }
@@ -12859,20 +12870,21 @@ fn collect_reachable_seed_claim_params(
 
 fn collect_claim_field_params_from_node(
     node: &RowSetExpr,
+    param_types: &BTreeMap<String, ColumnType>,
     params: &mut BTreeMap<String, ProgramClaimParam>,
 ) {
     match node {
         RowSetExpr::Filter { predicate, .. } | RowSetExpr::Join { on: predicate, .. } => {
-            collect_claim_field_params_from_predicate(predicate, params);
+            collect_claim_field_params_from_predicate(predicate, param_types, params);
         }
         RowSetExpr::RecursiveRelation {
             frontier_key,
             dedupe_keys,
             ..
         } => {
-            collect_claim_field_param(frontier_key, ColumnType::Uuid, params);
+            collect_claim_field_param_authoritative(frontier_key, ColumnType::Uuid, params);
             for key in dedupe_keys {
-                collect_claim_field_param(key, ColumnType::Uuid, params);
+                collect_claim_field_param_authoritative(key, ColumnType::Uuid, params);
             }
         }
         RowSetExpr::Project { columns, .. } => {
@@ -12886,15 +12898,15 @@ fn collect_claim_field_params_from_node(
         }
         RowSetExpr::Distinct { keys, .. } => {
             for key in keys {
-                collect_claim_field_param(key, ColumnType::Uuid, params);
+                collect_claim_field_param_authoritative(key, ColumnType::Uuid, params);
             }
         }
         RowSetExpr::CorrelatedPathProjection { correlation, .. } => {
-            collect_claim_field_params_from_predicate(correlation, params);
+            collect_claim_field_params_from_predicate(correlation, param_types, params);
         }
         RowSetExpr::OrderBy { keys, .. } => {
             for key in keys {
-                collect_claim_field_param(&key.value, ColumnType::Uuid, params);
+                collect_claim_field_param_authoritative(&key.value, ColumnType::Uuid, params);
             }
         }
         RowSetExpr::Slice {
@@ -12903,18 +12915,22 @@ fn collect_claim_field_params_from_node(
             ..
         } => {
             for value in partition_by.iter().chain(tie_breaker) {
-                collect_claim_field_param(value, ColumnType::Uuid, params);
+                collect_claim_field_param_authoritative(value, ColumnType::Uuid, params);
             }
         }
         RowSetExpr::Aggregate {
             group_by, outputs, ..
         } => {
             for value in group_by {
-                collect_claim_field_param(value, ColumnType::Uuid, params);
+                collect_claim_field_param_authoritative(value, ColumnType::Uuid, params);
             }
             for output in outputs {
                 if let Some(input) = &output.input {
-                    collect_claim_field_param(input, output.output.ty.clone(), params);
+                    collect_claim_field_param_authoritative(
+                        input,
+                        output.output.ty.clone(),
+                        params,
+                    );
                 }
             }
         }
@@ -12927,48 +12943,52 @@ fn collect_claim_field_params_from_node(
 
 fn collect_claim_field_params_from_predicate(
     predicate: &NormalizedPredicateExpr,
+    param_types: &BTreeMap<String, ColumnType>,
     params: &mut BTreeMap<String, ProgramClaimParam>,
 ) {
     match predicate {
         NormalizedPredicateExpr::True | NormalizedPredicateExpr::False => {}
         NormalizedPredicateExpr::Compare { left, right, .. } => {
-            collect_claim_field_param(left, ColumnType::Uuid, params);
-            collect_claim_field_param(right, ColumnType::Uuid, params);
+            collect_claim_field_param(left, param_types, params);
+            collect_claim_field_param(right, param_types, params);
         }
         NormalizedPredicateExpr::In { value, options } => {
-            collect_claim_field_param(value, ColumnType::Uuid, params);
+            collect_claim_field_param(value, param_types, params);
             for option in options {
-                collect_claim_field_param(option, ColumnType::Uuid, params);
+                collect_claim_field_param(option, param_types, params);
             }
         }
         NormalizedPredicateExpr::ArrayContains { value, needle }
         | NormalizedPredicateExpr::TextContains { value, needle } => {
-            collect_claim_field_param(value, ColumnType::Uuid, params);
-            collect_claim_field_param(needle, ColumnType::Uuid, params);
+            collect_claim_field_param(value, param_types, params);
+            collect_claim_field_param(needle, param_types, params);
         }
         NormalizedPredicateExpr::IsNull(value) | NormalizedPredicateExpr::IsNotNull(value) => {
-            collect_claim_field_param(value, ColumnType::Uuid, params);
+            collect_claim_field_param(value, param_types, params);
         }
         NormalizedPredicateExpr::And(children) | NormalizedPredicateExpr::Or(children) => {
             for child in children {
-                collect_claim_field_params_from_predicate(child, params);
+                collect_claim_field_params_from_predicate(child, param_types, params);
             }
         }
         NormalizedPredicateExpr::Not(child) => {
-            collect_claim_field_params_from_predicate(child, params);
+            collect_claim_field_params_from_predicate(child, param_types, params);
         }
     }
 }
 
 fn collect_claim_field_param(
     value: &NormalizedValueRef,
-    ty: ColumnType,
+    param_types: &BTreeMap<String, ColumnType>,
     params: &mut BTreeMap<String, ProgramClaimParam>,
 ) {
     let NormalizedValueRef::Param(param) = value else {
         return;
     };
     let Some(path) = claim_path_from_param_field(param) else {
+        return;
+    };
+    let Some(ty) = param_types.get(param).cloned() else {
         return;
     };
     params
@@ -14646,6 +14666,57 @@ mod tests {
                 coerce_prepared_binding_value(out_of_range.clone(), &column_type),
                 out_of_range,
                 "out-of-range nullable integers must not wrap or narrow"
+            );
+        }
+    }
+
+    #[test]
+    fn prepared_claim_descriptor_uses_validated_param_type_for_both_equality_orders() {
+        let schema = JazzSchema::new([
+            TableSchema::new(
+                "text_owners",
+                [ColumnSchema::new("owner", ColumnType::String)],
+            ),
+            TableSchema::new(
+                "nullable_owners",
+                [ColumnSchema::new("owner", ColumnType::String.nullable())],
+            ),
+            TableSchema::new(
+                "uuid_owners",
+                [ColumnSchema::new("owner", ColumnType::Uuid)],
+            ),
+        ]);
+        let (_dir, node) = open_node_with_uuid(NodeUuid::from_bytes([0xb4; 16]), schema.clone());
+        let claim_param = claim_param_field(&ClaimPath(vec!["user_id".to_owned()]));
+        let cases = [
+            (
+                Query::from("text_owners").filter(eq(col("owner"), param(&claim_param))),
+                ColumnType::String,
+                Value::String("alice".to_owned()),
+            ),
+            (
+                Query::from("nullable_owners").filter(eq(param(&claim_param), col("owner"))),
+                ColumnType::String.nullable(),
+                Value::Nullable(Some(Box::new(Value::String("alice".to_owned())))),
+            ),
+            (
+                Query::from("uuid_owners").filter(eq(col("owner"), param(&claim_param))),
+                ColumnType::Uuid,
+                Value::Uuid(uuid::Uuid::from_bytes([0xb5; 16])),
+            ),
+        ];
+
+        for (query, expected_type, value) in cases {
+            let shape = query.validate(&schema).unwrap();
+            let binding = shape
+                .bind(BTreeMap::from([(claim_param.clone(), value)]))
+                .unwrap();
+            let normalized = node.normalized_row_set_shape(&shape, &binding).unwrap();
+            let claims = binding_claim_params_for_shape(&normalized, shape.params());
+            assert_eq!(
+                claims.get(&claim_param).map(|claim| &claim.ty),
+                Some(&expected_type),
+                "prepared descriptor must retain the validator's paired-column type",
             );
         }
     }
