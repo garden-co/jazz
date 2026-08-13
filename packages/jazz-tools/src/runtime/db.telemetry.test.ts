@@ -41,6 +41,10 @@ class TestRuntimeSource extends RuntimeSource<DbConfig> {
 }
 
 class TestDb extends Db {
+  constructor(config: DbConfig, runtimeSource: TestRuntimeSource) {
+    super(config, runtimeSource);
+  }
+
   touchClient(): void {
     this.getClient({ telemetry_test: { columns: [] } });
   }

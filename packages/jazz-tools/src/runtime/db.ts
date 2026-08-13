@@ -1491,7 +1491,8 @@ export class Db {
     const wasmQuery = translateQuery(builderJson, planningSchema);
     const usesRelationTraversal = queryUsesRelationTraversal(builtQuery);
     const context = this.getRuntimeOperationContext();
-    await this.ensureReady(queryOptions.tier);
+    const effectiveTier = resolveEffectiveQueryExecutionOptions(this.config, queryOptions).tier;
+    await this.ensureReady(effectiveTier);
     const rows =
       context || usesRelationTraversal
         ? await client.query(wasmQuery, queryOptions, context?.readSession ?? context?.session)
