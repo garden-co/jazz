@@ -1084,6 +1084,56 @@ fn authority_merge_version_merges_concurrent_text_edits_and_records_strategy() {
 }
 
 #[test]
+fn synthetic_text_merge_witness_without_history_remains_shippable() {
+    let schema = text_large_value_schema();
+    let table = &schema.tables[0];
+    let (_dir, mut core) = open_node_with_schema(node(0xb8), schema.clone());
+    let schema_alias = core.catalogue.schema_version_aliases[&schema.version_id()];
+    let witness = |row_uuid, cells| {
+        VersionRow::from_parts_with_schema_version(
+            table,
+            VersionRowParts {
+                table: table.name.clone(),
+                row_uuid,
+                tx_node_alias: NodeAlias(0xb9),
+                schema_version_alias: schema_alias,
+                tx_time: TxTime::from(99),
+                parents: Vec::new(),
+                created_by: user(0xba),
+                created_at: TxTime::from(99),
+                updated_by: user(0xba),
+                updated_at: TxTime::from(99),
+                cells,
+                authored_columns: Some(BTreeSet::from(["body".to_owned()])),
+                deletion: None,
+            },
+            None,
+        )
+        .unwrap()
+    };
+
+    // Authority merge output can be a complete authored large-value version
+    // before that synthetic version has its own durable history row. The
+    // maintained bundle boundary must accept it without weakening the same
+    // boundary for a projected witness with an authored-but-absent cell.
+    let complete = witness(
+        row(0xbb),
+        BTreeMap::from([("body".to_owned(), Value::Bytes(b"merged text".to_vec()))]),
+    );
+    assert_eq!(
+        core.canonical_history_version_for_maintained_witness(&complete)
+            .unwrap(),
+        complete
+    );
+
+    let sparse = witness(row(0xbc), BTreeMap::new());
+    assert!(matches!(
+        core.canonical_history_version_for_maintained_witness(&sparse),
+        Err(Error::MaintainedViewMissingBundleWitness(_))
+    ));
+}
+
+#[test]
 fn concurrent_text_document_merge_over_extent_limit_is_extent_backed_and_checkpointed() {
     let schema = text_large_value_schema();
     let row_uuid = row(0xc2);

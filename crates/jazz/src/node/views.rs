@@ -1339,26 +1339,20 @@ where
             .ok_or(Error::InvalidStoredValue(
                 "maintained witness schema version alias must exist",
             ))?;
-        let has_authored_layout = self
-            .table_in_schema(version.table(), authored_schema)
-            .is_ok_and(|table| {
-                let descriptor = if version.layer() == VersionLayer::Deletion {
-                    table.register_storage_table().record_schema()
-                } else {
-                    table.history_storage_table().record_schema()
-                };
-                version.record.descriptor() == &descriptor
-                    && !table.columns.iter().any(|column| {
-                        column.large_value.is_some()
-                            && version.cell(&table, &column.name).is_ok_and(|value| {
-                                matches!(value, Some(Value::Bytes(bytes)) if bytes.starts_with(LARGE_VALUE_HANDLE_MAGIC))
-                            })
-                    })
-            });
-        if has_authored_layout {
-            return Ok(version.clone());
-        }
+        let authored_table = self
+            .table_in_schema(version.table(), authored_schema)?
+            .clone();
+        let authored_descriptor = if version.layer() == VersionLayer::Deletion {
+            authored_table.register_storage_table().record_schema()
+        } else {
+            authored_table.history_storage_table().record_schema()
+        };
+        let has_authored_layout = version.record.descriptor() == &authored_descriptor;
 
+        // A maintained witness is decoded from the current-query graph. Its
+        // descriptor can be identical to history storage while selected-out
+        // cells are still typed nulls, so first prefer its immutable stored
+        // history identity even when the descriptors match.
         for storage_table in
             self.version_storage_sources_for_layer(version.table(), version.layer())?
         {
@@ -1375,6 +1369,27 @@ where
             if canonical.schema_version_alias() == version.schema_version_alias() {
                 return Ok(canonical);
             }
+        }
+
+        // Some maintained rows are legitimate materialized/synthetic versions
+        // (notably large-value merge output) and therefore have no persisted
+        // history identity to reload. They may cross the boundary only when
+        // their authored descriptor is complete. `authored_columns` lets us
+        // distinguish such a row from a query projection whose selected-out
+        // authored cells were replaced by typed nulls.
+        let has_complete_authored_payload = has_authored_layout
+            && (version.layer() == VersionLayer::Deletion
+                || match version.authored_columns(&authored_table)? {
+                    Some(authored) => authored.iter().all(|column| {
+                        version
+                            .cell(&authored_table, column)
+                            .is_ok_and(|value| value.is_some())
+                    }),
+                    // Legacy complete rows predate authored-column metadata.
+                    None => true,
+                });
+        if has_complete_authored_payload {
+            return Ok(version.clone());
         }
         Err(Error::MaintainedViewMissingBundleWitness(
             "maintained witness is missing its canonical history row",
