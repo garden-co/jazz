@@ -4871,6 +4871,21 @@ where
         batch: &mut DatabaseBatch,
         version: &VersionRow,
     ) -> Result<(), Error> {
+        // A peer may replay a transaction that is already present locally
+        // (notably while a fresh browser relay hydrates from its persistent
+        // worker). History ingestion verifies that replay is byte-identical;
+        // its pending-current projection must be idempotent too. Otherwise a
+        // self-referential schema can visit the same version twice and try to
+        // insert its exact current primary key again.
+        if self.ahead_current_keys.contains(&(
+            version.table().to_owned(),
+            version.layer(),
+            version.row_uuid(),
+            version.tx_time(),
+            version.tx_node_alias(),
+        )) {
+            return Ok(());
+        }
         let schema_version = self
             .schema_version_for_alias(version.schema_version_alias())
             .ok_or(Error::InvalidStoredValue("unknown schema version alias"))?;
