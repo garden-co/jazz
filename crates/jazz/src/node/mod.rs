@@ -370,6 +370,7 @@ fn reconcile_nested_scalar_enum_cases(
 }
 
 mod branches;
+mod catalogue_ingest;
 mod codec;
 pub mod content_store;
 mod currency;
