@@ -394,13 +394,13 @@ function writePolicyPredicate(writer: PostcardWriter, expr: PolicyExpr): void {
       writePolicyOperand(writer, policyOperandValue(expr.value));
       return;
     case "IsNull":
-      writer.u64(11); // Predicate::IsNull
+      writer.u64(12); // Predicate::IsNull
       writer.u64(0); // Operand::Column
       writer.string(expr.column);
       return;
     case "IsNotNull":
       writer.u64(2); // Predicate::Not
-      writer.u64(11); // Predicate::IsNull
+      writer.u64(12); // Predicate::IsNull
       writer.u64(0); // Operand::Column
       writer.string(expr.column);
       return;

@@ -5268,7 +5268,13 @@ where
         identity: AuthorId,
         trust: CommitUnitTrust,
     ) -> Rc<RefCell<PeerConnection<S>>> {
-        self.accept_subscriber_with_resume_and_trust(transport, identity, trust, None)
+        self.accept_subscriber_with_resume_and_trust(
+            transport,
+            identity,
+            trust,
+            BTreeMap::new(),
+            None,
+        )
     }
 
     /// Accept a subscriber connection with explicit auth claims and upload trust mode.
@@ -5279,8 +5285,7 @@ where
         claims: BTreeMap<String, Value>,
         trust: CommitUnitTrust,
     ) -> Rc<RefCell<PeerConnection<S>>> {
-        self.node.borrow_mut().set_session_claims(identity, claims);
-        self.accept_subscriber_with_resume_and_trust(transport, identity, trust, None)
+        self.accept_subscriber_with_resume_and_trust(transport, identity, trust, claims, None)
     }
 
     /// Accept an edge-terminated subscriber with explicit auth claims.
@@ -5290,11 +5295,11 @@ where
         identity: AuthorId,
         claims: BTreeMap<String, Value>,
     ) -> Rc<RefCell<PeerConnection<S>>> {
-        self.node.borrow_mut().set_session_claims(identity, claims);
         self.accept_subscriber_with_peer(
             transport,
             identity,
             CommitUnitTrust::Session,
+            claims,
             None,
             PeerState::edge_client(identity),
             false,
@@ -5308,11 +5313,11 @@ where
         identity: AuthorId,
         claims: BTreeMap<String, Value>,
     ) -> Rc<RefCell<PeerConnection<S>>> {
-        self.node.borrow_mut().set_session_claims(identity, claims);
         self.accept_subscriber_with_peer(
             transport,
             identity,
             CommitUnitTrust::Session,
+            claims,
             None,
             PeerState::edge_client(identity),
             true,
@@ -5330,6 +5335,7 @@ where
             transport,
             identity,
             CommitUnitTrust::Session,
+            BTreeMap::new(),
             Some(cursor),
         )
     }
@@ -5339,6 +5345,7 @@ where
         transport: Box<dyn Transport>,
         identity: AuthorId,
         trust: CommitUnitTrust,
+        claims: BTreeMap<String, Value>,
         cursor: Option<ResumeCursor>,
     ) -> Rc<RefCell<PeerConnection<S>>> {
         let peer = match trust {
@@ -5347,7 +5354,7 @@ where
             }
             CommitUnitTrust::Session => PeerState::client_link(identity),
         };
-        self.accept_subscriber_with_peer(transport, identity, trust, cursor, peer, false)
+        self.accept_subscriber_with_peer(transport, identity, trust, claims, cursor, peer, false)
     }
 
     fn accept_subscriber_with_peer(
@@ -5355,12 +5362,35 @@ where
         transport: Box<dyn Transport>,
         identity: AuthorId,
         trust: CommitUnitTrust,
+        claims: BTreeMap<String, Value>,
         cursor: Option<ResumeCursor>,
         peer: PeerState,
         edge_authority: bool,
     ) -> Rc<RefCell<PeerConnection<S>>> {
-        let peer = cursor.map(|cursor| cursor.peer).unwrap_or(peer);
-        let session_claim_revision = self.node.borrow().session_claim_revision(identity);
+        let (peer, ingest_context, session_claims, session_claim_revision) = match cursor {
+            Some(cursor) => {
+                assert_eq!(
+                    cursor.ingest_context.identity, identity,
+                    "a resume cursor may only be used by its authenticated identity"
+                );
+                (
+                    cursor.peer,
+                    cursor.ingest_context,
+                    cursor.session_claims,
+                    cursor.session_claim_revision,
+                )
+            }
+            None => (
+                peer,
+                CommitUnitIngestContext {
+                    identity,
+                    trust,
+                    edge_authority,
+                },
+                claims,
+                0,
+            ),
+        };
         let connection_epoch = transport
             .connection_session_context()
             .map(|context| context.local.epoch)
@@ -5384,11 +5414,9 @@ where
             connection_epoch,
             link: ConnectionLink::Subscriber {
                 peer,
-                ingest_context: CommitUnitIngestContext {
-                    identity,
-                    trust,
-                    edge_authority,
-                },
+                ingest_context,
+                session_claims,
+                session_claim_revision,
                 outbox: Rc::clone(&self.outbox),
                 upstream_subscriptions: Rc::clone(&self.upstream_subscriptions),
                 served: BTreeMap::new(),
@@ -6519,6 +6547,12 @@ enum ConnectionLink {
     Subscriber {
         peer: PeerState,
         ingest_context: CommitUnitIngestContext,
+        /// Claims authenticated for this connection. They must not be shared
+        /// with another concurrent connection using the same author identity.
+        session_claims: BTreeMap<String, Value>,
+        /// Connection-local claim generation used to rebuild only this link's
+        /// maintained views when its session is refreshed.
+        session_claim_revision: u64,
         /// Accepted subscriber commit units awaiting upstream relay.
         outbox: Outbox,
         /// Subscriber-maintained views that must be announced upstream.
@@ -6593,17 +6627,51 @@ fn next_branch_metadata_repairs(
 ///
 /// Bindings keep this after a disconnect and pass it into
 /// [`Node::accept_subscriber_with_resume`] for the reconnecting subscriber. It is
-/// the facade handle for the peer-layer complete-tx payload inventory and
-/// result-set cursor.
+/// the facade handle for the peer-layer complete-tx payload inventory,
+/// result-set cursor, and authenticated connection context. Resume must never
+/// fall back to identity-global claim state because same-identity sessions can
+/// legitimately hold different admission claims.
 #[derive(Debug)]
 pub struct ResumeCursor {
     peer: PeerState,
+    ingest_context: CommitUnitIngestContext,
+    session_claims: BTreeMap<String, Value>,
+    session_claim_revision: u64,
 }
 
 impl<S> PeerConnection<S>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
+    /// Bind the process-local query compiler to this subscriber's authenticated
+    /// session immediately before it serves work for that subscriber. NodeState
+    /// retains a cache keyed by identity, while several websocket sessions can
+    /// legitimately share an identity with different claim maps.
+    fn bind_subscriber_session_claims(&self) {
+        let ConnectionLink::Subscriber {
+            ingest_context,
+            session_claims,
+            ..
+        } = &self.link
+        else {
+            return;
+        };
+        self.node
+            .borrow_mut()
+            .set_session_claims(ingest_context.identity, session_claims.clone());
+    }
+
+    fn subscriber_session_claim_revision(&self) -> u64 {
+        let ConnectionLink::Subscriber {
+            session_claim_revision,
+            ..
+        } = &self.link
+        else {
+            return 0;
+        };
+        *session_claim_revision
+    }
+
     /// Rebuild this subscriber's maintained views if its process-local claims
     /// changed. Policy claim values are bound when a maintained view opens, so
     /// retaining the old view after a claim change would retain its authority.
@@ -6613,7 +6681,8 @@ where
             ConnectionLink::Subscriber { ingest_context, .. } => ingest_context.identity,
             ConnectionLink::Upstream { .. } => return Ok(false),
         };
-        let current_revision = self.node.borrow().session_claim_revision(identity);
+        self.bind_subscriber_session_claims();
+        let current_revision = self.subscriber_session_claim_revision();
         if self.observed_session_claim_revision.get() == current_revision {
             return Ok(false);
         }
@@ -6785,12 +6854,22 @@ where
 
     /// Extract this subscriber connection's resume cursor for a reconnect.
     pub fn take_resume_cursor(&mut self) -> Option<ResumeCursor> {
-        let ConnectionLink::Subscriber { peer, .. } = &mut self.link else {
+        let ConnectionLink::Subscriber {
+            peer,
+            ingest_context,
+            session_claims,
+            session_claim_revision,
+            ..
+        } = &mut self.link
+        else {
             return None;
         };
         let replacement = PeerState::client_link(peer.link_identity());
         Some(ResumeCursor {
             peer: std::mem::replace(peer, replacement),
+            ingest_context: *ingest_context,
+            session_claims: std::mem::take(session_claims),
+            session_claim_revision: *session_claim_revision,
         })
     }
 
@@ -6799,6 +6878,7 @@ where
     /// tighter one: the client keeps the same subscription, but its visible
     /// membership must be recalculated immediately.
     fn rehydrate_subscriber_views(&mut self) -> Result<(), Error> {
+        self.bind_subscriber_session_claims();
         let connection_epoch = self.connection_epoch;
         let ConnectionLink::Subscriber {
             peer,
@@ -6897,6 +6977,7 @@ where
         let mut stats = DbTickStats::default();
         let connection_epoch = self.connection_epoch;
         self.observe_shared_subscriber_dirty_epoch();
+        self.bind_subscriber_session_claims();
         self.rebind_subscriber_views_after_claim_change()?;
         match &mut self.link {
             ConnectionLink::Upstream {
@@ -7713,6 +7794,8 @@ where
             ConnectionLink::Subscriber {
                 peer,
                 ingest_context,
+                session_claims: _,
+                session_claim_revision: _,
                 outbox,
                 upstream_subscriptions,
                 served,
@@ -8443,6 +8526,15 @@ where
                         // record only when its creator matches the authenticated
                         // link and its declared dependencies are available.
                         other => {
+                            if matches!(other, SyncMessage::SessionClaims { .. })
+                                && ingest_context.trust == CommitUnitTrust::Session
+                            {
+                                // Claims are fixed when the host admits or resumes this
+                                // connection. A subscriber can otherwise self-assert a
+                                // broader policy context after authentication.
+                                drop_peer_request(&self.node);
+                                continue;
+                            }
                             if let SyncMessage::BranchMetadata(metadata) = &other
                                 && ingest_context.trust == CommitUnitTrust::Session
                             {

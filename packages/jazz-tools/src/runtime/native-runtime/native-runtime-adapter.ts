@@ -826,22 +826,34 @@ export class NativeRuntimeAdapter implements Runtime {
     if (!write) {
       throw new Error(`Wait for batch failed: unknown batch ${batchId}`);
     }
-    this.throwServerTransportErrorForTier(tier);
-    this.pumpServerTransport();
-    this.throwServerTransportErrorForTier(tier);
-    const settlement = write.wait(tier);
-    const transportError = this.waitForServerTransportError(tier);
-    try {
-      await (transportError ? Promise.race([settlement, transportError.promise]) : settlement);
-      this.pumpSubscriptions();
-    } catch (error) {
-      const rejected = rejectedWaitError(batchId, error);
-      if (rejected) {
-        throw rejected;
+    for (;;) {
+      this.throwServerTransportErrorForTier(tier);
+      const observedServerWorkEpoch = this.serverTransportWorkEpoch;
+      this.pumpServerTransport();
+      this.throwServerTransportErrorForTier(tier);
+      const settlement = write.wait(tier);
+      const transportError = this.waitForServerTransportError(tier);
+      const transportWork = this.waitForServerTransportWork(tier, observedServerWorkEpoch);
+      try {
+        const wakes: Array<Promise<"settled" | "work"> | Promise<never>> = [
+          settlement.then(() => "settled" as const),
+        ];
+        if (transportError) wakes.push(transportError.promise);
+        if (transportWork) wakes.push(transportWork.promise.then(() => "work" as const));
+        if ((await Promise.race(wakes)) === "settled") {
+          this.pumpSubscriptions();
+          return;
+        }
+      } catch (error) {
+        const rejected = rejectedWaitError(batchId, error);
+        if (rejected) {
+          throw rejected;
+        }
+        throw error;
+      } finally {
+        transportError?.cancel();
+        transportWork?.cancel();
       }
-      throw error;
-    } finally {
-      transportError?.cancel();
     }
   }
 
@@ -3753,9 +3765,9 @@ export function applySubscriptionDeltaWithWireDelta(
     rowIndexByKey,
     wireDelta: {
       ...nativeDeltaFromChanges(
-        addedRows,
-        updatedRows,
-        removedEntries,
+        subscriptionOutputRows(addedRows, outputColumns),
+        subscriptionOutputRows(updatedRows, outputColumns),
+        subscriptionOutputRemovals(removedEntries, outputColumns),
         rowIndexByKey,
         schema,
         outputColumns,
@@ -3763,6 +3775,20 @@ export function applySubscriptionDeltaWithWireDelta(
       ...(reset ? { reset: true } : {}),
     },
   };
+}
+
+function subscriptionOutputRows(
+  rows: RowState[],
+  outputColumns: SubscriptionOutputColumns | null,
+): RowState[] {
+  return outputColumns ? rows.filter((row) => row.table === outputColumns.rootTable) : rows;
+}
+
+function subscriptionOutputRemovals(
+  removed: Array<{ table: string; id: string; index: number; resultKeyBytes?: Uint8Array }>,
+  outputColumns: SubscriptionOutputColumns | null,
+): Array<{ id: string; index: number; resultKeyBytes?: Uint8Array }> {
+  return outputColumns ? removed.filter((row) => row.table === outputColumns.rootTable) : removed;
 }
 
 function applySubscriptionDeltaToState(
@@ -3775,14 +3801,19 @@ function applySubscriptionDeltaToState(
 ): {
   addedRows: RowState[];
   updatedRows: RowState[];
-  removedEntries: Array<{ id: string; index: number; resultKeyBytes?: Uint8Array }>;
+  removedEntries: Array<{ table: string; id: string; index: number; resultKeyBytes?: Uint8Array }>;
   rows: RowState[];
   rowIndexByKey: Map<string, number>;
 } {
   const rowsByKey = reset
     ? new Map<string, RowState>()
     : new Map(currentRows.map((row) => [rowStateKey(row), row]));
-  const removedEntries: Array<{ id: string; index: number; resultKeyBytes?: Uint8Array }> = [];
+  const removedEntries: Array<{
+    table: string;
+    id: string;
+    index: number;
+    resultKeyBytes?: Uint8Array;
+  }> = [];
 
   for (const [removedIndex, removed] of delta.removed.entries()) {
     const id = formatUuid(removed.rowId);
@@ -3790,14 +3821,28 @@ function applySubscriptionDeltaToState(
     const key = resultKeyBytes
       ? occurrenceStateKey(resultKeyBytes, removed.table, id)
       : rowKey(removed.table, id);
-    removedEntries.push({ id, index: currentIndexByKey.get(key) ?? 0, resultKeyBytes });
+    removedEntries.push({
+      table: removed.table,
+      id,
+      index: currentIndexByKey.get(key) ?? 0,
+      resultKeyBytes,
+    });
     rowsByKey.delete(key);
   }
 
-  const projectedColumns = outputColumns?.rootColumns;
   const nestedRowCarrier: NestedRowCarrier = "full-record";
-  const addedRows = rowsFromBatches(delta.added, schema, projectedColumns, nestedRowCarrier);
-  const updatedRows = rowsFromBatches(delta.updated, schema, projectedColumns, nestedRowCarrier);
+  const addedRows = rowsFromSubscriptionBatches(
+    delta.added,
+    schema,
+    outputColumns,
+    nestedRowCarrier,
+  );
+  const updatedRows = rowsFromSubscriptionBatches(
+    delta.updated,
+    schema,
+    outputColumns,
+    nestedRowCarrier,
+  );
   attachOccurrenceKeys(addedRows, delta.addedOccurrenceKeys);
   attachOccurrenceKeys(updatedRows, delta.updatedOccurrenceKeys);
   for (const row of addedRows.concat(updatedRows)) {
@@ -3813,6 +3858,22 @@ function applySubscriptionDeltaToState(
     rows,
     rowIndexByKey,
   };
+}
+
+function rowsFromSubscriptionBatches(
+  batches: NativeRowBatch[],
+  schema: WasmSchema,
+  outputColumns: SubscriptionOutputColumns | null,
+  nestedRowCarrier: NestedRowCarrier,
+): RowState[] {
+  return batches.flatMap((batch) =>
+    rowsFromBatches(
+      [batch],
+      schema,
+      batch.table === outputColumns?.rootTable ? outputColumns.rootColumns : undefined,
+      nestedRowCarrier,
+    ),
+  );
 }
 
 function indexRowsByKey(rows: RowState[]): Map<string, number> {

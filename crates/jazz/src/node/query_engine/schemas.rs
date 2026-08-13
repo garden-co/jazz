@@ -27,6 +27,12 @@ pub(crate) struct AppRowSchema {
     pub(crate) carrier: AppRowCarrier,
     /// Per-field override for mixed collector records, keyed by descriptor name.
     pub(crate) field_carriers: BTreeMap<String, AppRowCarrier>,
+    /// Explicit physical descriptor field -> public output name mapping.
+    ///
+    /// This is distinct from the carrier: a logical include can legally begin
+    /// with `user_`, which is otherwise the physical CurrentRow source-cell
+    /// namespace.
+    pub(crate) public_field_names: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

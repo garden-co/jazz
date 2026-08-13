@@ -1251,6 +1251,106 @@ fn relation_schema() -> JazzSchema {
     ])
 }
 
+fn membership_scoped_relation_schema() -> JazzSchema {
+    JazzSchema::new([
+        TableSchema::new(
+            "chats",
+            [
+                ColumnSchema::new("name", ColumnType::String),
+                ColumnSchema::new("is_public", ColumnType::Bool),
+                ColumnSchema::new("created_by", ColumnType::String),
+                ColumnSchema::new("join_code", ColumnType::String.nullable()),
+            ],
+        )
+        .with_read_policy(Policy::shape(
+            Query::from("chats")
+                .filter(any_of([]))
+                .policy_branch(PolicyBranch::single_alternative_from_query(
+                    Query::from("chats").filter(eq(col("is_public"), lit(true))),
+                ))
+                .policy_branch(PolicyBranch::single_alternative_from_query(
+                    Query::from("chats").filter(eq(col("join_code"), claim("join_code"))),
+                ))
+                .policy_branch(PolicyBranch::single_alternative_from_query(
+                    Query::from("chats").join_via_column(
+                        "chat_members",
+                        "chat_id",
+                        "id",
+                        [eq(col("user_id"), claim("user_id"))],
+                    ),
+                )),
+        ))
+        .with_write_policy(Policy::public()),
+        TableSchema::new(
+            "chat_members",
+            [
+                ColumnSchema::new("chat_id", ColumnType::Uuid),
+                ColumnSchema::new("user_id", ColumnType::String),
+                ColumnSchema::new("join_code", ColumnType::String.nullable()),
+            ],
+        )
+        .with_reference("chat_id", "chats")
+        .with_read_policy(Policy::shape(
+            Query::from("chat_members")
+                .filter(any_of([]))
+                .policy_branch(PolicyBranch::single_alternative_from_query(
+                    Query::from("chat_members").filter(eq(col("user_id"), claim("user_id"))),
+                ))
+                .policy_branch(PolicyBranch::single_alternative_from_query(
+                    Query::from("chat_members").join_via_column(
+                        "chat_members",
+                        "chat_id",
+                        "chat_id",
+                        [eq(col("user_id"), claim("user_id"))],
+                    ),
+                )),
+        ))
+        .with_write_policy(Policy::public()),
+        TableSchema::new(
+            "profiles",
+            [
+                ColumnSchema::new("user_id", ColumnType::String),
+                ColumnSchema::new("name", ColumnType::String),
+                ColumnSchema::new("avatar", ColumnType::String.nullable()),
+            ],
+        )
+        .with_read_policy(Policy::public())
+        .with_write_policy(Policy::public()),
+        TableSchema::new(
+            "messages",
+            [
+                ColumnSchema::new("chat_id", ColumnType::Uuid),
+                ColumnSchema::new("sender_id", ColumnType::Uuid),
+                ColumnSchema::new("text", ColumnType::String),
+                ColumnSchema::new("created_at", ColumnType::U64),
+            ],
+        )
+        .with_reference("chat_id", "chats")
+        .with_reference("sender_id", "profiles")
+        .with_read_policy(Policy::shape(
+            Query::from("messages")
+                .filter(any_of([]))
+                .policy_branch(PolicyBranch::single_alternative_from_query(
+                    Query::from("messages").join_via_column(
+                        "chats",
+                        "id",
+                        "chat_id",
+                        [eq(col("is_public"), lit(true))],
+                    ),
+                ))
+                .policy_branch(PolicyBranch::single_alternative_from_query(
+                    Query::from("messages").join_via_column(
+                        "chat_members",
+                        "chat_id",
+                        "chat_id",
+                        [eq(col("user_id"), claim("user_id"))],
+                    ),
+                )),
+        ))
+        .with_write_policy(Policy::public()),
+    ])
+}
+
 fn relation_hop_schema() -> JazzSchema {
     JazzSchema::new([
         TableSchema::new("orgs", [ColumnSchema::new("name", ColumnType::String)])
@@ -3965,6 +4065,385 @@ fn structured_subscription_splices_in_terminal_root_order_after_insert() {
                 }] if path.is_empty()
             )
     ));
+}
+
+#[test]
+fn propagated_structured_subscription_rehydrates_after_membership_scoped_one_shot() {
+    let schema = membership_scoped_relation_schema();
+    let reader = AuthorId::from_bytes([0xb2; 16]);
+    let normal_claims =
+        BTreeMap::from([("user_id".to_owned(), Value::String(reader.0.to_string()))]);
+    let invite_claims = BTreeMap::from([
+        ("user_id".to_owned(), Value::String(reader.0.to_string())),
+        (
+            "join_code".to_owned(),
+            Value::String("invite-code".to_owned()),
+        ),
+    ]);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let client = open_db(0xc4, reader, &schema);
+    let invite_client = open_db(0xc5, reader, &schema);
+    client.set_identity_claims(reader, normal_claims.clone());
+    invite_client.set_identity_claims(reader, invite_claims.clone());
+    // The normal connection remains live while a separately scoped invite
+    // connection writes its membership. This is the production handoff.
+    let (client_transport, server_transport) = duplex();
+    let _upstream = client.connect_upstream(client_transport);
+    let _subscriber = server.accept_subscriber_with_claims(server_transport, reader, normal_claims);
+    let (invite_transport, server_invite_transport) = duplex();
+    let _invite_upstream = invite_client.connect_upstream(invite_transport);
+    let _invite_subscriber =
+        server.accept_subscriber_with_claims(server_invite_transport, reader, invite_claims);
+    let chat = row(0xc1);
+    let sender = row(0xa1);
+    let message = row(0xb1);
+    server
+        .insert_with_id(
+            "chats",
+            chat,
+            BTreeMap::from([
+                ("name".to_owned(), Value::String("private".to_owned())),
+                ("is_public".to_owned(), Value::Bool(false)),
+                ("created_by".to_owned(), Value::String("author".to_owned())),
+                (
+                    "join_code".to_owned(),
+                    Value::Nullable(Some(Box::new(Value::String("invite-code".to_owned())))),
+                ),
+            ]),
+        )
+        .unwrap();
+    server
+        .insert_with_id(
+            "profiles",
+            sender,
+            BTreeMap::from([
+                ("user_id".to_owned(), Value::String("alice".to_owned())),
+                ("name".to_owned(), Value::String("alice".to_owned())),
+                ("avatar".to_owned(), Value::Nullable(None)),
+            ]),
+        )
+        .unwrap();
+    // The browser fixture also has another visible profile which is unrelated
+    // to the message's sender. Keep that cardinality here: correlated include
+    // lowering must not lose the root because a support table has extra rows.
+    server
+        .insert_with_id(
+            "profiles",
+            row(0xa2),
+            BTreeMap::from([
+                ("user_id".to_owned(), Value::String("unrelated".to_owned())),
+                ("name".to_owned(), Value::String("unrelated".to_owned())),
+                ("avatar".to_owned(), Value::Nullable(None)),
+            ]),
+        )
+        .unwrap();
+    server
+        .insert_with_id(
+            "messages",
+            message,
+            BTreeMap::from([
+                ("chat_id".to_owned(), Value::Uuid(chat.0)),
+                ("sender_id".to_owned(), Value::Uuid(sender.0)),
+                ("text".to_owned(), Value::String("visible".to_owned())),
+                ("created_at".to_owned(), Value::U64(1_700_000_000_000)),
+            ]),
+        )
+        .unwrap();
+
+    let invite_chat_query = prepared(
+        &invite_client,
+        &Query::from("chats").filter(eq(col("id"), lit(chat.0))),
+    );
+    let invite_attachment = invite_client
+        .attach_query_with_opts(&invite_chat_query, edge_subscribe_opts())
+        .unwrap();
+    invite_client.tick().unwrap();
+    server.tick().unwrap();
+    invite_client.tick().unwrap();
+    assert!(invite_client.query_attachment_is_covered(&invite_attachment));
+    assert_eq!(
+        block_on(invite_client.all(&invite_chat_query, edge_subscribe_opts()))
+            .unwrap()
+            .len(),
+        1,
+        "the invite-scoped connection can read the private chat before acceptance",
+    );
+    invite_client.detach_query(invite_attachment);
+
+    // The ordinary session has the same authenticated identity, but not the
+    // invite claim. Its view must remain private until the separate invite
+    // session commits membership.
+    let normal_chat_query = prepared(
+        &client,
+        &Query::from("chats").filter(eq(col("id"), lit(chat.0))),
+    );
+    let normal_chat_attachment = client
+        .attach_query_with_opts(&normal_chat_query, edge_subscribe_opts())
+        .unwrap();
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+    assert!(client.query_attachment_is_covered(&normal_chat_attachment));
+    assert!(
+        block_on(client.all(&normal_chat_query, edge_subscribe_opts()))
+            .unwrap()
+            .is_empty(),
+        "the invite claim must not leak from its connection into Bob's normal session",
+    );
+    client.detach_query(normal_chat_attachment);
+
+    let accepted_membership = invite_client
+        .insert_with_id(
+            "chat_members",
+            row(0xc2),
+            BTreeMap::from([
+                ("chat_id".to_owned(), Value::Uuid(chat.0)),
+                ("user_id".to_owned(), Value::String(reader.0.to_string())),
+                ("join_code".to_owned(), Value::Nullable(None)),
+            ]),
+        )
+        .unwrap();
+    invite_client.tick().unwrap();
+    server.tick().unwrap();
+    invite_client.tick().unwrap();
+    client.tick().unwrap();
+    block_on(accepted_membership.wait(DurabilityTier::Global))
+        .expect("the invite connection's membership write must settle");
+
+    let member_query = prepared(
+        &client,
+        &Query::from("chat_members").filter(eq(col("chat_id"), lit(chat.0))),
+    );
+    let member_attachment = client
+        .attach_query_with_opts(&member_query, edge_subscribe_opts())
+        .unwrap();
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+    assert!(client.query_attachment_is_covered(&member_attachment));
+    assert_eq!(
+        block_on(client.all(&member_query, edge_subscribe_opts()))
+            .unwrap()
+            .len(),
+        1,
+        "the client first receives its membership through ordinary coverage",
+    );
+    client.detach_query(member_attachment);
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+
+    let plain_message_query = prepared(
+        &client,
+        &Query::from("messages").filter(eq(col("chat_id"), lit(chat.0))),
+    );
+    let plain_attachment = client
+        .attach_query_with_opts(&plain_message_query, edge_subscribe_opts())
+        .unwrap();
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+    assert!(client.query_attachment_is_covered(&plain_attachment));
+    assert_eq!(
+        block_on(client.all(&plain_message_query, edge_subscribe_opts()))
+            .unwrap()
+            .len(),
+        1,
+        "the client receives the root before it requests the structured shape",
+    );
+    client.detach_query(plain_attachment);
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+
+    let query = Query::from("messages")
+        .filter(eq(col("chat_id"), lit(chat.0)))
+        .array_subquery(ArraySubquery::new("sender", "profiles", "id", "sender_id"))
+        .order_by("created_at", OrderDirection::Desc)
+        .limit(21);
+    let prepared_query = prepared(&client, &query);
+    let attachment = client
+        .attach_query_with_opts(&prepared_query, edge_subscribe_opts())
+        .unwrap();
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+    assert!(client.query_attachment_is_covered(&attachment));
+    assert_eq!(
+        block_on(client.all_relation_snapshot(&prepared_query, edge_subscribe_opts()))
+            .unwrap()
+            .root_count,
+        1,
+    );
+    client.detach_query(attachment);
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+
+    let mut subscription =
+        block_on(client.subscribe(&prepared_query, edge_subscribe_opts())).unwrap();
+    assert!(opened_rows(block_on(subscription.next_event()).unwrap()).is_empty());
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+
+    let snapshot = snapshot_from_event(block_on(subscription.next_event()).unwrap());
+    assert!(
+        snapshot
+            .rows
+            .iter()
+            .any(|row| row.table() == "messages" && row.row_uuid() == message)
+    );
+}
+
+#[test]
+fn resume_cursor_restores_connection_claims_before_serving_same_identity_siblings() {
+    let schema = membership_scoped_relation_schema();
+    let reader = AuthorId::from_bytes([0xb3; 16]);
+    let normal_claims = BTreeMap::new();
+    let invite_claims = BTreeMap::from([
+        ("user_id".to_owned(), Value::String(reader.0.to_string())),
+        (
+            "join_code".to_owned(),
+            Value::String("resume-only-invite".to_owned()),
+        ),
+    ]);
+    let server = open_core(0x5f, AuthorId::SYSTEM, &schema);
+    let client = open_db(0xc6, reader, &schema);
+    let sibling = open_db(0xc7, reader, &schema);
+    let chat = row(0xc3);
+    server
+        .insert_with_id(
+            "chats",
+            chat,
+            BTreeMap::from([
+                ("name".to_owned(), Value::String("secret".to_owned())),
+                ("is_public".to_owned(), Value::Bool(false)),
+                ("created_by".to_owned(), Value::String("author".to_owned())),
+                (
+                    "join_code".to_owned(),
+                    Value::Nullable(Some(Box::new(Value::String(
+                        "resume-only-invite".to_owned(),
+                    )))),
+                ),
+            ]),
+        )
+        .unwrap();
+
+    let (client_transport, server_transport) = duplex();
+    let upstream = client.connect_upstream(client_transport);
+    let subscriber = server.accept_subscriber_with_claims(server_transport, reader, normal_claims);
+    let cursor = subscriber.borrow_mut().take_resume_cursor().unwrap();
+    assert!(server.server.detach_connection(&subscriber));
+    assert!(client.detach_connection(&upstream));
+
+    // This same-identity sibling is admitted with a broader invite claim. The
+    // resumed ordinary session must restore its own empty invite context, not
+    // inherit the process-local compiler cache that this sibling last bound.
+    let (sibling_transport, sibling_server_transport) = duplex();
+    let _sibling_upstream = sibling.connect_upstream(sibling_transport);
+    let _sibling_subscriber =
+        server.accept_subscriber_with_claims(sibling_server_transport, reader, invite_claims);
+    let (resumed_transport, resumed_server_transport) = duplex();
+    let _resumed_upstream = client.connect_upstream(resumed_transport);
+    let _resumed = server.accept_subscriber_with_resume(resumed_server_transport, reader, cursor);
+
+    let query = prepared(
+        &client,
+        &Query::from("chats").filter(eq(col("id"), lit(chat.0))),
+    );
+    let attachment = client
+        .attach_query_with_opts(&query, edge_subscribe_opts())
+        .unwrap();
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+
+    assert!(client.query_attachment_is_covered(&attachment));
+    assert!(
+        block_on(client.all(&query, edge_subscribe_opts()))
+            .unwrap()
+            .is_empty(),
+        "a resumed empty-claim session must not inherit its sibling's invite claim",
+    );
+}
+
+#[test]
+fn subscriber_wire_claims_cannot_escalate_host_admission() {
+    let schema = membership_scoped_relation_schema();
+    let reader = AuthorId::from_bytes([0xb4; 16]);
+    let normal_claims =
+        BTreeMap::from([("user_id".to_owned(), Value::String(reader.0.to_string()))]);
+    let self_asserted_invite = BTreeMap::from([
+        ("user_id".to_owned(), Value::String(reader.0.to_string())),
+        (
+            "join_code".to_owned(),
+            Value::String("self-asserted-invite".to_owned()),
+        ),
+    ]);
+    let server = open_core(0x60, AuthorId::SYSTEM, &schema);
+    let client = open_db(0xc8, reader, &schema);
+    let chat = row(0xc4);
+    server
+        .insert_with_id(
+            "chats",
+            chat,
+            BTreeMap::from([
+                ("name".to_owned(), Value::String("secret".to_owned())),
+                ("is_public".to_owned(), Value::Bool(false)),
+                ("created_by".to_owned(), Value::String("author".to_owned())),
+                (
+                    "join_code".to_owned(),
+                    Value::Nullable(Some(Box::new(Value::String(
+                        "self-asserted-invite".to_owned(),
+                    )))),
+                ),
+            ]),
+        )
+        .unwrap();
+
+    let (client_transport, server_transport) = duplex();
+    let _upstream = client.connect_upstream(client_transport);
+    let _subscriber = server.accept_subscriber_with_claims(server_transport, reader, normal_claims);
+    let dropped_before = server
+        .node()
+        .borrow()
+        .sync_metrics()
+        .dropped_peer_request_messages;
+
+    // This is an unverified wire message from an already admitted session,
+    // not an authenticated host refresh. It must not replace the admission
+    // claim map even though it carries the connection's real identity.
+    client.set_identity_claims(reader, self_asserted_invite);
+    client.tick().unwrap();
+    server.tick().unwrap();
+    assert_eq!(
+        server
+            .node()
+            .borrow()
+            .sync_metrics()
+            .dropped_peer_request_messages,
+        dropped_before + 1,
+    );
+
+    let query = prepared(
+        &client,
+        &Query::from("chats").filter(eq(col("id"), lit(chat.0))),
+    );
+    let attachment = client
+        .attach_query_with_opts(&query, edge_subscribe_opts())
+        .unwrap();
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+
+    assert!(client.query_attachment_is_covered(&attachment));
+    assert!(
+        block_on(client.all(&query, edge_subscribe_opts()))
+            .unwrap()
+            .is_empty(),
+        "a subscriber cannot grant itself an invite claim after host admission",
+    );
 }
 
 #[test]

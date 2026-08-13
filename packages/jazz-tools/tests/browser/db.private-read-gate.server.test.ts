@@ -673,9 +673,7 @@ describe("raw websocket private read gate", () => {
     aliceAgainUnsubscribe();
   }, 60_000);
 
-  // TEST_BURNDOWN_TS: chromium > raw websocket private read gate > converts a private chat invite code into normal membership visibility
-  // known red; tracked in TEST_BURNDOWN.md — private invite flow times out before its expected browser state stabilizes.
-  it.skip("converts a private chat invite code into normal membership visibility", async () => {
+  it("converts a private chat invite code into normal membership visibility", async () => {
     const { appId, serverUrl, adminSecret } = await getJazzServerInfo(
       uniqueDbName("camel-chat-private-invite"),
     );

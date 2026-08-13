@@ -10,6 +10,23 @@ use groove::records::ValueType;
 // Groove returns RecursiveIterationLimit instead of silently truncating when
 // this bound is reached before convergence.
 const FIXPOINT_MAX_ITERS: usize = 128;
+fn public_root_field_name(source: &ResolvedSource, field: &CollectFlatField) -> String {
+    let source_field = field.source_field.as_deref().unwrap_or(&field.output);
+    let logical = logical_user_column(source_field);
+    if source
+        .table_schema
+        .columns
+        .iter()
+        .any(|column| column.name == logical)
+    {
+        logical_user_column(&field.output).to_owned()
+    } else {
+        // Collector slots already carry their public path field as their
+        // physical descriptor name. Do not infer from a reserved-looking
+        // prefix here: table columns may legitimately use any such name.
+        field.output.clone()
+    }
+}
 
 /// Parameter domains attached to one lowered graph.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -5489,13 +5506,14 @@ fn lowered_terminals(
     // cannot retain any routed binding fields yet.
     if let Some(app_rows) = &request.output.app_rows {
         let projected_output = projected_multisource_terminal(plan, source);
-        let (graph, descriptor, hidden_fields, carrier, field_carriers) =
+        let (graph, descriptor, hidden_fields, carrier, field_carriers, public_field_names) =
             match app_rows.projection.clone() {
                 _ if !app_rows.public_terminal => (
                     closure.visible_root.clone(),
                     source.row_shape.descriptor.clone(),
                     hidden_source_fields(&source.row_shape),
                     AppRowCarrier::CurrentRow,
+                    BTreeMap::new(),
                     BTreeMap::new(),
                 ),
                 PayloadProjection::Tree(tree) => {
@@ -5515,6 +5533,7 @@ fn lowered_terminals(
                         collected.hidden_fields,
                         collected.carrier,
                         collected.field_carriers,
+                        collected.public_field_names,
                     )
                 }
                 _ if projected_output.is_some() => {
@@ -5550,12 +5569,22 @@ fn lowered_terminals(
                             .iter()
                             .map(|field| ProjectField::named(&field.name)),
                     );
+                    let public_field_names = public_fields
+                        .iter()
+                        .map(|field| {
+                            (
+                                field.name.clone(),
+                                logical_user_column(&field.name).to_owned(),
+                            )
+                        })
+                        .collect();
                     (
                         graph,
                         descriptor,
                         BTreeSet::new(),
                         AppRowCarrier::Logical,
                         BTreeMap::new(),
+                        public_field_names,
                     )
                 }
                 _ => {
@@ -5578,6 +5607,7 @@ fn lowered_terminals(
                         collected.hidden_fields,
                         collected.carrier,
                         collected.field_carriers,
+                        collected.public_field_names,
                     )
                 }
             };
@@ -5589,6 +5619,7 @@ fn lowered_terminals(
                 hidden_fields,
                 carrier,
                 field_carriers,
+                public_field_names,
             }),
         });
     }
@@ -5871,6 +5902,7 @@ struct LoweredCollectByAppRows {
     hidden_fields: BTreeSet<String>,
     carrier: AppRowCarrier,
     field_carriers: BTreeMap<String, AppRowCarrier>,
+    public_field_names: BTreeMap<String, String>,
 }
 
 fn lower_collect_by_app_rows(
@@ -5925,6 +5957,17 @@ fn lower_collect_by_app_rows(
                     } else {
                         AppRowCarrier::Logical
                     },
+                )
+            })
+            .collect();
+        let public_field_names = layout
+            .root_fields
+            .iter()
+            .filter(|field| field.is_output && !field.is_row_id)
+            .map(|field| {
+                (
+                    field.output.clone(),
+                    public_root_field_name(root_source, field),
                 )
             })
             .collect();
@@ -5985,6 +6028,7 @@ fn lower_collect_by_app_rows(
             hidden_fields: route_fields.clone(),
             carrier,
             field_carriers,
+            public_field_names,
         });
     }
     let root_context = root_collect_context_graph(visible_root.clone(), &layout)?;
@@ -6009,6 +6053,23 @@ fn lower_collect_by_app_rows(
             .iter()
             .map(|slot| (slot.collection_field.clone(), AppRowCarrier::Logical)),
     );
+    let mut public_field_names = layout
+        .root_fields
+        .iter()
+        .filter(|field| field.is_output && !field.is_row_id)
+        .map(|field| {
+            (
+                field.output.clone(),
+                public_root_field_name(root_source, field),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    public_field_names.extend(layout.slots.iter().map(|slot| {
+        // Collection field names are public query-path identities. They are
+        // carried verbatim into the terminal descriptor, so no prefix-based
+        // recovery is needed at this boundary.
+        (slot.collection_field.clone(), slot.collection_field.clone())
+    }));
     let mut association_graphs = Vec::new();
     for slot in &layout.slots {
         let path = find_correlated_path(plan, &slot.path).ok_or_else(|| {
@@ -6076,6 +6137,7 @@ fn lower_collect_by_app_rows(
         hidden_fields,
         carrier: AppRowCarrier::Logical,
         field_carriers,
+        public_field_names,
     })
 }
 
@@ -6982,6 +7044,7 @@ fn lowered_aggregate_terminals(
                 hidden_fields: root_route_fields.clone(),
                 carrier: AppRowCarrier::Logical,
                 field_carriers: BTreeMap::new(),
+                public_field_names: BTreeMap::new(),
             }),
         });
     }

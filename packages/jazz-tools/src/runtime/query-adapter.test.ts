@@ -144,4 +144,16 @@ describe("translateQuery", () => {
       { column_name: "todosViaOwner", limit: null },
     ]);
   });
+
+  it("keeps projected include fields in their public terminal namespace", () => {
+    const translated = JSON.parse(
+      translateQuery(app.todos.select("title").include({ owner: true })._build(), app.wasmSchema),
+    );
+
+    // Query bytes are ShapeAst v0-compatible: do not add a positional codec
+    // field just to recover this name later. The collector descriptor carries
+    // the public relation field directly.
+    expect(translated.array_subqueries).toMatchObject([{ column_name: "owner" }]);
+    expect(translated.array_subqueries[0]).not.toHaveProperty("public_name");
+  });
 });

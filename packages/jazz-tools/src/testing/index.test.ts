@@ -340,9 +340,7 @@ describe("createPolicyTestApp", () => {
     expect(calls).toEqual(["local", "edge"]);
   });
 
-  // TEST_BURNDOWN_TS: createPolicyTestApp > creates a test app from an app definition and compiled permissions
-  // known red; tracked in TEST_BURNDOWN.md — native schema decoding rejects the compiled policy fixture.
-  it.skip("creates a test app from an app definition and compiled permissions", async () => {
+  it("creates a test app from an app definition and compiled permissions", async () => {
     const policyTestApp = await createPolicyTestApp(testApp, testPermissions, expect);
 
     try {
@@ -366,9 +364,7 @@ describe("createPolicyTestApp", () => {
     }
   }, 10_000);
 
-  // TEST_BURNDOWN_TS: createPolicyTestApp > exposes expectAllowed and expectDenied on session-scoped test dbs
-  // known red; tracked in TEST_BURNDOWN.md — native schema decoding rejects the compiled policy fixture.
-  it.skip("exposes expectAllowed and expectDenied on session-scoped test dbs", async () => {
+  it("exposes expectAllowed and expectDenied on session-scoped test dbs", async () => {
     const policyTestApp = await createPolicyTestApp(testApp, testPermissions, expect);
 
     try {
