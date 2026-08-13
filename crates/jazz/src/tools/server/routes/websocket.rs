@@ -1666,6 +1666,16 @@ mod tests {
             tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
         >,
     ) -> (usize, usize) {
+        pump_core_websocket_transport_once_with_first_receive(client, ws, true).await
+    }
+
+    async fn pump_core_websocket_transport_once_with_first_receive(
+        client: &TestClient,
+        ws: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+        receive_after_client_send: bool,
+    ) -> (usize, usize) {
         let mut outbound = client.tick_take();
         let mut sent = 0;
         let mut received = 0;
@@ -1680,13 +1690,24 @@ mod tests {
                 .await
                 .expect("send client frames");
             sent += outbound.len();
-            let inbound = try_receive_ws_encoded_frames(ws).await;
+            let inbound = if receive_after_client_send {
+                try_receive_ws_encoded_frames(ws).await
+            } else {
+                Vec::new()
+            };
             if inbound.is_empty() {
                 outbound = client.tick_take();
             } else {
                 received += inbound.len();
                 outbound = client.receive_tick_take(inbound);
             }
+        }
+        // A server response may miss the short receive window immediately
+        // following the client frame. Keep an idle pump bidirectional: without
+        // this read, later pump calls with no client work would never observe
+        // that already-queued response.
+        if sent == 0 {
+            received += receive_core_websocket_transport_push_once(client, ws).await;
         }
         (sent, received)
     }
@@ -1883,6 +1904,46 @@ mod tests {
             vec!["after empty coverage".to_owned()]
         );
         client_b.detach_query(client_b_todos_attachment);
+    }
+
+    // Internal route-boundary guard: public client APIs do not expose a way to
+    // deliberately skip one websocket read. This forces that scheduling edge
+    // and proves an idle transport pump still consumes the queued response.
+    #[tokio::test(flavor = "current_thread")]
+    async fn ws_idle_pump_drains_response_after_missed_first_receive() {
+        let state = make_ws_convergence_test_state().await;
+        let addr = start_ws_test_server(state.clone()).await;
+        let client = TestClient::new(ws_public_schema_convert(), 0xb2, 0xb200).await;
+        let mut ws = open_negotiated_ws(addr, &state, AuthorId::from_bytes([0xb2; 16])).await;
+        let (_todos, attachment) = client.attach_todos_query();
+
+        let (sent, received) =
+            pump_core_websocket_transport_once_with_first_receive(&client, &mut ws, false).await;
+        assert!(
+            sent > 0,
+            "the query registration must reach the websocket route"
+        );
+        assert_eq!(
+            received, 0,
+            "the first pump deliberately skips its response"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !client.edge_attachment_is_covered(&attachment),
+            "the queued response must not be applied before the idle pump reads it"
+        );
+
+        let (sent, received) = pump_core_websocket_transport_once(&client, &mut ws).await;
+        assert_eq!(sent, 0, "the second pump must have no new client work");
+        assert!(
+            received > 0,
+            "the idle pump must consume the queued response"
+        );
+        assert!(
+            client.edge_attachment_is_covered(&attachment),
+            "the drained server response must cover the registered query"
+        );
+        client.detach_query(attachment);
     }
 
     #[tokio::test(flavor = "current_thread")]
