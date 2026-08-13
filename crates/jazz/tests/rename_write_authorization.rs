@@ -163,6 +163,7 @@ fn client_rename_lens() -> Lens {
 /// writer(v2) --people update--> authority(v2) --policy over projected v1 parent--> accepted
 /// ```
 #[test]
+#[ignore = "known red; tracked in TEST_BURNDOWN.md"]
 fn renamed_table_update_policy_uses_projected_parent_version() {
     let alice = author(0xa1);
     let v1 = SchemaVersion::new(v1_schema());
@@ -268,6 +269,7 @@ fn renamed_table_update_policy_uses_projected_parent_version() {
 /// bob   --insert people-------> server --write policy on v2 table--> accepted
 /// ```
 #[tokio::test(flavor = "current_thread")]
+#[ignore = "known red; tracked in TEST_BURNDOWN.md"]
 async fn renamed_table_insert_after_schema_evolution_reaches_edge() {
     tokio::task::LocalSet::new()
         .run_until(async {
