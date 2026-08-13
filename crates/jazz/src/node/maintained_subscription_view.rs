@@ -791,16 +791,24 @@ fn terminal_root_layout(rows: &AppRowSchema) -> TerminalRootLayout {
         .filter_map(|(slot, field)| {
             let name = field.name.as_deref()?;
             (slot != root_key_slot && !rows.hidden_fields.contains(name)).then(|| {
+                let carrier = rows
+                    .field_carriers
+                    .get(name)
+                    .copied()
+                    .unwrap_or(rows.carrier);
                 TerminalRootPublicField {
-                    name: logical_user_column(name).to_owned(),
+                    // The compiler binds this identity before terminal
+                    // publication. Carrier describes encoding, not naming:
+                    // a logical include may legitimately begin with `user_`.
+                    name: rows.public_field_names.get(name).cloned().unwrap_or_else(
+                        || match carrier {
+                            AppRowCarrier::CurrentRow => logical_user_column(name).to_owned(),
+                            AppRowCarrier::Logical => name.to_owned(),
+                        },
+                    ),
                     descriptor_field_name: name.to_owned(),
                     slot,
-                    carrier: match rows
-                        .field_carriers
-                        .get(name)
-                        .copied()
-                        .unwrap_or(rows.carrier)
-                    {
+                    carrier: match carrier {
                         AppRowCarrier::CurrentRow => TerminalRootCarrier::CurrentRow,
                         AppRowCarrier::Logical => TerminalRootCarrier::Logical,
                     },
@@ -1804,7 +1812,11 @@ mod tests {
                 ValueType::Nullable(Box::new(ValueType::String)),
             ),
             (
-                "todosViaOrg",
+                "user___jazz_include_project",
+                ValueType::Nullable(Box::new(ValueType::String)),
+            ),
+            (
+                "__jazz_include_project",
                 ValueType::Array(Box::new(ValueType::Record(Box::new(
                     RecordDescriptor::new([
                         ("row_uuid", ValueType::Uuid),
@@ -1820,7 +1832,19 @@ mod tests {
             carrier: AppRowCarrier::Logical,
             field_carriers: BTreeMap::from([
                 ("user_title".to_owned(), AppRowCarrier::CurrentRow),
-                ("todosViaOrg".to_owned(), AppRowCarrier::Logical),
+                (
+                    "user___jazz_include_project".to_owned(),
+                    AppRowCarrier::CurrentRow,
+                ),
+                ("__jazz_include_project".to_owned(), AppRowCarrier::Logical),
+            ]),
+            public_field_names: BTreeMap::from([
+                ("user_title".to_owned(), "title".to_owned()),
+                (
+                    "user___jazz_include_project".to_owned(),
+                    "__jazz_include_project".to_owned(),
+                ),
+                ("__jazz_include_project".to_owned(), "project".to_owned()),
             ]),
         };
         let layout = terminal_root_layout(&rows);
@@ -1834,9 +1858,15 @@ mod tests {
                     carrier: TerminalRootCarrier::CurrentRow,
                 },
                 TerminalRootPublicField {
-                    name: "todosViaOrg".to_owned(),
-                    descriptor_field_name: "todosViaOrg".to_owned(),
+                    name: "__jazz_include_project".to_owned(),
+                    descriptor_field_name: "user___jazz_include_project".to_owned(),
                     slot: 2,
+                    carrier: TerminalRootCarrier::CurrentRow,
+                },
+                TerminalRootPublicField {
+                    name: "project".to_owned(),
+                    descriptor_field_name: "__jazz_include_project".to_owned(),
+                    slot: 3,
                     carrier: TerminalRootCarrier::Logical,
                 },
             ]
@@ -1845,7 +1875,7 @@ mod tests {
         let mut without_nested = rows;
         without_nested
             .hidden_fields
-            .insert("todosViaOrg".to_owned());
+            .insert("__jazz_include_project".to_owned());
         assert_ne!(layout.id, terminal_root_layout(&without_nested).id);
     }
 

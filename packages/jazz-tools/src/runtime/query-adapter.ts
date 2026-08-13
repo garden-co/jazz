@@ -24,7 +24,7 @@ import {
   type NormalizedIncludeEntry,
   type NormalizedIncludeSpec,
 } from "./query-builder-shape.js";
-import { hiddenIncludeColumnName, resolveSelectedColumns } from "./select-projection.js";
+import { resolveSelectedColumns } from "./select-projection.js";
 import type {
   RelColumnRef,
   RelExpr,
@@ -303,11 +303,10 @@ function toArraySubqueries(
   tableName: string,
   relations: Map<string, Relation[]>,
   schema: WasmSchema,
-  options?: { hideCurrentLevelColumnNames?: boolean; requireIncludes?: boolean },
+  options?: { requireIncludes?: boolean },
 ): object[] {
   const tableRels = relations.get(tableName) || [];
   const subqueries: object[] = [];
-  const hideCurrentLevelColumnNames = options?.hideCurrentLevelColumnNames === true;
   const requireCurrentLevelIncludes = options?.requireIncludes === true;
 
   for (const [relName, spec] of Object.entries(includes)) {
@@ -329,7 +328,6 @@ function toArraySubqueries(
       direction === "desc" ? "Descending" : "Ascending",
     ]);
     const nestedArrays = toArraySubqueries(spec.includes, rel.toTable, relations, schema, {
-      hideCurrentLevelColumnNames: hasExplicitSelect,
       requireIncludes: spec.requireIncludes,
     });
     const selectColumns = visibleSelectColumns(resolvedSelectColumns);
@@ -340,7 +338,7 @@ function toArraySubqueries(
       // We join from the FK column to the target table's id
       const requirement = includeRequirementForRelation(rel, requireCurrentLevelIncludes);
       subqueries.push({
-        column_name: hideCurrentLevelColumnNames ? hiddenIncludeColumnName(relName) : relName,
+        column_name: relName,
         table: rel.toTable,
         inner_column: "id",
         outer_column: `${tableName}.${rel.fromColumn}`,
@@ -356,7 +354,7 @@ function toArraySubqueries(
       // Reverse relation: users -> todos via todos.owner_id
       // We join from the target table's FK column to our id
       subqueries.push({
-        column_name: hideCurrentLevelColumnNames ? hiddenIncludeColumnName(relName) : relName,
+        column_name: relName,
         table: rel.toTable,
         inner_column: rel.toColumn,
         outer_column: `${tableName}.id`,
@@ -922,7 +920,6 @@ export function translateQuery(builderJson: string, schema: WasmSchema): string 
     : [];
   const projectedColumns = visibleSelectColumns(selectColumns);
   const arraySubqueries = toArraySubqueries(builder.includes, builder.table, relations, schema, {
-    hideCurrentLevelColumnNames: hasExplicitSelect,
     requireIncludes: builder.requireIncludes,
   });
 
