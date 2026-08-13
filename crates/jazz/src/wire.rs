@@ -69,7 +69,7 @@ pub enum WireFrame {
 }
 
 /// A bounded physical extent of one encoded logical message.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WireMessageFragment {
     /// Negotiated protocol version used by the logical message.
     pub protocol_version: u16,
@@ -87,6 +87,21 @@ pub struct WireMessageFragment {
     pub offset: u64,
     /// Bytes at `offset`.
     pub payload: Vec<u8>,
+}
+
+impl std::fmt::Debug for WireMessageFragment {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WireMessageFragment")
+            .field("protocol_version", &self.protocol_version)
+            .field("features", &self.features)
+            .field("session", &self.session)
+            .field("message_id", &self.message_id)
+            .field("message_digest", &hex::encode(self.message_digest))
+            .field("total_len", &self.total_len)
+            .field("offset", &self.offset)
+            .field("payload_len", &self.payload.len())
+            .finish()
+    }
 }
 
 /// Link role advertised during handshake.
@@ -197,7 +212,7 @@ impl WireCompression {
 }
 
 /// Session metadata carried by message frames after handshake/admission.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WireSession {
     /// Binding/server assigned resumable session id.
     pub session_id: String,
@@ -207,8 +222,20 @@ pub struct WireSession {
     pub identity: Option<AuthorId>,
 }
 
+impl std::fmt::Debug for WireSession {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let fingerprint = blake3::hash(self.session_id.as_bytes()).to_hex();
+        f.debug_struct("WireSession")
+            .field("session_id_len", &self.session_id.len())
+            .field("session_id_fingerprint", &&fingerprint[..12])
+            .field("epoch", &self.epoch)
+            .field("identity", &self.identity)
+            .finish()
+    }
+}
+
 /// Metadata and payload for one semantic sync message.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WireEnvelope {
     /// Negotiated protocol version used to encode this payload.
     pub protocol_version: u16,
@@ -218,6 +245,17 @@ pub struct WireEnvelope {
     pub session: Option<WireSession>,
     /// Encoded semantic payload, usually a [`crate::protocol::SyncMessage`].
     pub payload: Vec<u8>,
+}
+
+impl std::fmt::Debug for WireEnvelope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WireEnvelope")
+            .field("protocol_version", &self.protocol_version)
+            .field("features", &self.features)
+            .field("session", &self.session)
+            .field("payload_len", &self.payload.len())
+            .finish()
+    }
 }
 
 impl WireEnvelope {
@@ -767,6 +805,72 @@ mod tests {
                 WireEnvelope::new(1, FEATURE_SESSION_FRAME, vec![1, 2, 3, 4]).with_session(session)
             )
         );
+    }
+
+    #[test]
+    fn wire_payload_debug_is_bounded_and_content_safe() {
+        let secret = b"do-not-log-wire-payload";
+        let envelope = WireEnvelope::new(1, 0, vec![b'x'; 1_000_000]);
+        let envelope_debug = format!("{envelope:?}");
+        assert_eq!(
+            envelope_debug,
+            "WireEnvelope { protocol_version: 1, features: 0, session: None, payload_len: 1000000 }"
+        );
+        assert!(envelope_debug.len() < 128);
+        assert!(!envelope_debug.contains(std::str::from_utf8(secret).unwrap()));
+
+        let fragment = WireMessageFragment {
+            protocol_version: 1,
+            features: 0,
+            session: None,
+            message_id: 7,
+            message_digest: [0xab; 32],
+            total_len: 1_000_000,
+            offset: 0,
+            payload: vec![b'x'; 1_000_000],
+        };
+        let fragment_debug = format!("{fragment:?}");
+        assert!(fragment_debug.contains("message_digest: \"abab"));
+        assert!(fragment_debug.contains("payload_len: 1000000"));
+        assert!(fragment_debug.len() < 256);
+        assert!(!fragment_debug.contains("xxxxx"));
+    }
+
+    #[test]
+    fn wire_session_debug_stays_bounded_when_nested_in_payload_frames() {
+        let session = WireSession {
+            session_id: "credential-bearing-session-id".repeat(10_000),
+            epoch: 3,
+            identity: Some(AuthorId::from_bytes([0x42; 16])),
+        };
+        let distinct_session = WireSession {
+            session_id: "credential-bearing-session-ix".repeat(10_000),
+            ..session.clone()
+        };
+        let session_debug = format!("{session:?}");
+        assert!(session_debug.contains("session_id_len: 290000"));
+        assert!(session_debug.len() < 256);
+        assert!(!session_debug.contains("credential-bearing-session-id"));
+        assert_ne!(session_debug, format!("{distinct_session:?}"));
+
+        let envelope = WireEnvelope::new(1, 0, vec![]).with_session(session.clone());
+        let envelope_debug = format!("{envelope:?}");
+        assert!(envelope_debug.len() < 384);
+        assert!(!envelope_debug.contains("credential-bearing-session-id"));
+
+        let fragment = WireMessageFragment {
+            protocol_version: 1,
+            features: 0,
+            session: Some(session),
+            message_id: 7,
+            message_digest: [0xab; 32],
+            total_len: 0,
+            offset: 0,
+            payload: vec![],
+        };
+        let fragment_debug = format!("{fragment:?}");
+        assert!(fragment_debug.len() < 512);
+        assert!(!fragment_debug.contains("credential-bearing-session-id"));
     }
 
     #[test]

@@ -328,8 +328,20 @@ pub(crate) struct ResolvedOverlay {
 }
 
 /// Canonical batch identity.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct BatchId(pub(crate) Vec<u8>);
+
+impl std::fmt::Debug for BatchId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let fingerprint = blake3::hash(&self.0).to_hex();
+        write!(
+            f,
+            "BatchId {{ len: {}, fingerprint: {} }}",
+            self.0.len(),
+            &fingerprint[..12]
+        )
+    }
+}
 
 /// Settled-frontier fact identity. Propagation, waiting, and retry behavior are
 /// runtime policy outside the compiler; the lowered program only emits the fact.
@@ -393,4 +405,27 @@ pub(crate) struct ResolvedPartitionLens {
     pub(crate) storage_schema: SchemaVersionId,
     /// Canonical fingerprint of applied lens/projection path.
     pub(crate) lens_path_fingerprint: Vec<u8>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BatchId;
+
+    #[test]
+    fn internal_batch_id_debug_is_bounded_and_content_safe() {
+        let empty = format!("{:?}", BatchId(vec![]));
+        assert_eq!(empty, "BatchId { len: 0, fingerprint: af1349b9f5f9 }");
+
+        let payload = vec![b'x'; 1_000_000];
+        let debug = format!("{:?}", BatchId(payload));
+        assert!(debug.starts_with("BatchId { len: 1000000, fingerprint: "));
+        assert!(debug.len() < 80);
+        assert!(!debug.contains("xxxxx"));
+
+        let first = format!("{:?}", BatchId(b"same-length-a".to_vec()));
+        let second = format!("{:?}", BatchId(b"same-length-b".to_vec()));
+        assert_ne!(first, second);
+        assert!(!first.contains("same-length-a"));
+        assert!(!second.contains("same-length-b"));
+    }
 }

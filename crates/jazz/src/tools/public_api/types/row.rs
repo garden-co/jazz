@@ -1,3 +1,4 @@
+use std::fmt;
 use std::ops::Deref;
 use std::sync::Arc;
 
@@ -46,8 +47,18 @@ impl QueryResult {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Clone, PartialEq, Eq, Default)]
 pub struct RowBytes(Arc<[u8]>);
+
+impl fmt::Debug for RowBytes {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Rows may contain arbitrary application data. Logging a length is
+        // enough to diagnose framing problems without leaking or flooding logs.
+        f.debug_struct("RowBytes")
+            .field("len", &self.0.len())
+            .finish()
+    }
+}
 
 impl RowBytes {
     pub fn to_vec(&self) -> Vec<u8> {
@@ -189,5 +200,25 @@ pub struct OrderedRowDelta {
 impl OrderedRowDelta {
     pub fn is_empty(&self) -> bool {
         self.added.is_empty() && self.removed.is_empty() && self.updated.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RowBytes;
+
+    #[test]
+    fn row_bytes_debug_is_stable_bounded_and_content_safe() {
+        assert_eq!(format!("{:?}", RowBytes::default()), "RowBytes { len: 0 }");
+        assert_eq!(
+            format!("{:?}", RowBytes::from(b"secret-row".as_slice())),
+            "RowBytes { len: 10 }"
+        );
+
+        let payload = vec![b'x'; 1_000_000];
+        let debug = format!("{:?}", RowBytes::from(payload));
+        assert_eq!(debug, "RowBytes { len: 1000000 }");
+        assert!(debug.len() < 64);
+        assert!(!debug.contains("secret-row"));
     }
 }
