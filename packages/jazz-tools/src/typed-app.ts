@@ -241,6 +241,9 @@ type UuidWhere<TOptional extends boolean> = WhereEqNe<
   TOptional,
   TOptional extends true ? { in?: string[]; isNull?: boolean } : { in?: string[] }
 >;
+type PayloadEnumMatch<T> = T extends { type: infer Case extends string }
+  ? { type: Case; where?: Partial<Omit<T, "type">> }
+  : never;
 
 type WhereInputForBuilder<TBuilder extends AnyTypedColumnBuilder> =
   ColumnBuilderSqlType<TBuilder> extends "TEXT"
@@ -271,18 +274,23 @@ type WhereInputForBuilder<TBuilder extends AnyTypedColumnBuilder> =
                     }
                   ? WhereEqNe<TVariant, ColumnBuilderOptional<TBuilder>, { in?: TVariant[] }>
                   : ColumnBuilderSqlType<TBuilder> extends {
-                        kind: "ARRAY";
-                        element: infer TElementSql extends SqlType;
+                        kind: "ENUM";
+                        cases: readonly unknown[];
                       }
-                    ? WhereEqNe<
-                        StoredColumnValue<TBuilder>,
-                        ColumnBuilderOptional<TBuilder>,
-                        {
-                          contains?: TSTypeFromSqlType<TElementSql>;
-                          in?: StoredColumnValue<TBuilder>[];
+                    ? { match?: PayloadEnumMatch<StoredColumnValue<TBuilder>> }
+                    : ColumnBuilderSqlType<TBuilder> extends {
+                          kind: "ARRAY";
+                          element: infer TElementSql extends SqlType;
                         }
-                      >
-                    : never;
+                      ? WhereEqNe<
+                          StoredColumnValue<TBuilder>,
+                          ColumnBuilderOptional<TBuilder>,
+                          {
+                            contains?: TSTypeFromSqlType<TElementSql>;
+                            in?: StoredColumnValue<TBuilder>[];
+                          }
+                        >
+                      : never;
 
 export type TableWhereInput<
   TSchema extends SchemaLike,

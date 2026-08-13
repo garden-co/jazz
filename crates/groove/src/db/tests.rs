@@ -19,7 +19,9 @@ use crate::queries::{
     BinaryOp, ColumnRef, Cte, Expr, JoinConstraint, JoinKind, Query, Select, SelectItem, TableRef,
     UnaryOp, WithQuery,
 };
-use crate::records::{EnumCase, EnumSchema, RecordDescriptor, ScalarEnumSchema, ValueType};
+use crate::records::{
+    EnumCase, EnumSchema, EnumValue, RecordDescriptor, ScalarEnumSchema, ValueType,
+};
 use crate::schema::{
     ColumnSchema, ColumnType, DatabaseSchema, DirectRecordStoreSchema, IndexSchema, IntegerKeyType,
     PrimaryKey, PrimaryKeyColumn, PrimaryKeyType, TableVariant, TableVariantField,
@@ -748,6 +750,58 @@ fn live_table_rejects_non_additive_enum_registry_mutations() {
             .column_type,
         old_payload
     );
+}
+
+fn open_task_payload_descriptor() -> RecordDescriptor {
+    RecordDescriptor::new([("priority", ValueType::U64), ("title", ValueType::String)])
+}
+
+fn closed_task_payload_descriptor() -> RecordDescriptor {
+    RecordDescriptor::new([("reason", ValueType::String)])
+}
+
+fn payload_enum_tasks_schema() -> DatabaseSchema {
+    let task_state = ColumnType::Enum(Box::new(
+        EnumSchema::new(
+            "task_state",
+            [
+                EnumCase::new("open", open_task_payload_descriptor()),
+                EnumCase::new("closed", closed_task_payload_descriptor()),
+            ],
+        )
+        .unwrap(),
+    ))
+    .nullable();
+    DatabaseSchema::new([TableSchema::new(
+        "payload_tasks",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("state", task_state),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))])
+}
+
+fn open_task(priority: u64, title: &str) -> Value {
+    Value::Enum(
+        EnumValue::create(
+            0,
+            open_task_payload_descriptor(),
+            &[Value::U64(priority), Value::String(title.to_owned())],
+        )
+        .unwrap(),
+    )
+}
+
+fn closed_task(reason: &str) -> Value {
+    Value::Enum(
+        EnumValue::create(
+            1,
+            closed_task_payload_descriptor(),
+            &[Value::String(reason.to_owned())],
+        )
+        .unwrap(),
+    )
 }
 
 #[test]
@@ -3137,6 +3191,105 @@ fn subscription_reports_incremental_contains_filter_deltas() {
             (vec![11_u64.into(), "Blue Train".into()], -1),
             (vec![7_u64.into(), "Night Train".into()], 1),
         ]
+    );
+}
+
+// This is intentionally an IVM-level test: Jazz lowers payload-enum matching
+// to this internal predicate, and the regression is the filter's weighted
+// incremental behavior rather than a client-facing API concern.
+#[test]
+fn payload_enum_filter_matches_selected_case_and_emits_cross_case_deltas() {
+    let storage = MemoryStorage::new(&["payload_tasks"]);
+    let mut database = Database::new(payload_enum_tasks_schema(), storage).unwrap();
+    let graph = GraphBuilder::table("payload_tasks")
+        .filter(PredicateExpr::EnumMatch {
+            field: "state".to_owned(),
+            case_tag: 0,
+            payload: Box::new(PredicateExpr::eq("priority", Value::U64(1))),
+        })
+        .project_fields([ProjectField::named("id")]);
+    let subscription = database.subscribe_one_sink(graph.clone()).unwrap();
+    assert!(subscription.recv().unwrap().is_empty());
+
+    let mut batch = database.open_batch();
+    batch.insert(
+        "payload_tasks",
+        vec![
+            Value::U64(1),
+            Value::Nullable(Some(Box::new(open_task(1, "matching")))),
+        ],
+    );
+    batch.insert(
+        "payload_tasks",
+        vec![
+            Value::U64(2),
+            Value::Nullable(Some(Box::new(open_task(2, "wrong payload")))),
+        ],
+    );
+    batch.insert(
+        "payload_tasks",
+        vec![
+            Value::U64(3),
+            Value::Nullable(Some(Box::new(closed_task("wrong case")))),
+        ],
+    );
+    batch.insert("payload_tasks", vec![Value::U64(4), Value::Nullable(None)]);
+    database.commit_batch(batch).unwrap();
+    assert_eq!(expect_recv_vals(&subscription), [(vec![1_u64.into()], 1)]);
+    assert_eq!(
+        database
+            .query_graph(graph.clone())
+            .unwrap()
+            .to_values()
+            .unwrap(),
+        [(vec![1_u64.into()], 1)]
+    );
+
+    let mut batch = database.open_batch();
+    batch.update(
+        "payload_tasks",
+        vec![
+            Value::U64(1),
+            Value::Nullable(Some(Box::new(closed_task("moved arm")))),
+        ],
+    );
+    batch.update(
+        "payload_tasks",
+        vec![
+            Value::U64(2),
+            Value::Nullable(Some(Box::new(open_task(1, "now matching")))),
+        ],
+    );
+    batch.update(
+        "payload_tasks",
+        vec![
+            Value::U64(3),
+            Value::Nullable(Some(Box::new(open_task(1, "changed arm")))),
+        ],
+    );
+    database.commit_batch(batch).unwrap();
+    assert_eq!(
+        expect_recv_vals(&subscription),
+        [
+            (vec![1_u64.into()], -1),
+            (vec![2_u64.into()], 1),
+            (vec![3_u64.into()], 1),
+        ]
+    );
+
+    let mut batch = database.open_batch();
+    batch.update(
+        "payload_tasks",
+        vec![
+            Value::U64(2),
+            Value::Nullable(Some(Box::new(open_task(2, "no longer matching")))),
+        ],
+    );
+    database.commit_batch(batch).unwrap();
+    assert_eq!(expect_recv_vals(&subscription), [(vec![2_u64.into()], -1)]);
+    assert_eq!(
+        database.query_graph(graph).unwrap().to_values().unwrap(),
+        [(vec![3_u64.into()], 1)]
     );
 }
 

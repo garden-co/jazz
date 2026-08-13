@@ -18,6 +18,7 @@ export type Value =
   | { type: "Bytea"; value: Uint8Array }
   | { type: "Array"; value: Value[] }
   | { type: "Row"; value: { id?: string; values: Value[] } }
+  | { type: "Enum"; value: { case: string; values: Value[] } }
   | { type: "Null" };
 
 export type InsertValues = Record<string, Value>;
@@ -116,6 +117,7 @@ export type ColumnType =
   | { type: "Text" }
   | { type: "Json"; schema?: Record<string, unknown> }
   | { type: "Enum"; variants: string[] }
+  | { type: "EnumPayload"; cases: Array<{ name: string; fields: ColumnDescriptor[] }> }
   | { type: "Timestamp" }
   | { type: "Uuid" }
   | { type: "Bytea" }

@@ -1,0 +1,12 @@
+{
+  "cases": [
+    {
+      "variants": ["draft", "active", "archived"],
+      "hash": "462dcb43747b0be89b4eb320e2d61f322fe8d9871baf87876d79b5d8611cfb75"
+    },
+    {
+      "variants": ["active", "draft", "archived"],
+      "hash": "37d743b0897361d13e0364d0933bf7d5c6380b356cfe936c6eb71ea0e60e2e04"
+    }
+  ]
+}

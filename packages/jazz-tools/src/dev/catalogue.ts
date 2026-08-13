@@ -286,6 +286,9 @@ function sqlTypeToWasmColumnType(sqlType: SqlType): WasmColumnType {
   }
 
   if (sqlType.kind === "ENUM") {
+    if (!sqlType.variants) {
+      throw new Error("Payload enum schema lowering is not implemented yet.");
+    }
     return {
       type: "Enum",
       variants: [...sqlType.variants],

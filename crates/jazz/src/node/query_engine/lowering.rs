@@ -516,6 +516,7 @@ fn collect_equality_filter_route_params(predicate: &PredicateExpr, routing: &mut
         | PredicateExpr::TextContains { .. }
         | PredicateExpr::IsNull(_)
         | PredicateExpr::IsNotNull(_)
+        | PredicateExpr::EnumMatch { .. }
         | PredicateExpr::Or(_)
         | PredicateExpr::Not(_) => {}
     }
@@ -1777,6 +1778,9 @@ fn predicate_contains_param(predicate: &PredicateExpr) -> bool {
             predicates.iter().any(predicate_contains_param)
         }
         PredicateExpr::Not(predicate) => predicate_contains_param(predicate),
+        PredicateExpr::EnumMatch { value, payload, .. } => {
+            value_contains_param(value) || predicate_contains_param(payload)
+        }
     }
 }
 
@@ -2259,6 +2263,9 @@ fn collect_predicate_requirements(
         }
         PredicateExpr::Not(predicate) => {
             collect_predicate_requirements(predicate, source, requirements)
+        }
+        PredicateExpr::EnumMatch { value, .. } => {
+            collect_value_requirements(value, source, requirements)
         }
     }
 }
@@ -4859,6 +4866,23 @@ fn lower_predicate_inner(
         PredicateExpr::IsNotNull(value) => {
             lower_null_test(value, false, source_id, source, request)?
         }
+        PredicateExpr::EnumMatch {
+            value,
+            case_tag,
+            payload,
+        } => {
+            let LoweredValueRef::Field(field) = lower_value_ref(value, source_id, source, request)?
+            else {
+                return Err(UnsupportedReason::Operator(
+                    "enum match requires a source field".to_owned(),
+                ));
+            };
+            GroovePredicateExpr::EnumMatch {
+                field,
+                case_tag: *case_tag,
+                payload: Box::new(lower_enum_payload_predicate(payload)?),
+            }
+        }
         PredicateExpr::And(predicates) => GroovePredicateExpr::And(
             predicates
                 .iter()
@@ -4873,6 +4897,83 @@ fn lower_predicate_inner(
         ),
         PredicateExpr::Not(predicate) => {
             lower_not_predicate(predicate, source_id, source, request)?
+        }
+    })
+}
+
+fn lower_enum_payload_predicate(
+    predicate: &PredicateExpr,
+) -> Result<GroovePredicateExpr, UnsupportedReason> {
+    Ok(match predicate {
+        PredicateExpr::True => GroovePredicateExpr::And(Vec::new()),
+        PredicateExpr::False => GroovePredicateExpr::Or(Vec::new()),
+        PredicateExpr::Compare { left, op, right } => {
+            let (field, value, op) = match (left, right) {
+                (
+                    NormalizedValueRef::SourceField { field, .. },
+                    NormalizedValueRef::Literal(bytes),
+                ) => {
+                    let value = postcard::from_bytes::<Value>(bytes).map_err(|err| {
+                        UnsupportedReason::Operator(format!(
+                            "payload enum literal could not be decoded: {err}"
+                        ))
+                    })?;
+                    (field.clone(), LiteralValue::from(value), *op)
+                }
+                (
+                    NormalizedValueRef::Literal(bytes),
+                    NormalizedValueRef::SourceField { field, .. },
+                ) => {
+                    let value = postcard::from_bytes::<Value>(bytes).map_err(|err| {
+                        UnsupportedReason::Operator(format!(
+                            "payload enum literal could not be decoded: {err}"
+                        ))
+                    })?;
+                    (
+                        field.clone(),
+                        LiteralValue::from(value),
+                        invert_comparison(*op),
+                    )
+                }
+                _ => {
+                    return Err(UnsupportedReason::Operator(
+                        "payload enum predicates require field/literal comparisons".to_owned(),
+                    ));
+                }
+            };
+            GroovePredicateExpr::from_field_literal(predicate_kind(op), field, value)
+        }
+        PredicateExpr::IsNull(NormalizedValueRef::SourceField { field, .. }) => {
+            GroovePredicateExpr::IsNull {
+                field: field.clone(),
+            }
+        }
+        PredicateExpr::IsNotNull(NormalizedValueRef::SourceField { field, .. }) => {
+            GroovePredicateExpr::IsNotNull {
+                field: field.clone(),
+            }
+        }
+        PredicateExpr::And(children) => GroovePredicateExpr::And(
+            children
+                .iter()
+                .map(lower_enum_payload_predicate)
+                .collect::<Result<_, _>>()?,
+        ),
+        PredicateExpr::Or(children) => GroovePredicateExpr::Or(
+            children
+                .iter()
+                .map(lower_enum_payload_predicate)
+                .collect::<Result<_, _>>()?,
+        ),
+        PredicateExpr::Not(_child) => {
+            return Err(UnsupportedReason::Operator(
+                "negated payload enum predicates are not lowered yet".to_owned(),
+            ));
+        }
+        _ => {
+            return Err(UnsupportedReason::Operator(
+                "unsupported payload enum predicate".to_owned(),
+            ));
         }
     })
 }
@@ -4937,6 +5038,11 @@ fn lower_not_predicate_inner(
                 .collect::<Result<Vec<_>, _>>()?,
         ),
         PredicateExpr::Not(predicate) => lower_predicate(predicate, source_id, source, request)?,
+        PredicateExpr::EnumMatch { .. } => {
+            return Err(UnsupportedReason::Operator(
+                "negated enum match predicates are not lowered yet".to_owned(),
+            ));
+        }
     })
 }
 

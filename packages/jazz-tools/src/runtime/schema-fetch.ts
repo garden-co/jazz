@@ -345,6 +345,7 @@ export type PublishedMigrationValue =
   | { type: "Bytea"; value: number[] }
   | { type: "Array"; value: PublishedMigrationValue[] }
   | { type: "Row"; value: { id?: string; values: PublishedMigrationValue[] } }
+  | { type: "Enum"; value: { case: string; values: PublishedMigrationValue[] } }
   | { type: "Null" };
 
 export type PublishedMigrationOp =
@@ -404,6 +405,14 @@ export function encodePublishedMigrationValue(value: WasmValue): PublishedMigrat
         type: "Row",
         value: {
           id: value.value.id,
+          values: value.value.values.map(encodePublishedMigrationValue),
+        },
+      };
+    case "Enum":
+      return {
+        type: "Enum",
+        value: {
+          case: value.value.case,
           values: value.value.values.map(encodePublishedMigrationValue),
         },
       };

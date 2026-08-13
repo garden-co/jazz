@@ -62,6 +62,12 @@ pub enum PredicateExpr {
         left: ColumnRef,
         right: ValueRef,
     },
+    /// Match one payload enum case and evaluate its payload-record predicate.
+    EnumMatch {
+        column: ColumnRef,
+        case: String,
+        payload: Box<PredicateExpr>,
+    },
     And(Vec<PredicateExpr>),
     Or(Vec<PredicateExpr>),
     Not(Box<PredicateExpr>),

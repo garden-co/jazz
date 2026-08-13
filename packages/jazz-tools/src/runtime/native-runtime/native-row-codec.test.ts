@@ -107,6 +107,56 @@ describe("native row codec", () => {
     );
   });
 
+  it("requires payload enum terminal descriptors to preserve their declared case layouts", () => {
+    const columns: ColumnDescriptor[] = [
+      {
+        name: "event",
+        column_type: {
+          type: "EnumPayload",
+          cases: [
+            {
+              name: "message",
+              fields: [
+                { name: "text", column_type: { type: "Text" }, nullable: false },
+                { name: "level", column_type: { type: "Integer" }, nullable: true },
+              ],
+            },
+          ],
+        },
+        nullable: false,
+      },
+    ];
+    const descriptor = [
+      { name: "__jazz_terminal_row_key", valueType: { tag: 10 } },
+      {
+        name: "event",
+        valueType: {
+          tag: 16,
+          enumSchema: {
+            registryId: 37,
+            name: "physical_event",
+            cases: [
+              {
+                name: "message",
+                payload: [
+                  { name: "text", valueType: { tag: 8 } },
+                  { name: "level", valueType: { tag: 14, inner: { tag: 4 } } },
+                ],
+              },
+            ],
+          },
+        },
+      },
+    ];
+    const wrongFieldType = structuredClone(descriptor);
+    wrongFieldType[1]!.valueType.enumSchema!.cases![0]!.payload[1]!.valueType = { tag: 8 };
+
+    expect(() => assertTerminalRootDescriptorCompatible(descriptor, columns)).not.toThrow();
+    expect(() => assertTerminalRootDescriptorCompatible(wrongFieldType, columns)).toThrow(
+      "terminal root descriptor does not match the public projection",
+    );
+  });
+
   it("keeps mutation cells byte-for-byte aligned with packed row values", () => {
     const nestedColumns: ColumnDescriptor[] = [
       { name: "label", column_type: { type: "Text" }, nullable: false },
@@ -229,6 +279,51 @@ describe("native row codec", () => {
     expect(row).toEqual(expected);
     expect(patch).toEqual(expected);
     expect(bytesToHex(row)).toMatchInlineSnapshot(`"01010576616c75650e0e08020100"`);
+  });
+
+  it("round-trips scalar payload enum cases, nullable fields, and descriptor metadata", () => {
+    const columns = [
+      {
+        name: "event",
+        column_type: {
+          type: "EnumPayload" as const,
+          cases: [
+            {
+              name: "message",
+              fields: [
+                { name: "text", column_type: { type: "Text" as const }, nullable: false },
+                { name: "level", column_type: { type: "Integer" as const }, nullable: true },
+              ],
+            },
+            {
+              name: "closed",
+              fields: [
+                { name: "code", column_type: { type: "Integer" as const }, nullable: false },
+              ],
+            },
+          ],
+        },
+        nullable: true,
+      },
+    ];
+    const payload = {
+      type: "Enum" as const,
+      value: {
+        case: "message",
+        values: [{ type: "Text" as const, value: "hello" }, { type: "Null" as const }],
+      },
+    };
+    const encoded = encodeNativeRowValues(columns, [payload]);
+    expect(decodeNativeRowValues(columns, encoded)).toEqual([payload]);
+    const storage = storageColumnValueType(columns[0]!);
+    expect(storage).toMatchObject({ tag: 14, inner: { tag: 16, enumSchema: { name: "event" } } });
+    expect(storage.inner?.enumSchema?.cases?.[0]?.payload[0]).toMatchObject({
+      name: "text",
+      valueType: { tag: 8 },
+    });
+    expect(() =>
+      encodeNativeRowValues(columns, [{ type: "Enum", value: { case: "missing", values: [] } }]),
+    ).toThrow("invalid Enum payload case or width");
   });
 
   it("round-trips the Record descriptor payload before reading the next field", () => {

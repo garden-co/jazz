@@ -255,6 +255,15 @@ fn hash_value(hasher: &mut blake3::Hasher, value: &Value) {
                 hash_value(hasher, inner);
             }
         }
+        Value::Enum { case, values } => {
+            hasher.update(&[14]);
+            hasher.update(case.as_bytes());
+            hasher.update(&[0]);
+            hasher.update(&(values.len() as u64).to_le_bytes());
+            for inner in values {
+                hash_value(hasher, inner);
+            }
+        }
         Value::Null => {
             hasher.update(&[9]);
         }
@@ -281,14 +290,27 @@ fn hash_column_type(hasher: &mut blake3::Hasher, col_type: &ColumnType) {
         }
         ColumnType::Enum { variants } => {
             hasher.update(&[9]);
-            // Enum variant ordering is normalized for hashing.
-            let mut normalized = variants.clone();
-            normalized.sort();
-            normalized.dedup();
-            hasher.update(&(normalized.len() as u64).to_le_bytes());
-            for variant in normalized {
+            // Scalar enum order assigns durable discriminant tags, so it is
+            // structural schema identity rather than presentation metadata.
+            hasher.update(&(variants.len() as u64).to_le_bytes());
+            for variant in variants {
                 hasher.update(variant.as_bytes());
                 hasher.update(&[0]);
+            }
+        }
+        ColumnType::EnumPayload { cases } => {
+            hasher.update(&[13]);
+            hasher.update(&(cases.len() as u64).to_le_bytes());
+            for case in cases {
+                hasher.update(case.name.as_bytes());
+                hasher.update(&[0]);
+                hasher.update(&(case.fields.len() as u64).to_le_bytes());
+                for field in &case.fields {
+                    hasher.update(field.name.as_str().as_bytes());
+                    hasher.update(&[0]);
+                    hash_column_type(hasher, &field.column_type);
+                    hasher.update(&[u8::from(field.nullable)]);
+                }
             }
         }
         ColumnType::Timestamp => {

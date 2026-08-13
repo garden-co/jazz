@@ -120,6 +120,35 @@ describe("toValue", () => {
     expect(() => toValue("invalid", colType)).toThrow("Invalid enum value");
   });
 
+  it("converts payload enum values with scalar fields and fails closed", () => {
+    const colType: ColumnType = {
+      type: "EnumPayload",
+      cases: [
+        {
+          name: "message",
+          fields: [
+            { name: "text", column_type: { type: "Text" }, nullable: false },
+            { name: "level", column_type: { type: "Integer" }, nullable: true },
+          ],
+        },
+      ],
+    };
+    expect(toValue({ type: "message", text: "hello", level: null }, colType)).toEqual({
+      type: "Enum",
+      value: {
+        case: "message",
+        values: [{ type: "Text", value: "hello" }, { type: "Null" }],
+      },
+    });
+    expect(() => toValue({ type: "message" }, colType)).toThrow("Missing required payload field");
+    expect(() => toValue({ type: "message", text: "hello", extra: true }, colType)).toThrow(
+      "Unknown payload field",
+    );
+    expect(() => toValue({ type: "missing", text: "hello" }, colType)).toThrow(
+      "Invalid payload enum case",
+    );
+  });
+
   it("converts Array values", () => {
     const colType: ColumnType = { type: "Array", element: { type: "Text" } };
     expect(toValue(["a", "b", "c"], colType)).toEqual({

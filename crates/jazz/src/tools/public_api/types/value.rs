@@ -36,6 +36,11 @@ pub enum Value {
         id: Option<ObjectId>,
         values: Vec<Value>,
     },
+    /// Selected case and positional payload values for a column-local enum.
+    Enum {
+        case: String,
+        values: Vec<Value>,
+    },
     Null,
 }
 
@@ -71,6 +76,11 @@ impl fmt::Debug for Value {
             Self::Row { id, values } => f
                 .debug_struct("Row")
                 .field("id", id)
+                .field("values_len", &values.len())
+                .finish(),
+            Self::Enum { case, values } => f
+                .debug_struct("Enum")
+                .field("case", case)
                 .field("values_len", &values.len())
                 .finish(),
             Self::Null => f.write_str("Null"),
@@ -114,6 +124,7 @@ enum ValueHuman {
     LargeValue(LargeValueHandle),
     Array(Vec<ValueHuman>),
     Row(RowHuman),
+    Enum(EnumHuman),
     Null,
 }
 
@@ -121,6 +132,11 @@ enum ValueHuman {
 struct RowHuman {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     id: Option<ObjectId>,
+    values: Vec<ValueHuman>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct EnumHuman {
+    case: String,
     values: Vec<ValueHuman>,
 }
 
@@ -139,6 +155,7 @@ enum ValueBinary {
     LargeValue(LargeValueHandle),
     Array(Vec<ValueBinary>),
     Row(Vec<ValueBinary>),
+    Enum(String, Vec<ValueBinary>),
     Null,
 }
 
@@ -260,6 +277,10 @@ impl From<&Value> for ValueHuman {
                 id: *id,
                 values: values.iter().map(ValueHuman::from).collect(),
             }),
+            Value::Enum { case, values } => ValueHuman::Enum(EnumHuman {
+                case: case.clone(),
+                values: values.iter().map(ValueHuman::from).collect(),
+            }),
             Value::Null => ValueHuman::Null,
         }
     }
@@ -283,6 +304,10 @@ impl From<ValueHuman> for Value {
                 id: r.id,
                 values: r.values.into_iter().map(Value::from).collect(),
             },
+            ValueHuman::Enum(e) => Value::Enum {
+                case: e.case,
+                values: e.values.into_iter().map(Value::from).collect(),
+            },
             ValueHuman::Null => Value::Null,
         }
     }
@@ -304,6 +329,9 @@ impl From<&Value> for ValueBinary {
             Value::Array(v) => ValueBinary::Array(v.iter().map(ValueBinary::from).collect()),
             Value::Row { values, .. } => {
                 ValueBinary::Row(values.iter().map(ValueBinary::from).collect())
+            }
+            Value::Enum { case, values } => {
+                ValueBinary::Enum(case.clone(), values.iter().map(ValueBinary::from).collect())
             }
             Value::Null => ValueBinary::Null,
         }
@@ -327,6 +355,10 @@ impl From<ValueBinary> for Value {
             ValueBinary::Row(v) => Value::Row {
                 id: None,
                 values: v.into_iter().map(Value::from).collect(),
+            },
+            ValueBinary::Enum(case, values) => Value::Enum {
+                case,
+                values: values.into_iter().map(Value::from).collect(),
             },
             ValueBinary::Null => Value::Null,
         }
@@ -372,6 +404,16 @@ impl PartialEq for Value {
             (Value::BatchId(a), Value::BatchId(b)) => a == b,
             (Value::Bytea(a), Value::Bytea(b)) => a == b,
             (Value::LargeValue(a), Value::LargeValue(b)) => a == b,
+            (
+                Value::Enum {
+                    case: a_case,
+                    values: a_values,
+                },
+                Value::Enum {
+                    case: b_case,
+                    values: b_values,
+                },
+            ) => a_case == b_case && a_values == b_values,
             (Value::Array(a), Value::Array(b)) => a == b,
             (
                 Value::Row {
@@ -417,6 +459,7 @@ impl Value {
             }
             // Row type requires external schema, can't be inferred
             Value::Row { .. } => None,
+            Value::Enum { .. } => None,
             Value::Null => None,
         }
     }

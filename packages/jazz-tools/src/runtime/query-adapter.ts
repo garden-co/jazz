@@ -385,6 +385,46 @@ function conditionToRelPredicate(
   if (!columnType) {
     throw new Error(`Unknown column "${column}" in table "${table}"`);
   }
+  if (cond.op === "match") {
+    if (columnType.type !== "EnumPayload") {
+      throw new Error(`match is only supported on payload enum column "${column}".`);
+    }
+    if (typeof cond.value !== "object" || cond.value === null || Array.isArray(cond.value)) {
+      throw new Error('"match" requires { type, where } input.');
+    }
+    const match = cond.value as { type?: unknown; where?: unknown };
+    if (typeof match.type !== "string") throw new Error('"match.type" must be a string.');
+    const entry = columnType.cases.find((candidate) => candidate.name === match.type);
+    if (!entry) throw new Error(`unknown payload enum case "${match.type}".`);
+    if (
+      match.where !== undefined &&
+      (typeof match.where !== "object" || match.where === null || Array.isArray(match.where))
+    ) {
+      throw new Error('"match.where" must be an object.');
+    }
+    const filters = Object.entries((match.where ?? {}) as Record<string, unknown>).map(
+      ([field, value]) => {
+        const descriptor = entry.fields.find((candidate) => candidate.name === field);
+        if (!descriptor)
+          throw new Error(`unknown payload enum field "${field}" for case "${match.type}".`);
+        return {
+          Cmp: {
+            left: relColumn(field),
+            op: "Eq" as const,
+            right: { Literal: toRuntimeValue(value, descriptor.column_type, field) },
+          },
+        } satisfies RelPredicateExpr;
+      },
+    );
+    return {
+      EnumMatch: {
+        column: columnRef,
+        case: match.type,
+        payload:
+          filters.length === 0 ? "True" : filters.length === 1 ? filters[0]! : { And: filters },
+      },
+    };
+  }
   if (cond.op === "in") {
     if (!Array.isArray(cond.value)) {
       throw new Error('"in" operator requires an array value');
@@ -768,6 +808,23 @@ function translateBuilderToRelationIr(builderJson: string, schema: WasmSchema): 
     relationTable = translated.outputTable;
   }
 
+  // The Rust relation facade identifies its output scope through Project. A
+  // payload match can be the only relation feature, so preserve the ordinary
+  // root-table result shape with an explicit identity projection in that case.
+  if (builder.hops.length === 0 && builder.gather === undefined) {
+    const columns = schema[relationTable]?.columns;
+    if (!columns) throw new Error(`Unknown table "${relationTable}" in relation query.`);
+    relation = {
+      Project: {
+        input: relation,
+        columns: columns.map((column) => ({
+          alias: column.name,
+          expr: { Column: relColumn(column.name, relationTable) },
+        })),
+      },
+    };
+  }
+
   if (Array.isArray(builder.orderBy) && builder.orderBy.length > 0) {
     for (const [column] of builder.orderBy) {
       const columnType = getColumnType(schema, relationTable, stripQualifier(column));
@@ -810,7 +867,14 @@ function translateBuilderToRelationIr(builderJson: string, schema: WasmSchema): 
 }
 
 function usesNativeRelationFeatures(builder: ReturnType<typeof normalizeBuiltQuery>): boolean {
-  return builder.hops.length > 0 || builder.gather !== undefined;
+  // Flat queries predate payload enum matching and have no representation for
+  // its nested predicate. Route it through the relation IR even without a hop
+  // so the public enum-match node reaches the Rust query compiler.
+  return (
+    builder.hops.length > 0 ||
+    builder.gather !== undefined ||
+    builder.conditions.some((condition) => condition.op === "match")
+  );
 }
 
 function toRuntimeOrderBy(

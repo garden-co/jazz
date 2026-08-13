@@ -1001,9 +1001,10 @@ where
     }
 
     /// Construct the physical-to-authored side of the enum interning boundary
-    /// for one user cell.  Every entry is keyed by a structural occurrence;
-    /// absent target cases deliberately stay `None` so projection fails rather
-    /// than fabricating an older client's value.
+    /// for one user cell. Entries are keyed by structural occurrence; absent
+    /// target cases stay `None`, so older schema views fail rather than
+    /// fabricating a value. Payload values also receive a `root/nullable`
+    /// alias for the current-table's synthetic nullable cell carrier.
     fn physical_to_authored_enum_remaps(
         &self,
         target_mapping: &TablePhysicalMapping,
@@ -1018,52 +1019,52 @@ where
             let physical_cases = self
                 .physical_scalar_enum_cases(target_mapping.table_id, column_id)
                 .unwrap_or_else(|_| target_cases.clone());
-            remaps.scalar.insert(
-                "root".to_owned(),
-                physical_cases
-                    .iter()
-                    .map(|identity| {
-                        target_cases
-                            .iter()
-                            .position(|candidate| candidate == identity)
-                            .map(|tag| {
-                                u8::try_from(tag).map_err(|_| {
-                                    Error::InvalidStoredValue("target scalar enum tag exhausted")
-                                })
+            let tags = physical_cases
+                .iter()
+                .map(|identity| {
+                    target_cases
+                        .iter()
+                        .position(|candidate| candidate == identity)
+                        .map(|tag| {
+                            u8::try_from(tag).map_err(|_| {
+                                Error::InvalidStoredValue("target scalar enum tag exhausted")
                             })
-                            .transpose()
-                    })
-                    .collect::<Result<_, _>>()?,
-            );
+                        })
+                        .transpose()
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            remaps.scalar.insert("root".to_owned(), tags);
         }
         if let Some(target_cases) = target_mapping.payload_enum_cases.get(&column_id) {
             let physical_cases = self
                 .physical_payload_enum_cases(target_mapping.table_id, column_id)
                 .unwrap_or_else(|_| target_cases.clone());
-            remaps.payload.insert(
-                "root".to_owned(),
-                physical_cases
-                    .iter()
-                    .map(|identity| {
-                        target_cases
-                            .iter()
-                            .position(|candidate| candidate == identity)
-                            .map(|tag| {
-                                u32::try_from(tag).map_err(|_| {
-                                    Error::InvalidStoredValue("target payload enum tag exhausted")
-                                })
+            let tags = physical_cases
+                .iter()
+                .map(|identity| {
+                    target_cases
+                        .iter()
+                        .position(|candidate| candidate == identity)
+                        .map(|tag| {
+                            u32::try_from(tag).map_err(|_| {
+                                Error::InvalidStoredValue("target payload enum tag exhausted")
                             })
-                            .transpose()
-                    })
-                    .collect::<Result<_, _>>()?,
-            );
-            remaps.payload_children.insert(
-                "root".to_owned(),
-                physical_cases
-                    .iter()
-                    .map(|identity| Some(global_case_path("root", identity)))
-                    .collect(),
-            );
+                        })
+                        .transpose()
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let children = physical_cases
+                .iter()
+                .map(|identity| Some(global_case_path("root", identity)))
+                .collect::<Vec<_>>();
+            remaps.payload.insert("root".to_owned(), tags.clone());
+            remaps
+                .payload_children
+                .insert("root".to_owned(), children.clone());
+            remaps.payload.insert("root/nullable".to_owned(), tags);
+            remaps
+                .payload_children
+                .insert("root/nullable".to_owned(), children);
         }
         if let Some(paths) = target_mapping.nested_scalar_enum_cases.get(&column_id) {
             for (path, target_cases) in paths {
@@ -4692,7 +4693,7 @@ mod variant_case_tests {
         let base = schema(1);
         let archived = schema(2);
         let snoozed = schema(3);
-        let base_cases = vec![
+        let base_cases = [
             GlobalScalarEnumCaseId {
                 introducing_schema: base,
                 introducing_ordinal: 0,

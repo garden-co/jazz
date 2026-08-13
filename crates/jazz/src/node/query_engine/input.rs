@@ -501,6 +501,13 @@ pub(crate) enum PredicateExpr {
     IsNull(NormalizedValueRef),
     /// Non-null test.
     IsNotNull(NormalizedValueRef),
+    /// Case-tag test and payload-record predicate for a tagged enum source
+    /// field. Payload source fields are relative to the selected case.
+    EnumMatch {
+        value: NormalizedValueRef,
+        case_tag: u32,
+        payload: Box<PredicateExpr>,
+    },
     /// Boolean conjunction.
     And(Vec<PredicateExpr>),
     /// Boolean disjunction.

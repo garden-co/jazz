@@ -91,6 +91,43 @@ export function toValue(value: unknown, columnType: ColumnType): WasmValue {
       }
       return { type: "Text", value: enumValue };
     }
+    case "EnumPayload": {
+      if (typeof value !== "object" || value === null || Array.isArray(value)) {
+        throw new Error("Invalid payload enum value. Expected an object with a string type.");
+      }
+      const input = value as Record<string, unknown>;
+      const caseName = input.type;
+      if (typeof caseName !== "string") {
+        throw new Error("Invalid payload enum value. Expected a string type discriminant.");
+      }
+      const entry = columnType.cases.find((candidate) => candidate.name === caseName);
+      if (!entry) throw new Error(`Invalid payload enum case "${caseName}".`);
+      const allowed = new Set(["type", ...entry.fields.map((field) => field.name)]);
+      for (const key of Object.keys(input)) {
+        if (!allowed.has(key))
+          throw new Error(`Unknown payload field "${key}" for enum case "${caseName}".`);
+      }
+      return {
+        type: "Enum",
+        value: {
+          case: caseName,
+          values: entry.fields.map((field) => {
+            const fieldValue = input[field.name];
+            if (fieldValue === undefined && !field.nullable && field.default === undefined) {
+              throw new Error(
+                `Missing required payload field "${field.name}" for enum case "${caseName}".`,
+              );
+            }
+            if (fieldValue === null && !field.nullable) {
+              throw new Error(`Cannot set required payload field "${field.name}" to null.`);
+            }
+            return fieldValue === undefined && field.default !== undefined
+              ? field.default
+              : toValue(fieldValue, field.column_type);
+          }),
+        },
+      };
+    }
     case "Array": {
       if (!Array.isArray(value)) {
         throw new Error(`Expected array for Array column type, got ${typeof value}`);
