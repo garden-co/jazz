@@ -7437,6 +7437,30 @@ function encodeSubscriptionDelta(delta: {
   return writer.finish();
 }
 
+function encodeSubscriptionDeltaWithTableColumns(
+  rows: Array<{ table: string; rowId: Uint8Array; column: string; value: string }>,
+): Uint8Array {
+  const writer = new PostcardWriter();
+  writer.vec((batch, index) => {
+    const row = rows[index]!;
+    const descriptor = [{ name: row.column, valueType: { tag: 8 } }];
+    batch.string(row.table);
+    writeDescriptor(batch, descriptor);
+    batch.vec((entry) => {
+      entry.bytes(row.rowId);
+      entry.bool(false);
+      entry.bytes(createRecord(descriptor, [new TextEncoder().encode(row.value)]));
+    }, 1);
+  }, rows.length);
+  writer.vec(() => undefined, 0);
+  writer.vec(() => undefined, 0);
+  const rowKey = (rowId: Uint8Array) => Uint8Array.from([1, ...rowId]);
+  writer.vec((key, index) => key.bytes(rowKey(rows[index]!.rowId)), rows.length);
+  writer.vec(() => undefined, 0);
+  writer.vec(() => undefined, 0);
+  return writer.finish();
+}
+
 it("preserves typed occurrence keys in the native subscription wire sidecar", () => {
   const typedKey = (label: string) => {
     const labelBytes = new TextEncoder().encode(label);
@@ -7650,6 +7674,45 @@ it("keeps same-row union occurrences distinct through apply, removal, and reopen
   expect(decodeNativeDelta(reopened.wireDelta, testSchema.todos.columns)[0]!.id).toBe(
     firstDelta[1]!.id,
   );
+});
+
+it("decodes related subscription batches with their own table schema", () => {
+  const schema = {
+    messages: {
+      columns: [{ name: "text", column_type: { type: "Text" }, nullable: false }],
+    },
+    profiles: {
+      columns: [{ name: "name", column_type: { type: "Text" }, nullable: false }],
+    },
+  } satisfies WasmSchema;
+  const messageId = uuidBytes("00000000-0000-0000-0000-000000000001");
+  const profileId = uuidBytes("00000000-0000-0000-0000-000000000002");
+  const delta = readNativeSubscriptionDelta(
+    new PostcardReader(
+      encodeSubscriptionDeltaWithTableColumns([
+        { table: "messages", rowId: messageId, column: "text", value: "visible message" },
+        { table: "profiles", rowId: profileId, column: "name", value: "Alice" },
+      ]),
+    ),
+  );
+
+  const applied = applySubscriptionDeltaWithWireDelta([], new Map(), delta, schema, true, {
+    rootTable: "messages",
+    rootColumns: schema.messages.columns,
+  });
+
+  expect(applied.rows).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        table: "messages",
+        values: [{ type: "Text", value: "visible message" }],
+      }),
+      expect.objectContaining({ table: "profiles", values: [{ type: "Text", value: "Alice" }] }),
+    ]),
+  );
+  expect(decodeNativeDelta(applied.wireDelta, schema.messages.columns)).toEqual([
+    expect.objectContaining({ id: formatUuid(messageId) }),
+  ]);
 });
 
 function encodeUserWrappedSubscriptionDelta(row: {
