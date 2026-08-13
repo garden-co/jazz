@@ -6,7 +6,7 @@ use std::rc::Rc;
 mod duplex_transport;
 
 use duplex_transport::duplex;
-use jazz::db::{Db, DbConfig, DbIdentity, ReadOpts, SubscriptionEvent, block_on};
+use jazz::db::{Db, DbConfig, DbIdentity, Propagation, ReadOpts, SubscriptionEvent, block_on};
 use jazz::groove::records::Value;
 use jazz::groove::schema::{ColumnSchema, ColumnType};
 use jazz::groove::storage::MemoryStorage;
@@ -329,6 +329,75 @@ fn browser_client_hydrates_local_subscription_from_worker_relay() {
             .iter()
             .any(|event| matches!(event, SubscriptionEvent::Rejected { .. }))
     );
+}
+
+/// A browser local-only subscription crosses the private main/worker boundary
+/// so the fresh in-memory main Db can hydrate from durable worker state, but it
+/// must not cross the worker/server boundary.
+#[test]
+fn browser_client_local_only_subscription_stops_at_worker() {
+    let schema = schema();
+    let alice = AuthorId::from_bytes([0xa9; 16]);
+    let worker = open_db(0x2a, alice, &schema);
+    let core = open_core(0x3a, &schema);
+    worker
+        .insert(
+            "todos",
+            BTreeMap::from([("title".to_owned(), Value::String("worker-local".to_owned()))]),
+        )
+        .expect("seed worker-local todo");
+    core.insert(
+        "todos",
+        BTreeMap::from([("title".to_owned(), Value::String("server-only".to_owned()))]),
+    )
+    .expect("seed server-only todo");
+
+    let main_thread = open_db(0x1b, alice, &schema);
+    main_thread.set_non_durable_client();
+    let (main_transport, worker_subscriber_transport) = duplex();
+    let _main_connection = main_thread.connect_upstream(main_transport);
+    let _worker_subscriber = worker.accept_subscriber(worker_subscriber_transport, alice);
+    let (worker_upstream_transport, core_transport) = duplex();
+    let _worker_upstream = worker.connect_upstream(worker_upstream_transport);
+    let _core_subscriber = core.accept_subscriber(core_transport, alice);
+
+    let todos = main_thread
+        .prepare_query(&main_thread.table("todos"))
+        .expect("prepare local-only todos query");
+    let mut subscription = block_on(main_thread.subscribe(
+        &todos,
+        ReadOpts {
+            tier: DurabilityTier::Local,
+            propagation: Propagation::LocalOnly,
+            ..ReadOpts::default()
+        },
+    ))
+    .expect("subscribe locally through the worker");
+    let _initial = subscription
+        .try_next_event()
+        .expect("subscription starts with the main Db's empty snapshot");
+
+    main_thread.tick().expect("register worker-local coverage");
+    for _ in 0..4 {
+        worker.tick().expect("serve worker-local coverage");
+        core.tick().expect("process any server traffic");
+        worker.tick().expect("process any server response");
+        main_thread.tick().expect("apply worker-local coverage");
+    }
+
+    let rows = main_thread
+        .read(&todos)
+        .expect("read worker-hydrated local-only view");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].cell_at(0),
+        Some(Value::String("worker-local".to_owned()))
+    );
+    let events = std::iter::from_fn(|| subscription.try_next_event()).collect::<Vec<_>>();
+    assert!(events.iter().any(|event| matches!(
+        event,
+        SubscriptionEvent::Delta { added, .. } if added.len() == 1
+    )));
 }
 
 /// An authority-tier browser subscription must not treat the worker's current

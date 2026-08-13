@@ -1428,8 +1428,7 @@ export class NativeRuntimeAdapter implements Runtime {
     session: RuntimeSession | null,
   ): Promise<unknown | undefined> {
     if (tier == null || (tier === "local" && !this.nonDurableClient)) return;
-    const options = optionsJson == null ? {} : (JSON.parse(optionsJson) as Record<string, unknown>);
-    if (options.propagation != null && options.propagation !== "full") return;
+    if (!readPropagationIsFull(optionsJson) && !this.nonDurableClient) return;
     if (!this.hasUpstream()) return;
     if (!this.db.attachQuery) return;
     const opts = readOptions(tier, false, optionsJson);

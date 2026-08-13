@@ -7945,6 +7945,7 @@ where
                     // Upstream client coverage is canonicalized to Global.
                     tier: DurabilityTier::Global,
                     read_view: read_view.clone(),
+                    ..RegisterShapeOptions::default()
                 }
                 .read_view_key(),
             )
@@ -8432,6 +8433,7 @@ where
                     RegisterShapeOptions {
                         tier,
                         read_view: read_view.clone(),
+                        ..RegisterShapeOptions::default()
                     }
                     .read_view_key(),
                 )
