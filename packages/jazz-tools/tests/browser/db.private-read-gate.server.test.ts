@@ -251,7 +251,7 @@ afterEach(async () => {
 });
 
 describe("raw websocket private read gate", () => {
-  it("delivers async-channel subscription updates for $createdBy-scoped inserts", async () => {
+  it("delivers main-thread subscription updates for $createdBy-scoped inserts", async () => {
     const { appId, serverUrl, adminSecret } = await getJazzServerInfo(
       uniqueDbName("created-by-async-channel-subscription"),
     );
@@ -271,7 +271,6 @@ describe("raw websocket private read gate", () => {
         type: "persistent",
         dbName: uniqueDbName("created-by-async-channel-client"),
       },
-      asyncSubscriptionsOnly: true,
     });
     ctx.track({
       shutdown: client.shutdown,

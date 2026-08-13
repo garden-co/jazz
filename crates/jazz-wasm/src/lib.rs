@@ -1887,6 +1887,19 @@ impl WasmDb {
         self.inner.tick().map_err(to_js_error)
     }
 
+    /// Configure this runtime as the optimistic in-memory side of a browser
+    /// client/worker pair. Must be called before application writes begin.
+    #[wasm_bindgen(js_name = setNonDurableClient)]
+    pub fn set_non_durable_client(&self) -> Result<(), JsValue> {
+        match &self.inner {
+            WasmDbInner::Memory(db) => db.set_non_durable_client(),
+            #[cfg(target_arch = "wasm32")]
+            WasmDbInner::Browser(db) => db.set_non_durable_client(),
+            WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
+        }
+        Ok(())
+    }
+
     #[wasm_bindgen(js_name = connectUpstream)]
     pub fn connect_upstream(&self) -> Result<WasmTransport, JsValue> {
         let queues = WasmWireQueues::default();
@@ -1979,9 +1992,18 @@ impl WasmDb {
     pub fn accept_subscriber(&self, identity: Vec<u8>) -> Result<WasmTransport, JsValue> {
         let identity = author_id_from_bytes(&identity)?;
         let queues = WasmWireQueues::default();
-        let transport = Box::new(WireTransportAdapter::current(WasmWireTransport {
-            queues: queues.clone(),
-        }));
+        // Like the JS-owned upstream carrier, this binding-local transport has
+        // no authenticated endpoint context for scoped receipt/view frames.
+        let transport = Box::new(WireTransportAdapter::new(
+            WasmWireTransport {
+                queues: queues.clone(),
+            },
+            jazz::wire::WIRE_PROTOCOL_VERSION,
+            jazz::wire::current_wire_features()
+                & !(jazz::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
+                    | jazz::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS),
+            None,
+        ));
         let inner = match &self.inner {
             WasmDbInner::Memory(db) => WasmTransportInner::Memory {
                 db: Rc::clone(db),

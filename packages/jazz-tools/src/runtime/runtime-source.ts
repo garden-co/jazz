@@ -22,6 +22,24 @@ export interface RuntimeTelemetryContext<RuntimeConfig extends DbConfig = DbConf
   runtimeThread: "main" | "worker";
 }
 
+export interface BrowserWorkerConnection {
+  ready(): Promise<void>;
+  waitForServerConnection(): Promise<void>;
+  updateAuth(authJson: string): void;
+  disconnect(): Promise<void>;
+  reconnect(authJson: string): Promise<void>;
+  deleteStorage(): Promise<void>;
+  shutdown(): Promise<void>;
+}
+
+export interface BrowserWorkerConnectionContext<RuntimeConfig extends DbConfig = DbConfig> {
+  config: RuntimeConfig;
+  schema: WasmSchema;
+  client: JazzClient;
+  onAuthFailure: (reason: AuthFailureReason) => void;
+  onFailure: (error: unknown) => void;
+}
+
 /**
  * Internal source for loading and wiring the native runtime.
  *
@@ -31,6 +49,8 @@ export interface RuntimeTelemetryContext<RuntimeConfig extends DbConfig = DbConf
  * concrete schemas.
  */
 export abstract class RuntimeSource<RuntimeConfig extends DbConfig = DbConfig> {
+  /** Set to true when this source can host browser persistence in a dedicated worker. */
+  readonly supportsBrowserWorker: boolean = false;
   /** Set to false when the runtime must receive schemas exactly as declared. */
   readonly supportsPolicyBypass: boolean = true;
 
@@ -43,6 +63,12 @@ export abstract class RuntimeSource<RuntimeConfig extends DbConfig = DbConfig> {
   }
 
   abstract createClient(context: RuntimeClientContext<RuntimeConfig>): JazzClient;
+
+  createBrowserWorkerConnection(
+    _context: BrowserWorkerConnectionContext<RuntimeConfig>,
+  ): BrowserWorkerConnection {
+    throw new Error("Db runtime source does not support browser worker connections");
+  }
 
   installTelemetry(
     _context: RuntimeTelemetryContext<RuntimeConfig>,

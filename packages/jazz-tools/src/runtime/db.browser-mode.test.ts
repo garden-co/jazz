@@ -19,12 +19,12 @@ afterEach(() => {
 });
 
 describe("createDb browser mode", () => {
-  it("uses the in-process native runtime path in browser when driver is persistent", async () => {
+  it("uses the dedicated-worker connection path in browser when driver is persistent", async () => {
     (globalThis as Record<string, unknown>).window = {};
     (globalThis as Record<string, unknown>).Worker = class {};
 
     const createdDb = {} as Db;
-    const createSpy = vi.spyOn(Db, "create").mockReturnValue(createdDb);
+    const createSpy = vi.spyOn(Db, "createWithBrowserWorker").mockResolvedValue(createdDb);
 
     const result = await createDb({
       appId: "driver-mode-persistent",

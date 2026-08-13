@@ -47,7 +47,6 @@ import { translateQuery } from "./query-adapter.js";
 import { transformRow, transformRows } from "./row-transformer.js";
 import { toWriteRecord } from "./value-converter.js";
 import { SubscriptionManager, type SubscriptionDelta } from "./subscription-manager.js";
-import type { SubscriptionChannel } from "./subscription-channel.js";
 import { createAuthStateStore, type AuthState, type AuthStateStoreOptions } from "./auth-state.js";
 import { resolveClientSessionSync } from "./client-session.js";
 import {
@@ -66,6 +65,7 @@ import {
 } from "./query-builder-shape.js";
 import { resolveSelectedColumns } from "./select-projection.js";
 import {
+  BrowserConnectionManager,
   DirectConnectionManager,
   type ConnectionManager,
   type DbForConnection,
@@ -115,18 +115,6 @@ export interface DbConfig {
   devMode?: boolean;
   /** Local-first auth via a local seed. Mutually exclusive with jwtToken. */
   secret?: string;
-  /**
-   * Client-factory option. Defaults to true at `createJazzClient`: subscriptions
-   * are served over an API-level channel and no main-thread Db is exposed.
-   * `createDb` itself ignores this field.
-   */
-  asyncSubscriptionsOnly?: boolean;
-  /**
-   * Client-factory option used when `asyncSubscriptionsOnly` is true, or when a
-   * synchronous-mode subscription opts into `subscriptionMode: "async"`.
-   * `createDb` itself ignores this field.
-   */
-  subscriptionChannel?: SubscriptionChannel;
 }
 
 function resolveStorageDriver(driver?: StorageDriver): StorageDriver {
@@ -190,11 +178,7 @@ type DbRuntimeOperationContext = {
 };
 
 function nativeDbQueryOptions(options?: QueryOptions): QueryOptions {
-  if (!options?.subscriptionMode) {
-    return options ?? {};
-  }
-  const { subscriptionMode: _subscriptionMode, ...nativeOptions } = options;
-  return nativeOptions;
+  return options ?? {};
 }
 
 function limitQueryToOne<T>(query: QueryBuilder<T>): QueryBuilder<T> {
@@ -1049,6 +1033,18 @@ export class Db {
     return new Db(config, runtimeSource);
   }
 
+  /** @internal Create a Db whose durable peer lives in a dedicated browser worker. */
+  static async createWithBrowserWorker(
+    config: DbConfig,
+    runtimeSource: AnyRuntimeSource,
+  ): Promise<Db> {
+    const db = new Db(config, runtimeSource);
+    const connection = new BrowserConnectionManager(db.dbForConnection());
+    db.connection = connection;
+    await connection.start();
+    return db;
+  }
+
   /**
    * Get or create a JazzClient for the given schema.
    * Synchronous because the runtime source is loaded before Db is created.
@@ -1086,12 +1082,7 @@ export class Db {
     }
   }
 
-  /**
-   * @internal Runs one synchronous high-level Db operation with an explicit
-   * session context. The browser worker subscription channel uses this when a
-   * shared worker Db serves edge-client requests for multiple identities.
-   */
-  __withRuntimeOperationContext<TResult>(
+  private withRuntimeOperationContext<TResult>(
     context: DbRuntimeOperationContext,
     operation: () => TResult,
   ): TResult {
@@ -1663,12 +1654,18 @@ export class Db {
     if (queryOptions.tier == null || queryOptions.tier === "local") {
       callback(manager.seed([]));
     }
-    if (this.connection.shouldDeferSubscriptionStart()) {
+    if (this.connection.shouldDeferSubscriptionStart(queryOptions.tier)) {
+      // The worker can only classify the initial authority-tier snapshot as
+      // settled after its own server transport is attached. Delay native
+      // subscription creation until that topology is ready; the native stream
+      // then owns the settled-snapshot gate and remains the sole data source.
       void this.ensureReady(queryOptions.tier)
         .then(startNativeSubscription)
         .catch((error: unknown) => {
           if (unsubscribed) return;
-          console.error("Failed to start Jazz subscription", error);
+          setTimeout(() => {
+            throw error;
+          }, 0);
         });
     } else {
       startNativeSubscription();
@@ -1684,7 +1681,7 @@ export class Db {
       const seedRows =
         session == null
           ? seedQuery()
-          : this.__withRuntimeOperationContext({ session }, () => seedQuery());
+          : this.withRuntimeOperationContext({ session }, () => seedQuery());
       void seedRows
         .then((rows) => {
           if (unsubscribed) return;
@@ -1898,7 +1895,11 @@ export async function createDbWithRuntimeSource<RuntimeConfig extends DbConfig>(
     resolvedConfig = { ...resolvedConfig, jwtToken };
   }
 
-  const db = Db.create(resolvedConfig, runtimeSource as AnyRuntimeSource);
+  const driver = resolveStorageDriver(resolvedConfig.driver);
+  const db =
+    runtimeSource.supportsBrowserWorker && isBrowserRuntime() && driver.type === "persistent"
+      ? await Db.createWithBrowserWorker(resolvedConfig, runtimeSource as AnyRuntimeSource)
+      : Db.create(resolvedConfig, runtimeSource as AnyRuntimeSource);
 
   if (localFirstSecret) {
     db.initLocalFirstAuth(localFirstSecret, 3600, !config.jwtToken);
@@ -1909,4 +1910,8 @@ export async function createDbWithRuntimeSource<RuntimeConfig extends DbConfig>(
 
 export async function createDb(config: DbConfig): Promise<Db> {
   return await createDbWithRuntimeSource(config, new DefaultRuntimeSource());
+}
+
+function isBrowserRuntime(): boolean {
+  return typeof window !== "undefined" && typeof Worker !== "undefined";
 }

@@ -222,12 +222,6 @@ export interface QueryExecutionOptions {
   propagate?: boolean;
   propagation?: QueryPropagation;
   visibility?: QueryVisibility;
-  /**
-   * In dual-mode clients, route this subscription over the API-level
-   * async subscription channel instead of the local main-thread node.
-   * Queries and writes are unaffected.
-   */
-  subscriptionMode?: "sync" | "async";
 }
 
 type InternalQueryExecutionOptions = QueryExecutionOptions & {
@@ -1203,6 +1197,11 @@ export class JazzClient {
    */
   getSchema(): WasmSchema {
     return normalizeRuntimeSchema(this.context.schema);
+  }
+
+  /** @internal Connection managers use this to attach native peer transports. */
+  getRuntime(): Runtime {
+    return this.runtime;
   }
 
   async waitForTransaction(

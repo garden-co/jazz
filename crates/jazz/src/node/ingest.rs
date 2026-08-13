@@ -1470,7 +1470,7 @@ where
         }])
     }
 
-    /// Ingest a commit unit as a relay without assigning fate.
+    /// Ingest an unfated commit unit at a Local relay without assigning fate.
     pub fn ingest_relay_commit_unit(
         &mut self,
         tx: Transaction,

@@ -554,6 +554,12 @@ pub struct NodeState<S> {
     groove_runtime_token: u64,
     /// Whether this node has complete settled history for historical reads.
     history_complete: bool,
+    /// Durability recorded for commits authored by this process.
+    ///
+    /// Ordinary storage-backed nodes author at `Local`. A browser main-thread
+    /// runtime uses `None` because its in-memory preview is not durable until
+    /// the dedicated worker acknowledges persistence.
+    authored_commit_durability: DurabilityTier,
     /// Mapping from stable node UUIDs to compact on-disk aliases.
     pub(crate) node_aliases: BTreeMap<NodeUuid, NodeAlias>,
     /// Ahead-current overlay keys for rows whose non-global versions can affect local reads.
@@ -1131,6 +1137,7 @@ where
             database: DatabaseSlot::new(database),
             groove_runtime_token: next_groove_runtime_token(),
             history_complete,
+            authored_commit_durability: DurabilityTier::Local,
             node_aliases: BTreeMap::new(),
             ahead_current_keys: BTreeSet::new(),
             ahead_current_rows: BTreeSet::new(),
@@ -1243,6 +1250,14 @@ where
     /// Stable identity of the authority issuing wire-level receipts.
     pub(crate) fn node_uuid(&self) -> NodeUuid {
         self.node_uuid
+    }
+
+    pub(crate) fn authored_commit_durability(&self) -> DurabilityTier {
+        self.authored_commit_durability
+    }
+
+    pub(crate) fn set_non_durable_client(&mut self) {
+        self.authored_commit_durability = DurabilityTier::None;
     }
 
     /// Attach process-local auth claims to an accepted subscriber identity.
@@ -1857,7 +1872,7 @@ where
                 &tx,
                 Fate::Pending,
                 None,
-                DurabilityTier::Local,
+                self.authored_commit_durability,
             ),
         );
         let mut stored_versions = Vec::new();
@@ -2135,7 +2150,7 @@ where
                 &tx,
                 Fate::Pending,
                 None,
-                DurabilityTier::Local,
+                self.authored_commit_durability,
             ),
         );
         let (history_table, groove_record) = self.version_storage_write_binding(&stored)?;
@@ -3764,6 +3779,49 @@ where
         author: AuthorId,
     ) -> Result<Vec<TxId>, Error> {
         Ok(self.pending_transaction_scan_for(node, author)?.tx_ids)
+    }
+
+    /// Return unsettled transactions by `author`, irrespective of their
+    /// originating node. A dedicated browser relay uses this when it reopens:
+    /// relayed main-thread commits retain the main thread's node id, so the
+    /// relay's ordinary local-origin recovery scan cannot find them.
+    pub(crate) fn pending_transaction_ids_for_author(
+        &mut self,
+        author: AuthorId,
+    ) -> Result<Vec<TxId>, Error> {
+        let mut candidates = Vec::new();
+        for raw in self.database.index_scan_raw(
+            "jazz_transactions",
+            "by_global_seq",
+            &[Value::Nullable(None)],
+        )? {
+            let record = raw.record();
+            if AuthorId(record.get_uuid(TransactionRowRecord::FIELD_MADE_BY_IDX)?) != author
+                || !matches!(
+                    record.get_enum(TransactionRowRecord::FIELD_FATE_IDX)?,
+                    0 | 1
+                )
+                || durability_from_discriminant(
+                    record.get_enum(TransactionRowRecord::FIELD_DURABILITY_IDX)?,
+                )? >= DurabilityTier::Global
+            {
+                continue;
+            }
+            candidates.push((
+                NodeAlias(record.get_u64(TransactionRowRecord::FIELD_NODE_ID_IDX)?),
+                TxTime(record.get_u64(TransactionRowRecord::FIELD_TIME_IDX)?),
+            ));
+        }
+        let mut tx_ids = Vec::with_capacity(candidates.len());
+        for (alias, time) in candidates {
+            let Some(node) = self.resolve_node_alias(alias)? else {
+                continue;
+            };
+            tx_ids.push(TxId::new(time, node));
+        }
+        tx_ids.sort();
+        tx_ids.dedup();
+        Ok(tx_ids)
     }
 
     /// Find replayable local transactions in the null slice of

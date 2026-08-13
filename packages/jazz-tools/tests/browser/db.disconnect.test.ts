@@ -2,7 +2,6 @@ import { afterEach, describe, expect, it } from "vitest";
 import { schema as s } from "../../src/";
 import { createDb, Db, type QueryBuilder } from "../../src/runtime/db.js";
 import { generateAuthSecret } from "../../src/runtime/auth-secret-store.js";
-import { PersistentBrowserOpfsRuntime } from "../../src/runtime/native-runtime/persistent-browser-runtime.js";
 import { deploy } from "../../src/dev/catalogue.js";
 import { TestCleanup, sleep, uniqueDbName, waitForQuery, withTimeout } from "./support.js";
 import { getJazzServerInfo, type JazzServerInfo } from "./testing-server.js";
@@ -127,35 +126,6 @@ describe("Db disconnect/reconnect", () => {
   });
 
   describe("worker mode", () => {
-    it.each(["close", "clearClientStorage"] as const)(
-      "rejects server-tier work parked behind reconnect on %s",
-      async (terminalMethod) => {
-        const runtime = new PersistentBrowserOpfsRuntime(
-          undefined,
-          app.wasmSchema,
-          uniqueDbName(`db-disconnect-${terminalMethod}`),
-          new Uint8Array(16),
-          new Uint8Array(16),
-        );
-
-        await runtime.disconnect({ rejectWaiters: false });
-        const query = runtime.query(JSON.stringify({ table: "todos" }), null, "edge", null);
-        const wait = runtime.waitForTransaction("parked-browser-transaction", "global");
-        const queryRejection = expect(query).rejects.toThrow(
-          "Persistent browser native runtime is closed",
-        );
-        const waitRejection = expect(wait).rejects.toThrow(
-          "Persistent browser native runtime is closed",
-        );
-
-        await runtime[terminalMethod]();
-
-        await queryRejection;
-        await waitRejection;
-      },
-      60_000,
-    );
-
     it("syncs writes made while disconnected after reconnect", async () => {
       const { db, peer } = await createDbPair(ctx, createWorkerDb);
 

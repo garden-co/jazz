@@ -44,7 +44,7 @@ export class DirectConnectionManager extends ConnectionManager {
     });
   }
 
-  shouldDeferSubscriptionStart(): boolean {
+  shouldDeferSubscriptionStart(_tier?: DurabilityTier): boolean {
     return false;
   }
 

@@ -68,27 +68,19 @@ test.describe("inspector overlay (embedded, own worker connection end-to-end)", 
 
     const inspector = page.frameLocator('iframe[title="jazz-inspector"]');
 
-    // The host publishes a live subscription channel into its own store; the
-    // overlay's client connects through it (same-origin realm call) instead of
-    // opening a competing worker/OPFS connection. Without this it would never
-    // see the host's local data offline.
-    const hasHostChannel = await page.evaluate(() => {
+    // The overlay gets an isolated in-memory config, so it does not open a
+    // competing persistent worker against the host's OPFS namespace.
+    const overlayConfig = await page.evaluate(() => {
       const host = (
         window as unknown as {
           __jazzInspectorHost?: {
-            getSubscriptionChannel(): { subscribeAll?: unknown; shutdown?: unknown };
+            getConnectionConfig(): { driver?: { type?: string } };
           };
         }
       ).__jazzInspectorHost;
-      if (!host) return { present: false };
-      const channel = host.getSubscriptionChannel();
-      return {
-        present: typeof channel?.subscribeAll === "function",
-        // shutdown must be masked so the overlay can't shut the host down.
-        shutdownMasked: channel?.shutdown === undefined,
-      };
+      return host?.getConnectionConfig() ?? null;
     });
-    expect(hasHostChannel).toEqual({ present: true, shutdownMasked: true });
+    expect(overlayConfig?.driver?.type).toBe("memory");
 
     // The overlay reads the handle, opens its connection joining that store, and
     // leaves the connecting state.

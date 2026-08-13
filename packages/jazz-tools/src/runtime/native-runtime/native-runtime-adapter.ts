@@ -201,6 +201,7 @@ type NativeDb = {
       | ((error: Error | null, urgency: string) => void),
   ): void;
   onMutationError(callback: (event: MutationErrorEvent) => void): void;
+  setNonDurableClient?(): void;
   connectUpstream(): Transport;
   connectUpstreamWithSession?(
     protocolVersion: number,
@@ -210,6 +211,7 @@ type NativeDb = {
     localNode: Uint8Array,
     localEpoch: bigint,
   ): Transport;
+  acceptSubscriber?(author: Uint8Array): Transport;
   tick(): void;
   close?(): void;
   free?(): void;
@@ -405,6 +407,8 @@ export class NativeRuntimeAdapter implements Runtime {
   private readonly subscriptions = new Map<number, SubscriptionState>();
   private authFailureCallback: ((reason: string) => void) | null = null;
   private serverTransport: Transport | null = null;
+  private peerUpstreamAttached = false;
+  private nonDurableClient = false;
   private serverCarrier: WebSocketCarrier | null = null;
   private serverCarrierPromise: Promise<WebSocketCarrier> | null = null;
   private serverTransportError: Error | null = null;
@@ -415,6 +419,8 @@ export class NativeRuntimeAdapter implements Runtime {
   private serverEndpointUrl: string | null = null;
   private readonly queuedServerFrames: Uint8Array[] = [];
   private readonly pendingInboundServerFrames: Uint8Array[] = [];
+  private readonly peerTransportWorkListeners = new Set<() => void>();
+  private peerTransportActivityEpoch = 0;
   private coreTickScheduled = false;
   private coreTickRunning = false;
   private coreTickAgain = false;
@@ -503,7 +509,52 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   connectUpstreamPeer(): Transport {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.connectUpstreamPeer();
+    this.peerUpstreamAttached = true;
     return this.db.connectUpstream();
+  }
+
+  onPeerTransportWork(listener: () => void): () => void {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.onPeerTransportWork(listener);
+    this.peerTransportWorkListeners.add(listener);
+    return () => {
+      this.peerTransportWorkListeners.delete(listener);
+    };
+  }
+
+  notifyPeerTransportActivity(): void {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.notifyPeerTransportActivity();
+    this.peerTransportActivityEpoch += 1;
+  }
+
+  setNonDurableClient(): void {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.setNonDurableClient();
+    if (!this.db.setNonDurableClient) {
+      throw new Error("Native runtime does not expose non-durable client mode");
+    }
+    this.db.setNonDurableClient();
+    this.nonDurableClient = true;
+  }
+
+  acceptPeer(): Transport {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.acceptPeer();
+    if (!this.db.acceptSubscriber) {
+      throw new Error("Native runtime does not expose subscriber links");
+    }
+    return this.db.acceptSubscriber(this.peerIdentity);
+  }
+
+  async waitForUpstreamServerConnection(): Promise<void> {
+    if (this !== this.ownerRuntime) {
+      return await this.ownerRuntime.waitForUpstreamServerConnection();
+    }
+    if (!this.serverCarrierPromise) return;
+    await this.serverCarrierPromise;
+  }
+
+  /** @internal */
+  isClosed(): boolean {
+    return this.ownerRuntime.closed;
   }
 
   close(): void {
@@ -528,10 +579,12 @@ export class NativeRuntimeAdapter implements Runtime {
     this.writes.clear();
     this.clearServerTransportErrorWaiters();
     this.resolveServerTransportWorkWaiters();
+    this.peerTransportWorkListeners.clear();
     this.queuedServerFrames.length = 0;
     this.pendingInboundServerFrames.length = 0;
     this.serverTransport?.close();
     this.serverTransport = null;
+    this.peerUpstreamAttached = false;
     this.serverCarrier?.close();
     this.serverCarrier = null;
     this.db.close?.();
@@ -814,6 +867,7 @@ export class NativeRuntimeAdapter implements Runtime {
     this.completedTxs.set(openBatchId, { kind: pending.kind, state: "committed" });
     this.pumpSubscriptions();
     this.scheduleServerPump();
+    this.notifyPeerTransportWork();
     return Promise.resolve(recordWrite(write, this.writes));
   }
 
@@ -881,7 +935,11 @@ export class NativeRuntimeAdapter implements Runtime {
     this.applySessionClaims(session);
     assertNoUnsupportedPermissionIntrospection(queryJson);
     const coreQueryJson = addNestedOuterColumns(queryJson);
-    const opts = readOptions(tier, queryIncludesDeleted(coreQueryJson), optionsJson);
+    // In browser mode the requested tier gates hydration through the worker,
+    // while the main-thread Db remains an in-memory materialized cache. Once
+    // coverage is confirmed, evaluate that cache at its Local tier.
+    const materializedTier = this.nonDurableClient ? "local" : tier;
+    const opts = readOptions(materializedTier, queryIncludesDeleted(coreQueryJson), optionsJson);
     if (queryUsesNativeRelationApi(coreQueryJson)) {
       if (this.readAuthorizationHost === "trusted-serving") {
         if (!this.db.allRelationQueryForIdentity) {
@@ -1163,6 +1221,7 @@ export class NativeRuntimeAdapter implements Runtime {
     const batchId = recordWrite(write, this.writes);
     this.pumpSubscriptions();
     this.scheduleServerPump();
+    this.notifyPeerTransportWork();
     const row = this.rowStateFromValues(table, rowId, values);
     return { id: row.id, values: row.values, kind: "committed", batchId };
   }
@@ -1171,6 +1230,7 @@ export class NativeRuntimeAdapter implements Runtime {
     const batchId = recordWrite(write, this.writes);
     this.pumpSubscriptions();
     this.scheduleServerPump();
+    this.notifyPeerTransportWork();
     return { kind: "committed", batchId };
   }
 
@@ -1323,7 +1383,7 @@ export class NativeRuntimeAdapter implements Runtime {
     session: RuntimeSession | null,
     rows: RowState[],
   ): Promise<void> {
-    if (!this.serverTransport || rows.length === 0) return;
+    if (!this.hasUpstream() || rows.length === 0) return;
     const seen = new Set<string>();
     for (const row of rows) {
       const key = rowKey(row.table, row.id);
@@ -1367,10 +1427,10 @@ export class NativeRuntimeAdapter implements Runtime {
     query: PreparedQuery,
     session: RuntimeSession | null,
   ): Promise<unknown | undefined> {
-    if (tier == null || tier === "local") return;
+    if (tier == null || (tier === "local" && !this.nonDurableClient)) return;
     const options = optionsJson == null ? {} : (JSON.parse(optionsJson) as Record<string, unknown>);
     if (options.propagation != null && options.propagation !== "full") return;
-    if (!this.serverTransport) return;
+    if (!this.hasUpstream()) return;
     if (!this.db.attachQuery) return;
     const opts = readOptions(tier, false, optionsJson);
     let attachment: unknown;
@@ -1387,11 +1447,15 @@ export class NativeRuntimeAdapter implements Runtime {
       attachment = this.db.attachQuery(query, opts);
     }
     if (!this.db.queryAttachmentIsCovered) return attachment;
+    const minimumPeerActivityEpoch = this.nonDurableClient
+      ? this.peerTransportActivityEpoch
+      : undefined;
     await this.waitForQueryCoverage(
       attachment,
       query,
       readOptions(tier, false, optionsJson),
       session?.identity,
+      minimumPeerActivityEpoch,
     );
     return attachment;
   }
@@ -1404,7 +1468,7 @@ export class NativeRuntimeAdapter implements Runtime {
   ): void {
     if (tier != null && tier !== "local") return;
     if (!readPropagationIsFull(optionsJson)) return;
-    if (!this.serverTransport || !this.db.attachQuery) return;
+    if (this.nonDurableClient || !this.serverTransport || !this.db.attachQuery) return;
 
     const refresh = async () => {
       await this.serverCarrierPromise;
@@ -1432,6 +1496,7 @@ export class NativeRuntimeAdapter implements Runtime {
     query: PreparedQuery,
     opts: unknown,
     identity?: Uint8Array,
+    minimumPeerActivityEpoch?: number,
   ): Promise<void> {
     const deadline = Date.now() + 15_000;
     const tier = (opts as { tier?: string }).tier ?? "";
@@ -1440,7 +1505,10 @@ export class NativeRuntimeAdapter implements Runtime {
       this.pumpServerTransport();
       this.throwServerTransportErrorForTier(tier);
       if (this.db.queryAttachmentIsCovered) {
-        if (this.db.queryAttachmentIsCovered(attachment)) return;
+        const peerHasResponded =
+          minimumPeerActivityEpoch == null ||
+          this.peerTransportActivityEpoch > minimumPeerActivityEpoch;
+        if (peerHasResponded && this.db.queryAttachmentIsCovered(attachment)) return;
       }
       try {
         this.readRowsForHost(query, opts, identity);
@@ -1559,6 +1627,7 @@ export class NativeRuntimeAdapter implements Runtime {
 
   private scheduleCoreWake(urgency: "immediate" | "deferred"): void {
     if (this.closed) return;
+    this.notifyPeerTransportWork();
     if (urgency === "immediate") {
       this.scheduleCoreTick();
       return;
@@ -1589,6 +1658,7 @@ export class NativeRuntimeAdapter implements Runtime {
       this.db.tick();
       this.pumpSubscriptions();
       this.scheduleServerPump();
+      this.notifyPeerTransportWork();
     } finally {
       this.coreTickRunning = false;
     }
@@ -1861,7 +1931,8 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   private subscriptionCallbacksAreSettledGated(subscription: SubscriptionState): boolean {
-    return (subscription.opts as { tier?: unknown }).tier === "global";
+    const tier = (subscription.opts as { tier?: unknown }).tier;
+    return tier === "global" || (this.nonDurableClient && tier === "edge");
   }
 
   private deferSubscriptionRows(
@@ -1904,6 +1975,16 @@ export class NativeRuntimeAdapter implements Runtime {
         this.scheduleServerPump();
       }
     }, SERVER_PUMP_DEBOUNCE_MS);
+  }
+
+  private notifyPeerTransportWork(): void {
+    for (const listener of this.peerTransportWorkListeners) {
+      listener();
+    }
+  }
+
+  private hasUpstream(): boolean {
+    return this.serverTransport != null || this.peerUpstreamAttached;
   }
 
   private pumpServerTransport(): void {

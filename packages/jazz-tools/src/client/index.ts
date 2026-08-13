@@ -1,13 +1,8 @@
 export {
-  BrowserWorkerSubscriptionChannel,
-  createBrowserWorkerSubscriptionChannel,
   createExtensionJazzClient,
   createJazzClient,
-  type AsyncChannelDb,
-  type AsyncOnlyJazzClient,
   type JazzClient,
   type JazzClientConfig,
-  type SyncJazzClient,
 } from "../web/create-jazz-client.js";
 export { BrowserAuthSecretStore } from "../runtime/auth-secret-store.js";
 export type {

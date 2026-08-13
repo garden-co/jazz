@@ -35,8 +35,8 @@ class InspectorConnectionErrorBoundary extends Component<
 /**
  * The dev-overlay inspector. Same-origin with the host page, it reads the
  * connection config the loader published on `window.__jazzInspectorHost`, opens
- * its OWN worker connection (like the standalone build, inheriting the host's
- * credential) via the shared `JazzProvider` — reusing its StrictMode-safe,
+ * an isolated direct in-memory connection with the host's credential via the
+ * shared `JazzProvider` — reusing its StrictMode-safe,
  * refcounted client lifecycle rather than hand-rolling one — and shows the
  * host's active subscriptions from the one-way push. No devtools bridge.
  */

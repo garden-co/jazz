@@ -695,7 +695,7 @@ where
                 &tx,
                 Fate::Pending,
                 None,
-                DurabilityTier::Local,
+                self.authored_commit_durability,
             ),
         );
         let mut transaction_tables = BTreeSet::new();

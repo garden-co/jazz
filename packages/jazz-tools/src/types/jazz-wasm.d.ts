@@ -154,6 +154,7 @@ declare module "jazz-wasm" {
     setTickScheduler(callback: (urgency: "immediate" | "deferred") => void): void;
     onMutationError(callback: (event: any) => void): void;
     tick(): void;
+    setNonDurableClient(): void;
     close(): boolean;
     connectUpstream(): WasmTransport;
     connectUpstreamWithSession(
