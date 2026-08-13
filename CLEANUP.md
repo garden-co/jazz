@@ -101,7 +101,8 @@ identities internally.
 - Avoid rerunning Rust differential binaries already selected by the workspace
   test run.
 - Add compiler caching for macOS and Windows release builds.
-- Make focused Rust commands fail when they execute zero tests.
+- [done] Make focused Rust commands resolve and run exactly one canonical test;
+  `dev/t` rejects zero or ambiguous matches before invoking the test runner.
 - Check generated-artifact provenance automatically at consumption time.
 - Bound browser logs and stop quickly on repeated infrastructure failures.
 
