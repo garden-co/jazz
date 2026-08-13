@@ -986,9 +986,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     expect(aliceRowsAfterBobInsert).toHaveLength(3);
   });
 
-  // TEST_BURNDOWN_TS: jazz-napi native runtime memory DB > delivers all client-local subscription rows even when callers supply sessions
-  // known red; tracked in TEST_BURNDOWN.md — terminal root layout registration rejects this session-scoped subscription.
-  it.skip("delivers all client-local subscription rows even when callers supply sessions", async () => {
+  it("delivers all client-local subscription rows even when callers supply sessions", async () => {
     const { NapiDb } = await loadNapiModule();
     const runtime = new NativeRuntimeAdapter(
       { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
@@ -1004,19 +1002,25 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     const bobSession = JSON.stringify({ user_id: BOB_ID });
     const query = JSON.stringify({ table: "todos" });
     const aliceUpdates: unknown[] = [];
+    // Terminal layouts are registered once at the subscription boundary and
+    // later deltas reference that stable id. Keep one decoder for the whole
+    // subscription rather than treating independent callbacks as snapshots.
+    const aliceSubscription = new SubscriptionManager<WasmRow>();
     const decodeAliceDelta = (delta: unknown) =>
-      new SubscriptionManager<WasmRow>().handleDelta(
+      aliceSubscription.handleDelta(
         delta as Parameters<SubscriptionManager<WasmRow>["handleDelta"]>[0],
         (row) => row,
         OWNED_TODOS_SCHEMA.todos.columns,
       );
+    const aliceDecodedUpdates: ReturnType<SubscriptionManager<WasmRow>["handleDelta"]>[] = [];
 
     const aliceHandle = runtime.createSubscription(query, aliceSession, "local");
     runtime.executeSubscription(aliceHandle, (delta: unknown) => {
       aliceUpdates.push(delta);
+      aliceDecodedUpdates.push(decodeAliceDelta(delta));
     });
 
-    expect(decodeAliceDelta(aliceUpdates[0])).toEqual({ all: [], delta: [], reset: true });
+    expect(aliceDecodedUpdates[0]).toEqual({ all: [], delta: [], reset: true });
 
     const aliceTodo = runtime.insert(
       "todos",
@@ -1056,7 +1060,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     );
 
     expect(aliceUpdates).toHaveLength(3);
-    expect(decodeAliceDelta(aliceUpdates[1])).toEqual(
+    expect(aliceDecodedUpdates[1]).toEqual(
       expect.objectContaining({
         all: [expect.objectContaining({ id: aliceTodo.id })],
         delta: [
@@ -1075,10 +1079,10 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
         ],
       }),
     );
-    expect(decodeAliceDelta(aliceUpdates[2]).all).toEqual([
-      expect.objectContaining({ id: bobTodo.id }),
-    ]);
-    expect(decodeAliceDelta(aliceUpdates[2]).delta).toEqual([
+    const finalRows = aliceDecodedUpdates[2]?.all;
+    expect(finalRows).toHaveLength(2);
+    expect(finalRows?.map((row) => row.id).sort()).toEqual([aliceTodo.id, bobTodo.id].sort());
+    expect(aliceDecodedUpdates[2]?.delta).toEqual([
       expect.objectContaining({ kind: 0, id: bobTodo.id }),
     ]);
 
