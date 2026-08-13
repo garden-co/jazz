@@ -13,7 +13,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::mpsc::TryRecvError;
 
 use groove::db::{StorageReadBucket, StorageReadMetrics};
-use groove::ivm::MultisinkSubscription;
 use groove::storage::{OrderedKvStorage, ReopenableStorage};
 use web_time::Instant;
 
@@ -21,18 +20,18 @@ use crate::authorization_scope::AuthorityScopeAggregate;
 use crate::ids::{AuthorId, RowUuid};
 use crate::node::content_store::Extent;
 use crate::node::maintained_subscription_view::{
-    MaintainedSubscriptionView,
     MaintainedSubscriptionViewFootprint as MaintainedSubscriptionViewIndexFootprint,
-    MaintainedTerminalSchemas, ResultTransitions,
+    ResultTransitions,
 };
-use crate::node::{Error, NodeState, PreparedQueryPlanHandle};
+use crate::node::{Error, NodeState};
+#[cfg(test)]
+use crate::protocol::KnownStateCompleteness;
 #[cfg(test)]
 use crate::protocol::ResultRowEntry;
 use crate::protocol::{
-    ContentExtent, KnownStateCompleteness, KnownStateDeclaration, LargeValueOwnerRef,
-    ProgramFactEntry, ReadViewSpec, RegisterShapeOptions, ResultMemberEntry, RowVersionRef,
-    ShapeAst, Subscribe, SubscriptionKey, SyncMessage, VersionBundle, VersionCarrier,
-    VersionRecord, expand_version_carriers,
+    ContentExtent, KnownStateDeclaration, LargeValueOwnerRef, ProgramFactEntry, ReadViewSpec,
+    RegisterShapeOptions, ResultMemberEntry, RowVersionRef, ShapeAst, Subscribe, SubscriptionKey,
+    SyncMessage, VersionBundle, VersionCarrier, VersionRecord, expand_version_carriers,
 };
 use crate::protocol_limits::validate_fetch_row_versions;
 use crate::query::{Binding, ValidatedQuery};
@@ -40,65 +39,20 @@ use crate::schema::TableSchema;
 use crate::tools::OutputOccurrenceId;
 use crate::tx::{DurabilityTier, Transaction, TxId, TxKind};
 
-const DEFAULT_EDGE_SCOPE_TTL_MS: u64 = 5_000;
+type RowKey = OutputOccurrenceId;
 
-fn fast_current_membership_position(
-    known_state: &Option<KnownStateDeclaration>,
-) -> Option<crate::time::GlobalSeq> {
-    match known_state {
-        Some(KnownStateDeclaration::Fast {
-            completeness: KnownStateCompleteness::FastCurrentMembership,
-            position,
-        }) => Some(*position),
-        Some(KnownStateDeclaration::FastWithAuthorizationProgress {
-            completeness: KnownStateCompleteness::FastCurrentMembership,
-            position,
-            ..
-        }) => Some(*position),
-        Some(KnownStateDeclaration::ExactVersionSet { .. }) | None => None,
-    }
-}
+mod subscription_state;
 
-fn fast_authorization_progress(known_state: &Option<KnownStateDeclaration>) -> Option<u64> {
-    match known_state {
-        Some(KnownStateDeclaration::FastWithAuthorizationProgress {
-            completeness: KnownStateCompleteness::FastCurrentMembership,
-            authorization_progress,
-            ..
-        }) => Some(*authorization_progress),
-        Some(KnownStateDeclaration::Fast { .. })
-        | Some(KnownStateDeclaration::ExactVersionSet { .. })
-        | None => None,
-    }
-}
-
-fn member_settle_position(member: &ResultMemberEntry) -> Option<crate::time::GlobalSeq> {
-    match member {
-        ResultMemberEntry::Row(row) | ResultMemberEntry::TypedRow { row, .. } => {
-            row.settle_position
-        }
-        ResultMemberEntry::Synthetic { .. } | ResultMemberEntry::PathTuple { .. } => None,
-    }
-}
-
-fn fast_cursor_membership_mismatch(
-    position: crate::time::GlobalSeq,
-    previous: &BTreeSet<ResultMemberEntry>,
-    current: &BTreeSet<ResultMemberEntry>,
-) -> bool {
-    previous.difference(current).next().is_some()
-        || current
-            .difference(previous)
-            .any(|member| member_settle_position(member).is_none_or(|settled| settled <= position))
-}
-
-fn fast_cursor_requires_authoritative_reset(
-    position: crate::time::GlobalSeq,
-    previous: &BTreeSet<ResultMemberEntry>,
-    current: &BTreeSet<ResultMemberEntry>,
-) -> bool {
-    fast_cursor_membership_mismatch(position, previous, current)
-}
+#[cfg(test)]
+use subscription_state::fast_cursor_membership_mismatch;
+use subscription_state::{
+    CachedPeerQueryPlan, DeferredEdgeFate, MaintainedRehydrateRequest,
+    MaintainedSubscriptionViewSubscription, MemberIndexKey, MemberSlot, PeerSubscriptionState,
+    RehydratePurpose, edge_scope_ttl_ms, fast_authorization_progress,
+    fast_current_membership_position, fast_cursor_requires_authoritative_reset,
+    member_settle_position,
+};
+pub use subscription_state::{PeerEvictionPins, PeerRole};
 
 /// Tracks what one downstream peer has already received.
 #[derive(Debug)]
@@ -119,174 +73,6 @@ pub struct PeerState {
     pub metrics: PeerMetrics,
 }
 
-/// Server-side role for one peer link.
-///
-/// Relay links are permanent topology links between non-client nodes and serve
-/// system identity views. Client links terminate one connecting client identity;
-/// all query reads served on that link are policy-composed for the terminated
-/// identity. Whether that client link also has edge fate authority is host-wired
-/// outside `PeerRole`.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum PeerRole {
-    /// Permanent relay/cache link to another node.
-    Relay,
-    /// Link serving one terminated client identity.
-    ClientLink {
-        /// Client author identity terminated by this link.
-        identity: AuthorId,
-    },
-}
-
-impl PeerRole {
-    fn identity(self) -> AuthorId {
-        match self {
-            Self::Relay => AuthorId::SYSTEM,
-            Self::ClientLink { identity } => identity,
-        }
-    }
-}
-
-/// Server-side shipped-state for one downstream subscription on a `PeerState`.
-///
-/// In a real topology this lives on the upstream/server node's per-peer link
-/// state and records what that peer has already been sent. This has the same
-/// `ResultRowEntry` shape as `NodeState::settled_result_sets`, but that node
-/// map is the downstream subscriber's settled canonical binding-view
-/// result-set/completeness state, not a cryptographic proof or protocol
-/// authority.
-#[derive(Debug, Default)]
-struct PeerSubscriptionState {
-    result_member_set: BTreeSet<ResultMemberEntry>,
-    program_fact_set: BTreeSet<ProgramFactEntry>,
-    member_index: BTreeMap<MemberIndexKey, MemberSlot>,
-    maintained_subscription_view: Option<MaintainedSubscriptionViewSubscription>,
-    prepared_query: Option<CachedPeerQueryPlan>,
-    groove_runtime_token: Option<u64>,
-    known_state: Option<KnownStateDeclaration>,
-    authorization_progress: u64,
-    has_served_authorization_progress: bool,
-}
-
-impl PeerSubscriptionState {
-    fn clear_groove_runtime_handles(&mut self) {
-        self.maintained_subscription_view = None;
-        self.prepared_query = None;
-        self.groove_runtime_token = None;
-    }
-}
-
-#[derive(Debug)]
-struct MaintainedSubscriptionViewSubscription {
-    subscription: MultisinkSubscription,
-    maintained: MaintainedSubscriptionView,
-    terminal_schemas: MaintainedTerminalSchemas,
-    tables: BTreeMap<String, TableSchema>,
-}
-
-struct MaintainedRehydrateRequest<'a> {
-    shape: &'a ValidatedQuery,
-    binding: &'a Binding,
-    subscription: SubscriptionKey,
-    previous_member_result_set: &'a BTreeSet<ResultMemberEntry>,
-    reset_result_set: bool,
-    result_table_filter: Option<&'a str>,
-    tier: DurabilityTier,
-    read_view: &'a ReadViewSpec,
-    purpose: RehydratePurpose,
-}
-
-/// Regular queries require all prepared values. CommitUnit authorization
-/// support turns an absent policy claim into an empty proof instead.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum RehydratePurpose {
-    Query,
-    AuthorizationSupport,
-}
-
-type RowKey = OutputOccurrenceId;
-
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-enum MemberIndexKey {
-    Row(RowKey),
-    Synthetic { table: String, row: Vec<u8> },
-    Member(ResultMemberEntry),
-}
-
-#[derive(Debug)]
-struct CachedPeerQueryPlan {
-    tier: DurabilityTier,
-    plan: Option<PreparedQueryPlanHandle>,
-}
-
-impl CachedPeerQueryPlan {
-    fn with_plan(tier: DurabilityTier, plan: PreparedQueryPlanHandle) -> Self {
-        Self {
-            tier,
-            plan: Some(plan),
-        }
-    }
-
-    fn tier(&self) -> DurabilityTier {
-        // If an app-row prepared plan exists, keep it live for the same
-        // invalidation lifetime as the subscription state; maintained-view
-        // bundling currently needs only the tier from this cached record.
-        let _retained_plan = &self.plan;
-        self.tier
-    }
-}
-
-#[derive(Clone, Debug)]
-struct DeferredEdgeFate {
-    tx: Transaction,
-    versions: Vec<VersionRecord>,
-    now_ms: u64,
-    permission_identity: AuthorId,
-    scope_subscriptions: Vec<SubscriptionKey>,
-}
-
-/// Peer-owned inputs to the edge eviction pin set.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct PeerEvictionPins {
-    /// Transactions currently parked on edge fate assignment.
-    pub deferred_edge_fate_txs: BTreeSet<TxId>,
-    /// Permission-scope subscriptions retained by active edge acceptance gates.
-    pub referenced_scope_subscriptions: BTreeSet<SubscriptionKey>,
-}
-
-impl PeerEvictionPins {
-    /// Merge another peer's pin roots into this aggregate pin set.
-    pub fn extend(&mut self, other: Self) {
-        self.deferred_edge_fate_txs
-            .extend(other.deferred_edge_fate_txs);
-        self.referenced_scope_subscriptions
-            .extend(other.referenced_scope_subscriptions);
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct MemberSlot {
-    member: ResultMemberEntry,
-    refcount: usize,
-}
-
-impl PeerSubscriptionState {
-    fn member_result_set(&self) -> BTreeSet<ResultMemberEntry> {
-        self.result_member_set.clone()
-    }
-
-    fn program_fact_set(&self) -> BTreeSet<ProgramFactEntry> {
-        self.program_fact_set.clone()
-    }
-
-    fn previous_tx_ids(&self) -> BTreeSet<TxId> {
-        self.result_member_set
-            .iter()
-            .filter_map(ResultMemberEntry::as_row)
-            .map(|(_, _, tx_id)| tx_id)
-            .collect()
-    }
-}
-
 impl Default for PeerState {
     fn default() -> Self {
         Self {
@@ -303,13 +89,6 @@ impl Default for PeerState {
             metrics: PeerMetrics::default(),
         }
     }
-}
-
-fn edge_scope_ttl_ms() -> u64 {
-    std::env::var("JAZZ_EDGE_SCOPE_TTL_MS")
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .unwrap_or(DEFAULT_EDGE_SCOPE_TTL_MS)
 }
 
 impl PeerState {
@@ -2495,6 +2274,7 @@ mod tests {
         let direct = settled_member(row(1), 5);
         let revoked = settled_member(row(2), 6);
         let newly_granted_old_row = settled_member(row(3), 7);
+        let newly_granted_at_cursor = settled_member(row(5), 10);
         let new_post_cursor_row = settled_member(row(4), 12);
         let cursor = GlobalSeq(10);
 
@@ -2508,6 +2288,14 @@ mod tests {
             cursor,
             &previous,
             &BTreeSet::from([direct.clone(), revoked.clone(), newly_granted_old_row]),
+        ));
+        // A row settled exactly at the fast cursor is not reconstructible from
+        // a cursor that already claims that position. Keep the equality case
+        // authoritative; changing `<=` to `<` here would silently lose it.
+        assert!(fast_cursor_membership_mismatch(
+            cursor,
+            &previous,
+            &BTreeSet::from([direct.clone(), revoked.clone(), newly_granted_at_cursor]),
         ));
         assert!(!fast_cursor_membership_mismatch(
             cursor,
