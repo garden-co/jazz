@@ -11,7 +11,7 @@ import {
   type LocalJazzServerHandle,
   startLocalJazzServer,
 } from "./index.js";
-import { settlePolicySeed } from "./policy-test-app.js";
+import { settlePolicySeed, settlePolicySeedForSessionReads } from "./policy-test-app.js";
 
 const tempRoots: string[] = [];
 const localServers = new Set<LocalJazzServerHandle>();
@@ -322,6 +322,22 @@ describe("createPolicyTestApp", () => {
 
     settle({ id: "settled" });
     await expect(result).resolves.toEqual({ id: "settled" });
+  });
+
+  it("waits for authority acceptance before a session-scoped seed is returned", async () => {
+    const calls: Array<"local" | "edge"> = [];
+    const write = {
+      value: { id: "seeded" },
+      wait: vi.fn(async ({ tier }: { tier: "local" | "edge" }) => {
+        calls.push(tier);
+        return { id: tier === "local" ? "locally-settled" : "authority-settled" };
+      }),
+    };
+
+    await expect(settlePolicySeedForSessionReads(write)).resolves.toEqual({
+      id: "authority-settled",
+    });
+    expect(calls).toEqual(["local", "edge"]);
   });
 
   it("creates a test app from an app definition and compiled permissions", async () => {
