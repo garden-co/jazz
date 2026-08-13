@@ -41,9 +41,9 @@ use crate::protocol::{
 use crate::protocol_limits::MAX_CONTENT_EXTENT_BYTES;
 use crate::query::{Binding, BindingId, QueryError, ShapeId, ValidatedQuery};
 use crate::schema::{
-    CLEAN_CLOSE_MARKERS_STORE, ColumnSchema, JazzSchema, KNOWN_STATE_FACTS_STORE, LargeValueKind,
-    MergeStrategy, SETTLED_PROGRAM_FACTS_STORE, SETTLED_RESULT_MEMBERS_STORE,
-    STORAGE_CONSISTENCY_MARKERS_STORE, TableSchema, registered_column_transform,
+    ColumnSchema, JazzSchema, KNOWN_STATE_FACTS_STORE, LargeValueKind, MergeStrategy,
+    SETTLED_PROGRAM_FACTS_STORE, SETTLED_RESULT_MEMBERS_STORE, TableSchema,
+    registered_column_transform,
 };
 use crate::text_merge::{Run as PlainTextRun, TextOp as PlainTextOp};
 use crate::time::{GlobalSeq, TxTime};
@@ -57,10 +57,6 @@ use crate::tx::{
 const TEXT_EXTENT_OPS_MAGIC: &[u8] = b"JTXTREF1";
 /// Version discriminator for the canonical large-value handles emitted by the core.
 pub(crate) const LARGE_VALUE_HANDLE_MAGIC: &[u8] = b"JLVH2";
-const CLEAN_CLOSE_MARKER_NAME: &str = "node-clean-close";
-const CLEAN_CLOSE_MARKER_VERSION: u64 = 1;
-const STORAGE_CONSISTENCY_MARKER_NAME: &str = "settled-ahead-current-clean-through";
-const STORAGE_CONSISTENCY_MARKER_VERSION: u64 = 1;
 
 fn hydrate_nested_scalar_enum_cases(
     value_type: &records::ValueType,
@@ -4064,96 +4060,6 @@ where
         Ok(())
     }
 
-    fn persist_clean_close_marker(&self) -> Result<(), Error> {
-        self.database
-            .direct_record_store(CLEAN_CLOSE_MARKERS_STORE)?
-            .set(
-                &clean_close_marker_key(),
-                &[
-                    Value::U64(CLEAN_CLOSE_MARKER_VERSION),
-                    Value::Uuid(self.node_uuid.0),
-                ],
-            )?;
-        Ok(())
-    }
-
-    fn take_valid_clean_close_marker(&mut self) -> Result<bool, Error> {
-        let store = self
-            .database
-            .direct_record_store(CLEAN_CLOSE_MARKERS_STORE)?;
-        let key = clean_close_marker_key();
-        let Some(record) = store.get(&key)? else {
-            return Ok(false);
-        };
-        store.delete(&key)?;
-
-        let version = match record.get_idx(0)? {
-            Value::U64(value) => value,
-            _ => return Ok(false),
-        };
-        let node = match record.get_idx(1)? {
-            Value::Uuid(value) => value,
-            _ => return Ok(false),
-        };
-        Ok(version == CLEAN_CLOSE_MARKER_VERSION && node == self.node_uuid.0)
-    }
-
-    pub(super) fn persist_storage_consistency_marker_through(
-        &self,
-        tx_time: TxTime,
-    ) -> Result<(), Error> {
-        let store = self
-            .database
-            .direct_record_store(STORAGE_CONSISTENCY_MARKERS_STORE)?;
-        let key = storage_consistency_marker_key();
-        if let Some(record) = store.get(&key)?
-            && matches!(
-                record.get_idx(0)?,
-                Value::U64(STORAGE_CONSISTENCY_MARKER_VERSION)
-            )
-            && matches!(record.get_idx(1)?, Value::Uuid(node) if node == self.node_uuid.0)
-            && let Value::U64(existing) = record.get_idx(2)?
-            && existing >= tx_time.0
-        {
-            return Ok(());
-        }
-        store.set(
-            &key,
-            &[
-                Value::U64(STORAGE_CONSISTENCY_MARKER_VERSION),
-                Value::Uuid(self.node_uuid.0),
-                Value::U64(tx_time.0),
-            ],
-        )?;
-        Ok(())
-    }
-
-    fn valid_storage_consistency_marker(&self) -> Result<Option<TxTime>, Error> {
-        let store = self
-            .database
-            .direct_record_store(STORAGE_CONSISTENCY_MARKERS_STORE)?;
-        let Some(record) = store.get(&storage_consistency_marker_key())? else {
-            return Ok(None);
-        };
-        let version = match record.get_idx(0)? {
-            Value::U64(value) => value,
-            _ => return Ok(None),
-        };
-        let node = match record.get_idx(1)? {
-            Value::Uuid(value) => value,
-            _ => return Ok(None),
-        };
-        let tx_time = match record.get_idx(2)? {
-            Value::U64(value) => value,
-            _ => return Ok(None),
-        };
-        if version == STORAGE_CONSISTENCY_MARKER_VERSION && node == self.node_uuid.0 {
-            Ok(Some(TxTime(tx_time)))
-        } else {
-            Ok(None)
-        }
-    }
-
     fn recover_known_state_facts(&mut self) -> Result<(), Error> {
         self.query.settled_through_by_binding_view.clear();
         self.query.authorization_progress_by_binding_view.clear();
@@ -7116,14 +7022,6 @@ fn binding_view_key_from_store_key(
         _ => return Err(Error::InvalidStoredValue(context)),
     };
     Ok(BindingViewKey::new(shape_id, binding_id, read_view))
-}
-
-fn clean_close_marker_key() -> [Value; 1] {
-    [Value::String(CLEAN_CLOSE_MARKER_NAME.to_owned())]
-}
-
-fn storage_consistency_marker_key() -> [Value; 1] {
-    [Value::String(STORAGE_CONSISTENCY_MARKER_NAME.to_owned())]
 }
 
 /// Details of a persisted current row that could not be decoded at the point of use.
