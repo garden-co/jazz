@@ -14,7 +14,10 @@ if [[ " $* " == *" -- --list "* ]]; then
   if [[ " $* " == *" --test incremental_delivery_canary "* ]]; then
     printf '%s\n' 'maintained_relation::smoke: test'
   else
-    printf '%s\n' 'db::tests::round_trips: test' 'db::tests::other: test'
+    printf '%s\n' \
+      'db::tests::round_trips: test' \
+      'db::tests::other: test' \
+      'node::tests::harness::query_rows_at_lowers_filters_against_historical_current_rows: test'
   fi
   exit "${MOCK_INVENTORY_STATUS:-0}"
 fi
@@ -38,6 +41,14 @@ grep -F -- '-p jazz --no-default-features --features test --lib db::tests::round
 : >"$TEMP/cargo.log"
 run --exact db::tests::round_trips
 grep -F -- 'db::tests::round_trips -- --exact' "$TEMP/cargo.log" >/dev/null
+
+# Rust files under src/node/tests are wired through node::tests::harness.  A
+# human should be able to supply the distinctive test-name suffix without
+# knowing that internal module wrapper, and dev/t must still invoke Cargo with
+# the canonical name and --exact.
+: >"$TEMP/cargo.log"
+run query_rows_at_lowers_filters_against_historical_current_rows
+grep -F -- 'node::tests::harness::query_rows_at_lowers_filters_against_historical_current_rows -- --exact' "$TEMP/cargo.log" >/dev/null
 
 if run --exact db::tests::round; then
   echo 'expected exact non-match to fail' >&2
