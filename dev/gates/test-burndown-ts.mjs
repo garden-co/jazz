@@ -23,7 +23,7 @@ function documentedRows(doc) {
     if (identities.has(identity)) fail(`duplicate documented TS/browser test: ${identity}`);
     identities.add(identity);
   }
-  if (active.length !== 8) fail(`expected 8 active TS/browser rows, got ${active.length}`);
+  if (active.length !== 7) fail(`expected 7 active TS/browser rows, got ${active.length}`);
   return { active, identities };
 }
 function sourceMarkers() {
@@ -87,4 +87,4 @@ for (const row of active)
   if (!fs.existsSync(row.path)) fail(`documented path does not exist: ${row.path}`);
 const source = sourceMarkers();
 if (!same(documented, source)) fail("TS/browser source markers differ from documented active set");
-console.log("TS/browser burndown: exact 8 active identity bijection.");
+console.log("TS/browser burndown: exact 7 active identity bijection.");

@@ -329,9 +329,7 @@ describe("History & Conflict Management", () => {
    *
    * Charlie must see the same converged winner.
    */
-  // TEST_BURNDOWN_TS: chromium > History & Conflict Management > fresh db sees converged state
-  // known red; tracked in TEST_BURNDOWN.md — a fresh peer misses the converged conflicting row.
-  it.skip("fresh db sees converged state", async () => {
+  it("fresh db sees converged state", async () => {
     const token = generateAuthSecret();
     const dbAlice = await createReadySyncedDb(ctx, "hc-alice-fresh", token, testingServer);
     const dbBob = await createReadySyncedDb(ctx, "hc-bob-fresh", token, testingServer);
@@ -354,18 +352,27 @@ describe("History & Conflict Management", () => {
       20000,
     );
 
-    // Both update concurrently — creates diverged tips (true conflict).
-    await Promise.all([
-      dbAlice.update(todos, id, { title: "alice-edit" }).wait({ tier: "local" }),
-      dbBob.update(todos, id, { title: "bob-edit" }).wait({ tier: "local" }),
+    // Both updates start concurrently — creating diverged tips — then settle
+    // at the edge so a fresh peer has an authoritative conflict winner to read.
+    const aliceConflictTitle = "alice-edit";
+    const bobConflictTitle = "bob-edit";
+    expect(aliceConflictTitle).not.toBe(bobConflictTitle);
+    const aliceConflict = dbAlice.update(todos, id, { title: aliceConflictTitle });
+    const bobConflict = dbBob.update(todos, id, { title: bobConflictTitle });
+    const [aliceConflictBatchId, bobConflictBatchId] = await Promise.all([
+      aliceConflict.batchId,
+      bobConflict.batchId,
     ]);
+    expect(aliceConflictBatchId).not.toBe(bobConflictBatchId);
+    await Promise.all([aliceConflict.wait({ tier: "edge" }), bobConflict.wait({ tier: "edge" })]);
 
-    // Wait for convergence between Alice and Bob
+    // Compare edge-tier reads: a local tier may still intentionally include a
+    // client's own optimistic conflict while upstream reconciliation is pending.
     let convergedTitle = "";
     await waitForCondition(
       async () => {
-        const aliceRows = await dbAlice.all(allTodos);
-        const bobRows = await dbBob.all(allTodos);
+        const aliceRows = await dbAlice.all(allTodos, { tier: "edge" });
+        const bobRows = await dbBob.all(allTodos, { tier: "edge" });
         const aliceTodo = aliceRows.find((r) => r.id === id);
         const bobTodo = bobRows.find((r) => r.id === id);
         if (!aliceTodo || !bobTodo) return false;
@@ -392,6 +399,7 @@ describe("History & Conflict Management", () => {
       (rows) => rows.some((row) => row.id === id && row.title === convergedTitle),
       "Charlie sees converged title",
       20000,
+      "edge",
     );
     const charlieTodo = charlieRows.find((r) => r.id === id);
     expect(charlieTodo?.title).toBe(convergedTitle);
