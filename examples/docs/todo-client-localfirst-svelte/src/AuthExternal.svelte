@@ -17,7 +17,6 @@
 
   const client = $derived(
     createJazzClient({
-      asyncSubscriptionsOnly: false,
       appId,
       serverUrl: jazzServerUrl,
       jwtToken,

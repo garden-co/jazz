@@ -10,7 +10,6 @@
   import { createJazzClient, JazzSvelteProvider, type JazzContext } from "jazz-tools/svelte";
 
   const client = createJazzClient({
-    asyncSubscriptionsOnly: false,
     appId: "my-app",
   });
 </script>

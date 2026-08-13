@@ -25,12 +25,14 @@ export class DedicatedBrowserWorkerConnection implements BrowserWorkerConnection
   private nextRequestId = 1;
   private closed = false;
   private failed: Error | null = null;
+  private readonly onFailure: (error: unknown) => void;
 
   constructor(
     runtime: NativeRuntimeAdapter,
     options: BrowserWorkerInitOptions,
     callbacks: Pick<BrowserWorkerConnectionContext, "onAuthFailure" | "onFailure">,
   ) {
+    this.onFailure = callbacks.onFailure;
     this.worker = new Worker(new URL("./browser-connection-worker.js", import.meta.url), {
       type: "module",
     });
@@ -143,6 +145,7 @@ export class DedicatedBrowserWorkerConnection implements BrowserWorkerConnection
   private fail(error: Error): void {
     if (this.failed || this.closed) return;
     this.failed = error;
+    this.onFailure(error);
     for (const pending of this.pending.values()) pending.reject(error);
     this.pending.clear();
     this.pump?.close();

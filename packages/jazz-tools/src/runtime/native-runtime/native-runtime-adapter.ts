@@ -275,6 +275,7 @@ export type Transport = {
   sendWireFrames?(frames: readonly Uint8Array[]): void;
   tick(): number;
   updateAuthenticatedClaims?(claims: Record<string, unknown>): void;
+  free?(): void;
 };
 
 type PendingTx = {

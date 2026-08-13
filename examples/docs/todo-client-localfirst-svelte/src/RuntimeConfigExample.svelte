@@ -12,7 +12,6 @@
   import { JazzSvelteProvider, createJazzClient } from "jazz-tools/svelte";
 
   const client = createJazzClient({
-    asyncSubscriptionsOnly: false,
     appId: "my-app",
     serverUrl: "https://my-jazz-server.example.com",
     runtimeSources: {

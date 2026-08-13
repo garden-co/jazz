@@ -291,6 +291,7 @@ impl Clone for WasmDbInner {
 pub struct WasmTransport {
     inner: WasmTransportInner,
     queues: WasmWireQueues,
+    subscriber_identity: Option<AuthorId>,
 }
 
 enum WasmTransportInner {
@@ -1929,7 +1930,11 @@ impl WasmDb {
             },
             WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
         };
-        Ok(WasmTransport { inner, queues })
+        Ok(WasmTransport {
+            inner,
+            queues,
+            subscriber_identity: None,
+        })
     }
 
     /// Connect after the browser carrier has accepted the server Hello. The
@@ -1985,7 +1990,11 @@ impl WasmDb {
             },
             WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
         };
-        Ok(WasmTransport { inner, queues })
+        Ok(WasmTransport {
+            inner,
+            queues,
+            subscriber_identity: None,
+        })
     }
 
     #[wasm_bindgen(js_name = acceptSubscriber)]
@@ -2012,7 +2021,11 @@ impl WasmDb {
         let inner = match &self.inner {
             WasmDbInner::Memory(db) => WasmTransportInner::Memory {
                 db: Rc::clone(db),
-                connection: Some(db.accept_subscriber_with_claims(transport, identity, claims.clone())),
+                connection: Some(db.accept_subscriber_with_claims(
+                    transport,
+                    identity,
+                    claims.clone(),
+                )),
             },
             #[cfg(target_arch = "wasm32")]
             WasmDbInner::Browser(db) => WasmTransportInner::Browser {
@@ -2021,7 +2034,11 @@ impl WasmDb {
             },
             WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
         };
-        Ok(WasmTransport { inner, queues })
+        Ok(WasmTransport {
+            inner,
+            queues,
+            subscriber_identity: Some(identity),
+        })
     }
 
     #[wasm_bindgen(js_name = mergeableTx)]
@@ -2102,22 +2119,24 @@ impl WasmDb {
 impl WasmTransport {
     #[wasm_bindgen(js_name = updateAuthenticatedClaims)]
     pub fn update_authenticated_claims(&self, claims: JsValue) -> Result<(), JsValue> {
-        let update = |connection: &Option<Rc<RefCell<PeerConnection<_>>>>| {
-            let connection = connection
-                .as_ref()
-                .ok_or_else(|| JsValue::from_str("subscriber transport is closed"))?;
-            let identity = connection.borrow().identity();
-            let claims = claims_from_js(identity, claims.clone())?;
-            connection
-                .borrow_mut()
-                .update_authenticated_session_claims(claims);
-            Ok(())
-        };
+        let identity = self
+            .subscriber_identity
+            .ok_or_else(|| JsValue::from_str("transport is not a subscriber link"))?;
+        let claims = claims_from_js(identity, claims)?;
         match &self.inner {
-            WasmTransportInner::Memory { connection, .. } => update(connection),
+            WasmTransportInner::Memory { connection, .. } => connection
+                .as_ref()
+                .ok_or_else(|| JsValue::from_str("subscriber transport is closed"))?
+                .borrow_mut()
+                .update_authenticated_session_claims(claims),
             #[cfg(target_arch = "wasm32")]
-            WasmTransportInner::Browser { connection, .. } => update(connection),
+            WasmTransportInner::Browser { connection, .. } => connection
+                .as_ref()
+                .ok_or_else(|| JsValue::from_str("subscriber transport is closed"))?
+                .borrow_mut()
+                .update_authenticated_session_claims(claims),
         }
+        Ok(())
     }
 
     #[wasm_bindgen(js_name = sendWireFrame)]

@@ -124,6 +124,8 @@ async function handleAfterInitialization(message: Exclude<BrowserWorkerMessage, 
 async function closeRuntime(): Promise<void> {
   relayPump?.close();
   relayPump = null;
+  subscriber?.free?.();
+  subscriber = null;
   await runtime?.close();
   runtime = null;
   disposeTelemetry?.();

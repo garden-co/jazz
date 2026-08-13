@@ -8,7 +8,7 @@ Pass a pre-created client or a promise that resolves to one.
 	import { initJazzContext } from './context.svelte.js';
 	import type { JazzClient } from './create-jazz-client.js';
 
-	type SvelteJazzClient = JazzClient<false>;
+	type SvelteJazzClient = JazzClient;
 
 	interface Props {
 		client: SvelteJazzClient | Promise<SvelteJazzClient>;

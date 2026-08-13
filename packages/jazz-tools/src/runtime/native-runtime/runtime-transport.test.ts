@@ -198,15 +198,13 @@ describe("NativeRuntimeAdapter server transport", () => {
     const transport = new FakeTransport([]);
     transport.tick = () => {
       transportTicks += 1;
-      if (transportTicks >= 3) settled = true;
+      if (transportTicks >= 2) settled = true;
       return 0;
     };
     const write = {
       batchId: "00000000000070008000000000000007",
       payload: new Uint8Array(),
-      wait: () => {
-        if (!settled) throw new Error("transaction has not reached requested tier Edge");
-      },
+      wait: () => (settled ? Promise.resolve() : new Promise<void>(() => {})),
       writeState: () => ({}),
       nextWriteStateChange: () => new Promise<void>(() => {}),
     };
@@ -244,12 +242,12 @@ describe("NativeRuntimeAdapter server transport", () => {
     const wait = runtime.waitForTransaction(await committedBatchId(inserted), "edge");
     await Promise.resolve();
     await Promise.resolve();
-    expect(transportTicks).toBe(2);
+    expect(transportTicks).toBe(1);
 
     sockets[0]!.emitMessage(encodeWebSocketFrameBatch([Uint8Array.from([1, 42])]));
     await wait;
 
-    expect(transportTicks).toBe(3);
+    expect(transportTicks).toBe(2);
   });
 
   it("uses the binding scheduler to drive native db ticks outside server pumps", async () => {

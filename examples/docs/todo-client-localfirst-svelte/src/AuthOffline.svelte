@@ -2,7 +2,7 @@
 <script lang="ts">
   import { createJazzClient, JazzSvelteProvider, type JazzContext } from 'jazz-tools/svelte';
 
-  const client = createJazzClient({ asyncSubscriptionsOnly: false, appId: 'my-app' });
+  const client = createJazzClient({ appId: 'my-app' });
 </script>
 
 <JazzSvelteProvider {client}>

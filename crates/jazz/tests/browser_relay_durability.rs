@@ -191,9 +191,10 @@ fn browser_worker_initial_view_preserves_newer_optimistic_membership() {
         .expect("prepare filtered todos query");
     let mut subscription = block_on(main_thread.subscribe(&open_todos, ReadOpts::default()))
         .expect("subscribe to open todos");
-    let _initial = subscription
-        .try_next_event()
-        .expect("subscription starts with the main Db's empty snapshot");
+    assert!(
+        subscription.try_next_event().is_none(),
+        "fresh remote coverage must withhold its provisional local snapshot"
+    );
 
     let insert = main_thread
         .insert(

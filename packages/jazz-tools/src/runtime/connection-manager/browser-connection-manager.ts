@@ -96,6 +96,10 @@ export class BrowserConnectionManager extends ConnectionManager {
     try {
       await this.bridge?.deleteStorage();
       await client.shutdown();
+    } catch (error) {
+      await this.bridge?.shutdown().catch(() => undefined);
+      await client.shutdown().catch(() => undefined);
+      throw error;
     } finally {
       this.bridge = null;
       this.clearClient();
