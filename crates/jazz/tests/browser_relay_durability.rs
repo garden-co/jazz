@@ -13,6 +13,7 @@ use jazz::groove::storage::MemoryStorage;
 #[cfg(feature = "rocksdb")]
 use jazz::groove::storage::RocksDbStorage;
 use jazz::ids::{AuthorId, NodeUuid};
+use jazz::query::{OrderDirection, col, eq, lit};
 use jazz::schema::{JazzSchema, TableSchema};
 use jazz::tx::{DurabilityTier, Fate};
 
@@ -162,6 +163,97 @@ fn non_durable_browser_client_waits_for_worker_local_ack() {
             fate: Fate::Pending,
             durability: DurabilityTier::Local,
         }
+    );
+}
+
+/// A worker's initial empty view can arrive after the main thread has already
+/// published a newer optimistic row. The worker snapshot advances the durable
+/// baseline, but must not replace the main thread's pending subscription view.
+#[test]
+fn browser_worker_initial_view_preserves_newer_optimistic_membership() {
+    let schema = schema();
+    let alice = AuthorId::from_bytes([0xaa; 16]);
+    let main_thread = open_db(0x1c, alice, &schema);
+    let worker = open_db(0x2c, alice, &schema);
+    main_thread.set_non_durable_client();
+
+    let (main_transport, worker_transport) = duplex();
+    let _main_connection = main_thread.connect_upstream(main_transport);
+    let _worker_connection = worker.accept_subscriber(worker_transport, alice);
+
+    let open_todos = main_thread
+        .prepare_query(
+            &main_thread
+                .table("todos")
+                .filter(eq(col("title"), lit("open")))
+                .order_by("title", OrderDirection::Asc),
+        )
+        .expect("prepare filtered todos query");
+    let mut subscription = block_on(main_thread.subscribe(&open_todos, ReadOpts::default()))
+        .expect("subscribe to open todos");
+    let _initial = subscription
+        .try_next_event()
+        .expect("subscription starts with the main Db's empty snapshot");
+
+    let insert = main_thread
+        .insert(
+            "todos",
+            BTreeMap::from([("title".to_owned(), Value::String("open".to_owned()))]),
+        )
+        .expect("insert optimistic open todo");
+    let row = insert.row_uuid();
+    let optimistic = std::iter::from_fn(|| subscription.try_next_event()).collect::<Vec<_>>();
+    assert!(optimistic.iter().any(|event| matches!(
+        event,
+        SubscriptionEvent::Delta { added, .. } if added.len() == 1
+    )));
+
+    // FIFO makes the worker serve the subscription's initial empty view before
+    // it ingests and acknowledges the later commit in this same tick.
+    main_thread
+        .tick()
+        .expect("send subscription and optimistic commit to worker");
+    worker
+        .tick()
+        .expect("serve initial view, persist commit, and acknowledge it");
+    main_thread
+        .tick()
+        .expect("apply stale initial view and Local acknowledgement");
+    assert_eq!(
+        main_thread
+            .write_state(insert.mergeable_tx_id())
+            .expect("acknowledged insert state")
+            .durability,
+        DurabilityTier::Local
+    );
+    let after_ack = std::iter::from_fn(|| subscription.try_next_event()).collect::<Vec<_>>();
+    assert!(
+        !after_ack
+            .iter()
+            .any(|event| matches!(event, SubscriptionEvent::Delta { reset: true, .. })),
+        "the worker's internal hydration must not reset the main subscription: {after_ack:?}"
+    );
+
+    main_thread
+        .update(
+            "todos",
+            row,
+            BTreeMap::from([("title".to_owned(), Value::String("done".to_owned()))]),
+        )
+        .expect("move optimistic todo out of filtered subscription");
+    assert!(
+        main_thread
+            .read(&open_todos)
+            .expect("read updated filtered query")
+            .is_empty()
+    );
+    let after_update = std::iter::from_fn(|| subscription.try_next_event()).collect::<Vec<_>>();
+    assert!(
+        after_update.iter().any(|event| matches!(
+            event,
+            SubscriptionEvent::Delta { removed, .. } if removed.len() == 1
+        )),
+        "expected the optimistic predicate transition to emit a removal, got {after_update:?}"
     );
 }
 

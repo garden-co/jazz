@@ -2151,6 +2151,7 @@ where
         }
         let settled_tier = remote_read_tier.unwrap_or(read_tier);
         if authorization_mode == QueryAuthorizationMode::ClientLocal
+            && self.node.node.borrow().authored_commit_durability() == DurabilityTier::None
             && remote_read_tier.is_some()
             && state_shape.query().aggregate.is_none()
         {
@@ -6173,7 +6174,18 @@ where
                         .borrow_mut()
                         .take_pending_terminal_operations(delivered_binding_view);
                     let snapshot_tier = remote_settled_tier.unwrap_or(read_tier);
-                    let authoritative_reset = authoritative_reset_pending;
+                    // The browser worker owns the durable baseline, while the
+                    // main Db owns the application subscription and its
+                    // optimistic overlay. Reconcile a worker reset through the
+                    // maintained view below so a delayed hydration snapshot
+                    // cannot replace newer main-thread writes.
+                    let reconciles_remote_authoritative_membership = authorization_mode
+                        == QueryAuthorizationMode::ClientLocal
+                        && node.borrow().authored_commit_durability() == DurabilityTier::None
+                        && remote_read_tier.is_some()
+                        && shape.query().aggregate.is_none();
+                    let authoritative_reset =
+                        authoritative_reset_pending && !reconciles_remote_authoritative_membership;
                     if authoritative_reset && terminal_rows {
                         let Some(maintained) = maintained_subscription.as_mut() else {
                             return Err(Error::new(
@@ -6372,11 +6384,9 @@ where
                             maintained_subscription.as_mut()
                         {
                             let mut node_ref = node.borrow_mut();
-                            let authoritative_binding_view = (authorization_mode
-                                == QueryAuthorizationMode::ClientLocal
-                                && remote_read_tier.is_some()
-                                && shape.query().aggregate.is_none())
-                            .then_some(settled_binding_view);
+                            let authoritative_binding_view =
+                                reconciles_remote_authoritative_membership
+                                    .then_some(settled_binding_view);
                             match node_ref.drain_local_maintained_view_subscription(
                                 maintained,
                                 authoritative_binding_view,
