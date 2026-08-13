@@ -4281,7 +4281,9 @@ fn propagated_structured_subscription_rehydrates_after_membership_scoped_one_sho
 
     let mut subscription =
         block_on(client.subscribe(&prepared_query, edge_subscribe_opts())).unwrap();
-    assert!(opened_rows(block_on(subscription.next_event()).unwrap()).is_empty());
+    // Client-local subscriptions suppress the provisional empty opening until
+    // their authority has supplied a settled result set.
+    assert!(subscription.try_next_event().is_none());
     client.tick().unwrap();
     server.tick().unwrap();
     client.tick().unwrap();

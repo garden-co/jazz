@@ -2151,7 +2151,6 @@ where
         }
         let settled_tier = remote_read_tier.unwrap_or(read_tier);
         if authorization_mode == QueryAuthorizationMode::ClientLocal
-            && self.node.node.borrow().authored_commit_durability() == DurabilityTier::None
             && remote_read_tier.is_some()
             && state_shape.query().aggregate.is_none()
         {
@@ -6402,9 +6401,18 @@ where
                             maintained_subscription.as_mut()
                         {
                             let mut node_ref = node.borrow_mut();
-                            let authoritative_binding_view =
-                                reconciles_remote_authoritative_membership
-                                    .then_some(settled_binding_view);
+                            // Every client-local remote subscription must
+                            // drain against the authority's binding view. The
+                            // non-durable browser runtime additionally uses
+                            // that same view to preserve its local overlay;
+                            // restricting the view to only that runtime makes
+                            // ordinary Local clients miss a later authority
+                            // revoke until a further refresh.
+                            let authoritative_binding_view = (authorization_mode
+                                == QueryAuthorizationMode::ClientLocal
+                                && remote_read_tier.is_some()
+                                && shape.query().aggregate.is_none())
+                            .then_some(settled_binding_view);
                             match node_ref.drain_local_maintained_view_subscription(
                                 maintained,
                                 authoritative_binding_view,
