@@ -26,6 +26,7 @@ Options:
   --shard-index N       one-based deterministic shard index (default: 1)
   --shard-count N       number of deterministic shards (default: 1)
   --timeout-seconds N   fallback whole-command timeout (default: 900)
+  --nextest-profile N   Nextest profile (default: jazz)
   --receipt PATH        JSON receipt path (default: target/test-receipts/...)
   --require-nextest     fail rather than use the Cargo fallback
 
@@ -35,6 +36,7 @@ const args = process.argv.slice(2);
 let shardIndex = 1,
   shardCount = 1,
   timeoutSeconds = 900,
+  nextestProfile = "jazz",
   receiptPath,
   requireNextest = false;
 let split = args.indexOf("--");
@@ -49,6 +51,7 @@ for (let i = 0; i < options.length; i += 1) {
   if (option === "--shard-index") shardIndex = Number(options[++i]);
   else if (option === "--shard-count") shardCount = Number(options[++i]);
   else if (option === "--timeout-seconds") timeoutSeconds = Number(options[++i]);
+  else if (option === "--nextest-profile") nextestProfile = options[++i];
   else if (option === "--receipt") receiptPath = options[++i];
   else if (option === "--require-nextest") requireNextest = true;
   else {
@@ -63,7 +66,9 @@ if (
   shardIndex < 1 ||
   shardIndex > shardCount ||
   !Number.isFinite(timeoutSeconds) ||
-  timeoutSeconds <= 0
+  timeoutSeconds <= 0 ||
+  typeof nextestProfile !== "string" ||
+  !nextestProfile
 ) {
   usage();
   throw new Error("invalid test command, shard, or timeout");
@@ -84,7 +89,7 @@ const commandArgs = useNextest
       "nextest",
       "run",
       "--profile",
-      "jazz",
+      nextestProfile,
       "--no-fail-fast",
       "--partition",
       `hash:${shardIndex}/${shardCount}`,
@@ -134,7 +139,8 @@ const data = {
   spawnError: result.error ?? null,
   timedOut,
   runner: useNextest ? "cargo-nextest" : "cargo-fallback",
-  perTestTimeout: useNextest ? "60s + one termination interval" : null,
+  nextestProfile: useNextest ? nextestProfile : null,
+  perTestTimeout: useNextest ? "configured Nextest slow-timeout + one termination interval" : null,
   hangIdentification: useNextest
     ? "nextest test-name output"
     : "whole command only; install cargo-nextest for per-test attribution",

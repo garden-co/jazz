@@ -8,6 +8,8 @@ import { spawnSync } from "node:child_process";
 const root = path.resolve(import.meta.dirname, "../../..");
 const runner = path.join(root, "dev/gates/run-rust-tests.mjs");
 const temp = () => fs.mkdtempSync(path.join(os.tmpdir(), "jazz-rust-receipt-"));
+const hasNextest =
+  spawnSync("cargo", ["nextest", "--version"], { cwd: root, stdio: "ignore" }).status === 0;
 test("writes source, command, cache, and failure metadata", () => {
   const dir = temp(),
     receipt = path.join(dir, "receipt.json");
@@ -23,6 +25,13 @@ test("writes source, command, cache, and failure metadata", () => {
   assert.match(value.source.commit, /^[0-9a-f]{40}$/);
   assert.equal(value.command[0], "cargo");
   assert.ok("cargoTargetDir" in value.environment);
+  assert.equal(value.nextestProfile, hasNextest ? "jazz" : null);
+});
+test("forwards the requested Nextest profile and records it in the receipt", () => {
+  const source = fs.readFileSync(runner, "utf8");
+  assert.match(source, /--nextest-profile N\s+Nextest profile \(default: jazz\)/);
+  assert.match(source, /"--profile",\s*nextestProfile/);
+  assert.match(source, /nextestProfile: useNextest \? nextestProfile : null/);
 });
 test("timeout propagates exit 124 and is recorded", () => {
   const dir = temp(),
@@ -48,15 +57,19 @@ test("rejects invalid shard partitions", () => {
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /invalid test command, shard, or timeout/);
 });
-test("does not duplicate a Cargo-fallback run across requested shards", () => {
-  const result = spawnSync(
-    "node",
-    [runner, "--shard-index", "1", "--shard-count", "2", "--", "--version"],
-    { cwd: root, encoding: "utf8" },
-  );
-  assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /sharding requires cargo-nextest/);
-});
+test(
+  "does not duplicate a Cargo-fallback run across requested shards",
+  { skip: hasNextest && "cargo-nextest installed" },
+  () => {
+    const result = spawnSync(
+      "node",
+      [runner, "--shard-index", "1", "--shard-count", "2", "--", "--version"],
+      { cwd: root, encoding: "utf8" },
+    );
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /sharding requires cargo-nextest/);
+  },
+);
 test("partition specification is complete and non-overlapping", () => {
   // The launcher forwards this exact syntax to Nextest, whose hash partition
   // owns each discovered test in exactly one shard. Keep the one-based bounds
