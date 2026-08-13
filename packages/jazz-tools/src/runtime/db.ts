@@ -1054,6 +1054,10 @@ export class Db {
     return this.connection.getClient(schema);
   }
 
+  protected getCurrentClient(): JazzClient | null {
+    return this.connection.getCurrentClient();
+  }
+
   protected async ensureReady(tier?: DurabilityTier): Promise<void> {
     await this.connection.ensureReady(tier);
   }
@@ -1389,12 +1393,18 @@ export class Db {
 
   private createTransaction<TKind extends TransactionKind>(kind: TKind): Transaction<TKind> {
     const context = this.getRuntimeOperationContext();
+    const ownerClient = this.getCurrentClient();
+    if (kind === "exclusive" && !ownerClient) {
+      throw new Error(
+        "Cannot begin an exclusive transaction before the JazzClient has been created. Run a query or mutation first.",
+      );
+    }
     return new Transaction(
       kind,
       (schema) => this.getClient(schema),
       context?.session,
       context?.attribution,
-      this.connection.getCurrentClient() ?? undefined,
+      ownerClient ?? undefined,
     );
   }
 

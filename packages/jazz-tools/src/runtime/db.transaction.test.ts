@@ -58,6 +58,14 @@ function allTodos() {
   return db.all(app.todos.where({}), { tier: "local" });
 }
 
+describe("Db exclusive transaction initialization", () => {
+  it("rejects beginning an exclusive transaction before the JazzClient exists", () => {
+    expect(() => db.beginExclusiveTransaction()).toThrow(
+      "Cannot begin an exclusive transaction before the JazzClient has been created. Run a query or mutation first.",
+    );
+  });
+});
+
 describe("Db transactions", () => {
   it("anchors an exclusive read snapshot at the public begin call", async () => {
     const { value: beforeBegin } = db.insert(app.todos, {
@@ -72,6 +80,7 @@ describe("Db transactions", () => {
   });
 
   it("rolls back an exclusive callback transaction when commit is called inside the callback", async () => {
+    await allTodos();
     await expect(
       db.exclusiveTransaction(async (tx) => {
         tx.insert(app.todos, { title: "Rejected callback transaction", done: false });
@@ -84,6 +93,7 @@ describe("Db transactions", () => {
   });
 
   it("rolls back an exclusive callback transaction when rollback is called inside the callback", async () => {
+    await allTodos();
     await expect(
       db.exclusiveTransaction(async (tx) => {
         tx.insert(app.todos, { title: "Rejected callback transaction", done: false });
@@ -294,6 +304,7 @@ describe("Db transactions", () => {
   });
 
   it("rejects exclusive transaction operations after commit", async () => {
+    await allTodos();
     const tx = db.beginExclusiveTransaction();
     tx.insert(app.todos, { title: "Committed transaction", done: false });
     const openBatchId = tx.openBatchId();
@@ -312,6 +323,7 @@ describe("Db transactions", () => {
   });
 
   it("rejects exclusive transaction operations after rollback", async () => {
+    await allTodos();
     const tx = db.beginExclusiveTransaction();
     tx.insert(app.todos, { title: "Rolled-back transaction", done: false });
     const openBatchId = tx.openBatchId();
@@ -330,6 +342,7 @@ describe("Db transactions", () => {
   });
 
   it("rejects exclusive writes from a second schema view", async () => {
+    await allTodos();
     const tx = db.beginExclusiveTransaction();
     tx.insert(app.todos, { title: "Primary client", done: false });
     expect(() =>

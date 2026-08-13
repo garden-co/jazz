@@ -300,7 +300,7 @@ describe("raw websocket private read gate", () => {
           title: "Alice-created async channel row",
           done: false,
         })
-        .then((write) => write.wait({ tier: "global" })),
+        .wait({ tier: "global" }),
       15_000,
       "async-channel $createdBy insert global wait",
     );
