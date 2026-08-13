@@ -65,9 +65,9 @@ export class DedicatedBrowserWorkerConnection implements BrowserWorkerConnection
     await this.request({ type: "wait-server" });
   }
 
-  updateAuth(authJson: string): void {
+  updateAuth(authJson: string, sessionClaims: Record<string, unknown>): void {
     void this.ready()
-      .then(() => this.request({ type: "update-auth", authJson }))
+      .then(() => this.request({ type: "update-auth", authJson, sessionClaims }))
       .catch((error: unknown) => this.fail(asError(error)));
   }
 
@@ -76,9 +76,9 @@ export class DedicatedBrowserWorkerConnection implements BrowserWorkerConnection
     await this.request({ type: "disconnect" });
   }
 
-  async reconnect(authJson: string): Promise<void> {
+  async reconnect(authJson: string, sessionClaims: Record<string, unknown>): Promise<void> {
     await this.ready();
-    await this.request({ type: "reconnect", authJson });
+    await this.request({ type: "reconnect", authJson, sessionClaims });
   }
 
   async deleteStorage(): Promise<void> {

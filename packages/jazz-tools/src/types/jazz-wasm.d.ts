@@ -36,6 +36,7 @@ declare module "jazz-wasm" {
     sendWireFrame(frame: Uint8Array): void;
     recvWireFrames(): Uint8Array[];
     tick(): number;
+    updateAuthenticatedClaims(claims: Record<string, unknown>): void;
     close(): boolean;
   }
 
@@ -165,7 +166,7 @@ declare module "jazz-wasm" {
       localNode: Uint8Array,
       localEpoch: bigint,
     ): WasmTransport;
-    acceptSubscriber(identity: Uint8Array): WasmTransport;
+    acceptSubscriber(identity: Uint8Array, claims: Record<string, unknown>): WasmTransport;
     mergeableTx(openBatchId: string): WasmTx;
     mergeableTxForIdentity(openBatchId: string, author: Uint8Array): WasmTx;
     exclusiveTx(openBatchId: string): WasmTx;

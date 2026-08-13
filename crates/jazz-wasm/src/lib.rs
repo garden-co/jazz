@@ -1989,8 +1989,13 @@ impl WasmDb {
     }
 
     #[wasm_bindgen(js_name = acceptSubscriber)]
-    pub fn accept_subscriber(&self, identity: Vec<u8>) -> Result<WasmTransport, JsValue> {
+    pub fn accept_subscriber(
+        &self,
+        identity: Vec<u8>,
+        claims: JsValue,
+    ) -> Result<WasmTransport, JsValue> {
         let identity = author_id_from_bytes(&identity)?;
+        let claims = claims_from_js(identity, claims)?;
         let queues = WasmWireQueues::default();
         // Like the JS-owned upstream carrier, this binding-local transport has
         // no authenticated endpoint context for scoped receipt/view frames.
@@ -2007,12 +2012,12 @@ impl WasmDb {
         let inner = match &self.inner {
             WasmDbInner::Memory(db) => WasmTransportInner::Memory {
                 db: Rc::clone(db),
-                connection: Some(db.accept_subscriber(transport, identity)),
+                connection: Some(db.accept_subscriber_with_claims(transport, identity, claims.clone())),
             },
             #[cfg(target_arch = "wasm32")]
             WasmDbInner::Browser(db) => WasmTransportInner::Browser {
                 db: Rc::clone(db),
-                connection: Some(db.accept_subscriber(transport, identity)),
+                connection: Some(db.accept_subscriber_with_claims(transport, identity, claims)),
             },
             WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
         };
@@ -2095,6 +2100,26 @@ impl WasmDb {
 
 #[wasm_bindgen]
 impl WasmTransport {
+    #[wasm_bindgen(js_name = updateAuthenticatedClaims)]
+    pub fn update_authenticated_claims(&self, claims: JsValue) -> Result<(), JsValue> {
+        let update = |connection: &Option<Rc<RefCell<PeerConnection<_>>>>| {
+            let connection = connection
+                .as_ref()
+                .ok_or_else(|| JsValue::from_str("subscriber transport is closed"))?;
+            let identity = connection.borrow().identity();
+            let claims = claims_from_js(identity, claims.clone())?;
+            connection
+                .borrow_mut()
+                .update_authenticated_session_claims(claims);
+            Ok(())
+        };
+        match &self.inner {
+            WasmTransportInner::Memory { connection, .. } => update(connection),
+            #[cfg(target_arch = "wasm32")]
+            WasmTransportInner::Browser { connection, .. } => update(connection),
+        }
+    }
+
     #[wasm_bindgen(js_name = sendWireFrame)]
     pub fn send_wire_frame(&self, frame: Vec<u8>) {
         self.queues.inbound.borrow_mut().push_back(frame);

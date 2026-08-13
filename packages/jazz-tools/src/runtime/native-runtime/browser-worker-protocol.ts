@@ -11,6 +11,7 @@ export interface BrowserWorkerInitOptions {
   appId: string;
   serverUrl?: string;
   authJson: string;
+  sessionClaims: Record<string, unknown>;
   logLevel?: "error" | "warn" | "info" | "debug" | "trace";
   telemetryCollectorUrl?: string;
 }
@@ -18,9 +19,9 @@ export interface BrowserWorkerInitOptions {
 export type BrowserWorkerRequest =
   | ({ type: "init" } & BrowserWorkerInitOptions)
   | { type: "wait-server" }
-  | { type: "update-auth"; authJson: string }
+  | { type: "update-auth"; authJson: string; sessionClaims: Record<string, unknown> }
   | { type: "disconnect" }
-  | { type: "reconnect"; authJson: string }
+  | { type: "reconnect"; authJson: string; sessionClaims: Record<string, unknown> }
   | { type: "delete-storage" }
   | { type: "close" };
 

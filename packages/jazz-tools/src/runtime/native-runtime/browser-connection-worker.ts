@@ -21,6 +21,7 @@ const workerScope = self as unknown as {
 let wasmModule: WasmModule | null = null;
 let runtime: NativeRuntimeAdapter | null = null;
 let relayPump: BrowserWorkerTransportPump | null = null;
+let subscriber: ReturnType<NativeRuntimeAdapter["acceptPeer"]> | null = null;
 let initOptions: BrowserWorkerInitOptions | null = null;
 let initPromise: Promise<void> | null = null;
 let disposeTelemetry: (() => void) | null = null;
@@ -69,7 +70,7 @@ async function initialize(options: BrowserWorkerInitOptions): Promise<void> {
     false,
   );
   runtime.onAuthFailure((reason) => postEvent({ type: "auth-failure", reason }));
-  const subscriber = runtime.acceptPeer();
+  subscriber = runtime.acceptPeer(options.sessionClaims);
   relayPump = new BrowserWorkerTransportPump(runtime, subscriber, postFrames);
   if (options.serverUrl) runtime.connect(options.serverUrl, options.authJson);
 }
@@ -87,6 +88,7 @@ async function handleAfterInitialization(message: Exclude<BrowserWorkerMessage, 
       await activeRuntime.waitForUpstreamServerConnection();
       break;
     case "update-auth":
+      subscriber?.updateAuthenticatedClaims?.(message.sessionClaims);
       await activeRuntime.updateAuth(message.authJson);
       break;
     case "disconnect":
@@ -97,6 +99,8 @@ async function handleAfterInitialization(message: Exclude<BrowserWorkerMessage, 
       const serverUrl = options?.serverUrl;
       if (!serverUrl) throw new Error("Browser worker reconnect requires a serverUrl");
       options.authJson = message.authJson;
+      options.sessionClaims = message.sessionClaims;
+      subscriber?.updateAuthenticatedClaims?.(message.sessionClaims);
       activeRuntime.connect(serverUrl, message.authJson);
       break;
     }

@@ -16,7 +16,7 @@ import {
 import { NativeRuntimeAdapter } from "./native-runtime/native-runtime-adapter.js";
 import { DedicatedBrowserWorkerConnection } from "./native-runtime/browser-worker-connection.js";
 import { installWasmTelemetry } from "./sync-telemetry.js";
-import { parseJwtPayload } from "./client-session.js";
+import { parseJwtPayload, resolveClientSessionSync } from "./client-session.js";
 import type { WasmSchema } from "../drivers/types.js";
 import { httpUrlToWs } from "./url.js";
 
@@ -183,6 +183,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
         appId: config.appId,
         serverUrl: config.serverUrl ? httpUrlToWs(config.serverUrl, config.appId) : undefined,
         authJson: JSON.stringify(runtimeAuth(config)),
+        sessionClaims: resolveClientSessionSync(config)?.claims ?? {},
         logLevel: config.logLevel,
         telemetryCollectorUrl: config.telemetryCollectorUrl,
       },

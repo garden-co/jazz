@@ -6968,6 +6968,25 @@ impl<S> PeerConnection<S>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
+    /// Replace the claims authenticated by the host for this subscriber link.
+    /// Wire peers cannot invoke this path; bindings use it only after their
+    /// trusted authentication layer has accepted a refreshed session.
+    pub fn update_authenticated_session_claims(&mut self, claims: BTreeMap<String, Value>) {
+        let ConnectionLink::Subscriber {
+            session_claims,
+            session_claim_revision,
+            ..
+        } = &mut self.link
+        else {
+            return;
+        };
+        if *session_claims == claims {
+            return;
+        }
+        *session_claims = claims;
+        *session_claim_revision = session_claim_revision.saturating_add(1);
+    }
+
     /// Bind the process-local query compiler to this subscriber's authenticated
     /// session immediately before it serves work for that subscriber. NodeState
     /// retains a cache keyed by identity, while several websocket sessions can

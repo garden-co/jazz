@@ -25,9 +25,9 @@ export interface RuntimeTelemetryContext<RuntimeConfig extends DbConfig = DbConf
 export interface BrowserWorkerConnection {
   ready(): Promise<void>;
   waitForServerConnection(): Promise<void>;
-  updateAuth(authJson: string): void;
+  updateAuth(authJson: string, sessionClaims: Record<string, unknown>): void;
   disconnect(): Promise<void>;
-  reconnect(authJson: string): Promise<void>;
+  reconnect(authJson: string, sessionClaims: Record<string, unknown>): Promise<void>;
   deleteStorage(): Promise<void>;
   shutdown(): Promise<void>;
 }

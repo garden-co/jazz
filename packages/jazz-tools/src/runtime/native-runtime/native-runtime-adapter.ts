@@ -211,7 +211,7 @@ type NativeDb = {
     localNode: Uint8Array,
     localEpoch: bigint,
   ): Transport;
-  acceptSubscriber?(author: Uint8Array): Transport;
+  acceptSubscriber?(author: Uint8Array, claims: Record<string, unknown>): Transport;
   tick(): void;
   close?(): void;
   free?(): void;
@@ -274,6 +274,7 @@ export type Transport = {
   sendWireFrame(frame: Uint8Array): void;
   sendWireFrames?(frames: readonly Uint8Array[]): void;
   tick(): number;
+  updateAuthenticatedClaims?(claims: Record<string, unknown>): void;
 };
 
 type PendingTx = {
@@ -536,12 +537,12 @@ export class NativeRuntimeAdapter implements Runtime {
     this.nonDurableClient = true;
   }
 
-  acceptPeer(): Transport {
-    if (this !== this.ownerRuntime) return this.ownerRuntime.acceptPeer();
+  acceptPeer(claims: Record<string, unknown> = {}): Transport {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.acceptPeer(claims);
     if (!this.db.acceptSubscriber) {
       throw new Error("Native runtime does not expose subscriber links");
     }
-    return this.db.acceptSubscriber(this.peerIdentity);
+    return this.db.acceptSubscriber(this.peerIdentity, claims);
   }
 
   async waitForUpstreamServerConnection(): Promise<void> {

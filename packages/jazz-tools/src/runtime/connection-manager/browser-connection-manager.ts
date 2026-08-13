@@ -1,6 +1,7 @@
 import type { DurabilityTier } from "../client.js";
 import type { Session } from "../context.js";
 import type { BrowserWorkerConnection } from "../runtime-source.js";
+import { resolveClientSessionSync } from "../client-session.js";
 import {
   ConnectionManager,
   type ConnectionManagerClientInput,
@@ -71,13 +72,19 @@ export class BrowserConnectionManager extends ConnectionManager {
       throw new Error("Db.reconnect() requires a configured serverUrl.");
     }
     this.isDisconnected = false;
-    await this.bridge?.reconnect(JSON.stringify(runtimeAuth(this.host.config)));
+    await this.bridge?.reconnect(
+      JSON.stringify(runtimeAuth(this.host.config)),
+      runtimeSessionClaims(this.host.config),
+    );
     for (const resolve of this.reconnectWaiters.splice(0)) resolve();
   }
 
   override updateAuth(auth: { jwtToken?: string; cookieSession?: Session }): void {
     super.updateAuth(auth);
-    this.bridge?.updateAuth(JSON.stringify(runtimeAuth(this.host.config)));
+    this.bridge?.updateAuth(
+      JSON.stringify(runtimeAuth(this.host.config)),
+      runtimeSessionClaims(this.host.config),
+    );
   }
 
   async deleteClientStorage(): Promise<void> {
@@ -113,6 +120,10 @@ function runtimeAuth(config: DbForConnection["config"]): Record<string, unknown>
     ...(config.backendSecret ? { backend_secret: config.backendSecret } : {}),
     ...(config.cookieSession ? { backend_session: config.cookieSession } : {}),
   };
+}
+
+function runtimeSessionClaims(config: DbForConnection["config"]): Record<string, unknown> {
+  return resolveClientSessionSync(config)?.claims ?? {};
 }
 
 function asError(error: unknown): Error {
