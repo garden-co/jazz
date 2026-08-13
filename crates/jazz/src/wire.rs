@@ -24,7 +24,7 @@ use crate::protocol_limits::{validate_logical_message_len, validate_wire_frame_l
 /// inside `SyncMessage::ViewUpdate`.  This is a semantic payload-layout change:
 /// older peers cannot safely decode maintained terminal rows, so negotiation
 /// deliberately rejects them rather than guessing a layout.
-pub const WIRE_PROTOCOL_VERSION: u16 = 7;
+pub const WIRE_PROTOCOL_VERSION: u16 = 8;
 
 /// No optional features.
 pub const FEATURE_NONE: WireFeatures = 0;
@@ -1309,6 +1309,7 @@ mod tests {
                 peer_payload_inventory: crate::protocol::PeerPayloadInventory {
                     complete_tx_payloads: vec![tx_id],
                     authorization_progress: None,
+                    opening_pending: false,
                 },
                 result_member_adds: Vec::new(),
                 result_member_removes: Vec::new(),
@@ -1387,6 +1388,7 @@ mod tests {
             peer_payload_inventory: crate::protocol::PeerPayloadInventory {
                 complete_tx_payloads: vec![tx_id],
                 authorization_progress: None,
+                opening_pending: false,
             },
             result_member_adds: vec![entry.into()],
             result_member_removes: Vec::new(),
@@ -1460,7 +1462,7 @@ mod tests {
             WIRE_PROTOCOL_VERSION,
             FEATURE_SYNC_MESSAGE_PAYLOAD,
         )
-        .expect_err("terminal descriptor protocol must not negotiate with an old peer");
+        .expect_err("current wire protocol must not negotiate with an old peer");
 
         assert_eq!(error.code, WireErrorCode::UnsupportedProtocolVersion);
         assert_eq!(error.retry, WireRetry::Never);

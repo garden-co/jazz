@@ -81,7 +81,6 @@ fn key_for_joined_title(results: &[QueryResult], title: &str) -> ResultKey {
 }
 
 #[tokio::test(flavor = "current_thread")]
-#[ignore = "known red; tracked in TEST_BURNDOWN.md"]
 async fn flat_join_output_occurrence_identity_addresses_additions_removals_and_replacements() {
     tokio::task::LocalSet::new()
         .run_until(async {
@@ -416,7 +415,6 @@ async fn flat_join_output_occurrence_identity_addresses_additions_removals_and_r
 }
 
 #[tokio::test(flavor = "current_thread")]
-#[ignore = "known red; tracked in TEST_BURNDOWN.md"]
 async fn flat_join_payload_netting_drops_add_then_remove_in_one_transaction_batch() {
     tokio::task::LocalSet::new()
         .run_until(async {

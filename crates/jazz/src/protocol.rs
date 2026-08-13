@@ -522,6 +522,11 @@ pub struct PeerPayloadInventory {
     /// Server-stamped authorization generation for the binding view carried by
     /// this update. It qualifies a subsequent fast known-state declaration.
     pub authorization_progress: Option<u64>,
+    /// Authority explicitly published a fail-closed opening snapshot while
+    /// authorization coverage is unavailable. This snapshot is observable but
+    /// remains pending until a later authoritative reset.
+    #[serde(default)]
+    pub opening_pending: bool,
 }
 
 /// One immutable row-version payload carried by a committed transaction.

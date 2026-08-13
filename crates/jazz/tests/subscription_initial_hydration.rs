@@ -7,7 +7,7 @@ use jazz::row_input;
 use jazz::tools::server::JazzServer;
 use jazz::tools::{
     ColumnType, DurabilityTier, JazzClient, QueryBuilder, ResultKey, Schema, SchemaBuilder,
-    SubscriptionStreamItem, TableSchema,
+    SubscriptionStreamItem, TableSchema, Value,
 };
 
 fn hydration_schema() -> Schema {
@@ -17,7 +17,6 @@ fn hydration_schema() -> Schema {
 }
 
 #[tokio::test(flavor = "current_thread")]
-#[ignore = "known red; tracked in TEST_BURNDOWN.md"]
 async fn fresh_subscription_first_delivery_reduces_from_empty_to_initial_view() {
     tokio::task::LocalSet::new()
         .run_until(async {
@@ -91,6 +90,10 @@ async fn fresh_subscription_first_delivery_reduces_from_empty_to_initial_view() 
                 delta.updated.is_empty(),
                 "initial reset must not update: {delta:?}"
             );
+            assert!(
+                !delta.pending,
+                "the authoritative initial edge view must already be settled: {delta:?}"
+            );
             let mut reduced = BTreeMap::new();
             for added in delta.added {
                 assert!(
@@ -103,6 +106,45 @@ async fn fresh_subscription_first_delivery_reduces_from_empty_to_initial_view() 
                 reduced.keys().cloned().collect::<BTreeSet<_>>(),
                 expected,
                 "reducing the first delivery from empty must yield the initial view"
+            );
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn fresh_empty_subscription_waits_for_and_reports_the_settled_empty_view() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = hydration_schema();
+            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let client = JazzClient::connect(
+                server.make_client_context_for_user(schema, "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaa403"),
+            )
+            .await
+            .expect("connect subscriber");
+            let query = QueryBuilder::new("items")
+                .filter_eq("label", Value::Text("absent".to_owned()))
+                .build();
+            let mut stream = client
+                .subscribe(query)
+                .await
+                .expect("subscribe to an empty edge view");
+            let item = tokio::time::timeout(Duration::from_secs(5), stream.next())
+                .await
+                .expect("settled empty subscription delivery arrives")
+                .expect("subscription stream stays open");
+            let delta = match item {
+                SubscriptionStreamItem::Delta(delta) => delta,
+                SubscriptionStreamItem::Rejected { reason } => {
+                    panic!("empty subscription rejected: {reason:?}")
+                }
+            };
+            assert!(delta.added.is_empty());
+            assert!(delta.updated.is_empty());
+            assert!(delta.removed.is_empty());
+            assert!(
+                !delta.pending,
+                "an authority-confirmed empty view is complete, not permissions-pending"
             );
         })
         .await;

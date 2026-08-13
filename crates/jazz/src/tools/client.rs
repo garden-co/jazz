@@ -1402,6 +1402,7 @@ impl ClientDbInner {
                         added,
                         updated,
                         removed,
+                        settled,
                         ..
                     } => {
                         let previous_rows: Vec<OutputOccurrenceId> = current_rows
@@ -1470,6 +1471,8 @@ impl ClientDbInner {
                         let Ok(delta) = delta else {
                             break;
                         };
+                        let mut delta = delta;
+                        delta.pending = !settled;
                         let _ = tx.send(SubscriptionStreamItem::Delta(delta));
                     }
                     CoreSubscriptionEvent::Rejected { reason } => {

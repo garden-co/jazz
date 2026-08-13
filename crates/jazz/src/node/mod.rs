@@ -754,6 +754,7 @@ struct QueryServing {
     /// Binding views whose settled state was replaced by an authoritative
     /// server-provided reset since the last facade refresh.
     pending_authoritative_reset_binding_views: BTreeSet<BindingViewKey>,
+    pending_opening_binding_views: BTreeSet<BindingViewKey>,
     /// FIFO terminal edits received from the serving peer and not yet
     /// published by the local subscription facade.
     pending_terminal_operations_by_binding_view:
@@ -1120,6 +1121,7 @@ where
                 initial_hydration_binding_views: BTreeSet::new(),
                 deferred_publication_binding_views: BTreeSet::new(),
                 pending_authoritative_reset_binding_views: BTreeSet::new(),
+                pending_opening_binding_views: BTreeSet::new(),
                 pending_terminal_operations_by_binding_view: BTreeMap::new(),
             },
             open_tx: OpenTxState {
@@ -1345,6 +1347,7 @@ where
         self.query.initial_hydration_binding_views.clear();
         self.query.deferred_publication_binding_views.clear();
         self.query.pending_authoritative_reset_binding_views.clear();
+        self.query.pending_opening_binding_views.clear();
     }
 
     fn result_member_row_key(member: &ResultMemberEntry) -> Option<ResultRowMembershipKey> {
@@ -6633,6 +6636,7 @@ pub(crate) struct ViewUpdateParts {
     pub(crate) version_bundles: Vec<VersionBundle>,
     pub(crate) peer_complete_tx_payload_refs: Vec<TxId>,
     pub(crate) authorization_progress: Option<u64>,
+    pub(crate) opening_pending: bool,
     pub(crate) result_member_adds: Vec<ResultMemberEntry>,
     pub(crate) result_member_removes: Vec<ResultMemberEntry>,
     pub(crate) terminal_operations: Vec<groove::ivm::TerminalOperation>,

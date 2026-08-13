@@ -621,6 +621,7 @@ where
             peer_payload_inventory: PeerPayloadInventory {
                 complete_tx_payloads: peer_payload_inventory_refs,
                 authorization_progress: None,
+                opening_pending: false,
             },
             result_member_adds: result_member_adds.into_iter().collect(),
             result_member_removes: result_member_removes.into_iter().collect(),
@@ -767,6 +768,7 @@ where
             version_bundles,
             peer_complete_tx_payload_refs,
             authorization_progress,
+            opening_pending,
             result_member_adds,
             result_member_removes,
             terminal_operations,
@@ -805,11 +807,6 @@ where
             }
             Err(error) => return Err(error),
         };
-        if let Some(progress) = authorization_progress {
-            self.query
-                .authorization_progress_by_binding_view
-                .insert(binding_view_key, progress);
-        }
         if reset_result_set {
             self.query
                 .pending_terminal_operations_by_binding_view
@@ -1043,6 +1040,20 @@ where
         {
             self.query
                 .initial_hydration_binding_views
+                .remove(&binding_view_key);
+        }
+        if let Some(progress) = authorization_progress {
+            self.query
+                .authorization_progress_by_binding_view
+                .insert(binding_view_key, progress);
+        }
+        if opening_pending {
+            self.query
+                .pending_opening_binding_views
+                .insert(binding_view_key);
+        } else {
+            self.query
+                .pending_opening_binding_views
                 .remove(&binding_view_key);
         }
         let generation = self

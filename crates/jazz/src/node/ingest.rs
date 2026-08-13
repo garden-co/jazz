@@ -594,6 +594,7 @@ where
                     version_bundles,
                     peer_complete_tx_payload_refs: peer_payload_inventory.complete_tx_payloads,
                     authorization_progress: peer_payload_inventory.authorization_progress,
+                    opening_pending: peer_payload_inventory.opening_pending,
                     result_member_adds,
                     result_member_removes,
                     terminal_operations,
