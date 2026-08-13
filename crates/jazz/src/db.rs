@@ -6184,8 +6184,26 @@ where
                         && node.borrow().authored_commit_durability() == DurabilityTier::None
                         && remote_read_tier.is_some()
                         && shape.query().aggregate.is_none();
+                    // A main-thread browser Db has no durable storage of its
+                    // own. A worker reset is authoritative unless this
+                    // subscription's author still has optimistic commits that
+                    // are not Global/authority-settled. In that case the
+                    // maintained view keeps the local overlay until its
+                    // authority generation advances. Avoid the pending-history
+                    // lookup on ordinary refreshes that have no reset to apply.
+                    let has_pending_local_overlay = if authoritative_reset_pending
+                        && reconciles_remote_authoritative_membership
+                    {
+                        let mut node_ref = node.borrow_mut();
+                        let node_id = node_ref.node_uuid();
+                        !node_ref
+                            .pending_transaction_ids_for(node_id, author)?
+                            .is_empty()
+                    } else {
+                        false
+                    };
                     let authoritative_reset =
-                        authoritative_reset_pending && !reconciles_remote_authoritative_membership;
+                        authoritative_reset_pending && !has_pending_local_overlay;
                     if authoritative_reset && terminal_rows {
                         let Some(maintained) = maintained_subscription.as_mut() else {
                             return Err(Error::new(

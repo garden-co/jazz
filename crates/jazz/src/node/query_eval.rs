@@ -7942,8 +7942,14 @@ where
                 shape.shape_id(),
                 binding.binding_id(),
                 RegisterShapeOptions {
-                    // Upstream client coverage is canonicalized to Global.
-                    tier: DurabilityTier::Global,
+                    // A non-durable browser-side runtime consumes the worker
+                    // relay's Edge handoff rather than the worker's Global
+                    // upstream coverage.
+                    tier: if self.authored_commit_durability == DurabilityTier::None {
+                        tier
+                    } else {
+                        DurabilityTier::Global
+                    },
                     read_view: read_view.clone(),
                     ..RegisterShapeOptions::default()
                 }

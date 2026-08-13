@@ -13,7 +13,7 @@ use jazz::groove::storage::MemoryStorage;
 #[cfg(feature = "rocksdb")]
 use jazz::groove::storage::RocksDbStorage;
 use jazz::ids::{AuthorId, NodeUuid};
-use jazz::query::{OrderDirection, col, eq, lit};
+use jazz::query::{OrderDirection, Query, col, eq, lit};
 use jazz::schema::{JazzSchema, TableSchema};
 use jazz::tx::{DurabilityTier, Fate};
 
@@ -22,6 +22,21 @@ fn schema() -> JazzSchema {
         "todos",
         [ColumnSchema::new("title", ColumnType::String)],
     )])
+}
+
+fn included_relation_schema() -> JazzSchema {
+    JazzSchema::new([
+        TableSchema::new("profiles", [ColumnSchema::new("name", ColumnType::String)]),
+        TableSchema::new(
+            "messages",
+            [
+                ColumnSchema::new("author", ColumnType::Uuid),
+                ColumnSchema::new("body", ColumnType::String),
+                ColumnSchema::new("created", ColumnType::U64),
+            ],
+        )
+        .with_reference("author", "profiles"),
+    ])
 }
 
 fn open_db(node: u8, author: AuthorId, schema: &JazzSchema) -> Db<MemoryStorage> {
@@ -592,6 +607,95 @@ fn browser_relay_does_not_publish_a_premature_settled_snapshot() {
             } if added.len() == 1
         )),
         "expected settled authority row, got {settled:?}"
+    );
+}
+
+/// A fresh browser main thread receives the worker's authority-owned reset as
+/// a complete relation snapshot. This is intentionally an internal topology
+/// test: only the public `Db` facade can model the non-durable main/runtime
+/// worker/core boundary used by the browser bridge.
+#[test]
+fn browser_relay_hydrates_fresh_included_edge_subscription_from_authority() {
+    let schema = included_relation_schema();
+    let alice = AuthorId::from_bytes([0xb2; 16]);
+    let main_thread = open_db(0x1f, alice, &schema);
+    let worker = open_db(0x2f, alice, &schema);
+    let core = open_core(0x3f, &schema);
+    main_thread.set_non_durable_client();
+
+    let seeder = open_db(0x20, alice, &schema);
+    let (seeder_transport, core_seed_transport) = duplex();
+    let _seeder_connection = seeder.connect_upstream(seeder_transport);
+    let _core_seed_subscriber = core.accept_subscriber(core_seed_transport, alice);
+    let profile = seeder
+        .insert(
+            "profiles",
+            BTreeMap::from([("name".to_owned(), Value::String("Alice".to_owned()))]),
+        )
+        .expect("seed included profile");
+    let message = seeder
+        .insert(
+            "messages",
+            BTreeMap::from([
+                ("author".to_owned(), Value::Uuid(profile.row_uuid().0)),
+                (
+                    "body".to_owned(),
+                    Value::String("already settled".to_owned()),
+                ),
+                ("created".to_owned(), Value::U64(1)),
+            ]),
+        )
+        .expect("seed included message");
+    seeder.tick().expect("upload seeded relation");
+    core.tick().expect("accept seeded relation");
+    seeder.tick().expect("apply seeded relation fate");
+
+    let (main_transport, worker_subscriber_transport) = duplex();
+    let _main_connection = main_thread.connect_upstream(main_transport);
+    let _worker_subscriber = worker.accept_subscriber(worker_subscriber_transport, alice);
+    let (worker_upstream_transport, core_transport) = duplex();
+    let _worker_upstream = worker.connect_upstream(worker_upstream_transport);
+    let _core_subscriber = core.accept_subscriber(core_transport, alice);
+
+    let query = main_thread
+        .prepare_query(
+            &Query::from("messages")
+                .include("author")
+                .order_by("created", OrderDirection::Desc)
+                .limit(21),
+        )
+        .expect("prepare included edge query");
+    let mut subscription = block_on(main_thread.subscribe(
+        &query,
+        ReadOpts {
+            tier: DurabilityTier::Edge,
+            ..ReadOpts::default()
+        },
+    ))
+    .expect("subscribe through worker relay");
+    assert!(
+        subscription.try_next_event().is_none(),
+        "fresh remote coverage must withhold its provisional local snapshot"
+    );
+
+    for _ in 0..4 {
+        main_thread.tick().expect("register worker coverage");
+        worker.tick().expect("forward authority coverage");
+        core.tick().expect("serve authority relation snapshot");
+        worker.tick().expect("relay authority relation snapshot");
+        main_thread
+            .tick()
+            .expect("apply authority relation snapshot");
+    }
+
+    let events = std::iter::from_fn(|| subscription.try_next_event()).collect::<Vec<_>>();
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            SubscriptionEvent::Delta { reset: true, added, settled: true, .. }
+                if added.iter().any(|row| row.row.row_uuid() == message.row_uuid())
+        )),
+        "fresh included Edge subscription must publish the authority result, got {events:?}"
     );
 }
 
