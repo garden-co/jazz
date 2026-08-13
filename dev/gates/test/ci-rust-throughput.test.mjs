@@ -105,6 +105,29 @@ test("build setup scopes mutable pnpm and sccache state to the agent temp direct
   );
 });
 
+test("build setup isolates mutable Rustup toolchains without moving Cargo caches", () => {
+  const rustupSetup =
+    /name: Isolate Rustup state[\s\S]*rustup_home="\$\{RUNNER_TEMP\}\/rustup"[\s\S]*echo "RUSTUP_HOME=\$\{rustup_home\}" >> "\$\{GITHUB_ENV\}"/;
+  assert.match(setupBuildAction, rustupSetup);
+  assert.ok(
+    setupBuildAction.indexOf("name: Isolate Rustup state") <
+      setupBuildAction.indexOf("name: Install Rust toolchain"),
+    "RUSTUP_HOME must be exported before rustup installs a toolchain",
+  );
+  assert.doesNotMatch(setupBuildAction, /RUSTUP_HOME=.*\$\{HOME\}/);
+  assert.throws(
+    () =>
+      assert.match(
+        setupBuildAction.replace(
+          'echo "RUSTUP_HOME=${rustup_home}" >> "${GITHUB_ENV}"',
+          'echo "RUST_UP_HOME=${rustup_home}" >> "${GITHUB_ENV}"',
+        ),
+        rustupSetup,
+      ),
+    /Isolate Rustup state/,
+  );
+});
+
 test("Rust tool installation is isolated from shared self-hosted runner state", () => {
   const installAction = "taiki-e/install-action@3235f8901fd37ffed0052b276cec25a362fb82e9";
   assert.match(installRustTool, new RegExp(`uses: ${installAction}`));

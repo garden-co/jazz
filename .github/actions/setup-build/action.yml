@@ -83,6 +83,17 @@ runs:
       shell: bash
       run: pnpm install --frozen-lockfile
 
+    - name: Isolate Rustup state
+      if: inputs.rust-toolchain != ''
+      shell: bash
+      run: |
+        # rustup replaces toolchains in RUSTUP_HOME while installing/updating.
+        # Runner agents share HOME, but RUNNER_TEMP is job-local; leave
+        # CARGO_HOME, target, and sccache alone so their caches remain usable.
+        rustup_home="${RUNNER_TEMP}/rustup"
+        mkdir -p "${rustup_home}"
+        echo "RUSTUP_HOME=${rustup_home}" >> "${GITHUB_ENV}"
+
     - name: Install Rust toolchain
       if: inputs.rust-toolchain != ''
       uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
