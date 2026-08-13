@@ -765,6 +765,55 @@ fn default_disjuncts() -> Vec<Conjunction> {
 }
 
 impl Query {
+    /// Exact core canonical order for aggregate outputs, exposed only to
+    /// integration-test helpers that decode the maintained wire record.
+    #[cfg(feature = "test-utils")]
+    #[doc(hidden)]
+    pub fn canonical_aggregate_functions(&self) -> Vec<AggregateFunction> {
+        let Some(aggregate) = &self.aggregate else {
+            return Vec::new();
+        };
+        let mut outputs = aggregate
+            .outputs
+            .iter()
+            .map(|output| {
+                let core = match output.function {
+                    AggregateFunction::Count => crate::query::Aggregate::count(),
+                    AggregateFunction::Sum => crate::query::Aggregate::sum(
+                        output
+                            .column
+                            .as_deref()
+                            .expect("sum aggregate has an input column"),
+                    ),
+                    AggregateFunction::Avg => crate::query::Aggregate::avg(
+                        output
+                            .column
+                            .as_deref()
+                            .expect("avg aggregate has an input column"),
+                    ),
+                    AggregateFunction::Min => crate::query::Aggregate::min(
+                        output
+                            .column
+                            .as_deref()
+                            .expect("min aggregate has an input column"),
+                    ),
+                    AggregateFunction::Max => crate::query::Aggregate::max(
+                        output
+                            .column
+                            .as_deref()
+                            .expect("max aggregate has an input column"),
+                    ),
+                };
+                (
+                    crate::query::canonical_aggregate_key(&core),
+                    output.function,
+                )
+            })
+            .collect::<Vec<_>>();
+        outputs.sort_by(|left, right| left.0.cmp(&right.0));
+        outputs.into_iter().map(|(_, function)| function).collect()
+    }
+
     fn validate_conditions(conditions: &[Condition]) -> Result<(), QueryBuildError> {
         for condition in conditions {
             match condition {
