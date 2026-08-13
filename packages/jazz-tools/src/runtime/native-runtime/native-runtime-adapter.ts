@@ -862,7 +862,12 @@ export class NativeRuntimeAdapter implements Runtime {
         "Commit transaction failed: empty mergeable batch has no committed unit; roll it back instead",
       );
     }
-    const write = this.db.commitTransaction(openBatchId, pending.kind);
+    let write: Write;
+    try {
+      write = this.db.commitTransaction(openBatchId, pending.kind);
+    } catch (error) {
+      return Promise.reject(error);
+    }
     this.pendingTxs.delete(openBatchId);
     this.completedTxs.set(openBatchId, { kind: pending.kind, state: "committed" });
     this.pumpSubscriptions();
