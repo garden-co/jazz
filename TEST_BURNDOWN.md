@@ -9,13 +9,20 @@ Measured on `e707640a6` by CI-equivalent cargo-nextest: **34 failures, 10 timeou
 | Baseline           | `e707640a6`                                                    | cargo-nextest 0.9.143, jazz profile | 2,255 run: 2,211 passed, 34 failed, 10 timed out, 7 skipped | `rust-2026-08-13T02-06-17-396Z.json`; source fingerprint `c91f36dba9cef7fb096d6e04eb811549736ec10c52252d683bfe7f4eafd5ee0b`    |
 | Final verification | tracked source tree `40904e45d59ff9f87e6bb699911d36829dff4c8f` | cargo-nextest 0.9.143, jazz profile | 2,211 run: 2,211 passed, 51 skipped                         | `rust-2026-08-13T02-36-51-283Z.json`; clean receipt at `1a4579222`; command `--workspace --lib --bins --tests --features test` |
 
+One additional teardown failure was measured twice under concurrent CI after
+that receipt: `fixed_schema_data_dir_reopen_bootstraps_policy_graph_policy_serving_state`
+reports its test body as passing, then its process aborts after about 18 seconds
+with `pthread lock: Invalid argument`. It passes in isolation. Quarantining it
+makes the current inventory 45 active known reds plus 7 dormant ignores; a full
+run therefore executes 2,210 tests and skips 52 relative to the receipt above.
+
 Receipts remain local test artifacts rather than committed bulk output. The final amendment updates only this audit prose, so it cites the verified tracked source-tree identity rather than a mutable commit ID.
 
 ## Exit rule
 
 A future fix must remove both the matching visible skip marker and this entry, then include a focused green receipt. Never delete or weaken the test. New known reds require both a source annotation and one row. Executable gates enforce the active annotation/entry bijection.
 
-## Active Rust quarantine (44)
+## Active Rust quarantine (45)
 
 | Test                                                                                                                     | Definition                                            | Status        | Category                    | Theory                                                        | Owner  |
 | ------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------- | ------------- | --------------------------- | ------------------------------------------------------------- | ------ |
@@ -32,6 +39,7 @@ A future fix must remove both the matching visible skip marker and this entry, t
 | `jazz::edge_fate_authority::core_shell_client_upload_still_reports_global_immediately`                                   | `crates/jazz/tests/edge_fate_authority.rs`            | FAIL          | Edge/global delivery        | Durability or ordered subscription propagation is incomplete. | Anselm |
 | `jazz::edge_server_mode::public_root_default_order_and_windows_are_stable_across_reset`                                  | `crates/jazz/tests/edge_server_mode.rs`               | FAIL          | Edge/global delivery        | Durability or ordered subscription propagation is incomplete. | Anselm |
 | `jazz::edge_server_mode::subscription_orders_by_unprojected_field`                                                       | `crates/jazz/tests/edge_server_mode.rs`               | FAIL          | Edge/global delivery        | Durability or ordered subscription propagation is incomplete. | Anselm |
+| `jazz::edge_server_mode::fixed_schema_data_dir_reopen_bootstraps_policy_graph_policy_serving_state`                      | `crates/jazz/tests/edge_server_mode.rs`               | SIGABRT       | Concurrent teardown         | Concurrent teardown invalidates a pthread lock.               | Anselm |
 | `jazz::aggregate_subscriptions::maintained_integer_sum_accumulates_multiple_deltas_and_retracts_empty_group`             | `crates/jazz/tests/aggregate_subscriptions.rs`        | FAIL          | Maintained aggregates       | Incremental aggregate replacement diverges from full state.   | Anselm |
 | `jazz::aggregate_subscriptions::maintained_min_and_max_replace_multi_row_groups`                                         | `crates/jazz/tests/aggregate_subscriptions.rs`        | FAIL          | Maintained aggregates       | Incremental aggregate replacement diverges from full state.   | Anselm |
 | `jazz::large_blob_permissions::large_blob_values_follow_ordinary_row_permissions`                                        | `crates/jazz/tests/large_blob_permissions.rs`         | FAIL          | Blob permissions            | Blob path diverges from ordinary row permissions.             | Anselm |
@@ -78,7 +86,7 @@ A future fix must remove both the matching visible skip marker and this entry, t
 
 ## Active TypeScript/browser quarantine (10)
 
-Measured on CI run `31669333671` at `30dc070e1`: 8 Node test failures and 2 Chromium failures. The two unrelated load flakes observed in the same run (the artifact-lock timing test and the Rust teardown abort) are deliberately not quarantined here.
+Measured on CI run `31669333671` at `30dc070e1`: 8 Node test failures and 2 Chromium failures. The unrelated artifact-lock timing flake observed in the same run is deliberately not quarantined here; the repeatedly observed Rust teardown abort is now tracked in the Rust table above.
 
 | Test                                                                                                                           | Definition                                                              | Status  | Category                     | Failure signature / theory                                                                                    | Owner  |
 | ------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------- | ------- | ---------------------------- | ------------------------------------------------------------------------------------------------------------- | ------ |
