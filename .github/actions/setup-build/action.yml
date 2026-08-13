@@ -133,10 +133,14 @@ runs:
       if: inputs.sccache == 'true' && runner.os == 'Linux'
       shell: bash
       run: |
-        # SCCACHE_DIR also owns the local daemon/socket state. RUNNER_TEMP is
-        # unique to an agent; HOME may be shared by concurrent agents.
+        # SCCACHE_DIR owns cached objects, while sccache's default server port
+        # is host-wide. Keep both the cache directory and the Unix-domain
+        # socket job-local so concurrent runner agents cannot share a daemon.
         sccache_dir="${RUNNER_TEMP}/sccache"
+        sccache_socket="${sccache_dir}/server.sock"
         mkdir -p "${sccache_dir}"
+        SCCACHE_DIR="${sccache_dir}" SCCACHE_SERVER_UDS="${sccache_socket}" sccache --start-server
         echo "RUSTC_WRAPPER=sccache" >> "${GITHUB_ENV}"
         echo "SCCACHE_DIR=${sccache_dir}" >> "${GITHUB_ENV}"
+        echo "SCCACHE_SERVER_UDS=${sccache_socket}" >> "${GITHUB_ENV}"
         echo "SCCACHE_CACHE_SIZE=${SCCACHE_CACHE_SIZE:-8G}" >> "${GITHUB_ENV}"

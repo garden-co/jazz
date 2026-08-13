@@ -98,10 +98,36 @@ test("Rust CI uses pinned prebuilt tools without charging Rust-only jobs for was
 test("build setup scopes mutable pnpm and sccache state to the agent temp directory", () => {
   assert.match(setupBuildAction, /dest: \$\{\{ runner\.temp \}\}\/setup-pnpm/);
   assert.match(setupBuildAction, /sccache_dir="\$\{RUNNER_TEMP\}\/sccache"/);
+  assert.match(setupBuildAction, /sccache_socket="\$\{sccache_dir\}\/server\.sock"/);
+  assert.match(
+    setupBuildAction,
+    /SCCACHE_DIR="\$\{sccache_dir\}" SCCACHE_SERVER_UDS="\$\{sccache_socket\}" sccache --start-server/,
+  );
+  const serverSocketExport = /echo "SCCACHE_SERVER_UDS=\$\{sccache_socket\}" >> "\$\{GITHUB_ENV\}"/;
+  assert.match(setupBuildAction, serverSocketExport);
+  const stickyMount = setupBuildAction.indexOf("name: Mount sccache sticky disk");
+  const serverStart = setupBuildAction.indexOf("sccache --start-server");
+  const environmentExport = setupBuildAction.indexOf('echo "RUSTC_WRAPPER=sccache"');
+  assert.ok(stickyMount !== -1 && serverStart !== -1 && environmentExport !== -1);
+  assert.ok(
+    stickyMount < serverStart && serverStart < environmentExport,
+    "mount the restored cache before starting its server and exporting it to compilers",
+  );
   assert.doesNotMatch(
     setupBuildAction,
     /\$\{HOME\}\/(?:setup-pnpm|\.cache\/sccache)/,
     "shared HOME must not hold mutable pnpm or sccache state",
+  );
+  assert.throws(
+    () =>
+      assert.match(
+        setupBuildAction.replace(
+          'echo "SCCACHE_SERVER_UDS=${sccache_socket}" >> "${GITHUB_ENV}"',
+          "",
+        ),
+        serverSocketExport,
+      ),
+    /SCCACHE_SERVER_UDS/,
   );
 });
 
