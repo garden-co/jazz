@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { resolve, join } from "node:path";
 import { mkdirSync, rmdirSync, symlinkSync, unlinkSync } from "node:fs";
 import { win32 } from "node:path";
-import { isInsideBrowserRoot, parseArgs } from "./test-browser-focused.mjs";
+import { isInsideBrowserRoot, parseArgs, run } from "./test-browser-focused.mjs";
 
 test("builds a Vitest command scoped to one file", () => {
   const result = parseArgs(["tests/browser/alpha-public-flow-gate.test.ts"]);
@@ -29,6 +29,36 @@ test("accepts pnpm's forwarded argument separator", () => {
     parseArgs(["--", "tests/browser/alpha-public-flow-gate.test.ts"]).file,
     resolve("tests/browser/alpha-public-flow-gate.test.ts"),
   );
+});
+
+test("runs the artifact preflight before Vitest and stops on a red preflight", () => {
+  const calls = [];
+  const spawn = (command, args) => {
+    calls.push({ command, args });
+    return { status: 17 };
+  };
+  assert.equal(run(["tests/browser/alpha-public-flow-gate.test.ts"], spawn), 17);
+  assert.deepEqual(calls, [
+    { command: "node", args: ["../../dev/artifacts/verify-correctness-test-artifacts.mjs"] },
+  ]);
+});
+
+test("runs Vitest only after the artifact preflight succeeds", () => {
+  const calls = [];
+  const spawn = (command, args) => {
+    calls.push({ command, args });
+    return { status: 0 };
+  };
+  assert.equal(run(["tests/browser/alpha-public-flow-gate.test.ts"], spawn), 0);
+  assert.equal(calls[0].command, "node");
+  assert.equal(calls[1].command, "pnpm");
+  assert.deepEqual(calls[1].args.slice(0, 5), [
+    "exec",
+    "vitest",
+    "run",
+    "--config",
+    "vitest.config.browser.ts",
+  ]);
 });
 
 test("rejects missing, multiple, and unknown arguments with specific errors", () => {
