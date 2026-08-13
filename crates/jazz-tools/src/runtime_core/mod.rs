@@ -527,6 +527,15 @@ impl<S: Storage, Sch: Scheduler> RuntimeCore<S, Sch> {
         self.schedule_mutation_error_delivery_if_needed();
     }
 
+    /// Release callbacks owned by the host binding during runtime shutdown.
+    pub fn clear_host_callbacks(&mut self) {
+        self.mutation_error_callback = None;
+        self.rejected_batch_acknowledged_callback = None;
+        self.auth_failure_callback = None;
+        self.subscriptions.clear();
+        self.subscription_reverse.clear();
+    }
+
     pub fn set_rejected_batch_acknowledged_callback(
         &mut self,
         callback: Option<RejectedBatchAcknowledgedCallback>,

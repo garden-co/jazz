@@ -822,10 +822,11 @@ impl NapiRuntime {
     /// Flush and close the underlying storage, releasing filesystem locks.
     #[napi]
     pub fn close(&self) -> napi::Result<()> {
-        let core = self
+        let mut core = self
             .core
             .lock()
             .map_err(|_| napi::Error::from_reason("lock"))?;
+        core.clear_host_callbacks();
         let flush_result = core.storage().flush();
         let flush_wal_result = core.storage().flush_wal();
         let close_result = core.storage().close();
