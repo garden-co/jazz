@@ -199,6 +199,7 @@ impl JazzSchema {
             merge_heads_table(),
         ];
         tables.push(global_changes_table());
+        tables.push(shared_deletion_history_table());
         tables
     }
 
@@ -915,6 +916,52 @@ fn global_changes_table() -> GrooveTableSchema {
     ))
 }
 
+/// Immutable sparse deletion/restore history for every physical table lineage.
+///
+/// This is intentionally a fixed system table rather than a schema-variant
+/// table: deletion payload has no user cells. `branch_kind` distinguishes root
+/// from a branch whose UUID happens to equal the root sentinel; callers must
+/// therefore always provide both fields when seeking the table.
+fn shared_deletion_history_table() -> GrooveTableSchema {
+    GrooveTableSchema::new(
+        "jazz_deletion_history",
+        [
+            column("branch_kind", GrooveColumnType::U8),
+            column("branch_id", GrooveColumnType::Uuid),
+            column("physical_table_id", GrooveColumnType::U64),
+            column("row_uuid", GrooveColumnType::Uuid),
+            column("tx_time", GrooveColumnType::U64),
+            column("tx_node_id", GrooveColumnType::U64),
+            column("schema_version", GrooveColumnType::U64),
+            column("parents", tx_id_column().array_of()),
+            column("created_by", GrooveColumnType::Uuid),
+            column("created_at", GrooveColumnType::U64),
+            column("updated_by", GrooveColumnType::Uuid),
+            column("updated_at", GrooveColumnType::U64),
+            column("_deletion", deletion_column()),
+        ],
+    )
+    .with_primary_key(PrimaryKey::composite([
+        PrimaryKeyColumn::integer("branch_kind", IntegerKeyType::U8),
+        PrimaryKeyColumn::uuid("branch_id"),
+        PrimaryKeyColumn::integer("physical_table_id", IntegerKeyType::U64),
+        PrimaryKeyColumn::uuid("row_uuid"),
+        PrimaryKeyColumn::integer("tx_time", IntegerKeyType::U64),
+        PrimaryKeyColumn::integer("tx_node_id", IntegerKeyType::U64),
+    ]))
+    .with_index(GrooveIndexSchema::new(
+        "by_tx",
+        [
+            "tx_time",
+            "tx_node_id",
+            "branch_kind",
+            "branch_id",
+            "physical_table_id",
+            "row_uuid",
+        ],
+    ))
+}
+
 fn merge_heads_table() -> GrooveTableSchema {
     GrooveTableSchema::new(
         MERGE_HEADS_TABLE,
@@ -1377,6 +1424,50 @@ mod tests {
         );
     }
 
+    // This is intentionally an internal schema test: physical-key boundedness
+    // is not observable through the public API until deletion ingestion routes
+    // through the shared table. It guards the storage contract that makes the
+    // later black-box collision and branch-isolation tests meaningful.
+    #[test]
+    fn shared_deletion_history_is_prefix_bounded_by_lineage_table_and_row() {
+        let table = shared_deletion_history_table();
+        assert_eq!(table.name, "jazz_deletion_history");
+        assert_eq!(
+            table
+                .primary_key
+                .as_ref()
+                .expect("shared deletion history has a primary key")
+                .columns
+                .iter()
+                .map(|column| column.column.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "branch_kind",
+                "branch_id",
+                "physical_table_id",
+                "row_uuid",
+                "tx_time",
+                "tx_node_id",
+            ]
+        );
+        assert_eq!(
+            table
+                .indices
+                .iter()
+                .find(|index| index.name == "by_tx")
+                .expect("shared deletion history has tx lookup")
+                .columns,
+            vec![
+                "tx_time",
+                "tx_node_id",
+                "branch_kind",
+                "branch_id",
+                "physical_table_id",
+                "row_uuid",
+            ]
+        );
+    }
+
     #[test]
     fn storage_lowering_declares_system_columns_by_shape() {
         let schema = JazzSchema::new([TableSchema::new(
@@ -1393,6 +1484,11 @@ mod tests {
                 .iter()
                 .all(|table| table.name != "jazz_todos_history"
                     && table.name != "jazz_todos_register")
+        );
+        assert!(
+            tables
+                .iter()
+                .any(|table| table.name == "jazz_deletion_history")
         );
         let history = schema.tables[0].history_storage_table();
         let register = schema.tables[0].register_storage_table();
