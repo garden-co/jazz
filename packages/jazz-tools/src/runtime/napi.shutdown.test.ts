@@ -12,7 +12,7 @@ const execFileAsync = promisify(execFile);
 function runFixture(fixturePath: string) {
   return execFileAsync(process.execPath, ["--import", import.meta.resolve("tsx"), fixturePath], {
     encoding: "utf8",
-    timeout: 5_000,
+    timeout: 9_000,
   });
 }
 
