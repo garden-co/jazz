@@ -107,6 +107,56 @@ describe("native row codec", () => {
     );
   });
 
+  it("requires payload enum terminal descriptors to preserve their declared case layouts", () => {
+    const columns: ColumnDescriptor[] = [
+      {
+        name: "event",
+        column_type: {
+          type: "EnumPayload",
+          cases: [
+            {
+              name: "message",
+              fields: [
+                { name: "text", column_type: { type: "Text" }, nullable: false },
+                { name: "level", column_type: { type: "Integer" }, nullable: true },
+              ],
+            },
+          ],
+        },
+        nullable: false,
+      },
+    ];
+    const descriptor = [
+      { name: "__jazz_terminal_row_key", valueType: { tag: 10 } },
+      {
+        name: "event",
+        valueType: {
+          tag: 16,
+          enumSchema: {
+            registryId: 37,
+            name: "physical_event",
+            cases: [
+              {
+                name: "message",
+                payload: [
+                  { name: "text", valueType: { tag: 8 } },
+                  { name: "level", valueType: { tag: 14, inner: { tag: 4 } } },
+                ],
+              },
+            ],
+          },
+        },
+      },
+    ];
+    const wrongFieldType = structuredClone(descriptor);
+    wrongFieldType[1]!.valueType.enumSchema!.cases![0]!.payload[1]!.valueType = { tag: 8 };
+
+    expect(() => assertTerminalRootDescriptorCompatible(descriptor, columns)).not.toThrow();
+    expect(() => assertTerminalRootDescriptorCompatible(wrongFieldType, columns)).toThrow(
+      "terminal root descriptor does not match the public projection",
+    );
+  });
+
   it("keeps mutation cells byte-for-byte aligned with packed row values", () => {
     const nestedColumns: ColumnDescriptor[] = [
       { name: "label", column_type: { type: "Text" }, nullable: false },

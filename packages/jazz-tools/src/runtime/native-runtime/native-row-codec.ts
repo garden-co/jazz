@@ -645,6 +645,32 @@ function terminalValueTypeMatchesColumn(
     case "Json":
     case "Enum":
       return valueType.tag === 8;
+    case "EnumPayload": {
+      const payloadColumn = column.column_type;
+      if (payloadColumn.type !== "EnumPayload") return false;
+      const payloadCases = valueType.enumSchema?.cases;
+      return (
+        valueType.tag === 16 &&
+        payloadCases !== undefined &&
+        payloadCases.length === payloadColumn.cases.length &&
+        payloadCases.every((payloadCase, caseIndex) => {
+          const declaredCase = payloadColumn.cases[caseIndex]!;
+          return (
+            payloadCase.name === declaredCase.name &&
+            payloadCase.payload.length === declaredCase.fields.length &&
+            payloadCase.payload.every(
+              (field, fieldIndex) =>
+                field.name === declaredCase.fields[fieldIndex]?.name &&
+                terminalValueTypeMatchesColumn(
+                  field.valueType,
+                  declaredCase.fields[fieldIndex]!,
+                  false,
+                ),
+            )
+          );
+        })
+      );
+    }
     case "Uuid":
       return valueType.tag === 10;
     case "Bytea":

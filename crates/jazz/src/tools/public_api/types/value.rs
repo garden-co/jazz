@@ -78,6 +78,11 @@ impl fmt::Debug for Value {
                 .field("id", id)
                 .field("values_len", &values.len())
                 .finish(),
+            Self::Enum { case, values } => f
+                .debug_struct("Enum")
+                .field("case", case)
+                .field("values_len", &values.len())
+                .finish(),
             Self::Null => f.write_str("Null"),
         }
     }

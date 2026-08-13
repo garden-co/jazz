@@ -290,12 +290,10 @@ fn hash_column_type(hasher: &mut blake3::Hasher, col_type: &ColumnType) {
         }
         ColumnType::Enum { variants } => {
             hasher.update(&[9]);
-            // Enum variant ordering is normalized for hashing.
-            let mut normalized = variants.clone();
-            normalized.sort();
-            normalized.dedup();
-            hasher.update(&(normalized.len() as u64).to_le_bytes());
-            for variant in normalized {
+            // Scalar enum order assigns durable discriminant tags, so it is
+            // structural schema identity rather than presentation metadata.
+            hasher.update(&(variants.len() as u64).to_le_bytes());
+            for variant in variants {
                 hasher.update(variant.as_bytes());
                 hasher.update(&[0]);
             }

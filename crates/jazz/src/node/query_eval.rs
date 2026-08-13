@@ -13249,8 +13249,8 @@ fn collect_claim_field_params_from_predicate(
         // record. They can still contain claim parameters, so walk the nested
         // predicate while only collecting the enclosing record value here.
         NormalizedPredicateExpr::EnumMatch { value, payload, .. } => {
-            collect_claim_field_param(value, ColumnType::Uuid, params);
-            collect_claim_field_params_from_predicate(payload, params);
+            collect_claim_field_param(value, param_types, params);
+            collect_claim_field_params_from_predicate(payload, param_types, params);
         }
     }
 }

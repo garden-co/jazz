@@ -203,9 +203,8 @@ function hashColumnType(writer: StructuralHashWriter, columnType: WasmColumnType
       return;
     case "Enum": {
       writer.byte(9);
-      const variants = [...new Set(columnType.variants)].sort();
-      writer.u64(variants.length);
-      for (const variant of variants) {
+      writer.u64(columnType.variants.length);
+      for (const variant of columnType.variants) {
         writer.stringBytes(variant);
         writer.byte(0);
       }

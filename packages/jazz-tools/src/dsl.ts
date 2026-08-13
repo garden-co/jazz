@@ -25,9 +25,14 @@ import type {
 } from "./schema.js";
 import { assertUserColumnNameAllowed } from "./magic-columns.js";
 
+const MAX_ENUM_VARIANTS = 256;
+
 function normalizeEnumVariants(variants: readonly string[]): string[] {
   if (variants.length === 0) {
     throw new Error("Enum columns require at least one variant.");
+  }
+  if (variants.length > MAX_ENUM_VARIANTS) {
+    throw new Error(`Enum columns support at most ${MAX_ENUM_VARIANTS} variants.`);
   }
   for (const variant of variants) {
     if (variant.length === 0) {
@@ -38,7 +43,9 @@ function normalizeEnumVariants(variants: readonly string[]): string[] {
   if (unique.size !== variants.length) {
     throw new Error("Enum variants must be unique.");
   }
-  return [...unique].sort((a, b) => a.localeCompare(b));
+  // Scalar-enum discriminants are declaration-order-sensitive. Keeping this
+  // order lets later schemas append a case without retagging existing values.
+  return [...variants];
 }
 
 type JsonSchemaSource<Output = JsonValue> = StandardJSONSchemaV1<unknown, Output> | JsonSchema;
@@ -308,7 +315,7 @@ export type ColumnAlias<
                             cases: infer Cases extends readonly EnumCaseSqlType[];
                           }
                         ? EnumCasesColumn<Cases, Optional, HasDefault, Value>
-                      : TypedColumnBuilder<Sql, Optional, Ref, HasDefault, Value>;
+                        : TypedColumnBuilder<Sql, Optional, Ref, HasDefault, Value>;
 
 type RefColumnKey = `${string}Id` | `${string}_id`;
 type RefArrayColumnKey = `${string}Ids` | `${string}_ids`;

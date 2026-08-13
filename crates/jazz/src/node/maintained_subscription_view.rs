@@ -257,7 +257,7 @@ impl MaintainedSubscriptionView {
         for (sink, terminal) in &deltas.terminal_sinks {
             if let MaintainedTerminalKind::StructuredAppRows { layout, .. } = schemas.get(sink)? {
                 for operation in &terminal.operations {
-                    if operation.root_descriptor != layout.root_descriptor {
+                    if !terminal_operation_descriptor_matches_layout(operation, layout) {
                         return Err(super::Error::InvalidStoredValue(
                             "structured terminal operation descriptor disagrees with prepared root layout",
                         ));
@@ -265,7 +265,14 @@ impl MaintainedSubscriptionView {
                 }
                 transitions
                     .terminal_operations
-                    .extend(terminal.operations.iter().cloned());
+                    .extend(terminal.operations.iter().cloned().map(|mut operation| {
+                        // Enum registry identities are physical-occurrence metadata, not
+                        // a byte-layout change. Publish the prepared descriptor after the
+                        // rebound check above so every operation obeys the early-bound
+                        // terminal layout contract.
+                        operation.root_descriptor = layout.root_descriptor;
+                        operation
+                    }));
             }
         }
         for (sink, deltas) in deltas.sinks {
@@ -642,6 +649,20 @@ impl MaintainedSubscriptionView {
             .map(|(member, payload)| (Some(member), Some(payload)))
             .unwrap_or((None, None))
     }
+}
+
+fn terminal_operation_descriptor_matches_layout(
+    operation: &TerminalOperation,
+    layout: &TerminalRootLayout,
+) -> bool {
+    operation.root_descriptor == layout.root_descriptor
+        || (operation.root_descriptor.fields().len() == layout.root_descriptor.fields().len()
+            && RecordProjector::new_registry_rebound(
+                operation.root_descriptor,
+                layout.root_descriptor,
+                (0..operation.root_descriptor.fields().len()).map(|index| (index, index)),
+            )
+            .is_ok())
 }
 
 impl MaintainedTerminalSchemas {
