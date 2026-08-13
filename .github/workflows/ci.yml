@@ -18,7 +18,7 @@ env:
 
 jobs:
   lint:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || github.event.pull_request.user.login == 'dependabot[bot]') && 'blacksmith-4vcpu-ubuntu-2404' || 'jazz-ci' }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -37,7 +37,7 @@ jobs:
         run: pnpm test:turbo-cache-inputs
 
   test-rust:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || github.event.pull_request.user.login == 'dependabot[bot]') && 'blacksmith-4vcpu-ubuntu-2404' || 'jazz-ci' }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -48,7 +48,7 @@ jobs:
           sccache: "true"
 
       - name: Install bounded Rust test runner
-        uses: taiki-e/install-action@3235f8901fd37ffed0052b276cec25a362fb82e9 # v2
+        uses: ./.github/actions/install-rust-tool
         with:
           # Download the release asset rather than compiling the runner in
           # every job. Keep this explicit so test selection is reproducible.
@@ -76,7 +76,7 @@ jobs:
           JAZZ_SEED_COUNT=50 cargo test -p jazz m3_maintained_one_shot_differential_oracle
 
   test-ts:
-    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'blacksmith-4vcpu-ubuntu-2404' || 'jazz-ci' }}
+    runs-on: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || github.event.pull_request.user.login == 'dependabot[bot]') && 'blacksmith-4vcpu-ubuntu-2404' || 'jazz-ci' }}
     timeout-minutes: 20
     # JAZZ_NAPI_RELEASE=0 (debug builds) removed 2026-07-19: debug-profile
     # jazz-napi .node files fail dlopen on the Linux runners deterministically
@@ -89,13 +89,11 @@ jobs:
         with:
           rust-targets: wasm32-unknown-unknown
           sccache: "true"
-          sccache-sticky-disk: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'true' || 'false' }}
+          sccache-sticky-disk: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || github.event.pull_request.user.login == 'dependabot[bot]') && 'true' || 'false' }}
 
       # Keep the integration-branch compile gate, but run it as the first
-      # phase of the only trusted-runner job. `jazz-ci` currently has one
-      # worker: separate build-integration and test-ts jobs otherwise queue
-      # behind one another, so their setup/checkout overhead is on the PR
-      # critical path rather than overlapping.
+      # phase of this trusted-runner job. Keeping it here avoids a separate
+      # checkout/setup phase on the PR critical path.
       #
       # PR-level checks cannot catch two independently green PRs whose merged
       # tree no longer compiles. This runs on every push to the integration
@@ -106,12 +104,12 @@ jobs:
       - name: Install WASM packager
         # Only this job builds jazz-wasm. Other Rust jobs receive their target
         # through setup-build but do not pay to install the packager.
-        uses: taiki-e/install-action@3235f8901fd37ffed0052b276cec25a362fb82e9 # v2
+        uses: ./.github/actions/install-rust-tool
         with:
           tool: wasm-pack@0.13.1
 
       - name: Mount Turbo sticky disk
-        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
+        if: github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || github.event.pull_request.user.login == 'dependabot[bot]')
         uses: useblacksmith/stickydisk@13af8883542ca949a717e70fef89d15edbb29d88 # v1
         with:
           key: turbo-cache-${{ env.CACHE_SCOPE_REPOSITORY_ID }}-${{ runner.os }}-v1
@@ -125,7 +123,7 @@ jobs:
       - name: Build correctness-test artifacts
         run: pnpm build:test-artifacts
       - name: Mount Playwright sticky disk
-        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
+        if: github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || github.event.pull_request.user.login == 'dependabot[bot]')
         uses: useblacksmith/stickydisk@13af8883542ca949a717e70fef89d15edbb29d88 # v1
         with:
           key: playwright-browsers-${{ env.CACHE_SCOPE_REPOSITORY_ID }}-${{ runner.os }}-v1

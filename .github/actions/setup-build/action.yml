@@ -64,6 +64,9 @@ runs:
       with:
         version: 10.14.0
         run_install: false
+        # Self-hosted runner agents may share HOME. Keep action-setup's
+        # mutable installation directory scoped to this job's temporary dir.
+        dest: ${{ runner.temp }}/setup-pnpm
 
     - name: Set up Node.js
       if: inputs.setup-node == 'true'
@@ -79,6 +82,17 @@ runs:
       if: inputs.setup-node == 'true'
       shell: bash
       run: pnpm install --frozen-lockfile
+
+    - name: Isolate Rustup state
+      if: inputs.rust-toolchain != ''
+      shell: bash
+      run: |
+        # rustup replaces toolchains in RUSTUP_HOME while installing/updating.
+        # Runner agents share HOME, but RUNNER_TEMP is job-local; leave
+        # CARGO_HOME, target, and sccache alone so their caches remain usable.
+        rustup_home="${RUNNER_TEMP}/rustup"
+        mkdir -p "${rustup_home}"
+        echo "RUSTUP_HOME=${rustup_home}" >> "${GITHUB_ENV}"
 
     - name: Install Rust toolchain
       if: inputs.rust-toolchain != ''
@@ -104,7 +118,7 @@ runs:
 
     - name: Install sccache
       if: inputs.sccache == 'true' && runner.os == 'Linux'
-      uses: taiki-e/install-action@3235f8901fd37ffed0052b276cec25a362fb82e9 # v2
+      uses: ./.github/actions/install-rust-tool
       with:
         tool: sccache
 
@@ -118,15 +132,15 @@ runs:
     - name: Export sccache environment
       if: inputs.sccache == 'true' && runner.os == 'Linux'
       shell: bash
-      env:
-        SCCACHE_STICKY_DISK: ${{ inputs.sccache-sticky-disk }}
       run: |
-        if [[ "${SCCACHE_STICKY_DISK}" == "true" ]]; then
-          sccache_dir="${RUNNER_TEMP}/sccache"
-        else
-          sccache_dir="${HOME}/.cache/sccache"
-        fi
+        # SCCACHE_DIR owns cached objects, while sccache's default server port
+        # is host-wide. Keep both the cache directory and the Unix-domain
+        # socket job-local so concurrent runner agents cannot share a daemon.
+        sccache_dir="${RUNNER_TEMP}/sccache"
+        sccache_socket="${sccache_dir}/server.sock"
         mkdir -p "${sccache_dir}"
+        SCCACHE_DIR="${sccache_dir}" SCCACHE_SERVER_UDS="${sccache_socket}" sccache --start-server
         echo "RUSTC_WRAPPER=sccache" >> "${GITHUB_ENV}"
         echo "SCCACHE_DIR=${sccache_dir}" >> "${GITHUB_ENV}"
+        echo "SCCACHE_SERVER_UDS=${sccache_socket}" >> "${GITHUB_ENV}"
         echo "SCCACHE_CACHE_SIZE=${SCCACHE_CACHE_SIZE:-8G}" >> "${GITHUB_ENV}"
