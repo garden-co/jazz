@@ -30,6 +30,8 @@ Invariant digest:
 - `INV-DATA-18`: Derived global-current storage MUST identify the per-layer winner by row and preserve the content fields needed for global current reads.
 - `INV-DATA-19`: The global change stream MUST retain enough table, row, layer, and sequence information to reconstruct global as-of reads.
 - `INV-DATA-20`: Schema lowering MUST provide storage for metadata, transaction outcomes, row-version layers, globally accepted current state, and change history.
+- `INV-DATA-21`: Deletion/register history MUST be one schema-independent immutable relation shared by every stable `PhysicalTableId`; its identity MUST include `(branch_lineage, physical_table_id, row_uuid, tx_time, tx_node_id)` so a row UUID never collides across logical tables or branch overlays.
+- `INV-DATA-22`: A per-lineage derived current row MUST carry the independently selected content winner and deletion winner/event, an explicit visibility bit, and projected content cells. It is node-local derived state, never replicated payload.
 
 ## Details
 
@@ -123,9 +125,16 @@ identified by the row, the writing transaction, and the layer; versions form a
 DAG through `parents` (ch. 4 specifies domination and merging). A stored version
 belongs to exactly one layer (`INV-DATA-17`). Content versions live in the
 resolved `PhysicalTableId`'s history table and carry user cells under their
-`SchemaVersionAlias` descriptor. Deletion-register versions live in the same
-lineage's stable register table and carry a non-null `_deletion` with no user
-cells.
+`SchemaVersionAlias` descriptor. Deletion-register versions live in the one
+schema-independent deletion history relation and carry a non-null `_deletion`
+with no user cells. The record names the stable `PhysicalTableId` of its content
+lineage, rather than a logical table name or schema version. `PhysicalTableId`
+is allocated once when a table lineage is created and retained through
+compatible schema changes, including table renames; a dropped lineage is never
+silently reused. Its full identity also contains `BranchLineage` (`Root` or a
+`BranchId`) so branch overlay events are not main-history events. This permits
+exactly one sparse immutable deletion history across the database without
+cross-table or cross-branch row-UUID collisions (`INV-DATA-21`).
 
 The replicated wire payload for a version (`VersionRecord`) is exactly the
 replicated-immutable fields (§2.1): `row_uuid`, `parents`, a nullable
@@ -169,12 +178,15 @@ from those tables on recovery.
   scaffolding `jazz_branches` / `jazz_branch_partitions` (behavior in ch. 11);
 - _transaction/audit_ — `jazz_transactions` keyed `(time, node_id)`,
   `jazz_rejected_transactions`;
-- _per physical lineage_ — `jazz_physical_{id}_history` and
-  `jazz_physical_{id}_register`, each keyed by
-  `(row_uuid, tx_time, tx_node_id)`; shared global-current, ahead-current, and
-  rejected-version tables; and optional branch overlay tables. Content rows use
-  `schema_version` as a Groove descriptor discriminator, while register rows use
-  a stable system descriptor (`INV-DATA-14`, `INV-DATA-15`, `INV-DATA-18`);
+- _per physical lineage_ — `jazz_physical_{id}_history`, keyed by
+  `(row_uuid, tx_time, tx_node_id)`, plus a per-lineage combined derived current
+  row. The database has exactly one `jazz_deletion_history`, keyed by
+  `(branch_lineage, physical_table_id, row_uuid, tx_time, tx_node_id)` and with
+  a seek/index prefix `(branch_lineage, physical_table_id, row_uuid)`. The
+  deletion record's `schema_version` is retained provenance, not a storage
+  partition. Content rows use `schema_version` as a Groove descriptor
+  discriminator, while deletion history uses a stable system descriptor
+  (`INV-DATA-14`, `INV-DATA-15`, `INV-DATA-18`, `INV-DATA-21`);
 - _change stream_ — the append-only `jazz_global_changes`, keyed
   `(physical_table_id, row_uuid, layer, global_seq)` with physical-table and
   global-sequence indexes (`INV-DATA-19`);

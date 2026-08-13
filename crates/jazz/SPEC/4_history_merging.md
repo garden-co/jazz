@@ -25,6 +25,7 @@ Invariant digest:
 - `INV-HIST-14`: Rejected transactions MUST NOT appear as accepted row-history entries and MUST NOT participate in currentness/domination.
 - `INV-HIST-15`: Merge strategy behavior MUST be deterministic and grouping-insensitive over the parent/head set; write-time canonicalization remains validation and rejects loudly.
 - `INV-HIST-16`: A merge value MUST be the deterministic fold over the de-duplicated raw head set, never a fold of already-merged values. Combining divergent merge versions MUST fold the union of their raw parent-closures de-duplicated by version identity (LWW argmax; `Counter` sums per-`TxId` deltas so shared ancestors count once), so divergent merges converge to the single-merger-over-the-union result.
+- `INV-HIST-17`: Content and deletion history MUST remain independently immutable and independently selected; a combined current row is a derived cache over their winners and MUST be reproducible from retained histories after restart or rebuild.
 - `INV-TX-6`: A commit unit MUST be rejected with RejectionReason::CausalityViolation if its txid.time is less than or equal to any parent transaction's txid.time, and its versions...
 
 ## Details
@@ -128,24 +129,39 @@ not rewrite its content history. Deletion events live in their own register laye
 (`VersionLayer::Deletion`) carrying `DeletionEvent::{Deleted, Restored}`, and a
 version belongs to exactly one layer (ch. 2). A current `Deleted` event hides the
 content-current row; a later current `Restored` event reveals it again; content
-writes never touch the register (`INV-HIST-11`). A row's _visible_ current state
-is therefore the content-current winner (§4.2) gated by the register-current
-event.
+writes never touch the register (`INV-HIST-11`).
+
+Physically, deletion history is one sparse, schema-independent relation shared
+by all content lineages. Every event is keyed by its root/branch lineage and
+stable physical table lineage before row identity, so a seek for one row is
+bounded to `(branch_lineage, physical_table_id, row_uuid)` and a table scan is
+bounded to `(branch_lineage, physical_table_id)`. It is not a universal scan and
+it never identifies a row by `RowUuid` alone.
 
 ### 4.5 Global-current as derived state
 
-Immutable history versions are the replicated source material. The per-layer
-**global-current** winner tables are node-local derived state (ch. 2), so they
-are not shipped. When the authority accepts a globally-settled version that
-becomes a per-layer winner, it is reflected in `jazz_{table}_global_current` or
-`jazz_{table}_register_global_current` (`INV-HIST-12`).
+Immutable history versions are the replicated source material. The separately
+selected content and deletion winners are node-local derived inputs. The
+per-lineage **combined current row** is then derived as:
 
-Those overwrite tables are the source of truth for `Global` current-row reads
-and sync snapshots on a node that has observed the accepted version. They carry
-only the settled per-layer winners, so a global current read is O(current) in the
-rows and values returned. Local visibility layers optimistic writes over those
-tables as described in §4.2; it does not rehydrate the global baseline from the
-history/register DAG.
+```text
+{ content_winner, deletion_winner, deletion_event, visible, projected_cells }
+```
+
+`visible` is true exactly when a content winner exists and the deletion winner
+is absent or `Restored`. The current row is rewritten when either winning layer
+changes; it must preserve both winner identities even while invisible. It is
+not shipped and can be rebuilt atomically from retained accepted history. An
+implementation may retain private per-layer helper indexes to make that rebuild
+or ingestion cheap, but ordinary current reads consume the combined current
+source and do not perform a deletion anti-join (`INV-HIST-17`).
+
+The combined global-current table is the source of truth for `Global`
+current-row reads and sync snapshots on a node that has observed the accepted
+version. It carries only settled winner references and projected cells, so a
+global current read is O(current) in the rows and values returned. Local/edge
+tiers use corresponding combined current state or a bounded overlay above this
+base; neither rehydrates the global baseline from either immutable history.
 
 _Further invariants._ `INV-HIST-13` — re-ingesting the same commit unit with its
 version rows in a different order is idempotent and conflict-free. `INV-HIST-14` —

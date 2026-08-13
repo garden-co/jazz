@@ -30,6 +30,7 @@ Invariant digest:
 - `INV-LENS-17`: TransformColumn MUST be accepted only when its transform key is registered as bijective and canonical-equality-preserving.
 - `INV-LENS-19`: Policy evaluation under lenses MUST translate data into the pinned permission evaluation schema and MUST NOT translate policy bundles.
 - `INV-LENS-20`: Published physical lineages and authored schema variants MUST NOT be automatically garbage-collected.
+- `INV-LENS-21`: A compatible table rename MUST retain its `PhysicalTableId`; deletion history and combined-current state therefore continue under that id without copying, rewriting, or rescanning unrelated lineages.
 
 ## Details
 
@@ -228,6 +229,13 @@ lens projection, and a pointer mismatch alone is never a rejection or rewrite
 condition (`INV-LENS-16`). A `RejectSourceDelta` declaration affects an explicit
 projection through that lens, not admission of history authored on either side.
 
+The same physical id is also the deletion-history routing key. A compatible
+`RenameTable` preserves it, so old and new logical names resolve to the same
+sparse deletion events and combined current row. Adding or incompatibly
+replacing a table allocates a new id and cannot observe old deletion events even
+if a caller reuses a `RowUuid`; dropped ids remain retained for history and are
+never reassigned (`INV-LENS-21`).
+
 A current-write-pointer flip is a core-ordered, monotone catalogue write
 (§10.2) and **never invalidates in-flight work**. The pointer selects the schema
 for new local authoring; it does not redirect commits another client already
@@ -236,10 +244,10 @@ authored under a different Active schema.
 ### 10.5 Reads: select, then project
 
 Reads begin from storage reality, then project into the requested schema. A read
-against schema S resolves its `PhysicalTableId`, selects content/deletion
-winners from that shared lineage by the **schema-agnostic `(tx_time, node)`
-ordering first**, and only then translates the winning cells into S
-(`INV-LENS-12`, ch. 4).
+against schema S resolves its `PhysicalTableId`, selects the combined current
+row (or independently selected historical winners at a fixed cut) from that
+shared lineage by the **schema-agnostic `(tx_time, node)` ordering first**, and
+only then translates the winning cells into S (`INV-LENS-12`, ch. 4).
 
 Natural lens projection applies supported operations deterministically in both
 directions and rejects unsupported transformations (`INV-LENS-13`). The shape's
