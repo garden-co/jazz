@@ -738,8 +738,12 @@ fn branch_overlay_spans_schema_renames_and_merge_back_after_restart() {
     assert_eq!(
         core.database
             .primary_key_scan_raw(
-                &physical_branch_register_table_name(base_table_id, branch_id),
-                &[],
+                SHARED_DELETION_HISTORY_TABLE,
+                &[
+                    Value::U8(1),
+                    Value::Uuid(branch_id.0),
+                    Value::U64(base_table_id.0),
+                ],
             )
             .unwrap()
             .len(),

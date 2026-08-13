@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::ids::{PhysicalColumnId, PhysicalTableId};
+use crate::tx::BranchLineage;
 use groove::schema::{
     ColumnSchema as GrooveColumnSchema, IndexSchema as GrooveIndexSchema,
     TableSchema as GrooveTableSchema, TableVariantField as GrooveTableVariantField,
@@ -497,6 +498,35 @@ pub(super) fn physical_history_table_name(table_id: PhysicalTableId) -> String {
 
 pub(super) fn physical_register_table_name(table_id: PhysicalTableId) -> String {
     format!("jazz_physical_{}_register", table_id.0)
+}
+
+/// Fixed sparse deletion history shared by every physical content lineage.
+///
+/// Unlike `physical_register_table_name`, this is not a per-lineage table;
+/// callers must pair it with the full `(BranchLineage, PhysicalTableId)` key.
+pub(super) const SHARED_DELETION_HISTORY_TABLE: &str = "jazz_deletion_history";
+
+pub(super) fn shared_deletion_lineage_values(lineage: BranchLineage) -> (u8, uuid::Uuid) {
+    match lineage {
+        BranchLineage::Root => (0, uuid::Uuid::nil()),
+        BranchLineage::Branch(branch_id) => (1, branch_id.0),
+    }
+}
+
+pub(super) fn shared_deletion_history_primary_key(
+    lineage: BranchLineage,
+    table_id: PhysicalTableId,
+    version: &VersionRow,
+) -> PrimaryKeyValue {
+    let (branch_kind, branch_id) = shared_deletion_lineage_values(lineage);
+    PrimaryKeyValue::Composite(vec![
+        PrimaryKeyValue::U8(branch_kind),
+        PrimaryKeyValue::Uuid(branch_id),
+        PrimaryKeyValue::U64(table_id.0),
+        PrimaryKeyValue::Uuid(version.row_uuid().0),
+        PrimaryKeyValue::U64(version.tx_time().0),
+        PrimaryKeyValue::U64(version.tx_node_alias().0),
+    ])
 }
 
 pub(super) fn physical_global_current_table_name(table_id: PhysicalTableId) -> String {
@@ -2644,7 +2674,7 @@ where
             ))?;
         if version.layer() == VersionLayer::Deletion {
             return Ok(groove::Intern::new(
-                self.physical_register_table_for_schema(schema_version, version.table())?,
+                SHARED_DELETION_HISTORY_TABLE.to_owned(),
             ));
         }
         Ok(groove::Intern::new(
@@ -2657,6 +2687,45 @@ where
             )?
             .storage_table,
         ))
+    }
+
+    pub(super) fn version_storage_primary_key(
+        &self,
+        version: &VersionRow,
+        lineage: BranchLineage,
+    ) -> Result<PrimaryKeyValue, Error> {
+        if version.layer() == VersionLayer::Deletion {
+            return Ok(shared_deletion_history_primary_key(
+                lineage,
+                self.physical_table_id_for_version(version)?,
+                version,
+            ));
+        }
+        Ok(history_primary_key(version))
+    }
+
+    pub(super) fn version_storage_primary_key_values(
+        &self,
+        version: &VersionRow,
+        lineage: BranchLineage,
+    ) -> Result<Vec<Value>, Error> {
+        if version.layer() == VersionLayer::Deletion {
+            let table_id = self.physical_table_id_for_version(version)?;
+            let (branch_kind, branch_id) = shared_deletion_lineage_values(lineage);
+            return Ok(vec![
+                Value::U8(branch_kind),
+                Value::Uuid(branch_id),
+                Value::U64(table_id.0),
+                Value::Uuid(version.row_uuid().0),
+                Value::U64(version.tx_time().0),
+                Value::U64(version.tx_node_alias().0),
+            ]);
+        }
+        Ok(vec![
+            Value::Uuid(version.row_uuid().0),
+            Value::U64(version.tx_time().0),
+            Value::U64(version.tx_node_alias().0),
+        ])
     }
 
     /// Re-encode every enum occurrence in a logical storage record before it
@@ -2836,8 +2905,7 @@ where
                 "stored row schema version alias missing while preparing storage write",
             ))?;
         if version.layer() == VersionLayer::Deletion {
-            let table = self.version_storage_table_for_row(version)?;
-            return Ok((table, version.groove_record()));
+            return self.shared_deletion_history_write_binding(version, BranchLineage::Root);
         }
 
         let binding = physical_history_binding(
@@ -3028,6 +3096,39 @@ where
         ))
     }
 
+    /// Encode a deletion/register version into the fixed shared history table.
+    /// The wire and in-memory `VersionRow` stay logical-table scoped; this is
+    /// the sole physical boundary that adds local routing identity.
+    pub(super) fn shared_deletion_history_write_binding(
+        &mut self,
+        version: &VersionRow,
+        lineage: BranchLineage,
+    ) -> Result<(groove::Intern<String>, groove::records::VariantRecord), Error> {
+        debug_assert_eq!(version.layer(), VersionLayer::Deletion);
+        let schema_version = self
+            .schema_version_for_alias(version.schema_version_alias())
+            .ok_or(Error::InvalidStoredValue(
+                "stored register schema version alias missing while preparing shared deletion write",
+            ))?;
+        let table_id = self.physical_table_id_for_schema(schema_version, version.table())?;
+        let (branch_kind, branch_id) = shared_deletion_lineage_values(lineage);
+        let mut values = vec![
+            Value::U8(branch_kind),
+            Value::Uuid(branch_id),
+            Value::U64(table_id.0),
+        ];
+        values.extend(version.record.to_values()?);
+        let descriptor = self
+            .database
+            .table_schema(SHARED_DELETION_HISTORY_TABLE)?
+            .record_schema();
+        let record = OwnedRecord::new(descriptor.create(&values)?, descriptor);
+        Ok((
+            groove::Intern::new(SHARED_DELETION_HISTORY_TABLE.to_owned()),
+            version.bind_groove_record(record),
+        ))
+    }
+
     pub(super) fn rejected_version_storage_write_binding(
         &self,
         version: &VersionRow,
@@ -3059,6 +3160,10 @@ where
         version: &VersionRow,
         branch_id: BranchId,
     ) -> Result<(groove::Intern<String>, groove::records::VariantRecord), Error> {
+        if version.layer() == VersionLayer::Deletion {
+            return self
+                .shared_deletion_history_write_binding(version, BranchLineage::Branch(branch_id));
+        }
         let schema_version = self
             .schema_version_for_alias(version.schema_version_alias())
             .ok_or(Error::InvalidStoredValue(

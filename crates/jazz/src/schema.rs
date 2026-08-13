@@ -922,7 +922,7 @@ fn global_changes_table() -> GrooveTableSchema {
 /// table: deletion payload has no user cells. `branch_kind` distinguishes root
 /// from a branch whose UUID happens to equal the root sentinel; callers must
 /// therefore always provide both fields when seeking the table.
-fn shared_deletion_history_table() -> GrooveTableSchema {
+pub(crate) fn shared_deletion_history_table() -> GrooveTableSchema {
     GrooveTableSchema::new(
         "jazz_deletion_history",
         [

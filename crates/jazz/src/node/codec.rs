@@ -708,12 +708,6 @@ impl VersionRow {
         )
     }
 
-    /// Bind this row's encoded payload to the schema version already stored in
-    /// its Jazz metadata before handing it to Groove.
-    pub(super) fn groove_record(&self) -> groove::records::VariantRecord {
-        self.bind_groove_record(self.record.clone())
-    }
-
     /// Bind a derived storage row to the same schema version as this version.
     pub(super) fn bind_groove_record(&self, record: OwnedRecord) -> groove::records::VariantRecord {
         groove::records::VariantRecord::new(

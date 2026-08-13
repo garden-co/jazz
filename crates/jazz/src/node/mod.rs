@@ -45,9 +45,9 @@ use crate::schema::{
 use crate::time::{GlobalSeq, TxTime};
 use crate::tools::OpenBatchId;
 use crate::tx::{
-    AbsentRead, BranchMergeProvenance, DeletionEvent, DurabilityTier, Fate, HistoryEntry,
-    PredicateRead, RejectedTransaction, RejectedVersion, RejectionReason, RowRead, Snapshot,
-    Transaction, TransactionRecord, TxId, TxKind,
+    AbsentRead, BranchLineage, BranchMergeProvenance, DeletionEvent, DurabilityTier, Fate,
+    HistoryEntry, PredicateRead, RejectedTransaction, RejectedVersion, RejectionReason, RowRead,
+    Snapshot, Transaction, TransactionRecord, TxId, TxKind,
 };
 
 fn hydrate_nested_scalar_enum_cases(
@@ -1836,7 +1836,7 @@ where
             let (history_table, groove_record) = self.version_storage_write_binding(&stored)?;
             batch.insert_raw(
                 history_table.as_ref(),
-                history_primary_key(&stored),
+                self.version_storage_primary_key(&stored, BranchLineage::Root)?,
                 groove_record,
             );
             self.update_merge_heads_for_content_version(&mut batch, &stored)?;

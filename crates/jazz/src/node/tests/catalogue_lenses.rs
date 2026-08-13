@@ -1294,12 +1294,19 @@ fn physical_deletion_register_spans_renamed_schemas_and_reopens() {
         assert_eq!(
             core.version_storage_sources_for_layer(logical_table, VersionLayer::Deletion)
                 .unwrap(),
-            vec![physical_register_table_name(table_id)]
+            vec![SHARED_DELETION_HISTORY_TABLE.to_owned()]
         );
     }
     assert_eq!(
         core.database
-            .primary_key_scan_raw(&physical_register_table_name(table_id), &[])
+            .primary_key_scan_raw(
+                SHARED_DELETION_HISTORY_TABLE,
+                &[
+                    Value::U8(0),
+                    Value::Uuid(uuid::Uuid::nil()),
+                    Value::U64(table_id.0),
+                ],
+            )
             .unwrap()
             .len(),
         2
@@ -1340,7 +1347,7 @@ fn physical_deletion_register_spans_renamed_schemas_and_reopens() {
         reopened
             .version_storage_sources_for_layer("tasks", VersionLayer::Deletion)
             .unwrap(),
-        vec![physical_register_table_name(table_id)]
+        vec![SHARED_DELETION_HISTORY_TABLE.to_owned()]
     );
     assert_eq!(
         reopened
@@ -1350,6 +1357,100 @@ fn physical_deletion_register_spans_renamed_schemas_and_reopens() {
             .filter(|version| version.layer() == VersionLayer::Deletion)
             .count(),
         2
+    );
+}
+
+#[test]
+fn shared_deletion_history_keeps_same_row_uuid_table_scoped() {
+    let schema = JazzSchema::new([
+        TableSchema::new("todos", [ColumnSchema::new("title", ColumnType::String)]),
+        TableSchema::new("notes", [ColumnSchema::new("body", ColumnType::String)]),
+    ]);
+    let (dir, mut core) = open_node_with_schema(node(0x2c), schema.clone());
+    let shared_row = row(0x4c);
+    core.commit_mergeable(
+        MergeableCommit::new("todos", shared_row, 10).cells(BTreeMap::from([(
+            "title".to_owned(),
+            v("todo"),
+        )])),
+    )
+    .unwrap();
+    core.commit_mergeable(
+        MergeableCommit::new("notes", shared_row, 11).cells(BTreeMap::from([(
+            "body".to_owned(),
+            v("note"),
+        )])),
+    )
+    .unwrap();
+    let deletion_tx = core
+        .commit_mergeable_many(vec![
+            MergeableCommit::new("todos", shared_row, 12).deletion(DeletionEvent::Deleted),
+            MergeableCommit::new("notes", shared_row, 13).deletion(DeletionEvent::Deleted),
+        ])
+        .unwrap();
+
+    let mapping = &core.catalogue.physical_mappings[&schema.version_id()].tables;
+    let todos_id = mapping["todos"].table_id;
+    let notes_id = mapping["notes"].table_id;
+    assert_ne!(todos_id, notes_id);
+    for table_id in [todos_id, notes_id] {
+        assert_eq!(
+            core.database
+                .primary_key_scan_raw(
+                    SHARED_DELETION_HISTORY_TABLE,
+                    &[
+                        Value::U8(0),
+                        Value::Uuid(uuid::Uuid::nil()),
+                        Value::U64(table_id.0),
+                        Value::Uuid(shared_row.0),
+                    ],
+                )
+                .unwrap()
+                .len(),
+            1,
+            "table/row prefix must not see the other table's deletion",
+        );
+    }
+    for table in ["todos", "notes"] {
+        let shape = Query::from(table).validate(&schema).unwrap();
+        assert!(core
+            .query_rows(
+                &shape,
+                &shape.bind(BTreeMap::new()).unwrap(),
+                DurabilityTier::Local,
+            )
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            core.query_table_versions(table)
+                .unwrap()
+                .into_iter()
+                .filter(|version| version.layer() == VersionLayer::Deletion)
+                .count(),
+            1
+        );
+    }
+
+    assert_eq!(
+        core.query_versions_for_tx(deletion_tx)
+            .unwrap()
+            .into_iter()
+            .filter(|version| version.layer() == VersionLayer::Deletion)
+            .count(),
+        2,
+        "a transaction-wide shared-index scan must decode each physical table independently",
+    );
+    drop(core);
+    let mut reopened = reopen_node_at(&dir, node(0x2c), schema);
+    assert_eq!(
+        reopened
+            .query_versions_for_tx(deletion_tx)
+            .unwrap()
+            .into_iter()
+            .filter(|version| version.layer() == VersionLayer::Deletion)
+            .count(),
+        2,
+        "recovery must preserve the transaction-wide physical-table routing",
     );
 }
 

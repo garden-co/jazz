@@ -13,6 +13,7 @@ use crate::protocol_limits::{
     commit_unit_limit_violation, validate_known_state_declaration, validate_shape_ast_size,
 };
 use crate::schema::{ColumnSchema, MERGE_HEADS_TABLE};
+use crate::tx::BranchLineage;
 use groove::records::ValueType;
 
 pub(super) const MAX_SCHEMA_LINEAGE_DECLARATIONS: usize = 4096;
@@ -2068,7 +2069,7 @@ where
                 let (history_table, groove_record) = self.version_storage_write_binding(&stored)?;
                 batch.insert_raw(
                     history_table.as_ref(),
-                    history_primary_key(&stored),
+                    self.version_storage_primary_key(&stored, BranchLineage::Root)?,
                     groove_record,
                 );
                 if stored.layer() == VersionLayer::Content {
@@ -2988,7 +2989,10 @@ where
         for version in &rejected {
             self.write_ahead_current_delete(batch, version)?;
             let history_table = self.version_storage_table_for_row(version)?;
-            batch.delete(history_table.as_ref(), history_primary_key(version));
+            batch.delete(
+                history_table.as_ref(),
+                self.version_storage_primary_key(version, tx.tx.target_lineage)?,
+            );
         }
         for (table_id, table, row_uuid) in affected_content_rows {
             self.rewrite_merge_heads_excluding_tx(batch, table_id, &table, row_uuid, tx_id)?;
@@ -3477,15 +3481,21 @@ where
         tx_node_alias: NodeAlias,
     ) -> Result<Option<VersionRow>, Error> {
         for storage_table in self.version_storage_sources_for_layer(table, layer)? {
-            let raw = self.database.primary_key_get_raw_in_batch(
-                batch,
-                &storage_table,
-                &[
+            let key = if storage_table == SHARED_DELETION_HISTORY_TABLE {
+                let mut key =
+                    self.deletion_storage_prefix(table, BranchLineage::Root, Some(row_uuid))?;
+                key.extend([Value::U64(tx_time.0), Value::U64(tx_node_alias.0)]);
+                key
+            } else {
+                vec![
                     Value::Uuid(row_uuid.0),
                     Value::U64(tx_time.0),
                     Value::U64(tx_node_alias.0),
-                ],
-            )?;
+                ]
+            };
+            let raw = self
+                .database
+                .primary_key_get_raw_in_batch(batch, &storage_table, &key)?;
             let record = raw.map(|raw| raw.owned_record());
             let Some(record) = record else {
                 continue;
@@ -4460,33 +4470,22 @@ where
                     self.branch_version_storage_write_binding(&stored, branch_id)?
                 }
             };
+            let storage_key = self.version_storage_primary_key(&stored, tx.target_lineage)?;
             if tx_already_known {
                 let existing = self.database.primary_key_get_raw_in_batch(
                     batch,
                     history_table.as_ref(),
-                    &[
-                        Value::Uuid(stored.row_uuid().0),
-                        Value::U64(stored.tx_time().0),
-                        Value::U64(stored.tx_node_alias().0),
-                    ],
+                    &self.version_storage_primary_key_values(&stored, tx.target_lineage)?,
                 )?;
                 if let Some(existing) = existing {
-                    if existing.record().raw() != stored.record.raw() {
+                    if existing.record().raw() != groove_record.record().raw() {
                         return Err(Error::ConflictingCommitUnit(tx.tx_id));
                     }
                 } else {
-                    batch.insert_raw(
-                        history_table.as_ref(),
-                        history_primary_key(&stored),
-                        groove_record,
-                    );
+                    batch.insert_raw(history_table.as_ref(), storage_key, groove_record);
                 }
             } else {
-                batch.insert_raw_fresh(
-                    history_table.as_ref(),
-                    history_primary_key(&stored),
-                    groove_record,
-                );
+                batch.insert_raw_fresh(history_table.as_ref(), storage_key, groove_record);
             }
             if update_current_indexes && !matches!(fate, Fate::Rejected(_)) && global_seq.is_none()
             {
