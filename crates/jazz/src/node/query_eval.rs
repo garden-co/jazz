@@ -11397,10 +11397,11 @@ where
                 "maintained subscription view policy slice does not support include policies",
             ));
         }
-        let declared_claim_params = disambiguate_policy_claim_params(
+        let declared_claim_params = disambiguate_policy_claim_params_with_outer_slots(
             &mut query,
             policy_schema,
             &mut policy_binding_values,
+            &binding_claim_params,
         )?;
         let policy_shape = query.validate(policy_schema)?;
         coerce_binding_values_for_shape(&policy_shape, &mut policy_binding_values);
@@ -12421,6 +12422,26 @@ fn disambiguate_policy_claim_params(
     schema: &JazzSchema,
     binding_values: &mut BTreeMap<String, Value>,
 ) -> Result<BTreeMap<String, ProgramClaimParam>, Error> {
+    disambiguate_policy_claim_params_with_outer_slots(
+        query,
+        schema,
+        binding_values,
+        &BTreeMap::new(),
+    )
+}
+
+/// Give a policy-local claim parameter a stable binding slot. A nested policy
+/// which is lowered under an already-prepared outer source must reuse that
+/// source's slot when its claim path and validated type are identical. Creating
+/// a fresh typed alias in that case changes the shared source descriptor after
+/// it was registered. Different validated types deliberately retain distinct
+/// aliases, so a claim cannot cross a type boundary through source reuse.
+fn disambiguate_policy_claim_params_with_outer_slots(
+    query: &mut JazzQuery,
+    schema: &JazzSchema,
+    binding_values: &mut BTreeMap<String, Value>,
+    outer_slots: &BTreeMap<String, ProgramClaimParam>,
+) -> Result<BTreeMap<String, ProgramClaimParam>, Error> {
     let shape = query.validate(schema)?;
     let mut aliases = BTreeMap::new();
     let mut claims = BTreeMap::new();
@@ -12428,7 +12449,11 @@ fn disambiguate_policy_claim_params(
         let Some(path) = claim_path_from_param_field(name) else {
             continue;
         };
-        let alias = typed_claim_param_alias(name, ty);
+        let alias = outer_slots
+            .iter()
+            .find(|(_, slot)| slot.path == path && slot.ty == *ty)
+            .map(|(name, _)| name.clone())
+            .unwrap_or_else(|| typed_claim_param_alias(name, ty));
         aliases.insert(name.clone(), alias.clone());
         claims.insert(
             alias,
@@ -14991,6 +15016,185 @@ mod tests {
         assert_ne!(
             first,
             query_binding_source_shape_for_parts(&params, &different_claims)
+        );
+    }
+
+    #[test]
+    fn nested_read_policies_reuse_an_outer_equivalent_claim_slot() {
+        // A maintained outer query owns this prepared source. Its first
+        // nested policy uses the legacy claim field name; a later protected
+        // source validates the same claim as Text and must reuse that slot
+        // rather than add a redundant typed alias under the already-active
+        // source name.
+        let schema = JazzSchema::new([
+            TableSchema::new(
+                "public_profiles",
+                [ColumnSchema::new("name", ColumnType::String)],
+            )
+            .with_read_policy(Policy::public()),
+            TableSchema::new(
+                "private_chats",
+                [ColumnSchema::new("owner", ColumnType::String)],
+            )
+            .with_read_policy(Policy::shape(
+                Query::from("private_chats").filter(eq(col("owner"), claim("user_id"))),
+            )),
+        ]);
+        let (_dir, mut node) =
+            open_node_with_uuid(NodeUuid::from_bytes([0xf4; 16]), schema.clone());
+        let identity = author(0xf5);
+        node.set_session_claims(
+            identity,
+            BTreeMap::from([("user_id".to_owned(), Value::String(identity.0.to_string()))]),
+        );
+
+        let claim_name = claim_param_field(&ClaimPath(vec!["user_id".to_owned()]));
+        let outer_claims = BTreeMap::from([(
+            claim_name.clone(),
+            ProgramClaimParam {
+                path: ClaimPath(vec!["user_id".to_owned()]),
+                ty: ColumnType::String,
+            },
+        )]);
+        let source_shape = query_binding_source_shape_for_parts(&BTreeMap::new(), &outer_claims);
+        let binding = Query::from("public_profiles")
+            .validate(&schema)
+            .unwrap()
+            .bind(BTreeMap::new())
+            .unwrap();
+
+        for table in ["public_profiles", "private_chats"] {
+            let request = node
+                .table_read_policy_authorization_request(
+                    node.catalogue.current_schema_version_id,
+                    table,
+                    identity,
+                    ParamBindingMode::RetainAllParams,
+                    DurabilityTier::Edge,
+                    Some(source_shape.clone()),
+                    BTreeMap::new(),
+                    outer_claims.clone(),
+                )
+                .unwrap();
+            let program = node.compile_query_program_request(request).unwrap();
+            node.subscribe_lowered_program(
+                program,
+                &binding,
+                source_shape.clone(),
+                PreparedClaimBindingMode::Strict,
+            )
+            .unwrap_or_else(|error| {
+                panic!(
+                    "{table} must reuse the outer String claim slot instead of registering a divergent binding descriptor: {error:?}"
+                )
+            });
+        }
+    }
+
+    #[test]
+    fn nested_read_policy_claim_slots_do_not_cross_validated_types() {
+        let schema = JazzSchema::new([
+            TableSchema::new(
+                "uuid_owners",
+                [ColumnSchema::new("owner", ColumnType::Uuid)],
+            ),
+            TableSchema::new(
+                "other_string_owners",
+                [ColumnSchema::new("owner", ColumnType::String)],
+            ),
+            TableSchema::new(
+                "nullable_string_owners",
+                [ColumnSchema::new("owner", ColumnType::String.nullable())],
+            ),
+        ]);
+        let plain_name = claim_param_field(&ClaimPath(vec!["user_id".to_owned()]));
+        let outer_slots = BTreeMap::from([(
+            plain_name.clone(),
+            ProgramClaimParam {
+                path: ClaimPath(vec!["user_id".to_owned()]),
+                ty: ColumnType::String,
+            },
+        )]);
+        let mut query = Query::from("uuid_owners").filter(eq(col("owner"), claim("user_id")));
+        let mut binding_values = BTreeMap::new();
+        bind_scope_claim_operands(
+            &mut query,
+            &BTreeMap::from([("user_id".to_owned(), Value::String("not-a-uuid".to_owned()))]),
+            &mut binding_values,
+        );
+        let slots = disambiguate_policy_claim_params_with_outer_slots(
+            &mut query,
+            &schema,
+            &mut binding_values,
+            &outer_slots,
+        )
+        .expect("the policy shape is valid before binding values");
+
+        let uuid_slot = typed_claim_param_alias(&plain_name, &ColumnType::Uuid);
+        assert!(slots.contains_key(&uuid_slot));
+        assert!(
+            !slots.contains_key(&plain_name),
+            "a String outer claim slot must never be reused for a UUID policy operand"
+        );
+        assert!(
+            query
+                .validate(&schema)
+                .unwrap()
+                .params()
+                .contains_key(&uuid_slot),
+            "the policy query itself must reference the UUID-specific slot"
+        );
+
+        let other_path = ClaimPath(vec!["account_id".to_owned()]);
+        let other_name = claim_param_field(&other_path);
+        let mut other_path_query =
+            Query::from("other_string_owners").filter(eq(col("owner"), claim("account_id")));
+        let mut other_path_values = BTreeMap::new();
+        bind_scope_claim_operands(
+            &mut other_path_query,
+            &BTreeMap::from([(
+                "account_id".to_owned(),
+                Value::String("same-type-different-path".to_owned()),
+            )]),
+            &mut other_path_values,
+        );
+        let other_path_slots = disambiguate_policy_claim_params_with_outer_slots(
+            &mut other_path_query,
+            &schema,
+            &mut other_path_values,
+            &outer_slots,
+        )
+        .expect("same-type claim at another path validates");
+        let other_path_alias = typed_claim_param_alias(&other_name, &ColumnType::String);
+        assert!(other_path_slots.contains_key(&other_path_alias));
+        assert!(
+            !other_path_slots.contains_key(&plain_name),
+            "an outer user_id slot must not be reused by account_id merely because both are String"
+        );
+
+        let mut nullable_query =
+            Query::from("nullable_string_owners").filter(eq(col("owner"), claim("user_id")));
+        let mut nullable_values = BTreeMap::new();
+        bind_scope_claim_operands(
+            &mut nullable_query,
+            &BTreeMap::from([(
+                "user_id".to_owned(),
+                Value::String("nullable-boundary".to_owned()),
+            )]),
+            &mut nullable_values,
+        );
+        let nullable_slots = disambiguate_policy_claim_params_with_outer_slots(
+            &mut nullable_query,
+            &schema,
+            &mut nullable_values,
+            &outer_slots,
+        )
+        .expect("nullable policy claim validates");
+        let nullable_alias = typed_claim_param_alias(&plain_name, &ColumnType::String.nullable());
+        assert!(nullable_slots.contains_key(&nullable_alias));
+        assert!(
+            !nullable_slots.contains_key(&plain_name),
+            "a non-nullable String outer slot must not be reused for a nullable String operand"
         );
     }
 
