@@ -47,8 +47,9 @@ can distinguish moved code from changed behavior.
 
 ### 3. Remove dead and obsolete seams
 
-- Remove the unused `ResultTransitions::observed_delta_batches` field.
-- Remove or justify the unused singular `structured_app_row` hook.
+- Remove or justify apparently dead hooks. For example, the singular
+  `structured_app_row` accessor is live: incremental updates use it to
+  materialize only the roots reported as changed.
 - Remove stale compatibility comments that refer to already-landed PRs.
 - Consolidate duplicated subscription-carrier normalization helpers.
 - Remove production paths retained only for compatibility tests, or explicitly

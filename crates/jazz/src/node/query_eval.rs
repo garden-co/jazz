@@ -5650,7 +5650,6 @@ where
                 program_fact_removes,
                 structured_app_row_changes: BTreeSet::new(),
                 allow_storage_witness_fallback: true,
-                observed_delta_batches: 0,
                 observed_result_delta_batches: 0,
                 terminal_operations: Vec::new(),
             },
