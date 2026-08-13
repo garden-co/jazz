@@ -709,7 +709,6 @@ impl PeerState {
             program_fact_removes,
             structured_app_row_changes: _,
             allow_storage_witness_fallback,
-            observed_delta_batches: _,
             observed_result_delta_batches,
             terminal_operations,
         } = transitions;
@@ -926,7 +925,6 @@ impl PeerState {
         let mut program_fact_adds = Vec::new();
         let mut program_fact_removes = Vec::new();
         let mut allow_storage_witness_fallback = false;
-        let mut observed_delta_batches = 0_usize;
         let mut observed_result_delta_batches = 0_usize;
         let mut terminal_operations = Vec::new();
         {
@@ -941,7 +939,6 @@ impl PeerState {
                 match maintained_subscription_view.subscription.try_recv() {
                     Ok(deltas) => {
                         self.metrics.maintained_subscription_view.delta_batches_in += 1;
-                        observed_delta_batches += 1;
                         let transitions = maintained_subscription_view
                             .maintained
                             .apply_multisink_deltas(
@@ -1042,7 +1039,6 @@ impl PeerState {
             program_fact_removes,
             structured_app_row_changes: BTreeSet::new(),
             allow_storage_witness_fallback,
-            observed_delta_batches,
             observed_result_delta_batches,
             terminal_operations,
         })
@@ -1495,7 +1491,6 @@ impl PeerState {
             program_fact_removes: source_program_fact_removes,
             structured_app_row_changes: _,
             allow_storage_witness_fallback: source_allow_storage_witness_fallback,
-            observed_delta_batches: _,
             observed_result_delta_batches: _,
             terminal_operations: source_terminal_operations,
         } = source_transitions;

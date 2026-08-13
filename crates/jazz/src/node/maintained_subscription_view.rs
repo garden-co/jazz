@@ -131,7 +131,6 @@ pub(crate) struct ResultTransitions {
     /// and are forwarded unchanged to the subscription boundary.
     pub(crate) terminal_operations: Vec<TerminalOperation>,
     pub(crate) allow_storage_witness_fallback: bool,
-    pub(crate) observed_delta_batches: usize,
     pub(crate) observed_result_delta_batches: usize,
 }
 
@@ -477,10 +476,9 @@ impl MaintainedSubscriptionView {
             .collect()
     }
 
-    /// The collector's current recursive rows, retained directly from its
-    /// incremental terminal. This is intentionally an internal hand-off for
-    /// the view-update builder; the existing wire still uses fact delivery.
-    #[allow(dead_code)] // PR 4 consumes this from `MaintainedViewBundleInputs`.
+    /// Returns the collector's current recursive row for one changed root.
+    ///
+    /// The incremental update builder uses this to replace just that root.
     pub(crate) fn structured_app_row(&self, root: RowUuid) -> Option<OwnedRecord> {
         let descriptor = self.structured_app_row_descriptor?;
         self.structured_app_rows
