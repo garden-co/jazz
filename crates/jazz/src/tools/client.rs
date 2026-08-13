@@ -1765,21 +1765,11 @@ fn json_claim_to_core_value(value: serde_json::Value) -> Result<CoreValue> {
         serde_json::Value::Bool(value) => Ok(CoreValue::Bool(value)),
         serde_json::Value::String(value) => Ok(CoreValue::String(value)),
         serde_json::Value::Number(value) => {
-            if let Some(value) = value.as_u64() {
-                u32::try_from(value)
-                    .map(CoreValue::U32)
-                    .or(Ok(CoreValue::U64(value)))
-            } else if let Some(value) = value.as_i64() {
-                i32::try_from(value)
-                    .map(|value| CoreValue::I64(i64::from(value)))
-                    .or(Ok(CoreValue::I64(value)))
-            } else if let Some(value) = value.as_f64() {
-                Ok(CoreValue::F64(value))
-            } else {
-                Err(JazzError::Connection(
-                    "JWT claim number is not representable".to_string(),
-                ))
-            }
+            crate::tools::policy_claims::json_number_to_policy_claim(
+                value,
+                crate::tools::policy_claims::NumericClaimOrigin::ExactJson,
+            )
+            .map_err(JazzError::Connection)
         }
         serde_json::Value::Array(values) => values
             .into_iter()
@@ -3313,6 +3303,23 @@ mod tests {
             public_to_core_value(Value::Integer(0)).expect("encode zero"),
             CoreValue::I32(0)
         );
+    }
+
+    #[test]
+    fn client_session_claim_numbers_match_admission_classification() {
+        assert_eq!(
+            json_claim_to_core_value(json!(7)).unwrap(),
+            CoreValue::U64(7)
+        );
+        assert_eq!(
+            json_claim_to_core_value(json!(-7)).unwrap(),
+            CoreValue::I64(-7)
+        );
+        assert_eq!(
+            json_claim_to_core_value(json!(9_007_199_254_740_992_u64)).unwrap(),
+            CoreValue::U64(9_007_199_254_740_992)
+        );
+        assert!(json_claim_to_core_value(json!({ "role": "admin" })).is_err());
     }
 
     // This narrow internal test is necessary because the wire crossing is an

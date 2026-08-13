@@ -2499,13 +2499,11 @@ fn claim_value_from_json(value: serde_json::Value) -> Result<Value, JsValue> {
         serde_json::Value::Null => Value::Nullable(None),
         serde_json::Value::Bool(value) => Value::Bool(value),
         serde_json::Value::Number(value) => {
-            if let Some(value) = value.as_u64() {
-                Value::U64(value)
-            } else if let Some(value) = value.as_f64() {
-                Value::F64(value)
-            } else {
-                return Err(JsValue::from_str("unsupported numeric claim value"));
-            }
+            jazz::tools::policy_claims::json_number_to_policy_claim(
+                value,
+                jazz::tools::policy_claims::NumericClaimOrigin::JavaScript,
+            )
+            .map_err(to_js_error)?
         }
         serde_json::Value::String(value) => Value::String(value),
         serde_json::Value::Array(values) => Value::Array(
@@ -2989,6 +2987,39 @@ mod dynamic_schema_view_tests {
     use jazz::db::{DbConfig, DbIdentity, ExclusiveTxOps};
     use jazz::groove::schema::ColumnType;
     use jazz::schema::{ColumnSchema, Policy, TableSchema};
+
+    #[test]
+    fn javascript_numeric_claims_preserve_safe_integers_and_fail_closed_when_lossy() {
+        assert_eq!(
+            claim_value_from_json(serde_json::json!(7)).unwrap(),
+            Value::U64(7)
+        );
+        assert_eq!(
+            claim_value_from_json(serde_json::json!(-7)).unwrap(),
+            Value::I64(-7)
+        );
+        assert_eq!(
+            claim_value_from_json(serde_json::Value::Number(
+                serde_json::Number::from_f64(7.0).unwrap()
+            ))
+            .unwrap(),
+            Value::U64(7),
+            "WASM's f64 JS-number path must agree with integer JSON"
+        );
+        assert_eq!(
+            claim_value_from_json(serde_json::json!(7.5)).unwrap(),
+            Value::F64(7.5)
+        );
+        assert_eq!(
+            claim_value_from_json(serde_json::json!(9_007_199_254_740_992_u64)).unwrap(),
+            Value::F64(9_007_199_254_740_992.0),
+            "integers beyond Number.MAX_SAFE_INTEGER must not participate in integer policy matching"
+        );
+        assert_eq!(
+            claim_value_from_json(serde_json::json!(-9_007_199_254_740_992_i64)).unwrap(),
+            Value::F64(-9_007_199_254_740_992.0)
+        );
+    }
 
     #[test]
     fn wasm_delta_preserves_typed_union_occurrence_keys() {

@@ -11,6 +11,7 @@ pub mod middleware;
 mod object;
 #[cfg(feature = "otel-core")]
 pub mod otel;
+pub mod policy_claims;
 pub(crate) mod public_api;
 pub mod public_schema;
 pub mod schema_lens;

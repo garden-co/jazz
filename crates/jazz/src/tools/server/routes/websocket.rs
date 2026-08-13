@@ -279,12 +279,12 @@ fn json_claim_to_core_value(value: serde_json::Value) -> Result<CoreValue, Strin
     match value {
         serde_json::Value::Null => Ok(CoreValue::Nullable(None)),
         serde_json::Value::Bool(value) => Ok(CoreValue::Bool(value)),
-        serde_json::Value::Number(value) => value
-            .as_u64()
-            .map(CoreValue::U64)
-            .or_else(|| value.as_i64().map(CoreValue::I64))
-            .or_else(|| value.as_f64().map(CoreValue::F64))
-            .ok_or_else(|| "claim number is not representable".to_owned()),
+        serde_json::Value::Number(value) => {
+            crate::tools::policy_claims::json_number_to_policy_claim(
+                value,
+                crate::tools::policy_claims::NumericClaimOrigin::ExactJson,
+            )
+        }
         serde_json::Value::String(value) => Ok(CoreValue::String(value)),
         serde_json::Value::Array(values) => values
             .into_iter()
@@ -967,6 +967,23 @@ mod tests {
         assert!(ws_has_auth_cookie(&headers, Some("jazz-auth")));
         assert!(!ws_has_auth_cookie(&headers, Some("missing")));
         assert!(!ws_has_auth_cookie(&headers, None));
+    }
+
+    #[test]
+    fn websocket_session_claim_numbers_match_admission_classification() {
+        assert_eq!(
+            json_claim_to_core_value(serde_json::json!(7)).unwrap(),
+            CoreValue::U64(7)
+        );
+        assert_eq!(
+            json_claim_to_core_value(serde_json::json!(-7)).unwrap(),
+            CoreValue::I64(-7)
+        );
+        assert_eq!(
+            json_claim_to_core_value(serde_json::json!(9_007_199_254_740_992_u64)).unwrap(),
+            CoreValue::U64(9_007_199_254_740_992)
+        );
+        assert!(json_claim_to_core_value(serde_json::json!({ "role": "admin" })).is_err());
     }
 
     #[test]

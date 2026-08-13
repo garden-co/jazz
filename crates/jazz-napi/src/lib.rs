@@ -2192,15 +2192,11 @@ fn core_claim_value_from_json(value: JsonValue) -> napi::Result<CoreValue> {
     Ok(match value {
         JsonValue::Null => CoreValue::Nullable(None),
         JsonValue::Bool(value) => CoreValue::Bool(value),
-        JsonValue::Number(value) => {
-            if let Some(value) = value.as_u64() {
-                CoreValue::U64(value)
-            } else if let Some(value) = value.as_f64() {
-                CoreValue::F64(value)
-            } else {
-                return Err(napi::Error::from_reason("unsupported numeric claim value"));
-            }
-        }
+        JsonValue::Number(value) => jazz::tools::policy_claims::json_number_to_policy_claim(
+            value,
+            jazz::tools::policy_claims::NumericClaimOrigin::JavaScript,
+        )
+        .map_err(napi::Error::from_reason)?,
         JsonValue::String(value) => CoreValue::String(value),
         JsonValue::Array(values) => CoreValue::Array(
             values
@@ -3130,8 +3126,8 @@ mod tests {
 
     use crate::{
         NapiDbInnerStorage, NapiTxKind, Tx, authority_epoch_from_bigint, core_block_on,
-        core_read_opts_from_json, core_subscription_event_to_napi, encode_core_subscription_delta,
-        terminal_bytes_to_numbers,
+        core_claim_value_from_json, core_read_opts_from_json, core_subscription_event_to_napi,
+        encode_core_subscription_delta, terminal_bytes_to_numbers,
     };
     use jazz::db::{
         Db as CoreDb, DbConfig as CoreDbConfig, DbIdentity as CoreDbIdentity, ExclusiveTxOps,
@@ -3152,6 +3148,39 @@ mod tests {
     use jazz::tx::DurabilityTier;
     use napi::bindgen_prelude::{BigInt, Either, Either3, Either4};
     use serde_json::json;
+
+    #[test]
+    fn javascript_numeric_claims_preserve_safe_integers_and_fail_closed_when_lossy() {
+        assert_eq!(
+            core_claim_value_from_json(json!(7)).unwrap(),
+            CoreValue::U64(7)
+        );
+        assert_eq!(
+            core_claim_value_from_json(json!(-7)).unwrap(),
+            CoreValue::I64(-7)
+        );
+        assert_eq!(
+            core_claim_value_from_json(serde_json::Value::Number(
+                serde_json::Number::from_f64(7.0).unwrap()
+            ))
+            .unwrap(),
+            CoreValue::U64(7),
+            "JS-number deserialization must agree with integer JSON"
+        );
+        assert_eq!(
+            core_claim_value_from_json(json!(7.5)).unwrap(),
+            CoreValue::F64(7.5)
+        );
+        assert_eq!(
+            core_claim_value_from_json(json!(9_007_199_254_740_992_u64)).unwrap(),
+            CoreValue::F64(9_007_199_254_740_992.0),
+            "integers beyond Number.MAX_SAFE_INTEGER must not participate in integer policy matching"
+        );
+        assert_eq!(
+            core_claim_value_from_json(json!(-9_007_199_254_740_992_i64)).unwrap(),
+            CoreValue::F64(-9_007_199_254_740_992.0)
+        );
+    }
 
     #[test]
     fn authority_epoch_bigint_rejects_lossy_values_and_preserves_u64() {
