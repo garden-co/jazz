@@ -7,9 +7,12 @@
 
 use std::collections::BTreeMap;
 
+use groove::records::{Value, ValueType};
+
 use crate::content_manifest::{
-    ContentAddress, ContentId, ContentManifest, ContentManifestAdapter, ContentReadContext,
-    ImmutableContentKind, ImmutableContentStore, ManifestError, MaterializationRequest, content_id,
+    ContentAddress, ContentId, ContentManifest, ContentManifestAdapter, ContentManifestSchema,
+    ContentReadContext, ImmutableContentKind, ImmutableContentStore, ManifestError,
+    MaterializationRequest, content_id,
 };
 
 pub const DEFAULT_STREAM_INLINE_TAIL_BYTES: usize = 256;
@@ -96,13 +99,20 @@ impl StreamManifestAdapter {
         if bytes.is_empty() {
             return Ok(manifest.clone());
         }
-        let mut combined = Vec::with_capacity(old_tail.len() + bytes.len());
+        let combined_len = old_tail
+            .len()
+            .checked_add(bytes.len())
+            .ok_or(ManifestError::Malformed)?;
+        let mut combined = Vec::new();
+        combined
+            .try_reserve_exact(combined_len)
+            .map_err(|_| ManifestError::Malformed)?;
         combined.extend_from_slice(old_tail);
         combined.extend_from_slice(bytes);
         if combined.len() <= self.inline_tail_bytes {
             return Ok(ContentManifest {
                 root: manifest.root,
-                edit_tail: vec![combined],
+                edit_tail: vec![Value::Bytes(combined)],
             });
         }
 
@@ -114,7 +124,7 @@ impl StreamManifestAdapter {
                 tree,
                 TreeRef {
                     id,
-                    length: part.len() as u64,
+                    length: u64::try_from(part.len()).map_err(|_| ManifestError::Malformed)?,
                     height: 0,
                 },
                 context,
@@ -123,8 +133,8 @@ impl StreamManifestAdapter {
         }
         let prefix_bytes = old_root
             .prefix_bytes
-            .checked_add(combined.len() as u64)
-            .ok_or(ManifestError::Conflict("stream length overflow"))?;
+            .checked_add(u64::try_from(combined.len()).map_err(|_| ManifestError::Malformed)?)
+            .ok_or(ManifestError::Malformed)?;
         Ok(ContentManifest {
             root: self.put_root(context, store, StreamRoot { tree, prefix_bytes })?,
             edit_tail: Vec::new(),
@@ -134,11 +144,12 @@ impl StreamManifestAdapter {
     fn tail<'a>(&self, manifest: &'a ContentManifest) -> Result<&'a [u8], ManifestError> {
         match manifest.edit_tail.as_slice() {
             [] => Ok(&[]),
-            [tail] if tail.len() <= self.inline_tail_bytes => Ok(tail),
-            [_] => Err(ManifestError::TailTooLarge {
-                actual: manifest.edit_tail[0].len(),
+            [Value::Bytes(tail)] if tail.len() <= self.inline_tail_bytes => Ok(tail),
+            [Value::Bytes(tail)] => Err(ManifestError::TailTooLarge {
+                actual: tail.len(),
                 maximum: self.inline_tail_bytes as u32,
             }),
+            [_] => Err(ManifestError::Malformed),
             _ => Err(ManifestError::Conflict(
                 "stream manifests have one logical tail",
             )),
@@ -269,11 +280,18 @@ impl StreamManifestAdapter {
                 height: replacement.height,
                 children: vec![replacement, split],
             };
-            let length = replacement.length + split.length;
+            let length = replacement
+                .length
+                .checked_add(split.length)
+                .ok_or(ManifestError::Malformed)?;
+            let height = replacement
+                .height
+                .checked_add(1)
+                .ok_or(ManifestError::Malformed)?;
             return Ok(TreeRef {
                 id: self.put_node(context, store, node)?,
                 length,
-                height: replacement.height + 1,
+                height,
             });
         }
         Ok(replacement)
@@ -287,7 +305,7 @@ impl StreamManifestAdapter {
         store: &mut dyn ImmutableContentStore,
     ) -> Result<(TreeRef, Option<TreeRef>), ManifestError> {
         let node = self.get_node(tree.id, context, store)?;
-        if tree.height != node.height + 1 || node.children.is_empty() {
+        if node.height.checked_add(1) != Some(tree.height) || node.children.is_empty() {
             return Err(ManifestError::Malformed);
         }
         let mut children = node.children;
@@ -315,12 +333,13 @@ impl StreamManifestAdapter {
         store: &mut dyn ImmutableContentStore,
     ) -> Result<(TreeRef, Option<TreeRef>), ManifestError> {
         if children.len() <= self.fanout {
-            let length = children.iter().map(|child| child.length).sum();
+            let length = checked_tree_length(&children)?;
+            let tree_height = height.checked_add(1).ok_or(ManifestError::Malformed)?;
             return Ok((
                 TreeRef {
                     id: self.put_node(context, store, StreamNode { height, children })?,
                     length,
-                    height: height + 1,
+                    height: tree_height,
                 },
                 None,
             ));
@@ -328,8 +347,9 @@ impl StreamManifestAdapter {
         let split_at = children.len() / 2;
         let right_children = children[split_at..].to_vec();
         let left_children = children[..split_at].to_vec();
-        let left_length = left_children.iter().map(|child| child.length).sum();
-        let right_length = right_children.iter().map(|child| child.length).sum();
+        let left_length = checked_tree_length(&left_children)?;
+        let right_length = checked_tree_length(&right_children)?;
+        let tree_height = height.checked_add(1).ok_or(ManifestError::Malformed)?;
         let left = TreeRef {
             id: self.put_node(
                 context,
@@ -340,7 +360,7 @@ impl StreamManifestAdapter {
                 },
             )?,
             length: left_length,
-            height: height + 1,
+            height: tree_height,
         };
         let right = TreeRef {
             id: self.put_node(
@@ -352,7 +372,7 @@ impl StreamManifestAdapter {
                 },
             )?,
             length: right_length,
-            height: height + 1,
+            height: tree_height,
         };
         Ok((left, Some(right)))
     }
@@ -370,22 +390,33 @@ impl StreamManifestAdapter {
             return Err(ManifestError::Malformed);
         }
         let node = self.get_node(tree.id, context, store)?;
-        if tree.height != node.height + 1 {
+        if node.height.checked_add(1) != Some(tree.height) {
             return Err(ManifestError::Malformed);
         }
-        let mut offset = 0;
+        let mut offset = 0_u64;
         for child in node.children {
-            let child_end = offset + child.length;
+            let child_end = offset
+                .checked_add(child.length)
+                .ok_or(ManifestError::Malformed)?;
             if child_end > start && offset < end {
                 let child_start = start.saturating_sub(offset);
                 let child_limit = end.min(child_end) - offset;
                 if node.height == 0 {
                     let bytes =
                         self.get_object(context, child.id, ImmutableContentKind::Leaf, store)?;
-                    if bytes.len() as u64 != child.length {
+                    if u64::try_from(bytes.len()).map_err(|_| ManifestError::Malformed)?
+                        != child.length
+                    {
                         return Err(ManifestError::Malformed);
                     }
-                    out.extend_from_slice(&bytes[child_start as usize..child_limit as usize]);
+                    let child_start =
+                        usize::try_from(child_start).map_err(|_| ManifestError::Malformed)?;
+                    let child_limit =
+                        usize::try_from(child_limit).map_err(|_| ManifestError::Malformed)?;
+                    let range = bytes
+                        .get(child_start..child_limit)
+                        .ok_or(ManifestError::Malformed)?;
+                    out.extend_from_slice(range);
                 } else {
                     self.tree_range(child, child_start, child_limit, context, store, out)?;
                 }
@@ -408,11 +439,14 @@ impl StreamManifestAdapter {
     ) -> Result<Vec<u8>, ManifestError> {
         let root = self.get_root(manifest.root, context, store)?;
         let tail = self.tail(manifest)?;
-        let total = root.prefix_bytes + tail.len() as u64;
+        let total = checked_total_length(root.prefix_bytes, tail.len())?;
         if start > end || end > total {
             return Err(ManifestError::Conflict("stream range is out of bounds"));
         }
-        let mut out = Vec::with_capacity((end - start) as usize);
+        let requested_len = usize::try_from(end - start).map_err(|_| ManifestError::Malformed)?;
+        let mut out = Vec::new();
+        out.try_reserve_exact(requested_len)
+            .map_err(|_| ManifestError::Malformed)?;
         if let Some(tree) = root.tree {
             if start < root.prefix_bytes {
                 self.tree_range(
@@ -426,9 +460,14 @@ impl StreamManifestAdapter {
             }
         }
         if end > root.prefix_bytes {
-            let tail_start = start.saturating_sub(root.prefix_bytes) as usize;
-            let tail_end = (end - root.prefix_bytes) as usize;
-            out.extend_from_slice(&tail[tail_start..tail_end]);
+            let tail_start = usize::try_from(start.saturating_sub(root.prefix_bytes))
+                .map_err(|_| ManifestError::Malformed)?;
+            let tail_end =
+                usize::try_from(end - root.prefix_bytes).map_err(|_| ManifestError::Malformed)?;
+            let range = tail
+                .get(tail_start..tail_end)
+                .ok_or(ManifestError::Malformed)?;
+            out.extend_from_slice(range);
         }
         Ok(out)
     }
@@ -439,7 +478,17 @@ impl ContentManifestAdapter for StreamManifestAdapter {
         ADAPTER_KIND
     }
 
-    fn validate_operation(&self, operation: &[u8]) -> Result<(), ManifestError> {
+    fn validate_schema(&self, schema: &ContentManifestSchema) -> Result<(), ManifestError> {
+        if schema.adapter_kind != ADAPTER_KIND || schema.tail_entry_type != ValueType::Bytes {
+            return Err(ManifestError::InvalidSchema);
+        }
+        Ok(())
+    }
+
+    fn validate_operation(&self, operation: &Value) -> Result<(), ManifestError> {
+        let Value::Bytes(operation) = operation else {
+            return Err(ManifestError::Malformed);
+        };
         if operation.len() > self.inline_tail_bytes {
             return Err(ManifestError::TailTooLarge {
                 actual: operation.len(),
@@ -457,7 +506,7 @@ impl ContentManifestAdapter for StreamManifestAdapter {
         store: &dyn ImmutableContentStore,
     ) -> Result<Vec<u8>, ManifestError> {
         let root = self.get_root(manifest.root, context, store)?;
-        let total = root.prefix_bytes + self.tail(manifest)?.len() as u64;
+        let total = checked_total_length(root.prefix_bytes, self.tail(manifest)?.len())?;
         match request {
             MaterializationRequest::Full => {
                 self.materialize_range(manifest, 0, total, context, store)
@@ -467,7 +516,7 @@ impl ContentManifestAdapter for StreamManifestAdapter {
                 *offset,
                 offset
                     .checked_add(*length)
-                    .ok_or(ManifestError::Conflict("stream range overflow"))?,
+                    .ok_or(ManifestError::Malformed)?,
                 context,
                 store,
             ),
@@ -503,7 +552,7 @@ impl ContentManifestAdapter for StreamManifestAdapter {
         store: &dyn ImmutableContentStore,
     ) -> Result<BTreeMap<String, Vec<u8>>, ManifestError> {
         let root = self.get_root(manifest.root, context, store)?;
-        let length = root.prefix_bytes + self.tail(manifest)?.len() as u64;
+        let length = checked_total_length(root.prefix_bytes, self.tail(manifest)?.len())?;
         let mut values = BTreeMap::new();
         for name in requested {
             match name.as_str() {
@@ -533,12 +582,26 @@ fn encode_root(root: StreamRoot) -> Vec<u8> {
     out
 }
 
+fn checked_tree_length(children: &[TreeRef]) -> Result<u64, ManifestError> {
+    children.iter().try_fold(0_u64, |total, child| {
+        total
+            .checked_add(child.length)
+            .ok_or(ManifestError::Malformed)
+    })
+}
+
+fn checked_total_length(prefix_bytes: u64, tail_bytes: usize) -> Result<u64, ManifestError> {
+    prefix_bytes
+        .checked_add(u64::try_from(tail_bytes).map_err(|_| ManifestError::Malformed)?)
+        .ok_or(ManifestError::Malformed)
+}
+
 fn decode_root(bytes: &[u8]) -> Result<StreamRoot, ManifestError> {
     if bytes.len() < 13 || &bytes[..4] != b"JSR1" {
         return Err(ManifestError::Malformed);
     }
     let (tree, cursor) = match bytes[4] {
-        0 => (None, 5),
+        0 => (None, 5_usize),
         1 if bytes.len() >= 49 => {
             let mut id = [0; 32];
             id.copy_from_slice(&bytes[5..37]);
@@ -558,12 +621,13 @@ fn decode_root(bytes: &[u8]) -> Result<StreamRoot, ManifestError> {
                     length,
                     height,
                 }),
-                49,
+                49_usize,
             )
         }
         _ => return Err(ManifestError::Malformed),
     };
-    if bytes.len() != cursor + 8 {
+    let expected_len = cursor.checked_add(8).ok_or(ManifestError::Malformed)?;
+    if bytes.len() != expected_len {
         return Err(ManifestError::Malformed);
     }
     let prefix_bytes = u64::from_le_bytes(
@@ -581,7 +645,13 @@ fn decode_root(bytes: &[u8]) -> Result<StreamRoot, ManifestError> {
 }
 
 fn encode_node(node: &StreamNode) -> Vec<u8> {
-    let mut out = Vec::with_capacity(12 + node.children.len() * 44);
+    let encoded_len = node
+        .children
+        .len()
+        .checked_mul(44)
+        .and_then(|children_len| 12_usize.checked_add(children_len))
+        .expect("bounded stream node encoding length");
+    let mut out = Vec::with_capacity(encoded_len);
     out.extend_from_slice(b"JSN1");
     out.extend_from_slice(&node.height.to_le_bytes());
     out.extend_from_slice(&(node.children.len() as u32).to_le_bytes());
@@ -602,15 +672,23 @@ fn decode_node(bytes: &[u8]) -> Result<StreamNode, ManifestError> {
             .try_into()
             .map_err(|_| ManifestError::Malformed)?,
     );
-    let count = u32::from_le_bytes(
+    let count = usize::try_from(u32::from_le_bytes(
         bytes[8..12]
             .try_into()
             .map_err(|_| ManifestError::Malformed)?,
-    ) as usize;
-    if count == 0 || bytes.len() != 12 + count * 44 {
+    ))
+    .map_err(|_| ManifestError::Malformed)?;
+    let encoded_len = count
+        .checked_mul(44)
+        .and_then(|children_len| 12_usize.checked_add(children_len))
+        .ok_or(ManifestError::Malformed)?;
+    if count == 0 || bytes.len() != encoded_len {
         return Err(ManifestError::Malformed);
     }
-    let mut children = Vec::with_capacity(count);
+    let mut children = Vec::new();
+    children
+        .try_reserve_exact(count)
+        .map_err(|_| ManifestError::Malformed)?;
     for chunk in bytes[12..].chunks_exact(44) {
         let mut id = [0; 32];
         id.copy_from_slice(&chunk[..32]);
@@ -701,7 +779,7 @@ mod tests {
             .append(&empty, b"abc", context(), &mut store)
             .unwrap();
         let promoted = adapter.append(&tail, b"d", context(), &mut store).unwrap();
-        assert_eq!(tail.edit_tail, vec![b"abc".to_vec()]);
+        assert_eq!(tail.edit_tail, vec![Value::Bytes(b"abc".to_vec())]);
         assert!(promoted.edit_tail.is_empty());
         let repeated = adapter
             .append(&empty, b"abcd", context(), &mut store)
@@ -856,6 +934,120 @@ mod tests {
                 Err(ManifestError::Malformed),
             ),
             "full reads, ranges, and later appends must all enforce the fetched-node fanout"
+        );
+    }
+
+    #[test]
+    fn extreme_declared_lengths_fail_closed_without_panicking() {
+        let adapter = StreamManifestAdapter::with_layout_for_test(256, 4);
+        let mut store = MemoryImmutableContentStore::default();
+        let children = [u64::MAX, 1, 1, 1]
+            .into_iter()
+            .map(|length| TreeRef {
+                id: ContentId([3; 32]),
+                length,
+                height: 0,
+            })
+            .collect::<Vec<_>>();
+        let node_bytes = encode_node(&StreamNode {
+            height: 0,
+            children,
+        });
+        let node_id = store
+            .put_if_absent_or_identical(
+                ContentAddress {
+                    domain: context().domain,
+                    adapter_kind: ADAPTER_KIND,
+                    kind: ImmutableContentKind::Node,
+                },
+                node_bytes,
+            )
+            .unwrap();
+        let root_bytes = encode_root(StreamRoot {
+            tree: Some(TreeRef {
+                id: node_id,
+                length: u64::MAX,
+                height: 1,
+            }),
+            prefix_bytes: u64::MAX,
+        });
+        let root = store
+            .put_if_absent_or_identical(
+                ContentAddress {
+                    domain: context().domain,
+                    adapter_kind: ADAPTER_KIND,
+                    kind: ImmutableContentKind::Root,
+                },
+                root_bytes,
+            )
+            .unwrap();
+        let without_tail = ContentManifest {
+            root,
+            edit_tail: Vec::new(),
+        };
+        let with_tail = ContentManifest {
+            root,
+            edit_tail: vec![Value::Bytes(vec![1])],
+        };
+
+        let outcomes = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let full =
+                adapter.materialize(&with_tail, &MaterializationRequest::Full, context(), &store);
+            let request_overflow = adapter.materialize(
+                &without_tail,
+                &MaterializationRequest::Range {
+                    offset: u64::MAX,
+                    length: 1,
+                },
+                context(),
+                &store,
+            );
+            let empty_boundary_range = adapter.materialize(
+                &without_tail,
+                &MaterializationRequest::Range {
+                    offset: u64::MAX,
+                    length: 0,
+                },
+                context(),
+                &store,
+            );
+            let mut traversal_bytes = Vec::new();
+            let traversal_overflow = adapter.tree_range(
+                TreeRef {
+                    id: node_id,
+                    length: u64::MAX,
+                    height: 1,
+                },
+                u64::MAX,
+                u64::MAX,
+                context(),
+                &store,
+                &mut traversal_bytes,
+            );
+            let index = adapter.index_values(&with_tail, &["length".into()], context(), &store);
+            let append = adapter.append(&without_tail, &[9; 257], context(), &mut store);
+            (
+                full,
+                request_overflow,
+                empty_boundary_range,
+                traversal_overflow,
+                index,
+                append,
+            )
+        }))
+        .expect("untrusted stream lengths must never panic");
+
+        assert_eq!(
+            outcomes,
+            (
+                Err(ManifestError::Malformed),
+                Err(ManifestError::Malformed),
+                Ok(Vec::new()),
+                Err(ManifestError::Malformed),
+                Err(ManifestError::Malformed),
+                Err(ManifestError::Malformed),
+            ),
+            "full/range/index/append/promotion paths reject extreme metadata"
         );
     }
 
