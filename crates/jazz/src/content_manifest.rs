@@ -417,6 +417,11 @@ pub fn global_content_manifest_adapters() -> &'static ContentManifestAdapterRegi
             .register(Arc::new(crate::text_content::TextContentAdapter::default()))
             .expect("built-in text content adapter registers exactly once");
         registry
+            .register(Arc::new(
+                crate::stream_manifest::StreamManifestAdapter::default(),
+            ))
+            .expect("built-in stream manifest adapter must register once");
+        registry
     })
 }
 
