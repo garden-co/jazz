@@ -297,8 +297,6 @@ describe("package root public API", () => {
     for (const publicRuntimeExport of [
       "BrowserAuthSecretStore",
       "Db",
-      "FileNotFoundError",
-      "IncompleteFileDataError",
       "PersistedWriteRejectedError",
       "RowChangeKind",
       "Transaction",
