@@ -12,16 +12,18 @@ subtrees. It instead emits a complete balanced root when scattered path copies
 would create more rows than rebuilding the full leaf tree.
 
 Environment: one Node 24 process using the freshly built release NAPI/RocksDB
-artifact. These are single-machine receipts and not stable release thresholds.
+artifact. The production RocksDB profile uses Zstd for append/history column
+families, LZ4 for current/index/meta, and Zstd for bottommost compression. These
+are single-machine receipts and not stable release thresholds.
 
 ## 100 KiB initial text, 300 edits
 
-| Workload | Representation   | durable p50 / p95 | row mutations/edit | logical bytes | RocksDB dir | consolidations p50 / p95 | exact-version materialization p50 |
-| -------- | ---------------- | ----------------: | -----------------: | ------------: | ----------: | -----------------------: | --------------------------------: |
-| end      | whole string     |  15.50 / 27.21 ms |               1.00 |      30.87 MB |    62.43 MB |                       -- |                       not exposed |
-| end      | bounded frontier |   6.82 / 13.24 ms |               2.21 |       ≥248 KB |     2.67 MB |         26.29 / 28.51 ms |                          85.37 ms |
-| middle   | whole string     |  16.43 / 26.26 ms |               1.00 |      30.87 MB |    62.41 MB |                       -- |                       not exposed |
-| middle   | bounded frontier |   6.52 / 11.40 ms |               3.53 |      ≥1.17 MB |     4.89 MB |         66.36 / 74.83 ms |                         237.01 ms |
+| Workload | Representation   | durable p50 / p95 | row mutations/edit | logical bytes | closed apparent / allocated | reopened apparent / allocated | consolidations p50 / p95 | exact-version materialization p50 |
+| -------- | ---------------- | ----------------: | -----------------: | ------------: | --------------------------: | ----------------------------: | -----------------------: | --------------------------------: |
+| end      | whole string     |  15.46 / 25.94 ms |               1.00 |      30.87 MB |            62.43 / 62.46 MB |                0.62 / 0.66 MB |                       -- |                       not exposed |
+| end      | bounded frontier |   6.45 / 13.18 ms |               2.21 |       ≥248 KB |             2.67 / 78.18 MB |                0.50 / 0.53 MB |         25.21 / 27.72 ms |                          83.12 ms |
+| middle   | whole string     |  16.29 / 26.59 ms |               1.00 |      30.87 MB |            62.41 / 62.43 MB |                0.96 / 1.00 MB |                       -- |                       not exposed |
+| middle   | bounded frontier |   6.62 / 12.05 ms |               3.53 |      ≥1.17 MB |             4.89 / 78.18 MB |                0.64 / 0.68 MB |         65.45 / 83.93 ms |                         230.76 ms |
 
 `logical bytes` for the frontier is deliberately marked as a lower bound: it
 counts encoded patch frontiers, ids, leaf text, and child references, but not
@@ -30,12 +32,35 @@ version insert and document-head update plus amortized new rope nodes.
 
 ## 4 KiB initial text, 1,000 edits
 
-| Workload | Representation   | durable p50 / p95 | row mutations/edit | logical bytes | RocksDB dir | consolidations p50 / p95 | exact-version materialization p50 |
-| -------- | ---------------- | ----------------: | -----------------: | ------------: | ----------: | -----------------------: | --------------------------------: |
-| end      | whole string     |    3.32 / 6.34 ms |               1.00 |       4.60 MB |    11.06 MB |                       -- |                       not exposed |
-| end      | bounded frontier |   9.39 / 19.58 ms |               2.06 |       ≥441 KB |    16.62 MB |         17.94 / 36.24 ms |                          13.70 ms |
-| middle   | whole string     |    3.21 / 6.57 ms |               1.00 |       4.60 MB |    11.04 MB |                       -- |                       not exposed |
-| middle   | bounded frontier |  10.02 / 17.43 ms |               2.09 |       ≥556 KB |    16.86 MB |         55.45 / 85.76 ms |                          12.70 ms |
+| Workload | Representation   | durable p50 / p95 | row mutations/edit | logical bytes | closed apparent / allocated | reopened apparent / allocated | consolidations p50 / p95 | exact-version materialization p50 |
+| -------- | ---------------- | ----------------: | -----------------: | ------------: | --------------------------: | ----------------------------: | -----------------------: | --------------------------------: |
+| end      | whole string     |    2.51 / 4.35 ms |               1.00 |       4.60 MB |            11.06 / 11.08 MB |                0.57 / 0.61 MB |                       -- |                       not exposed |
+| end      | bounded frontier |   8.21 / 15.05 ms |               2.06 |       ≥441 KB |            16.60 / 78.18 MB |                0.88 / 0.91 MB |         12.91 / 22.96 ms |                          10.14 ms |
+| middle   | whole string     |    2.41 / 4.93 ms |               1.00 |       4.60 MB |            11.04 / 11.06 MB |                1.51 / 1.54 MB |                       -- |                       not exposed |
+| middle   | bounded frontier |   8.44 / 15.56 ms |               2.09 |       ≥556 KB |            16.86 / 78.18 MB |                0.96 / 1.00 MB |         39.05 / 46.04 ms |                          10.92 ms |
+
+## Storage measurement method
+
+Each representation/workload uses a fresh isolated database and the same
+deterministic edit offsets. `apparent` recursively sums file lengths;
+`allocated` sums `stat.blocks * 512`, equivalent to the data portion of `du`.
+The live and just-closed stores are WAL-dominated. RocksDB can preallocate WAL
+blocks, which explains the 78.18 MB allocated figure even when apparent bytes
+are much lower.
+
+To prove recovery without relying on the original process releasing every DB
+wrapper, the benchmark copies the exact closed directory, reopens that copy,
+reads and verifies the final value, and shuts it down before measuring again.
+Normal recovery turns almost all of the WAL into compressed SSTs: reopened WAL
+is below 1 KB in every receipt, while SST apparent bytes range from 0.19 MB to
+1.20 MB. The reopened columns above therefore show a useful compressed
+post-recovery footprint, not merely the logical payload or a live WAL size.
+They are not a claim about fully compacted bottommost-level size.
+
+No public production API currently exposes RocksDB memtable flush or manual
+compaction. `JazzContext.flush()` flushes the query runtime, not RocksDB. The
+receipt records live-after-runtime-flush, close, and reopen in its JSON output,
+but deliberately does not label any number as a forced-compaction result.
 
 ## Interpretation
 

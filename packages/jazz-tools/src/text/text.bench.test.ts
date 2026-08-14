@@ -5,7 +5,7 @@
  * JAZZ_TEXT_BENCH_EDITS=300 pnpm --dir packages/jazz-tools exec vitest run \
  * src/text/text.bench.test.ts --reporter=verbose
  */
-import { mkdtempSync, readdirSync, rmSync, statSync } from "node:fs";
+import { cpSync, mkdtempSync, readdirSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -31,21 +31,69 @@ function percentile(values: readonly number[], quantile: number): number {
   return sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * quantile))] ?? 0;
 }
 
-function directorySize(path: string): number {
+type DiskUsage = {
+  apparentBytes: number;
+  allocatedBytes: number;
+  walApparentBytes: number;
+  sstApparentBytes: number;
+};
+
+function diskUsage(path: string): DiskUsage {
   const stat = statSync(path);
-  return stat.isDirectory()
-    ? readdirSync(path).reduce((total, child) => total + directorySize(join(path, child)), 0)
-    : stat.size;
+  if (!stat.isDirectory()) {
+    return {
+      apparentBytes: stat.size,
+      allocatedBytes: stat.blocks * 512,
+      walApparentBytes: path.endsWith(".log") ? stat.size : 0,
+      sstApparentBytes: path.endsWith(".sst") ? stat.size : 0,
+    };
+  }
+  return readdirSync(path).reduce<DiskUsage>(
+    (total, child) => {
+      const usage = diskUsage(join(path, child));
+      total.apparentBytes += usage.apparentBytes;
+      total.allocatedBytes += usage.allocatedBytes;
+      total.walApparentBytes += usage.walApparentBytes;
+      total.sstApparentBytes += usage.sstApparentBytes;
+      return total;
+    },
+    { apparentBytes: 0, allocatedBytes: 0, walApparentBytes: 0, sstApparentBytes: 0 },
+  );
 }
 
 function insertionOffset(length: number, edit: number, workload: "end" | "middle"): number {
   return workload === "end" ? length : (edit * 48271 + 17) % (length + 1);
 }
 
+async function reopenContext(appId: string, path: string) {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    try {
+      const context = createJazzContext({
+        appId,
+        app,
+        permissions: {},
+        driver: { type: "persistent", dataPath: path },
+        adminSecret: "ordinary-text-benchmark",
+        tier: "local",
+      });
+      // Force the lazy runtime open while it is still covered by the retry.
+      context.asBackend();
+      return context;
+    } catch (error) {
+      lastError = error;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  }
+  throw lastError;
+}
+
 async function wholeStringReceipt(initial: string, workload: "end" | "middle") {
   const path = mkdtempSync(join(tmpdir(), "jazz-text-whole-"));
+  const restartPath = `${path}-restart`;
+  const appId = `text-whole-${crypto.randomUUID()}`;
   const context = createJazzContext({
-    appId: `text-whole-${crypto.randomUUID()}`,
+    appId,
     app,
     permissions: {},
     driver: { type: "persistent", dataPath: path },
@@ -74,7 +122,21 @@ async function wholeStringReceipt(initial: string, workload: "end" | "middle") {
         ?.value,
     ).toBe(value);
     const materializationMs = performance.now() - readStarted;
+    context.flush();
+    const liveDisk = diskUsage(path);
     await context.shutdown();
+    const closedDisk = diskUsage(path);
+    cpSync(path, restartPath, { recursive: true });
+    const reopened = await reopenContext(appId, restartPath);
+    expect(
+      (
+        await reopened
+          .asBackend()
+          .one(app.text_benchmark_whole.where({ id: document.value.id }), { tier: "local" })
+      )?.value,
+    ).toBe(value);
+    await reopened.shutdown();
+    const reopenedDisk = diskUsage(restartPath);
     return {
       label: `whole-${workload}`,
       editCount,
@@ -83,19 +145,22 @@ async function wholeStringReceipt(initial: string, workload: "end" | "middle") {
       ordinaryRowsPerEdit: 1,
       retainedVersionRows: 0,
       logicalWriteBytes: logicalBytes,
-      diskBytes: directorySize(path),
+      disk: { liveAfterRuntimeFlush: liveDisk, afterClose: closedDisk, afterReopen: reopenedDisk },
       currentReadMs: materializationMs,
     };
   } finally {
     await context.shutdown().catch(() => undefined);
     rmSync(path, { recursive: true, force: true });
+    rmSync(restartPath, { recursive: true, force: true });
   }
 }
 
 async function textReceipt(initial: string, workload: "end" | "middle") {
   const path = mkdtempSync(join(tmpdir(), "jazz-text-frontier-"));
+  const restartPath = `${path}-restart`;
+  const appId = `text-frontier-${crypto.randomUUID()}`;
   const context = createJazzContext({
-    appId: `text-frontier-${crypto.randomUUID()}`,
+    appId,
     app,
     permissions: {},
     driver: { type: "persistent", dataPath: path },
@@ -145,7 +210,20 @@ async function textReceipt(initial: string, workload: "end" | "middle") {
         total + (node.text?.length ?? 0) + (node.left?.length ?? 0) + (node.right?.length ?? 0),
       0,
     );
+    context.flush();
+    const liveDisk = diskUsage(path);
     await context.shutdown();
+    const closedDisk = diskUsage(path);
+    cpSync(path, restartPath, { recursive: true });
+    const reopened = await reopenContext(appId, restartPath);
+    const reopenedStore = createTextStore(reopened.asBackend(), textTablesFromApp(app), {
+      maxPatches: 32,
+      maxPatchBytes: 4096,
+      leafBytes: 4096,
+    });
+    expect((await reopenedStore.read(snapshot.documentId)).text).toBe(snapshot.text);
+    await reopened.shutdown();
+    const reopenedDisk = diskUsage(restartPath);
     return {
       label: `frontier-${workload}`,
       editCount,
@@ -157,13 +235,14 @@ async function textReceipt(initial: string, workload: "end" | "middle") {
       consolidationP50Ms: percentile(consolidationLatencies, 0.5),
       consolidationP95Ms: percentile(consolidationLatencies, 0.95),
       logicalWriteBytesLowerBound: logicalFrontierBytes + nodePayloadBytes,
-      diskBytes: directorySize(path),
+      disk: { liveAfterRuntimeFlush: liveDisk, afterClose: closedDisk, afterReopen: reopenedDisk },
       historicalMaterializationP50Ms: percentile(historicalReads, 0.5),
       finalPatchCount: snapshot.patchCount,
     };
   } finally {
     await context.shutdown().catch(() => undefined);
     rmSync(path, { recursive: true, force: true });
+    rmSync(restartPath, { recursive: true, force: true });
   }
 }
 
