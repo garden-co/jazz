@@ -853,6 +853,38 @@ fn append_base_leaves(
 mod tests {
     use super::*;
     use crate::content_manifest::MemoryImmutableContentStore;
+    use std::cell::Cell;
+    struct CountingStore {
+        inner: MemoryImmutableContentStore,
+        reads: Cell<usize>,
+    }
+    impl CountingStore {
+        fn new() -> Self {
+            Self {
+                inner: MemoryImmutableContentStore::default(),
+                reads: Cell::new(0),
+            }
+        }
+        fn reads(&self) -> usize {
+            self.reads.get()
+        }
+        fn reset(&self) {
+            self.reads.set(0);
+        }
+    }
+    impl ImmutableContentStore for CountingStore {
+        fn get(&self, context: ContentReadContext, id: ContentId) -> Option<&[u8]> {
+            self.reads.set(self.reads.get() + 1);
+            self.inner.get(context, id)
+        }
+        fn put_if_absent_or_identical(
+            &mut self,
+            address: ContentAddress<'_>,
+            bytes: Vec<u8>,
+        ) -> Result<ContentId, ManifestError> {
+            self.inner.put_if_absent_or_identical(address, bytes)
+        }
+    }
     struct CorruptStore;
     impl ImmutableContentStore for CorruptStore {
         fn get(&self, _context: ContentReadContext, _id: ContentId) -> Option<&[u8]> {
@@ -1038,6 +1070,58 @@ mod tests {
             a.materialize(&merged, &MaterializationRequest::Full, context, &store)
                 .unwrap(),
             b"XabYd"
+        );
+    }
+    #[test]
+    fn tail_range_and_consolidation_keep_unaffected_leaves_structural() {
+        let mut store = CountingStore::new();
+        let a = FileContentAdapter;
+        let context = ctx(1);
+        let source: Vec<u8> = (0..LEAF_BYTES * 9).map(|i| (i % 251) as u8).collect();
+        let root = a.store_bytes(&source, context, &mut store).unwrap();
+        let manifest = ContentManifest {
+            root,
+            edit_tail: vec![FileContentAdapter::encode_edit(&FileEdit::Overwrite {
+                offset: 4_100,
+                delete: 2,
+                bytes: b"XY".to_vec(),
+            })],
+        };
+        store.reset();
+        assert_eq!(
+            a.materialize(
+                &manifest,
+                &MaterializationRequest::Range {
+                    offset: 32_000,
+                    length: 16
+                },
+                context,
+                &store,
+            )
+            .unwrap(),
+            source[32_000..32_016]
+        );
+        // root-length + the selected root/node/leaf branch. A full walk reads
+        // all nine leaves (at least eleven objects), so this plant is sensitive
+        // to restoring the old full-materialization implementation.
+        assert!(store.reads() <= 5, "unexpected full-tree range hydration");
+        let before = collect_leaves(root, context, &store).unwrap();
+        let compact = a.consolidate(&manifest, context, &mut store).unwrap();
+        let after = collect_leaves(compact.root, context, &store).unwrap();
+        assert_eq!(before[0].0, after[0].0);
+        assert!(after.iter().any(|(id, _)| *id == before[8].0));
+        assert_eq!(
+            a.materialize(
+                &compact,
+                &MaterializationRequest::Range {
+                    offset: 32_000,
+                    length: 16
+                },
+                context,
+                &store
+            )
+            .unwrap(),
+            source[32_000..32_016]
         );
     }
 }
