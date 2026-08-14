@@ -5,6 +5,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
+use std::time::Instant;
 
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
@@ -17,7 +18,7 @@ const HISTORY: &str = "history";
 const PARTS: &str = "parts";
 const NODES: &str = "nodes";
 const FANOUT: usize = 32;
-const INLINE_TAIL_BYTES: usize = 64 * 1024;
+const INLINE_TAIL_CAPS: [usize; 6] = [64, 128, 256, 512, 1_024, 64 * 1_024];
 
 #[derive(Clone, Copy, Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -46,9 +47,18 @@ struct DiskBytes {
     allocated: Option<u64>,
 }
 
+#[derive(Clone, Copy, Debug, Serialize)]
+struct WriteLatencyMicros {
+    total: u64,
+    p50: u64,
+    p95: u64,
+    max: u64,
+}
+
 #[derive(Debug, Serialize)]
 struct Receipt {
     layout: Layout,
+    inline_tail_bytes: usize,
     payload_kind: PayloadKind,
     appends: usize,
     append_bytes: usize,
@@ -62,12 +72,16 @@ struct Receipt {
     empty_store: DiskBytes,
     before_memtable_flush: DiskBytes,
     after_memtable_flush: DiskBytes,
+    after_memtable_flush_increment: DiskBytes,
     after_full_compaction: DiskBytes,
+    after_full_compaction_increment: DiskBytes,
+    write_latency_micros: WriteLatencyMicros,
 }
 
 struct Writer<'a> {
     db: &'a DB,
     layout: Layout,
+    inline_tail_bytes: usize,
     nodes: BTreeMap<u64, Node>,
     next_id: u64,
     root: Option<u64>,
@@ -80,10 +94,11 @@ struct Writer<'a> {
 }
 
 impl<'a> Writer<'a> {
-    fn new(db: &'a DB, layout: Layout) -> Self {
+    fn new(db: &'a DB, layout: Layout, inline_tail_bytes: usize) -> Self {
         Self {
             db,
             layout,
+            inline_tail_bytes,
             nodes: BTreeMap::new(),
             next_id: 1,
             root: None,
@@ -109,7 +124,7 @@ impl<'a> Writer<'a> {
             }
             Layout::PersistentTreeInlineTail => {
                 self.tail.extend_from_slice(bytes);
-                if self.tail.len() > INLINE_TAIL_BYTES {
+                if self.tail.len() > self.inline_tail_bytes {
                     let consolidated = std::mem::take(&mut self.tail);
                     let length = consolidated.len() as u64;
                     let part = self.write_part(&mut batch, &consolidated);
@@ -257,15 +272,24 @@ fn main() {
             (short_appends, 1_024),
             (large_appends, 64 * 1024),
         ] {
-            for layout in [
-                Layout::Flat,
-                Layout::PersistentTree,
-                Layout::PersistentTreeInlineTail,
-            ] {
+            for (layout, inline_tail_bytes) in [(Layout::Flat, 0), (Layout::PersistentTree, 0)]
+                .into_iter()
+                .chain(
+                    INLINE_TAIL_CAPS
+                        .into_iter()
+                        .map(|cap| (Layout::PersistentTreeInlineTail, cap)),
+                )
+            {
                 println!(
                     "{}",
-                    serde_json::to_string(&measure(layout, payload_kind, appends, append_bytes))
-                        .expect("serialize receipt")
+                    serde_json::to_string(&measure(
+                        layout,
+                        inline_tail_bytes,
+                        payload_kind,
+                        appends,
+                        append_bytes,
+                    ))
+                    .expect("serialize receipt")
                 );
             }
         }
@@ -274,6 +298,7 @@ fn main() {
 
 fn measure(
     layout: Layout,
+    inline_tail_bytes: usize,
     payload_kind: PayloadKind,
     appends: usize,
     append_bytes: usize,
@@ -282,9 +307,13 @@ fn measure(
     let db = open_db(dir.path());
     flush_and_compact(&db);
     let empty_store = disk_bytes(dir.path());
-    let mut writer = Writer::new(&db, layout);
+    let mut writer = Writer::new(&db, layout, inline_tail_bytes);
+    let mut write_latencies = Vec::with_capacity(appends);
     for ordinal in 0..appends {
-        writer.append(ordinal, &payload(payload_kind, ordinal, append_bytes));
+        let bytes = payload(payload_kind, ordinal, append_bytes);
+        let started = Instant::now();
+        writer.append(ordinal, &bytes);
+        write_latencies.push(started.elapsed().as_micros() as u64);
     }
     db.flush_wal(true).expect("flush WAL before measuring");
     let before_memtable_flush = disk_bytes(dir.path());
@@ -298,6 +327,7 @@ fn measure(
         .unwrap_or(0);
     Receipt {
         layout,
+        inline_tail_bytes,
         payload_kind,
         appends,
         append_bytes,
@@ -311,8 +341,36 @@ fn measure(
         empty_store,
         before_memtable_flush,
         after_memtable_flush,
+        after_memtable_flush_increment: subtract_disk_bytes(after_memtable_flush, empty_store),
         after_full_compaction,
+        after_full_compaction_increment: subtract_disk_bytes(after_full_compaction, empty_store),
+        write_latency_micros: summarize_latencies(&mut write_latencies),
     }
+}
+
+fn subtract_disk_bytes(total: DiskBytes, baseline: DiskBytes) -> DiskBytes {
+    DiskBytes {
+        apparent: total.apparent.saturating_sub(baseline.apparent),
+        allocated: total
+            .allocated
+            .zip(baseline.allocated)
+            .map(|(total, baseline)| total.saturating_sub(baseline)),
+    }
+}
+
+fn summarize_latencies(latencies: &mut [u64]) -> WriteLatencyMicros {
+    latencies.sort_unstable();
+    WriteLatencyMicros {
+        total: latencies.iter().sum(),
+        p50: percentile(latencies, 50),
+        p95: percentile(latencies, 95),
+        max: latencies.last().copied().unwrap_or_default(),
+    }
+}
+
+fn percentile(sorted: &[u64], percentile: usize) -> u64 {
+    let index = sorted.len().saturating_sub(1).saturating_mul(percentile) / 100;
+    sorted.get(index).copied().unwrap_or_default()
 }
 
 fn open_db(path: &Path) -> DB {
