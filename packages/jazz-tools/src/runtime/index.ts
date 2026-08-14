@@ -37,6 +37,24 @@ export {
 } from "./db.js";
 export type { AuthFailureReason, AuthState } from "./auth-state.js";
 export {
+  createConventionalStreamStorage,
+  DEFAULT_STREAM_INLINE_TAIL_BYTES,
+  DEFAULT_STREAM_TREE_FANOUT,
+  InvalidStreamDataError,
+  MAX_STREAM_PART_BYTES,
+  StreamNotFoundError,
+  type AppendStreamOptions,
+  type ConventionalStreamApp,
+  type CreateStreamOptions,
+  type ReadStreamOptions,
+  type StreamNodeRow,
+  type StreamPartRow,
+  type StreamRow,
+  type StreamSnapshot,
+  type StreamStorage,
+  type StreamStorageOptions,
+} from "./stream-storage.js";
+export {
   fetchStoredPermissions,
   fetchSchemaHashes,
   fetchStoredWasmSchema,
