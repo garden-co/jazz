@@ -6,10 +6,7 @@
 //! mutable identity and every historical row version already retains a complete
 //! text snapshot.
 
-use std::{
-    collections::BTreeMap,
-    sync::{Arc, OnceLock},
-};
+use std::collections::BTreeMap;
 
 use crate::content_manifest::{
     ContentAddress, ContentDomainId, ContentId, ContentManifest, ContentManifestAdapter,
@@ -235,23 +232,24 @@ impl TextContentAdapter {
 
     fn build_balanced(
         &self,
-        mut level: Vec<Rope>,
+        mut nodes: Vec<Rope>,
         domain: ContentDomainId,
         store: &mut dyn ImmutableContentStore,
     ) -> Result<Rope, ManifestError> {
-        debug_assert!(!level.is_empty());
-        while level.len() > 1 {
-            let mut next = Vec::with_capacity(level.len().div_ceil(2));
-            let mut entries = level.into_iter();
-            while let Some(left) = entries.next() {
-                match entries.next() {
-                    Some(right) => next.push(self.store_branch(left, right, domain, store)?),
-                    None => next.push(left),
-                }
-            }
-            level = next;
+        if nodes.is_empty() {
+            return Err(ManifestError::Malformed);
         }
-        Ok(level.pop().expect("nonempty text rope"))
+        if nodes.len() == 1 {
+            return Ok(nodes.pop().expect("one text rope node"));
+        }
+        // Splitting by count, recursively, guarantees the two child heights
+        // differ by at most one for every leaf count. Pairing successive levels
+        // leaves a five-leaf tree as [height 3, height 1], which its own reader
+        // correctly rejects.
+        let right = nodes.split_off(nodes.len() / 2);
+        let left = self.build_balanced(nodes, domain, store)?;
+        let right = self.build_balanced(right, domain, store)?;
+        self.store_branch(left, right, domain, store)
     }
 
     fn store_leaf(
@@ -481,17 +479,6 @@ impl TextContentAdapter {
         }
         Ok(text)
     }
-}
-
-/// Register the production `text-v1` adapter through the process-wide
-/// foundation registry. Registration is append-only and idempotent.
-pub fn register_text_content_adapter() -> Result<Arc<TextContentAdapter>, ManifestError> {
-    static ADAPTER: OnceLock<Arc<TextContentAdapter>> = OnceLock::new();
-    let adapter = ADAPTER
-        .get_or_init(|| Arc::new(TextContentAdapter::default()))
-        .clone();
-    crate::content_manifest::global_content_manifest_adapters().register(adapter.clone())?;
-    Ok(adapter)
 }
 
 impl Default for TextContentAdapter {
@@ -810,7 +797,7 @@ mod tests {
         schema::{ColumnSchema, JazzSchema, TableSchema},
     };
     use groove::{records::Value, schema::ColumnType, storage::MemoryStorage};
-    use std::collections::BTreeSet;
+    use std::{collections::BTreeSet, sync::Arc};
 
     #[derive(Default)]
     struct CountingStore {
@@ -1007,8 +994,31 @@ mod tests {
             Rope::Leaf { .. } => panic!("fixture must remain multi-leaf"),
         };
         assert_eq!(new_left, old_left, "untouched left subtree must be reused");
-        assert_eq!(store.puts, 3, "one leaf, one path node, and one root");
-        assert_eq!(store.ids.len(), 3);
+        assert_eq!(
+            store.puts, 4,
+            "one leaf, two path nodes, and one root wrapper"
+        );
+        assert_eq!(store.ids.len(), 4);
+    }
+
+    #[test]
+    fn balanced_builder_round_trips_adversarial_leaf_counts() {
+        let adapter = TextContentAdapter::default();
+        let mut store = MemoryImmutableContentStore::default();
+        for leaf_count in [1usize, 2, 3, 4, 5, 6, 7, 9, 10, 17, 31, 33, 65] {
+            let byte_length = if leaf_count == 1 {
+                1
+            } else {
+                (leaf_count - 1) * TEXT_MAX_LEAF_BYTES + 1
+            };
+            let value = "x".repeat(byte_length);
+            let manifest = adapter.create(&value, context(), &mut store).unwrap();
+            assert_eq!(
+                text(&adapter, &manifest, &store),
+                value,
+                "leaf count {leaf_count} must create a reader-valid AVL rope"
+            );
+        }
     }
 
     fn store_raw(
@@ -1146,8 +1156,15 @@ mod tests {
 
     #[test]
     fn registered_text_schema_runs_through_node_materialize_merge_and_index_seams() {
-        let registered = register_text_content_adapter().unwrap();
-        let manifest_schema = registered.schema().clone();
+        let writer = TextContentAdapter::default();
+        let manifest_schema = writer.schema().clone();
+        // No adapter registration call precedes this lookup: `text-v1` is a
+        // production built-in installed while the global registry is created.
+        assert!(
+            global_content_manifest_adapters()
+                .get(TEXT_ADAPTER_KIND)
+                .is_ok()
+        );
         let column = ColumnSchema::content_manifest("body", manifest_schema.clone());
         let schema = JazzSchema::new([TableSchema::new(
             "documents",
@@ -1157,13 +1174,11 @@ mod tests {
             ],
         )]);
         let mut store = MemoryImmutableContentStore::default();
-        let base = registered.create("root", context(), &mut store).unwrap();
-        let tailed = registered
+        let base = writer.create("root", context(), &mut store).unwrap();
+        let tailed = writer
             .insert(&base, 4, " tail", context(), &mut store)
             .unwrap();
-        let equivalent = registered
-            .create("root tail", context(), &mut store)
-            .unwrap();
+        let equivalent = writer.create("root tail", context(), &mut store).unwrap();
         let tailed_value = Value::Bytes(tailed.encode(&manifest_schema).unwrap());
         let equivalent_value = Value::Bytes(equivalent.encode(&manifest_schema).unwrap());
 

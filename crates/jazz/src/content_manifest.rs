@@ -411,7 +411,13 @@ impl ContentManifestAdapterRegistry {
 /// races with node/query worker threads.
 pub fn global_content_manifest_adapters() -> &'static ContentManifestAdapterRegistry {
     static REGISTRY: OnceLock<ContentManifestAdapterRegistry> = OnceLock::new();
-    REGISTRY.get_or_init(ContentManifestAdapterRegistry::default)
+    REGISTRY.get_or_init(|| {
+        let registry = ContentManifestAdapterRegistry::default();
+        registry
+            .register(Arc::new(crate::text_content::TextContentAdapter::default()))
+            .expect("built-in text content adapter registers exactly once");
+        registry
+    })
 }
 
 /// Validate adapter-specific schema limits when the adapter is built in or has
