@@ -31,7 +31,8 @@ benchmarked before claiming efficient arbitrary large-file insertion.
 A `FileRow` input is reloaded by id, so it always reads the current head. Only
 `FileSnapshot` is a historical object. Nodes and parts should be policy-locked
 to `select` plus `insert` (with the same owner/tenant isolation as the root),
-never update/delete. Current range reads validate and materialize the reachable
+and explicitly set both `update` and `delete` to `False`; omission is
+permissive. Current range reads validate and materialize the reachable
 file before slicing; that is correct but not the final large-range I/O path.
 
 ## Native RocksDB receipt
