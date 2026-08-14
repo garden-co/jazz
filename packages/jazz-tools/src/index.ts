@@ -223,7 +223,6 @@ export * from "./runtime/index.js";
 
 // Permissions DSL
 export * from "./permissions/index.js";
-export * from "./dev-tools/index.js";
 // Inspector overlay host contract (types + global) and the host bridge that
 // publishes the handle for the same-origin overlay iframe.
 export * from "./dev/inspector-overlay/inspector-host-types.js";
