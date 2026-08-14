@@ -12024,6 +12024,14 @@ fn authoritative_reset_rebuilds_occurrence_sidecar_after_order_and_count_change(
         reset,
         SubscriptionEvent::Delta { reset: true, .. }
     ));
+    let SubscriptionEvent::Delta { added, .. } = &reset else {
+        unreachable!("reset was checked above");
+    };
+    assert_eq!(
+        added.iter().map(|row| row.row_uuid()).collect::<Vec<_>>(),
+        vec![last, first],
+        "the reset wire payload must preserve the maintained snapshot order"
+    );
 
     let state = subscription._state.borrow();
     let SubscriptionKind::Prepared {

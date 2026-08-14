@@ -27,6 +27,11 @@ const allowAllPermissions = s.definePermissions(app, ({ policy }) => [
 
 const PENDING_ASSERTION_MS = 750;
 const LOCAL_OPERATION_TIMEOUT_MS = 2_000;
+// Persistent browser Db creation crosses the OPFS worker boundary. The
+// reconnect test still verifies this is a local-only read, but a CI worker
+// under the full browser suite needs a startup budget distinct from the
+// steady-state local-read responsiveness budget above.
+const WORKER_STARTUP_OPERATION_TIMEOUT_MS = 5_000;
 const SYNC_OPERATION_TIMEOUT_MS = 10_000;
 
 type DbFactory = (
@@ -151,7 +156,7 @@ describe("Db disconnect/reconnect", () => {
           localUpdates: "immediate",
           propagation: "local-only",
         }),
-        LOCAL_OPERATION_TIMEOUT_MS,
+        WORKER_STARTUP_OPERATION_TIMEOUT_MS,
         "worker mode: peer local read before reconnect did not resolve",
       );
       expect(peerRowsBeforeReconnect).toEqual([]);

@@ -174,7 +174,17 @@ pub(super) enum RehydratePurpose {
     AuthorizationSupport,
 }
 
-type RowKey = OutputOccurrenceId;
+/// One physical row emitted for a rendered output occurrence.
+///
+/// A terminal root and each of its included children deliberately share the
+/// root occurrence address, but they must keep independent contribution
+/// lifetimes.  The physical table/row identity therefore belongs in the
+/// delivery index as well as the occurrence.
+pub(super) type RowKey = (
+    OutputOccurrenceId,
+    groove::Intern<String>,
+    super::super::ids::RowUuid,
+);
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) enum MemberIndexKey {

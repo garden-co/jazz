@@ -220,6 +220,63 @@ describe("SubscriptionManager", () => {
     expect(manager.size).toBe(2);
   });
 
+  it("keeps an identical bigint and binary update at its retained index", () => {
+    type EdgeItem = {
+      id: string;
+      count: bigint;
+      bytes: Uint8Array;
+      missing?: undefined;
+      nan: number;
+    };
+    const manager = new SubscriptionManager<EdgeItem>();
+    const transformEdge = (row: WasmRow): EdgeItem => ({
+      id: row.id,
+      count: 1n,
+      bytes: Uint8Array.of(7, 8),
+      missing: undefined,
+      nan: Number.NaN,
+    });
+    manager.handleDelta(
+      makeDelta([
+        { kind: 0, id: "A", index: 0, row: makeRow("A", "A", 1) },
+        { kind: 0, id: "B", index: 1, row: makeRow("B", "B", 2) },
+      ]),
+      transformEdge,
+    );
+    const result = manager.handleDelta(
+      makeDelta([{ kind: 2, id: "B", index: 0, row: makeRow("B", "B", 2) }]),
+      transformEdge,
+    );
+
+    expect(result.delta).toMatchObject([{ kind: 2, id: "B", index: 1 }]);
+    expect(result.all?.map((item) => item.id)).toEqual(["A", "B"]);
+  });
+
+  it("reports an identical update at its final index after same-frame inserts", () => {
+    const manager = new SubscriptionManager<TestItem>();
+    manager.handleDelta(
+      makeDelta([
+        { kind: 0, id: "A", index: 0, row: makeRow("A", "A", 1) },
+        { kind: 0, id: "B", index: 1, row: makeRow("B", "B", 2) },
+      ]),
+      transform,
+    );
+
+    const result = manager.handleDelta(
+      makeDelta([
+        { kind: 0, id: "C", index: 0, row: makeRow("C", "C", 3) },
+        { kind: 2, id: "B", index: 0, row: makeRow("B", "B", 2) },
+      ]),
+      transform,
+    );
+
+    expect(result.delta).toMatchObject([
+      { kind: 0, id: "C", index: 0 },
+      { kind: 2, id: "B", index: 2 },
+    ]);
+    expect(result.all?.map((item) => item.id)).toEqual(["C", "A", "B"]);
+  });
+
   it("decodes native subscription additions", () => {
     const manager = new SubscriptionManager<TestItem>();
     const id = "00000000-0000-4000-8000-000000000001";
@@ -1534,21 +1591,7 @@ describe("SubscriptionManager", () => {
       };
     };
 
-    manager.handleDelta(
-      {
-        __jazzNativeRowDelta: true,
-        added: nativeAddedRawRecord(rootId, 0, nativeRootWithEmptyChildren("root")),
-        removed: new Uint8Array(),
-        updated: new Uint8Array(),
-        addedCount: 1,
-        removedCount: 0,
-        updatedCount: 0,
-      },
-      transformIncluded,
-      rootColumns,
-    );
-
-    const result = manager.handleDelta(
+    const deferred = manager.handleDelta(
       {
         __jazzNativeRowDelta: true,
         added: new Uint8Array(),
@@ -1570,6 +1613,21 @@ describe("SubscriptionManager", () => {
             },
           },
         ],
+      },
+      transformIncluded,
+      rootColumns,
+    );
+    expect(deferred.all).toEqual([]);
+
+    const result = manager.handleDelta(
+      {
+        __jazzNativeRowDelta: true,
+        added: nativeAddedRawRecord(rootId, 0, nativeRootWithEmptyChildren("root")),
+        removed: new Uint8Array(),
+        updated: new Uint8Array(),
+        addedCount: 1,
+        removedCount: 0,
+        updatedCount: 0,
       },
       transformIncluded,
       rootColumns,

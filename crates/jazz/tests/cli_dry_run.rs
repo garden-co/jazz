@@ -836,8 +836,8 @@ fn websocket_reconnect_resets_structured_terminal_before_live_patches() {
     };
     assert!(reset);
     assert!(
-        added.is_empty(),
-        "reset state arrives through version carriers"
+        !added.is_empty(),
+        "a structured reset publishes its authoritative root relation"
     );
     assert!(terminal_operations.is_empty());
     while subscription.next().now_or_never().flatten().is_some() {}

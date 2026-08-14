@@ -310,6 +310,7 @@ fn worker_relay_forwards_authority_fate_to_browser_client() {
         )
         .expect("insert relayed todo");
     let tx_id = write.mergeable_tx_id();
+    let row = write.row_uuid();
 
     let global_wait = Rc::new(Cell::new(None));
     let observed_wait = Rc::clone(&global_wait);
@@ -375,6 +376,32 @@ fn worker_relay_forwards_authority_fate_to_browser_client() {
         event,
         SubscriptionEvent::Delta { added, .. } if added.len() == 1
     )));
+
+    // A second mutation after the relay has installed Edge coverage must make
+    // the full main -> worker -> core -> worker -> main round trip without
+    // re-entering the worker's current-row projection.
+    let update = main_thread
+        .update(
+            "todos",
+            row,
+            BTreeMap::from([("title".to_owned(), Value::String("relay update".to_owned()))]),
+        )
+        .expect("update through settled relay");
+    let update_tx = update.mergeable_tx_id();
+    main_thread.tick().expect("upload update to worker");
+    worker.tick().expect("persist and forward update");
+    core.tick().expect("accept update at core");
+    worker.tick().expect("forward update fate");
+    main_thread.tick().expect("apply update fate");
+    assert_eq!(
+        main_thread
+            .write_state(update_tx)
+            .expect("updated global state"),
+        jazz::db::WriteState {
+            fate: Fate::Accepted,
+            durability: DurabilityTier::Global,
+        }
+    );
 }
 
 /// A fresh main-thread Db hydrates its application-owned subscription from the

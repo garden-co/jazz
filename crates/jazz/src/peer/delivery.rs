@@ -5,6 +5,8 @@
 //! protocol message details emitted from it.
 
 use super::*;
+#[cfg(debug_assertions)]
+use crate::tools::OutputOccurrenceId;
 
 pub(super) fn maintained_view_update_is_empty(
     result_member_adds: &[ResultMemberEntry],
@@ -21,7 +23,12 @@ pub(super) fn maintained_view_update_is_empty(
 }
 
 fn member_row_key(member: &ResultMemberEntry) -> Option<RowKey> {
-    member.output_occurrence_id()
+    let row = member.as_real_row()?;
+    Some((
+        member.output_occurrence_id()?,
+        row.table.clone(),
+        row.row_uuid,
+    ))
 }
 
 fn member_index_key(member: &ResultMemberEntry) -> MemberIndexKey {
@@ -37,8 +44,39 @@ fn member_index_key(member: &ResultMemberEntry) -> MemberIndexKey {
     }
 }
 
-fn member_content_tx(member: &ResultMemberEntry) -> Option<TxId> {
-    member.as_row().map(|(_, _, tx_id)| tx_id)
+pub(super) fn result_member_replaces(
+    replacement: &ResultMemberEntry,
+    previous: &ResultMemberEntry,
+) -> bool {
+    if member_index_key(replacement) != member_index_key(previous) || replacement == previous {
+        return false;
+    }
+    match (replacement.as_row(), previous.as_row()) {
+        (
+            Some((replacement_table, replacement_row, _)),
+            Some((previous_table, previous_row, _)),
+        ) => replacement_table == previous_table && replacement_row == previous_row,
+        _ => matches!(replacement, ResultMemberEntry::Synthetic { .. }),
+    }
+}
+
+pub(super) fn replacement_removals(
+    previous: &PeerSubscriptionState,
+    additions: &[ResultMemberEntry],
+) -> Vec<ResultMemberEntry> {
+    additions
+        .iter()
+        .filter_map(|added| {
+            previous
+                .member_index
+                .get(&member_index_key(added))
+                .map(|slot| &slot.member)
+                .filter(|old| result_member_replaces(added, old))
+        })
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 pub(super) fn filter_program_facts_for_result_table(
@@ -72,30 +110,13 @@ pub(super) fn apply_contribution_add<'a>(
         let key = member_index_key(member);
         match state.member_index.get_mut(&key) {
             Some(slot) if slot.member == *member => slot.refcount += 1,
-            Some(slot)
-                if member_content_tx(member)
-                    .zip(member_content_tx(&slot.member))
-                    .is_some_and(|(new_tx, old_tx)| new_tx > old_tx) =>
-            {
+            Some(slot) if result_member_replaces(member, &slot.member) => {
                 let old_member = slot.member.clone();
                 result_member_removes.push(old_member.clone());
                 result_member_adds.push(member.clone());
                 state.result_member_set.remove(&old_member);
                 state.result_member_set.insert(member.clone());
                 slot.member = member.clone();
-                slot.refcount += 1;
-            }
-            Some(slot)
-                if slot.member != *member
-                    && matches!(member, ResultMemberEntry::Synthetic { .. }) =>
-            {
-                let old_member = slot.member.clone();
-                result_member_removes.push(old_member.clone());
-                result_member_adds.push(member.clone());
-                state.result_member_set.remove(&old_member);
-                state.result_member_set.insert(member.clone());
-                slot.member = member.clone();
-                slot.refcount += 1;
             }
             Some(slot) => slot.refcount += 1,
             None => {
@@ -135,19 +156,23 @@ pub(super) fn apply_contribution_remove<'a>(
 }
 
 #[cfg(debug_assertions)]
-pub(super) fn duplicate_output_occurrence_result_set(
+pub(super) fn duplicate_physical_row_result_set(
     result_set: &BTreeSet<ResultMemberEntry>,
-) -> Option<(OutputOccurrenceId, TxId, TxId)> {
+) -> Option<(
+    (OutputOccurrenceId, groove::Intern<String>, RowUuid),
+    TxId,
+    TxId,
+)> {
     let mut rows = BTreeMap::new();
     for member in result_set {
-        let Some(occurrence_id) = member.output_occurrence_id() else {
+        let Some(row_key) = member_row_key(member) else {
             continue;
         };
         let Some((_, _, tx_id)) = member.as_row() else {
             continue;
         };
-        if let Some(first) = rows.insert(occurrence_id.clone(), tx_id) {
-            return Some((occurrence_id, first, tx_id));
+        if let Some(first) = rows.insert(row_key.clone(), tx_id) {
+            return Some((row_key, first, tx_id));
         }
     }
     None

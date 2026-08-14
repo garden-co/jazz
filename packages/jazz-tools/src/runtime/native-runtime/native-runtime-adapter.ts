@@ -967,6 +967,7 @@ export class NativeRuntimeAdapter implements Runtime {
     }
     const query = this.prepareQuery(coreQueryJson);
     const attachment = await this.attachQueryIfNeeded(tier, optionsJson, query, session);
+    if (this.closed) return [];
     this.attachLocalReadCoverageInBackground(tier, optionsJson, query, session);
     try {
       if (queryHasArraySubqueries(coreQueryJson)) {
@@ -1000,12 +1001,13 @@ export class NativeRuntimeAdapter implements Runtime {
       let rowStates = rowsFromBatches(readRowBatches(rows), this.schema);
       if (!pendingTx && (tier === "edge" || tier === "global") && rowStates.length > 0) {
         await this.refreshRowsFromEdge(session, rowStates);
+        if (this.closed) return [];
         rows = this.readPlainRows(query, opts, session ?? undefined, pendingTx);
         rowStates = rowsFromBatches(readRowBatches(rows), this.schema);
       }
       return rowStates;
     } finally {
-      if (attachment !== undefined) this.db.detachQuery?.(attachment);
+      if (attachment !== undefined && !this.closed) this.db.detachQuery?.(attachment);
     }
   }
 
@@ -1405,10 +1407,11 @@ export class NativeRuntimeAdapter implements Runtime {
       let attachment: unknown;
       try {
         attachment = await this.attachQueryIfNeeded("edge", null, query, session);
+        if (this.closed) return;
         const opts = readOptions("edge", false, null);
         this.readRowsForHost(query, opts, session?.identity);
       } finally {
-        if (attachment !== undefined) this.db.detachQuery?.(attachment);
+        if (attachment !== undefined && !this.closed) this.db.detachQuery?.(attachment);
       }
     }
   }
@@ -1434,6 +1437,7 @@ export class NativeRuntimeAdapter implements Runtime {
     query: PreparedQuery,
     session: RuntimeSession | null,
   ): Promise<unknown | undefined> {
+    if (this.closed) return;
     if (tier == null || (tier === "local" && !this.nonDurableClient)) return;
     if (!readPropagationIsFull(optionsJson) && !this.nonDurableClient) return;
     if (!this.hasUpstream()) return;
@@ -1478,9 +1482,10 @@ export class NativeRuntimeAdapter implements Runtime {
 
     const refresh = async () => {
       await this.serverCarrierPromise;
+      if (this.closed) return;
       const edgeOptionsJson = JSON.stringify({ propagation: "full" });
       const attachment = await this.attachQueryIfNeeded("edge", edgeOptionsJson, query, session);
-      if (attachment !== undefined) this.db.detachQuery?.(attachment);
+      if (attachment !== undefined && !this.closed) this.db.detachQuery?.(attachment);
     };
 
     void refresh().catch((error: unknown) => {
@@ -1507,6 +1512,11 @@ export class NativeRuntimeAdapter implements Runtime {
     const deadline = Date.now() + 15_000;
     const tier = (opts as { tier?: string }).tier ?? "";
     while (Date.now() < deadline) {
+      // A query can still be waiting for an upstream coverage response while
+      // its owning browser runtime is being torn down. `close()` frees the
+      // WASM Db, so this background wait must not touch its attachment after
+      // that boundary.
+      if (this.closed) return;
       this.throwServerTransportErrorForTier(tier);
       this.pumpServerTransport();
       this.throwServerTransportErrorForTier(tier);
@@ -1744,6 +1754,7 @@ export class NativeRuntimeAdapter implements Runtime {
       this.failSubscription(subscription, subscriptionRejectionError(chunk.reason));
       return;
     }
+    if (chunk.type === "delta" && chunk.publishable === false) return;
     if (chunk.type === "snapshot") {
       const previousRows = subscription.rows;
       const wasOpened = subscription.opened;
@@ -4279,6 +4290,7 @@ function normalizeSubscriptionChunk(chunk: unknown):
       terminalOperations?: NativeTerminalOperation[];
       terminalLayouts?: NativeTerminalRootLayout[];
       settled?: boolean;
+      publishable?: boolean;
     }
   | {
       type: "rejected";
@@ -4296,6 +4308,7 @@ function normalizeSubscriptionChunk(chunk: unknown):
     reason?: unknown;
     reset?: unknown;
     settled?: unknown;
+    publishable?: unknown;
     terminalOperations?: unknown;
     terminalLayouts?: unknown;
   };
@@ -4323,6 +4336,7 @@ function normalizeSubscriptionChunk(chunk: unknown):
         ? (record.terminalLayouts as NativeTerminalRootLayout[])
         : undefined,
       settled: typeof record.settled === "boolean" ? record.settled : undefined,
+      publishable: typeof record.publishable === "boolean" ? record.publishable : undefined,
     };
   }
   if (record.type === "rejected" || record.type === "Rejected") {

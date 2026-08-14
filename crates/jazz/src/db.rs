@@ -2147,7 +2147,9 @@ where
             upstream_subscription_handles = opened.handles;
             suppress_provisional_opening = authorization_mode
                 == QueryAuthorizationMode::ClientLocal
-                && opened.awaits_initial_authority_response;
+                && opened.awaits_initial_authority_response
+                && snapshot.root_count == 0
+                && snapshot.edges.is_empty();
         }
         let settled_tier = remote_read_tier.unwrap_or(read_tier);
         if authorization_mode == QueryAuthorizationMode::ClientLocal
@@ -6100,6 +6102,8 @@ where
         }
         let (snapshot, snapshot_source, settled, snapshot_tier, force_reset_event) = {
             let mut state_ref = state.borrow_mut();
+            let local_snapshot_is_empty =
+                state_ref.snapshot.root_count == 0 && state_ref.snapshot.edges.is_empty();
             match &mut state_ref.kind {
                 SubscriptionKind::Prepared {
                     shape,
@@ -6183,26 +6187,21 @@ where
                         && node.borrow().authored_commit_durability() == DurabilityTier::None
                         && remote_read_tier.is_some()
                         && shape.query().aggregate.is_none();
-                    // A main-thread browser Db has no durable storage of its
-                    // own. A worker reset is authoritative unless this
-                    // subscription's author still has optimistic commits that
-                    // are not Global/authority-settled. In that case the
-                    // maintained view keeps the local overlay until its
-                    // authority generation advances. Avoid the pending-history
-                    // lookup on ordinary refreshes that have no reset to apply.
-                    let has_pending_local_overlay = if authoritative_reset_pending
-                        && reconciles_remote_authoritative_membership
-                    {
-                        let mut node_ref = node.borrow_mut();
-                        let node_id = node_ref.node_uuid();
-                        !node_ref
-                            .pending_transaction_ids_for(node_id, author)?
-                            .is_empty()
-                    } else {
-                        false
-                    };
-                    let authoritative_reset =
-                        authoritative_reset_pending && !has_pending_local_overlay;
+                    // A main-thread browser Db is an optimistic overlay, so
+                    // its worker's durable baseline must reconcile through
+                    // the maintained view. Fate bookkeeping can advance
+                    // before that worker has incorporated every overlay row;
+                    // using a pending-transaction scan here would therefore
+                    // allow a stale reset to reorder or erase live rows.
+                    // The first authority handoff still needs to be an
+                    // explicit relation replacement: there is no local
+                    // overlay to preserve, and consumers use the reset as the
+                    // boundary at which an initially provisional relation
+                    // becomes authoritative. Once a local relation exists,
+                    // reconcile the worker baseline through the maintained
+                    // view so it cannot erase an optimistic overlay.
+                    let authoritative_reset = authoritative_reset_pending
+                        && (!reconciles_remote_authoritative_membership || local_snapshot_is_empty);
                     if authoritative_reset && terminal_rows {
                         let Some(maintained) = maintained_subscription.as_mut() else {
                             return Err(Error::new(
@@ -12166,9 +12165,9 @@ fn subscription_delta_event(
     settled: bool,
     previous: &RelationSnapshot,
     current: &RelationSnapshot,
-    _terminal_rows: bool,
+    terminal_rows: bool,
 ) -> SubscriptionEvent {
-    subscription_delta_event_with_reset(tier, settled, previous, current, false, _terminal_rows)
+    subscription_delta_event_with_reset(tier, settled, previous, current, false, terminal_rows)
 }
 
 /// Publishes an ordered terminal as a root-addressed suffix splice.
@@ -12235,6 +12234,27 @@ fn subscription_delta_event_with_reset(
     reset: bool,
     _terminal_rows: bool,
 ) -> SubscriptionEvent {
+    // A reset is a complete ordered snapshot.  Re-keying it through the
+    // occurrence BTreeMap below would sort by identity and silently discard
+    // the maintained query order (for example `order_by rank`).
+    if reset {
+        return SubscriptionEvent::Delta {
+            reset: true,
+            publishable: true,
+            added: current
+                .rows
+                .iter()
+                .cloned()
+                .map(subscription_output_row)
+                .collect(),
+            updated: Vec::new(),
+            removed: Vec::new(),
+            terminal_operations: Vec::new(),
+            terminal_layout: None,
+            settled,
+            tier,
+        };
+    }
     let mut previous_by_id = BTreeMap::new();
     for row in &previous.rows {
         previous_by_id.insert(subscription_row_key(row), row);
