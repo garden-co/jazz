@@ -39,3 +39,7 @@ harness = false
 [[bench]]
 name = "micro"
 harness = false
+
+[[bench]]
+name = "stream_layout_storage"
+harness = false
