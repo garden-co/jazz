@@ -90,6 +90,13 @@ subscriptions, and conflict behavior are inspectable through the normal Jazz
 model. A future general secondary-index facility may optimize the physical
 query without changing this logical representation.
 
+For each declared `(document_id, path)`, the mutation API requires exactly one
+current projection row. Before advancing a root it verifies that row names the
+observed old root and contains the scalar represented by that root. Missing,
+duplicate, stale-root, or stale-value projection rows MUST fail closed before a
+transaction opens; selecting an arbitrary duplicate and advancing only that row
+would leave cross-document filters inconsistent with the document root.
+
 Ad-hoc arbitrary-path queryability is not promised by the first API. An
 application can declare more paths or explicitly opt into an all-scalar-path
 projection, accepting its row and write amplification.

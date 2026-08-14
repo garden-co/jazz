@@ -1899,15 +1899,25 @@ fn core_query_condition(
     condition: &PublicCondition,
     table_schema: &TableSchema,
 ) -> Result<Vec<crate::query::Predicate>> {
-    let column = condition.column();
-    let column_schema = table_schema
+    let public_column = condition.column();
+    let declared_column = table_schema
         .columns
         .columns
         .iter()
-        .find(|schema| schema.name.as_str() == column)
-        .ok_or_else(|| JazzError::Query(format!("unknown column {column}")))?;
+        .find(|schema| schema.name.as_str() == public_column);
+    // Public queries treat `id`/`_id` as the implicit row id when the
+    // application did not declare a column with that name. Core's executable
+    // spelling for that operand is `id`.
+    let (column, column_type) =
+        if declared_column.is_none() && matches!(public_column, "id" | "_id") {
+            ("id", &ColumnType::Uuid)
+        } else {
+            let column_schema = declared_column
+                .ok_or_else(|| JazzError::Query(format!("unknown column {public_column}")))?;
+            (public_column, &column_schema.column_type)
+        };
     let column_operand = || crate::query::Operand::Column(column.to_owned());
-    let literal_operand = |value: &Value| core_literal_operand(value, &column_schema.column_type);
+    let literal_operand = |value: &Value| core_literal_operand(value, column_type);
 
     let predicate = match condition {
         PublicCondition::Eq { value, .. } if value.is_null() => {

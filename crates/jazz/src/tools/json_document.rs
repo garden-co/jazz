@@ -11,7 +11,7 @@ use serde_json::{Map, Value as JsonValue};
 
 use super::{
     BatchId, ColumnType, JazzClient, JazzError, ObjectId, Query, QueryBuilder, Result, Schema,
-    TableSchema, Value, WriteContext,
+    TableName, TableSchema, Value,
 };
 
 const DOCUMENT_ROOT_COLUMN: &str = "root_id";
@@ -82,6 +82,18 @@ impl JsonDocumentSchema {
     /// publishing the schema. This helper intentionally grants no special
     /// document authorization semantics.
     pub fn install(&self, schema: &mut Schema) -> Result<()> {
+        for name in [
+            &self.names.documents,
+            &self.names.roots,
+            &self.names.parts,
+            &self.names.projections,
+        ] {
+            if schema.contains_key(&TableName::new(name)) {
+                return Err(JazzError::Schema(format!(
+                    "JSON document table already exists: {name}"
+                )));
+            }
+        }
         let tables = [
             TableSchema::builder(&self.names.documents)
                 .fk_column(DOCUMENT_ROOT_COLUMN, &self.names.roots)
@@ -109,11 +121,7 @@ impl JsonDocumentSchema {
                 .build_named(),
         ];
         for (name, table) in tables {
-            if schema.insert(name.clone(), table).is_some() {
-                return Err(JazzError::Schema(format!(
-                    "JSON document table already exists: {name}"
-                )));
-            }
+            schema.insert(name, table);
         }
         Ok(())
     }
@@ -121,6 +129,15 @@ impl JsonDocumentSchema {
     /// Build a query over the ordinary declared-path projection table.
     pub fn query_scalar(&self, pointer: &str, value: &JsonValue) -> Result<Query> {
         validate_pointer(pointer)?;
+        if !self
+            .projected_pointers
+            .iter()
+            .any(|declared| declared == pointer)
+        {
+            return Err(JazzError::Query(format!(
+                "JSON Pointer is not a declared query projection: {pointer}"
+            )));
+        }
         if !is_scalar(value) {
             return Err(JazzError::Query(
                 "JSON document projection queries require a scalar value".to_owned(),
@@ -185,66 +202,69 @@ impl<'a> JsonDocumentStore<'a> {
             })
             .collect::<Result<_>>()?;
         let part_ids: Vec<ObjectId> = (0..records.len()).map(|_| ObjectId::new()).collect();
-        let open = self.client.begin_transaction()?.open_batch_id();
-        let writer = self
-            .client
-            .with_write_context(WriteContext::default().with_batch_id(open));
-
-        for (id, record) in part_ids.iter().zip(&records) {
-            writer.insert_with_id(
-                &self.schema.names.parts,
-                *id.uuid(),
+        let transaction = self.client.begin_transaction()?;
+        let staged = (|| -> Result<()> {
+            for (id, record) in part_ids.iter().zip(&records) {
+                transaction.insert_with_id(
+                    &self.schema.names.parts,
+                    *id.uuid(),
+                    HashMap::from([
+                        (PART_DOCUMENT_COLUMN.to_owned(), Value::Uuid(document_id)),
+                        (
+                            PART_POINTER_COLUMN.to_owned(),
+                            Value::Text(record.pointer.clone()),
+                        ),
+                        (
+                            PART_KIND_COLUMN.to_owned(),
+                            Value::Text(record.kind.as_str().to_owned()),
+                        ),
+                        (
+                            PART_SCALAR_COLUMN.to_owned(),
+                            Value::Text(record.scalar_json.clone()),
+                        ),
+                    ]),
+                )?;
+            }
+            transaction.insert_with_id(
+                &self.schema.names.roots,
+                *root_id.uuid(),
                 HashMap::from([
-                    (PART_DOCUMENT_COLUMN.to_owned(), Value::Uuid(document_id)),
+                    (ROOT_DOCUMENT_COLUMN.to_owned(), Value::Uuid(document_id)),
                     (
-                        PART_POINTER_COLUMN.to_owned(),
-                        Value::Text(record.pointer.clone()),
-                    ),
-                    (
-                        PART_KIND_COLUMN.to_owned(),
-                        Value::Text(record.kind.as_str().to_owned()),
-                    ),
-                    (
-                        PART_SCALAR_COLUMN.to_owned(),
-                        Value::Text(record.scalar_json.clone()),
+                        ROOT_PARTS_COLUMN.to_owned(),
+                        Value::Array(part_ids.iter().copied().map(Value::Uuid).collect()),
                     ),
                 ]),
             )?;
-        }
-        writer.insert_with_id(
-            &self.schema.names.roots,
-            *root_id.uuid(),
-            HashMap::from([
-                (ROOT_DOCUMENT_COLUMN.to_owned(), Value::Uuid(document_id)),
-                (
-                    ROOT_PARTS_COLUMN.to_owned(),
-                    Value::Array(part_ids.iter().copied().map(Value::Uuid).collect()),
-                ),
-            ]),
-        )?;
-        for (pointer, projected) in projections {
-            writer.insert(
-                &self.schema.names.projections,
-                HashMap::from([
-                    (
-                        PROJECTION_DOCUMENT_COLUMN.to_owned(),
-                        Value::Uuid(document_id),
-                    ),
-                    (PROJECTION_ROOT_COLUMN.to_owned(), Value::Uuid(root_id)),
-                    (
-                        PROJECTION_POINTER_COLUMN.to_owned(),
-                        Value::Text(pointer.clone()),
-                    ),
-                    (PROJECTION_SCALAR_COLUMN.to_owned(), Value::Text(projected)),
-                ]),
+            for (pointer, projected) in projections {
+                transaction.insert(
+                    &self.schema.names.projections,
+                    HashMap::from([
+                        (
+                            PROJECTION_DOCUMENT_COLUMN.to_owned(),
+                            Value::Uuid(document_id),
+                        ),
+                        (PROJECTION_ROOT_COLUMN.to_owned(), Value::Uuid(root_id)),
+                        (
+                            PROJECTION_POINTER_COLUMN.to_owned(),
+                            Value::Text(pointer.clone()),
+                        ),
+                        (PROJECTION_SCALAR_COLUMN.to_owned(), Value::Text(projected)),
+                    ]),
+                )?;
+            }
+            transaction.insert_with_id(
+                &self.schema.names.documents,
+                *document_id.uuid(),
+                HashMap::from([(DOCUMENT_ROOT_COLUMN.to_owned(), Value::Uuid(root_id))]),
             )?;
+            Ok(())
+        })();
+        if let Err(error) = staged {
+            let _ = transaction.rollback();
+            return Err(error);
         }
-        writer.insert_with_id(
-            &self.schema.names.documents,
-            *document_id.uuid(),
-            HashMap::from([(DOCUMENT_ROOT_COLUMN.to_owned(), Value::Uuid(root_id))]),
-        )?;
-        let batch_id = self.client.commit_transaction(open)?;
+        let batch_id = transaction.commit()?;
         Ok(JsonDocumentCommit {
             document_id,
             root_id,
@@ -266,8 +286,8 @@ impl<'a> JsonDocumentStore<'a> {
     }
 
     /// Reconstruct one retained immutable root without scanning document row
-    /// history. Only the root row and its explicitly referenced ordinary part
-    /// rows are read.
+    /// history. The v0 facade loads the document's immutable ordinary part rows
+    /// in one filtered query, then reconstructs only the ids named by this root.
     pub async fn load_root(
         &self,
         document_id: ObjectId,
@@ -286,30 +306,14 @@ impl<'a> JsonDocumentStore<'a> {
             ));
         }
         let part_ids = expect_uuid_array(root.get(1), "root parts")?;
+        let available_parts = self.parts_for_document(document_id).await?;
         let mut records = Vec::with_capacity(part_ids.len());
         for part_id in &part_ids {
-            let row = self
-                .row(
-                    &self.schema.names.parts,
-                    *part_id,
-                    &[
-                        PART_DOCUMENT_COLUMN,
-                        PART_POINTER_COLUMN,
-                        PART_KIND_COLUMN,
-                        PART_SCALAR_COLUMN,
-                    ],
-                )
-                .await?;
-            if expect_uuid(row.first(), "part document")? != document_id {
-                return Err(JazzError::Query(
-                    "JSON document part belongs to another document".to_owned(),
-                ));
-            }
-            records.push(PartRecord {
-                pointer: expect_text(row.get(1), "part pointer")?.to_owned(),
-                kind: PartKind::parse(expect_text(row.get(2), "part kind")?)?,
-                scalar_json: expect_text(row.get(3), "part scalar")?.to_owned(),
-            });
+            records.push(available_parts.get(part_id).cloned().ok_or_else(|| {
+                JazzError::Query(format!(
+                    "JSON document root references an unavailable part: {part_id}"
+                ))
+            })?);
         }
         Ok(JsonDocumentSnapshot {
             document_id,
@@ -356,22 +360,16 @@ impl<'a> JsonDocumentStore<'a> {
             ));
         }
         let mut part_ids = expect_uuid_array(root.get(1), "root parts")?;
+        let available_parts = self.parts_for_document(document_id).await?;
         let mut replacement_index = None;
         for (index, part_id) in part_ids.iter().enumerate() {
-            let row = self
-                .row(
-                    &self.schema.names.parts,
-                    *part_id,
-                    &[PART_DOCUMENT_COLUMN, PART_POINTER_COLUMN, PART_KIND_COLUMN],
-                )
-                .await?;
-            if expect_uuid(row.first(), "part document")? != document_id {
-                return Err(JazzError::Query(
-                    "JSON document part belongs to another document".to_owned(),
-                ));
-            }
-            if expect_text(row.get(1), "part pointer")? == pointer {
-                if PartKind::parse(expect_text(row.get(2), "part kind")?)? != PartKind::Scalar {
+            let part = available_parts.get(part_id).ok_or_else(|| {
+                JazzError::Query(format!(
+                    "JSON document root references an unavailable part: {part_id}"
+                ))
+            })?;
+            if part.pointer == pointer {
+                if part.kind != PartKind::Scalar {
                     return Err(JazzError::Write(format!(
                         "JSON pointer does not name a scalar: {pointer}"
                     )));
@@ -383,66 +381,115 @@ impl<'a> JsonDocumentStore<'a> {
         let replacement_index = replacement_index.ok_or_else(|| {
             JazzError::Write(format!("JSON pointer is absent from document: {pointer}"))
         })?;
-        let replacement_id = ObjectId::new();
-        part_ids[replacement_index] = replacement_id;
-        let root_id = ObjectId::new();
-        let open = self.client.begin_transaction()?.open_batch_id();
-        let writer = self
-            .client
-            .with_write_context(WriteContext::default().with_batch_id(open));
-        writer.insert_with_id(
-            &self.schema.names.parts,
-            *replacement_id.uuid(),
-            HashMap::from([
-                (PART_DOCUMENT_COLUMN.to_owned(), Value::Uuid(document_id)),
-                (
-                    PART_POINTER_COLUMN.to_owned(),
-                    Value::Text(pointer.to_owned()),
-                ),
-                (
-                    PART_KIND_COLUMN.to_owned(),
-                    Value::Text("scalar".to_owned()),
-                ),
-                (
-                    PART_SCALAR_COLUMN.to_owned(),
-                    Value::Text(serde_json::to_string(value)?),
-                ),
-            ]),
-        )?;
-        writer.insert_with_id(
-            &self.schema.names.roots,
-            *root_id.uuid(),
-            HashMap::from([
-                (ROOT_DOCUMENT_COLUMN.to_owned(), Value::Uuid(document_id)),
-                (
-                    ROOT_PARTS_COLUMN.to_owned(),
-                    Value::Array(part_ids.into_iter().map(Value::Uuid).collect()),
-                ),
-            ]),
-        )?;
-        writer.update(
-            document_id,
-            vec![(DOCUMENT_ROOT_COLUMN.to_owned(), Value::Uuid(root_id))],
-        )?;
+        let mut projection_updates = Vec::with_capacity(self.schema.projected_pointers.len());
         for projected in &self.schema.projected_pointers {
+            let mut matching_parts = part_ids.iter().filter_map(|part_id| {
+                available_parts
+                    .get(part_id)
+                    .filter(|part| part.pointer == *projected)
+            });
+            let projected_part = matching_parts.next().ok_or_else(|| {
+                JazzError::Write(format!(
+                    "declared projection is absent from current root: {projected}"
+                ))
+            })?;
+            if matching_parts.next().is_some() {
+                return Err(JazzError::Write(format!(
+                    "declared projection occurs more than once in current root: {projected}"
+                )));
+            }
+            if projected_part.kind != PartKind::Scalar {
+                return Err(JazzError::Write(format!(
+                    "declared projection is not scalar in current root: {projected}"
+                )));
+            }
             let query = QueryBuilder::new(&self.schema.names.projections)
                 .filter_eq(PROJECTION_DOCUMENT_COLUMN, Value::Uuid(document_id))
                 .filter_eq(PROJECTION_POINTER_COLUMN, Value::Text(projected.clone()))
+                .select(&[
+                    PROJECTION_DOCUMENT_COLUMN,
+                    PROJECTION_ROOT_COLUMN,
+                    PROJECTION_POINTER_COLUMN,
+                    PROJECTION_SCALAR_COLUMN,
+                ])
                 .build();
             let rows = self.client.query(query, None).await?;
-            let (projection_id, _) = rows.first().ok_or_else(|| {
-                JazzError::Write(format!("missing declared projection row: {projected}"))
-            })?;
-            let mut patch = vec![(PROJECTION_ROOT_COLUMN.to_owned(), Value::Uuid(root_id))];
-            if projected == pointer {
-                patch.push((
-                    PROJECTION_SCALAR_COLUMN.to_owned(),
-                    Value::Text(serde_json::to_string(value)?),
-                ));
+            if rows.len() != 1 {
+                return Err(JazzError::Write(format!(
+                    "expected exactly one declared projection row for {projected}, found {}",
+                    rows.len()
+                )));
             }
-            writer.update(*projection_id, patch)?;
+            let (projection_id, projection) = &rows[0];
+            if expect_uuid(projection.first(), "projection document")? != document_id
+                || expect_uuid(projection.get(1), "projection root")? != old_root
+                || expect_text(projection.get(2), "projection pointer")? != projected
+                || expect_text(projection.get(3), "projection scalar")?
+                    != projected_part.scalar_json
+            {
+                return Err(JazzError::Write(format!(
+                    "declared projection does not match current root: {projected}"
+                )));
+            }
+            projection_updates.push((*projection_id, projected == pointer));
         }
-        let batch_id = self.client.commit_transaction(open)?;
+        let replacement_id = ObjectId::new();
+        part_ids[replacement_index] = replacement_id;
+        let root_id = ObjectId::new();
+        let scalar_json = serde_json::to_string(value)?;
+        let transaction = self.client.begin_transaction()?;
+        let staged = (|| -> Result<()> {
+            transaction.insert_with_id(
+                &self.schema.names.parts,
+                *replacement_id.uuid(),
+                HashMap::from([
+                    (PART_DOCUMENT_COLUMN.to_owned(), Value::Uuid(document_id)),
+                    (
+                        PART_POINTER_COLUMN.to_owned(),
+                        Value::Text(pointer.to_owned()),
+                    ),
+                    (
+                        PART_KIND_COLUMN.to_owned(),
+                        Value::Text("scalar".to_owned()),
+                    ),
+                    (
+                        PART_SCALAR_COLUMN.to_owned(),
+                        Value::Text(scalar_json.clone()),
+                    ),
+                ]),
+            )?;
+            transaction.insert_with_id(
+                &self.schema.names.roots,
+                *root_id.uuid(),
+                HashMap::from([
+                    (ROOT_DOCUMENT_COLUMN.to_owned(), Value::Uuid(document_id)),
+                    (
+                        ROOT_PARTS_COLUMN.to_owned(),
+                        Value::Array(part_ids.into_iter().map(Value::Uuid).collect()),
+                    ),
+                ]),
+            )?;
+            transaction.update(
+                document_id,
+                vec![(DOCUMENT_ROOT_COLUMN.to_owned(), Value::Uuid(root_id))],
+            )?;
+            for (projection_id, changed) in projection_updates {
+                let mut patch = vec![(PROJECTION_ROOT_COLUMN.to_owned(), Value::Uuid(root_id))];
+                if changed {
+                    patch.push((
+                        PROJECTION_SCALAR_COLUMN.to_owned(),
+                        Value::Text(scalar_json.clone()),
+                    ));
+                }
+                transaction.update(projection_id, patch)?;
+            }
+            Ok(())
+        })();
+        if let Err(error) = staged {
+            let _ = transaction.rollback();
+            return Err(error);
+        }
+        let batch_id = transaction.commit()?;
         Ok(JsonDocumentCommit {
             document_id,
             root_id,
@@ -452,12 +499,55 @@ impl<'a> JsonDocumentStore<'a> {
 
     async fn row(&self, table: &str, id: ObjectId, columns: &[&str]) -> Result<Vec<Value>> {
         self.client
-            .query(QueryBuilder::new(table).select(columns).build(), None)
+            .query(
+                QueryBuilder::new(table)
+                    .filter_eq("id", Value::Uuid(id))
+                    .select(columns)
+                    .build(),
+                None,
+            )
             .await?
             .into_iter()
             .find(|(row_id, _)| *row_id == id)
             .map(|(_, values)| values)
             .ok_or_else(|| JazzError::Query(format!("row {id} not found in {table}")))
+    }
+
+    async fn parts_for_document(
+        &self,
+        document_id: ObjectId,
+    ) -> Result<HashMap<ObjectId, PartRecord>> {
+        self.client
+            .query(
+                QueryBuilder::new(&self.schema.names.parts)
+                    .filter_eq(PART_DOCUMENT_COLUMN, Value::Uuid(document_id))
+                    .select(&[
+                        PART_DOCUMENT_COLUMN,
+                        PART_POINTER_COLUMN,
+                        PART_KIND_COLUMN,
+                        PART_SCALAR_COLUMN,
+                    ])
+                    .build(),
+                None,
+            )
+            .await?
+            .into_iter()
+            .map(|(part_id, row)| {
+                if expect_uuid(row.first(), "part document")? != document_id {
+                    return Err(JazzError::Query(
+                        "JSON document part belongs to another document".to_owned(),
+                    ));
+                }
+                Ok((
+                    part_id,
+                    PartRecord {
+                        pointer: expect_text(row.get(1), "part pointer")?.to_owned(),
+                        kind: PartKind::parse(expect_text(row.get(2), "part kind")?)?,
+                        scalar_json: expect_text(row.get(3), "part scalar")?.to_owned(),
+                    },
+                ))
+            })
+            .collect()
     }
 }
 
