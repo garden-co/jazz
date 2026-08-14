@@ -58,9 +58,7 @@ A **full-diff full recompute is sometimes correctness-preserving, not a failure*
 example, a permission change can make an old exclusive transaction newly
 visible, and the test expects exactly one `full_diff_recomputes_out`. Large reset
 rehydrates deliberately avoid a duplicate groove hydration and full-diff from
-stored peer state thereafter. There is no `LARGE_REHYDRATE_RESULT_ROWS` constant;
-the nearby `1024` constant in code is the large-value checkpoint operation
-interval, not a result-set rehydrate threshold.
+stored peer state thereafter. There is no `LARGE_REHYDRATE_RESULT_ROWS` constant.
 
 ### C.3 Current-row reads
 
@@ -124,8 +122,8 @@ Measurement categories stay separate so that a slow propagation path is not
 mistaken for a slow settlement path. The S4 "throughput regression" was a
 measurement conflation: retained baselines included per-commit peer refresh (~23
 tx/s) while refresh-suppressed engine throughput was much higher; the real issue
-is propagation fan-out, not settlement. Gates (`[needs: column-delta]`, `[needs:
-text-merge]`, `[needs: payload-inventory]`) stay _visibly_ gated, never silently
+is propagation fan-out, not settlement. Gates (`[needs: payload-inventory]`)
+stay _visibly_ gated, never silently
 counted as measured.
 
 ### C.6 Developer feedback throughput (implementation guidance)

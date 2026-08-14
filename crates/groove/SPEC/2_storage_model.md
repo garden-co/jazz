@@ -200,8 +200,7 @@ subscription, but the store remains a typed record store like any other
 variable-width `Bytes` column, that column encodes to exactly the stored bytes,
 so opaque payloads add no encoding overhead. This makes directly-exposed stores
 appropriate for data that does not need incremental maintenance, such as
-persistent caches and large binary content. jazz uses them for large-value
-content: extents, offsets, and checkpoints (ch. 12).
+persistent caches and opaque binary content.
 
 ### 2.5 Durable secondary indices
 
@@ -393,9 +392,7 @@ The former hybrid columnar-base proposal is rejected and is not part of Groove's
   but a tuple member may not itself be variable-width (`INV-STORAGE-9`, §2.7).
   Allowing variable-width members — by reusing the record encoding (§2.7) _inside_
   a tuple — would let consumers represent structured, variable-length values as a
-  native column type instead of a custom encoding. The motivating consumer is
-  jazz's large-value op-log, whose ops could then be a true groove column rather
-  than a jazz-private byte encoding (jazz ch. 12 open questions).
+  native column type instead of a custom encoding.
 - 🔶 **Async persistence boundary.** Mobile and host bindings may need
   non-blocking persistence, but the contract still needs atomic batch writes and
   ordered scans. Decide whether async is a wrapper, a second trait, or the only

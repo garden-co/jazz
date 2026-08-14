@@ -36,7 +36,6 @@ const CLASS_GLOBAL_CURRENT_CF: &str = "__groove_class_global_current";
 const CLASS_AHEAD_CURRENT_CF: &str = "__groove_class_ahead_current";
 const CLASS_CHANGES_CF: &str = "__groove_class_changes";
 const CLASS_INDICES_CF: &str = "__groove_class_indices";
-const CLASS_CONTENT_CF: &str = "__groove_class_content";
 const CLASS_META_CF: &str = "__groove_class_meta";
 
 /// RocksDB durability tier used for writes.
@@ -237,7 +236,6 @@ enum RocksDbClassProfile {
     Default,
     AppendRange,
     OverwriteHot,
-    Content,
     Meta,
 }
 
@@ -247,7 +245,6 @@ fn rocksdb_class_profile(cf: &str) -> RocksDbClassProfile {
         CLASS_GLOBAL_CURRENT_CF | CLASS_AHEAD_CURRENT_CF | CLASS_INDICES_CF => {
             RocksDbClassProfile::OverwriteHot
         }
-        CLASS_CONTENT_CF => RocksDbClassProfile::Content,
         CLASS_META_CF => RocksDbClassProfile::Meta,
         _ => RocksDbClassProfile::Default,
     }
@@ -292,29 +289,29 @@ impl RocksDbClassProfile {
     fn uses_blooms(self) -> bool {
         match self {
             // History/register/changes are consumed as prefix/range/latest scans.
-            // Current/index/content-meta classes still have real point probes.
+            // Current/index/meta classes still have real point probes.
             Self::AppendRange => false,
-            Self::Default | Self::OverwriteHot | Self::Content | Self::Meta => true,
+            Self::Default | Self::OverwriteHot | Self::Meta => true,
         }
     }
 
     fn block_size(self) -> usize {
         match self {
-            Self::AppendRange | Self::Content => ROCKSDB_LARGE_BLOCK_BYTES,
+            Self::AppendRange => ROCKSDB_LARGE_BLOCK_BYTES,
             Self::Default | Self::OverwriteHot | Self::Meta => ROCKSDB_DEFAULT_BLOCK_BYTES,
         }
     }
 
     fn target_file_size(self) -> u64 {
         match self {
-            Self::AppendRange | Self::Content => ROCKSDB_APPEND_TARGET_FILE_BYTES,
+            Self::AppendRange => ROCKSDB_APPEND_TARGET_FILE_BYTES,
             Self::Default | Self::OverwriteHot | Self::Meta => ROCKSDB_OVERWRITE_TARGET_FILE_BYTES,
         }
     }
 
     fn compression(self) -> DBCompressionType {
         match self {
-            Self::AppendRange | Self::Content => DBCompressionType::Zstd,
+            Self::AppendRange => DBCompressionType::Zstd,
             Self::Default | Self::OverwriteHot | Self::Meta => DBCompressionType::Lz4,
         }
     }
@@ -612,9 +609,9 @@ fn advance_prefix_upper_bound(prefix: &mut [u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        CLASS_AHEAD_CURRENT_CF, CLASS_CHANGES_CF, CLASS_CONTENT_CF, CLASS_GLOBAL_CURRENT_CF,
-        CLASS_HISTORY_CF, CLASS_INDICES_CF, CLASS_META_CF, CLASS_REGISTER_CF, RocksDbClassProfile,
-        RocksDbStorage, any_available, rocksdb_class_profile, sum_available,
+        CLASS_AHEAD_CURRENT_CF, CLASS_CHANGES_CF, CLASS_GLOBAL_CURRENT_CF, CLASS_HISTORY_CF,
+        CLASS_INDICES_CF, CLASS_META_CF, CLASS_REGISTER_CF, RocksDbClassProfile, RocksDbStorage,
+        any_available, rocksdb_class_profile, sum_available,
     };
 
     #[test]
@@ -637,13 +634,6 @@ mod tests {
             assert_eq!(profile, RocksDbClassProfile::OverwriteHot);
             assert!(profile.uses_blooms(), "{cf} should keep point-probe blooms");
         }
-
-        let content = rocksdb_class_profile(CLASS_CONTENT_CF);
-        assert_eq!(content, RocksDbClassProfile::Content);
-        assert!(
-            content.uses_blooms(),
-            "content class includes content_meta/checkpoint point probes today"
-        );
 
         assert_eq!(
             rocksdb_class_profile(CLASS_META_CF),

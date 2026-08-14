@@ -1284,6 +1284,36 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "counter merge strategy requires a non-nullable integer column")]
+    fn counter_merge_strategy_rejects_string_columns() {
+        JazzSchema::new([TableSchema::new(
+            "todos",
+            [ColumnSchema::new("title", ColumnType::String)],
+        )
+        .with_column_merge_strategy("title", MergeStrategy::Counter)]);
+    }
+
+    #[test]
+    #[should_panic(expected = "merge strategy declared for unknown column todos.missing")]
+    fn merge_strategy_rejects_unknown_user_column() {
+        JazzSchema::new([TableSchema::new(
+            "todos",
+            [ColumnSchema::new("title", ColumnType::String)],
+        )
+        .with_column_merge_strategy("missing", MergeStrategy::Lww)]);
+    }
+
+    #[test]
+    #[should_panic(expected = "counter merge strategy requires a non-nullable integer column")]
+    fn counter_merge_strategy_rejects_nullable_integer_columns() {
+        JazzSchema::new([TableSchema::new(
+            "todos",
+            [ColumnSchema::new("count", ColumnType::U64.nullable())],
+        )
+        .with_column_merge_strategy("count", MergeStrategy::Counter)]);
+    }
+
+    #[test]
     #[should_panic(expected = "read policy table must match")]
     fn read_policy_must_name_attached_table() {
         JazzSchema::new([TableSchema::new(

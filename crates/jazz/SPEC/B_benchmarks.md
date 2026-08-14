@@ -266,16 +266,6 @@ wired.
 | S5 durable stream    | prefix-monotone oracle                                   | Yes                      | `s5_durable_stream.rs` asserts tailer/resumer content convergence and prefix monotonicity for the generated stream, matching `INV-BENCH-8`.                                                                                                                                                                                                                                   |
 | S5 durable stream    | column-delta efficiency target                           | Partial                  | FEATURE: the scenario intentionally rewrites full bytes values; no structural column-delta path was found in `jazz/src/node/content_store.rs` or the sync benches, so bytes/token are baseline numbers only.                                                                                                                                                                  |
 | S5 durable stream    | evicted-prefix resumer                                   | No                       | FEATURE: the `[needs: eviction]` phase is specified but not implemented.                                                                                                                                                                                                                                                                                                      |
-| S6 text              | trace replay                                             | Yes                      | `jazz-sim/benches/s6_text_traces.rs` emits `phase: trace_replay` plus `db_surface_trace_replay`, throughput, echo latency, history bytes/edit, zstd anchors, and final/prefix correctness.                                                                                                                                                                                    |
-| S6 text              | live observation                                         | Yes                      | `s6_text_traces.rs` emits `phase: live_observation` with observer p95, synced bytes, and link floor.                                                                                                                                                                                                                                                                          |
-| S6 text              | cold load: current only                                  | Yes                      | `s6_text_traces.rs` emits `phase: cold_load` current-only latency and current bytes.                                                                                                                                                                                                                                                                                          |
-| S6 text              | cold load: full history                                  | Partial                  | FEATURE: `s6_text_traces.rs` marks full-history load as gated until a history subscription load path exists.                                                                                                                                                                                                                                                                  |
-| S6 text              | point-in-time reads                                      | Yes                      | `s6_text_traces.rs` emits `phase: point_in_time_read` for cut percentages with direct-prefix replay correctness.                                                                                                                                                                                                                                                              |
-| S6 text              | storage                                                  | Yes                      | `s6_text_traces.rs` reports history/metadata bytes per edit and zstd final-doc / JSON-op-log anchors.                                                                                                                                                                                                                                                                         |
-| S6 text              | CRDT adversary comparisons                               | Partial                  | BASELINE: `s6_text_traces.rs` has in-process adversary comparison fields and Automerge/diamond-style paths, but these are local/library baselines, not the full pinned eg-walker/dmonad external-result matrix for every trace.                                                                                                                                               |
-| S6 text              | memory                                                   | Partial                  | ORACLE: the bench reports `peak_memory_proxy_bytes` as peak document characters/bytes, not process peak RSS; useful but not the spec's memory metric.                                                                                                                                                                                                                         |
-| S6 text              | concurrent merge                                         | No                       | FEATURE: current text semantics remain whole-value HLC-LWW; the concurrent merge phase is gated by `[needs: text-merge]` despite `jazz/src/node/text_oplog.rs` existing.                                                                                                                                                                                                      |
-| S6 text              | column-delta efficiency target                           | Partial                  | FEATURE: full text values are rewritten per edit; no structural column-delta maintenance was found, so storage/wire ratios are baseline numbers only.                                                                                                                                                                                                                         |
 | S7 migrations        | mixed-version steady state                               | Partial                  | HARNESS: `jazz-sim/benches/s7_migrations.rs` is a smoke-style executable over a schema chain and `MigrationLens` with JSONL phase output, but still has no retained reporting matrix.                                                                                                                                                                                         |
 | S7 migrations        | lens-tax measurement                                     | No                       | HARNESS: no native vs 1-hop/3-hop latency, write translation, or sync-byte overhead output was found.                                                                                                                                                                                                                                                                         |
 | S7 migrations        | rollout wave                                             | No                       | HARNESS: no mid-stream population migration phase or latency/recompute metrics were found.                                                                                                                                                                                                                                                                                    |
@@ -294,7 +284,6 @@ Landed capabilities were retired from the gate list; git history is the record.
 | ---------------------------- | ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `[needs: payload-inventory]` | FUTURE | Reconnect/resume delta-resubscribe from peer payload inventory is still not the measured path in S1/S5/S9; steady-state complete-tx payload dedup (`PeerState.shipped_complete_tx_payloads`, appendix C) is a different mechanism. |
 | `[needs: column-delta]`      | FUTURE | S5/S6 intentionally rewrite full `bytes`/text column values; no structural column-delta encoding path was found in `jazz/src/node/content_store.rs` or the scenario benches.                                                       |
-| `[needs: text-merge]`        | FUTURE | `jazz/src/node/text_oplog.rs` exists, but current S6 scenario semantics are still whole-value HLC-LWW; no rich-text three-way merge strategy is wired into the phase.                                                              |
 | `[needs: eviction]`          | FUTURE | S5's evicted-prefix resumer phase is specified but no eviction/resume benchmark path was found.                                                                                                                                    |
 
 #### Existing infrastructure inventory
@@ -314,12 +303,10 @@ Landed capabilities were retired from the gate list; git history is the record.
   when `JAZZ_BENCH_RETAIN=1`. Legacy `scripts/bench_run.py` enriches groove
   scenario JSONL with `git_sha`, `git_dirty`, and host metadata.
 - **Bytes/token accounting.** Several benches have local helpers:
-  `view_update_bytes` / `bytes_floor` in S1/S2/S3/S6/S9, stream bytes/token in
-  `s5_durable_stream.rs`, text bytes/edit in `s6_text_traces.rs`, and storage
-  tree walkers in S5/S6/S9. This is useful but not shared infrastructure.
+  `view_update_bytes` / `bytes_floor` in S1/S2/S3/S9, stream bytes/token in
+  `s5_durable_stream.rs`, and storage tree walkers in S5/S9. This is useful but
+  not shared infrastructure.
 - **Memory accounting.** No reusable peak-RSS/process-memory utility was found.
-  S6 emits `peak_memory_proxy_bytes`, but it is derived from document length or
-  library-visible characters, not process peak RSS.
 - **Baselines.** Real `rusqlite` references exist in
   `jazz-sim/benches/s4_order_processing.rs`, `s5_durable_stream.rs`, and
   `s9_durable_execution.rs`; `groove/benches/scenario.rs` also has SQLite modes
@@ -440,10 +427,7 @@ gets fast by being wrong must fail, not report.
 
 **Feature gates.** Each phase is tagged by the feature set it needs: `[base]`
 runs on the currently-shipped engine, while `[needs: …]` phases depend on a
-not-yet-built feature — `[needs: column-delta]` (structural sharing / delta
-encoding of large column values across row versions) and `[needs: text-merge]` (a
-rich-text column merge strategy doing three-way merges against the version DAG's
-common ancestor). The suite lands incrementally; a `[needs: …]` phase is
+not-yet-built feature. The suite lands incrementally; a `[needs: …]` phase is
 specified now and activated when its feature ships, and the gates double as the
 demand signal for prioritizing those features.
 
@@ -920,130 +904,6 @@ every tailer observes a strictly prefix-monotone sequence of content
 versions and converges to the final content, byte-exact · resumer state ==
 full-replay state, byte-exact · a late resumer over an evicted prefix
 (`[needs: eviction]`) re-fetches correctly from upstream.
-
----
-
-### 6. Collaborative text editing (real editing trace)
-
-_Motivation: large documents in a text column, edited as linear runs at
-random positions — the same value-versioning pressure as scenario 5 but with
-mid-value edits instead of appends. This is the arena where jazz competes
-directly with CRDT libraries, on their own canonical benchmark._
-
-#### The trace
-
-The [automerge-perf editing trace](https://github.com/automerge/automerge-perf):
-Martin Kleppmann's keystroke-by-keystroke recording of writing the LaTeX
-source of _“A Conflict-Free Replicated JSON Datatype”_ (Kleppmann &
-Beresford) — **182,315 single-character insertions and 77,463 deletions
-(259,778 edit operations)** producing a ~100KB final document; CC-BY-4.0;
-the standard benchmark for Automerge, Yjs, diamond-types, Loro, et al.
-
-#### Trace catalog (eg-walker superset)
-
-We adopt the [eg-walker evaluation set](https://arxiv.org/abs/2409.14252)
-verbatim as the literature-comparable core — their published per-trace
-results (stored size, load time, replay/merge time, memory) become free
-side-by-side baselines — organized by their taxonomy and extended with
-jazz-specific traces in each group:
-
-| label | trace                                                                                                                            | character                                                                                              | gate                                                                                  |
-| ----- | -------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------- |
-| S1    | _automerge-paper_ (Kleppmann LaTeX; 2 authors taking turns)                                                                      | sequential, keystroke                                                                                  | `[base]`                                                                              |
-| S2    | _seph-blog1_ (8,800-word blog post, 1 author)                                                                                    | sequential, keystroke                                                                                  | `[base]`                                                                              |
-| S3    | _egwalker_ (the eg-walker paper's own source, 2 authors)                                                                         | sequential, keystroke                                                                                  | `[base]`                                                                              |
-| W1    | Wikipedia revision history of one large page (pinned page + revision range + content hash; CC-BY-SA)                             | sequential, multi-author, **full-state revisions with reverts** — the brainless-dump model in the wild | `[base]`                                                                              |
-| C1    | _friendsforever_ (2 users realtime, 1s simulated latency, ~26k edits)                                                            | concurrent, fine-grained                                                                               | ingest/storage `[base]`; merged-content assertions `[needs: text-merge]`              |
-| C2    | _clownschool_ (2 users realtime, 0.5s latency, 5,380 txns, timestamps)                                                           | concurrent, fine-grained                                                                               | as C1                                                                                 |
-| A1    | `src/node.cc` from Node.js (git-derived)                                                                                         | async divergence, **human merge resolutions recorded**                                                 | DAG replay with recorded merges `[base]`; jazz-generated merges `[needs: text-merge]` |
-| A2    | `Makefile` from git.git (git-derived)                                                                                            | as A1                                                                                                  | as A1                                                                                 |
-| A3    | repo-corpus variant: every file of a busy repo over a commit range                                                               | async, thousands of text rows merged concurrently                                                      | as A1                                                                                 |
-| X1    | synthetic contention generator (seeded; K = 2–32 authors, Zipf edit positions, per-author offline windows from seconds to hours) | **contention as a dial** — the axis no recorded trace provides; offline divergence is jazz's home turf | ingest `[base]`; merge `[needs: text-merge]`                                          |
-
-Methodology adopted with the traces:
-
-- **mirror their per-trace metrics** — stored size, cold-load time,
-  replay/merge time, steady-state and peak memory — so every cell is
-  directly comparable with the eg-walker paper's tables;
-- run both **natural size** and their **~500k-inserted-characters
-  normalization** (repetition) — the latter for cross-trace comparability,
-  the former for realism;
-- **sourcing is pinned**: S and C traces from
-  [automerge-perf](https://github.com/automerge/automerge-perf) and
-  [josephg/editing-traces](https://github.com/josephg/editing-traces); A1/A2
-  from the paper's artifacts, or regenerated by their described method
-  (minimal edit operations per commit diff, pinned repo + commit range,
-  content-hashed into fixtures).
-
-The [dmonad/crdt-benchmarks](https://github.com/dmonad/crdt-benchmarks)
-suite remains in use for cross-library comparability where shapes overlap.
-
-**Semantic honesty up front**: jazz today merges text columns by whole-value
-HLC-LWW — concurrent edits to one document _replace_, they do not interleave.
-Character-level concurrent merging is `[needs: text-merge]`: a rich-text
-column merge strategy doing **three-way merges**, with the common ancestor
-supplied by the version DAG (`parents` gives it directly — this is the
-ancestor-aware strategy the README defers). The Kleppmann trace is
-single-author and sequential, so phases 1–4 are a fair fight on storage,
-throughput, and latency without merge semantics; the concurrent phase is
-specified now and activated with the feature.
-
-#### Modeling — brainless dump only
-
-One row per document, the full `text` column rewritten on every edit — the
-same thesis as scenario 5: no userland op-log modeling, no CRDT structures
-in app code; jazz owns the efficiency problem (`[needs: column-delta]`) and,
-later, the merge problem (`[needs: text-merge]`). The adversaries below are
-the systems where humans did that work by hand.
-
-#### Phases
-
-1. **Trace replay** `[base]`: single writer replays all 259,778 edits as
-   mergeable commits (batching axis: 1 / 32 / 256 edits per commit).
-   Metrics: ingest throughput (edits/s), local-echo latency, peak memory.
-2. **Live observation** `[base]`: writer replays at a realistic 10 edits/s
-   sample while a second client tails — edit→observer p95 at tier `none`.
-3. **Cold load** `[base]`: fresh client loads the finished document — current
-   state only vs. with full history; historical
-   states at 25/50/75% of the trace. The canvas pairing rule applies: any
-   storage claim is reported _with_ these latencies.
-4. **Storage** `[base]`: total store size and **history+metadata bytes per
-   edit** after full replay, against the anchors below.
-5. **Concurrent merge** `[needs: text-merge]`: replay the concurrent traces
-   below; the converged document must match the three-way strategy's
-   documented semantics (compared against CRDT-library output on the same
-   trace as a _semantic_, not byte, comparison — the strategies legitimately
-   differ).
-
-#### Adversarial comparisons
-
-Two explicitly-labeled tiers, because most CRDT libraries are in-memory and
-jazz is durable — the label _is_ the fairness mechanism:
-
-- **in-memory CRDT floor** (non-durable): diamond-types, Yjs, Loro replaying
-  the same trace — CPU/latency/memory floor;
-- **durable CRDT baseline**: Automerge with its persisted save format /
-  Yjs with a persistence backend — the apples-to-apples storage and
-  cold-load comparison (their save-file sizes on this trace are published
-  and reproducible);
-- **storage anchors**: zstd (3 and 19) of the final document, and of the
-  JSON edit-op log — the latter is the same anchor pattern as canvas.
-
-#### Metrics
-
-trace replay throughput vs. in-memory floor · storage ratio vs. durable CRDT
-baseline and zstd anchors · synced bytes per edit per observer ·
-history+metadata bytes per edit ·
-cold-load time (current vs. full history) vs. durable CRDT load · memory ·
-point-in-time read latency (paired with storage, per
-the canvas rule).
-
-#### Correctness
-
-final document byte-equals the reference string produced by directly
-applying the trace · every prefix replay equals the corresponding reference
-prefix · `[needs: text-merge]` concurrent convergence per the strategy's
-spec, identical on every node.
 
 ---
 

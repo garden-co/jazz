@@ -511,4 +511,36 @@ mod tests {
         assert_eq!(table.columns[0].column_type, ColumnType::String);
         assert_eq!(table.columns[1].column_type, ColumnType::String.nullable());
     }
+
+    #[test]
+    fn rejects_removed_large_value_descriptor_field() {
+        let err = convert_admin_schema(&json!({
+            "files": {
+                "columns": [{
+                    "name": "data",
+                    "column_type": "Bytea",
+                    "large_value": "Blob"
+                }]
+            }
+        }))
+        .unwrap_err();
+
+        assert_eq!(err.path, "$.files.columns[0].large_value");
+    }
+
+    #[test]
+    fn rejects_removed_truthy_large_column_flag() {
+        let err = convert_admin_schema(&json!({
+            "files": {
+                "columns": [{
+                    "name": "data",
+                    "column_type": "Bytea",
+                    "large": true
+                }]
+            }
+        }))
+        .unwrap_err();
+
+        assert_eq!(err.path, "$.files.columns[0].large");
+    }
 }

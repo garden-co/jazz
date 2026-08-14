@@ -46,8 +46,6 @@ pub use schema_lens::{Direction, Lens, LensOp, LensTransform};
 pub use transaction::OpenBatchId;
 
 #[cfg(feature = "client")]
-pub use crate::db::TextEdit;
-#[cfg(feature = "client")]
 pub use client::{JazzClient, JazzTransaction};
 
 pub(crate) use object::OutputOccurrenceId;

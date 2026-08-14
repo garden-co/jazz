@@ -128,8 +128,8 @@ reads are now O(current+ahead) through direct global base plus ahead overlay, so
 structural moves in `peer.rs` and the current-row path are unblocked.
 Propagation performance is still the remaining hot-path investigation, so C2
 and the runtime/arrangements split still coordinate with it. `ingest.rs` has
-grown further (connection-auth, attribution, and the §4.3 large-value merge
-engine), so the corresponding jazz grouping split is now more warranted.
+grown further (connection-auth and attribution), so the corresponding jazz
+grouping split is now more warranted.
 
 Style rules for future structure:
 

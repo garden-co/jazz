@@ -13,8 +13,7 @@ use crate::db::{
     ErrorCode as CoreDbErrorCode, ExclusiveTxOps, LocalUpdates as CoreLocalUpdates,
     PeerConnection as CorePeerConnection, Propagation as CorePropagation, ReadOpts as CoreReadOpts,
     SubscriptionEvent as CoreSubscriptionEvent, SubscriptionOutputRow as CoreSubscriptionOutputRow,
-    TextEdit as CoreTextEdit, TickScheduler, TickUrgency, Transport as CoreTransport,
-    WireTransportAdapter,
+    TickScheduler, TickUrgency, Transport as CoreTransport, WireTransportAdapter,
 };
 use crate::groove::records::Value as CoreValue;
 use crate::groove::storage::MemoryStorage as CoreMemoryStorage;
@@ -422,20 +421,6 @@ impl Backend {
             Self::Memory(db) => Ok(db.update(table, row_id, cells)?.mergeable_tx_id()),
             #[cfg(feature = "rocksdb")]
             Self::RocksDb(db) => Ok(db.update(table, row_id, cells)?.mergeable_tx_id()),
-        }
-    }
-
-    fn edit_text(
-        &self,
-        table: &str,
-        row_id: CoreRowUuid,
-        column: &str,
-        edit: CoreTextEdit,
-    ) -> std::result::Result<CoreTxId, CoreDbError> {
-        match self {
-            Self::Memory(db) => Ok(db.edit_text(table, row_id, column, edit)?.mergeable_tx_id()),
-            #[cfg(feature = "rocksdb")]
-            Self::RocksDb(db) => Ok(db.edit_text(table, row_id, column, edit)?.mergeable_tx_id()),
         }
     }
 
@@ -909,21 +894,6 @@ impl ClientDb {
         JazzClient::check_core_write_not_rejected(&inner.db, write)?;
         inner.remember_write(row_id, &table, write);
         let tx_id = write;
-        Ok(tx_id)
-    }
-
-    fn edit_text(&self, row_id: ObjectId, column: &str, edit: CoreTextEdit) -> Result<CoreTxId> {
-        let mut inner = self.inner.borrow_mut();
-        let table = inner.row_tables.get(&row_id).cloned().ok_or_else(|| {
-            JazzError::Write(
-                "text edit requires a row created or observed by this client".to_string(),
-            )
-        })?;
-        let tx_id = inner
-            .db
-            .edit_text(&table, CoreRowUuid(*row_id.uuid()), column, edit)
-            .map_err(|error| JazzError::Write(error.to_string()))?;
-        inner.remember_write(row_id, &table, tx_id);
         Ok(tx_id)
     }
 
@@ -3022,27 +2992,6 @@ impl JazzClient {
                 Ok(Some(core_batch_id(tx_id)))
             }
         }
-    }
-
-    /// Apply explicit byte-position edits to a text-document column.
-    pub fn edit_text(
-        &self,
-        object_id: ObjectId,
-        column: &str,
-        edit: CoreTextEdit,
-    ) -> Result<BatchId> {
-        if self
-            .write_context
-            .as_ref()
-            .and_then(|ctx| ctx.batch_id)
-            .is_some()
-        {
-            return Err(JazzError::Write(
-                "text edits are not supported inside exclusive transactions".to_string(),
-            ));
-        }
-        let tx_id = self.db.edit_text(object_id, column, edit)?;
-        Ok(core_batch_id(tx_id))
     }
 
     /// Delete a row.
