@@ -38,7 +38,6 @@ Reach for the `examples/` apps below when you want to see a specific pattern wor
 | [todo-client-localfirst-ts](https://github.com/garden-co/jazz/tree/main/examples/todo-client-localfirst-ts)         | Vanilla TypeScript + Vite  | The low-level client API with no framework bindings: `createDb`, `db.subscribeAll`, `db.onAuthChanged`, `BrowserAuthSecretStore`                                                                                                                                                        |
 | [todo-server-rs](https://github.com/garden-co/jazz/tree/main/examples/todo-server-rs)                               | Rust (axum) + `jazz-tools` | Using Jazz directly from Rust as the embedded database for an axum REST + SSE service&hairsp;—&hairsp;no browser, no WASM, no Node bindings                                                                                                                                             |
 | [todo-server-ts](https://github.com/garden-co/jazz/tree/main/examples/todo-server-ts)                               | Node + Express             | Jazz as a server-side backend via `jazz-tools/backend` and NAPI SQLite storage; `context.forSession(session)` for per-user policy; SSE live snapshots; `wait({ tier })` durability                                                                                                      |
-| [wequencer](https://github.com/garden-co/jazz/tree/main/examples/wequencer)                                         | React + Vite + Tone.js     | Clock-synchronised collaborative playback&hairsp;—&hairsp;`ClockSync` aligns peers to server epoch time, BPM nudged on drift; instrument samples stored as Jazz `files`                                                                                                                 |
 | [world-tour](https://github.com/garden-co/jazz/tree/main/examples/world-tour)                                       | Vue + Vite + MapLibre GL   | The Vue bindings end-to-end in a non-trivial app (tour management with maps)                                                                                                                                                                                                            |
 
 ## How the examples group together
@@ -56,7 +55,6 @@ Reach for the `examples/` apps below when you want to see a specific pattern wor
   database from a server runtime &mdash; Node, Rust, Next.js App Router, and
   Cloudflare Workers respectively.
 - **The product-shaped examples** (`chat-react`, `moon-lander-react`,
-  `wequencer`, `world-tour`, `file-upload-react`) are full apps that lean on
+  `world-tour`) are full apps that lean on
   Jazz for a specific real-world pattern: real-time chat with invites and
-  canvases, multiplayer game state, clock-synchronised collaborative playback,
-  Vue + maps, and chunked binary uploads.
+  canvases, multiplayer game state, and Vue + maps.

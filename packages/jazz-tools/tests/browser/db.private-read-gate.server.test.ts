@@ -71,18 +71,6 @@ const camelChatApp = schema.defineApp({
     userId: schema.string(),
     emoji: schema.string(),
   }),
-  attachments: schema.table({
-    messageId: schema.ref("messages"),
-    type: schema.string(),
-    name: schema.string(),
-    fileId: schema.ref("files"),
-    size: schema.int(),
-  }),
-  files: schema.table({
-    name: schema.string().optional(),
-    mime_type: schema.string(),
-    data: schema.bytes(),
-  }),
 });
 
 const permissions = schema.definePermissions(app, ({ policy, anyOf, session }) => [
@@ -207,14 +195,6 @@ const camelChatStyleMessagePermissions = schema.definePermissions(
     policy.reactions.allowRead.where(allowedTo.read("messageId")),
     policy.reactions.allowInsert.where({ userId: session.user_id }),
     policy.reactions.allowDelete.where({ userId: session.user_id }),
-
-    policy.attachments.allowRead.where(allowedTo.read("messageId")),
-    policy.attachments.allowInsert.where(allowedTo.read("messageId")),
-    policy.attachments.allowDelete.where(allowedTo.read("messageId")),
-
-    policy.files.allowInsert.where({}),
-    policy.files.allowRead.where(allowedTo.readReferencing(policy.attachments, "fileId")),
-    policy.files.allowDelete.where(allowedTo.deleteReferencing(policy.attachments, "fileId")),
   ],
 );
 
@@ -444,17 +424,6 @@ describe("raw websocket private read gate", () => {
     await expect(
       waitForQuery(
         bob,
-        camelChatApp.attachments.where({ messageId: bobMessage.id }),
-        (rows) => rows.length === 0,
-        "Bob should settle attachment reads that inherit through camelCase message membership",
-        15_000,
-        "edge",
-      ),
-    ).resolves.toBeDefined();
-
-    await expect(
-      waitForQuery(
-        bob,
         camelChatApp.profiles.where({ id: bobProfile.id }),
         (rows) => rows.some((row) => row.id === bobProfile.id),
         "Bob should read the sender profile mounted by rendered chat messages",
@@ -462,131 +431,6 @@ describe("raw websocket private read gate", () => {
         "edge",
       ),
     ).resolves.toBeDefined();
-
-    await expect(
-      waitForQuery(
-        bob,
-        camelChatApp.files,
-        (rows) => rows.length === 0,
-        "Bob should settle file reads that inherit through referencing attachments",
-        15_000,
-        "edge",
-      ),
-    ).resolves.toBeDefined();
-
-    const fileBytes = deterministicBytes(129 * 1024);
-    const hiddenFile = await withTimeout(
-      alice.createFileFromBlob(
-        camelChatApp,
-        new Blob([fileBytes], { type: "application/x-private-proof" }),
-        {
-          name: "private-proof.bin",
-          tier: "edge",
-        },
-      ),
-      15_000,
-      "Alice private file edge wait",
-    );
-    await expect(
-      waitForQuery(
-        bob,
-        camelChatApp.files.where({ id: hiddenFile.id }),
-        (rows) => rows.length === 0,
-        "Bob should not read a file row before a readable attachment references it",
-        15_000,
-        "edge",
-      ),
-    ).resolves.toBeDefined();
-    await expect(bob.loadFileAsBlob(camelChatApp, hiddenFile.id, { tier: "edge" })).rejects.toThrow(
-      `File "${hiddenFile.id}" was not found.`,
-    );
-
-    await withTimeout(
-      alice
-        .insert(camelChatApp.attachments, {
-          messageId: bobMessage.id,
-          type: "file",
-          name: hiddenFile.name ?? "private-proof.bin",
-          fileId: hiddenFile.id,
-          size: fileBytes.byteLength,
-        })
-        .wait({ tier: "edge" }),
-      15_000,
-      "Alice attachment edge wait",
-    );
-    const [visibleFile] = await waitForQuery(
-      bob,
-      camelChatApp.files.where({ id: hiddenFile.id }),
-      (rows) => rows.length === 1,
-      "Bob should read a file row after a readable attachment references it",
-      15_000,
-      "edge",
-    );
-    expect(visibleFile.mime_type).toBe("application/x-private-proof");
-    expectBytesEqual(visibleFile.data, fileBytes);
-    const visibleBlob = await withTimeout(
-      bob.loadFileAsBlob(camelChatApp, hiddenFile.id, { tier: "edge" }),
-      15_000,
-      "Bob visible file blob edge load",
-    );
-    expect(visibleBlob.type).toBe("application/x-private-proof");
-    expectBytesEqual(new Uint8Array(await visibleBlob.arrayBuffer()), fileBytes);
-
-    const rawFileBytes = new Uint8Array([9, 8, 7, 6]);
-    const rawFile = await withTimeout(
-      alice
-        .insert(camelChatApp.files, {
-          mime_type: "application/x-raw-file-proof",
-          data: rawFileBytes,
-        })
-        .wait({ tier: "edge" }),
-      15_000,
-      "Alice raw private file edge wait",
-    );
-    await expect(
-      waitForQuery(
-        bob,
-        camelChatApp.files.where({ id: rawFile.id }),
-        (rows) => rows.length === 0,
-        "Bob should not read a raw files row before a readable attachment references it",
-        15_000,
-        "edge",
-      ),
-    ).resolves.toBeDefined();
-    await expect(bob.loadFileAsBlob(camelChatApp, rawFile.id, { tier: "edge" })).rejects.toThrow(
-      `File "${rawFile.id}" was not found.`,
-    );
-
-    await withTimeout(
-      alice
-        .insert(camelChatApp.attachments, {
-          messageId: bobMessage.id,
-          type: "file",
-          name: "raw-private-proof.bin",
-          fileId: rawFile.id,
-          size: rawFileBytes.byteLength,
-        })
-        .wait({ tier: "edge" }),
-      15_000,
-      "Alice raw attachment edge wait",
-    );
-    const [visibleRawFile] = await waitForQuery(
-      bob,
-      camelChatApp.files.where({ id: rawFile.id }),
-      (rows) => rows.length === 1,
-      "Bob should read a raw files row after a readable attachment references it",
-      15_000,
-      "edge",
-    );
-    expect(visibleRawFile.mime_type).toBe("application/x-raw-file-proof");
-    expectBytesEqual(visibleRawFile.data, rawFileBytes);
-    const visibleRawBlob = await withTimeout(
-      bob.loadFileAsBlob(camelChatApp, rawFile.id, { tier: "edge" }),
-      15_000,
-      "Bob visible raw file blob edge load",
-    );
-    expect(visibleRawBlob.type).toBe("application/x-raw-file-proof");
-    expectBytesEqual(new Uint8Array(await visibleRawBlob.arrayBuffer()), rawFileBytes);
 
     const subscriptionQueries = [
       {
@@ -607,11 +451,6 @@ describe("raw websocket private read gate", () => {
           .orderBy("createdAt", "asc")
           .limit(1),
         predicate: (rows: Array<{ id: string }>) => rows.length === 1,
-      },
-      {
-        label: "rendered message attachments",
-        query: camelChatApp.attachments.where({ messageId: bobMessage.id }),
-        predicate: (rows: unknown[]) => rows.length === 0,
       },
       {
         label: "rendered message reactions",
@@ -1204,19 +1043,6 @@ function requireUserId(db: Db, label: string): string {
     throw new Error(`${label} Db did not initialize a local-first session`);
   }
   return userId;
-}
-
-function deterministicBytes(length: number): Uint8Array {
-  const bytes = new Uint8Array(length);
-  for (let i = 0; i < bytes.length; i++) bytes[i] = (i * 31 + 17) % 256;
-  return bytes;
-}
-
-function expectBytesEqual(actual: Uint8Array, expected: Uint8Array): void {
-  expect(actual.byteLength).toBe(expected.byteLength);
-  for (let i = 0; i < expected.byteLength; i++) {
-    expect(actual[i]).toBe(expected[i]);
-  }
 }
 
 async function waitForSubscription<T extends { id: string }>(

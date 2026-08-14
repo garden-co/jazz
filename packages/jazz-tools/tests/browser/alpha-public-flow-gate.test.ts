@@ -49,14 +49,6 @@ const richApp = schema.defineApp({
   }),
 });
 
-const fileApp = schema.defineApp({
-  files: schema.table({
-    name: schema.string(),
-    mime_type: schema.string(),
-    data: schema.bytes(),
-  }),
-});
-
 const permissions = schema.definePermissions(app, ({ policy }) => [
   policy.todos.allowRead.always(),
   policy.todos.allowInsert.always(),
@@ -73,13 +65,6 @@ const richPermissions = schema.definePermissions(richApp, ({ policy }) => [
   policy.todos.allowInsert.always(),
   policy.todos.allowUpdate.always(),
   policy.todos.allowDelete.always(),
-]);
-
-const filePermissions = schema.definePermissions(fileApp, ({ policy }) => [
-  policy.files.allowRead.always(),
-  policy.files.allowInsert.always(),
-  policy.files.allowUpdate.always(),
-  policy.files.allowDelete.always(),
 ]);
 
 type Todo = RowOf<typeof app.todos>;
@@ -847,83 +832,6 @@ describe("alpha public package flow", () => {
     expect(deletedTodo).toEqual(todo);
     expect(Object.keys(deletedTodo).includes("deleted")).toBe(false);
   });
-
-  it("opens public file/blob helpers with persistent OPFS and websocket server config, then converges file rows", async () => {
-    const requestedAppId = uniqueDbName("alpha-public-file-flow");
-    const { appId, serverUrl, adminSecret } = await getJazzServerInfo(requestedAppId);
-    await publishSchemaAndPermissions(appId, serverUrl, adminSecret, filePermissions, fileApp);
-
-    const sharedSecret = generateAuthSecret();
-    const persistentDbName = uniqueDbName("alpha-public-file-opfs");
-    const sourceBytes = makeLargeProbeBytes();
-    const sourceBlob = new Blob([sourceBytes], { type: "application/x-jazz-probe" });
-    const sourceFile = new File([sourceBlob], "probe.bin", { type: sourceBlob.type });
-
-    const db = await openAlphaDb(appId, serverUrl, adminSecret, persistentDbName, sharedSecret, {
-      uniqueLabel: false,
-    });
-    const file = await withTimeout(
-      db.createFileFromBlob(fileApp, sourceFile, {
-        tier: "edge",
-      }),
-      20_000,
-      "file blob row was not accepted at the server",
-    );
-
-    expect(file.name).toBe("probe.bin");
-    expect(file.mime_type).toBe("application/x-jazz-probe");
-    expect(Array.from(file.data)).toEqual(Array.from(sourceBytes));
-
-    await withTimeout(
-      waitForFileRecord(db, file.id),
-      20_000,
-      "created file metadata was not readable locally",
-    );
-
-    await db.shutdown();
-    ctx.untrack(db);
-
-    const reopenedDb = await openAlphaDb(
-      appId,
-      serverUrl,
-      adminSecret,
-      persistentDbName,
-      sharedSecret,
-      { uniqueLabel: false },
-    );
-    await withTimeout(
-      waitForFileRecord(reopenedDb, file.id),
-      20_000,
-      "file metadata did not reload from persistent OPFS after reopen",
-    );
-    const reopenedBlob = await withTimeout(
-      reopenedDb.loadFileAsBlob(fileApp, file.id, { tier: "local" }),
-      10_000,
-      "file was not readable from persistent OPFS after reopen",
-    );
-    expect(reopenedBlob.type).toBe("application/x-jazz-probe");
-    await expectBlobBytes(reopenedBlob, sourceBytes);
-
-    const secondDb = await openAlphaDb(
-      appId,
-      serverUrl,
-      adminSecret,
-      "alpha-public-file-b",
-      sharedSecret,
-    );
-    await withTimeout(
-      waitForSubscribedFileRecord(secondDb, file.id),
-      20_000,
-      "file metadata did not converge to the second websocket client",
-    );
-    const secondClientBlob = await withTimeout(
-      secondDb.loadFileAsBlob(fileApp, file.id, { tier: "edge" }),
-      20_000,
-      "file was not readable from second websocket client",
-    );
-    expect(secondClientBlob.type).toBe("application/x-jazz-probe");
-    await expectBlobBytes(secondClientBlob, sourceBytes);
-  });
 });
 
 async function openAlphaDb(
@@ -1108,55 +1016,4 @@ function summary(todo: Todo): string {
 
 function byTitle(left: Todo, right: Todo): number {
   return left.title.localeCompare(right.title);
-}
-
-async function waitForFileRecord(db: Db, fileId: string): Promise<void> {
-  await waitForQuery(
-    db,
-    fileApp.files.where({ id: fileId }),
-    (files) => files.length === 1,
-    `file ${fileId}`,
-    45_000,
-    "local",
-  );
-}
-
-async function waitForSubscribedFileRecord(db: Db, fileId: string): Promise<void> {
-  await new Promise<void>((resolve, reject) => {
-    let lastRows: Array<{ id: string }> = [];
-    let unsubscribe: () => void = () => {};
-    const timeout = setTimeout(() => {
-      unsubscribe();
-      reject(
-        new Error(
-          `file metadata subscription timed out for ${fileId}; ` +
-            `lastRows=${JSON.stringify(lastRows.slice(0, 10))}`,
-        ),
-      );
-    }, 45_000);
-    unsubscribe = ctx.trackSubscription(
-      db.subscribeAll(fileApp.files.where({ id: fileId }), (delta) => {
-        lastRows = [...delta.all];
-        if (lastRows.length === 1) {
-          clearTimeout(timeout);
-          unsubscribe();
-          resolve();
-        }
-      }),
-    );
-  });
-}
-
-async function expectBlobBytes(blob: Blob, expected: Uint8Array): Promise<void> {
-  const actual = new Uint8Array(await blob.arrayBuffer());
-  expect(actual.length).toBe(expected.length);
-  expect(Array.from(actual)).toEqual(Array.from(expected));
-}
-
-function makeLargeProbeBytes(): Uint8Array {
-  const bytes = new Uint8Array(170_000);
-  for (let index = 0; index < bytes.length; index += 1) {
-    bytes[index] = (index * 31 + (index >>> 8)) % 256;
-  }
-  return bytes;
 }

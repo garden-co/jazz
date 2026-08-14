@@ -1,10 +1,7 @@
 import { useState } from "react";
 import DOMPurify from "dompurify";
 import { TrashIcon } from "lucide-react";
-import { useAll } from "jazz-tools/react";
 import { ChatMetadata } from "@/components/chat/ChatMetadata";
-import { ChatImage } from "@/components/chat/ChatImage";
-import { ChatFile } from "@/components/chat/ChatFile";
 import { CollaborativeCanvas } from "@/components/canvas/Canvas";
 import { ReactionPicker } from "@/components/chat/ChatReactionPicker";
 import { MessageReactions } from "@/components/chat/ChatReactions";
@@ -44,8 +41,6 @@ export const ChatMessage = ({ message, sender, isMe, onDelete }: ChatMessageProp
   const { data: senderProfiles = [] } = useAll(app.profiles.where({ id: message.senderId }));
   const resolvedSender = (senderProfiles[0] as unknown as Profile) ?? sender;
 
-  const { data: attachments = [] } = useAll(app.attachments.where({ messageId: message.id }));
-
   const canvasMatch = message.text?.match(/^\[Canvas: ([^\]]+)\]$/);
   const canvasId = canvasMatch?.[1] ?? null;
 
@@ -78,14 +73,6 @@ export const ChatMessage = ({ message, sender, isMe, onDelete }: ChatMessageProp
                     dangerouslySetInnerHTML={{ __html: sanitisedHtml }}
                   />
                 ) : null}
-
-                {attachments.map((att) =>
-                  att.type === "image" ? (
-                    <ChatImage key={att.id} attachment={att} />
-                  ) : (
-                    <ChatFile key={att.id} attachment={att} />
-                  ),
-                )}
 
                 <MessageReactions messageId={message.id} isMe={isMe} />
               </ItemContent>

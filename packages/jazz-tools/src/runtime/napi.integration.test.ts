@@ -63,19 +63,6 @@ type ByteChunkInit = {
   data: Uint8Array;
 };
 
-type StoredFile = {
-  id: string;
-  name: string;
-  mime_type: string;
-  data: Uint8Array;
-};
-
-type StoredFileInit = {
-  name: string;
-  mime_type: string;
-  data: Uint8Array;
-};
-
 type PolicyTodo = {
   id: string;
   title: string;
@@ -145,16 +132,6 @@ const BYTEA_SCHEMA: WasmSchema = {
   byte_chunks: {
     columns: [
       { name: "label", column_type: { type: "Text" }, nullable: false },
-      { name: "data", column_type: { type: "Bytea" }, nullable: false },
-    ],
-  },
-};
-
-const FILE_STORAGE_SCHEMA: WasmSchema = {
-  files: {
-    columns: [
-      { name: "name", column_type: { type: "Text" }, nullable: false },
-      { name: "mime_type", column_type: { type: "Text" }, nullable: false },
       { name: "data", column_type: { type: "Bytea" }, nullable: false },
     ],
   },
@@ -240,8 +217,6 @@ function makeWhereTable<Row, Init>(table: string, schema: WasmSchema): WhereTabl
 }
 
 const byteChunksTable = makeWhereTable<ByteChunk, ByteChunkInit>("byte_chunks", BYTEA_SCHEMA);
-const filesTable = makeWhereTable<StoredFile, StoredFileInit>("files", FILE_STORAGE_SCHEMA);
-
 function makePolicyTodosTable(schema: WasmSchema): TableProxy<PolicyTodo, PolicyTodoInit> {
   return {
     _table: "todos",
@@ -1809,47 +1784,6 @@ describe("NAPI integration", () => {
       expect(Array.from(reloaded?.data ?? [])).toEqual([4, 5, 6]);
     } finally {
       seedRuntime?.close();
-      if (context) {
-        await context.shutdown();
-      }
-      await rm(dataRoot, { recursive: true, force: true });
-    }
-  }, 30_000);
-
-  it("stores Blob bytes in files.data when using createFileFromBlob", async () => {
-    const dataRoot = await createTempDir("jazz-napi-bytea-file-");
-    const dataPath = join(dataRoot, "runtime.skv");
-    let context: {
-      db(): Db;
-      shutdown(): Promise<void>;
-    } | null = null;
-
-    try {
-      const { createJazzContext } = await import("../backend/create-jazz-context.js");
-
-      context = createJazzContext({
-        appId: randomUUID(),
-        app: { wasmSchema: FILE_STORAGE_SCHEMA },
-        permissions: {},
-        driver: { type: "persistent", dataPath },
-      });
-
-      const file = await context.db().createFileFromBlob(
-        {
-          files: filesTable,
-        },
-        new Blob([new Uint8Array([7, 8, 9])], { type: "application/octet-stream" }),
-        { name: "probe.bin" },
-      );
-
-      const storedFile = await context.db().one(filesTable.where({ id: file.id }), {
-        tier: "local",
-      });
-
-      expect(storedFile).not.toBeNull();
-      expect(storedFile?.mime_type).toBe("application/octet-stream");
-      expect(Array.from(storedFile?.data ?? [])).toEqual([7, 8, 9]);
-    } finally {
       if (context) {
         await context.shutdown();
       }
