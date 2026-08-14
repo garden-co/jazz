@@ -1,11 +1,7 @@
 import { createJazzContext, Db, Session, type JazzContext } from "../backend/index.js";
 import type { WasmSchema } from "../drivers/types.js";
 import type { CompiledPermissions } from "../permissions/index.js";
-import {
-  fetchPermissionsHead,
-  publishStoredPermissions,
-  publishStoredSchema,
-} from "../runtime/schema-fetch.js";
+import { deploy } from "../dev/catalogue.js";
 import { startLocalJazzServer, type LocalJazzServerHandle } from "../dev/dev-server.js";
 
 type PolicyTestAppSchema = { wasmSchema: WasmSchema };
@@ -24,12 +20,18 @@ type PendingWrite = {
 };
 type SeedWrite<T> = {
   readonly value: T;
-  wait(options: { tier: "local" }): Promise<T>;
+  wait(options: { tier: "local" | "edge" }): Promise<T>;
 };
 
 /** @internal */
 export async function settlePolicySeed<T>(write: SeedWrite<T>): Promise<T> {
   return write.wait({ tier: "local" });
+}
+
+/** @internal */
+export async function settlePolicySeedForSessionReads<T>(write: SeedWrite<T>): Promise<T> {
+  await settlePolicySeed(write);
+  return write.wait({ tier: "edge" });
 }
 
 /**
@@ -94,13 +96,14 @@ export class PolicyTestApp {
   ) {}
 
   /**
-   * Seed the database with one admin write and wait until it is locally
-   * visible before returning. This prevents the following session-scoped read
-   * from racing the asynchronous native runtime commit.
+   * Seed the database with one admin write and wait until the serving
+   * authority has accepted it before returning. Session-scoped reads default
+   * to the edge tier, so local staging alone can otherwise race their first
+   * policy-evaluated query.
    */
   async seed<T>(callback: (db: Db) => SeedWrite<T>): Promise<T> {
     const db = this.jazzContext.asBackend();
-    return settlePolicySeed(callback(db));
+    return settlePolicySeedForSessionReads(callback(db));
   }
 
   /**
@@ -140,21 +143,12 @@ export async function createPolicyTestApp(
     adminSecret,
   });
 
-  const { hash: schemaHash } = await publishStoredSchema(server.url, {
+  await deploy({
     appId: server.appId,
+    serverUrl: server.url,
     adminSecret,
-    schema: app.wasmSchema,
-  });
-  const { head } = await fetchPermissionsHead(server.url, {
-    appId: server.appId,
-    adminSecret,
-  });
-  await publishStoredPermissions(server.url, {
-    appId: server.appId,
-    adminSecret,
-    schemaHash,
+    schema: app,
     permissions,
-    expectedParentBundleObjectId: head?.bundleObjectId ?? null,
   });
 
   const jazzContext = createJazzContext({

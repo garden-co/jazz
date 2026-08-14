@@ -12,7 +12,7 @@ currency and deletion semantics of chapter 4 and feeds queries (ch. 6) and the
 
 Invariant digest:
 
-- `INV-READ-1`: Opening an exclusive transaction MUST capture a `Snapshot` whose `owner` is the node UUID, whose `global_base` is the node's contiguous `applied_global_watermark`, whose `local_base` is the node's current `TxTime`, and whose exclusive-base dots contain no foreign transactions.
+- `INV-READ-1`: Opening an exclusive transaction MUST capture a `Snapshot` whose `owner` is the node UUID, whose `global_base` is the node's contiguous `applied_global_watermark`, whose `local_base` is the node's current `TxTime`, and whose `dots` contain every non-rejected transaction with `global_seq > global_base`, including foreign transactions.
 - `INV-READ-2`: A snapshot MUST cover exactly transactions with stored `global_seq <= Snapshot.global_base`, transactions from `Snapshot.owner` with `tx_id.time <= Snapshot.local_base`, or transactions explicitly listed in `Snapshot.dots`.
 - `INV-READ-3`: Reads inside an open exclusive transaction MUST choose the domination winner among snapshot-covered versions per `VersionLayer` and MUST NOT observe later uncovered current-winner changes.
 - `INV-READ-4`: Reads inside an open exclusive transaction MUST overlay that transaction's own pending writes on top of the snapshot-covered base view.
@@ -76,18 +76,19 @@ a snapshot when its stored `global_seq <= global_base`, or it is owned by
 
 Opening an exclusive transaction captures `owner = self`,
 `global_base = the contiguous applied global watermark` (not merely the highest
-seen seq), `local_base = the current TxTime`, and empty `dots` (`INV-READ-1`).
-Using the _contiguous_ watermark for `global_base` is what makes the snapshot a
-clean prefix: gapped global seqs are excluded until their gaps fill.
+seen seq), `local_base = the current TxTime`, and a dot for every locally known,
+non-rejected transaction whose `global_seq` lies beyond that watermark
+(`INV-READ-1`). Using the _contiguous_ watermark for `global_base` makes the
+prefix explicit; sparse globally sequenced transactions beyond the prefix remain
+visible through `dots` while their gaps fill.
 
 The `dots` field is the escape hatch for the general snapshot model: a snapshot
 ref can name explicit transaction dots outside the contiguous/global and
-owner-local prefixes. An exclusive base snapshot carries no foreign dots: it
-sees exactly the contiguous global prefix plus its own `owner`/`local_base`
-transactions. Snapshot creation enforces that any admitted dots are owned by the
-snapshot owner. Sync payload dedup and reconnect state are separate from this
-read-frontier model (ch. 8); they must not overload `Snapshot.dots` to mean
-"payloads already known by a peer."
+owner-local prefixes. An exclusive base snapshot preserves both local and
+foreign dots, and `open_exclusive` populates them from sparse globally sequenced
+transactions above the contiguous watermark. Sync payload dedup and reconnect
+state are separate from this read-frontier model (ch. 8); they must not overload
+`Snapshot.dots` to mean "payloads already known by a peer."
 
 ### 5.4 Reads inside an exclusive transaction
 

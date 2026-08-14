@@ -90,9 +90,16 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
 pub use macros::{FieldKind, RecordField, assert_record_field_layout};
-pub use values::{EnumSchema, Value, ValueType};
+pub use values::{
+    EnumCase, EnumSchema, EnumValue, ScalarEnumSchema, SystemVariantRegistry, Value, ValueType,
+    VariantRegistry, variant_registry_id_for_path,
+};
 
-pub const SCHEMA_VERSION_HEADER_LEN: usize = std::mem::size_of::<u64>();
+/// Maximum bytes in the canonical table-local variant-tag prefix.
+///
+/// Tags are deliberately bounded to `u32`: a table with billions of retained
+/// row cases has a registry problem long before it has a tag-space problem.
+pub const MAX_VARIANT_TAG_LEN: usize = 5;
 
 use values::{
     checked_add, decode_value, encode_fixed_value, encode_value, ensure_value_type, usize_to_u32,
@@ -128,6 +135,27 @@ impl RecordDescriptor {
 
     pub fn fields(&self) -> &[DescriptorField] {
         &self.fields
+    }
+
+    pub(crate) fn registry_compatible_with(&self, other: &Self) -> bool {
+        self.fields.len() == other.fields.len()
+            && self.fields.iter().zip(other.fields()).all(|(a, b)| {
+                a.name == b.name && a.value_type.registry_compatible_with(&b.value_type)
+            })
+    }
+
+    /// Whether this descriptor may advance to `next` solely by appending enum
+    /// registry cases while preserving every existing field's interpretation.
+    pub(crate) fn can_evolve_registry_to(&self, next: &Self) -> bool {
+        self.fields.len() == next.fields.len()
+            && self
+                .fields
+                .iter()
+                .zip(next.fields())
+                .all(|(current, next)| {
+                    current.name == next.name
+                        && current.value_type.can_evolve_registry_to(&next.value_type)
+                })
     }
 
     pub fn field_index(&self, field_name: &str) -> Option<usize> {
@@ -608,6 +636,31 @@ impl RecordProjector {
         target: RecordDescriptor,
         mapping: impl IntoIterator<Item = (usize, usize)>,
     ) -> Result<Self, Error> {
+        Self::new_inner(source, target, mapping, false)
+    }
+
+    /// Construct a byte-copy projector across descriptors that have identical
+    /// encoded layouts but were rebound to different enum registry IDs.
+    ///
+    /// This is intentionally narrower than general enum compatibility: every
+    /// case and nested payload layout must match exactly, so no tag can be
+    /// silently reinterpreted. Callers that cross evolved enum schemas must
+    /// use an explicit enum remap instead.
+    #[doc(hidden)]
+    pub fn new_registry_rebound(
+        source: RecordDescriptor,
+        target: RecordDescriptor,
+        mapping: impl IntoIterator<Item = (usize, usize)>,
+    ) -> Result<Self, Error> {
+        Self::new_inner(source, target, mapping, true)
+    }
+
+    fn new_inner(
+        source: RecordDescriptor,
+        target: RecordDescriptor,
+        mapping: impl IntoIterator<Item = (usize, usize)>,
+        allow_registry_rebinding: bool,
+    ) -> Result<Self, Error> {
         let mut target_to_source = vec![None; target.fields.len()];
         for (source_idx, target_idx) in mapping {
             let source_field =
@@ -629,12 +682,17 @@ impl RecordProjector {
             if target_to_source[target_idx].is_some() {
                 return Err(Error::ProjectDuplicateTarget { target_idx });
             }
-            if source_field.value_type != target_field.value_type {
+            if source_field.value_type != target_field.value_type
+                && !(allow_registry_rebinding
+                    && source_field
+                        .value_type
+                        .registry_rebound_layout_compatible_with(&target_field.value_type))
+            {
                 return Err(Error::ProjectTypeMismatch {
                     source_idx,
                     target_idx,
-                    source_type: source_field.value_type.clone(),
-                    target_type: target_field.value_type.clone(),
+                    source_type: Box::new(source_field.value_type.clone()),
+                    target_type: Box::new(target_field.value_type.clone()),
                 });
             }
             target_to_source[target_idx] = Some(source_idx);
@@ -1174,7 +1232,7 @@ impl<'a> BorrowedRecord<'a> {
                 index: field_idx,
                 len: self.descriptor.fields.len(),
             })?;
-        if !matches!(field.value_type, ValueType::Enum(_)) {
+        if !matches!(field.value_type, ValueType::EnumTag(_)) {
             return Err(Error::TypeMismatch {
                 expected: ValueType::U8,
             });
@@ -1192,7 +1250,7 @@ impl<'a> BorrowedRecord<'a> {
                 index: field_idx,
                 len: self.descriptor.fields.len(),
             })?;
-        let ValueType::Enum(schema) = &field.value_type else {
+        let ValueType::EnumTag(schema) = &field.value_type else {
             return Err(Error::TypeMismatch {
                 expected: ValueType::U8,
             });
@@ -1256,7 +1314,7 @@ impl<'a> BorrowedRecord<'a> {
                 expected: ValueType::Nullable(Box::new(ValueType::U8)),
             });
         };
-        if !matches!(inner.as_ref(), ValueType::Enum(_)) {
+        if !matches!(inner.as_ref(), ValueType::EnumTag(_)) {
             return Err(Error::TypeMismatch {
                 expected: ValueType::Nullable(Box::new(ValueType::U8)),
             });
@@ -1575,48 +1633,50 @@ pub struct DescriptorField {
 }
 
 /// Owned encoded record tied to the descriptor that decodes it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Record<'a> {
     raw: Vec<u8>,
     descriptor: &'a RecordDescriptor,
 }
 
 /// Owned encoded record tied to an owned descriptor.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct OwnedRecord {
     raw: Vec<u8>,
     descriptor: RecordDescriptor,
 }
 
-/// An encoded row bound to the table-local schema version that describes it.
+/// An encoded row bound to the table-local variant case that describes it.
 ///
-/// The version travels with the row through batching and is written as the
-/// stable eight-byte prefix of the stored value.
+/// The tag travels with the row through batching and is written as a canonical
+/// bounded varint prefix. Its meaning belongs to the table registry. Groove
+/// does not distinguish user-declared enum cases from storage-layout cases;
+/// a lowering layer may allocate one tag for every `(layout, user_case)` pair.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct VersionedRecord {
-    schema_version: u64,
+pub struct VariantRecord {
+    variant_tag: u32,
     record: OwnedRecord,
 }
 
-impl VersionedRecord {
-    pub fn new(schema_version: u64, record: OwnedRecord) -> Self {
+impl VariantRecord {
+    pub fn new(variant_tag: u32, record: OwnedRecord) -> Self {
         Self {
-            schema_version,
+            variant_tag,
             record,
         }
     }
 
-    pub fn schema_version(&self) -> u64 {
-        self.schema_version
+    pub fn variant_tag(&self) -> u32 {
+        self.variant_tag
     }
 
     pub fn create(
-        schema_version: u64,
+        variant_tag: u32,
         descriptor: RecordDescriptor,
         values: &[Value],
     ) -> Result<Self, Error> {
         let raw = descriptor.create(values)?;
-        Ok(Self::new(schema_version, OwnedRecord::new(raw, descriptor)))
+        Ok(Self::new(variant_tag, OwnedRecord::new(raw, descriptor)))
     }
 
     pub fn record(&self) -> &OwnedRecord {
@@ -1652,27 +1712,47 @@ impl VersionedRecord {
     }
 
     pub fn into_stored_bytes(self) -> Vec<u8> {
-        encode_versioned_record(self.schema_version, self.record.raw())
+        encode_variant_record(self.variant_tag, self.record.raw())
     }
 }
 
-pub fn encode_versioned_record(schema_version: u64, payload: &[u8]) -> Vec<u8> {
-    let mut stored = Vec::with_capacity(SCHEMA_VERSION_HEADER_LEN + payload.len());
-    stored.extend_from_slice(&schema_version.to_le_bytes());
+pub fn encode_variant_record(variant_tag: u32, payload: &[u8]) -> Vec<u8> {
+    let mut stored = Vec::with_capacity(MAX_VARIANT_TAG_LEN + payload.len());
+    put_canonical_u32_varint(&mut stored, variant_tag);
     stored.extend_from_slice(payload);
     stored
 }
 
-pub fn split_versioned_record(stored: &[u8]) -> Result<(u64, &[u8]), Error> {
-    let header = stored
-        .get(..SCHEMA_VERSION_HEADER_LEN)
-        .ok_or(Error::InvalidSchemaVersionHeader)?;
-    let schema_version = u64::from_le_bytes(
-        header
-            .try_into()
-            .expect("schema-version header has u64 width"),
-    );
-    Ok((schema_version, &stored[SCHEMA_VERSION_HEADER_LEN..]))
+pub fn split_variant_record(stored: &[u8]) -> Result<(u32, &[u8]), Error> {
+    let (tag, header_len) = read_canonical_u32_varint(stored)?;
+    Ok((tag, &stored[header_len..]))
+}
+
+fn put_canonical_u32_varint(out: &mut Vec<u8>, mut value: u32) {
+    while value >= 0x80 {
+        out.push((value as u8) | 0x80);
+        value >>= 7;
+    }
+    out.push(value as u8);
+}
+
+fn read_canonical_u32_varint(input: &[u8]) -> Result<(u32, usize), Error> {
+    let mut value = 0_u32;
+    for index in 0..MAX_VARIANT_TAG_LEN {
+        let byte = *input.get(index).ok_or(Error::InvalidSchemaVersionHeader)?;
+        let payload = u32::from(byte & 0x7f);
+        if index == MAX_VARIANT_TAG_LEN - 1 && payload > 0x0f {
+            return Err(Error::InvalidSchemaVersionHeader);
+        }
+        value |= payload << (index * 7);
+        if byte & 0x80 == 0 {
+            if index > 0 && payload == 0 {
+                return Err(Error::InvalidSchemaVersionHeader);
+            }
+            return Ok((value, index + 1));
+        }
+    }
+    Err(Error::InvalidSchemaVersionHeader)
 }
 
 impl OwnedRecord {
@@ -1828,6 +1908,18 @@ pub enum Error {
     InvalidOffset,
     #[error("invalid schema-version header")]
     InvalidSchemaVersionHeader,
+    #[error("invalid enum value header")]
+    InvalidEnumHeader,
+    #[error("enum {name} has {cases} cases; maximum is u32::MAX + 1")]
+    EnumTooManyCases { name: String, cases: usize },
+    #[error("duplicate case {case} in enum {enum_name}")]
+    DuplicateEnumCaseName { enum_name: String, case: String },
+    #[error("unknown case {case} in enum {enum_name}")]
+    UnknownEnumCase { enum_name: String, case: String },
+    #[error("unknown tag {tag} in enum {enum_name}")]
+    UnknownEnumTag { enum_name: String, tag: u32 },
+    #[error("table variant tag {0} exceeds the bounded u32 tag space")]
+    VariantTagOutOfRange(u64),
     #[error("nested record bytes are not canonical")]
     NonCanonicalRecord,
     #[error("tuple members must be fixed-width, got {member_type:?}")]
@@ -1850,8 +1942,8 @@ pub enum Error {
     ProjectTypeMismatch {
         source_idx: usize,
         target_idx: usize,
-        source_type: ValueType,
-        target_type: ValueType,
+        source_type: Box<ValueType>,
+        target_type: Box<ValueType>,
     },
     #[error("projection source record descriptor does not match projector source descriptor")]
     ProjectSourceDescriptorMismatch,

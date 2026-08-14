@@ -7,6 +7,7 @@ import {
   type JazzClient,
   type BatchId,
   type LocalTransactionRecord,
+  type MutationErrorEvent,
   type Row,
 } from "./client.js";
 import type { Session } from "./context.js";
@@ -283,5 +284,72 @@ describe("Db write handles", () => {
       "transaction-session-delete",
     );
     expect(deleteClient.waitForTransaction.mock.calls[0]?.[1]).toBe("local");
+  });
+});
+
+describe("Db mutation error handling", () => {
+  function makeRejectedEvent(batchId: BatchId): MutationErrorEvent {
+    return {
+      code: "permission_denied",
+      reason: "write rejected by policy",
+      transaction: {
+        batchId,
+        kind: "mergeable",
+        sealed: true,
+        latestSettlement: {
+          kind: "rejected",
+          batchId,
+          code: "permission_denied",
+          reason: "write rejected by policy",
+        },
+      },
+    };
+  }
+
+  it("replays an unhandled client rejection to the first Db listener and supports unsubscribe", () => {
+    let runtimeListener: ((event: MutationErrorEvent) => void) | undefined;
+    const batchId = "mutation-error-batch" as BatchId;
+    let client!: JazzClient;
+    const clientImpl = {
+      onMutationError: vi.fn((listener: (event: MutationErrorEvent) => void) => {
+        runtimeListener = listener;
+      }),
+      insert: vi.fn(
+        () =>
+          new WriteResult(
+            {
+              id: "todo-1",
+              values: [
+                { type: "Text", value: "Buy milk" },
+                { type: "Boolean", value: false },
+              ],
+            },
+            batchId,
+            client,
+          ),
+      ),
+      waitForTransaction: vi.fn(async () => undefined),
+    };
+    client = clientImpl as unknown as JazzClient;
+    class MutationErrorDb extends Db {
+      constructor() {
+        super({ appId: "mutation-error-db" }, new TestRuntimeSource(client));
+      }
+    }
+    const db = new MutationErrorDb();
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    db.insert(todoTable(), { title: "Buy milk", done: false });
+    const event = makeRejectedEvent(batchId);
+    runtimeListener?.(event);
+
+    const listener = vi.fn();
+    const unsubscribe = db.onMutationError(listener);
+    expect(listener).toHaveBeenCalledWith(event);
+    expect(consoleError).toHaveBeenCalledWith("Unhandled Jazz mutation error", event);
+
+    unsubscribe();
+    runtimeListener?.(makeRejectedEvent("later-batch" as BatchId));
+    expect(listener).toHaveBeenCalledTimes(1);
   });
 });

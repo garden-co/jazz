@@ -704,6 +704,181 @@ fn receiver_batch_coalesces_partial_bundles_for_same_tx() {
 }
 
 // This stays internal because it directly exercises the protocol receiver's
+// receiver-batch boundary. The public serving tests below assert the matching
+// producer-side whole-row payload rule.
+#[test]
+fn receiver_batch_replays_identical_whole_versions_and_rejects_conflicts() {
+    let projection_schema = JazzSchema::new([TableSchema::new(
+        "todos",
+        [
+            ColumnSchema::new("title", ColumnType::String),
+            ColumnSchema::new("body", ColumnType::String),
+        ],
+    )]);
+    let (_writer_dir, mut writer) = open_node_with_schema(node(1), projection_schema.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(2), projection_schema.clone());
+    let (_reader_dir, mut reader) = open_node_with_schema(node(3), projection_schema.clone());
+    let row_uuid = row(1);
+    let (tx_id, unit) = writer
+        .commit_mergeable_unit(
+            MergeableCommit::new("todos", row_uuid, 10).cells(BTreeMap::from([
+                ("title".to_owned(), Value::String("visible title".to_owned())),
+                ("body".to_owned(), Value::String("visible body".to_owned())),
+            ])),
+        )
+        .unwrap();
+    let SyncMessage::CommitUnit { tx, versions } = unit else {
+        panic!("expected commit unit");
+    };
+    let [fate] = core
+        .ingest_commit_unit(tx.clone(), versions.clone(), u64::MAX - SKEW_TOLERANCE_MS)
+        .unwrap()
+        .try_into()
+        .unwrap();
+    let SyncMessage::FateUpdate {
+        global_seq: Some(global_seq),
+        durability: Some(durability),
+        ..
+    } = fate
+    else {
+        panic!("expected accepted fate");
+    };
+    let full = versions.into_iter().next().unwrap();
+    let conflicting = VersionRecord::encode(
+        &projection_schema.tables[0],
+        full.schema_version(),
+        full.row_uuid(),
+        full.parents(),
+        full.created_by(),
+        full.created_at(),
+        full.updated_by(),
+        full.updated_at(),
+        &[
+            Some(Value::String("conflicting title".to_owned())),
+            full.cell_at(1),
+        ],
+        full.deletion(),
+    )
+    .unwrap()
+    .with_authored_columns(full.authored_columns().cloned());
+    let subscription = reader.whole_table_subscription_key("todos").unwrap();
+    let update = |version, fate, update_global_seq, update_durability, result_member_adds| ViewUpdateParts {
+        subscription,
+        settled_through: global_seq,
+        defer_settlement: false,
+        reset_result_set: false,
+        version_carriers: Vec::new(),
+        version_bundles: vec![VersionBundle {
+            tx: tx.clone(),
+            versions: vec![version],
+            fate,
+            global_seq: update_global_seq,
+            durability: update_durability,
+        }],
+        peer_complete_tx_payload_refs: Vec::new(),
+        authorization_progress: None,
+        result_member_adds,
+        result_member_removes: Vec::new(),
+        terminal_operations: Vec::new(),
+        program_fact_adds: Vec::new(),
+        program_fact_removes: Vec::new(),
+    };
+
+    assert!(matches!(
+        reader.apply_view_updates_in_batch(vec![
+            update(
+                full.clone(),
+                Fate::Accepted,
+                Some(global_seq),
+                durability,
+                Vec::new(),
+            ),
+            update(
+                conflicting.clone(),
+                Fate::Accepted,
+                Some(global_seq),
+                durability,
+                Vec::new(),
+            ),
+        ]),
+        Err(Error::ConflictingCommitUnit(conflicting_tx)) if conflicting_tx == tx_id
+    ));
+
+    reader
+        .apply_view_updates_in_batch(vec![
+            update(
+                full.clone(),
+                Fate::Accepted,
+                Some(global_seq),
+                durability,
+                vec![ResultMemberEntry::row((
+                    "todos".to_owned().into(),
+                    row_uuid,
+                    tx_id,
+                ))],
+            ),
+            update(
+                full.clone(),
+                Fate::Accepted,
+                Some(global_seq),
+                durability,
+                vec![ResultMemberEntry::row((
+                    "todos".to_owned().into(),
+                    row_uuid,
+                    tx_id,
+                ))],
+            ),
+        ])
+        .unwrap();
+
+    assert_eq!(
+        reader
+            .subscription_current_rows("todos", DurabilityTier::Global)
+            .unwrap()
+            .into_iter()
+            .map(current_row_pair)
+            .collect::<BTreeMap<_, _>>(),
+        BTreeMap::from([(
+            row_uuid,
+            BTreeMap::from([
+                ("title".to_owned(), Value::String("visible title".to_owned())),
+                ("body".to_owned(), Value::String("visible body".to_owned())),
+            ]),
+        )])
+    );
+    assert_eq!(reader.sync_metrics().receiver_bulk_bundle_ingests, 1);
+    assert_eq!(reader.sync_metrics().receiver_per_bundle_ingests, 0);
+
+    // A later subscription can replay the exact same immutable row payload
+    // with weaker fate metadata. The payload stays idempotent while fate and
+    // durability remain monotone.
+    reader
+        .apply_view_updates_in_batch(vec![update(
+            full.clone(),
+            Fate::Pending,
+            None,
+            DurabilityTier::Edge,
+            Vec::new(),
+        )])
+        .unwrap();
+    assert_eq!(
+        reader.transaction_state(tx_id).unwrap(),
+        (Fate::Accepted, Some(global_seq), DurabilityTier::Global),
+    );
+
+    assert!(matches!(
+        reader.apply_view_updates_in_batch(vec![update(
+            conflicting,
+            Fate::Accepted,
+            Some(global_seq),
+            durability,
+            Vec::new(),
+        )]),
+        Err(Error::ConflictingCommitUnit(conflicting_tx)) if conflicting_tx == tx_id
+    ));
+}
+
+// This stays internal because it directly exercises the protocol receiver's
 // single-message fragment assembly boundary.
 #[test]
 fn sequential_partial_exclusive_bundles_index_the_complete_transaction() {

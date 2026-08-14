@@ -1240,22 +1240,22 @@ fn normalize_literal_for_field(
     field_type: &ValueType,
 ) -> Result<LiteralValue, PlannerError> {
     match (value, field_type) {
-        (LiteralValue::String(variant), ValueType::Enum(schema)) => schema
+        (LiteralValue::String(variant), ValueType::EnumTag(schema)) => schema
             .discriminant(&variant)
-            .map(LiteralValue::Enum)
+            .map(LiteralValue::EnumTag)
             .map_err(|_| PlannerError::TypeMismatch {
                 left: field_type.clone(),
                 right: ValueType::String,
             }),
         (LiteralValue::String(variant), ValueType::Nullable(inner))
-            if matches!(inner.as_ref(), ValueType::Enum(_)) =>
+            if matches!(inner.as_ref(), ValueType::EnumTag(_)) =>
         {
-            let ValueType::Enum(schema) = inner.as_ref() else {
+            let ValueType::EnumTag(schema) = inner.as_ref() else {
                 unreachable!();
             };
             schema
                 .discriminant(&variant)
-                .map(LiteralValue::Enum)
+                .map(LiteralValue::EnumTag)
                 .map_err(|_| PlannerError::TypeMismatch {
                     left: field_type.clone(),
                     right: ValueType::String,
@@ -1279,7 +1279,7 @@ fn comparable_value_types(left: &ValueType, right: &ValueType) -> bool {
     };
     if matches!(
         (left_unwrapped, right_unwrapped),
-        (ValueType::Enum(_), ValueType::String) | (ValueType::String, ValueType::Enum(_))
+        (ValueType::EnumTag(_), ValueType::String) | (ValueType::String, ValueType::EnumTag(_))
     ) {
         return true;
     }

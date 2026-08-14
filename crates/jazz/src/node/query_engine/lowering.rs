@@ -269,6 +269,7 @@ pub(crate) fn graph_declared_output_fields(graph: &GraphBuilder) -> Option<BTree
         ),
         GraphBuilder::Filter { input, .. }
         | GraphBuilder::UnwrapNullable { input, .. }
+        | GraphBuilder::VariantProject { input, .. }
         | GraphBuilder::ArgMaxBy { input, .. }
         | GraphBuilder::ArgMinBy { input, .. }
         | GraphBuilder::TopBy { input, .. }
@@ -353,6 +354,7 @@ fn source_authorization_for_source(
                 protected_row_field: "row_uuid".to_owned(),
                 binding_source_shape: request.input.binding.source_shape.clone(),
                 binding_user_params: binding_user_param_types(&request.input.binding)?,
+                binding_claim_params: request.input.binding.claim_params.clone(),
             },
         }),
         // Auxiliary closure and payload sources do not establish policy
@@ -514,6 +516,7 @@ fn collect_equality_filter_route_params(predicate: &PredicateExpr, routing: &mut
         | PredicateExpr::TextContains { .. }
         | PredicateExpr::IsNull(_)
         | PredicateExpr::IsNotNull(_)
+        | PredicateExpr::EnumMatch { .. }
         | PredicateExpr::Or(_)
         | PredicateExpr::Not(_) => {}
     }
@@ -565,6 +568,7 @@ fn collect_binding_source_params(graph: &GraphBuilder, domain: &mut ParameterDom
         }
         GraphBuilder::Filter { input, .. }
         | GraphBuilder::UnwrapNullable { input, .. }
+        | GraphBuilder::VariantProject { input, .. }
         | GraphBuilder::Unnest { input, .. }
         | GraphBuilder::Project { input, .. }
         | GraphBuilder::ArgMaxBy { input, .. }
@@ -1774,6 +1778,9 @@ fn predicate_contains_param(predicate: &PredicateExpr) -> bool {
             predicates.iter().any(predicate_contains_param)
         }
         PredicateExpr::Not(predicate) => predicate_contains_param(predicate),
+        PredicateExpr::EnumMatch { value, payload, .. } => {
+            value_contains_param(value) || predicate_contains_param(payload)
+        }
     }
 }
 
@@ -1849,6 +1856,24 @@ fn source_requirements(
         requirements.insert(source, SourceRequirements::default());
     }
 
+    // Every closure hop consumes its parent reference as an executable join
+    // key, even when that intermediate source contributes no application
+    // payload.  Source projections are allowed to elide unrequested fields;
+    // without this requirement a nested include such as `project.org` can
+    // resolve `projects` with `user_org` replaced by its sparse projection
+    // default, making the second hop look universally missing.
+    for path in &request.input.shape.closure_paths {
+        for segment in closure_path_segments(path) {
+            let source_requirements = requirements.get_mut(&segment.parent).ok_or_else(|| {
+                single_gap_report(UnsupportedReason::Runtime(format!(
+                    "closure parent source {:?} was not initialized",
+                    segment.parent
+                )))
+            })?;
+            add_required_app_field(source_requirements, segment.source_field.clone());
+        }
+    }
+
     // A flat output carries an occurrence-addressed tuple. Keep source
     // version metadata available at the source boundary so joined-side
     // changes can be represented as maintained replacements.
@@ -1901,10 +1926,13 @@ fn source_requirements(
                 SourceMetadataRequirement::Provenance(ProvenanceField::UpdatedBy),
             ]);
         }
-        root_requirements.app_fields = match &app_rows.projection {
-            PayloadProjection::ShapeDefault => FieldRequirement::All,
-            PayloadProjection::Tree(tree) => tree.fields.clone().into(),
-        };
+        merge_field_requirement(
+            &mut root_requirements.app_fields,
+            match &app_rows.projection {
+                PayloadProjection::ShapeDefault => FieldRequirement::All,
+                PayloadProjection::Tree(tree) => tree.fields.clone().into(),
+            },
+        );
         if let PayloadProjection::Tree(tree) = &app_rows.projection {
             if let FieldProjection::Fields(fields) = &tree.fields {
                 for field in fields {
@@ -2010,6 +2038,19 @@ fn source_requirements(
     collect_plan_requirements(plan, &mut requirements)?;
 
     Ok(requirements)
+}
+
+#[cfg(test)]
+pub(super) fn source_requirements_for_test(
+    request: &QueryProgramRequest,
+) -> CapabilityResult<BTreeMap<SourceId, SourceRequirements>> {
+    let plan = analyze_query_plan(request).map_err(|gaps| {
+        Box::new(CapabilityReport {
+            gaps,
+            explain: ExplainPlan::default(),
+        })
+    })?;
+    source_requirements(request, &plan)
 }
 
 fn collect_app_path_projection_requirements(
@@ -2222,6 +2263,9 @@ fn collect_predicate_requirements(
         }
         PredicateExpr::Not(predicate) => {
             collect_predicate_requirements(predicate, source, requirements)
+        }
+        PredicateExpr::EnumMatch { value, .. } => {
+            collect_value_requirements(value, source, requirements)
         }
     }
 }
@@ -3704,12 +3748,17 @@ fn lower_value_source(
                     (!projected.contains(&route_field))
                         .then(|| ProjectField::renamed(param.clone(), route_field))
                 })
-                .chain(domain.claim_params.keys().filter_map(|param| {
-                    source_user_params
-                        .contains(param)
-                        .then(|| (!projected.contains(param)).then(|| ProjectField::named(param)))
-                        .flatten()
-                }))
+                // A nested policy graph can consume an enclosing claim only
+                // in a sibling/ancestor branch. The shared binding descriptor
+                // nevertheless needs that slot to survive this value-source
+                // projection so downstream authorization joins can route it.
+                .chain(
+                    domain
+                        .claim_params
+                        .keys()
+                        .filter(|param| !projected.contains(*param))
+                        .map(ProjectField::named),
+                )
                 .collect::<Vec<_>>();
             Ok(
                 GraphBuilder::binding_source(shape.to_owned(), input_descriptor).project_fields(
@@ -3752,6 +3801,24 @@ fn lower_value_source(
             })
         }
     }
+}
+
+#[cfg(test)]
+pub(super) fn binding_value_source_projection_fields_for_test(
+    request: &QueryProgramRequest,
+    columns: &[ValueSourceColumn],
+) -> Result<BTreeSet<String>, UnsupportedReason> {
+    let graph = lower_value_source(
+        "test-binding-source",
+        columns,
+        &ValueSourceMode::Binding,
+        request,
+    )?;
+    graph_declared_output_fields(&graph).ok_or_else(|| {
+        UnsupportedReason::Runtime(
+            "binding value-source projection must have a named descriptor".to_owned(),
+        )
+    })
 }
 
 fn lower_value_source_column(
@@ -4700,7 +4767,7 @@ fn lower_aggregate(
     fields.extend(
         outputs
             .iter()
-            .map(|aggregate| logical_user_column(&aggregate.output.name).to_owned()),
+            .map(|aggregate| aggregate_output_field(&aggregate.output.name)),
     );
     Ok(LoweredRelationInput {
         graph: GraphBuilder::aggregate(graph, group_cols, aggregates),
@@ -4736,7 +4803,7 @@ fn lower_aggregate_expr(
         },
         expression,
         distinct: false,
-        output_name: Some(logical_user_column(&aggregate.output.name).to_owned()),
+        output_name: Some(aggregate_output_field(&aggregate.output.name)),
     })
 }
 
@@ -4799,6 +4866,23 @@ fn lower_predicate_inner(
         PredicateExpr::IsNotNull(value) => {
             lower_null_test(value, false, source_id, source, request)?
         }
+        PredicateExpr::EnumMatch {
+            value,
+            case_tag,
+            payload,
+        } => {
+            let LoweredValueRef::Field(field) = lower_value_ref(value, source_id, source, request)?
+            else {
+                return Err(UnsupportedReason::Operator(
+                    "enum match requires a source field".to_owned(),
+                ));
+            };
+            GroovePredicateExpr::EnumMatch {
+                field,
+                case_tag: *case_tag,
+                payload: Box::new(lower_enum_payload_predicate(payload)?),
+            }
+        }
         PredicateExpr::And(predicates) => GroovePredicateExpr::And(
             predicates
                 .iter()
@@ -4813,6 +4897,83 @@ fn lower_predicate_inner(
         ),
         PredicateExpr::Not(predicate) => {
             lower_not_predicate(predicate, source_id, source, request)?
+        }
+    })
+}
+
+fn lower_enum_payload_predicate(
+    predicate: &PredicateExpr,
+) -> Result<GroovePredicateExpr, UnsupportedReason> {
+    Ok(match predicate {
+        PredicateExpr::True => GroovePredicateExpr::And(Vec::new()),
+        PredicateExpr::False => GroovePredicateExpr::Or(Vec::new()),
+        PredicateExpr::Compare { left, op, right } => {
+            let (field, value, op) = match (left, right) {
+                (
+                    NormalizedValueRef::SourceField { field, .. },
+                    NormalizedValueRef::Literal(bytes),
+                ) => {
+                    let value = postcard::from_bytes::<Value>(bytes).map_err(|err| {
+                        UnsupportedReason::Operator(format!(
+                            "payload enum literal could not be decoded: {err}"
+                        ))
+                    })?;
+                    (field.clone(), LiteralValue::from(value), *op)
+                }
+                (
+                    NormalizedValueRef::Literal(bytes),
+                    NormalizedValueRef::SourceField { field, .. },
+                ) => {
+                    let value = postcard::from_bytes::<Value>(bytes).map_err(|err| {
+                        UnsupportedReason::Operator(format!(
+                            "payload enum literal could not be decoded: {err}"
+                        ))
+                    })?;
+                    (
+                        field.clone(),
+                        LiteralValue::from(value),
+                        invert_comparison(*op),
+                    )
+                }
+                _ => {
+                    return Err(UnsupportedReason::Operator(
+                        "payload enum predicates require field/literal comparisons".to_owned(),
+                    ));
+                }
+            };
+            GroovePredicateExpr::from_field_literal(predicate_kind(op), field, value)
+        }
+        PredicateExpr::IsNull(NormalizedValueRef::SourceField { field, .. }) => {
+            GroovePredicateExpr::IsNull {
+                field: field.clone(),
+            }
+        }
+        PredicateExpr::IsNotNull(NormalizedValueRef::SourceField { field, .. }) => {
+            GroovePredicateExpr::IsNotNull {
+                field: field.clone(),
+            }
+        }
+        PredicateExpr::And(children) => GroovePredicateExpr::And(
+            children
+                .iter()
+                .map(lower_enum_payload_predicate)
+                .collect::<Result<_, _>>()?,
+        ),
+        PredicateExpr::Or(children) => GroovePredicateExpr::Or(
+            children
+                .iter()
+                .map(lower_enum_payload_predicate)
+                .collect::<Result<_, _>>()?,
+        ),
+        PredicateExpr::Not(_child) => {
+            return Err(UnsupportedReason::Operator(
+                "negated payload enum predicates are not lowered yet".to_owned(),
+            ));
+        }
+        _ => {
+            return Err(UnsupportedReason::Operator(
+                "unsupported payload enum predicate".to_owned(),
+            ));
         }
     })
 }
@@ -4877,6 +5038,11 @@ fn lower_not_predicate_inner(
                 .collect::<Result<Vec<_>, _>>()?,
         ),
         PredicateExpr::Not(predicate) => lower_predicate(predicate, source_id, source, request)?,
+        PredicateExpr::EnumMatch { .. } => {
+            return Err(UnsupportedReason::Operator(
+                "negated enum match predicates are not lowered yet".to_owned(),
+            ));
+        }
     })
 }
 
@@ -5007,9 +5173,9 @@ fn coerce_literal_for_value_type(value: LiteralValue, value_type: &ValueType) ->
             .map(LiteralValue::Uuid)
             .unwrap_or(LiteralValue::String(value)),
         (LiteralValue::Uuid(value), ValueType::String) => LiteralValue::String(value.to_string()),
-        (LiteralValue::String(value), ValueType::Enum(schema)) => schema
+        (LiteralValue::String(value), ValueType::EnumTag(schema)) => schema
             .discriminant(&value)
-            .map(LiteralValue::Enum)
+            .map(LiteralValue::EnumTag)
             .unwrap_or(LiteralValue::String(value)),
         (LiteralValue::Nullable(Some(value)), value_type) => LiteralValue::Nullable(Some(
             Box::new(coerce_literal_for_value_type(*value, value_type)),
@@ -5293,6 +5459,18 @@ fn lowered_terminals(
         &root_route_fields,
         &closure_root_carrier_fields,
     )?;
+    // Correlated include paths can preserve routes in the graph while their
+    // conservative root field set omits them. Use the graph's declared output
+    // after closure lowering when choosing the fields retained by maintained
+    // result-membership facts.
+    let root_route_fields = graph_declared_output_fields(&closure.visible_root)
+        .map(|fields| {
+            routing_param_fields
+                .intersection(&fields)
+                .cloned()
+                .collect::<BTreeSet<_>>()
+        })
+        .unwrap_or(root_route_fields);
     let visible_root_with_routes = if root_route_fields.is_empty() {
         closure.visible_root.clone()
     } else {
@@ -5311,90 +5489,106 @@ fn lowered_terminals(
     // cannot retain any routed binding fields yet.
     if let Some(app_rows) = &request.output.app_rows {
         let projected_output = projected_multisource_terminal(plan, source);
-        let (graph, descriptor, hidden_fields) = match app_rows.projection.clone() {
-            _ if !app_rows.public_terminal => (
-                closure.visible_root.clone(),
-                source.row_shape.descriptor.clone(),
-                hidden_source_fields(&source.row_shape),
-            ),
-            PayloadProjection::Tree(tree) => {
-                let collected = lower_collect_by_app_rows(
+        let (graph, descriptor, hidden_fields, carrier, field_carriers) =
+            match app_rows.projection.clone() {
+                _ if !app_rows.public_terminal => (
                     closure.visible_root.clone(),
-                    &tree,
-                    plan,
-                    source,
-                    resolved_sources,
-                    request,
-                    &root_route_fields,
-                    available_fields,
-                )?;
-                (
-                    collected.graph,
-                    collected.descriptor,
-                    collected.hidden_fields,
-                )
-            }
-            _ if projected_output.is_some() => {
-                let (output_source_id, output_fields, _is_flat) = projected_output
-                    .as_ref()
-                    .expect("guarded projected multi-source output");
-                let output_source = resolved_sources.get(output_source_id).ok_or_else(|| {
-                    single_gap_report(UnsupportedReason::Runtime(format!(
-                        "projected output source {output_source_id:?} was not resolved"
-                    )))
-                })?;
-                let hidden_fields = hidden_source_fields(&output_source.row_shape)
-                    .into_iter()
-                    .chain(
-                        output_fields
-                            .iter()
-                            .filter(|field| field.name.starts_with("__flat_join_row_"))
-                            .map(|field| field.name.clone()),
+                    source.row_shape.descriptor.clone(),
+                    hidden_source_fields(&source.row_shape),
+                    AppRowCarrier::CurrentRow,
+                    BTreeMap::new(),
+                ),
+                PayloadProjection::Tree(tree) => {
+                    let collected = lower_collect_by_app_rows(
+                        closure.visible_root.clone(),
+                        &tree,
+                        plan,
+                        source,
+                        resolved_sources,
+                        request,
+                        &root_route_fields,
+                        available_fields,
+                    )?;
+                    (
+                        collected.graph,
+                        collected.descriptor,
+                        collected.hidden_fields,
+                        collected.carrier,
+                        collected.field_carriers,
                     )
-                    .collect::<BTreeSet<_>>();
-                let public_fields = output_fields
-                    .iter()
-                    .filter(|field| !hidden_fields.contains(&field.name))
-                    .collect::<Vec<_>>();
-                let descriptor = RecordDescriptor::new(
-                    public_fields
+                }
+                _ if projected_output.is_some() => {
+                    let (output_source_id, output_fields, _is_flat) = projected_output
+                        .as_ref()
+                        .expect("guarded projected multi-source output");
+                    let output_source =
+                        resolved_sources.get(output_source_id).ok_or_else(|| {
+                            single_gap_report(UnsupportedReason::Runtime(format!(
+                                "projected output source {output_source_id:?} was not resolved"
+                            )))
+                        })?;
+                    let hidden_fields = hidden_source_fields(&output_source.row_shape)
+                        .into_iter()
+                        .chain(
+                            output_fields
+                                .iter()
+                                .filter(|field| field.name.starts_with("__flat_join_row_"))
+                                .map(|field| field.name.clone()),
+                        )
+                        .collect::<BTreeSet<_>>();
+                    let public_fields = output_fields
                         .iter()
-                        .map(|field| (field.name.clone(), field.ty.clone())),
-                );
-                let graph = graph.clone().project_fields(
-                    public_fields
-                        .iter()
-                        .map(|field| ProjectField::named(&field.name)),
-                );
-                (graph, descriptor, BTreeSet::new())
-            }
-            _ => {
-                let collected = lower_collect_by_app_rows(
-                    closure.visible_root.clone(),
-                    &AppProjectionTree {
-                        fields: FieldProjection::All,
-                        paths: Vec::new(),
-                    },
-                    plan,
-                    source,
-                    resolved_sources,
-                    request,
-                    &root_route_fields,
-                    available_fields,
-                )?;
-                (
-                    collected.graph,
-                    collected.descriptor,
-                    collected.hidden_fields,
-                )
-            }
-        };
+                        .filter(|field| !hidden_fields.contains(&field.name))
+                        .collect::<Vec<_>>();
+                    let descriptor = RecordDescriptor::new(
+                        public_fields
+                            .iter()
+                            .map(|field| (field.name.clone(), field.ty.clone())),
+                    );
+                    let graph = graph.clone().project_fields(
+                        public_fields
+                            .iter()
+                            .map(|field| ProjectField::named(&field.name)),
+                    );
+                    (
+                        graph,
+                        descriptor,
+                        BTreeSet::new(),
+                        AppRowCarrier::Logical,
+                        BTreeMap::new(),
+                    )
+                }
+                _ => {
+                    let collected = lower_collect_by_app_rows(
+                        closure.visible_root.clone(),
+                        &AppProjectionTree {
+                            fields: FieldProjection::All,
+                            paths: Vec::new(),
+                        },
+                        plan,
+                        source,
+                        resolved_sources,
+                        request,
+                        &root_route_fields,
+                        available_fields,
+                    )?;
+                    (
+                        collected.graph,
+                        collected.descriptor,
+                        collected.hidden_fields,
+                        collected.carrier,
+                        collected.field_carriers,
+                    )
+                }
+            };
         terminals.push(LoweredTerminal {
             sink: "app_rows".to_owned(),
             graph,
             output: OutputTerminalSchema::AppRows(AppRowSchema {
                 descriptor,
                 hidden_fields,
+                carrier,
+                field_carriers,
             }),
         });
     }
@@ -5675,6 +5869,8 @@ struct LoweredCollectByAppRows {
     graph: GraphBuilder,
     descriptor: RecordDescriptor,
     hidden_fields: BTreeSet<String>,
+    carrier: AppRowCarrier,
+    field_carriers: BTreeMap<String, AppRowCarrier>,
 }
 
 fn lower_collect_by_app_rows(
@@ -5702,6 +5898,36 @@ fn lower_collect_by_app_rows(
     align_collect_root_window(&mut layout, plan)?;
     align_collect_join_key_types(&mut layout.slots, plan, resolved_sources, request)?;
     if layout.slots.is_empty() {
+        // A collect-all root preserves the source CurrentRow application-cell
+        // wrappers. Explicit projections unwrap those cells to their declared
+        // logical types. Bind that distinction here while both input and
+        // output types are authoritative; consumers must never infer it from
+        // the eventual descriptor's field names.
+        let carrier = if layout
+            .root_fields
+            .iter()
+            .filter(|field| field.is_output && !field.is_row_id)
+            .all(|field| field.value_type == field.output_value_type)
+        {
+            AppRowCarrier::CurrentRow
+        } else {
+            AppRowCarrier::Logical
+        };
+        let field_carriers = layout
+            .root_fields
+            .iter()
+            .filter(|field| field.is_output && !field.is_row_id)
+            .map(|field| {
+                (
+                    field.output.clone(),
+                    if field.value_type == field.output_value_type {
+                        AppRowCarrier::CurrentRow
+                    } else {
+                        AppRowCarrier::Logical
+                    },
+                )
+            })
+            .collect();
         let anchor = collect_anchor_graph(visible_root, &layout)?;
         let has_window = root_linear_steps(plan).is_some_and(|steps| {
             steps
@@ -5752,10 +5978,37 @@ fn lower_collect_by_app_rows(
         return Ok(LoweredCollectByAppRows {
             graph,
             descriptor,
-            hidden_fields: BTreeSet::new(),
+            // Route parameters are retained in the collector record so the
+            // maintained graph can partition results, but they are not part
+            // of the app projection. Nested collectors already apply the same
+            // boundary below.
+            hidden_fields: route_fields.clone(),
+            carrier,
+            field_carriers,
         });
     }
     let root_context = root_collect_context_graph(visible_root.clone(), &layout)?;
+    let mut field_carriers = layout
+        .root_fields
+        .iter()
+        .filter(|field| field.is_output && !field.is_row_id)
+        .map(|field| {
+            (
+                field.output.clone(),
+                if field.value_type == field.output_value_type {
+                    AppRowCarrier::CurrentRow
+                } else {
+                    AppRowCarrier::Logical
+                },
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    field_carriers.extend(
+        layout
+            .slots
+            .iter()
+            .map(|slot| (slot.collection_field.clone(), AppRowCarrier::Logical)),
+    );
     let mut association_graphs = Vec::new();
     for slot in &layout.slots {
         let path = find_correlated_path(plan, &slot.path).ok_or_else(|| {
@@ -5821,6 +6074,8 @@ fn lower_collect_by_app_rows(
         graph,
         descriptor,
         hidden_fields,
+        carrier: AppRowCarrier::Logical,
+        field_carriers,
     })
 }
 
@@ -6612,6 +6867,11 @@ fn collect_slot_builder(
         slot.offset,
         slot.limit,
     )
+    // Route fields identify a maintained binding, but are not application
+    // fields on nested records. Carry them only as execution owner keys so a
+    // grandchild can still group by the same binding without exposing them in
+    // the nested descriptor.
+    .with_owner_key_cols(route_fields.iter().cloned())
     .with_presence_col(&slot.presence_input)
 }
 
@@ -6720,6 +6980,8 @@ fn lowered_aggregate_terminals(
             output: OutputTerminalSchema::AppRows(AppRowSchema {
                 descriptor: aggregate_app_row_descriptor(plan, source)?,
                 hidden_fields: root_route_fields.clone(),
+                carrier: AppRowCarrier::Logical,
+                field_carriers: BTreeMap::new(),
             }),
         });
     }
@@ -7595,7 +7857,7 @@ fn fact_terminal_graph(
                             ) =>
                     {
                         graph.filter(GroovePredicateExpr::Neq {
-                            field: logical_user_column(&outputs[0].output.name).to_owned(),
+                            field: aggregate_output_field(&outputs[0].output.name),
                             value: LiteralValue::U64(0),
                         })
                     }
@@ -7979,7 +8241,7 @@ fn aggregate_app_row_descriptor(
             .iter()
             .map(|output| {
                 Ok((
-                    logical_user_column(&output.output.name).to_owned(),
+                    aggregate_output_field(&output.output.name),
                     aggregate_output_value_type(output, source)?,
                 ))
             })
@@ -8065,7 +8327,7 @@ fn aggregate_result_membership_fields(
     // runtime boundary, so it cannot be mistaken for row version metadata.
     if let Some(first_output) = outputs.first() {
         fields.push(ProjectField::renamed(
-            logical_user_column(&first_output.output.name),
+            aggregate_output_field(&first_output.output.name),
             "synthetic_replacement",
         ));
     } else {
@@ -8081,7 +8343,7 @@ fn aggregate_result_membership_fields(
     fields.extend(
         outputs
             .iter()
-            .map(|output| ProjectField::named(logical_user_column(&output.output.name))),
+            .map(|output| ProjectField::named(aggregate_output_field(&output.output.name))),
     );
     fields.extend(routing_param_fields.into_iter().map(ProjectField::named));
     Ok(fields)
@@ -8111,7 +8373,7 @@ fn aggregate_typed_output_field(
     source: &ResolvedSource,
 ) -> CapabilityResult<TypedOutputField> {
     Ok(TypedOutputField {
-        name: logical_user_column(&output.output.name).to_owned(),
+        name: aggregate_output_field(&output.output.name),
         ty: aggregate_output_value_type(output, source)?,
     })
 }

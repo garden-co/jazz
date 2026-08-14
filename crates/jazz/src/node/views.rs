@@ -59,24 +59,20 @@ fn merge_receiver_version_bundle_ref(
     let mut seen = existing
         .versions
         .iter()
-        .map(|version| {
-            (
-                version_bundle_record_key(version),
-                version.record().raw().to_vec(),
-            )
-        })
-        .collect::<BTreeMap<_, Vec<u8>>>();
+        .cloned()
+        .map(|version| (version_bundle_record_key(&version), version))
+        .collect::<BTreeMap<_, VersionRecord>>();
     for version in bundle.versions {
         let key = version_bundle_record_key(version);
         match seen.get(&key) {
-            Some(raw) if raw.as_slice() == version.record().raw() => {}
+            Some(existing) if existing == version => {}
             Some(_) => return Err(Error::ConflictingCommitUnit(bundle.tx.tx_id)),
             None => {
-                seen.insert(key, version.record().raw().to_vec());
-                existing.versions.push(version.clone());
+                seen.insert(key, version.clone());
             }
         }
     }
+    existing.versions = seen.into_values().collect();
     Ok(())
 }
 
@@ -637,6 +633,7 @@ where
     /// Apply a downstream current-row view update.
     pub(super) fn apply_view_update(&mut self, update: ViewUpdateParts) -> Result<(), Error> {
         self.validate_received_view_update_global_seq_durability(&update)?;
+        self.validate_view_update_payloads(std::slice::from_ref(&update))?;
         self.apply_view_update_inner(update, None)
     }
 
@@ -650,6 +647,11 @@ where
         for update in &updates {
             self.validate_received_view_update_global_seq_durability(update)?;
         }
+        // A receiver tick is one atomic protocol frame. Validate every row
+        // descriptor before the first reset can change flush cadence, or a
+        // preceding valid bundle can advance clocks, allocate aliases, or
+        // stage history before a later malformed bundle rejects the frame.
+        self.validate_view_update_payloads(&updates)?;
         if updates.iter().any(|update| update.reset_result_set) {
             self.begin_initial_sync_flush_cadence()?;
         }
@@ -734,6 +736,19 @@ where
         }
         if self.initial_sync_flush_active && self.query.initial_hydration_binding_views.is_empty() {
             self.finish_initial_sync_flush_cadence()?;
+        }
+        Ok(())
+    }
+
+    /// Validate all row bundles carried by a receiver frame without changing
+    /// storage or in-memory receiver state.
+    fn validate_view_update_payloads(&self, updates: &[ViewUpdateParts]) -> Result<(), Error> {
+        for update in updates {
+            for bundle in
+                version_bundle_refs_for_carriers(&update.version_bundles, &update.version_carriers)?
+            {
+                self.validate_view_payload_versions(bundle.versions)?;
+            }
         }
         Ok(())
     }
@@ -1280,8 +1295,13 @@ where
         };
         let mut versions = Vec::with_capacity(tx_versions.len());
         for version in tx_versions {
-            let canonical = self.canonical_maintained_view_witness(version)?;
-            versions.push(self.version_record_from_row(canonical.as_ref().unwrap_or(version))?);
+            // A maintained terminal may use a current-row source projected for
+            // query evaluation, but a VersionRecord is replicated history, not
+            // query output. Resolve its identity back to the stored authored
+            // row before crossing the wire boundary (INV-DATA-16/18,
+            // INV-SYNC-16, and C.3's byte-fidelity rule).
+            let canonical = self.canonical_history_version_for_maintained_witness(version)?;
+            versions.push(self.version_record_from_row(&canonical)?);
         }
         Ok(VersionBundle {
             tx: tx_payload,
@@ -1292,14 +1312,17 @@ where
         })
     }
 
-    /// Maintained query evaluation uses rows projected into the subscription's
-    /// schema. Sync must still ship the immutable payload authored under the
-    /// row's stored schema alias, so recover that exact history row only when
-    /// the projected witness no longer has its authored logical layout.
-    pub(super) fn canonical_maintained_view_witness(
+    /// Return the stored, authored history row for a maintained witness.
+    ///
+    /// The maintained graph may evaluate a schema-compatible current source,
+    /// whereas a wire `VersionRecord` is always the complete immutable row
+    /// version under its authored schema. This producer-side normalization is
+    /// deliberately before serialization; receivers reject non-identical
+    /// duplicate row versions rather than repairing them.
+    pub(super) fn canonical_history_version_for_maintained_witness(
         &mut self,
         version: &VersionRow,
-    ) -> Result<Option<VersionRow>, Error> {
+    ) -> Result<VersionRow, Error> {
         let authored_schema = self
             .schema_version_for_alias(version.schema_version_alias())
             .ok_or(Error::InvalidStoredValue(
@@ -1322,7 +1345,7 @@ where
                     })
             });
         if has_authored_layout {
-            return Ok(None);
+            return Ok(version.clone());
         }
 
         for storage_table in
@@ -1339,11 +1362,11 @@ where
                 continue;
             };
             if canonical.schema_version_alias() == version.schema_version_alias() {
-                return Ok(Some(canonical));
+                return Ok(canonical);
             }
         }
         Err(Error::MaintainedViewMissingBundleWitness(
-            "projected maintained witness is missing its canonical history row",
+            "maintained witness is missing its canonical history row",
         ))
     }
 }

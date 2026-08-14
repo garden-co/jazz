@@ -18,6 +18,8 @@ now_untested=0
 # Newline-delimited sets keep this gate compatible with macOS's system Bash
 # 3.2, which does not support associative arrays.
 known_functions=$'\n'
+readonly RUST_TEST_CITATION_RE='[a-z][a-z0-9_]*(::[A-Za-z0-9_*]+)+'
+readonly TEST_FILE_CITATION_RE='[A-Za-z0-9_./-]+\.(test|spec)\.(ts|tsx|js|jsx|mjs|cjs)'
 
 fail() {
     printf 'invariant-registry: ERROR: %s\n' "$*" >&2
@@ -168,6 +170,20 @@ check_test_citations() {
     done
 }
 
+check_test_file_citations() {
+    local registry=$1 id=$2 text=$3 remaining citation
+    remaining=$text
+    while [[ $remaining =~ $TEST_FILE_CITATION_RE ]]; do
+        citation=${BASH_REMATCH[0]}
+        remaining=${remaining#*"$citation"}
+        if [[ ! -f $citation ]]; then
+            printf 'invariant-registry: missing test file: %s:%s: %s\n' "$registry" "$id" "$citation" >&2
+            missing_tests=$((missing_tests + 1))
+            failures=$((failures + 1))
+        fi
+    done
+}
+
 check_registry() {
     local registry=$1 record id invariant tests impl status coverage registry_rows=0
     local seen_ids=$'\n'
@@ -186,7 +202,7 @@ check_registry() {
         if [[ -z $status || -z $coverage ]]; then
             fail "$registry:$id: status and coverage must not be empty"
         fi
-        if [[ $coverage == '✓' && ! $tests =~ [a-z][a-z0-9_]*(::[A-Za-z0-9_*]+)+ ]]; then
+        if [[ $coverage == '✓' && ! $tests =~ $RUST_TEST_CITATION_RE && ! $tests =~ $TEST_FILE_CITATION_RE ]]; then
             printf 'invariant-registry: covered without test: %s:%s\n' "$registry" "$id" >&2
             uncited_covered=$((uncited_covered + 1))
             failures=$((failures + 1))
@@ -196,6 +212,7 @@ check_registry() {
             printf 'invariant-registry: documented debt (not failing): %s:%s is now + untested\n' "$registry" "$id" >&2
         fi
         check_test_citations "$registry" "$id" "$tests"
+        check_test_file_citations "$registry" "$id" "$tests"
         registry_rows=$((registry_rows + 1))
         rows=$((rows + 1))
     done <<< "$PARSED_ROWS"

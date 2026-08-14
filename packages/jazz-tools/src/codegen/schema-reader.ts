@@ -42,6 +42,25 @@ const map: Record<ScalarSqlType, ColumnType> = {
 function sqlTypeToWasm(sqlType: SqlType): ColumnType {
   if (typeof sqlType !== "string") {
     if (sqlType.kind === "ENUM") {
+      if (sqlType.cases) {
+        return {
+          type: "EnumPayload",
+          cases: sqlType.cases.map((entry) => ({
+            name: entry.name,
+            fields: entry.fields.map((field) => ({
+              name: field.name,
+              column_type: sqlTypeToWasm(field.sqlType),
+              nullable: field.nullable,
+              ...(field.default === undefined
+                ? {}
+                : { default: toValue(field.default, sqlTypeToWasm(field.sqlType)) }),
+            })),
+          })),
+        };
+      }
+      if (!sqlType.variants) {
+        throw new Error("Enum columns must declare variants or payload cases.");
+      }
       return { type: "Enum", variants: [...sqlType.variants] };
     }
     if (sqlType.kind === "JSON") {

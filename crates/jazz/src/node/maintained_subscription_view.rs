@@ -10,10 +10,12 @@ use super::codec::{
     tx_ids_from_value, version_tx_id_from_aliases,
 };
 use super::query_engine::{
-    AggregateResultSchema, AppRowSchema, OutputTerminalSchema, ProgramFactKey, ProgramFactSchema,
-    ProgramFactTerminal, QueryProgram, RelationEdgeSchema, ResultMembershipSchema,
-    ResultMembershipVersionSchema, VersionWitnessSchema, VersionedRowRefSchema,
+    AggregateResultSchema, AppRowCarrier, AppRowSchema, OutputTerminalSchema, ProgramFactKey,
+    ProgramFactSchema, ProgramFactTerminal, QueryProgram, RelationEdgeSchema,
+    ResultMembershipSchema, ResultMembershipVersionSchema, VersionWitnessSchema,
+    VersionedRowRefSchema, logical_user_column,
 };
+use crate::db::{TerminalRootCarrier, TerminalRootLayout, TerminalRootPublicField};
 use crate::ids::{AuthorId, NodeAlias, NodeUuid, RowUuid};
 use crate::protocol::{
     ProgramFactEntry, RealRowMemberEntry, RelationEdgeEntry, ResultMemberEntry,
@@ -170,7 +172,10 @@ enum MaintainedTerminalKind {
     ReplacementContent(VersionWitnessSchema),
     ReplacementDeletion(VersionWitnessSchema),
     RelationEdge(RelationEdgeSchema),
-    StructuredAppRows(AppRowSchema),
+    StructuredAppRows {
+        schema: AppRowSchema,
+        layout: TerminalRootLayout,
+    },
     /// Public aggregate rows are a one-shot output sibling. Maintained state
     /// is driven by the typed AggregateResult fact terminal instead.
     IgnoredAggregateAppRows,
@@ -250,13 +255,24 @@ impl MaintainedSubscriptionView {
     ) -> Result<ResultTransitions, super::Error> {
         let mut transitions = ResultTransitions::default();
         for (sink, terminal) in &deltas.terminal_sinks {
-            if matches!(
-                schemas.get(sink)?,
-                MaintainedTerminalKind::StructuredAppRows(_)
-            ) {
+            if let MaintainedTerminalKind::StructuredAppRows { layout, .. } = schemas.get(sink)? {
+                for operation in &terminal.operations {
+                    if !terminal_operation_descriptor_matches_layout(operation, layout) {
+                        return Err(super::Error::InvalidStoredValue(
+                            "structured terminal operation descriptor disagrees with prepared root layout",
+                        ));
+                    }
+                }
                 transitions
                     .terminal_operations
-                    .extend(terminal.operations.iter().cloned());
+                    .extend(terminal.operations.iter().cloned().map(|mut operation| {
+                        // Enum registry identities are physical-occurrence metadata, not
+                        // a byte-layout change. Publish the prepared descriptor after the
+                        // rebound check above so every operation obeys the early-bound
+                        // terminal layout contract.
+                        operation.root_descriptor = layout.root_descriptor;
+                        operation
+                    }));
             }
         }
         for (sink, deltas) in deltas.sinks {
@@ -635,6 +651,20 @@ impl MaintainedSubscriptionView {
     }
 }
 
+fn terminal_operation_descriptor_matches_layout(
+    operation: &TerminalOperation,
+    layout: &TerminalRootLayout,
+) -> bool {
+    operation.root_descriptor == layout.root_descriptor
+        || (operation.root_descriptor.fields().len() == layout.root_descriptor.fields().len()
+            && RecordProjector::new_registry_rebound(
+                operation.root_descriptor,
+                layout.root_descriptor,
+                (0..operation.root_descriptor.fields().len()).map(|index| (index, index)),
+            )
+            .is_ok())
+}
+
 impl MaintainedTerminalSchemas {
     #[cfg(feature = "testing")]
     pub(crate) fn footprint(&self) -> MaintainedTerminalSchemasFootprint {
@@ -657,7 +687,10 @@ impl MaintainedTerminalSchemas {
                 if rows.descriptor.field_index("row_uuid").is_some() {
                     sinks.insert(
                         terminal.sink.clone(),
-                        MaintainedTerminalKind::StructuredAppRows(rows.clone()),
+                        MaintainedTerminalKind::StructuredAppRows {
+                            schema: rows.clone(),
+                            layout: terminal_root_layout(rows),
+                        },
                     );
                 } else {
                     sinks.insert(
@@ -731,6 +764,85 @@ impl MaintainedTerminalSchemas {
         self.sinks.get(sink).ok_or(super::Error::InvalidStoredValue(
             "maintained view delta arrived for an unknown query-engine terminal",
         ))
+    }
+
+    pub(crate) fn terminal_root_layout(&self) -> Option<&TerminalRootLayout> {
+        self.sinks.values().find_map(|kind| match kind {
+            MaintainedTerminalKind::StructuredAppRows { layout, .. } => Some(layout),
+            _ => None,
+        })
+    }
+}
+
+fn terminal_root_layout(rows: &AppRowSchema) -> TerminalRootLayout {
+    let root_key_slot = rows
+        .descriptor
+        .field_index("row_uuid")
+        .expect("structured app-row terminal has a row_uuid slot");
+    // Bind every public descriptor slot, including collector-owned trailing
+    // arrays/records. A collector root may contain both physical `user_*`
+    // source cells and logical nested fields, so the presence of one family
+    // must not hide the other.
+    let public_fields = rows
+        .descriptor
+        .fields()
+        .iter()
+        .enumerate()
+        .filter_map(|(slot, field)| {
+            let name = field.name.as_deref()?;
+            (slot != root_key_slot && !rows.hidden_fields.contains(name)).then(|| {
+                TerminalRootPublicField {
+                    name: logical_user_column(name).to_owned(),
+                    descriptor_field_name: name.to_owned(),
+                    slot,
+                    carrier: match rows
+                        .field_carriers
+                        .get(name)
+                        .copied()
+                        .unwrap_or(rows.carrier)
+                    {
+                        AppRowCarrier::CurrentRow => TerminalRootCarrier::CurrentRow,
+                        AppRowCarrier::Logical => TerminalRootCarrier::Logical,
+                    },
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"jazz terminal root layout v1");
+    hasher.update(
+        &postcard::to_allocvec(&rows.descriptor)
+            .expect("record descriptors are postcard serializable"),
+    );
+    hasher.update(&(root_key_slot as u64).to_le_bytes());
+    hasher.update(&[match rows.carrier {
+        AppRowCarrier::CurrentRow => 0,
+        AppRowCarrier::Logical => 1,
+    }]);
+    for field in &public_fields {
+        hasher.update(field.name.as_bytes());
+        hasher.update(&[0]);
+        hasher.update(field.descriptor_field_name.as_bytes());
+        hasher.update(&[0]);
+        hasher.update(&(field.slot as u64).to_le_bytes());
+        hasher.update(&[match field.carrier {
+            TerminalRootCarrier::CurrentRow => 0,
+            TerminalRootCarrier::Logical => 1,
+        }]);
+    }
+    TerminalRootLayout {
+        id: format!("terminal:{}", hasher.finalize().to_hex()),
+        root_descriptor: rows.descriptor,
+        root_key_slot,
+        root_key_field_name: rows.descriptor.fields()[root_key_slot]
+            .name
+            .clone()
+            .expect("structured app-row row_uuid field is named"),
+        public_fields,
+        carrier: match rows.carrier {
+            AppRowCarrier::CurrentRow => TerminalRootCarrier::CurrentRow,
+            AppRowCarrier::Logical => TerminalRootCarrier::Logical,
+        },
     }
 }
 
@@ -935,7 +1047,7 @@ fn decode_typed_terminal_record(
             decode_typed_relation_edge(record, schema, tables, node_aliases)
                 .map(DecodedMaintainedEvent::RelationEdge)
         }
-        MaintainedTerminalKind::StructuredAppRows(schema) => {
+        MaintainedTerminalKind::StructuredAppRows { schema, .. } => {
             let root = RowUuid(record.get_uuid(field_idx(record, "row_uuid")?)?);
             Ok(DecodedMaintainedEvent::StructuredAppRow {
                 root,
@@ -1212,9 +1324,13 @@ fn build_content_witness_projector(
         field_idx_in_descriptor(terminal_descriptor, &schema.authored_columns_field)?,
         9 + table.columns.len(),
     ));
-    RecordProjector::new(terminal_descriptor, storage_descriptor, mapping).map_err(|_| {
-        super::Error::InvalidStoredValue("content witness projector construction failed")
-    })
+    // Current-source tables bind enum registries to physical occurrences,
+    // while version carriers bind the same authored layout to history-table
+    // occurrences. The projector copies the encoded value only after the
+    // narrow rebound-layout check has proved every tag/payload layout equal.
+    RecordProjector::new_registry_rebound(terminal_descriptor, storage_descriptor, mapping).map_err(
+        |_| super::Error::InvalidStoredValue("content witness projector construction failed"),
+    )
 }
 
 fn tagged_deletion(value: Value) -> Result<Option<crate::tx::DeletionEvent>, super::Error> {
@@ -1222,7 +1338,7 @@ fn tagged_deletion(value: Value) -> Result<Option<crate::tx::DeletionEvent>, sup
         Value::Nullable(None) => Ok(None),
         Value::Nullable(Some(value)) => {
             let value = match *value {
-                Value::U8(discriminant) => Value::Enum(discriminant),
+                Value::U8(discriminant) => Value::EnumTag(discriminant),
                 value => value,
             };
             deletion_event_from_value(value).map(Some)
@@ -1652,7 +1768,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use groove::ivm::RecordDelta;
-    use groove::records::Value;
+    use groove::records::{Value, ValueType};
     use groove::schema::ColumnType;
 
     use super::*;
@@ -1677,6 +1793,60 @@ mod tests {
 
     fn aliases() -> BTreeMap<NodeUuid, NodeAlias> {
         BTreeMap::from([(node(1), NodeAlias(10)), (node(2), NodeAlias(20))])
+    }
+
+    #[test]
+    fn terminal_layout_includes_nested_public_slots_and_excludes_hidden_routes() {
+        let descriptor = RecordDescriptor::new([
+            ("row_uuid", ValueType::Uuid),
+            (
+                "user_title",
+                ValueType::Nullable(Box::new(ValueType::String)),
+            ),
+            (
+                "todosViaOrg",
+                ValueType::Array(Box::new(ValueType::Record(Box::new(
+                    RecordDescriptor::new([
+                        ("row_uuid", ValueType::Uuid),
+                        ("title", ValueType::String),
+                    ]),
+                )))),
+            ),
+            ("__route_org", ValueType::Uuid),
+        ]);
+        let rows = AppRowSchema {
+            descriptor: descriptor.clone(),
+            hidden_fields: BTreeSet::from(["__route_org".to_owned()]),
+            carrier: AppRowCarrier::Logical,
+            field_carriers: BTreeMap::from([
+                ("user_title".to_owned(), AppRowCarrier::CurrentRow),
+                ("todosViaOrg".to_owned(), AppRowCarrier::Logical),
+            ]),
+        };
+        let layout = terminal_root_layout(&rows);
+        assert_eq!(
+            layout.public_fields,
+            vec![
+                TerminalRootPublicField {
+                    name: "title".to_owned(),
+                    descriptor_field_name: "user_title".to_owned(),
+                    slot: 1,
+                    carrier: TerminalRootCarrier::CurrentRow,
+                },
+                TerminalRootPublicField {
+                    name: "todosViaOrg".to_owned(),
+                    descriptor_field_name: "todosViaOrg".to_owned(),
+                    slot: 2,
+                    carrier: TerminalRootCarrier::Logical,
+                },
+            ]
+        );
+
+        let mut without_nested = rows;
+        without_nested
+            .hidden_fields
+            .insert("todosViaOrg".to_owned());
+        assert_ne!(layout.id, terminal_root_layout(&without_nested).id);
     }
 
     fn table() -> TableSchema {

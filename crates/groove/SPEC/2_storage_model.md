@@ -22,7 +22,7 @@ Invariant digest:
 - `INV-STORAGE-10`: Fixed-width nullable nulls MUST encode as flag `0` plus zero-filled reserved payload width; variable-width nullable nulls MUST encode as only flag `0`.
 - `INV-STORAGE-11`: Fixed-width arrays MUST encode as concatenated element encodings without an element count; variable-width arrays MUST encode `count: u32`, offsets for all but the final element, then payloads.
 - `INV-STORAGE-12`: `F64` record and ordered-key values MUST NOT be NaN.
-- `INV-STORAGE-13`: `EnumSchema` values MUST persist and compare by declaration-order `u8` discriminant; appending variants is compatible, but reordering/removing variants changes stored meaning.
+- `INV-STORAGE-13`: A standalone `ScalarEnumSchema` value MUST persist and compare by its declaration-order `u8` discriminant. A distributed embedding such as Jazz MUST qualify that compact discriminant with the authored schema that declares it before treating it as a semantic value; a node-local physical discriminant is only an interned shorthand for that qualified identity.
 - `INV-STORAGE-14`: Primary-key bytes MUST be order-preserving tagged encodings: integer payloads big-endian, `Bool` as `0|1`, `Uuid` raw bytes, and `String`/`Bytes` escaped with embedded NUL `00 ff` plus terminator `00 00`.
 - `INV-STORAGE-15`: Table writes MUST reject rows whose primary-key values do not match the declared `PrimaryKeyColumn.key_type`, and MUST reject table writes for tables with no primary key.
 - `INV-STORAGE-16`: Inserts MUST reject an existing primary key, including keys introduced by earlier operations in the same `DatabaseBatch`.
@@ -36,6 +36,42 @@ Invariant digest:
 - `INV-STORAGE-25`: Ordered index key encoding via `encode_key_part` MUST preserve logical ordering for supported key values in RocksDB lexicographic order and MUST reject arrays as keys.
 - `INV-STORAGE-26`: Record-store persistence is row-only: each logical stored record has its canonical row key/value entry, and no storage maintenance may replace a run of rows with a second logical representation.
 - `INV-STORAGE-27`: A record-valued `ValueType` MUST carry its descriptor inline and accept only canonical child bytes; it MUST NOT appear, directly or recursively, in a durable primary key.
+- `INV-STORAGE-28`: Every enum occurrence has an independent persistent registry identity; nested enums and the hidden whole-row enum never share or flatten registry state.
+
+Engine-owned schema catalogues and operator-supplied native schema files are trusted
+durable formats: their serialized enum registry identities round-trip exactly. Public
+Jazz schema JSON is a separate, deliberately narrower model and cannot carry a Groove
+enum registry identity; public conversion creates fresh internal descriptors instead.
+
+### Enum registries and variant records
+
+An `EnumSchema` is an ordered set of `EnumCase`s. A selected `EnumValue` carries a
+canonical bounded `u32` case tag and that case's record payload. Tags are dense in
+declaration order; appending a case is compatible, while changing an existing case,
+its tag, or payload descriptor is not. Scalar enum columns use the same declaration
+and registry rules with zero-payload cases, encoded as their compact discriminant.
+
+Groove's standalone registry model deliberately has no distributed-schema
+semantics: its discriminant is meaningful only together with the descriptor that
+owns it. A host with concurrent schema versions MUST add that qualification at its
+boundary. In particular, a naked `u8` is never a globally meaningful user enum
+value merely because two schemas both happen to use it. The host may intern a
+resolved semantic case into a local dense tag, but equality, hashing, grouping,
+ordering, indexing, and projection must preserve the semantic case identity rather
+than depend on a local allocation order. This requirement applies to scalar enum
+columns now; payload enums need the same identity model before they are exposed
+through concurrent Jazz schema versions.
+
+Every enum occurrence owns a persistent registry identity derived from its physical
+path. Registries evolve independently: adding a case to one user column cannot alter
+another column or the hidden whole-row enum. `TableSchema` persists the registry
+snapshots separately from referencing descriptors. It never forms a Cartesian product
+of row layouts and nested enum cases, and it has no central flattened registry.
+
+Whole-row storage uses the same bounded-tag machinery through `VariantRecord`; its
+registry is hidden inside the table implementation. Jazz normalizes these opaque
+physical rows at `VariantProject` before exposing logical rows, so no physical tag or
+whole-row enum appears in Jazz's public schema, wire values, lenses, or query API.
 
 ## Details
 
@@ -95,7 +131,7 @@ an offset table (`INV-STORAGE-8`).
 
 Two value rules protect higher-layer ordering and schema stability. An `F64`
 value must never be NaN, whether it appears in a record or in an ordered key
-(`INV-STORAGE-12`). An `EnumSchema` variant is persisted and
+(`INV-STORAGE-12`). A `ScalarEnumSchema` variant is persisted and
 compared by its declaration-order `u8` discriminant (`INV-STORAGE-13`):
 appending variants is forward-compatible, while reordering or removing a
 variant changes the stored meaning of existing data and is a breaking change.

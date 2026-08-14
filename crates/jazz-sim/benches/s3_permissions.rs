@@ -14,7 +14,7 @@ use jazz::db::{
 use jazz::groove::db::{
     StorageReadBucket, StorageReadMetrics, StorageWriteBucket, StorageWriteMetrics,
 };
-use jazz::groove::records::{EnumSchema, Value};
+use jazz::groove::records::{ScalarEnumSchema, Value};
 use jazz::groove::schema::{ColumnSchema, ColumnType};
 use jazz::groove::storage::{Durability, RocksDbStorage};
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
@@ -2371,11 +2371,11 @@ fn seed_fixture_db(config: &Config, core: &CoreDb) -> Fixture {
 }
 
 fn schema() -> JazzSchema {
-    let enum_like = ColumnType::Enum(
-        EnumSchema::new("resource_enum", ["alpha", "beta", "gamma", "delta"]).unwrap(),
+    let enum_like = ColumnType::EnumTag(
+        ScalarEnumSchema::new("resource_enum", ["alpha", "beta", "gamma", "delta"]).unwrap(),
     );
-    let permission = ColumnType::Enum(
-        EnumSchema::new("resource_permission", ["read", "write", "delete"]).unwrap(),
+    let permission = ColumnType::EnumTag(
+        ScalarEnumSchema::new("resource_permission", ["read", "write", "delete"]).unwrap(),
     );
     let policy = Policy::shape(Query::from(RESOURCES).reachable_via_with_access_filters(
         ACCESS,
@@ -2948,7 +2948,7 @@ fn cell_bool(row: &jazz::node::CurrentRow, table: &str, column: &str) -> bool {
 fn resource_cells(idx: usize) -> BTreeMap<String, Value> {
     BTreeMap::from([
         ("name".to_owned(), Value::String(format!("resource-{idx}"))),
-        ("enumLikeField".to_owned(), Value::Enum((idx % 4) as u8)),
+        ("enumLikeField".to_owned(), Value::EnumTag((idx % 4) as u8)),
         ("intField".to_owned(), Value::U64(idx as u64)),
         ("floatField".to_owned(), Value::F64(idx as f64 + 0.25)),
         (
@@ -2975,7 +2975,7 @@ fn access_cells(resource: RowUuid, team: RowUuid, admins_only: bool) -> BTreeMap
         ("resource".to_owned(), Value::Uuid(resource.0)),
         ("team".to_owned(), Value::Uuid(team.0)),
         ("adminsOnly".to_owned(), Value::Bool(admins_only)),
-        ("permission".to_owned(), Value::Enum(PERM_READ)),
+        ("permission".to_owned(), Value::EnumTag(PERM_READ)),
     ])
 }
 

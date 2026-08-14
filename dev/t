@@ -1,69 +1,149 @@
 #!/usr/bin/env bash
-# Run a cargo-test filter, refusing Cargo's successful "running 0 tests" result.
+# Run one focused Jazz Rust test without Cargo's successful zero-test trap.
+#
+# The default deliberately matches the core-only gate.  Use --test for an
+# integration target rather than relying on Cargo's package-wide target search.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 usage() {
-  echo "Usage: dev/t <filter> [cargo test arguments...]" >&2
+  cat >&2 <<'EOF'
+Usage: dev/t [--lib | --test TARGET] [--exact] FILTER [-- LIBTEST-OPTIONS...]
+
+Runs a focused Jazz test with -p jazz --no-default-features --features test.
+The default target is --lib.  --exact requires FILTER to be the fully-qualified
+test name reported by Cargo; without it FILTER is a substring.
+
+Examples:
+  dev/t subscription::tests::reopens
+  dev/t --exact db::tests::round_trips
+  dev/t --test incremental_delivery_canary maintained_relation -- --nocapture
+EOF
 }
 
-(($# >= 1)) || {
-  usage
-  exit 2
-}
+target_kind="lib"
+target_name=""
+exact=false
+while (($#)); do
+  case "$1" in
+    --lib)
+      target_kind="lib"
+      target_name=""
+      shift
+      ;;
+    --test)
+      (($# >= 2)) || { usage; exit 2; }
+      target_kind="test"
+      target_name="$2"
+      shift 2
+      ;;
+    --exact)
+      exact=true
+      shift
+      ;;
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    --)
+      shift
+      break
+      ;;
+    -*)
+      usage
+      echo "dev/t: unknown option: $1" >&2
+      exit 2
+      ;;
+    *) break ;;
+  esac
+done
 
-for required in cargo rg mktemp cat grep; do
+(($# >= 1)) || { usage; exit 2; }
+filter="$1"
+shift
+extra_args=("$@")
+# The separator belongs to this wrapper's syntax; Cargo receives it once,
+# between its filter and libtest's options.
+if ((${#extra_args[@]})) && [[ "${extra_args[0]}" == "--" ]]; then
+  extra_args=("${extra_args[@]:1}")
+fi
+
+for required in cargo mktemp grep sed date; do
   command -v "$required" >/dev/null 2>&1 || {
     echo "dev/t: required command not found: $required" >&2
     exit 127
   }
 done
 
-filter="$1"
-shift
-output="$(mktemp "${TMPDIR:-/tmp}/jazz-dev-t.XXXXXX")"
-trap 'rm -f "$output"' EXIT
-
-# Redirect to a file instead of teeing through a pipe so the captured status is
-# Cargo's actual status, not a pipeline's status.
-set +e
-cargo test "$filter" "$@" >"$output" 2>&1
-status=$?
-set -e
-cat "$output"
-
-if ((status != 0)); then
-  exit "$status"
+cargo_args=(-p jazz --no-default-features --features test)
+if [[ "$target_kind" == "lib" ]]; then
+  cargo_args+=(--lib)
+  selected_binary="jazz lib tests"
+else
+  cargo_args+=(--test "$target_name")
+  selected_binary="jazz integration test: $target_name"
 fi
 
-# Cargo may also print zero-test doctest targets after a real match. It only
-# matched nothing when no result line reports one or more passed tests.
-if grep -q 'running 0 tests' "$output" && ! grep -Eq 'test result: ok\. [1-9][0-9]* passed;' "$output"; then
-  test_name="${filter##*::}"
-  echo "dev/t: filter matched nothing: $filter" >&2
-  echo "Likely location(s) for $test_name:" >&2
-  matches="$(rg -l -F "$test_name" --glob '*.rs' crates 2>/dev/null || true)"
-  if [[ -n "$matches" ]]; then
-    while IFS= read -r file; do
-      echo "  $file" >&2
-      base="$(basename "$file")"
-      includers="$(rg -l -F "include!(\"$base\")" --glob '*.rs' crates 2>/dev/null || true)"
-      if [[ -n "$includers" ]]; then
-        while IFS= read -r includer; do
-          module="${includer#crates/*/src/}"
-          module="${module%.rs}"
-          module="${module%/mod}"
-          module="${module//\//::}"
-          echo "    likely module path: $module::$test_name (included by $includer)" >&2
-        done <<<"$includers"
-      fi
-    done <<<"$matches"
-  else
-    echo "  no Rust source mention found" >&2
-  fi
+target_dir="${CARGO_TARGET_DIR:-$ROOT/target}"
+printf 'dev/t: target=%s\n' "$selected_binary"
+printf 'dev/t: features=no-default-features,test; cache target=%s rustc_wrapper=%s sccache_dir=%s incremental=%s\n' \
+  "$target_dir" "${RUSTC_WRAPPER:-none}" "${SCCACHE_DIR:-none}" "${CARGO_INCREMENTAL:-default}"
+printf 'dev/t: inventory command:'
+printf ' %q' cargo test "${cargo_args[@]}" -- --list
+printf '\n'
+
+inventory="$(mktemp "${TMPDIR:-/tmp}/jazz-dev-t-inventory.XXXXXX")"
+output="$(mktemp "${TMPDIR:-/tmp}/jazz-dev-t.XXXXXX")"
+trap 'rm -f "$inventory" "$output"' EXIT
+
+started="$(date +%s)"
+echo 'dev/t: resolving Cargo test inventory (may compile selected target)...'
+set +e
+cargo test "${cargo_args[@]}" -- --list >"$inventory" 2>&1
+inventory_status=$?
+set -e
+inventory_elapsed=$(( $(date +%s) - started ))
+printf 'dev/t: inventory compile/list elapsed=%ss\n' "$inventory_elapsed"
+if ((inventory_status != 0)); then
+  cat "$inventory"
+  echo "dev/t: inventory command failed (exit $inventory_status); test was not run" >&2
+  exit "$inventory_status"
+fi
+
+# Cargo writes each discovered unit test as "fully::qualified::name: test".
+# Inspect that authoritative inventory before the run so a spelling, target, or
+# feature mismatch cannot look like a successful focused test invocation.
+names="$(sed -n 's/: test$//p' "$inventory")"
+inventory_count="$(printf '%s\n' "$names" | grep -c . || true)"
+printf 'dev/t: selected inventory has %s test(s)\n' "$inventory_count"
+if [[ "$exact" == true ]]; then
+  matches="$(printf '%s\n' "$names" | grep -F -x -- "$filter" || true)"
+else
+  matches="$(printf '%s\n' "$names" | grep -F -- "$filter" || true)"
+fi
+if [[ -z "$matches" ]]; then
+  echo "dev/t: filter matched no selected test inventory entries: $filter" >&2
+  echo "dev/t: check --lib versus --test TARGET, feature selection, or use a shorter substring." >&2
   exit 1
 fi
+match_count="$(printf '%s\n' "$matches" | grep -c . || true)"
+printf 'dev/t: inventory matched %s test(s):\n%s\n' "$match_count" "$matches"
 
-exit 0
+run_args=(test "${cargo_args[@]}" "$filter" -- "${extra_args[@]}")
+if [[ "$exact" == true ]]; then
+  run_args+=(--exact)
+fi
+printf 'dev/t: run command:'
+printf ' %q' cargo "${run_args[@]}"
+printf '\n'
+started="$(date +%s)"
+set +e
+cargo "${run_args[@]}" >"$output" 2>&1
+status=$?
+set -e
+run_elapsed=$(( $(date +%s) - started ))
+cat "$output"
+printf 'dev/t: test run elapsed=%ss exit=%s\n' "$run_elapsed" "$status"
+exit "$status"

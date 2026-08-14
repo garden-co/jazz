@@ -175,6 +175,11 @@ pub enum GraphBuilder {
         array_field: FieldRef,
         element_field: String,
     },
+    VariantProject {
+        input: Box<GraphBuilder>,
+        field: FieldRef,
+        case: String,
+    },
     Project {
         input: Box<GraphBuilder>,
         fields: Vec<ProjectField>,
@@ -261,6 +266,14 @@ pub struct CollectByBuilder {
 pub struct CollectBySlotBuilder {
     /// Source fields identifying the parent record that owns this slot.
     pub group_cols: Vec<FieldRef>,
+    /// Additional source fields carried with a child solely so nested slots
+    /// can address that child. These fields are intentionally not part of the
+    /// child projection or its rendered descriptor.
+    ///
+    /// Every owner-key field must also be a grouping field for this slot. That
+    /// makes it stable for the child record it accompanies and prevents this
+    /// metadata channel from changing the observable collection shape.
+    pub owner_key_cols: Vec<FieldRef>,
     pub child_fields: Vec<CollectByField>,
     pub collection_field: String,
     pub slots: Vec<CollectBySlotBuilder>,
@@ -293,6 +306,7 @@ impl CollectBySlotBuilder {
     ) -> Self {
         Self {
             group_cols: group_cols.into_iter().map(FieldRef::name).collect(),
+            owner_key_cols: Vec::new(),
             child_fields: child_fields.into_iter().collect(),
             collection_field: collection_field.into(),
             slots: slots.into_iter().collect(),
@@ -308,6 +322,18 @@ impl CollectBySlotBuilder {
     /// this slot. Unmarked records still may serve as parent anchors.
     pub fn with_presence_col(mut self, presence_col: impl Into<String>) -> Self {
         self.presence_col = Some(FieldRef::name(presence_col));
+        self
+    }
+
+    /// Carry non-rendered grouping fields to nested slots.
+    ///
+    /// This is for execution metadata such as a maintained query's route key;
+    /// it deliberately does not alter the child record descriptor.
+    pub fn with_owner_key_cols(
+        mut self,
+        owner_key_cols: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.owner_key_cols = owner_key_cols.into_iter().map(FieldRef::name).collect();
         self
     }
 }
@@ -361,7 +387,7 @@ impl GraphBuilder {
     /// Projection cases live in the runtime registry rather than this builder,
     /// so registering another source discriminator does not replace the graph
     /// node or disturb active subscriptions.
-    pub fn variant_project(table: impl Into<String>, projection_target: impl Into<String>) -> Self {
+    pub fn variant_source(table: impl Into<String>, projection_target: impl Into<String>) -> Self {
         Self::Table {
             table: table.into(),
             scan: None,
@@ -371,7 +397,7 @@ impl GraphBuilder {
 
     /// Read a bounded range of a heterogeneous table through one fixed-output
     /// projection target.
-    pub fn variant_project_scan(
+    pub fn variant_source_scan(
         table: impl Into<String>,
         projection_target: impl Into<String>,
         scan: StaticScanSpec,
@@ -778,6 +804,16 @@ impl GraphBuilder {
         }
     }
 
+    /// Select one named case from an enum field. Nonmatching rows emit no
+    /// delta; matching rows emit the case's fixed payload descriptor.
+    pub fn variant_project(self, field: impl Into<String>, case: impl Into<String>) -> Self {
+        Self::VariantProject {
+            input: Box::new(self),
+            field: FieldRef::name(field),
+            case: case.into(),
+        }
+    }
+
     pub fn project(self, fields: impl IntoIterator<Item = impl Into<String>>) -> Self {
         Self::Project {
             input: Box::new(self),
@@ -878,11 +914,87 @@ impl ProjectField {
         }
     }
 
+    /// Remap a scalar enum's compact source discriminant into another
+    /// descriptor's discriminant. `None` is a deliberate non-total projection
+    /// and fails execution rather than fabricating a case.
+    pub fn enum_tag_remap(
+        source_name: impl Into<String>,
+        output_name: impl Into<String>,
+        tags: Vec<Option<u8>>,
+    ) -> Self {
+        Self {
+            expression: ProjectExpr::EnumTagRemap {
+                source: FieldRef::name(source_name),
+                tags,
+            },
+            output_name: output_name.into(),
+        }
+    }
+
+    /// Remap a payload enum's case tag while retaining its selected payload.
+    /// As for scalar enums, `None` is a deliberate non-total projection.
+    pub fn enum_remap(
+        source_name: impl Into<String>,
+        output_name: impl Into<String>,
+        tags: Vec<Option<u32>>,
+    ) -> Self {
+        Self {
+            expression: ProjectExpr::EnumRemap {
+                source: FieldRef::name(source_name),
+                tags,
+            },
+            output_name: output_name.into(),
+        }
+    }
+
+    /// Recursively re-encode enum tags at every mapped nested occurrence.
+    /// This is descriptor-aware and therefore deliberately cannot take the
+    /// raw-copy projection fast path.
+    pub fn recursive_enum_remap(
+        source_name: impl Into<String>,
+        output_name: impl Into<String>,
+        target: ValueType,
+        remaps: RecursiveEnumRemaps,
+    ) -> Self {
+        Self {
+            expression: ProjectExpr::RecursiveEnumRemap {
+                source: FieldRef::name(source_name),
+                target,
+                remaps,
+                omit_unrepresentable: false,
+            },
+            output_name: output_name.into(),
+        }
+    }
+
+    /// Recursively re-encode enum tags and omit a row when a target schema
+    /// cannot represent one of its cases. This is reserved for Jazz's
+    /// compatibility boundary; ordinary descriptor errors still surface.
+    pub fn recursive_enum_remap_omitting_unrepresentable(
+        source_name: impl Into<String>,
+        output_name: impl Into<String>,
+        target: ValueType,
+        remaps: RecursiveEnumRemaps,
+    ) -> Self {
+        Self {
+            expression: ProjectExpr::RecursiveEnumRemap {
+                source: FieldRef::name(source_name),
+                target,
+                remaps,
+                omit_unrepresentable: true,
+            },
+            output_name: output_name.into(),
+        }
+    }
+
     pub fn source(&self) -> Option<&FieldRef> {
         match &self.expression {
             ProjectExpr::Field(source)
             | ProjectExpr::Nullable(source)
-            | ProjectExpr::NullableFlat(source) => Some(source),
+            | ProjectExpr::NullableFlat(source)
+            | ProjectExpr::EnumTagRemap { source, .. }
+            | ProjectExpr::EnumRemap { source, .. }
+            | ProjectExpr::RecursiveEnumRemap { source, .. } => Some(source),
             ProjectExpr::Literal(_) | ProjectExpr::TypedLiteral { .. } | ProjectExpr::Null(_) => {
                 None
             }
@@ -901,6 +1013,20 @@ pub enum ProjectExpr {
     Null(ValueType),
     Nullable(FieldRef),
     NullableFlat(FieldRef),
+    EnumTagRemap {
+        source: FieldRef,
+        tags: Vec<Option<u8>>,
+    },
+    EnumRemap {
+        source: FieldRef,
+        tags: Vec<Option<u32>>,
+    },
+    RecursiveEnumRemap {
+        source: FieldRef,
+        target: ValueType,
+        remaps: RecursiveEnumRemaps,
+        omit_unrepresentable: bool,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -1480,6 +1606,16 @@ impl NodeDescriptor {
                 }
                 Ok(())
             }
+            OpType::VariantProject(variant_project) => {
+                expect_arity(&self.inputs, 1)?;
+                if variant_project.field_idx >= input_outputs[0].fields().len() {
+                    return Err(GraphValidationError::FieldIndexOutOfBounds {
+                        index: variant_project.field_idx,
+                        len: input_outputs[0].fields().len(),
+                    });
+                }
+                Ok(())
+            }
             OpType::MapProject(project) => {
                 expect_arity(&self.inputs, 1)?;
                 for &(_, field_idx) in &project.mapping {
@@ -1591,7 +1727,7 @@ fn expect_same_output(
     expected: &RecordDescriptor,
     actual: &RecordDescriptor,
 ) -> Result<(), GraphValidationError> {
-    if expected == actual {
+    if expected.registry_compatible_with(actual) {
         Ok(())
     } else {
         Err(GraphValidationError::OutputDescriptorMismatch)
@@ -1612,7 +1748,7 @@ fn collect_by_ordered_scalar(value_type: &ValueType) -> bool {
         | ValueType::String
         | ValueType::Bytes
         | ValueType::Uuid
-        | ValueType::Enum(_) => true,
+        | ValueType::EnumTag(_) => true,
         _ => false,
     }
 }
@@ -1660,6 +1796,7 @@ pub enum OpType {
     MapProject(MapProjectOp),
     UnwrapNullable(UnwrapNullableOp),
     Unnest(UnnestOp),
+    VariantProject(VariantProjectOp),
     IndexBy(IndexByOp),
     Join(JoinOp),
     SemiJoin(JoinOp),

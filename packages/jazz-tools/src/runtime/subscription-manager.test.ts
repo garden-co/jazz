@@ -5,6 +5,13 @@
 import { describe, it, expect } from "vitest";
 import { SubscriptionManager, applySubscriptionDelta } from "./subscription-manager.js";
 import type { SubscriptionDelta } from "./subscription-manager.js";
+import {
+  encodeNativeRowValues,
+  logicalStorageColumns,
+  storageColumnValueType,
+  writeDescriptor,
+} from "./native-runtime/native-row-codec.js";
+import { PostcardWriter } from "./native-runtime/native-codec.js";
 import type {
   ColumnDescriptor,
   NativeRowDelta,
@@ -98,15 +105,22 @@ function nativeRowData(name: string, count: number): Uint8Array {
 }
 
 function terminalRowData(id: string, name: string, count: number): Uint8Array {
-  return Uint8Array.from([...uuidBytes(id), ...nativeRowData(name, count)]);
+  return Uint8Array.from([
+    ...uuidBytes(id),
+    ...encodeNativeRowValues(currentRowColumns(nativeColumns), [
+      { type: "Text", value: name },
+      { type: "Integer", value: count },
+    ]),
+  ]);
 }
 
 function terminalRootWithEmptyChildren(id: string, title: string): Uint8Array {
   const text = new TextEncoder().encode(title);
   const bytes: number[] = [...uuidBytes(id)];
-  pushU32(bytes, 20 + text.byteLength);
-  bytes.push(...text);
-  pushU32(bytes, 0);
+  // The root uses CurrentRow's nullable carrier. The child collection stays a
+  // terminal record when it is populated by a descendant operation.
+  pushU32(bytes, 21 + text.byteLength);
+  bytes.push(1, ...text, 1, 0, 0, 0, 0);
   return Uint8Array.from(bytes);
 }
 
@@ -117,6 +131,47 @@ function nativeRootWithEmptyChildren(title: string): Uint8Array {
   bytes.push(...text);
   pushU32(bytes, 0);
   return Uint8Array.from(bytes);
+}
+
+function currentRowColumns(columns: readonly ColumnDescriptor[]): readonly ColumnDescriptor[] {
+  return columns.map((column) => ({ ...column, nullable: true, sparse: undefined }));
+}
+
+function terminalDescriptor(columns: readonly ColumnDescriptor[]): number[] {
+  const writer = new PostcardWriter();
+  writeDescriptor(writer, [
+    { name: "__jazz_terminal_row_key", valueType: { tag: 10 } },
+    ...columns.map((column) => ({
+      name: column.name,
+      valueType: storageColumnValueType(column),
+    })),
+  ]);
+  return [...writer.finish()];
+}
+
+function currentRowTerminalDescriptor(columns: readonly ColumnDescriptor[]): number[] {
+  const writer = new PostcardWriter();
+  writeDescriptor(writer, [
+    { name: "row_uuid", valueType: { tag: 10 } },
+    ...currentRowColumns(columns).map((column) => ({
+      name: `user_${column.name}`,
+      valueType: storageColumnValueType(column),
+    })),
+  ]);
+  return [...writer.finish()];
+}
+
+function collectorTerminalDescriptor(columns: readonly ColumnDescriptor[]): number[] {
+  const logicalColumns = logicalStorageColumns(columns);
+  const writer = new PostcardWriter();
+  writeDescriptor(writer, [
+    { name: "row_uuid", valueType: { tag: 10 } },
+    ...logicalColumns.map((column) => ({
+      name: `user_${column.name}`,
+      valueType: storageColumnValueType(column),
+    })),
+  ]);
+  return [...writer.finish()];
 }
 
 function terminalTextChild(id: string, name: string): Uint8Array {
@@ -221,6 +276,7 @@ describe("SubscriptionManager", () => {
         terminalOperations: [
           {
             root_key: key,
+            rootDescriptor: currentRowTerminalDescriptor(nativeColumns),
             path: [],
             edit: { Update: { key, value: [...terminalRowData(id, "after", 2)] } },
           },
@@ -269,6 +325,7 @@ describe("SubscriptionManager", () => {
         terminalOperations: [
           {
             root_key: key,
+            rootDescriptor: currentRowTerminalDescriptor(nativeColumns),
             path: [],
             edit: { Update: { key, value: [...terminalRowData(id, "joined", 7)] } },
           },
@@ -321,6 +378,7 @@ describe("SubscriptionManager", () => {
             terminalOperations: [
               {
                 root_key: key,
+                rootDescriptor: currentRowTerminalDescriptor(nativeColumns),
                 path: [],
                 edit: { Update: { key, value: [...terminalRowData(id, "after", 7)] } },
               },
@@ -386,6 +444,7 @@ describe("SubscriptionManager", () => {
           terminalOperations: [
             {
               root_key: legacyComposite,
+              rootDescriptor: currentRowTerminalDescriptor(nativeColumns),
               path: [],
               edit: { Update: { key: legacyComposite, value: [...terminalRowData(id, "bad", 9)] } },
             },
@@ -523,6 +582,7 @@ describe("SubscriptionManager", () => {
         terminalOperations: [
           {
             root_key: key,
+            rootDescriptor: currentRowTerminalDescriptor(nativeColumns),
             path: [],
             edit: { Update: { key, value: [...terminalRowData(id, "updated", 2)] } },
           },
@@ -550,6 +610,7 @@ describe("SubscriptionManager", () => {
         terminalOperations: [
           {
             root_key: key,
+            rootDescriptor: currentRowTerminalDescriptor(nativeColumns),
             path: [],
             edit: { Insert: { key, index: 0, value: [...terminalRowData(id, "reopened", 3)] } },
           },
@@ -593,6 +654,7 @@ describe("SubscriptionManager", () => {
         terminalOperations: [
           {
             root_key: key,
+            rootDescriptor: currentRowTerminalDescriptor(nativeColumns),
             path: [],
             edit: { Update: { key, value: [...terminalRowData(id, "patched", 2)] } },
           },
@@ -623,6 +685,7 @@ describe("SubscriptionManager", () => {
         terminalOperations: [
           {
             root_key: key,
+            rootDescriptor: currentRowTerminalDescriptor(nativeColumns),
             path: [],
             edit: { Update: { key, value: [...terminalRowData(id, "stale", 1)] } },
           },
@@ -668,6 +731,7 @@ describe("SubscriptionManager", () => {
           terminalOperations: [
             {
               root_key: key,
+              rootDescriptor: currentRowTerminalDescriptor(nativeColumns),
               path: [],
               edit: { Update: { key, value: [...terminalRowData(other, "corrupt", 2)] } },
             },
@@ -699,6 +763,7 @@ describe("SubscriptionManager", () => {
         terminalOperations: [
           {
             root_key: key,
+            rootDescriptor: currentRowTerminalDescriptor(nativeColumns),
             path: [],
             edit: { Insert: { index: 0, key, value: [...terminalRowData(id, "root", 1)] } },
           },
@@ -718,6 +783,371 @@ describe("SubscriptionManager", () => {
       nativeColumns,
     );
     expect(removed).toEqual({ delta: [{ kind: 1, id, index: 0 }], all: [] });
+  });
+
+  it("decodes every root terminal payload through the CurrentRow nullable carrier", () => {
+    type NullableRoot = { id: string; title: string | null; done: boolean | null };
+    const manager = new SubscriptionManager<NullableRoot>();
+    const id = "00000000-0000-4000-8000-000000000001";
+    const key = [10, ...uuidBytes(id)];
+    const columns: ColumnDescriptor[] = [
+      { name: "title", column_type: { type: "Text" }, nullable: false },
+      { name: "done", column_type: { type: "Boolean" }, nullable: false },
+    ];
+    const currentRowPayload = Uint8Array.from([
+      ...uuidBytes(id),
+      ...encodeNativeRowValues(currentRowColumns(columns), [
+        { type: "Null" },
+        { type: "Boolean", value: false },
+      ]),
+    ]);
+
+    const result = manager.handleDelta(
+      {
+        __jazzNativeRowDelta: true,
+        added: new Uint8Array(),
+        removed: new Uint8Array(),
+        updated: new Uint8Array(),
+        addedCount: 0,
+        removedCount: 0,
+        updatedCount: 0,
+        terminalOperations: [
+          {
+            root_key: key,
+            rootDescriptor: currentRowTerminalDescriptor(columns),
+            path: [],
+            edit: { Insert: { index: 0, key, value: [...currentRowPayload] } },
+          },
+        ],
+      },
+      (row) => {
+        const title = row.values[0];
+        const done = row.values[1];
+        return {
+          id: row.id,
+          title: title?.type === "Text" ? title.value : null,
+          done: done?.type === "Boolean" ? done.value : null,
+        };
+      },
+      columns,
+    );
+
+    expect(result.all).toEqual([{ id, title: null, done: false }]);
+  });
+
+  it("uses the producer descriptor for a logical terminal root instead of guessing CurrentRow", () => {
+    const manager = new SubscriptionManager<TestItem>();
+    const id = "00000000-0000-4000-8000-000000000001";
+    const key = [10, ...uuidBytes(id)];
+    const logicalPayload = Uint8Array.from([
+      ...uuidBytes(id),
+      ...encodeNativeRowValues(nativeColumns, [
+        { type: "Text", value: "logical" },
+        { type: "Integer", value: 7 },
+      ]),
+    ]);
+
+    const result = manager.handleDelta(
+      {
+        __jazzNativeRowDelta: true,
+        added: new Uint8Array(),
+        removed: new Uint8Array(),
+        updated: new Uint8Array(),
+        addedCount: 0,
+        removedCount: 0,
+        updatedCount: 0,
+        terminalOperations: [
+          {
+            root_key: key,
+            rootDescriptor: terminalDescriptor(nativeColumns),
+            path: [],
+            edit: { Insert: { index: 0, key, value: [...logicalPayload] } },
+          },
+        ],
+      },
+      transform,
+      nativeColumns,
+    );
+
+    expect(result.all).toEqual([{ id, name: "logical", count: 7 }]);
+  });
+
+  it("fails closed for missing, incompatible, unknown, or trailing terminal descriptors", () => {
+    const id = "00000000-0000-4000-8000-000000000001";
+    const key = [10, ...uuidBytes(id)];
+    const payload = Uint8Array.from([
+      ...uuidBytes(id),
+      ...encodeNativeRowValues(nativeColumns, [
+        { type: "Text", value: "logical" },
+        { type: "Integer", value: 7 },
+      ]),
+    ]);
+    const wrongOrder = terminalDescriptor([nativeColumns[1]!, nativeColumns[0]!]);
+    const wrongType = terminalDescriptor([
+      { ...nativeColumns[0]!, column_type: { type: "Integer" } },
+      nativeColumns[1]!,
+    ]);
+    const unknownTagWriter = new PostcardWriter();
+    writeDescriptor(unknownTagWriter, [
+      { name: "__jazz_terminal_row_key", valueType: { tag: 10 } },
+      { name: "name", valueType: { tag: 99 } },
+      { name: "count", valueType: { tag: 4 } },
+    ]);
+    const descriptors: Array<number[] | undefined> = [
+      undefined,
+      wrongOrder,
+      wrongType,
+      [...unknownTagWriter.finish()],
+      [...terminalDescriptor(nativeColumns), 0],
+    ];
+
+    for (const rootDescriptor of descriptors) {
+      const manager = new SubscriptionManager<TestItem>();
+      expect(() =>
+        manager.handleDelta(
+          {
+            __jazzNativeRowDelta: true,
+            added: new Uint8Array(),
+            removed: new Uint8Array(),
+            updated: new Uint8Array(),
+            addedCount: 0,
+            removedCount: 0,
+            updatedCount: 0,
+            terminalOperations: [
+              {
+                root_key: key,
+                ...(rootDescriptor === undefined ? {} : { rootDescriptor }),
+                path: [],
+                edit: { Insert: { index: 0, key, value: [...payload] } },
+              },
+            ],
+          },
+          transform,
+          nativeColumns,
+        ),
+      ).toThrow(/terminal (operation is missing its root descriptor|root descriptor)/);
+    }
+  });
+
+  it("accepts terminal root descriptors that retain sparse current-row carriers", () => {
+    const id = "00000000-0000-4000-8000-000000000001";
+    const key = [10, ...uuidBytes(id)];
+    const sparseColumns: ColumnDescriptor[] = [
+      { name: "name", column_type: { type: "Text" }, nullable: false, sparse: true },
+      { name: "ownerId", column_type: { type: "Uuid" }, nullable: true, sparse: true },
+    ];
+    const payload = Uint8Array.from([
+      ...uuidBytes(id),
+      ...encodeNativeRowValues(sparseColumns, [
+        { type: "Text", value: "logical" },
+        { type: "Null" },
+      ]),
+    ]);
+    const manager = new SubscriptionManager<{ id: string; name: string }>();
+    const transform = (row: WasmRow) => ({
+      id: row.id,
+      name: (row.values[0] as { type: "Text"; value: string }).value,
+    });
+
+    const result = manager.handleDelta(
+      {
+        __jazzNativeRowDelta: true,
+        added: new Uint8Array(),
+        removed: new Uint8Array(),
+        updated: new Uint8Array(),
+        addedCount: 0,
+        removedCount: 0,
+        updatedCount: 0,
+        terminalOperations: [
+          {
+            root_key: key,
+            rootDescriptor: terminalDescriptor(sparseColumns),
+            path: [],
+            edit: { Insert: { index: 0, key, value: [...payload] } },
+          },
+        ],
+      },
+      transform,
+      sparseColumns,
+    );
+
+    expect(result.all).toEqual([{ id, name: "logical" }]);
+  });
+
+  it("registers a producer-owned root layout before decoding its operations", () => {
+    const id = "00000000-0000-4000-8000-000000000001";
+    const key = [10, ...uuidBytes(id)];
+    const manager = new SubscriptionManager<TestItem>();
+    const result = manager.handleDelta(
+      {
+        __jazzNativeRowDelta: true,
+        added: new Uint8Array(),
+        removed: new Uint8Array(),
+        updated: new Uint8Array(),
+        addedCount: 0,
+        removedCount: 0,
+        updatedCount: 0,
+        terminalLayouts: [
+          {
+            id: "current-row-v1",
+            rootDescriptor: currentRowTerminalDescriptor(nativeColumns),
+            rootKeySlot: 0,
+            rootKeyFieldName: "row_uuid",
+            publicFields: [
+              { name: "name", descriptorFieldName: "user_name", slot: 1 },
+              { name: "count", descriptorFieldName: "user_count", slot: 2 },
+            ],
+            carrier: "CurrentRow",
+          },
+        ],
+        terminalOperations: [
+          {
+            rootLayoutId: "current-row-v1",
+            root_key: key,
+            path: [],
+            edit: { Insert: { index: 0, key, value: [...terminalRowData(id, "layout", 9)] } },
+          },
+        ],
+      },
+      transform,
+      nativeColumns,
+    );
+    expect(result.all).toEqual([{ id, name: "layout", count: 9 }]);
+  });
+
+  it("decodes logical collector roots and rejects the wrong carrier kind", () => {
+    const id = "00000000-0000-4000-8000-000000000001";
+    const key = [10, ...uuidBytes(id)];
+    const sparseLogicalColumns = nativeColumns.map((column) => ({ ...column, sparse: true }));
+    const descriptor = collectorTerminalDescriptor(sparseLogicalColumns);
+    const value = [
+      ...uuidBytes(id),
+      ...encodeNativeRowValues(nativeColumns, [
+        { type: "Text", value: "collector" },
+        { type: "Integer", value: 11 },
+      ]),
+    ];
+    const delta = (carrier: "Logical" | "CurrentRow"): NativeRowDelta => ({
+      __jazzNativeRowDelta: true,
+      added: new Uint8Array(),
+      removed: new Uint8Array(),
+      updated: new Uint8Array(),
+      addedCount: 0,
+      removedCount: 0,
+      updatedCount: 0,
+      terminalLayouts: [
+        {
+          id: `collector-${carrier}`,
+          rootDescriptor: descriptor,
+          rootKeySlot: 0,
+          rootKeyFieldName: "row_uuid",
+          publicFields: [
+            { name: "name", descriptorFieldName: "user_name", slot: 1 },
+            { name: "count", descriptorFieldName: "user_count", slot: 2 },
+          ],
+          carrier,
+        },
+      ],
+      terminalOperations: [
+        {
+          rootLayoutId: `collector-${carrier}`,
+          root_key: key,
+          path: [],
+          edit: { Insert: { index: 0, key, value } },
+        },
+      ],
+    });
+
+    expect(
+      new SubscriptionManager<TestItem>().handleDelta(
+        delta("Logical"),
+        transform,
+        sparseLogicalColumns,
+      ).all,
+    ).toEqual([{ id, name: "collector", count: 11 }]);
+    expect(() =>
+      new SubscriptionManager<TestItem>().handleDelta(
+        delta("CurrentRow"),
+        transform,
+        sparseLogicalColumns,
+      ),
+    ).toThrow(/terminal root layout does not match/);
+  });
+
+  it("normalizes sparse logical trees but preserves CurrentRow nullable carriers", () => {
+    const columns: ColumnDescriptor[] = [
+      {
+        name: "profile",
+        column_type: {
+          type: "Row",
+          columns: [{ name: "label", column_type: { type: "Text" }, nullable: true, sparse: true }],
+        },
+        nullable: true,
+        sparse: true,
+      },
+    ];
+    const layoutDelta = (
+      id: string,
+      carrier: "Logical" | "CurrentRow",
+      rootDescriptor: number[],
+      fieldCarrier = carrier,
+    ): NativeRowDelta => ({
+      __jazzNativeRowDelta: true,
+      added: new Uint8Array(),
+      removed: new Uint8Array(),
+      updated: new Uint8Array(),
+      addedCount: 0,
+      removedCount: 0,
+      updatedCount: 0,
+      terminalLayouts: [
+        {
+          id,
+          rootDescriptor,
+          rootKeySlot: 0,
+          rootKeyFieldName: "row_uuid",
+          publicFields: [
+            {
+              name: "profile",
+              descriptorFieldName: "user_profile",
+              slot: 1,
+              carrier: fieldCarrier,
+            },
+          ],
+          carrier,
+        },
+      ],
+    });
+    expect(() =>
+      new SubscriptionManager().handleDelta(
+        layoutDelta("logical-tree", "CurrentRow", collectorTerminalDescriptor(columns), "Logical"),
+        (row) => row,
+        columns,
+      ),
+    ).not.toThrow();
+
+    const normalized = { ...columns[0]!, sparse: undefined };
+    const writer = new PostcardWriter();
+    writeDescriptor(writer, [
+      { name: "row_uuid", valueType: { tag: 10 } },
+      {
+        name: "user_profile",
+        valueType: { tag: 14, inner: storageColumnValueType(normalized) },
+      },
+    ]);
+    expect(() =>
+      new SubscriptionManager().handleDelta(
+        layoutDelta("current-row-nullable", "CurrentRow", [...writer.finish()]),
+        (row) => row,
+        columns,
+      ),
+    ).not.toThrow();
+    expect(() =>
+      new SubscriptionManager().handleDelta(
+        layoutDelta("wrong-current-row", "CurrentRow", collectorTerminalDescriptor(columns)),
+        (row) => row,
+        columns,
+      ),
+    ).toThrow(/terminal root layout does not match/);
   });
 
   it("applies root insert positions in producer order after earlier removals", () => {
@@ -743,6 +1173,7 @@ describe("SubscriptionManager", () => {
         terminalOperations: [
           {
             root_key: key(ids.b),
+            rootDescriptor: currentRowTerminalDescriptor(nativeColumns),
             path: [],
             edit: {
               Insert: { index: 0, key: key(ids.b), value: [...terminalRowData(ids.b, "B", 2)] },
@@ -750,6 +1181,7 @@ describe("SubscriptionManager", () => {
           },
           {
             root_key: key(ids.c),
+            rootDescriptor: currentRowTerminalDescriptor(nativeColumns),
             path: [],
             edit: {
               Insert: { index: 1, key: key(ids.c), value: [...terminalRowData(ids.c, "C", 3)] },
@@ -768,6 +1200,7 @@ describe("SubscriptionManager", () => {
           { root_key: key(ids.b), path: [], edit: { Remove: { key: key(ids.b) } } },
           {
             root_key: key(ids.d),
+            rootDescriptor: currentRowTerminalDescriptor(nativeColumns),
             path: [],
             edit: {
               Insert: { index: 1, key: key(ids.d), value: [...terminalRowData(ids.d, "D", 4)] },
@@ -805,6 +1238,7 @@ describe("SubscriptionManager", () => {
           terminalOperations: [
             {
               root_key: key,
+              rootDescriptor: currentRowTerminalDescriptor(nativeColumns),
               path: [],
               edit: {
                 Insert: { index: 0, key: otherKey, value: [...terminalRowData(id, "root", 1)] },
@@ -909,6 +1343,7 @@ describe("SubscriptionManager", () => {
           },
           {
             root_key: rootKey,
+            rootDescriptor: currentRowTerminalDescriptor(rootColumns),
             path: [],
             edit: {
               Insert: {
@@ -932,6 +1367,41 @@ describe("SubscriptionManager", () => {
       },
     ]);
     expect(result.delta).toEqual([{ kind: 0, id: rootId, index: 0, item: result.all![0] }]);
+
+    // Producers canonicalize a weighted child replacement as Remove(old),
+    // Insert(new); consumers apply that wire contract without inference.
+    const replacement = manager.handleDelta(
+      {
+        __jazzNativeRowDelta: true,
+        added: new Uint8Array(),
+        removed: new Uint8Array(),
+        updated: new Uint8Array(),
+        addedCount: 0,
+        removedCount: 0,
+        updatedCount: 0,
+        terminalOperations: [
+          {
+            root_key: rootKey,
+            path: [{ Collection: "__jazz_include_project" }],
+            edit: { Remove: { key: childKey } },
+          },
+          {
+            root_key: rootKey,
+            path: [{ Collection: "__jazz_include_project" }],
+            edit: {
+              Insert: {
+                index: 0,
+                key: childKey,
+                value: [...terminalTextChild(childId, "Revised announcements")],
+              },
+            },
+          },
+        ],
+      },
+      transformIncluded,
+      rootColumns,
+    );
+    expect(replacement.all?.[0]?.project?.name).toBe("Revised announcements");
 
     expect(() =>
       manager.handleDelta(
@@ -960,7 +1430,7 @@ describe("SubscriptionManager", () => {
         rootColumns,
       ),
     ).toThrow(/does not match addressed key/);
-    expect(manager.all()).toEqual(result.all);
+    expect(manager.all()).toEqual(replacement.all);
 
     const nestedUpdate = manager.handleDelta(
       {
@@ -1006,6 +1476,7 @@ describe("SubscriptionManager", () => {
           },
           {
             root_key: rootKey,
+            rootDescriptor: currentRowTerminalDescriptor(rootColumns),
             path: [],
             edit: {
               Update: {

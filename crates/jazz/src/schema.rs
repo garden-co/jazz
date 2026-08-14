@@ -8,7 +8,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use groove::records::{EnumSchema, RecordDescriptor, Value, ValueType};
+use groove::records::{
+    RecordDescriptor, ScalarEnumSchema, SystemVariantRegistry, Value, ValueType,
+};
 use groove::schema::{
     ColumnType as GrooveColumnType, DatabaseSchema as GrooveDatabaseSchema,
     DirectRecordStoreSchema, IndexSchema as GrooveIndexSchema, IntegerKeyType, PrimaryKey,
@@ -1121,8 +1123,8 @@ impl Policy {
 }
 
 fn storage_enum(name: &str, variants: &[&str]) -> GrooveColumnType {
-    GrooveColumnType::Enum(
-        EnumSchema::new(name, variants.iter().copied()).expect("valid enum schema"),
+    GrooveColumnType::EnumTag(
+        ScalarEnumSchema::new(name, variants.iter().copied()).expect("valid enum schema"),
     )
 }
 
@@ -1135,7 +1137,11 @@ fn fate_column() -> GrooveColumnType {
 }
 
 fn deletion_column() -> GrooveColumnType {
-    storage_enum("jazz_deletion", &["deleted", "restored"])
+    GrooveColumnType::EnumTag(
+        ScalarEnumSchema::new("jazz_deletion", ["deleted", "restored"])
+            .expect("valid deletion enum")
+            .with_system_registry(SystemVariantRegistry::deletion_state()),
+    )
 }
 
 fn rejection_reason_column() -> GrooveColumnType {
@@ -1284,7 +1290,7 @@ fn put_column_type(bytes: &mut Vec<u8>, column_type: &GrooveColumnType) {
         GrooveColumnType::String => bytes.push(8),
         GrooveColumnType::Bytes => bytes.push(9),
         GrooveColumnType::Uuid => bytes.push(10),
-        GrooveColumnType::Enum(schema) => {
+        GrooveColumnType::EnumTag(schema) => {
             bytes.push(11);
             put_str(bytes, &schema.name);
             put_u64(bytes, schema.variants.len() as u64);
@@ -1319,6 +1325,25 @@ fn put_column_type(bytes: &mut Vec<u8>, column_type: &GrooveColumnType) {
                     None => bytes.push(0),
                 }
                 put_column_type(bytes, &field.value_type);
+            }
+        }
+        GrooveColumnType::Enum(schema) => {
+            bytes.push(16);
+            put_str(bytes, &schema.name);
+            put_u64(bytes, schema.cases.len() as u64);
+            for case in &schema.cases {
+                put_str(bytes, &case.name);
+                put_u64(bytes, case.payload.fields().len() as u64);
+                for field in case.payload.fields() {
+                    match &field.name {
+                        Some(name) => {
+                            bytes.push(1);
+                            put_str(bytes, name);
+                        }
+                        None => bytes.push(0),
+                    }
+                    put_column_type(bytes, &field.value_type);
+                }
             }
         }
     }
@@ -1692,6 +1717,46 @@ mod tests {
                 .map(|column| column.column.as_str())
                 .collect::<Vec<_>>(),
             vec!["row_uuid"]
+        );
+    }
+
+    #[test]
+    fn system_deletion_registry_survives_storage_rebinding_but_user_enums_do_not() {
+        let state = ScalarEnumSchema::new("state", ["open", "done"]).unwrap();
+        let left = TableSchema::new(
+            "left",
+            [ColumnSchema::new(
+                "state",
+                ColumnType::EnumTag(state.clone()),
+            )],
+        );
+        let right = TableSchema::new(
+            "right",
+            [ColumnSchema::new("state", ColumnType::EnumTag(state))],
+        );
+        let registry = |table: GrooveTableSchema, name: &str| match &table
+            .columns
+            .iter()
+            .find(|column| column.name == name)
+            .unwrap()
+            .column_type
+        {
+            GrooveColumnType::EnumTag(schema) => schema.registry_id(),
+            GrooveColumnType::Nullable(inner) => match inner.as_ref() {
+                GrooveColumnType::EnumTag(schema) => schema.registry_id(),
+                other => panic!("expected enum field, got {other:?}"),
+            },
+            other => panic!("expected enum field, got {other:?}"),
+        };
+
+        assert_eq!(
+            registry(left.register_storage_table(), "_deletion"),
+            registry(right.register_storage_table(), "_deletion")
+        );
+        assert_ne!(
+            registry(left.history_storage_table(), "user_state"),
+            registry(right.history_storage_table(), "user_state"),
+            "structurally identical user enums must retain independent registries"
         );
     }
 }

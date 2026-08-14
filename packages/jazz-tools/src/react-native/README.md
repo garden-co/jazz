@@ -48,8 +48,10 @@ writes instead of orphaning its outbox. Attaching the first upstream transport
 performs a synchronous bootstrap tick so replay does not depend on a foreign
 callback that may have fired before the connection existed.
 
-Native writes are durable by default. `Db.shutdown()` closes transports,
-cancels pending native waiters, checkpoints SQLite, and joins the actor thread.
+Native writes are durable by default. Durability waits use the core-owned async
+settlement primitive, and unhandled write rejections cross to JavaScript on a
+detached callback worker. `Db.shutdown()` closes transports, cancels pending
+native waits and callbacks, checkpoints SQLite, and joins the actor thread.
 After a terminal native panic or close, construct a new client rather than
 reusing the old instance.
 

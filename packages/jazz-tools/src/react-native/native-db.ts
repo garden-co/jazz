@@ -7,21 +7,16 @@ import type {
   Tx,
   Write,
 } from "../runtime/native-runtime/native-runtime-adapter.js";
-import type { OpenBatchId, TransactionKind } from "../runtime/client.js";
+import type { MutationErrorEvent, OpenBatchId, TransactionKind } from "../runtime/client.js";
 
 type GeneratedPreparedQuery = object;
 type GeneratedQueryAttachment = object;
-
-interface GeneratedWriteStateWaiter {
-  wait(options?: { signal: AbortSignal }): Promise<void>;
-}
 
 interface GeneratedWrite {
   batchId(): string;
   close(): boolean;
   payload(): ArrayBuffer;
-  registerWriteStateWaiter(): GeneratedWriteStateWaiter;
-  wait(tier: string): void;
+  wait(tier: string): Promise<void>;
   writeState(): string;
 }
 
@@ -30,6 +25,7 @@ interface GeneratedSubscriptionEvent {
   reset: boolean | undefined;
   delta: ArrayBuffer | undefined;
   terminalOperationsJson: string | undefined;
+  terminalLayoutsJson: string | undefined;
   settled: boolean | undefined;
   tier: string | undefined;
   reasonJson: string | undefined;
@@ -177,6 +173,7 @@ interface GeneratedDb {
   ): GeneratedWrite;
   setIdentityClaims(author: ArrayBuffer, claimsJson: string | undefined): void;
   setTickScheduler(callback: { onTickNeeded(urgency: string): void }): void;
+  onMutationError(callback: { onMutationError(eventJson: string): void }): void;
   subscribe(query: GeneratedPreparedQuery, optsJson: string | undefined): GeneratedSubscription;
   subscribeForIdentity(
     query: GeneratedPreparedQuery,
@@ -262,18 +259,27 @@ function parseJson(value: string): unknown {
 function subscriptionEvent(event: GeneratedSubscriptionEvent): unknown {
   switch (event.eventType) {
     case "delta": {
-      if (event.delta === undefined || event.terminalOperationsJson === undefined) {
+      if (
+        event.delta === undefined ||
+        event.terminalOperationsJson === undefined ||
+        event.terminalLayoutsJson === undefined
+      ) {
         throw new Error("React Native subscription delta is missing its payload");
       }
       const terminalOperations = parseJson(event.terminalOperationsJson);
+      const terminalLayouts = parseJson(event.terminalLayoutsJson);
       if (!Array.isArray(terminalOperations)) {
         throw new Error("React Native subscription terminal operations must be an array");
+      }
+      if (!Array.isArray(terminalLayouts)) {
+        throw new Error("React Native subscription terminal layouts must be an array");
       }
       return {
         type: "delta",
         reset: event.reset === true,
         delta: toUint8Array(event.delta),
         terminalOperations,
+        terminalLayouts,
         settled: event.settled === true,
         tier: event.tier,
       };
@@ -422,17 +428,12 @@ class RnWriteShim implements Write {
     return toUint8Array(this.write.payload());
   }
 
-  wait(tier: string): void {
-    this.write.wait(tier);
+  wait(tier: string): Promise<void> {
+    return this.write.wait(tier);
   }
 
   writeState(): unknown {
     return parseJson(this.write.writeState());
-  }
-
-  nextWriteStateChange(): Promise<void> {
-    const waiter = this.write.registerWriteStateWaiter();
-    return waiter.wait();
   }
 
   close(): boolean {
@@ -882,6 +883,14 @@ export class RnDbShim implements NativeDb {
     this.db.setTickScheduler({
       onTickNeeded: (urgency) => {
         (callback as (urgency: string) => void)(urgency);
+      },
+    });
+  }
+
+  onMutationError(callback: (event: MutationErrorEvent) => void): void {
+    this.db.onMutationError({
+      onMutationError(eventJson) {
+        callback(parseJson(eventJson) as MutationErrorEvent);
       },
     });
   }

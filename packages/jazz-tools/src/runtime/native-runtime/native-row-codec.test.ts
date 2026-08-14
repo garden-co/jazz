@@ -3,15 +3,19 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 import { PostcardReader, PostcardWriter } from "./native-codec.js";
+import { encodeCellsForPatch, encodeCellsForRow } from "./native-runtime-adapter.js";
 import {
   createRecord,
   decodeNativeTerminalRow,
   decodeNativeRowValues,
   decodeRecordValue,
   encodeNativeRowValues,
+  assertTerminalRootDescriptorCompatible,
   readDescriptor,
+  storageColumnValueType,
   writeDescriptor,
 } from "./native-row-codec.js";
+import type { ColumnDescriptor, Value } from "../../drivers/types.js";
 
 type NativeRowCodecFixture = {
   cases: NativeRowCodecCase[];
@@ -24,6 +28,304 @@ type NativeRowCodecCase = {
 };
 
 describe("native row codec", () => {
+  it("accepts nested terminal descriptors with producer fields beyond the root output", () => {
+    const columns: ColumnDescriptor[] = [
+      { name: "title", column_type: { type: "Text" }, nullable: false },
+    ];
+    const descriptor = [
+      { name: "__jazz_terminal_row_key", valueType: { tag: 10 } },
+      { name: "title", valueType: { tag: 8 } },
+      {
+        name: "members",
+        valueType: { tag: 13, inner: { tag: 15, record: [] } },
+      },
+    ];
+
+    expect(() => assertTerminalRootDescriptorCompatible(descriptor, columns)).not.toThrow();
+  });
+
+  it("rejects terminal descriptors that omit, reorder, rename, or change required root fields", () => {
+    const columns: ColumnDescriptor[] = [
+      { name: "title", column_type: { type: "Text" }, nullable: false },
+      { name: "body", column_type: { type: "Text" }, nullable: false },
+    ];
+    const missingRootField = [{ name: "__jazz_terminal_row_key", valueType: { tag: 10 } }];
+    const wrongRootType = [
+      { name: "__jazz_terminal_row_key", valueType: { tag: 10 } },
+      { name: "title", valueType: { tag: 4 } },
+      { name: "members", valueType: { tag: 13, inner: { tag: 15, record: [] } } },
+    ];
+    const reorderedSameTypeFields = [
+      { name: "__jazz_terminal_row_key", valueType: { tag: 10 } },
+      { name: "body", valueType: { tag: 8 } },
+      { name: "title", valueType: { tag: 8 } },
+    ];
+    const wrongKeyName = [
+      { name: "not_the_terminal_key", valueType: { tag: 10 } },
+      { name: "title", valueType: { tag: 8 } },
+      { name: "body", valueType: { tag: 8 } },
+    ];
+
+    expect(() => assertTerminalRootDescriptorCompatible(missingRootField, columns)).toThrow(
+      "terminal root descriptor does not match the public projection",
+    );
+    expect(() => assertTerminalRootDescriptorCompatible(wrongRootType, columns)).toThrow(
+      "terminal root descriptor does not match the public projection",
+    );
+    expect(() => assertTerminalRootDescriptorCompatible(reorderedSameTypeFields, columns)).toThrow(
+      "terminal root descriptor does not match the public projection",
+    );
+    expect(() => assertTerminalRootDescriptorCompatible(wrongKeyName, columns)).toThrow(
+      "terminal root descriptor does not match the public projection",
+    );
+  });
+
+  it("accepts only the canonical CurrentRow carrier layout", () => {
+    const columns: ColumnDescriptor[] = [
+      { name: "title", column_type: { type: "Text" }, nullable: false },
+      { name: "done", column_type: { type: "Boolean" }, nullable: false },
+    ];
+    const currentRow = [
+      { name: "row_uuid", valueType: { tag: 10 } },
+      { name: "user_title", valueType: { tag: 14, inner: { tag: 8 } } },
+      { name: "user_done", valueType: { tag: 14, inner: { tag: 7 } } },
+      { name: "$createdBy", valueType: { tag: 10 } },
+    ];
+    const nullableLogicalNames = [
+      { name: "__jazz_terminal_row_key", valueType: { tag: 10 } },
+      { name: "title", valueType: { tag: 14, inner: { tag: 8 } } },
+      { name: "done", valueType: { tag: 14, inner: { tag: 7 } } },
+    ];
+    const reorderedCarriers = [currentRow[0]!, currentRow[2]!, currentRow[1]!];
+
+    expect(() => assertTerminalRootDescriptorCompatible(currentRow, columns)).not.toThrow();
+    expect(() => assertTerminalRootDescriptorCompatible(nullableLogicalNames, columns)).toThrow(
+      "terminal root descriptor does not match the public projection",
+    );
+    expect(() => assertTerminalRootDescriptorCompatible(reorderedCarriers, columns)).toThrow(
+      "terminal root descriptor does not match the public projection",
+    );
+  });
+
+  it("requires payload enum terminal descriptors to preserve their declared case layouts", () => {
+    const columns: ColumnDescriptor[] = [
+      {
+        name: "event",
+        column_type: {
+          type: "EnumPayload",
+          cases: [
+            {
+              name: "message",
+              fields: [
+                { name: "text", column_type: { type: "Text" }, nullable: false },
+                { name: "level", column_type: { type: "Integer" }, nullable: true },
+              ],
+            },
+          ],
+        },
+        nullable: false,
+      },
+    ];
+    const descriptor = [
+      { name: "__jazz_terminal_row_key", valueType: { tag: 10 } },
+      {
+        name: "event",
+        valueType: {
+          tag: 16,
+          enumSchema: {
+            registryId: 37,
+            name: "physical_event",
+            cases: [
+              {
+                name: "message",
+                payload: [
+                  { name: "text", valueType: { tag: 8 } },
+                  { name: "level", valueType: { tag: 14, inner: { tag: 4 } } },
+                ],
+              },
+            ],
+          },
+        },
+      },
+    ];
+    const wrongFieldType = structuredClone(descriptor);
+    wrongFieldType[1]!.valueType.enumSchema!.cases![0]!.payload[1]!.valueType = { tag: 8 };
+
+    expect(() => assertTerminalRootDescriptorCompatible(descriptor, columns)).not.toThrow();
+    expect(() => assertTerminalRootDescriptorCompatible(wrongFieldType, columns)).toThrow(
+      "terminal root descriptor does not match the public projection",
+    );
+  });
+
+  it("keeps mutation cells byte-for-byte aligned with packed row values", () => {
+    const nestedColumns: ColumnDescriptor[] = [
+      { name: "label", column_type: { type: "Text" }, nullable: false },
+    ];
+    const columns: ColumnDescriptor[] = [
+      { name: "active", column_type: { type: "Boolean" }, nullable: false },
+      {
+        name: "choice",
+        column_type: { type: "Enum", variants: ["draft", "published"] },
+        nullable: false,
+      },
+      {
+        name: "labels",
+        column_type: { type: "Array", element: { type: "Text" } },
+        nullable: false,
+      },
+      { name: "note", column_type: { type: "Text" }, nullable: true },
+      {
+        name: "nested",
+        column_type: { type: "Row", columns: nestedColumns },
+        nullable: false,
+      },
+      { name: "sparse", column_type: { type: "Integer" }, nullable: false, sparse: true },
+    ];
+    const values: Record<string, Value> = {
+      active: { type: "Boolean", value: false },
+      choice: { type: "Text", value: "published" },
+      labels: {
+        type: "Array",
+        value: [
+          { type: "Text", value: "one" },
+          { type: "Text", value: "two" },
+        ],
+      },
+      note: { type: "Null" },
+      nested: {
+        type: "Row",
+        value: {
+          id: "00000000-0000-4000-8000-000000000001",
+          values: [{ type: "Text", value: "child" }],
+        },
+      },
+      sparse: { type: "Integer", value: 7 },
+    };
+    const sortedColumns = [...columns].sort((left, right) => left.name.localeCompare(right.name));
+    const writer = new PostcardWriter();
+    writeDescriptor(
+      writer,
+      sortedColumns.map((column) => ({
+        name: column.name,
+        valueType: storageColumnValueType(column),
+      })),
+    );
+    writer.bytes(
+      encodeNativeRowValues(
+        sortedColumns,
+        sortedColumns.map((column) => values[column.name]!),
+      ),
+    );
+
+    const cells = encodeCellsForRow({ columns }, values);
+    expect(cells).toEqual(writer.finish());
+    expect(bytesToHex(cells)).toMatchInlineSnapshot(
+      `"06010661637469766507010663686f6963650801066c6162656c730d0801066e65737465640901046e6f74650e0801067370617273650e04440001070000001b00000029000000430000007075626c6973686564020000000b0000006f6e6574776f0100000000000040008000000000000001050000006368696c6400"`,
+    );
+  });
+
+  it.each([
+    ["scalar", { type: "Text", value: "wrong" }],
+    ["nullable", { type: "Text", value: "wrong" }],
+    ["array", { type: "Text", value: "wrong" }],
+    ["row", { type: "Text", value: "wrong" }],
+    ["enum", { type: "Boolean", value: true }],
+  ] as const)("rejects an invalid %s value tag rather than encoding a fallback", (_kind, value) => {
+    const column: ColumnDescriptor =
+      _kind === "nullable"
+        ? { name: "value", column_type: { type: "Boolean" }, nullable: true }
+        : _kind === "array"
+          ? {
+              name: "value",
+              column_type: { type: "Array", element: { type: "Text" } },
+              nullable: false,
+            }
+          : _kind === "row"
+            ? {
+                name: "value",
+                column_type: {
+                  type: "Row",
+                  columns: [{ name: "label", column_type: { type: "Text" }, nullable: false }],
+                },
+                nullable: false,
+              }
+            : _kind === "enum"
+              ? {
+                  name: "value",
+                  column_type: { type: "Enum", variants: ["draft", "published"] },
+                  nullable: false,
+                }
+              : { name: "value", column_type: { type: "Boolean" }, nullable: false };
+
+    expect(() =>
+      encodeCellsForRow({ columns: [column] }, { value } as Record<string, Value>),
+    ).toThrow();
+  });
+
+  it("keeps an explicit sparse nullable null present for both rows and patches", () => {
+    const column: ColumnDescriptor = {
+      name: "value",
+      column_type: { type: "Text" },
+      nullable: true,
+      sparse: true,
+    };
+    const writer = new PostcardWriter();
+    writeDescriptor(writer, [{ name: column.name, valueType: storageColumnValueType(column) }]);
+    writer.bytes(encodeNativeRowValues([column], [{ type: "Null" }]));
+    const expected = writer.finish();
+
+    const row = encodeCellsForRow({ columns: [column] }, { value: { type: "Null" } });
+    const patch = encodeCellsForPatch({ columns: [column] }, { value: { type: "Null" } });
+    expect(row).toEqual(expected);
+    expect(patch).toEqual(expected);
+    expect(bytesToHex(row)).toMatchInlineSnapshot(`"01010576616c75650e0e08020100"`);
+  });
+
+  it("round-trips scalar payload enum cases, nullable fields, and descriptor metadata", () => {
+    const columns = [
+      {
+        name: "event",
+        column_type: {
+          type: "EnumPayload" as const,
+          cases: [
+            {
+              name: "message",
+              fields: [
+                { name: "text", column_type: { type: "Text" as const }, nullable: false },
+                { name: "level", column_type: { type: "Integer" as const }, nullable: true },
+              ],
+            },
+            {
+              name: "closed",
+              fields: [
+                { name: "code", column_type: { type: "Integer" as const }, nullable: false },
+              ],
+            },
+          ],
+        },
+        nullable: true,
+      },
+    ];
+    const payload = {
+      type: "Enum" as const,
+      value: {
+        case: "message",
+        values: [{ type: "Text" as const, value: "hello" }, { type: "Null" as const }],
+      },
+    };
+    const encoded = encodeNativeRowValues(columns, [payload]);
+    expect(decodeNativeRowValues(columns, encoded)).toEqual([payload]);
+    const storage = storageColumnValueType(columns[0]!);
+    expect(storage).toMatchObject({ tag: 14, inner: { tag: 16, enumSchema: { name: "event" } } });
+    expect(storage.inner?.enumSchema?.cases?.[0]?.payload[0]).toMatchObject({
+      name: "text",
+      valueType: { tag: 8 },
+    });
+    expect(() =>
+      encodeNativeRowValues(columns, [{ type: "Enum", value: { case: "missing", values: [] } }]),
+    ).toThrow("invalid Enum payload case or width");
+  });
+
   it("round-trips the Record descriptor payload before reading the next field", () => {
     const writer = new PostcardWriter();
     writeDescriptor(writer, [
@@ -43,6 +345,42 @@ describe("native row codec", () => {
       },
       { name: "count", valueType: { tag: 4 } },
     ]);
+    expect(reader.u64()).toBe(42);
+  });
+
+  it("round-trips a payload enum descriptor at ValueType tag 16", () => {
+    // Keep this fixture explicit: a tag-16 decoder which merely consumes the
+    // enum header, or skips a case payload descriptor, leaves the trailing
+    // value unread and is rejected below.
+    const descriptor: Parameters<typeof writeDescriptor>[1] = [
+      {
+        name: "event",
+        valueType: {
+          tag: 16,
+          enumSchema: {
+            registryId: 41,
+            name: "event",
+            cases: [
+              { name: "connected", payload: [] },
+              {
+                name: "message",
+                payload: [
+                  { name: "body", valueType: { tag: 8 } },
+                  { name: "priority", valueType: { tag: 14, inner: { tag: 4 } } },
+                ],
+              },
+            ],
+          },
+        },
+      },
+      { name: "following", valueType: { tag: 4 } },
+    ];
+    const writer = new PostcardWriter();
+    writeDescriptor(writer, descriptor);
+    writer.u64(42);
+
+    const reader = new PostcardReader(writer.finish());
+    expect(readDescriptor(reader)).toEqual(descriptor);
     expect(reader.u64()).toBe(42);
   });
 

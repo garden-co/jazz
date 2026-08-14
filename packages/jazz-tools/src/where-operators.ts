@@ -47,6 +47,10 @@ function operatorsForColumn(
       return ["eq", "ne", "in"];
     case "Enum":
       return ["eq", "ne", "in"];
+    case "EnumPayload":
+      // Payload enums deliberately use their dedicated `match` operator rather
+      // than pretending that a whole discriminated record is comparable.
+      return [];
     case "Array":
       return ["eq", "contains", "in"];
     case "Row":

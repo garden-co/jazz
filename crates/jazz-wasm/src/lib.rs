@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::pin::Pin;
 use std::rc::Rc;
 
@@ -8,9 +8,10 @@ use base64::Engine;
 use futures_util::{Stream, StreamExt};
 use jazz::db::{
     block_on, ConnectionSessionContext, Db, DbConfig, DbIdentity, ExclusiveTxOps,
-    InitialSyncFlushCadence, LocalUpdates, MergeableTxOps, PeerConnection, PermissionAdvice,
-    PreparedQuery, Propagation, QueryAttachment, ReadOpts, RowCells, SeededRowIdSource,
-    SubscriptionEvent, TickScheduler, TickUrgency, WireTransportAdapter, WriteHandle,
+    InitialSyncFlushCadence, LocalUpdates, MergeableTxOps, MutationErrorCallback, PeerConnection,
+    PermissionAdvice, PreparedQuery, Propagation, QueryAttachment, ReadOpts, RowCells,
+    SeededRowIdSource, SubscriptionEvent, TickScheduler, TickUrgency, WireTransportAdapter,
+    WriteHandle,
 };
 use jazz::groove::records::{BorrowedRecord, RecordDescriptor, Value};
 #[cfg(target_arch = "wasm32")]
@@ -278,40 +279,15 @@ impl WasmWrite {
     }
 
     #[wasm_bindgen(js_name = wait)]
-    pub fn wait(&self, tier: String) -> Result<(), JsValue> {
+    pub fn wait(&self, tier: String) -> Result<js_sys::Promise, JsValue> {
         let tier = durability_tier_from_str(&tier)?;
         match &self.inner {
             Some(WasmWriteInner::MemoryTx { db, tx_id }) => {
-                wait_for_tx(db, *tx_id, tier)?;
+                Ok(wait_promise(db.as_ref(), *tx_id, tier))
             }
             #[cfg(target_arch = "wasm32")]
             Some(WasmWriteInner::BrowserTx { db, tx_id }) => {
-                wait_for_tx(db, *tx_id, tier)?;
-            }
-            None => return Err(JsValue::from_str("write wait is unavailable")),
-        }
-        Ok(())
-    }
-
-    #[wasm_bindgen(js_name = nextWriteStateChange)]
-    pub fn next_write_state_change(&self) -> Result<js_sys::Promise, JsValue> {
-        match &self.inner {
-            Some(WasmWriteInner::MemoryTx { db, tx_id }) => {
-                let db = Rc::clone(db);
-                let tx_id = *tx_id;
-                Ok(future_to_promise(async move {
-                    db.next_write_state_change(tx_id).await;
-                    Ok(JsValue::UNDEFINED)
-                }))
-            }
-            #[cfg(target_arch = "wasm32")]
-            Some(WasmWriteInner::BrowserTx { db, tx_id }) => {
-                let db = Rc::clone(db);
-                let tx_id = *tx_id;
-                Ok(future_to_promise(async move {
-                    db.next_write_state_change(tx_id).await;
-                    Ok(JsValue::UNDEFINED)
-                }))
+                Ok(wait_promise(db.as_ref(), *tx_id, tier))
             }
             None => Err(JsValue::from_str("write state is unavailable")),
         }
@@ -1564,7 +1540,7 @@ impl WasmDb {
             .inner
             .subscribe(&query.inner, opts)
             .map_err(to_js_error)?;
-        readable_stream_from_stream(stream.map(subscription_chunk_to_js))
+        subscription_stream_to_js(stream)
     }
 
     #[wasm_bindgen(js_name = subscribeForIdentity)]
@@ -1580,7 +1556,7 @@ impl WasmDb {
             .inner
             .subscribe_for_identity(&query.inner, opts, author)
             .map_err(to_js_error)?;
-        readable_stream_from_stream(stream.map(subscription_chunk_to_js))
+        subscription_stream_to_js(stream)
     }
 
     #[wasm_bindgen(js_name = subscribeRelationQuery)]
@@ -1595,7 +1571,7 @@ impl WasmDb {
             .inner
             .subscribe_relation_query(&query, opts)
             .map_err(to_js_error)?;
-        readable_stream_from_stream(stream.map(subscription_chunk_to_js))
+        subscription_stream_to_js(stream)
     }
 
     #[wasm_bindgen(js_name = subscribeRelationQueryForIdentity)]
@@ -1612,7 +1588,7 @@ impl WasmDb {
             .inner
             .subscribe_relation_query_for_identity(&query, opts, author)
             .map_err(to_js_error)?;
-        readable_stream_from_stream(stream.map(subscription_chunk_to_js))
+        subscription_stream_to_js(stream)
     }
 
     #[wasm_bindgen(js_name = attachQuery)]
@@ -1660,6 +1636,23 @@ impl WasmDb {
     #[wasm_bindgen(js_name = setTickScheduler)]
     pub fn set_tick_scheduler(&self, callback: js_sys::Function) {
         self.inner.set_tick_scheduler(callback);
+    }
+
+    /// Register a callback for rejected writes that no active wait consumed.
+    #[wasm_bindgen(js_name = onMutationError)]
+    pub fn on_mutation_error(&self, callback: js_sys::Function) {
+        let callback: MutationErrorCallback = Rc::new(move |event| {
+            let Ok(value) = serde_wasm_bindgen::to_value(event) else {
+                return;
+            };
+            let _ = callback.call1(&JsValue::UNDEFINED, &value);
+        });
+        match &self.inner {
+            WasmDbInner::Memory(db) => db.on_mutation_error(Rc::clone(&callback)),
+            #[cfg(target_arch = "wasm32")]
+            WasmDbInner::Browser(db) => db.on_mutation_error(Rc::clone(&callback)),
+            WasmDbInner::Closed => {}
+        }
     }
 
     #[wasm_bindgen(js_name = insertEncoded)]
@@ -2433,20 +2426,20 @@ where
     Ok(stats.subscription_events as u32)
 }
 
-fn wait_for_tx<S>(db: &Db<S>, tx_id: TxId, tier: DurabilityTier) -> Result<(), JsValue>
+fn wait_promise<S>(db: &Db<S>, tx_id: TxId, tier: DurabilityTier) -> js_sys::Promise
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
-    if tier <= DurabilityTier::Local {
-        return Ok(());
-    }
-    let state = db.write_state(tx_id).map_err(to_js_error)?;
-    if state.durability >= tier {
-        return Ok(());
-    }
-    Err(JsValue::from_str(&format!(
-        "transaction has not reached requested tier {tier:?}"
-    )))
+    js_sys::Promise::new(&mut |resolve, reject| {
+        db.wait_for_transaction_with(tx_id, tier, move |result| match result {
+            Ok(_) => {
+                let _ = resolve.call0(&JsValue::UNDEFINED);
+            }
+            Err(error) => {
+                let _ = reject.call1(&JsValue::UNDEFINED, &to_js_error(error));
+            }
+        });
+    })
 }
 
 fn row_uuid_from_bytes(bytes: &[u8]) -> Result<RowUuid, JsValue> {
@@ -2506,13 +2499,11 @@ fn claim_value_from_json(value: serde_json::Value) -> Result<Value, JsValue> {
         serde_json::Value::Null => Value::Nullable(None),
         serde_json::Value::Bool(value) => Value::Bool(value),
         serde_json::Value::Number(value) => {
-            if let Some(value) = value.as_u64() {
-                Value::U64(value)
-            } else if let Some(value) = value.as_f64() {
-                Value::F64(value)
-            } else {
-                return Err(JsValue::from_str("unsupported numeric claim value"));
-            }
+            jazz::tools::policy_claims::json_number_to_policy_claim(
+                value,
+                jazz::tools::policy_claims::NumericClaimOrigin::JavaScript,
+            )
+            .map_err(to_js_error)?
         }
         serde_json::Value::String(value) => Value::String(value),
         serde_json::Value::Array(values) => Value::Array(
@@ -2726,7 +2717,18 @@ fn wasm_row<'a>(row: &jazz::node::CurrentRow, raw: &'a [u8]) -> WasmRow<'a> {
     }
 }
 
-fn subscription_chunk_to_js(event: SubscriptionEvent) -> Result<JsValue, JsValue> {
+fn subscription_stream_to_js(
+    stream: impl Stream<Item = SubscriptionEvent> + 'static,
+) -> Result<JsValue, JsValue> {
+    readable_stream_from_stream(stream.scan(HashSet::new(), |layouts, event| {
+        std::future::ready(Some(subscription_chunk_to_js(event, layouts)))
+    }))
+}
+
+fn subscription_chunk_to_js(
+    event: SubscriptionEvent,
+    published_terminal_layouts: &mut HashSet<String>,
+) -> Result<JsValue, JsValue> {
     let object = js_sys::Object::new();
     match event {
         SubscriptionEvent::Delta {
@@ -2735,6 +2737,7 @@ fn subscription_chunk_to_js(event: SubscriptionEvent) -> Result<JsValue, JsValue
             updated,
             removed,
             terminal_operations,
+            terminal_layout,
             settled,
             tier,
             ..
@@ -2746,6 +2749,16 @@ fn subscription_chunk_to_js(event: SubscriptionEvent) -> Result<JsValue, JsValue
             };
             let delta =
                 encode_subscription_delta(&added, &updated, &removed).map_err(to_js_error)?;
+            if let Some(layout) = terminal_layout.as_ref() {
+                if terminal_operations
+                    .iter()
+                    .any(|operation| operation.root_descriptor != layout.root_descriptor)
+                {
+                    return Err(JsValue::from_str(
+                        "terminal operation descriptor disagrees with its prepared root layout",
+                    ));
+                }
+            }
             set_prop(&object, "type", JsValue::from_str("delta"))?;
             set_prop(
                 &object,
@@ -2755,7 +2768,34 @@ fn subscription_chunk_to_js(event: SubscriptionEvent) -> Result<JsValue, JsValue
             set_prop(
                 &object,
                 "terminalOperations",
-                serde_wasm_bindgen::to_value(&terminal_operations).map_err(to_js_error)?,
+                terminal_operations_to_json(
+                    &terminal_operations,
+                    terminal_layout.as_ref().map(|layout| layout.id.as_str()),
+                )?
+                .serialize(&serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true))
+                .map_err(to_js_error)?,
+            )?;
+            let terminal_layouts = if terminal_operations.is_empty() {
+                Vec::new()
+            } else {
+                let layout = terminal_layout.as_ref().ok_or_else(|| {
+                    JsValue::from_str("terminal operation arrived without a prepared root layout")
+                })?;
+                published_terminal_layouts
+                    .insert(layout.id.clone())
+                    .then(|| terminal_layout_to_json(layout))
+                    .transpose()?
+                    .into_iter()
+                    .collect()
+            };
+            set_prop(
+                &object,
+                "terminalLayouts",
+                serde_json::Value::Array(terminal_layouts)
+                    .serialize(
+                        &serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true),
+                    )
+                    .map_err(to_js_error)?,
             )?;
             set_prop(&object, "reset", JsValue::from_bool(reset))?;
             set_prop(&object, "settled", JsValue::from_bool(settled))?;
@@ -2800,6 +2840,62 @@ fn subscription_chunk_to_js(event: SubscriptionEvent) -> Result<JsValue, JsValue
         }
     };
     Ok(object.into())
+}
+
+/// Encode each terminal operation with the exact descriptor of its root
+/// payload.  Terminal bytes may be either logical output rows or nullable
+/// CurrentRow carriers, so consumers must not reconstruct this layout from a
+/// query projection.
+fn terminal_operations_to_json(
+    operations: &[jazz::groove::ivm::TerminalOperation],
+    root_layout_id: Option<&str>,
+) -> Result<serde_json::Value, JsValue> {
+    let mut encoded = serde_json::to_value(operations).map_err(to_js_error)?;
+    if operations.is_empty() {
+        return Ok(encoded);
+    }
+    let root_layout_id = root_layout_id.ok_or_else(|| {
+        JsValue::from_str("terminal operation arrived without a prepared root layout")
+    })?;
+    let encoded_operations = encoded
+        .as_array_mut()
+        .expect("terminal operations serialize as an array");
+    for wire in encoded_operations {
+        let serde_json::Value::Object(wire) = wire else {
+            unreachable!("terminal operation serializes as an object");
+        };
+        wire.remove("root_descriptor");
+        wire.insert(
+            "rootLayoutId".to_owned(),
+            serde_json::Value::String(root_layout_id.to_owned()),
+        );
+    }
+    Ok(encoded)
+}
+
+fn terminal_layout_to_json(
+    layout: &jazz::db::TerminalRootLayout,
+) -> Result<serde_json::Value, JsValue> {
+    let descriptor = postcard::to_allocvec(&layout.root_descriptor).map_err(to_js_error)?;
+    Ok(serde_json::json!({
+        "id": layout.id,
+        "rootDescriptor": descriptor,
+        "rootKeySlot": layout.root_key_slot,
+        "rootKeyFieldName": layout.root_key_field_name,
+        "publicFields": layout.public_fields.iter().map(|field| serde_json::json!({
+            "name": field.name,
+            "descriptorFieldName": field.descriptor_field_name,
+            "slot": field.slot,
+            "carrier": match field.carrier {
+                jazz::db::TerminalRootCarrier::CurrentRow => "CurrentRow",
+                jazz::db::TerminalRootCarrier::Logical => "Logical",
+            },
+        })).collect::<Vec<_>>(),
+        "carrier": match layout.carrier {
+            jazz::db::TerminalRootCarrier::CurrentRow => "CurrentRow",
+            jazz::db::TerminalRootCarrier::Logical => "Logical",
+        },
+    }))
 }
 
 fn set_prop(object: &js_sys::Object, name: &str, value: JsValue) -> Result<(), JsValue> {
@@ -2891,6 +2987,39 @@ mod dynamic_schema_view_tests {
     use jazz::db::{DbConfig, DbIdentity, ExclusiveTxOps};
     use jazz::groove::schema::ColumnType;
     use jazz::schema::{ColumnSchema, Policy, TableSchema};
+
+    #[test]
+    fn javascript_numeric_claims_preserve_safe_integers_and_fail_closed_when_lossy() {
+        assert_eq!(
+            claim_value_from_json(serde_json::json!(7)).unwrap(),
+            Value::U64(7)
+        );
+        assert_eq!(
+            claim_value_from_json(serde_json::json!(-7)).unwrap(),
+            Value::I64(-7)
+        );
+        assert_eq!(
+            claim_value_from_json(serde_json::Value::Number(
+                serde_json::Number::from_f64(7.0).unwrap()
+            ))
+            .unwrap(),
+            Value::U64(7),
+            "WASM's f64 JS-number path must agree with integer JSON"
+        );
+        assert_eq!(
+            claim_value_from_json(serde_json::json!(7.5)).unwrap(),
+            Value::F64(7.5)
+        );
+        assert_eq!(
+            claim_value_from_json(serde_json::json!(9_007_199_254_740_992_u64)).unwrap(),
+            Value::F64(9_007_199_254_740_992.0),
+            "integers beyond Number.MAX_SAFE_INTEGER must not participate in integer policy matching"
+        );
+        assert_eq!(
+            claim_value_from_json(serde_json::json!(-9_007_199_254_740_992_i64)).unwrap(),
+            Value::F64(-9_007_199_254_740_992.0)
+        );
+    }
 
     #[test]
     fn wasm_delta_preserves_typed_union_occurrence_keys() {

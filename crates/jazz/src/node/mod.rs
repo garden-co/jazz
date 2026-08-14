@@ -62,6 +62,313 @@ const CLEAN_CLOSE_MARKER_VERSION: u64 = 1;
 const STORAGE_CONSISTENCY_MARKER_NAME: &str = "settled-ahead-current-clean-through";
 const STORAGE_CONSISTENCY_MARKER_VERSION: u64 = 1;
 
+fn hydrate_nested_scalar_enum_cases(
+    value_type: &records::ValueType,
+    introducing_schema: SchemaVersionId,
+    path: &str,
+    output: &mut BTreeMap<String, Vec<GlobalScalarEnumCaseId>>,
+) -> Result<(), Error> {
+    use records::ValueType;
+    match value_type {
+        ValueType::EnumTag(schema) => {
+            output.entry(path.to_owned()).or_insert_with(|| {
+                schema
+                    .variants
+                    .iter()
+                    .enumerate()
+                    .map(|(ordinal, _)| GlobalScalarEnumCaseId {
+                        introducing_schema,
+                        introducing_ordinal: ordinal as u8,
+                    })
+                    .collect()
+            });
+        }
+        ValueType::Nullable(inner) => hydrate_nested_scalar_enum_cases(
+            inner,
+            introducing_schema,
+            &format!("{path}/nullable"),
+            output,
+        )?,
+        ValueType::Array(inner) => hydrate_nested_scalar_enum_cases(
+            inner,
+            introducing_schema,
+            &format!("{path}/array"),
+            output,
+        )?,
+        ValueType::Tuple(values) => {
+            for (index, value) in values.iter().enumerate() {
+                hydrate_nested_scalar_enum_cases(
+                    value,
+                    introducing_schema,
+                    &format!("{path}/tuple/{index}"),
+                    output,
+                )?;
+            }
+        }
+        ValueType::Record(record) => {
+            for field in record.fields() {
+                let name = field.name.as_deref().ok_or(Error::InvalidStoredValue(
+                    "nested enum record field unnamed",
+                ))?;
+                hydrate_nested_scalar_enum_cases(
+                    &field.value_type,
+                    introducing_schema,
+                    &format!("{path}/record/{name}"),
+                    output,
+                )?;
+            }
+        }
+        ValueType::Enum(schema) => {
+            for (ordinal, case) in schema.cases.iter().enumerate() {
+                let identity = GlobalScalarEnumCaseId {
+                    introducing_schema,
+                    introducing_ordinal: ordinal as u8,
+                };
+                hydrate_nested_scalar_enum_cases(
+                    &records::ValueType::Record(Box::new(case.payload.clone())),
+                    introducing_schema,
+                    &global_case_path(path, &identity),
+                    output,
+                )?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn global_case_path(path: &str, case: &GlobalScalarEnumCaseId) -> String {
+    format!(
+        "{path}/case/{}/{}",
+        case.introducing_schema.0.simple(),
+        case.introducing_ordinal
+    )
+}
+
+/// Register every nested payload enum by its schema-qualified case identity.
+/// Scalar descendants are handled by the existing scalar registry walker;
+/// this map owns only the payload tag boundary itself.
+fn hydrate_nested_payload_enum_cases(
+    value_type: &records::ValueType,
+    introducing_schema: SchemaVersionId,
+    path: &str,
+    output: &mut BTreeMap<String, Vec<GlobalScalarEnumCaseId>>,
+) -> Result<(), Error> {
+    use records::ValueType;
+    match value_type {
+        ValueType::Nullable(inner) => hydrate_nested_payload_enum_cases(
+            inner,
+            introducing_schema,
+            &format!("{path}/nullable"),
+            output,
+        )?,
+        ValueType::Array(inner) => hydrate_nested_payload_enum_cases(
+            inner,
+            introducing_schema,
+            &format!("{path}/array"),
+            output,
+        )?,
+        ValueType::Tuple(values) => {
+            for (index, value) in values.iter().enumerate() {
+                hydrate_nested_payload_enum_cases(
+                    value,
+                    introducing_schema,
+                    &format!("{path}/tuple/{index}"),
+                    output,
+                )?;
+            }
+        }
+        ValueType::Record(record) => {
+            for field in record.fields() {
+                let name = field.name.as_deref().ok_or(Error::InvalidStoredValue(
+                    "nested enum record field unnamed",
+                ))?;
+                hydrate_nested_payload_enum_cases(
+                    &field.value_type,
+                    introducing_schema,
+                    &format!("{path}/record/{name}"),
+                    output,
+                )?;
+            }
+        }
+        ValueType::Enum(schema) => {
+            let cases = output.entry(path.to_owned()).or_insert_with(|| {
+                schema
+                    .cases
+                    .iter()
+                    .enumerate()
+                    .map(|(ordinal, _)| GlobalScalarEnumCaseId {
+                        introducing_schema,
+                        introducing_ordinal: ordinal as u8,
+                    })
+                    .collect()
+            });
+            let cases = cases.clone();
+            for (case, layout) in cases.iter().zip(&schema.cases) {
+                hydrate_nested_payload_enum_cases(
+                    &records::ValueType::Record(Box::new(layout.payload.clone())),
+                    introducing_schema,
+                    &global_case_path(path, case),
+                    output,
+                )?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn reconcile_nested_payload_enum_cases(
+    value_type: &records::ValueType,
+    introducing_schema: SchemaVersionId,
+    path: &str,
+    output: &mut BTreeMap<String, Vec<GlobalScalarEnumCaseId>>,
+) -> Result<(), Error> {
+    use records::ValueType;
+    match value_type {
+        ValueType::Nullable(inner) => reconcile_nested_payload_enum_cases(
+            inner,
+            introducing_schema,
+            &format!("{path}/nullable"),
+            output,
+        )?,
+        ValueType::Array(inner) => reconcile_nested_payload_enum_cases(
+            inner,
+            introducing_schema,
+            &format!("{path}/array"),
+            output,
+        )?,
+        ValueType::Tuple(values) => {
+            for (index, value) in values.iter().enumerate() {
+                reconcile_nested_payload_enum_cases(
+                    value,
+                    introducing_schema,
+                    &format!("{path}/tuple/{index}"),
+                    output,
+                )?;
+            }
+        }
+        ValueType::Record(record) => {
+            for field in record.fields() {
+                let name = field.name.as_deref().ok_or(Error::InvalidStoredValue(
+                    "nested enum record field unnamed",
+                ))?;
+                reconcile_nested_payload_enum_cases(
+                    &field.value_type,
+                    introducing_schema,
+                    &format!("{path}/record/{name}"),
+                    output,
+                )?;
+            }
+        }
+        ValueType::Enum(schema) => {
+            let cases = output.entry(path.to_owned()).or_default();
+            if cases.len() > schema.cases.len() {
+                return Err(Error::InvalidStoredValue(
+                    "nested payload enum registry changed non-additively",
+                ));
+            }
+            for ordinal in cases.len()..schema.cases.len() {
+                cases.push(GlobalScalarEnumCaseId {
+                    introducing_schema,
+                    introducing_ordinal: u8::try_from(ordinal).map_err(|_| {
+                        Error::InvalidStoredValue("nested payload enum ordinal exhausted")
+                    })?,
+                });
+            }
+            let cases = cases.clone();
+            for (case, layout) in cases.iter().zip(&schema.cases) {
+                reconcile_nested_payload_enum_cases(
+                    &records::ValueType::Record(Box::new(layout.payload.clone())),
+                    introducing_schema,
+                    &global_case_path(path, case),
+                    output,
+                )?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn reconcile_nested_scalar_enum_cases(
+    value_type: &records::ValueType,
+    introducing_schema: SchemaVersionId,
+    path: &str,
+    output: &mut BTreeMap<String, Vec<GlobalScalarEnumCaseId>>,
+) -> Result<(), Error> {
+    use records::ValueType;
+    match value_type {
+        ValueType::EnumTag(schema) => {
+            let cases = output.entry(path.to_owned()).or_default();
+            if cases.len() > schema.variants.len() {
+                return Err(Error::InvalidStoredValue(
+                    "nested scalar enum registry changed non-additively",
+                ));
+            }
+            for ordinal in cases.len()..schema.variants.len() {
+                cases.push(GlobalScalarEnumCaseId {
+                    introducing_schema,
+                    introducing_ordinal: u8::try_from(ordinal).map_err(|_| {
+                        Error::InvalidStoredValue("nested scalar enum ordinal exhausted")
+                    })?,
+                });
+            }
+        }
+        ValueType::Nullable(inner) => reconcile_nested_scalar_enum_cases(
+            inner,
+            introducing_schema,
+            &format!("{path}/nullable"),
+            output,
+        )?,
+        ValueType::Array(inner) => reconcile_nested_scalar_enum_cases(
+            inner,
+            introducing_schema,
+            &format!("{path}/array"),
+            output,
+        )?,
+        ValueType::Tuple(values) => {
+            for (index, value) in values.iter().enumerate() {
+                reconcile_nested_scalar_enum_cases(
+                    value,
+                    introducing_schema,
+                    &format!("{path}/tuple/{index}"),
+                    output,
+                )?;
+            }
+        }
+        ValueType::Record(record) => {
+            for field in record.fields() {
+                let name = field.name.as_deref().ok_or(Error::InvalidStoredValue(
+                    "nested enum record field unnamed",
+                ))?;
+                reconcile_nested_scalar_enum_cases(
+                    &field.value_type,
+                    introducing_schema,
+                    &format!("{path}/record/{name}"),
+                    output,
+                )?;
+            }
+        }
+        ValueType::Enum(schema) => {
+            for (ordinal, case) in schema.cases.iter().enumerate() {
+                let identity = GlobalScalarEnumCaseId {
+                    introducing_schema,
+                    introducing_ordinal: ordinal as u8,
+                };
+                reconcile_nested_scalar_enum_cases(
+                    &records::ValueType::Record(Box::new(case.payload.clone())),
+                    introducing_schema,
+                    &global_case_path(path, &identity),
+                    output,
+                )?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 mod branches;
 mod codec;
 pub mod content_store;
@@ -347,10 +654,27 @@ struct Clock {
     tx_time: TxTime,
     /// Next global sequence number to allocate when accepting local work globally.
     next_global_seq: GlobalSeq,
+    /// Whether the maximum global sequence has already been allocated or recovered.
+    global_seq_exhausted: bool,
     /// Contiguous global sequence watermark already applied to local storage.
     applied_global_watermark: GlobalSeq,
     /// Applied global sequence numbers above the contiguous watermark.
     applied_global_above_watermark: BTreeSet<GlobalSeq>,
+}
+
+impl Clock {
+    fn allocate_global_seq(&mut self) -> Result<GlobalSeq, Error> {
+        if self.global_seq_exhausted {
+            return Err(Error::InvalidStoredValue("global sequence exhausted"));
+        }
+        let global_seq = self.next_global_seq;
+        if global_seq == GlobalSeq(u64::MAX) {
+            self.global_seq_exhausted = true;
+        } else {
+            self.next_global_seq = global_seq.next();
+        }
+        Ok(global_seq)
+    }
 }
 
 /// Payloads parked until missing schema or catalogue context arrives.
@@ -450,6 +774,7 @@ struct ReadPolicyAuthorizationRequestCacheKey {
     tier: DurabilityTier,
     binding_source_shape: Option<String>,
     binding_user_params: String,
+    binding_claim_params: String,
     include_deleted_root: bool,
 }
 
@@ -767,6 +1092,7 @@ where
             clock: Clock {
                 tx_time: TxTime::default(),
                 next_global_seq: GlobalSeq(1),
+                global_seq_exhausted: false,
                 applied_global_watermark: GlobalSeq(0),
                 applied_global_above_watermark: BTreeSet::new(),
             },
@@ -974,6 +1300,10 @@ where
     }
 
     fn rebuild_database_slot(&mut self) -> Result<(), Error> {
+        // Reopening the database refreshes Groove's physical table catalogue.
+        // Parking is in-memory delivery state, not derivable from storage, so a
+        // live refresh must retain it for the caller to drain afterwards.
+        let parking = self.parking.clone();
         let old_database = self.database.take();
         let storage = old_database.into_storage();
         let database = Self::open_full_database(
@@ -989,6 +1319,7 @@ where
         self.register_physical_current_variant_projections()?;
         self.groove_runtime_token = next_groove_runtime_token();
         self.invalidate_runtime_handles_after_database_rebuild();
+        self.parking = parking;
         Ok(())
     }
 
@@ -1221,6 +1552,7 @@ where
             schema_version_aliases.insert(schema_version, alias);
             physical_mappings.insert(schema_version, mapping);
         }
+        validate_physical_variant_cases(&physical_mappings, &schema_version_aliases)?;
         let mut next_physical_table_id = 1;
         let mut next_physical_column_id = 1;
         for mapping in physical_mappings.values() {
@@ -2945,8 +3277,8 @@ where
         column: &str,
         kind: LargeValueKind,
     ) -> Result<Vec<u8>, Error> {
-        let canonical = self.canonical_maintained_view_witness(version)?;
-        let version = canonical.as_ref().unwrap_or(version);
+        let canonical = self.canonical_history_version_for_maintained_witness(version)?;
+        let version = &canonical;
         let authored_schema = self
             .schema_version_for_alias(version.schema_version_alias())
             .ok_or(Error::InvalidStoredValue(
@@ -4169,6 +4501,106 @@ where
         Ok(())
     }
 
+    fn hydrate_scalar_enum_case_mapping(
+        &mut self,
+        schema_version: SchemaVersionId,
+    ) -> Result<(), Error> {
+        let schema = self
+            .catalogue
+            .catalogue_schemas
+            .get(&schema_version)
+            .ok_or(Error::InvalidStoredValue(
+                "physical mapping schema payload missing",
+            ))?
+            .schema
+            .clone();
+        let mapping = self
+            .catalogue
+            .physical_mappings
+            .get_mut(&schema_version)
+            .ok_or(Error::InvalidStoredValue("physical mapping missing"))?;
+        for table in &schema.tables {
+            let Some(physical) = mapping.tables.get_mut(&table.name) else {
+                continue;
+            };
+            for column in &table.columns {
+                let records::ValueType::EnumTag(enum_schema) = &column.column_type else {
+                    continue;
+                };
+                let Some(id) = physical.columns.get(&column.name).copied() else {
+                    continue;
+                };
+                physical.scalar_enum_cases.entry(id).or_insert_with(|| {
+                    enum_schema
+                        .variants
+                        .iter()
+                        .enumerate()
+                        .map(|(ordinal, _)| GlobalScalarEnumCaseId {
+                            introducing_schema: schema_version,
+                            introducing_ordinal: ordinal as u8,
+                        })
+                        .collect()
+                });
+            }
+            for column in &table.columns {
+                let records::ValueType::Enum(enum_schema) = &column.column_type else {
+                    continue;
+                };
+                let Some(id) = physical.columns.get(&column.name).copied() else {
+                    continue;
+                };
+                physical.payload_enum_cases.entry(id).or_insert_with(|| {
+                    enum_schema
+                        .cases
+                        .iter()
+                        .enumerate()
+                        .map(|(ordinal, _)| GlobalScalarEnumCaseId {
+                            introducing_schema: schema_version,
+                            introducing_ordinal: ordinal as u8,
+                        })
+                        .collect()
+                });
+                let nested = physical.nested_scalar_enum_cases.entry(id).or_default();
+                hydrate_nested_scalar_enum_cases(
+                    &column.column_type,
+                    schema_version,
+                    "root",
+                    nested,
+                )?;
+                let nested_payload = physical.nested_payload_enum_cases.entry(id).or_default();
+                hydrate_nested_payload_enum_cases(
+                    &column.column_type,
+                    schema_version,
+                    "root",
+                    nested_payload,
+                )?;
+            }
+            for column in &table.columns {
+                if matches!(column.column_type, records::ValueType::Enum(_)) {
+                    continue;
+                }
+                let Some(id) = physical.columns.get(&column.name).copied() else {
+                    continue;
+                };
+                let nested = physical.nested_scalar_enum_cases.entry(id).or_default();
+                hydrate_nested_scalar_enum_cases(
+                    &column.column_type,
+                    schema_version,
+                    "root",
+                    nested,
+                )?;
+                let nested_payload = physical.nested_payload_enum_cases.entry(id).or_default();
+                hydrate_nested_payload_enum_cases(
+                    &column.column_type,
+                    schema_version,
+                    "root",
+                    nested_payload,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
     fn ensure_provisional_physical_mapping(
         &mut self,
         schema_version: SchemaVersionId,
@@ -4182,6 +4614,7 @@ where
                 .schema_version_aliases
                 .contains_key(&schema_version)
         {
+            self.hydrate_scalar_enum_case_mapping(schema_version)?;
             return Ok(());
         }
         let mapping = match self.catalogue.physical_mappings.get(&schema_version) {
@@ -4205,7 +4638,15 @@ where
                     }
                     tables.insert(
                         table.name.clone(),
-                        TablePhysicalMapping { table_id, columns },
+                        TablePhysicalMapping {
+                            table_id,
+                            columns,
+                            variant_cases: Vec::new(),
+                            scalar_enum_cases: BTreeMap::new(),
+                            payload_enum_cases: BTreeMap::new(),
+                            nested_scalar_enum_cases: BTreeMap::new(),
+                            nested_payload_enum_cases: BTreeMap::new(),
+                        },
                     );
                 }
                 SchemaPhysicalMapping { tables }
@@ -4224,6 +4665,38 @@ where
                     .ok_or(Error::InvalidStoredValue("schema version alias exhausted"))?,
             ),
         };
+        let schema = self
+            .catalogue
+            .catalogue_schemas
+            .get(&schema_version)
+            .ok_or(Error::InvalidStoredValue(
+                "physical mapping schema payload missing",
+            ))?
+            .schema
+            .clone();
+        let mut candidate_mappings = self.catalogue.physical_mappings.clone();
+        candidate_mappings.insert(schema_version, mapping);
+        let mut candidate_aliases = self.catalogue.schema_version_aliases.clone();
+        candidate_aliases.insert(schema_version, alias);
+        for table in &schema.tables {
+            allocate_physical_variant_cases(
+                &mut candidate_mappings,
+                &candidate_aliases,
+                schema_version,
+                &table.name,
+                table
+                    .columns
+                    .iter()
+                    .map(|column| column.name.clone())
+                    .collect(),
+            )?;
+        }
+        let mapping =
+            candidate_mappings
+                .remove(&schema_version)
+                .ok_or(Error::InvalidStoredValue(
+                    "allocated physical mapping disappeared",
+                ))?;
         let mut batch = self.database.open_batch();
         Self::write_schema_version_mapping_to_batch(&mut batch, alias, schema_version, &mapping)?;
         self.database.commit_batch(batch)?;
@@ -4245,6 +4718,14 @@ where
                 .schema_version_aliases
                 .values()
                 .map(|alias| alias.0)
+                .chain(
+                    self.catalogue
+                        .physical_mappings
+                        .values()
+                        .flat_map(|mapping| mapping.tables.values())
+                        .flat_map(|table| table.variant_cases.iter())
+                        .map(|case| u64::from(case.tag)),
+                )
                 .max()
                 .unwrap_or(0)
                 .checked_add(1)
@@ -4420,15 +4901,228 @@ where
                     Ok((target_name, column_id))
                 })
                 .collect::<Result<BTreeMap<_, _>, Error>>()?;
+            let mut scalar_enum_cases = BTreeMap::new();
+            let mut payload_enum_cases = BTreeMap::new();
+            for column in &target_table_schema.columns {
+                let id = *columns
+                    .get(&column.name)
+                    .ok_or(Error::InvalidStoredValue("enum physical column missing"))?;
+                match &column.column_type {
+                    records::ValueType::EnumTag(enum_schema) => {
+                        let mut cases = source_table
+                            .scalar_enum_cases
+                            .get(&id)
+                            .cloned()
+                            .unwrap_or_default();
+                        if cases.len() > enum_schema.variants.len() {
+                            return Err(Error::InvalidStoredValue(
+                                "scalar enum registry changed non-additively",
+                            ));
+                        }
+                        for ordinal in cases.len()..enum_schema.variants.len() {
+                            cases.push(GlobalScalarEnumCaseId {
+                                introducing_schema: target_schema_version.id,
+                                introducing_ordinal: u8::try_from(ordinal).map_err(|_| {
+                                    Error::InvalidStoredValue("scalar enum ordinal exhausted")
+                                })?,
+                            });
+                        }
+                        scalar_enum_cases.insert(id, cases);
+                    }
+                    records::ValueType::Enum(enum_schema) => {
+                        let mut cases = source_table
+                            .payload_enum_cases
+                            .get(&id)
+                            .cloned()
+                            .unwrap_or_default();
+                        if cases.len() > enum_schema.cases.len() {
+                            return Err(Error::InvalidStoredValue(
+                                "payload enum registry changed non-additively",
+                            ));
+                        }
+                        for ordinal in cases.len()..enum_schema.cases.len() {
+                            cases.push(GlobalScalarEnumCaseId {
+                                introducing_schema: target_schema_version.id,
+                                introducing_ordinal: u8::try_from(ordinal).map_err(|_| {
+                                    Error::InvalidStoredValue("payload enum ordinal exhausted")
+                                })?,
+                            });
+                        }
+                        payload_enum_cases.insert(id, cases);
+                    }
+                    _ => {}
+                }
+            }
+            let mut nested_scalar_enum_cases = source_table.nested_scalar_enum_cases.clone();
+            let mut nested_payload_enum_cases = source_table.nested_payload_enum_cases.clone();
+            for column in &target_table_schema.columns {
+                let id = *columns.get(&column.name).ok_or(Error::InvalidStoredValue(
+                    "nested enum physical column missing",
+                ))?;
+                let nested = nested_scalar_enum_cases.entry(id).or_default();
+                reconcile_nested_scalar_enum_cases(
+                    &column.column_type,
+                    target_schema_version.id,
+                    "root",
+                    nested,
+                )?;
+                let nested_payload = nested_payload_enum_cases.entry(id).or_default();
+                reconcile_nested_payload_enum_cases(
+                    &column.column_type,
+                    target_schema_version.id,
+                    "root",
+                    nested_payload,
+                )?;
+            }
+            // Registry entries belong to a live physical column.  Leaving an
+            // entry behind for a dropped column makes otherwise identical
+            // cross-lens mappings compare unequal solely because one path had
+            // an intermediate column epoch.
+            let live_columns = columns.values().copied().collect::<BTreeSet<_>>();
+            scalar_enum_cases.retain(|column, _| live_columns.contains(column));
+            payload_enum_cases.retain(|column, _| live_columns.contains(column));
+            nested_scalar_enum_cases.retain(|column, _| live_columns.contains(column));
+            nested_payload_enum_cases.retain(|column, _| live_columns.contains(column));
             target_mapping.tables.insert(
                 table_lens.target_table.clone(),
                 TablePhysicalMapping {
                     table_id: source_table.table_id,
                     columns,
+                    variant_cases: Vec::new(),
+                    scalar_enum_cases,
+                    payload_enum_cases,
+                    nested_scalar_enum_cases,
+                    nested_payload_enum_cases,
                 },
             );
         }
         Ok(target_mapping)
+    }
+
+    fn reconcile_source_physical_mapping_for_lens_payload(
+        lens: &MigrationLens,
+        source_schema_version: &SchemaVersion,
+        target_schema_version: &SchemaVersion,
+        provisional_source_mapping: &SchemaPhysicalMapping,
+        target_mapping: &SchemaPhysicalMapping,
+    ) -> Result<SchemaPhysicalMapping, Error> {
+        let mut source_mapping = provisional_source_mapping.clone();
+        for table_lens in &lens.table_lenses {
+            let provisional_source_table = source_mapping
+                .tables
+                .get(&table_lens.source_table)
+                .ok_or(Error::InvalidStoredValue(
+                    "source provisional physical table mapping missing",
+                ))?
+                .clone();
+            let target_table = target_mapping.tables.get(&table_lens.target_table).ok_or(
+                Error::InvalidStoredValue("target physical table mapping missing"),
+            )?;
+            let source_table_schema = source_schema_version
+                .schema
+                .tables
+                .iter()
+                .find(|table| table.name == table_lens.source_table)
+                .ok_or(Error::InvalidStoredValue(
+                    "source physical table schema missing",
+                ))?;
+            let target_table_schema = target_schema_version
+                .schema
+                .tables
+                .iter()
+                .find(|table| table.name == table_lens.target_table)
+                .ok_or(Error::InvalidStoredValue(
+                    "target physical table schema missing",
+                ))?;
+
+            let mut target_name_by_source = source_table_schema
+                .columns
+                .iter()
+                .map(|column| (column.name.clone(), Some(column.name.clone())))
+                .collect::<BTreeMap<_, _>>();
+            for op in &table_lens.ops {
+                match op {
+                    LensOp::RenameColumn { from, to } => {
+                        for target_name in target_name_by_source.values_mut() {
+                            if target_name.as_deref() == Some(from.as_str()) {
+                                *target_name = Some(to.clone());
+                                break;
+                            }
+                        }
+                    }
+                    LensOp::DropColumn { column, .. } => {
+                        for target_name in target_name_by_source.values_mut() {
+                            if target_name.as_deref() == Some(column.as_str()) {
+                                *target_name = None;
+                                break;
+                            }
+                        }
+                    }
+                    LensOp::RenameTable { .. }
+                    | LensOp::CopyColumn { .. }
+                    | LensOp::AddColumn { .. }
+                    | LensOp::TransformColumn { .. }
+                    | LensOp::RejectSourceDelta { .. } => {}
+                }
+            }
+
+            let columns = source_table_schema
+                .columns
+                .iter()
+                .map(|source_column| {
+                    let provisional_id = provisional_source_table
+                        .columns
+                        .get(&source_column.name)
+                        .copied()
+                        .ok_or(Error::InvalidStoredValue(
+                            "source provisional physical column mapping missing",
+                        ))?;
+                    let column_id = target_name_by_source
+                        .get(&source_column.name)
+                        .and_then(|target_name| target_name.as_deref())
+                        .and_then(|target_name| {
+                            physical_column_epoch_is_compatible(
+                                source_table_schema,
+                                &source_column.name,
+                                target_table_schema,
+                                target_name,
+                            )
+                            .then(|| target_table.columns.get(target_name).copied())
+                            .flatten()
+                        })
+                        .unwrap_or(provisional_id);
+                    Ok((source_column.name.clone(), column_id))
+                })
+                .collect::<Result<BTreeMap<_, _>, Error>>()?;
+            let live_column_ids = columns.values().copied().collect::<BTreeSet<_>>();
+            let mut scalar_enum_cases = provisional_source_table.scalar_enum_cases.clone();
+            scalar_enum_cases.extend(target_table.scalar_enum_cases.clone());
+            scalar_enum_cases.retain(|id, _| live_column_ids.contains(id));
+            let mut payload_enum_cases = provisional_source_table.payload_enum_cases.clone();
+            payload_enum_cases.extend(target_table.payload_enum_cases.clone());
+            payload_enum_cases.retain(|id, _| live_column_ids.contains(id));
+            let mut nested_scalar_enum_cases =
+                provisional_source_table.nested_scalar_enum_cases.clone();
+            nested_scalar_enum_cases.extend(target_table.nested_scalar_enum_cases.clone());
+            nested_scalar_enum_cases.retain(|id, _| live_column_ids.contains(id));
+            let mut nested_payload_enum_cases =
+                provisional_source_table.nested_payload_enum_cases.clone();
+            nested_payload_enum_cases.extend(target_table.nested_payload_enum_cases.clone());
+            nested_payload_enum_cases.retain(|id, _| live_column_ids.contains(id));
+            source_mapping.tables.insert(
+                table_lens.source_table.clone(),
+                TablePhysicalMapping {
+                    table_id: target_table.table_id,
+                    columns,
+                    variant_cases: target_table.variant_cases.clone(),
+                    scalar_enum_cases,
+                    payload_enum_cases,
+                    nested_scalar_enum_cases,
+                    nested_payload_enum_cases,
+                },
+            );
+        }
+        Ok(source_mapping)
     }
 
     fn persist_catalogue_schema_lineage(
@@ -4647,11 +5341,6 @@ where
         &mut self,
         schema_version_id: SchemaVersionId,
     ) -> Result<SchemaVersionAlias, Error> {
-        if schema_version_id == self.catalogue.current_schema_version_id
-            && let Some(alias) = self.catalogue.current_schema_version_alias
-        {
-            return Ok(alias);
-        }
         if let Some(alias) = self
             .catalogue
             .schema_version_aliases
@@ -5007,6 +5696,7 @@ where
             if versions.is_empty() {
                 continue;
             }
+            self.validate_view_payload_versions(&versions)?;
             self.ingest_known_transaction(
                 bundle.tx,
                 versions,
@@ -5585,7 +6275,12 @@ impl CurrentRow {
             .filter_map(|(idx, field)| {
                 let name = field.name.as_ref()?.as_str();
                 let name = if name.starts_with("user_") {
-                    self::query_engine::logical_user_column(name).to_owned()
+                    let name = self::query_engine::logical_user_column(name);
+                    self::query_engine::aggregate_output_logical_name(name)
+                        .unwrap_or(name)
+                        .to_owned()
+                } else if let Some(name) = self::query_engine::aggregate_output_logical_name(name) {
+                    name.to_owned()
                 } else if matches!(field.value_type, records::ValueType::Nullable(_))
                     && !matches!(name, "authored_columns" | "settle_position")
                 {
@@ -5640,6 +6335,11 @@ pub struct SyncMetrics {
     pub parked_catalogue_orphans: u64,
     /// Catalogue-orphan commit units later resolved.
     pub parked_catalogue_orphans_resolved: u64,
+    /// Relay-only commit units discarded after an unknown authored schema became
+    /// known and proved their row record incomplete for that schema. A relay
+    /// cannot assign a fate, so these are deliberately dropped rather than
+    /// stored as a synthetic rejected transaction.
+    pub dropped_malformed_relay_commit_units: u64,
     /// Shape registrations parked because their schema version was missing.
     pub parked_catalogue_shapes: u64,
     /// Parked shape registrations later resolved by catalogue arrival.
@@ -6493,14 +7193,19 @@ pub enum Error {
     #[error(transparent)]
     Storage(#[from] storage::Error),
     /// Error returned by query validation or binding.
-    #[error(transparent)]
-    Query(#[from] QueryError),
+    #[error("{0}")]
+    Query(#[source] Box<QueryError>),
     /// Query could not be represented by the unified query engine.
     #[error("query lowering failed: {0}")]
     QueryLowering(String),
     /// Query-engine capability report for a currently unsupported program.
     #[error("query capability unsupported: {0}")]
     QueryCapability(String),
+    /// A terminal authorization-support subscription depends on a session
+    /// claim the permission subject did not provide. This is a denied proof,
+    /// not malformed persisted state.
+    #[error("authorization support policy claim is not bound: {0}")]
+    AuthorizationSupportMissingClaim(String),
     /// A membership-policy proof revisited a table already on its compilation
     /// stack. The named error prevents stack exhaustion while diagnosing a
     /// policy cycle.
@@ -6594,4 +7299,41 @@ pub enum Error {
     /// A prepared point-read subscription closed before its initial snapshot.
     #[error("prepared point-read subscription closed")]
     SubscriptionClosed,
+}
+
+/// Whether encoding a projected current row failed solely because the read
+/// schema does not know the selected enum case.
+///
+/// Schema projection is deliberately fail-closed at this boundary: callers
+/// omit that row, while every other lens, materialization, and record error
+/// remains visible to the query caller.
+pub(super) fn is_unrepresentable_enum_projection(error: &Error) -> bool {
+    matches!(
+        error,
+        Error::Record(
+            records::Error::InvalidEnumDiscriminant { .. } | records::Error::UnknownEnumTag { .. }
+        )
+    )
+}
+
+impl From<QueryError> for Error {
+    fn from(error: QueryError) -> Self {
+        Self::Query(Box::new(error))
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn query_errors_keep_display_source_and_matching_after_node_conversion() {
+    let error = Error::from(QueryError::UnknownTable("missing".to_owned()));
+
+    assert_eq!(error.to_string(), "unknown table missing");
+    assert_eq!(
+        std::error::Error::source(&error).unwrap().to_string(),
+        "unknown table missing"
+    );
+    assert!(matches!(
+        error,
+        Error::Query(source) if matches!(*source, QueryError::UnknownTable(ref table) if table == "missing")
+    ));
 }

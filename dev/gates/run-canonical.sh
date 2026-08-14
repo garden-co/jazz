@@ -100,7 +100,7 @@ run_gate cargo-test-jazz cargo test -p jazz
 run_gate cargo-test-groove cargo test -p groove
 run_gate cargo-test-groove-sqlite cargo test -p groove --no-default-features --features sqlite
 run_gate cargo-test-jazz-no-default-features cargo test -p jazz --no-default-features --features test
-run_gate cargo-test-jazz-server cargo test -p jazz --bin jazz-server
+run_gate cargo-test-jazz-bin cargo test -p jazz --bin jazz-server
 run_gate cargo-check-jazz-sim-benches cargo check -p jazz-sim --benches
 run_gate invariant-registry dev/gates/invariant-registry.sh
 run_gate rn-bindings-fresh dev/gates/rn-bindings-fresh.sh

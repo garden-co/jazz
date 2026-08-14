@@ -52,6 +52,7 @@ function makeJwt(payload: Record<string, unknown>): string {
 function makeDbWithJwt(jwtToken: string) {
   const runtimeClient = {
     updateAuthToken: vi.fn(),
+    onMutationError: vi.fn(),
   };
 
   const db = new TestDb(
@@ -69,6 +70,7 @@ function makeDbWithCookieSession(cookieSession: Session) {
   const runtimeClient = {
     updateAuthToken: vi.fn(),
     updateCookieSession: vi.fn(),
+    onMutationError: vi.fn(),
   };
 
   const db = new TestDb(
@@ -112,6 +114,7 @@ describe("Db auth state", () => {
     };
     const runtimeClient = {
       updateAuthToken: vi.fn(),
+      onMutationError: vi.fn(),
     };
 
     const db = new TestDb(
@@ -140,6 +143,7 @@ describe("Db auth state", () => {
   it("does not leak scoped auth updates into a shared runtime client", () => {
     const runtimeClient = {
       updateAuthToken: vi.fn(),
+      onMutationError: vi.fn(),
     };
 
     const sharedDb = new TestDb(

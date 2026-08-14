@@ -1,6 +1,12 @@
 use super::ClaimPath;
 
 pub(crate) const USER_COLUMN_PREFIX: &str = "user_";
+/// Physical namespace for aggregate result values.
+///
+/// Aggregate aliases are public-facing names and can legally collide with a
+/// grouped source column (for example, `group_by("sum_score").sum("score")`).
+/// Keep aggregate values separate from source-row fields in compiler records.
+pub(crate) const AGGREGATE_OUTPUT_PREFIX: &str = "__jazz_aggregate_";
 pub(crate) const LEFT_JOIN_PREFIX: &str = "left.";
 pub(crate) const RIGHT_JOIN_PREFIX: &str = "right.";
 pub(crate) const CLOSURE_REQUIRED_ELEMENT: &str = "__closure_required_element";
@@ -14,6 +20,26 @@ pub(crate) fn user_column_field(column: &str) -> String {
 
 pub(crate) fn logical_user_column(field: &str) -> &str {
     field.strip_prefix(USER_COLUMN_PREFIX).unwrap_or(field)
+}
+
+pub(crate) fn aggregate_output_field(output: &str) -> String {
+    aggregate_output_column(output)
+}
+
+pub(crate) fn aggregate_output_app_field(output: &str) -> String {
+    user_column_field(&aggregate_output_field(output))
+}
+
+pub(crate) fn aggregate_output_column(output: &str) -> String {
+    if output.starts_with(AGGREGATE_OUTPUT_PREFIX) {
+        output.to_owned()
+    } else {
+        format!("{AGGREGATE_OUTPUT_PREFIX}{output}")
+    }
+}
+
+pub(crate) fn aggregate_output_logical_name(column: &str) -> Option<&str> {
+    column.strip_prefix(AGGREGATE_OUTPUT_PREFIX)
 }
 
 pub(crate) fn join_field(prefix: &str, field: &str) -> String {

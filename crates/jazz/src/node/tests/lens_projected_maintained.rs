@@ -114,6 +114,17 @@ fn maintained_projected_current_picks_winner_before_lens_projection() {
     assert_eq!(bundles.len(), 1);
     assert_eq!(bundles[0].versions.len(), 1);
     let shipped = &bundles[0].versions[0];
+    let canonical = core
+        .query_versions_for_tx(new_tx)
+        .unwrap()
+        .into_iter()
+        .find(|version| version.row_uuid() == shared_row)
+        .map(|version| core.version_record_from_row(&version).unwrap())
+        .expect("new winner must remain in canonical history");
+    assert_eq!(
+        shipped, &canonical,
+        "the title-only read projection must not change the replicated VersionRecord (INV-DATA-16/18; INV-SYNC-16; C.3)"
+    );
     assert_eq!(shipped.schema_version(), evolved_payload.id);
     assert_eq!(shipped.table(), "todos");
     assert_eq!(shipped.cell_at(0), Some(v("new-name")));

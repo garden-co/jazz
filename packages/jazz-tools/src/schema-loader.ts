@@ -103,6 +103,19 @@ function columnTypeToSqlType(columnType: ColumnType): SqlType {
       return columnType.schema ? { kind: "JSON", schema: columnType.schema } : { kind: "JSON" };
     case "Enum":
       return { kind: "ENUM", variants: [...columnType.variants] };
+    case "EnumPayload":
+      return {
+        kind: "ENUM",
+        cases: columnType.cases.map((entry) => ({
+          name: entry.name,
+          fields: entry.fields.map((field) => ({
+            name: field.name,
+            sqlType: columnTypeToSqlType(field.column_type),
+            nullable: field.nullable,
+            ...(field.default === undefined ? {} : { default: field.default }),
+          })),
+        })),
+      };
     case "Array":
       return { kind: "ARRAY", element: columnTypeToSqlType(columnType.element) };
     case "Row":

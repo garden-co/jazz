@@ -181,6 +181,13 @@ pub enum RelationPredicate {
         left: RelationColumnRef,
         right: RelationValueRef,
     },
+    /// Match one tagged payload-enum case. The nested predicate's column refs
+    /// name fields in the selected case payload and are deliberately unscoped.
+    EnumMatch {
+        column: RelationColumnRef,
+        case: String,
+        payload: Box<RelationPredicate>,
+    },
     And(Vec<RelationPredicate>),
     Or(Vec<RelationPredicate>),
     Not(Box<RelationPredicate>),
@@ -679,6 +686,7 @@ fn relation_gather_step_predicates(
         | RelationPredicate::IsNotNull { .. }
         | RelationPredicate::In { .. }
         | RelationPredicate::Contains { .. }
+        | RelationPredicate::EnumMatch { .. }
         | RelationPredicate::Or(_)
         | RelationPredicate::Not(_) => {
             filters.push(predicate.clone());
@@ -983,6 +991,18 @@ fn relation_predicate_to_query_predicate(
                 relation_value_to_operand(right)?,
             ),
         ))),
+        RelationPredicate::EnumMatch {
+            column,
+            case,
+            payload,
+        } => Ok(Some((
+            relation_scope(column)?,
+            Predicate::EnumMatch {
+                column: column.column.clone(),
+                case: case.clone(),
+                payload: Box::new(relation_payload_predicate_to_predicate(payload)?),
+            },
+        ))),
         RelationPredicate::And(predicates) => relation_predicate_list(predicates, true),
         RelationPredicate::Or(predicates) => relation_predicate_list(predicates, false),
         RelationPredicate::Not(predicate) => {
@@ -996,6 +1016,68 @@ fn relation_predicate_to_query_predicate(
         }
         RelationPredicate::True => Ok(None),
         RelationPredicate::False => Ok(Some((String::new(), Predicate::Any(Vec::new())))),
+    }
+}
+
+fn relation_payload_predicate_to_predicate(
+    predicate: &RelationPredicate,
+) -> Result<Predicate, QueryError> {
+    let unscoped_column = |column: &RelationColumnRef| {
+        if column.scope.is_some() {
+            return Err(relation_unification_error(
+                "payload enum predicate fields must be unscoped",
+            ));
+        }
+        Ok(Operand::Column(column.column.clone()))
+    };
+    match predicate {
+        RelationPredicate::Cmp { left, op, right } => {
+            let left = unscoped_column(left)?;
+            let right = relation_value_to_operand(right)?;
+            Ok(match op {
+                RelationCmpOp::Eq => Predicate::Eq(left, right),
+                RelationCmpOp::Ne => Predicate::Ne(left, right),
+                RelationCmpOp::Lt => Predicate::Lt(left, right),
+                RelationCmpOp::Le => Predicate::Lte(left, right),
+                RelationCmpOp::Gt => Predicate::Gt(left, right),
+                RelationCmpOp::Ge => Predicate::Gte(left, right),
+            })
+        }
+        RelationPredicate::IsNull { column } => Ok(Predicate::IsNull(unscoped_column(column)?)),
+        RelationPredicate::IsNotNull { column } => Ok(Predicate::Not(Box::new(Predicate::IsNull(
+            unscoped_column(column)?,
+        )))),
+        RelationPredicate::In { left, values } => Ok(Predicate::In(
+            unscoped_column(left)?,
+            values
+                .iter()
+                .map(relation_value_to_operand)
+                .collect::<Result<Vec<_>, _>>()?,
+        )),
+        RelationPredicate::Contains { left, right } => Ok(Predicate::Contains(
+            unscoped_column(left)?,
+            relation_value_to_operand(right)?,
+        )),
+        RelationPredicate::And(children) => Ok(Predicate::All(
+            children
+                .iter()
+                .map(relation_payload_predicate_to_predicate)
+                .collect::<Result<Vec<_>, _>>()?,
+        )),
+        RelationPredicate::Or(children) => Ok(Predicate::Any(
+            children
+                .iter()
+                .map(relation_payload_predicate_to_predicate)
+                .collect::<Result<Vec<_>, _>>()?,
+        )),
+        RelationPredicate::Not(child) => Ok(Predicate::Not(Box::new(
+            relation_payload_predicate_to_predicate(child)?,
+        ))),
+        RelationPredicate::True => Ok(Predicate::All(Vec::new())),
+        RelationPredicate::False => Ok(Predicate::Any(Vec::new())),
+        RelationPredicate::EnumMatch { .. } => Err(relation_unification_error(
+            "nested payload enum matches are not supported",
+        )),
     }
 }
 
@@ -2298,6 +2380,16 @@ pub enum Predicate {
     Lte(Operand, Operand),
     /// String substring or array membership.
     Contains(Operand, Operand),
+    /// Match one discriminated enum case, then evaluate the predicate against
+    /// that case's payload record fields.
+    EnumMatch {
+        /// Name of the enum column in the containing table.
+        column: String,
+        /// Name of the enum case that must be selected.
+        case: String,
+        /// Predicate evaluated against the selected case's payload record.
+        payload: Box<Predicate>,
+    },
     /// Nullable value is null.
     IsNull(Operand),
 }
@@ -2582,6 +2674,9 @@ pub(crate) fn binding_id_for_values(values: &BTreeMap<String, Value>) -> Binding
 /// Query validation error.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum QueryError {
+    /// Aggregate aliases cannot occupy compiler-owned output names.
+    #[error("aggregate alias {0} uses a reserved compiler namespace")]
+    ReservedAggregateAlias(String),
     /// Flat tuple output currently has a deliberately narrow executable envelope.
     #[error("flat join cannot be combined with {feature}")]
     UnsupportedFlatJoinCombination {
@@ -2618,9 +2713,9 @@ pub enum QueryError {
         /// Column on the left side of the `in` predicate.
         column: String,
         /// Declared type of that column.
-        column_type: ColumnType,
+        column_type: Box<ColumnType>,
         /// Type of the mismatched candidate.
-        candidate_type: ColumnType,
+        candidate_type: Box<ColumnType>,
     },
     /// Claim and column operand types do not match.
     #[error(
@@ -2961,6 +3056,9 @@ fn validate_aggregate(table: &TableSchema, aggregate: &AggregateQuery) -> Result
         planner_column_type(table, group_by)?;
     }
     for aggregate in &aggregate.aggregates {
+        if aggregate.alias.starts_with("__jazz_aggregate_") {
+            return Err(QueryError::ReservedAggregateAlias(aggregate.alias.clone()));
+        }
         match aggregate.function {
             AggregateFunction::Count => {
                 if let Some(column) = &aggregate.column {
@@ -3354,6 +3452,33 @@ fn validate_predicate(
                 (None, None) => Err(QueryError::OperandTypeMismatch),
             }
         }
+        Predicate::EnumMatch {
+            column,
+            case,
+            payload,
+        } => {
+            let column_type = planner_column_type(table, column)?;
+            let ColumnType::Enum(schema) = non_null_column_type(column_type) else {
+                return Err(QueryError::OperandTypeMismatch);
+            };
+            let enum_case = schema
+                .case(
+                    schema
+                        .tag(case)
+                        .map_err(|_| QueryError::OperandTypeMismatch)?,
+                )
+                .map_err(|_| QueryError::OperandTypeMismatch)?;
+            let payload_table = TableSchema::new(
+                "__enum_payload",
+                enum_case.payload.fields().iter().map(|field| {
+                    crate::schema::ColumnSchema::new(
+                        field.name.clone().unwrap_or_default(),
+                        field.value_type.clone(),
+                    )
+                }),
+            );
+            validate_predicate(&payload_table, payload, params)
+        }
         Predicate::IsNull(operand) => match operand_type(table, operand, params)? {
             Some(ColumnType::Nullable(_)) => Ok(()),
             Some(_) => Err(QueryError::OperandTypeMismatch),
@@ -3430,7 +3555,7 @@ fn column_types_comparable(left: &ColumnType, right: &ColumnType) -> bool {
     left == right
         || matches!(
             (&left, &right),
-            (ColumnType::Enum(_), ColumnType::U8) | (ColumnType::U8, ColumnType::Enum(_))
+            (ColumnType::EnumTag(_), ColumnType::U8) | (ColumnType::U8, ColumnType::EnumTag(_))
         )
 }
 
@@ -3440,7 +3565,8 @@ fn in_operand_types_compatible(left: &ColumnType, right: &ColumnType) -> bool {
     }
     let left = non_null_column_type(left);
     let right = non_null_column_type(right);
-    if matches!(left, ColumnType::Enum(_)) && matches!(right, ColumnType::String | ColumnType::Uuid)
+    if matches!(left, ColumnType::EnumTag(_))
+        && matches!(right, ColumnType::String | ColumnType::Uuid)
     {
         return true;
     }
@@ -3465,7 +3591,7 @@ fn in_literal_value_coercible(left: &ColumnType, value: &Operand) -> bool {
     };
     match non_null_column_type(left) {
         ColumnType::String => matches!(value, Value::Uuid(_)),
-        ColumnType::Enum(_) => matches!(value, Value::String(_) | Value::Uuid(_)),
+        ColumnType::EnumTag(_) => matches!(value, Value::String(_) | Value::Uuid(_)),
         ColumnType::Array(member) => matches!(value, Value::Array(values)
         if values.iter().all(|value| {
             in_literal_value_coercible(&member, &Operand::Literal(value.clone()))
@@ -3482,8 +3608,8 @@ fn in_candidate_type_mismatch_error(
     match left {
         Operand::Column(column) => QueryError::InCandidateTypeMismatch {
             column: column.clone(),
-            column_type,
-            candidate_type,
+            column_type: Box::new(column_type),
+            candidate_type: Box::new(candidate_type),
         },
         _ => QueryError::OperandTypeMismatch,
     }
@@ -4029,6 +4155,16 @@ fn canonical_predicate_key(predicate: &Predicate) -> Vec<u8> {
             bytes.push(b'0');
             put_bytes(&mut bytes, &canonical_operand_key(operand));
         }
+        Predicate::EnumMatch {
+            column,
+            case,
+            payload,
+        } => {
+            bytes.push(b'm');
+            put_str(&mut bytes, column);
+            put_str(&mut bytes, case);
+            put_bytes(&mut bytes, &canonical_predicate_key(payload));
+        }
     }
     bytes
 }
@@ -4187,7 +4323,7 @@ fn value_type(value: &Value) -> ColumnType {
         Value::String(_) => ColumnType::String,
         Value::Bytes(_) => ColumnType::Bytes,
         Value::Uuid(_) => ColumnType::Uuid,
-        Value::Enum(_) => ColumnType::U8,
+        Value::EnumTag(_) => ColumnType::U8,
         Value::Tuple(values) => ColumnType::Tuple(values.iter().map(value_type).collect()),
         Value::Array(values) => values
             .first()
@@ -4197,6 +4333,9 @@ fn value_type(value: &Value) -> ColumnType {
         Value::Nullable(None) => ColumnType::Nullable(Box::new(ColumnType::Bytes)),
         Value::Record(_) => {
             panic!("record-valued query bindings are not part of the current Jazz query surface")
+        }
+        Value::Enum(_) => {
+            panic!("union-valued query bindings are an internal Groove representation")
         }
     }
 }
@@ -4214,7 +4353,7 @@ fn value_matches_type(value: &Value, column_type: &ColumnType) -> bool {
         | (Value::String(_), ColumnType::String)
         | (Value::Bytes(_), ColumnType::Bytes)
         | (Value::Uuid(_), ColumnType::Uuid) => true,
-        (Value::Enum(_), ColumnType::Enum(_)) => true,
+        (Value::EnumTag(_), ColumnType::EnumTag(_)) => true,
         (Value::Tuple(values), ColumnType::Tuple(types)) => {
             values.len() == types.len()
                 && values
@@ -4232,6 +4371,7 @@ fn value_matches_type(value: &Value, column_type: &ColumnType) -> bool {
         // Jazz has no public record column type in this step, so records are
         // never accepted as query-bound values.
         (Value::Record(_), _) => false,
+        (Value::Enum(_), _) => false,
         _ => false,
     }
 }
@@ -4282,7 +4422,7 @@ fn put_value(bytes: &mut Vec<u8>, value: &Value) {
             bytes.push(9);
             bytes.extend_from_slice(value.as_bytes());
         }
-        Value::Enum(value) => {
+        Value::EnumTag(value) => {
             bytes.push(10);
             bytes.push(*value);
         }
@@ -4312,6 +4452,9 @@ fn put_value(bytes: &mut Vec<u8>, value: &Value) {
         Value::Record(_) => {
             panic!("record-valued query bindings have no current canonical encoding")
         }
+        Value::Enum(_) => {
+            panic!("union-valued query bindings are an internal Groove representation")
+        }
     }
 }
 
@@ -4328,7 +4471,7 @@ fn put_column_type(bytes: &mut Vec<u8>, ty: &ColumnType) {
         ColumnType::String => bytes.push(8),
         ColumnType::Bytes => bytes.push(9),
         ColumnType::Uuid => bytes.push(10),
-        ColumnType::Enum(schema) => {
+        ColumnType::EnumTag(schema) => {
             bytes.push(11);
             put_str(bytes, &schema.name);
             put_len(bytes, schema.variants.len());
@@ -4364,6 +4507,11 @@ fn put_column_type(bytes: &mut Vec<u8>, ty: &ColumnType) {
                 }
                 put_column_type(bytes, &field.value_type);
             }
+        }
+        ColumnType::Enum(_) => {
+            panic!(
+                "union column types are internal to Groove and have no Jazz query binding encoding"
+            )
         }
     }
 }
@@ -4431,6 +4579,7 @@ pub mod doctest_support {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use groove::records::{EnumCase, EnumSchema, RecordDescriptor, ValueType};
     use groove::schema::{ColumnSchema, ColumnType};
 
     fn schema() -> JazzSchema {
@@ -4514,6 +4663,124 @@ mod tests {
         assert_eq!(
             relation_predicate_to_query_predicate(&predicate).unwrap(),
             Some((String::new(), Predicate::Any(Vec::new())))
+        );
+    }
+
+    // This focused lowerer test is intentional: relation IR is the NAPI/WASM
+    // boundary, while end-to-end matching and subscription deltas are covered
+    // at the Groove runtime boundary below it.
+    #[test]
+    fn relation_payload_enum_match_lowers_and_validates_against_case_fields() {
+        let event_payload = RecordDescriptor::new([("level", ValueType::I32)]);
+        let schema = JazzSchema::new([TableSchema::new(
+            "events",
+            [ColumnSchema::new(
+                "event",
+                ColumnType::Enum(Box::new(
+                    EnumSchema::new("event", [EnumCase::new("message", event_payload)]).unwrap(),
+                )),
+            )],
+        )]);
+        let relation = RelationQuery {
+            rel: RelationExpr::Project {
+                input: Box::new(RelationExpr::Filter {
+                    input: Box::new(RelationExpr::TableScan {
+                        table: "events".to_owned(),
+                        alias: None,
+                    }),
+                    predicate: RelationPredicate::EnumMatch {
+                        column: RelationColumnRef {
+                            scope: Some("events".to_owned()),
+                            column: "event".to_owned(),
+                        },
+                        case: "message".to_owned(),
+                        payload: Box::new(RelationPredicate::Cmp {
+                            left: RelationColumnRef {
+                                scope: None,
+                                column: "level".to_owned(),
+                            },
+                            op: RelationCmpOp::Eq,
+                            right: RelationValueRef::Literal(serde_json::json!({
+                                "type": "Integer",
+                                "value": 2,
+                            })),
+                        }),
+                    },
+                }),
+                columns: vec![RelationProjectColumn {
+                    alias: "event".to_owned(),
+                    expr: RelationProjectExpr::Column(RelationColumnRef {
+                        scope: Some("events".to_owned()),
+                        column: "event".to_owned(),
+                    }),
+                }],
+            },
+        };
+
+        let query = relation_query_to_query(&relation).unwrap();
+        assert_eq!(
+            query.filters,
+            vec![Predicate::EnumMatch {
+                column: "event".to_owned(),
+                case: "message".to_owned(),
+                payload: Box::new(Predicate::Eq(
+                    Operand::Column("level".to_owned()),
+                    Operand::Literal(Value::I32(2)),
+                )),
+            }]
+        );
+        assert!(query.validate(&schema).is_ok());
+    }
+
+    #[test]
+    fn enum_match_validation_uses_selected_case_fields_not_outer_table_fields() {
+        let payload =
+            RecordDescriptor::new([("case_only", ValueType::String), ("shared", ValueType::I32)]);
+        let schema = JazzSchema::new([TableSchema::new(
+            "events",
+            [
+                ColumnSchema::new("shared", ColumnType::String),
+                ColumnSchema::new("outer_only", ColumnType::String),
+                ColumnSchema::new(
+                    "event",
+                    ColumnType::Enum(Box::new(
+                        EnumSchema::new("event", [EnumCase::new("message", payload)]).unwrap(),
+                    )),
+                ),
+            ],
+        )]);
+        let matched = |payload| Predicate::EnumMatch {
+            column: "event".to_owned(),
+            case: "message".to_owned(),
+            payload: Box::new(payload),
+        };
+
+        assert!(
+            Query::from("events")
+                .filter(matched(Predicate::Eq(
+                    Operand::Column("case_only".to_owned()),
+                    Operand::Literal(Value::String("present only in the case".to_owned())),
+                )))
+                .validate(&schema)
+                .is_ok()
+        );
+        assert!(
+            Query::from("events")
+                .filter(matched(Predicate::Eq(
+                    Operand::Column("outer_only".to_owned()),
+                    Operand::Literal(Value::String("outer".to_owned())),
+                )))
+                .validate(&schema)
+                .is_err()
+        );
+        assert!(
+            Query::from("events")
+                .filter(matched(Predicate::Eq(
+                    Operand::Column("shared".to_owned()),
+                    Operand::Literal(Value::String("outer type".to_owned())),
+                )))
+                .validate(&schema)
+                .is_err()
         );
     }
 
@@ -4965,6 +5232,26 @@ mod tests {
             .validate(&schema())
             .unwrap_err();
         assert!(matches!(err, QueryError::UnknownColumn { .. }));
+
+        let valid_user_alias = Query::from("issues")
+            .aggregate([Aggregate::sum("priority").alias("user_total")])
+            .validate(&schema())
+            .expect("explicit aliases are logical names, not compiler fields");
+        assert_eq!(
+            valid_user_alias
+                .query()
+                .aggregate
+                .as_ref()
+                .unwrap()
+                .aggregates[0]
+                .alias,
+            "user_total"
+        );
+        let err = Query::from("issues")
+            .aggregate([Aggregate::sum("priority").alias("__jazz_aggregate_user_total")])
+            .validate(&schema())
+            .unwrap_err();
+        assert!(matches!(err, QueryError::ReservedAggregateAlias(_)));
 
         let err = Query::from("issues")
             .count()

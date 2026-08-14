@@ -5,7 +5,7 @@
 Multiple schema versions coexist in one database, and migration lenses translate
 between them without rewriting history. This is one of jazz's most novel
 properties. This chapter defines the catalogue, shared physical storage,
-copy-on-write-into-current writes, and lens-projected reads. It builds on schema
+authored-schema writes, and lens-projected reads. It builds on schema
 identity (ch. 2), history winner selection (ch. 4), and the catalogue sync lane
 (ch. 8).
 
@@ -18,15 +18,15 @@ Invariant digest:
 - `INV-LENS-5`: Unknown-schema commit units MUST park without ingesting a transaction and MUST drain when the corresponding `SchemaVersion` catalogue value arrives.
 - `INV-LENS-6`: Unknown-schema shape registrations MUST park and MUST register only after the named schema-version catalogue value arrives.
 - `INV-LENS-7`: `CurrentWriteSchema` updates MUST be monotone by `revision`; stale revisions MUST leave `current_write_schema` unchanged.
-- `INV-LENS-8`: Durable catalogue schemas, lenses, current-write pointer, schema-version aliases, and physical mappings MUST survive node restart.
+- `INV-LENS-8`: Durable catalogue schemas, lenses, current-write pointer, schema-version aliases, and physical mappings MUST survive node restart; installing an authority snapshot MUST preserve the node-local storage identity of an already-open schema so pre-snapshot local writes remain addressable.
 - `INV-LENS-9`: Publishing a non-genesis schema and its lineage-defining lens MUST durably stage the complete ordered bundle, keep it invisible while every physical table and schema variant is registered, then durably activate it before acknowledging or draining parked work; reopen MUST resume staged activation idempotently.
 - `INV-LENS-10`: New local writes MUST retain `current_write_schema.schema` as their schema discriminator and resolve storage through that schema's durable physical mapping.
-- `INV-LENS-11`: Old-schema commit units with a forward lens path to the current write schema MUST be copied forward into the current schema variant at ingest.
+- `INV-LENS-11`: Incoming commit units MUST retain their authored schema discriminator and resolve storage through that schema's durable physical mapping, even when the current write pointer names another schema.
 - `INV-LENS-12`: Natural lens reads MUST select winners from the shared physical lineage before projecting rows into the requested schema.
 - `INV-LENS-13`: Natural lens projection MUST apply supported operations deterministically in both directions and MUST reject unsupported transformations.
 - `INV-LENS-14`: For every non-rejected natural lens delta sequence, translating then applying MUST equal applying then translating for all known schema materializations.
 - `INV-LENS-15`: `ShapeId` MUST include the authored `SchemaVersionId`; identical canonical query bytes against different schema versions MUST produce different shape ids.
-- `INV-LENS-16`: `RejectSourceDelta` on an old-to-current forward lens path MUST reject the source delta with the declared reason as a normal transaction rejection, not a protocol error.
+- `INV-LENS-16`: A commit unit MUST NOT be rejected or rewritten solely because its authored schema differs from the current write schema.
 - `INV-LENS-17`: TransformColumn MUST be accepted only when its transform key is registered as bijective and canonical-equality-preserving.
 - `INV-LENS-18`: Large-value columns MAY be renamed by a lens but MUST NOT be content-transformed.
 - `INV-LENS-19`: Policy evaluation under lenses MUST translate data into the pinned permission evaluation schema and MUST NOT translate policy bundles.
@@ -40,15 +40,17 @@ Schema evolution is modeled as immutable catalogue data plus explicit
 translations between versions. A `SchemaVersion` names one content-addressed
 schema snapshot. A `MigrationLens` names a pure, deterministic translation
 between two `SchemaVersionId`s, so old and new materializations can coexist while
-presenting a coherent view to readers and writers.
+presenting a coherent view to readers and writers. Incoming commits retain the
+schema in which they were authored; translation happens when a read requests a
+different schema, not while history is ingested.
 
 Each lens is bidirectional: it defines behavior in **both** directions, forward
 for old→new and backward for new→old. A direction may instead be declared as
-`RejectSourceDelta`, which refuses that translation as a normal transaction
-rejection (§10.4), rather than producing a translated value. Publishing a schema
-or a lens **never rewrites existing history**. Old rows remain in the version
-where they were written, and translation happens either at read time or as
-copy-on-write at ingest (§10.4–10.5).
+`RejectSourceDelta`, which refuses that explicit projection rather than
+producing a translated value. It does not reject a commit merely because its
+authored schema differs from the write pointer (§10.4). Publishing a schema or a
+lens **never rewrites existing history**. Rows remain in the version where they
+were authored, and translation happens at read time (§10.5).
 
 Identity is content-addressed. `SchemaVersionId = JazzSchema::version_id()`
 (ch. 2), and `MigrationLensId = lens.content_id()`. The lens id hashes a
@@ -132,6 +134,33 @@ Compatible schema versions share the `PhysicalTableId` established by their
 published lenses while retaining distinct Groove descriptor variants
 (`INV-LENS-4`, ch. 2).
 
+Each physical lineage has one stable Groove field catalogue derived from its
+`PhysicalColumnId`s. A content row carries its local `SchemaVersionAlias` as
+its descriptor discriminator; the surrounding physical table and that
+alias select the row's descriptor. The alias, its schema mapping, and the
+descriptor registry are durable local storage state and are recovered before
+any payload is decoded. They never appear in a public value or on the wire.
+An alias or mapping remains retained while any retained history, current row,
+branch, snapshot, or rejected payload can name it.
+
+Jazz registers a schema variant and every projection needed for its logical
+views before activating a catalogue bundle or accepting a row under that
+alias. Variant registration is append-only: extending a lineage with a new
+descriptor or projection case neither changes the identity or output
+descriptor of an existing lowered plan nor resets its active subscriptions.
+Each projection case either emits the declared logical row or deliberately
+`Ignore`s a variant that cannot supply the projection; an unregistered variant
+is a configuration error. This is the only boundary at which opaque physical
+variant rows become logical Jazz rows (ch. 14).
+
+Physical secondary indexes are append-only for a lineage. A schema may use an
+index only when it declares the corresponding logical index, but dropping that
+declaration does not remove the physical index. Adding an index for an
+existing physical column registers and backfills it across retained variants
+before the schema bundle becomes Active. A variant missing an indexed field
+contributes no entry; later compatible variants extend the same physical index
+rather than creating a schema-version partition.
+
 Publishing a non-genesis schema first derives its complete physical mapping
 from the bundled lineage lens: compatible unchanged/renamed tables and columns
 reuse source physical ids; added tables, added/copied columns, and incompatible
@@ -174,35 +203,36 @@ client self-declare `SYSTEM` authority.
 
 _Further invariants._ `INV-LENS-8` — durable catalogue schemas, lenses, the
 current-write pointer, aliases, and physical mappings survive node restart and
-are recovered before the full Groove database is constructed.
+are recovered before the full Groove database is constructed. Aliases and
+physical ids are node-local: when a client has already opened and written under
+a schema before receiving an authority snapshot, snapshot planning preserves
+that schema's local storage identity and reconciles its ancestors and descendants
+around the local anchor. Pending local rows therefore remain addressable.
 
-### 10.4 Writes: copy-on-write into current
+### 10.4 Writes: authored schema variants
 
-Writes converge on the schema selected by the current write pointer. New local
-writes carry that schema's local alias as their Groove discriminator and resolve
-their table and columns through its durable physical mapping (`INV-LENS-10`).
+New local writes carry the schema selected by `current_write_schema` as their
+Groove discriminator and resolve their table and columns through that schema's
+durable physical mapping (`INV-LENS-10`).
 
-Incoming work authored against an older schema is not stored under the old
-variant. When a forward lens path exists, the commit unit is
-**forward-translated into the current schema variant at ingest**
-(`INV-LENS-11`). If the selected lens path declares `RejectSourceDelta`, the
-old-schema delta is rejected as a normal `Fate::Rejected(reason)`, not as a
-protocol error (`INV-LENS-16`).
+Incoming work retains the schema under which it was authored, regardless of the
+current write pointer (`INV-LENS-11`). Before ingest, Jazz verifies that every
+known authored schema has a local alias, physical mapping, and registered Groove
+descriptor variant. A schema-and-lineage bundle normally installs those facts
+atomically before the schema becomes Active; the ingest preflight also closes
+the provisional catalogue compatibility path. An unknown schema still parks
+until its complete lineage arrives (`INV-LENS-5`, `INV-LENS-9`).
 
-New or dropped tables are not silently omitted during cross-version writes. In
-this first shared-storage layer, a commit unit that cannot be represented
-exactly through the declared table endpoints is terminally rejected atomically
-with an explicit unsupported-projection reason; only transient missing Active
-catalogue dependencies park. Representable writes in the same unit do not
-partially apply. Preserving original-schema variants and symmetric sync
-across new/dropped tables is a required follow-up, not behavior this layer
-claims to implement.
+Compatible schema versions may share one `PhysicalTableId`, but the stored
+schema discriminator remains the authored variant. Ingest does not require a
+lens projection, and a pointer mismatch alone is never a rejection or rewrite
+condition (`INV-LENS-16`). A `RejectSourceDelta` declaration affects an explicit
+projection through that lens, not admission of history authored on either side.
 
-The transaction records its author's schema version as **audit metadata with no
-semantic role**. A current-write-pointer flip is a core-ordered, monotone
-catalogue write (§10.2), and it **never invalidates in-flight work**: a
-transaction admitted under the previous pointer translates forward at ingest
-like any other old-schema write.
+A current-write-pointer flip is a core-ordered, monotone catalogue write
+(§10.2) and **never invalidates in-flight work**. The pointer selects the schema
+for new local authoring; it does not redirect commits another client already
+authored under a different Active schema.
 
 ### 10.5 Reads: select, then project
 
@@ -241,12 +271,12 @@ schema materializations (`INV-LENS-14`).
 **Worked example.** A row is first written under schema `v1`, landing in a
 physical history lineage with `schema_version = v1`. Atomically publishing `v2`
 with its `v1 ↔ v2` lineage lens maps `v2` to that lineage and registers its
-descriptor variant. After the
-write pointer moves, new writes use the `v2` discriminator, including an old
-client's `v1`-authored commit after forward translation (`INV-LENS-11`). The
-original row is not rewritten. A `v2` read scans the same physical lineage,
-selects the winner first, and projects its authored variant into `v2`
-(`INV-LENS-12`).
+descriptor variant. After the write pointer moves, new local writes use the
+`v2` discriminator. An older client's later `v1`-authored commit still uses the
+`v1` descriptor variant in that shared lineage (`INV-LENS-11`); neither it nor
+the original row is rewritten. A `v2` read scans the physical lineage, selects
+the winner first, and projects the winning authored variant into `v2`, including
+when the winner comes from a settled subscription cache (`INV-LENS-12`).
 
 ### 10.6 The lens op surface
 

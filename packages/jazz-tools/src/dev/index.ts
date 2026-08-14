@@ -9,7 +9,6 @@ export {
   pushMigration,
   pushPermissions,
   pushSchema,
-  type CatalogueEvent,
   type DeployOptions,
   type DeployResult,
   type DeploySchemaResult,
@@ -19,6 +18,7 @@ export {
   type PushPermissionsResult,
   type PushSchemaOptions,
   type PushSchemaResult,
+  type SchemaSourceInput,
 } from "./catalogue.js";
 
 export { watchSchema, type SchemaWatcherOptions } from "./schema-watcher.js";

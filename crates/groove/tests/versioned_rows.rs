@@ -1,8 +1,8 @@
 use groove::db::{Database, Error, GraphBuilder, IvmRuntimeError, ProjectField};
-use groove::records::{RecordDescriptor, Value, ValueType, VersionedRecord};
+use groove::records::{RecordDescriptor, Value, ValueType, VariantRecord};
 use groove::schema::{
     ColumnSchema, ColumnType, DatabaseSchema, IndexSchema, IntegerKeyType, PrimaryKey, TableSchema,
-    TableSchemaVersion,
+    TableVariant,
 };
 use groove::storage::{MemoryStorage, OrderedKvStorage};
 
@@ -17,8 +17,8 @@ fn versioned_schema() -> DatabaseSchema {
     )
     .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
     // A version's logical field order is independent from catalogue order.
-    .with_schema_version(1, ["title", "id"])
-    .with_schema_version(2, ["id", "title", "completed"])])
+    .with_variant(1, ["title", "id"])
+    .with_variant(2, ["id", "title", "completed"])])
 }
 
 fn open_database() -> Result<Database<MemoryStorage>, Error> {
@@ -27,27 +27,27 @@ fn open_database() -> Result<Database<MemoryStorage>, Error> {
     Database::new(schema, storage)
 }
 
-fn row(version: u64, values: &[Value]) -> VersionedRecord {
+fn row(version: u32, values: &[Value]) -> VariantRecord {
     let schema = versioned_schema();
     let descriptor = schema
         .table("items")
         .unwrap()
-        .record_schema_for_version(version)
+        .record_schema_for_variant(version)
         .expect("registered test version");
-    VersionedRecord::create(version, descriptor, values).expect("valid test row")
+    VariantRecord::create(version, descriptor, values).expect("valid test row")
 }
 
 fn row_for(
     schema: &DatabaseSchema,
-    version: u64,
+    version: u32,
     values: &[Value],
-) -> Result<VersionedRecord, groove::records::Error> {
+) -> Result<VariantRecord, groove::records::Error> {
     let descriptor = schema
         .table("items")
         .unwrap()
-        .record_schema_for_version(version)
+        .record_schema_for_variant(version)
         .expect("registered test version");
-    VersionedRecord::create(version, descriptor, values)
+    VariantRecord::create(version, descriptor, values)
 }
 
 #[test]
@@ -62,7 +62,7 @@ fn active_variant_projection_accepts_an_appended_case_without_rebuilding()
         ],
     )
     .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
-    .with_schema_version(1, ["title", "id"]);
+    .with_variant(1, ["title", "id"]);
     let schema = DatabaseSchema::new([table]);
     let storage = MemoryStorage::new(&schema.column_families());
     let mut database = Database::new(schema, storage)?;
@@ -76,7 +76,7 @@ fn active_variant_projection_accepts_an_appended_case_without_rebuilding()
     )?;
 
     let subscription =
-        database.subscribe_one_sink(GraphBuilder::variant_project("items", "reader-v1"))?;
+        database.subscribe_one_sink(GraphBuilder::variant_source("items", "reader-v1"))?;
     let subscription_id = subscription.id();
     assert!(subscription.recv()?.is_empty());
 
@@ -84,7 +84,7 @@ fn active_variant_projection_accepts_an_appended_case_without_rebuilding()
     let mut batch = database.open_batch();
     batch.insert(
         "items",
-        VersionedRecord::create(1, v1, &[Value::String("first".into()), Value::U64(1)])?,
+        VariantRecord::create(1, v1, &[Value::String("first".into()), Value::U64(1)])?,
     );
     database.commit_batch(batch)?;
     assert_eq!(
@@ -92,10 +92,7 @@ fn active_variant_projection_accepts_an_appended_case_without_rebuilding()
         vec![(vec![Value::U64(1), Value::String("first".into())], 1,)]
     );
 
-    database.register_table_schema_version(
-        "items",
-        TableSchemaVersion::new(2, ["id", "title", "completed"]),
-    )?;
+    database.register_table_variant("items", TableVariant::new(2, ["id", "title", "completed"]))?;
     database.register_variant_projection_case(
         "items",
         "reader-v1",
@@ -113,7 +110,7 @@ fn active_variant_projection_accepts_an_appended_case_without_rebuilding()
     let mut batch = database.open_batch();
     batch.update(
         "items",
-        VersionedRecord::create(
+        VariantRecord::create(
             2,
             v2,
             &[
@@ -139,7 +136,7 @@ fn active_variant_projection_accepts_an_appended_case_without_rebuilding()
     );
     assert_eq!(
         database
-            .query_graph(GraphBuilder::variant_project("items", "reader-v1"))?
+            .query_graph(GraphBuilder::variant_source("items", "reader-v1"))?
             .to_values()?,
         vec![(
             vec![Value::U64(1), Value::String("first, revised".into())],
@@ -166,7 +163,7 @@ fn ignored_variant_projection_case_is_distinct_from_an_unregistered_case()
     database.register_variant_projection_ignore_case("items", "v1-only", 2)?;
 
     let subscription =
-        database.subscribe_one_sink(GraphBuilder::variant_project("items", "v1-only"))?;
+        database.subscribe_one_sink(GraphBuilder::variant_source("items", "v1-only"))?;
     assert!(subscription.recv()?.is_empty());
 
     let mut batch = database.open_batch();
@@ -186,13 +183,13 @@ fn ignored_variant_projection_case_is_distinct_from_an_unregistered_case()
     assert!(subscription.try_recv().is_err());
     assert!(
         database
-            .query_graph(GraphBuilder::variant_project("items", "v1-only"))?
+            .query_graph(GraphBuilder::variant_source("items", "v1-only"))?
             .is_empty()
     );
 
     database.define_variant_projection("items", "unregistered", output)?;
     assert!(matches!(
-        database.query_graph(GraphBuilder::variant_project("items", "unregistered")),
+        database.query_graph(GraphBuilder::variant_source("items", "unregistered")),
         Err(Error::IvmRuntime(
             IvmRuntimeError::VariantProjectionCaseNotFound { version: 2, .. }
         ))
@@ -218,8 +215,8 @@ fn indexed_versioned_schema(unique_email: bool) -> DatabaseSchema {
     .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
     .with_index(email_index)
     .with_index(IndexSchema::new("items_by_active", ["active"]))
-    .with_schema_version(1, ["email", "id"])
-    .with_schema_version(2, ["id", "email", "active"])])
+    .with_variant(1, ["email", "id"])
+    .with_variant(2, ["id", "email", "active"])])
 }
 
 #[test]
@@ -264,7 +261,7 @@ fn variant_indices_span_versions_skip_missing_fields_and_survive_reopen()
         &[Value::String("first@example.com".into())],
     )?;
     assert_eq!(first.len(), 1);
-    assert_eq!(first[0].schema_version(), 1);
+    assert_eq!(first[0].variant_tag(), 1);
     assert_eq!(
         database
             .index_get("items", "items_by_active", &[Value::Bool(true)])?
@@ -327,7 +324,7 @@ fn variant_indices_span_versions_skip_missing_fields_and_survive_reopen()
         &[Value::String("second+old@example.com".into())],
     )?;
     assert_eq!(second.len(), 1);
-    assert_eq!(second[0].schema_version(), 1);
+    assert_eq!(second[0].variant_tag(), 1);
     assert_eq!(
         reopened
             .index_get("items", "items_by_active", &[Value::Bool(true)])?
@@ -389,7 +386,7 @@ fn active_variant_index_accepts_a_live_schema_version_without_rebuilding()
     )
     .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
     .with_index(IndexSchema::new("items_by_active", ["active"]))
-    .with_schema_version(1, ["email", "id"]);
+    .with_variant(1, ["email", "id"]);
     let schema = DatabaseSchema::new([table]);
     let storage = MemoryStorage::new(&schema.column_families());
     let mut database = Database::new(schema, storage)?;
@@ -398,10 +395,7 @@ fn active_variant_index_accepts_a_live_schema_version_without_rebuilding()
     let subscription_id = subscription.id();
     assert!(subscription.recv()?.is_empty());
 
-    database.register_table_schema_version(
-        "items",
-        TableSchemaVersion::new(2, ["id", "email", "active"]),
-    )?;
+    database.register_table_variant("items", TableVariant::new(2, ["id", "email", "active"]))?;
     assert_eq!(subscription.id(), subscription_id);
 
     let descriptor = RecordDescriptor::new([
@@ -412,7 +406,7 @@ fn active_variant_index_accepts_a_live_schema_version_without_rebuilding()
     let mut batch = database.open_batch();
     batch.insert(
         "items",
-        VersionedRecord::create(
+        VariantRecord::create(
             2,
             descriptor,
             &[
@@ -448,8 +442,8 @@ fn live_variant_index_backfills_existing_rows_without_perturbing_subscriptions()
         ],
     )
     .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
-    .with_schema_version(1, ["email", "id"])
-    .with_schema_version(2, ["id", "email", "active"]);
+    .with_variant(1, ["email", "id"])
+    .with_variant(2, ["id", "email", "active"]);
     let schema = DatabaseSchema::new([table.clone()]);
     let mut column_families = schema.column_families();
     column_families.push("indices");
@@ -466,7 +460,7 @@ fn live_variant_index_backfills_existing_rows_without_perturbing_subscriptions()
         )?;
     }
     let subscription =
-        database.subscribe_one_sink(GraphBuilder::variant_project("items", "reader"))?;
+        database.subscribe_one_sink(GraphBuilder::variant_source("items", "reader"))?;
     assert!(subscription.recv()?.is_empty());
 
     let mut batch = database.open_batch();
@@ -498,7 +492,7 @@ fn live_variant_index_backfills_existing_rows_without_perturbing_subscriptions()
     assert!(subscription.try_recv().is_err());
     let indexed = database.index_get("items", "items_by_active", &[Value::Bool(true)])?;
     assert_eq!(indexed.len(), 1);
-    assert_eq!(indexed[0].schema_version(), 2);
+    assert_eq!(indexed[0].variant_tag(), 2);
     assert_eq!(indexed[0].get("id")?, Value::U64(2));
 
     let mut batch = database.open_batch();
@@ -563,10 +557,10 @@ fn mixed_schema_versions_survive_replacement_and_reopen() -> Result<(), Box<dyn 
 
     let rows = database.primary_key_scan("items", &[])?;
     assert_eq!(rows.len(), 2);
-    assert_eq!(rows[0].schema_version(), 1);
+    assert_eq!(rows[0].variant_tag(), 1);
     assert_eq!(rows[0].get("title")?, Value::String("first".into()));
     assert!(rows[0].get("completed").is_err());
-    assert_eq!(rows[1].schema_version(), 2);
+    assert_eq!(rows[1].variant_tag(), 2);
     assert_eq!(rows[1].get("completed")?, Value::Bool(false));
 
     let mut batch = database.open_batch();
@@ -585,7 +579,7 @@ fn mixed_schema_versions_survive_replacement_and_reopen() -> Result<(), Box<dyn 
     let replaced = database
         .primary_key_get("items", &[Value::U64(1)])?
         .expect("updated row exists");
-    assert_eq!(replaced.schema_version(), 2);
+    assert_eq!(replaced.variant_tag(), 2);
     assert_eq!(
         replaced.get("title")?,
         Value::String("first, revised".into())
@@ -596,28 +590,29 @@ fn mixed_schema_versions_survive_replacement_and_reopen() -> Result<(), Box<dyn 
     let reopened = Database::new(versioned_schema(), storage)?;
     let rows = reopened.primary_key_scan("items", &[])?;
     assert_eq!(rows.len(), 2);
-    assert_eq!(rows[0].schema_version(), 2);
-    assert_eq!(rows[1].schema_version(), 2);
+    assert_eq!(rows[0].variant_tag(), 2);
+    assert_eq!(rows[1].variant_tag(), 2);
     assert_eq!(rows[1].get("completed")?, Value::Bool(false));
     Ok(())
 }
 
 #[test]
-fn version_header_is_fixed_width_and_validated_on_read() -> Result<(), Box<dyn std::error::Error>> {
+fn variant_header_is_canonical_varint_and_validated_on_read()
+-> Result<(), Box<dyn std::error::Error>> {
     let mut database = open_database()?;
+    let record = row(1, &[Value::String("first".into()), Value::U64(1)]);
+    let payload_len = record.raw().len();
     let mut batch = database.open_batch();
-    batch.insert(
-        "items",
-        row(1, &[Value::String("first".into()), Value::U64(1)]),
-    );
+    batch.insert("items", record);
     database.commit_batch(batch)?;
 
     let storage = database.into_storage();
     let entries = storage.prefix("items", b"")?;
     let (key, stored) = entries.first().expect("stored row");
-    assert_eq!(&stored[..8], &1_u64.to_le_bytes());
+    assert_eq!(stored[0], 1);
+    assert_eq!(stored.len(), payload_len + 1);
 
-    storage.set("items", key, &[1, 2, 3])?;
+    storage.set("items", key, &[0x80, 0x00])?;
     let reopened = Database::new(versioned_schema(), storage)?;
     assert!(matches!(
         reopened.primary_key_get("items", &[Value::U64(1)]),
@@ -634,7 +629,7 @@ fn writes_reject_unregistered_schema_versions() -> Result<(), Box<dyn std::error
     let mut batch = database.open_batch();
     batch.insert(
         "items",
-        VersionedRecord::new(
+        VariantRecord::new(
             3,
             groove::records::OwnedRecord::new(
                 Vec::new(),
@@ -644,7 +639,7 @@ fn writes_reject_unregistered_schema_versions() -> Result<(), Box<dyn std::error
     );
     assert!(matches!(
         database.commit_batch(batch),
-        Err(Error::UnknownTableSchemaVersion { table, version })
+        Err(Error::UnknownTableVariant { table, version })
             if table == "items" && version == 3
     ));
     Ok(())
@@ -657,10 +652,10 @@ fn explicit_registries_cannot_claim_reserved_version_zero() {
         [ColumnSchema::new("id", ColumnType::U64)],
     )
     .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
-    .with_schema_version(0, ["id"])]);
+    .with_variant(0, ["id"])]);
     let storage = MemoryStorage::new(&schema.column_families());
     assert!(matches!(
         Database::new(schema, storage),
-        Err(Error::ReservedTableSchemaVersion(table)) if table == "items"
+        Err(Error::ReservedTableVariant(table)) if table == "items"
     ));
 }

@@ -11,6 +11,14 @@ core. Amends `dev/RN_BINDING_REWRITE_DESIGN.md` (M1–M5, landed 2026-08-10);
 that document's architecture stands, this one records what the base branch
 changed underneath it and how the binding follows.
 
+2026-08-14 refresh: the pending merge advances the base another 262 commits to
+`24728c3a8`. The core now owns durability waiting through
+`Db::wait_for_transaction_with`, requires `NativeDb.onMutationError`, and
+publishes producer-owned terminal layouts alongside terminal operations. The
+RN actor, UniFFI surface, generated bindings, and TypeScript shim are realigned
+to all three contracts; focused host checks are recorded in the refreshed
+§13 receipt below.
+
 v1 → v2: owner review found six correctness blockers in v1 — snapshot wire
 shape, transaction keying, view release, mergeable transaction reads, the
 `connectUpstreamWithSession` consequence, and the landing-gate script — and
@@ -48,11 +56,12 @@ result fails to compile or, worse, compiles and mis-encodes the wire.
    optional async `request*PermissionAdvice*` members backed by a serving
    authority, with an adapter-side timeout.
 
-Implementation state: all 9 textual conflicts and the semantic realignment are
+Implementation state: all textual conflicts and both semantic realignments are
 resolved in the working tree. `binding_support`, `jazz-rn`, generated UniFFI
 bindings, the `jazz-tools` RN shim, transaction/schema-view/session surfaces,
-and the collision-resistant filename rule are implemented. The current validation
-receipt is in §13. Recovery points retained from the merge are tag
+async settlement, mutation-error delivery, terminal layouts, and the
+collision-resistant filename rule are implemented. The current validation
+receipt is in §13. Recovery points retained from the original merge are tag
 `pre-merge-backup-81f69f600` and patch `/tmp/merge-resolution.patch`.
 
 ## 2. Recorded decisions (made during the merge)
@@ -282,8 +291,9 @@ rewritten, except where this document records intentional behavior change.
    lengths equal row counts; JSON payload has `terminalOperations` and no
    `relation_delta`; **snapshot encodes exactly `(root_count, rows)` — a
    positional decode of the two fields round-trips** (§3.2).
-2. **Actor** (`cargo test -p jazz-rn`, host): existing lifecycle/poisoning/
-   waiter matrices unchanged; transaction tests re-keyed by `OpenBatchId`;
+2. **Actor** (`cargo test -p jazz-rn`, host): existing lifecycle/poisoning
+   matrices retained; write waiting realigned to the core-owned async
+   `Db::wait_for_transaction_with` contract; transaction tests re-keyed by `OpenBatchId`;
    new: attached-`RnTx`-drop preserves the owner batch; same batch attached
    from two views yields independent attachments (no collision, §4.2);
    **read-your-writes through both mergeable and exclusive batches with

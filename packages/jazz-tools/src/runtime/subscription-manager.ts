@@ -9,6 +9,7 @@ import type {
   ColumnDescriptor,
   NativeRowDelta,
   NativeTerminalOperation,
+  NativeTerminalRootLayout,
   SubscriptionWireDelta,
   Value,
   WasmRow,
@@ -18,8 +19,12 @@ import { HIDDEN_INCLUDE_COLUMN_PREFIX } from "./select-projection.js";
 import {
   decodeNativeRow,
   decodeNativeTerminalRow,
+  decodeNativeTerminalRowWithDescriptor,
+  compileNativeTerminalRootDecoder,
   logicalStorageColumns,
+  readDescriptor,
 } from "./native-runtime/native-row-codec.js";
+import { PostcardReader } from "./native-runtime/native-codec.js";
 
 const fatalUtf8Decoder = new TextDecoder("utf-8", { fatal: true });
 
@@ -59,6 +64,12 @@ type SubscriptionManagerSnapshot<T> = {
   terminalOccurrenceAddresses: Map<string, string>;
   orderedIds: string[];
   orderedIdIndex: Map<string, number>;
+  terminalRootDecoders: Map<string, TerminalRootDecoder>;
+};
+
+type TerminalRootDecoder = {
+  signature: string;
+  decode: (id: string, raw: Uint8Array) => WasmRow;
 };
 
 /**
@@ -237,6 +248,7 @@ export class SubscriptionManager<T extends { id: string }> {
   private terminalOccurrenceAddresses = new Map<string, string>();
   private orderedIds: string[] = [];
   private orderedIdIndex = new Map<string, number>();
+  private terminalRootDecoders = new Map<string, TerminalRootDecoder>();
 
   private removeId(id: string): void {
     const index = this.orderedIdIndex.get(id);
@@ -278,8 +290,9 @@ export class SubscriptionManager<T extends { id: string }> {
       const snapshot = this.snapshot(nativeColumns);
       try {
         if (reset) {
-          this.clear();
+          this.clearRows();
         }
+        this.registerTerminalRootLayouts(delta.terminalLayouts, nativeColumns);
         for (const key of [
           ...(delta.addedOccurrenceKeys ?? []),
           ...(delta.updatedOccurrenceKeys ?? []),
@@ -337,6 +350,7 @@ export class SubscriptionManager<T extends { id: string }> {
       terminalOccurrenceAddresses: new Map(this.terminalOccurrenceAddresses),
       orderedIds: [...this.orderedIds],
       orderedIdIndex: new Map(this.orderedIdIndex),
+      terminalRootDecoders: new Map(this.terminalRootDecoders),
     };
   }
 
@@ -346,6 +360,56 @@ export class SubscriptionManager<T extends { id: string }> {
     this.terminalOccurrenceAddresses = snapshot.terminalOccurrenceAddresses;
     this.orderedIds = snapshot.orderedIds;
     this.orderedIdIndex = snapshot.orderedIdIndex;
+    this.terminalRootDecoders = snapshot.terminalRootDecoders;
+  }
+
+  private registerTerminalRootLayouts(
+    layouts: readonly NativeTerminalRootLayout[] | undefined,
+    columns: readonly ColumnDescriptor[],
+  ): void {
+    for (const layout of layouts ?? []) {
+      const signature = JSON.stringify(layout);
+      const existing = this.terminalRootDecoders.get(layout.id);
+      if (existing) {
+        if (existing.signature !== signature) {
+          throw new Error(`terminal root layout ${layout.id} was redefined`);
+        }
+        continue;
+      }
+      const reader = new PostcardReader(Uint8Array.from(layout.rootDescriptor));
+      const descriptor = readDescriptor(reader);
+      if (!reader.done()) throw new Error("terminal root layout descriptor has trailing bytes");
+      this.terminalRootDecoders.set(layout.id, {
+        signature,
+        decode: compileNativeTerminalRootDecoder(layout, descriptor, columns),
+      });
+    }
+  }
+
+  private decodeNativeTerminalRoot(
+    id: string,
+    operation: NativeTerminalOperation,
+    columns: readonly ColumnDescriptor[],
+    raw: Uint8Array,
+  ): WasmRow {
+    if (operation.rootLayoutId) {
+      const decoder = this.terminalRootDecoders.get(operation.rootLayoutId);
+      if (!decoder) {
+        throw new Error(
+          `terminal operation references unknown root layout ${operation.rootLayoutId}`,
+        );
+      }
+      return decoder.decode(id, raw);
+    }
+    // Kept solely for older test fixtures and a mixed-version native addon.
+    // Current Rust producers publish a layout before emitting any operation.
+    if (!operation.rootDescriptor) {
+      throw new Error("terminal operation is missing its root descriptor or layout ID");
+    }
+    const reader = new PostcardReader(Uint8Array.from(operation.rootDescriptor));
+    const descriptor = readDescriptor(reader);
+    if (!reader.done()) throw new Error("terminal root descriptor has trailing bytes");
+    return decodeNativeTerminalRowWithDescriptor(id, descriptor, columns, raw);
   }
 
   private handleTerminalOperations(
@@ -355,15 +419,12 @@ export class SubscriptionManager<T extends { id: string }> {
   ): SubscriptionDelta<T> {
     const beforeIndices = new Map(this.orderedIdIndex);
     const affectedRoots = new Set<string>();
-    const rootInserts = operations.filter(
-      (operation) => operation.path.length === 0 && "Insert" in operation.edit,
-    );
-
     // Pre-establish only newly inserted root payloads so child-before-root
     // batches are addressable. Positional insertion remains in producer order:
     // applying its index before an earlier root Remove makes the outcome depend
     // on operation-key ordering.
-    for (const operation of rootInserts) {
+    for (const operation of operations) {
+      if (operation.path.length !== 0 || !("Insert" in operation.edit)) continue;
       const rootId = this.terminalAddress(operation.root_key);
       const rootRowId = terminalPayloadRowId(operation.root_key);
       const edit = operation.edit;
@@ -371,7 +432,12 @@ export class SubscriptionManager<T extends { id: string }> {
       if (!("Insert" in edit)) throw new Error("terminal root insert partition is invalid");
       this.terminalRows.set(
         rootId,
-        decodeNativeTerminalRow(rootRowId, rootColumns, Uint8Array.from(edit.Insert.value)),
+        this.decodeNativeTerminalRoot(
+          rootRowId,
+          operation,
+          rootColumns,
+          Uint8Array.from(edit.Insert.value),
+        ),
       );
     }
 
@@ -393,8 +459,9 @@ export class SubscriptionManager<T extends { id: string }> {
           }
           this.terminalRows.set(
             rootId,
-            decodeNativeTerminalRow(
+            this.decodeNativeTerminalRoot(
               terminalPayloadRowId(operation.root_key),
+              operation,
               rootColumns,
               Uint8Array.from(edit.Update.value),
             ),
@@ -657,6 +724,11 @@ export class SubscriptionManager<T extends { id: string }> {
    * Called when unsubscribing to free memory.
    */
   clear(): void {
+    this.clearRows();
+    this.terminalRootDecoders.clear();
+  }
+
+  private clearRows(): void {
     this.currentResults.clear();
     this.terminalRows.clear();
     this.terminalOccurrenceAddresses.clear();

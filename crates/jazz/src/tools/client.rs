@@ -1765,21 +1765,11 @@ fn json_claim_to_core_value(value: serde_json::Value) -> Result<CoreValue> {
         serde_json::Value::Bool(value) => Ok(CoreValue::Bool(value)),
         serde_json::Value::String(value) => Ok(CoreValue::String(value)),
         serde_json::Value::Number(value) => {
-            if let Some(value) = value.as_u64() {
-                u32::try_from(value)
-                    .map(CoreValue::U32)
-                    .or(Ok(CoreValue::U64(value)))
-            } else if let Some(value) = value.as_i64() {
-                i32::try_from(value)
-                    .map(|value| CoreValue::I64(i64::from(value)))
-                    .or(Ok(CoreValue::I64(value)))
-            } else if let Some(value) = value.as_f64() {
-                Ok(CoreValue::F64(value))
-            } else {
-                Err(JazzError::Connection(
-                    "JWT claim number is not representable".to_string(),
-                ))
-            }
+            crate::tools::policy_claims::json_number_to_policy_claim(
+                value,
+                crate::tools::policy_claims::NumericClaimOrigin::ExactJson,
+            )
+            .map_err(JazzError::Connection)
         }
         serde_json::Value::Array(values) => values
             .into_iter()
@@ -2104,7 +2094,11 @@ fn aggregate_public_values(
     let Some(aggregate) = &query.aggregate else {
         return Ok(Vec::new());
     };
-    let mut columns: Vec<(String, Option<ColumnType>)> = Vec::new();
+    // Aggregate result descriptors are compiler records, not public table
+    // rows. Like all compiler records, their application-facing fields carry
+    // the `user_` prefix. Keep the public label only for diagnostics and
+    // translate the lookup to that physical field name at this boundary.
+    let mut columns: Vec<(String, String, Option<ColumnType>)> = Vec::new();
     if let Some(group_by) = &aggregate.group_by {
         let idx = table_schema.columns.column_index(group_by).ok_or_else(|| {
             JazzError::Query(format!(
@@ -2114,12 +2108,15 @@ fn aggregate_public_values(
         })?;
         columns.push((
             group_by.clone(),
+            crate::node::query_engine::user_column_field(group_by),
             Some(table_schema.columns.columns[idx].column_type.clone()),
         ));
     }
     for output in &aggregate.outputs {
+        let public_name = aggregate_output_name(output);
         columns.push((
-            aggregate_output_name(output),
+            public_name.clone(),
+            crate::node::query_engine::aggregate_output_app_field(&public_name),
             aggregate_output_column_type(output, table_schema, query.table.as_str())?,
         ));
     }
@@ -2127,9 +2124,11 @@ fn aggregate_public_values(
     let borrowed = crate::groove::records::BorrowedRecord::new(raw, descriptor);
     columns
         .into_iter()
-        .map(|(column, column_type)| {
-            let idx = descriptor.field_index(&column).ok_or_else(|| {
-                JazzError::Query(format!("aggregate row missing column {column}"))
+        .map(|(public_column, physical_column, column_type)| {
+            let idx = descriptor.field_index(&physical_column).ok_or_else(|| {
+                JazzError::Query(format!(
+                    "aggregate row missing column {public_column} (physical field {physical_column})"
+                ))
             })?;
             let value = borrowed
                 .get_idx(idx)
@@ -3304,6 +3303,23 @@ mod tests {
             public_to_core_value(Value::Integer(0)).expect("encode zero"),
             CoreValue::I32(0)
         );
+    }
+
+    #[test]
+    fn client_session_claim_numbers_match_admission_classification() {
+        assert_eq!(
+            json_claim_to_core_value(json!(7)).unwrap(),
+            CoreValue::U64(7)
+        );
+        assert_eq!(
+            json_claim_to_core_value(json!(-7)).unwrap(),
+            CoreValue::I64(-7)
+        );
+        assert_eq!(
+            json_claim_to_core_value(json!(9_007_199_254_740_992_u64)).unwrap(),
+            CoreValue::U64(9_007_199_254_740_992)
+        );
+        assert!(json_claim_to_core_value(json!({ "role": "admin" })).is_err());
     }
 
     // This narrow internal test is necessary because the wire crossing is an

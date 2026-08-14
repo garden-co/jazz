@@ -7,11 +7,12 @@
 uniffi::setup_scaffolding!();
 
 mod actor;
+mod mutation_errors;
 mod scheduler;
 
 use std::future::Future;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
 
 use base64::Engine;
 use futures::FutureExt;
@@ -75,6 +76,8 @@ pub struct RnSubscriptionEvent {
     /// string and the TypeScript shim parses it — the same treatment
     /// `reason_json` gets.
     pub terminal_operations_json: Option<String>,
+    /// Producer-owned terminal root layouts referenced by operations, as JSON.
+    pub terminal_layouts_json: Option<String>,
     /// Read-tier settlement marker for delta events.
     pub settled: Option<bool>,
     /// Durability tier for delta events.
@@ -225,6 +228,13 @@ pub trait TickSchedulerCallback: Send + Sync {
     fn on_tick_needed(&self, urgency: String);
 }
 
+/// Called from the detached notifier for an unhandled rejected write.
+#[uniffi::export(callback_interface)]
+pub trait MutationErrorCallback: Send + Sync {
+    /// Deliver one camelCase `MutationErrorEvent` JSON object.
+    fn on_mutation_error(&self, event_json: String);
+}
+
 /// A React Native database backed by one dedicated Jazz actor thread.
 #[derive(uniffi::Object)]
 pub struct RnDb {
@@ -282,6 +292,16 @@ impl RnDb {
     ) -> Result<(), JazzRnError> {
         with_panic_boundary("RnDb.set_tick_scheduler", || {
             self.actor.set_tick_scheduler(callback)
+        })
+    }
+
+    /// Register the callback for rejected writes not consumed by an active wait.
+    pub fn on_mutation_error(
+        &self,
+        callback: Box<dyn MutationErrorCallback>,
+    ) -> Result<(), JazzRnError> {
+        with_panic_boundary("RnDb.on_mutation_error", || {
+            self.actor.on_mutation_error(self.view, callback)
         })
     }
 
@@ -1173,12 +1193,24 @@ impl RnWrite {
         })
     }
 
-    /// Check whether the write has reached the requested durability tier.
-    pub fn wait(&self, tier: String) -> Result<(), JazzRnError> {
-        with_panic_boundary("RnWrite.wait", || {
+    /// Wait until the write reaches the requested durability tier or is rejected.
+    pub async fn wait(&self, tier: String) -> Result<(), JazzRnError> {
+        with_async_panic_boundary("RnWrite.wait", || async {
             self.ensure_open()?;
-            self.actor.wait_for_write(self.id, tier)
+            let (id, receiver) = self.actor.wait_for_write(self.id, tier)?;
+            let registration = WriteWaitRegistration {
+                actor: Arc::clone(&self.actor),
+                id,
+            };
+            let signal = receiver.await.map_err(|_| closed_error())?;
+            drop(registration);
+            match signal {
+                WaiterSignal::Completed(result) => result,
+                WaiterSignal::Closed => Err(closed_error()),
+                WaiterSignal::Poisoned(reason) => Err(poisoned_error(reason)),
+            }
         })
+        .await
     }
 
     /// Return the current write state as JSON.
@@ -1186,19 +1218,6 @@ impl RnWrite {
         with_panic_boundary("RnWrite.write_state", || {
             self.ensure_open()?;
             self.actor.write_state(self.id)
-        })
-    }
-
-    /// Synchronously register a one-shot state-transition waiter.
-    pub fn register_write_state_waiter(&self) -> Result<Arc<RnWriteStateWaiter>, JazzRnError> {
-        with_panic_boundary("RnWrite.register_write_state_waiter", || {
-            self.ensure_open()?;
-            let (id, receiver) = self.actor.register_write_state_waiter(self.id)?;
-            Ok(Arc::new(RnWriteStateWaiter {
-                actor: Arc::clone(&self.actor),
-                id,
-                receiver: Mutex::new(Some(receiver)),
-            }))
         })
     }
 
@@ -1219,42 +1238,12 @@ impl Drop for RnWrite {
     }
 }
 
-/// An eagerly registered write-state wake primitive.
-#[derive(uniffi::Object)]
-pub struct RnWriteStateWaiter {
+struct WriteWaitRegistration {
     actor: Arc<ActorHandle>,
     id: u64,
-    receiver: Mutex<Option<futures::channel::oneshot::Receiver<WaiterSignal>>>,
 }
 
-#[uniffi::export]
-impl RnWriteStateWaiter {
-    /// Await the already-registered state transition.
-    pub async fn wait(&self) -> Result<(), JazzRnError> {
-        with_async_panic_boundary("RnWriteStateWaiter.wait", || async {
-            let receiver = self
-                .receiver
-                .lock()
-                .map_err(|_| JazzRnError::Internal {
-                    message: "write-state waiter lock poisoned".to_owned(),
-                })?
-                .take()
-                .ok_or_else(|| JazzRnError::Runtime {
-                    message: "write-state waiter was already awaited".to_owned(),
-                })?;
-            let signal = receiver.await.map_err(|_| closed_error())?;
-            self.actor.release_waiter(self.id);
-            match signal {
-                WaiterSignal::Changed => Ok(()),
-                WaiterSignal::Closed => Err(closed_error()),
-                WaiterSignal::Poisoned(reason) => Err(poisoned_error(reason)),
-            }
-        })
-        .await
-    }
-}
-
-impl Drop for RnWriteStateWaiter {
+impl Drop for WriteWaitRegistration {
     fn drop(&mut self) {
         self.actor.release_waiter(self.id);
     }
@@ -1626,8 +1615,7 @@ mod tests {
                 Some(1_000.0),
             )
             .expect("insert offline row");
-        write
-            .wait("local".to_owned())
+        futures::executor::block_on(write.wait("local".to_owned()))
             .expect("write reaches local durability");
         let (_, expected_tx): (RowUuid, TxId) =
             postcard::from_bytes(&write.payload().expect("read write payload"))
@@ -1661,15 +1649,16 @@ mod tests {
         for (kind, node) in [("mergeable", 0x61), ("exclusive", 0x62)] {
             let db = open_memory_with(encoded_schema(), node);
             let existing_id = RowUuid::from_bytes([0x11; 16]);
-            db.insert_with_id_encoded(
-                "todos".to_owned(),
-                existing_id.to_bytes(),
-                encoded_cells_with_title("existing"),
-                None,
-            )
-            .expect("insert existing row")
-            .wait("local".to_owned())
-            .expect("existing row reaches local durability");
+            let existing_write = db
+                .insert_with_id_encoded(
+                    "todos".to_owned(),
+                    existing_id.to_bytes(),
+                    encoded_cells_with_title("existing"),
+                    None,
+                )
+                .expect("insert existing row");
+            futures::executor::block_on(existing_write.wait("local".to_owned()))
+                .expect("existing row reaches local durability");
 
             let batch = OpenBatchId::new().to_string();
             db.begin_transaction(batch.clone(), kind.to_owned(), None)
@@ -1994,12 +1983,8 @@ mod tests {
             .expect("insert session row");
         for _ in 0..8 {
             pump_session(&client, &transport, &mut server, session);
-            if write.wait("global".to_owned()).is_ok() {
-                break;
-            }
         }
-        write
-            .wait("global".to_owned())
+        futures::executor::block_on(write.wait("global".to_owned()))
             .expect("session write reaches core authority");
         assert!(server.metrics_snapshot().frames_received > 0);
         transport.close().expect("close client transport");

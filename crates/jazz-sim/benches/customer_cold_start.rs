@@ -11,7 +11,7 @@ use jazz::db::{
     Db, DbConfig, DbIdentity, InitialSyncFlushCadence, Node, ReadOpts, SeededRowIdSource,
     SubscriptionEvent, SubscriptionStream, Transport,
 };
-use jazz::groove::records::{EnumSchema, Value};
+use jazz::groove::records::{ScalarEnumSchema, Value};
 use jazz::groove::schema::{ColumnSchema, ColumnType};
 use jazz::groove::storage::{Durability, RocksDbStorage};
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
@@ -238,10 +238,10 @@ mod alloc_metrics {
     }
 }
 
-#[cfg(any(all(
+#[cfg(all(
     not(feature = "bench-alloc-metrics"),
     not(feature = "bench-alloc-sites")
-)))]
+))]
 mod alloc_metrics {
     #[derive(Clone, Copy, Debug, Default)]
     pub struct Snapshot {
@@ -691,14 +691,14 @@ impl CodecProbe {
             *self.per_message_zstd_bytes.get_or_insert(0) += compressed.len() as u64;
             let _ = jazz::wire::decompress_sync_payload(&compressed, active);
         }
-        if self.zstd_stream.is_none() {
-            if let (Ok(encoder), Ok(decoder)) = (
+        if self.zstd_stream.is_none()
+            && let (Ok(encoder), Ok(decoder)) = (
                 WireStreamEncoder::new(FEATURE_PAYLOAD_ZSTD),
                 WireStreamDecoder::new(FEATURE_PAYLOAD_ZSTD),
-            ) {
-                self.zstd_stream = Some((encoder, decoder));
-                self.streaming_zstd_bytes = Some(0);
-            }
+            )
+        {
+            self.zstd_stream = Some((encoder, decoder));
+            self.streaming_zstd_bytes = Some(0);
         }
         if let Some((encoder, decoder)) = &mut self.zstd_stream {
             let encode_start = Instant::now();
@@ -710,14 +710,14 @@ impl CodecProbe {
                 self.streaming_zstd_decode_ns += decode_start.elapsed().as_nanos() as u64;
             }
         }
-        if self.lz4_stream.is_none() {
-            if let (Ok(encoder), Ok(decoder)) = (
+        if self.lz4_stream.is_none()
+            && let (Ok(encoder), Ok(decoder)) = (
                 WireStreamEncoder::new(FEATURE_PAYLOAD_LZ4),
                 WireStreamDecoder::new(FEATURE_PAYLOAD_LZ4),
-            ) {
-                self.lz4_stream = Some((encoder, decoder));
-                self.streaming_lz4_bytes = Some(0);
-            }
+            )
+        {
+            self.lz4_stream = Some((encoder, decoder));
+            self.streaming_lz4_bytes = Some(0);
         }
         if let Some((encoder, decoder)) = &mut self.lz4_stream {
             let encode_start = Instant::now();
@@ -778,12 +778,12 @@ impl Transport for DuplexTransport {
             }
             entry.result_adds += result_member_adds.len() as u64;
         }
-        if let SyncMessage::Subscribe(subscribe) = &message {
-            if subscribe.known_state.is_some() {
-                self.metrics
-                    .known_state_subscribes
-                    .set(self.metrics.known_state_subscribes.get() + 1);
-            }
+        if let SyncMessage::Subscribe(subscribe) = &message
+            && subscribe.known_state.is_some()
+        {
+            self.metrics
+                .known_state_subscribes
+                .set(self.metrics.known_state_subscribes.get() + 1);
         }
         #[cfg(feature = "cold-settle-attribution")]
         let probe_start = Instant::now();
@@ -837,7 +837,7 @@ fn duplex_counted() -> CountedDuplex {
 }
 
 fn schema() -> JazzSchema {
-    let mut tables = Vec::new();
+    let mut tables = Vec::with_capacity(5);
     tables.push(TableSchema::new(
         ORG,
         [
@@ -977,7 +977,7 @@ fn resource_columns() -> [ColumnSchema; 13] {
 }
 
 fn role_type(name: &str) -> ColumnType {
-    ColumnType::Enum(EnumSchema::new(name, ["viewer", "editor", "manager"]).unwrap())
+    ColumnType::EnumTag(ScalarEnumSchema::new(name, ["viewer", "editor", "manager"]).unwrap())
 }
 
 fn resource_policy(table: &str, access_table: &str) -> Option<Query> {
@@ -1282,7 +1282,7 @@ fn resource_access_group(
         // Another direct visible resource kind without children so the member
         // slice is not child-only.
         ("res_e", 0) => groups[2],
-        _ if spec.table == "res_n" || edge_index % 5 == 0 => groups[34 + (edge_index % 4)],
+        _ if spec.table == "res_n" || edge_index.is_multiple_of(5) => groups[34 + (edge_index % 4)],
         _ => groups[(edge_index + kind) % 34],
     }
 }
@@ -1997,7 +1997,7 @@ fn group_access_cells(group: RowUuid, user: RowUuid, i: usize) -> BTreeMap<Strin
     BTreeMap::from([
         ("group_id".to_owned(), Value::Uuid(group.0)),
         ("user_id".to_owned(), Value::Uuid(user.0)),
-        ("role".to_owned(), Value::Enum((i % 3) as u8)),
+        ("role".to_owned(), Value::EnumTag((i % 3) as u8)),
     ])
 }
 
@@ -2072,7 +2072,7 @@ fn resource_access_cells(resource: RowUuid, group: RowUuid, i: usize) -> BTreeMa
     BTreeMap::from([
         ("resource".to_owned(), Value::Uuid(resource.0)),
         ("team".to_owned(), Value::Uuid(group.0)),
-        ("grant_role".to_owned(), Value::Enum((i % 3) as u8)),
+        ("grant_role".to_owned(), Value::EnumTag((i % 3) as u8)),
         ("administrator".to_owned(), Value::Bool(false)),
     ])
 }
@@ -2121,8 +2121,8 @@ fn child_counts(total: usize, parents: usize) -> Vec<usize> {
         return Vec::new();
     }
     let mut counts = vec![total / parents; parents];
-    for i in 0..(total % parents) {
-        counts[i] += 1;
+    for count in counts.iter_mut().take(total % parents) {
+        *count += 1;
     }
     counts
 }

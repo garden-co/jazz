@@ -46,6 +46,8 @@ Invariant digest:
 - `INV-LOWER-24`: Dry-run policy probes and recursion seed hydration MUST use the same deterministic source access-path selection as ordinary one-shot reads, with equivalence to the full-scan path and counters proving the selected path.
 - `INV-LOWER-25`: A lens-projected maintained source MUST emit the same net weighted current-row and witness deltas as applying the selected natural lens path to the authoritative source.
 - `INV-LOWER-26`: A structured query MUST expose one authoritative terminal output relation. Groove MUST assemble nested paths into that terminal; a child change semantically replaces or patches its owning root output, and public carriers MUST NOT require a second relation-edge delta stream.
+- `INV-LOWER-27`: An enum case's authored discriminant is scoped to its row `SchemaVersionId`; lowering MUST translate it through the persistent case identity of its physical occurrence before using a local storage tag, predicate, grouping key, or ordering key.
+- `INV-LOWER-28`: An additive enum case MUST be a row-level incompatibility for an older read schema, never a query or subscription error. For a current read, Global/Ahead candidates first choose their single canonical winner; the compatibility boundary then removes that unrepresentable winner before any semantic consumer (filter, ordering, grouping, aggregation, policy, relation requirement, pagination, or maintained delta) observes it. It MUST NOT fall back to an older compatible candidate. Unused enum occurrences remain undecoded and do not affect row visibility.
 
 ## Details
 
@@ -81,6 +83,75 @@ the recovered physical lineages (ch. 2, `INV-DATA-20`).
 Wire identities remain UUIDs. Lowered storage may intern those identities into
 node-local `u64` aliases in `jazz_nodes`/`jazz_schema_versions`, but those
 aliases must never appear on the wire (ch. 2, `INV-LOWER-3`).
+
+### 14.2.1 Concurrent enum cases
+
+Jazz explicitly permits concurrent schema versions. Therefore every compact enum
+discriminant in a wire row is an **authored ordinal**, qualified by the
+row's `SchemaVersionId`; it is not a global enum tag. For every physical enum
+occurrence, including a payload enum case and recursively inside its payload,
+the semantic identity of a case is its `GlobalCaseId`:
+
+```text
+(introducing SchemaVersionId, introducing authored ordinal)
+```
+
+An inherited case retains the identity of the schema version that introduced it.
+For example, if a base schema declares `draft` and `published`, concurrent
+children A and B may both declare authored ordinal `2`, respectively `archived`
+and `snoozed`. They are distinct cases: `(A, 2)` and `(B, 2)`. A later merge
+schema maps both into its own authored ordinal space. The physical column
+occurrence is part of every lookup of that identity; similarly named cases in
+different columns never share a registry.
+
+The catalogue supplies the evidence for the introducing schema and its lineage.
+Active catalogue subsets are dense prefixes: a receiver parks a later envelope
+until every earlier `CatalogueSeq` has activated. Thus a node interns cases in
+authoritative catalogue order, never arbitrary network receipt order, and that
+order remains append-only as its prefix grows. A node may assign durable dense
+local tags after resolving `GlobalCaseId`, but it must persist the
+mapping and translate at the wire/storage and storage/projection boundaries.
+The compact wire representation remains `SchemaVersionId + authored ordinal`,
+because the row already carries the former; values which escape that row context
+(for example standalone parameters or caches) must carry equivalent schema or
+case context.
+
+For ordering, a node uses the target schema's current representable case view.
+Within that view an ancestrally earlier introduction MUST sort before a later
+introduction. Concurrent siblings have no ancestral order, so their order is the
+deterministic lexicographic order of their introducing `SchemaVersionId` followed
+by the introducing ordinal. This is a semantic tie-break, not local arrival order.
+It is optimized into the physical registry ordinal assigned by the authoritative
+catalogue prefix; a partial node must preserve that order for every case it can
+represent.
+
+Payload-enum projection preserves the selected payload record while remapping
+its case tag. Same-name cases from independent schemas are distinct identities;
+incompatible payload layouts reject rather than merge. The same translation
+recurs at nested enum occurrences.
+
+Projection from a physical case back into an authored schema is non-total. If a
+query does not read, filter, join, order, group, authorize, or otherwise require
+that occurrence, the row remains usable without decoding it. If a query
+semantically requires a case absent from its target schema, the physical source
+MUST deterministically omit that row before pagination, aggregation, or any
+maintained-view delta processing. It MUST NOT surface an old-client query or
+subscription error, substitute an old case, or invent a default. A policy
+dependency is fail-closed and therefore also omits the row. An optional relation
+or include may omit only its incompatible child while retaining its readable
+parent; a required relation follows its explicit requirement semantics. Equality
+against a known case consequently treats an absent newer case as non-matching.
+
+_Further invariant._ `INV-LOWER-27` — local enum tags are only interned
+representations of schema-qualified case identities; simultaneous sibling ordinal
+allocations cannot alias one another.
+
+_Further invariant._ `INV-LOWER-28` — enum compatibility is evaluated at the
+source boundary immediately after Global/Ahead currentness selection (or after
+the equivalent historical/branch winner materialization), so one-shot and
+maintained reads have the same row-membership semantics. A later incompatible
+winner retracts rather than exposing a stale compatible predecessor, and no
+downstream operator can turn it into a runtime failure.
 
 _Further invariants._ `INV-LOWER-2`, `INV-LOWER-4` — content and deletion lower
 to distinct tables belonging to the resolved `PhysicalTableId`, each with PK
@@ -268,7 +339,8 @@ new schema variant. Historical current reads with filters and joins lower throug
 the shared clause layer over a historical source; historical reachable still
 requires source-aware reachable lowering. These staged source gaps must not
 create a second query algebra. `INV-LOWER-11` — prepared lowering rejects `!=`
-parameter predicates until supported.
+parameter predicates only when their operand types are invalid; valid parameter
+inequality predicates lower with the same semantics as literal execution.
 
 ### 14.5 Sync views & exclusive validation → groove
 

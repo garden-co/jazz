@@ -17,38 +17,8 @@ env:
   CACHE_SCOPE_REPOSITORY_ID: ${{ github.event.pull_request.head.repo.id || github.repository_id }}
 
 jobs:
-  # Does the integration branch still compile after a merge?
-  #
-  # PR-level checks cannot answer this. Each PR is built against the base as it
-  # was, so two PRs that are individually green can merge cleanly and produce a
-  # tree that does not build. That happened on 2026-07-29: one PR removed
-  # `RecursionBound::iteration_cap`, another kept a call to it, neither
-  # conflicted, and `codex/jazz-core-engine-swap` was left unable to compile —
-  # unnoticed until it broke unrelated work hours later.
-  #
-  # Deliberately narrow. The full suites are not yet green, so gating on them
-  # would force routine overrides and make "red" meaningless. This checks the
-  # one property we can guarantee, and is fast and flake-free. Promote the other
-  # jobs to gates individually as each goes green.
-  build-integration:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-
-      - uses: ./.github/actions/setup-build
-        with:
-          rust-targets: wasm32-unknown-unknown
-          sccache: "true"
-
-      - name: Install Rust prerequisites
-        run: pnpm run ensure:rust-toolchain
-
-      - run: cargo check --workspace --all-targets
-      - run: dev/gates/rn-bindings-fresh.sh
-
   lint:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || github.event.pull_request.user.login == 'dependabot[bot]') && 'blacksmith-4vcpu-ubuntu-2404' || 'jazz-ci' }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -59,15 +29,15 @@ jobs:
           rust-components: clippy,rustfmt
           sccache: "true"
 
-      - name: Install Rust prerequisites
-        run: pnpm run ensure:rust-toolchain
-
       - run: pnpm format:check
       - run: pnpm lint
-      - run: cargo clippy --workspace -- -D warnings
+      # Keep workflow assertions required without adding another Rust build.
+      - run: pnpm test:ci-workflow
+      - name: Verify Turbo artifact cache inputs
+        run: pnpm test:turbo-cache-inputs
 
   test-rust:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || github.event.pull_request.user.login == 'dependabot[bot]') && 'blacksmith-4vcpu-ubuntu-2404' || 'jazz-ci' }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -75,14 +45,14 @@ jobs:
       - uses: ./.github/actions/setup-build
         with:
           rust-targets: wasm32-unknown-unknown
-          rust-components: clippy,rustfmt
           sccache: "true"
 
-      - name: Install Rust prerequisites
-        run: pnpm run ensure:rust-toolchain
-
       - name: Install bounded Rust test runner
-        run: cargo install cargo-nextest --locked
+        uses: ./.github/actions/install-rust-tool
+        with:
+          # Download the release asset rather than compiling the runner in
+          # every job. Keep this explicit so test selection is reproducible.
+          tool: cargo-nextest@0.9.143
       - name: Workspace Rust tests (bounded, sharded, receipted)
         run: node dev/gates/run-rust-tests.mjs --timeout-seconds 780 -- --workspace --lib --bins --tests --features test
       - name: Verify Nextest partition coverage
@@ -100,13 +70,13 @@ jobs:
       # count. Builds reuse the workspace test build above.
       - name: Differential gates
         run: |
-          cargo test -p jazz --test incremental_delivery_canary
-          cargo test -p jazz --test shared_coverage_differential
-          cargo test -p jazz --test warm_reopen_differential
+          # The three integration-test binaries above are already selected by
+          # the workspace runner's `--tests` argument. Keep the M3 oracle
+          # separate: its CI seed count is wider than the default test run.
           JAZZ_SEED_COUNT=50 cargo test -p jazz m3_maintained_one_shot_differential_oracle
 
   test-ts:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || github.event.pull_request.user.login == 'dependabot[bot]') && 'blacksmith-4vcpu-ubuntu-2404' || 'jazz-ci' }}
     timeout-minutes: 20
     # JAZZ_NAPI_RELEASE=0 (debug builds) removed 2026-07-19: debug-profile
     # jazz-napi .node files fail dlopen on the Linux runners deterministically
@@ -118,38 +88,52 @@ jobs:
       - uses: ./.github/actions/setup-build
         with:
           rust-targets: wasm32-unknown-unknown
-          rust-components: clippy,rustfmt
           sccache: "true"
+          sccache-sticky-disk: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || github.event.pull_request.user.login == 'dependabot[bot]') && 'true' || 'false' }}
 
-      - name: Install Rust prerequisites
-        run: pnpm run ensure:rust-toolchain
+      # Keep the integration-branch compile gate, but run it as the first
+      # phase of this trusted-runner job. Keeping it here avoids a separate
+      # checkout/setup phase on the PR critical path.
+      #
+      # PR-level checks cannot catch two independently green PRs whose merged
+      # tree no longer compiles. This runs on every push to the integration
+      # branch before building the TypeScript correctness artifacts.
+      - name: Check integration workspace
+        run: cargo check --workspace --all-targets
+
+      - name: Verify React Native bindings are fresh
+        run: dev/gates/rn-bindings-fresh.sh
+
+      - name: Install WASM packager
+        # Only this job builds jazz-wasm. Other Rust jobs receive their target
+        # through setup-build but do not pay to install the packager.
+        uses: ./.github/actions/install-rust-tool
+        with:
+          tool: wasm-pack@0.13.1
 
       - name: Mount Turbo sticky disk
+        if: github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || github.event.pull_request.user.login == 'dependabot[bot]')
         uses: useblacksmith/stickydisk@13af8883542ca949a717e70fef89d15edbb29d88 # v1
         with:
           key: turbo-cache-${{ env.CACHE_SCOPE_REPOSITORY_ID }}-${{ runner.os }}-v1
           path: ${{ github.workspace }}/.turbo/cache
 
-      - run: pnpm build:ci
-      # Turbo cache hits have reproducibly restored jazz-napi without a loadable
-      # .node binding (CI rounds 9/9-rerun, 2026-07-19); verify and force-rebuild
-      # if needed. See dev/CI_NOTES.md.
-      # Cached jazz-napi archives have restored .node files that fail dlopen
-      # (likely sticky-disk corruption across concurrent runs); build the
-      # binding fresh and verify it loads. Tests then run with --only so no
-      # turbo build dependency can restore a cached artifact over it.
-      - name: Rebuild and verify jazz-napi native binding
-        run: |
-          pnpm turbo run build --filter=jazz-napi --force
-          node -e "require('./crates/jazz-napi')"
+      # Correctness tests use an unoptimised, provenance-checked WASM build.
+      # Package/publish workflows continue to use jazz-wasm's release build.
+      # The script reuses the restored default Cargo target, runs NAPI alone on
+      # the 4-vCPU runner, then overlaps CLI with fast WASM. It only repairs
+      # NAPI if its first load check proves the artifact unusable.
+      - name: Build correctness-test artifacts
+        run: pnpm build:test-artifacts
       - name: Mount Playwright sticky disk
+        if: github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || github.event.pull_request.user.login == 'dependabot[bot]')
         uses: useblacksmith/stickydisk@13af8883542ca949a717e70fef89d15edbb29d88 # v1
         with:
           key: playwright-browsers-${{ env.CACHE_SCOPE_REPOSITORY_ID }}-${{ runner.os }}-v1
           path: /home/runner/.cache/ms-playwright
       - run: pnpm exec playwright install chromium
-      - name: Run Node and browser test suites
-        run: |
-          pnpm test --filter=!moon-lander-react --filter=!@jazz/rust --filter=!auth-simple-chat --filter=!auth-workos-chat --filter=!auth-betterauth-chat --filter=!chat-react --filter=!world-tour --filter=!jazz-rn --concurrency=2 || status=1
-          pnpm --filter jazz-tools test:browser || status=1
-          exit "${status:-0}"
+      # Both suites consume the already-built artifacts and do not write shared
+      # outputs. Running them together avoids extending the PR critical path
+      # while retaining the complete Node and browser coverage in this gate.
+      - name: Run Node and browser test suites in parallel
+        run: dev/gates/run-ts-tests.sh

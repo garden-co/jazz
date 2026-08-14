@@ -61,6 +61,7 @@ fn collect_binding_source_fingerprint(graph: &GraphBuilder, sources: &mut BTreeS
         }
         GraphBuilder::Filter { input, .. }
         | GraphBuilder::UnwrapNullable { input, .. }
+        | GraphBuilder::VariantProject { input, .. }
         | GraphBuilder::Unnest { input, .. }
         | GraphBuilder::Project { input, .. }
         | GraphBuilder::ArgMaxBy { input, .. }
@@ -110,6 +111,7 @@ fn graph_any(graph: &GraphBuilder, predicate: &impl Fn(&GraphBuilder) -> bool) -
         }
         GraphBuilder::Filter { input, .. }
         | GraphBuilder::UnwrapNullable { input, .. }
+        | GraphBuilder::VariantProject { input, .. }
         | GraphBuilder::Unnest { input, .. }
         | GraphBuilder::Project { input, .. }
         | GraphBuilder::ArgMaxBy { input, .. }
@@ -868,6 +870,160 @@ fn compiler_boundary_has_no_usage_or_lifecycle_mode() {
     );
 }
 
+/// Closure hops must retain their executable parent keys even when sparse
+/// public projection asks for only the root title.
+///
+/// system ──reads roots.{project, backup, members, owner}──► closure targets
+#[test]
+fn closure_requirements_merge_sparse_root_and_every_alias_hop_key() {
+    let root = source("roots", SourceRole::Root);
+    let project = source("projects", SourceRole::Alias("include:0:0".to_owned()));
+    let org = source("orgs", SourceRole::Alias("include:0:1".to_owned()));
+    let backup = source("projects", SourceRole::Alias("include:1:0".to_owned()));
+    let backup_org = source("orgs", SourceRole::Alias("include:1:1".to_owned()));
+    let member = source("profiles", SourceRole::Alias("include:2:0".to_owned()));
+    let owner = source("users", SourceRole::Alias("reference:owner".to_owned()));
+    let mut input = row_set_input(0x2a);
+    input.shape.result = ResultId::RealRow {
+        table: "roots".to_owned(),
+        row: ResultRowRef::Source(root.clone()),
+    };
+    input.shape.nodes = BTreeMap::from([(
+        input.shape.root.clone(),
+        RowSetExpr::Source {
+            source: root.clone(),
+            visibility: RowVisibility::Visible,
+        },
+    )]);
+    input.shape.auxiliary_sources = BTreeSet::from([
+        project.clone(),
+        org.clone(),
+        backup.clone(),
+        backup_org.clone(),
+        member.clone(),
+        owner.clone(),
+    ]);
+    input.shape.closure_paths = vec![
+        ClosurePath::ExplicitInclude {
+            id: "include:0:project.org".to_owned(),
+            segments: vec![
+                ClosurePathSegment {
+                    parent: root.clone(),
+                    target: project.clone(),
+                    source_field: "project".to_owned(),
+                },
+                ClosurePathSegment {
+                    parent: project.clone(),
+                    target: org.clone(),
+                    source_field: "org".to_owned(),
+                },
+            ],
+            root_gate: Some(ClosureRootGate::Inner),
+        },
+        ClosurePath::ExplicitInclude {
+            id: "include:1:backup.org".to_owned(),
+            segments: vec![
+                ClosurePathSegment {
+                    parent: root.clone(),
+                    target: backup.clone(),
+                    source_field: "backup".to_owned(),
+                },
+                ClosurePathSegment {
+                    parent: backup.clone(),
+                    target: backup_org.clone(),
+                    source_field: "org".to_owned(),
+                },
+            ],
+            root_gate: Some(ClosureRootGate::Inner),
+        },
+        ClosurePath::ExplicitInclude {
+            id: "include:2:members".to_owned(),
+            segments: vec![ClosurePathSegment {
+                parent: root.clone(),
+                target: member.clone(),
+                source_field: "members".to_owned(),
+            }],
+            root_gate: Some(ClosureRootGate::Required),
+        },
+        ClosurePath::ImplicitRootReference {
+            id: "reference:owner".to_owned(),
+            segment: ClosurePathSegment {
+                parent: root.clone(),
+                target: owner.clone(),
+                source_field: "owner".to_owned(),
+            },
+        },
+    ];
+    let mut output = row_set_output(BTreeSet::new());
+    output.app_rows.as_mut().expect("app rows").projection =
+        PayloadProjection::Tree(AppProjectionTree {
+            fields: FieldProjection::Fields(BTreeSet::from(["title".to_owned()])),
+            paths: Vec::new(),
+        });
+    let request = QueryProgramRequest {
+        authorization_mode: QueryAuthorizationMode::TrustedServing,
+        reads: QueryReadSet::primary(ReadView {
+            read_schema: schema(0x10),
+            policy_schema: schema(0x11),
+            sources: BTreeMap::from([
+                (
+                    root.clone(),
+                    requested_current_source(DurabilityTier::Global),
+                ),
+                (
+                    project.clone(),
+                    requested_current_source(DurabilityTier::Global),
+                ),
+                (
+                    org.clone(),
+                    requested_current_source(DurabilityTier::Global),
+                ),
+                (
+                    backup.clone(),
+                    requested_current_source(DurabilityTier::Global),
+                ),
+                (
+                    backup_org.clone(),
+                    requested_current_source(DurabilityTier::Global),
+                ),
+                (
+                    member.clone(),
+                    requested_current_source(DurabilityTier::Global),
+                ),
+                (
+                    owner.clone(),
+                    requested_current_source(DurabilityTier::Global),
+                ),
+            ]),
+        }),
+        policy: system_policy_context(),
+        input,
+        output,
+    };
+
+    let requirements = source_requirements_for_test(&request).expect("collect closure fields");
+
+    let expected_root = BTreeSet::from([
+        "title".to_owned(),
+        "project".to_owned(),
+        "backup".to_owned(),
+        "members".to_owned(),
+        "owner".to_owned(),
+    ]);
+    assert!(matches!(
+        requirements.get(&root).map(|requirements| &requirements.app_fields),
+        Some(FieldRequirement::Fields(fields)) if *fields == expected_root
+    ));
+    for source in [&project, &backup] {
+        assert!(matches!(
+            requirements
+                .get(source)
+                .map(|requirements| &requirements.app_fields),
+            Some(FieldRequirement::Fields(fields)) if *fields == BTreeSet::from(["org".to_owned()])
+        ));
+    }
+}
+
 #[test]
 fn simple_current_table_root_query_lowers_for_local_edge_and_global_sync_outputs() {
     for tier in [
@@ -962,6 +1118,7 @@ fn simple_current_table_root_query_lowers_for_local_edge_and_global_sync_outputs
                 OutputTerminalSchema::AppRows(AppRowSchema {
                     descriptor,
                     hidden_fields,
+                    carrier: AppRowCarrier::CurrentRow,
                     ..
                 }) if descriptor.field_index("user_title").is_some()
                     && hidden_fields.is_empty()
@@ -2353,13 +2510,15 @@ fn collector_layout_retains_public_magic_timestamp_fields_on_child_rows() {
     let program = lower_query_program(request, &mut InlineCollectorResolver::new(None))
         .expect("magic timestamp child projection should lower");
     let ProgramOutputSchemas::RowSet(outputs) = &program.lowered.output;
-    let descriptor = outputs
+    let schema = outputs
         .iter()
         .find_map(|output| match output {
-            OutputTerminalSchema::AppRows(schema) => Some(&schema.descriptor),
+            OutputTerminalSchema::AppRows(schema) => Some(schema),
             OutputTerminalSchema::Fact(_) => None,
         })
         .expect("app rows descriptor");
+    assert_eq!(schema.carrier, AppRowCarrier::Logical);
+    let descriptor = &schema.descriptor;
     let tags = descriptor
         .fields()
         .iter()
@@ -2377,6 +2536,57 @@ fn collector_layout_retains_public_magic_timestamp_fields_on_child_rows() {
     assert!(row.field_index("$updatedAt").is_some());
     assert!(row.field_index("$createdBy").is_none());
     assert!(row.field_index("$updatedBy").is_none());
+}
+
+#[test]
+fn flat_collectors_bind_preserved_and_unwrapped_root_carriers() {
+    let mut collect_all = collector_request(system_policy_context());
+    let PayloadProjection::Tree(projection) = &mut collect_all
+        .output
+        .app_rows
+        .as_mut()
+        .expect("app rows")
+        .projection
+    else {
+        panic!("collector request must use a tree projection");
+    };
+    projection.paths.clear();
+    let program = lower_query_program(collect_all, &mut InlineCollectorResolver::new(None))
+        .expect("flat collect-all should lower");
+    let ProgramOutputSchemas::RowSet(outputs) = &program.lowered.output;
+    let schema = outputs
+        .iter()
+        .find_map(|output| match output {
+            OutputTerminalSchema::AppRows(schema) => Some(schema),
+            OutputTerminalSchema::Fact(_) => None,
+        })
+        .expect("app rows descriptor");
+    assert_eq!(schema.carrier, AppRowCarrier::CurrentRow);
+
+    let mut projected = collector_request(system_policy_context());
+    let PayloadProjection::Tree(projection) = &mut projected
+        .output
+        .app_rows
+        .as_mut()
+        .expect("app rows")
+        .projection
+    else {
+        panic!("collector request must use a tree projection");
+    };
+    projection.paths.clear();
+    projection.fields =
+        FieldProjection::Fields(BTreeSet::from(["title".to_owned(), "todo".to_owned()]));
+    let program = lower_query_program(projected, &mut InlineCollectorResolver::new(None))
+        .expect("flat projected collector should lower");
+    let ProgramOutputSchemas::RowSet(outputs) = &program.lowered.output;
+    let schema = outputs
+        .iter()
+        .find_map(|output| match output {
+            OutputTerminalSchema::AppRows(schema) => Some(schema),
+            OutputTerminalSchema::Fact(_) => None,
+        })
+        .expect("app rows descriptor");
+    assert_eq!(schema.carrier, AppRowCarrier::Logical);
 }
 
 #[test]
@@ -3422,6 +3632,20 @@ fn equality_filter_param_lowers_to_prepared_binding_join() {
     assert!(graph.contains("BindingSource"), "{graph}");
     assert!(graph.contains("query-binding"), "{graph}");
     assert!(graph.contains("title"), "{graph}");
+    let ProgramOutputSchemas::RowSet(outputs) = &program.lowered.output;
+    let app_rows = outputs
+        .iter()
+        .find_map(|output| match output {
+            OutputTerminalSchema::AppRows(rows) => Some(rows),
+            OutputTerminalSchema::Fact(_) => None,
+        })
+        .expect("app rows schema");
+    let route = route_param_field("title");
+    assert!(app_rows.descriptor.field_index(&route).is_some());
+    assert!(
+        app_rows.hidden_fields.contains(&route),
+        "prepared binding route must remain internal to the flat collector"
+    );
 }
 
 // Internal compiler-boundary test: the public query API cannot expose which
@@ -3598,6 +3822,7 @@ fn identity_policy_context_requests_policy_filtered_sources() {
                 protected_row_field: "row_uuid".to_owned(),
                 binding_source_shape: None,
                 binding_user_params: BTreeMap::new(),
+                binding_claim_params: BTreeMap::new(),
             },
         }
     );
@@ -3689,8 +3914,55 @@ fn binding_descriptor_types_do_not_depend_on_runtime_array_values() {
                     "teams".to_owned(),
                     ColumnType::Array(Box::new(ColumnType::Uuid)),
                 )]),
+                binding_claim_params: BTreeMap::new(),
             },
         }
+    );
+}
+
+#[test]
+fn nested_binding_value_source_keeps_sibling_nullable_claim_route() {
+    let user_id = ClaimPath(vec!["user_id".to_owned()]);
+    let join_code = ClaimPath(vec!["join_code".to_owned()]);
+    let typed_user_id = claim_param_field(&user_id);
+    let typed_join_code = claim_param_field(&join_code);
+    let mut input = row_set_input(0xc5);
+    input.binding.source_shape = Some("test-binding-source".to_owned());
+    input.binding.claim_params = BTreeMap::from([
+        (
+            typed_user_id.clone(),
+            ProgramClaimParam {
+                path: user_id.clone(),
+                ty: ColumnType::String,
+            },
+        ),
+        (
+            typed_join_code.clone(),
+            ProgramClaimParam {
+                path: join_code,
+                ty: ColumnType::String.nullable(),
+            },
+        ),
+    ]);
+    let request = QueryProgramRequest {
+        authorization_mode: QueryAuthorizationMode::TrustedServing,
+        reads: QueryReadSet::primary(current_read_view()),
+        policy: policy_context(),
+        input,
+        output: row_set_output(BTreeSet::new()),
+    };
+    let fields = binding_value_source_projection_fields_for_test(
+        &request,
+        &[ValueSourceColumn {
+            name: "userId".to_owned(),
+            value: NormalizedValueRef::Claim(user_id),
+            ty: ColumnType::String,
+        }],
+    )
+    .expect("nested binding source lowers");
+    assert!(
+        fields.contains(&typed_join_code),
+        "a user-id proof source must retain its sibling nullable join-code route"
     );
 }
 

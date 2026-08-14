@@ -355,6 +355,22 @@ fn value_matches_column_type(value: &Value, column_type: &ColumnType) -> bool {
             Value::Text(s) => variants.contains(s),
             _ => false,
         },
+        ColumnType::EnumPayload { cases } => match value {
+            Value::Enum { case, values } => cases
+                .iter()
+                .find(|entry| entry.name == *case)
+                .is_some_and(|entry| {
+                    values.len() == entry.fields.len()
+                        && values.iter().zip(&entry.fields).all(|(value, field)| {
+                            if value.is_null() {
+                                field.nullable
+                            } else {
+                                value_matches_column_type(value, &field.column_type)
+                            }
+                        })
+                }),
+            _ => false,
+        },
         ColumnType::Array {
             element: element_type,
         } => match value {
@@ -492,6 +508,7 @@ fn encode_fixed_value(buf: &mut Vec<u8>, col: &ColumnDescriptor, val: &Value) {
         Value::LargeValue(_) => unreachable!("LargeValue is not fixed-size"),
         Value::Array(_) => unreachable!("Array is not fixed-size"),
         Value::Row { .. } => unreachable!("Row is not fixed-size"),
+        Value::Enum { .. } => unreachable!("Enum payload is not fixed-size"),
     }
 }
 
@@ -527,6 +544,23 @@ fn encode_variable_value(buf: &mut Vec<u8>, col: &ColumnDescriptor, val: &Value)
                 let row_bytes = encode_row(desc, values).unwrap_or_default();
                 buf.extend(row_bytes);
             }
+        }
+        Value::Enum { case, values } => {
+            let ColumnType::EnumPayload { cases } = &col.column_type else {
+                unreachable!("Enum value does not match column type")
+            };
+            let descriptor = cases
+                .iter()
+                .find(|entry| entry.name == *case)
+                .map(|entry| RowDescriptor::new(entry.fields.clone()))
+                .unwrap_or_else(|| unreachable!("validated enum case"));
+            let case_bytes = case.as_bytes();
+            buf.extend_from_slice(&(case_bytes.len() as u32).to_le_bytes());
+            buf.extend_from_slice(case_bytes);
+            buf.extend(
+                encode_row(&descriptor, values)
+                    .unwrap_or_else(|_| unreachable!("validated enum payload")),
+            );
         }
         Value::Null => {} // Already handled above for nullable
         _ => unreachable!("Non-text/bytea/array/row types are fixed-size"),
@@ -682,7 +716,16 @@ cfg_decode! {
             }
             ColumnType::Bytea => Ok(Value::Bytea(data.to_vec())),
             ColumnType::Text | ColumnType::Json { schema: _ } => decode_text_value(data, None),
-            ColumnType::Enum { variants } => decode_enum_value(data, variants),
+        ColumnType::Enum { variants } => decode_enum_value(data, variants),
+            ColumnType::EnumPayload { cases } => {
+                if data.len() < 4 { return Err(EncodingError::MalformedData { message: "enum payload case length missing".to_string() }); }
+                let len = u32::from_le_bytes(data[..4].try_into().unwrap()) as usize;
+                if data.len() < 4 + len { return Err(EncodingError::MalformedData { message: "enum payload case truncated".to_string() }); }
+                let case = std::str::from_utf8(&data[4..4 + len]).map_err(|e| EncodingError::MalformedData { message: format!("invalid enum payload case utf8: {e}") })?.to_owned();
+                let entry = cases.iter().find(|entry| entry.name == case).ok_or_else(|| EncodingError::MalformedData { message: format!("unknown enum payload case: {case}") })?;
+                let values = decode_row(&RowDescriptor::new(entry.fields.clone()), &data[4 + len..])?;
+                Ok(Value::Enum { case, values })
+            }
             ColumnType::Array {
                 element: element_type,
             } => {
@@ -930,6 +973,9 @@ fn encode_value(value: &Value) -> Vec<u8> {
         }
         Value::Array(elements) => encode_array_simple(elements),
         Value::Row { .. } => panic!("Row values require a descriptor - use encode_value_with_type"),
+        Value::Enum { .. } => {
+            panic!("Enum payload values require a descriptor - use encode_value_with_type")
+        }
         Value::Null => vec![],
     }
 }
@@ -1165,6 +1211,7 @@ cfg_decode! {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::public_api::types::EnumCaseDescriptor;
     use uuid::Uuid;
 
     fn test_descriptor() -> RowDescriptor {
@@ -1590,6 +1637,64 @@ mod tests {
 
         let err = encode_row(&descriptor, &[Value::Text("invalid".to_string())]).unwrap_err();
         assert!(matches!(err, EncodingError::TypeMismatch { .. }));
+    }
+
+    #[test]
+    fn enum_payload_roundtrip_and_rejects_invalid_case_or_width() {
+        let descriptor = RowDescriptor::new(vec![ColumnDescriptor::new(
+            "event",
+            ColumnType::EnumPayload {
+                cases: vec![
+                    EnumCaseDescriptor {
+                        name: "ping".into(),
+                        fields: vec![],
+                    },
+                    EnumCaseDescriptor {
+                        name: "message".into(),
+                        fields: vec![
+                            ColumnDescriptor::new("body", ColumnType::Text),
+                            ColumnDescriptor::new("priority", ColumnType::Integer).nullable(),
+                            ColumnDescriptor::new(
+                                "tags",
+                                ColumnType::Array {
+                                    element: Box::new(ColumnType::Text),
+                                },
+                            ),
+                        ],
+                    },
+                ],
+            },
+        )]);
+        let value = Value::Enum {
+            case: "message".into(),
+            values: vec![
+                Value::Text("hello".into()),
+                Value::Null,
+                Value::Array(vec![Value::Text("x".into())]),
+            ],
+        };
+        let encoded = encode_row(&descriptor, std::slice::from_ref(&value)).unwrap();
+        assert_eq!(decode_row(&descriptor, &encoded).unwrap(), vec![value]);
+        assert!(
+            encode_row(
+                &descriptor,
+                &[Value::Enum {
+                    case: "missing".into(),
+                    values: vec![]
+                }]
+            )
+            .is_err()
+        );
+        assert!(
+            encode_row(
+                &descriptor,
+                &[Value::Enum {
+                    case: "message".into(),
+                    values: vec![Value::Text("x".into())]
+                }]
+            )
+            .is_err()
+        );
     }
 
     #[test]

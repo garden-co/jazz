@@ -51,6 +51,7 @@ function makeClient() {
     getSchema: () => new Map(Object.entries(app.wasmSchema)),
     query,
     beginTransaction,
+    onMutationError: vi.fn(),
   } as unknown as JazzClient;
 
   return { client, query, beginTransaction };

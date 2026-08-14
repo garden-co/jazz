@@ -1,8 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { NativeRowDelta, WasmSchema } from "../../drivers/types.js";
-import { createOpenBatchId, type BatchId } from "../client.js";
+import { createOpenBatchId, type BatchId, type MutationErrorEvent } from "../client.js";
 import type { InsertResult, MutationResult } from "../client.js";
-import type { PersistentBrowserSubscriptionMessage } from "./persistent-browser-protocol.js";
+import type {
+  PersistentBrowserSubscriptionMessage,
+  PersistentBrowserWorkerError,
+} from "./persistent-browser-protocol.js";
+import { serializePersistentBrowserWorkerError } from "./persistent-browser-error.js";
 import {
   PersistentBrowserOpfsRuntime,
   type PersistentBrowserOpfsOwnerRequest,
@@ -51,16 +55,18 @@ class FakeWorker {
     });
   }
 
-  reject(id: number, message: string): void {
+  reject(id: number, error: string | PersistentBrowserWorkerError): void {
     queueMicrotask(() => {
-      this.onmessage?.({ data: { id, ok: false, error: { message } } } as MessageEvent);
+      this.onmessage?.({
+        data: { id, ok: false, error: typeof error === "string" ? { message: error } : error },
+      } as MessageEvent);
     });
   }
 
   emitSubscription(subscription: number, delta: NativeRowDelta): void {
     queueMicrotask(() => {
       this.onmessage?.({
-        data: {
+        data: structuredClone({
           subscription,
           frame: {
             kind: "native-row-delta",
@@ -80,8 +86,9 @@ class FakeWorker {
             addedCount: delta.addedCount,
             removedCount: delta.removedCount,
             updatedCount: delta.updatedCount,
+            terminalOperations: delta.terminalOperations,
           },
-        },
+        }),
       } as MessageEvent);
     });
   }
@@ -95,6 +102,12 @@ class FakeWorker {
       this.onmessage?.({
         data,
       } as MessageEvent);
+    });
+  }
+
+  emitMutationError(payload: MutationErrorEvent): void {
+    queueMicrotask(() => {
+      this.onmessage?.({ data: { event: "mutationError", payload } } as MessageEvent);
     });
   }
 }
@@ -147,6 +160,133 @@ describe("PersistentBrowserOpfsRuntime", () => {
     worker.respond(waitMessage!.id, undefined);
 
     await expect(wait).resolves.toBeUndefined();
+    await runtime.close();
+  });
+
+  it("preserves structured transaction rejections from the worker", async () => {
+    vi.stubGlobal("Worker", FakeWorker);
+
+    const runtime = new PersistentBrowserOpfsRuntime(
+      undefined,
+      schema,
+      "persistent-browser-runtime-rejected-wait-test",
+      new Uint8Array(16),
+      new Uint8Array(16),
+    );
+    const worker = FakeWorker.instances[0];
+    const batchId = "00000000000070008000000000000046" as BatchId;
+
+    const wait = runtime.waitForTransaction(batchId, "edge");
+    await vi.waitFor(() => {
+      expect(worker.messages.some((message) => message.method === "waitForTransaction")).toBe(true);
+    });
+    const waitMessage = worker.messages.find((message) => message.method === "waitForTransaction");
+    worker.reject(waitMessage!.id, {
+      kind: "rejected",
+      batchId,
+      code: "permission_denied",
+      reason: "Write rejected by server authorization",
+    });
+
+    await expect(wait).rejects.toEqual({
+      kind: "rejected",
+      batchId,
+      code: "permission_denied",
+      reason: "Write rejected by server authorization",
+    });
+    await runtime.close();
+  });
+
+  it("keeps direct rejection diagnostics out of the worker transport payload", () => {
+    const batchId = "00000000000070008000000000000047" as BatchId;
+    const rejection = {
+      kind: "rejected" as const,
+      batchId,
+      code: "permission_denied",
+      reason: "Write rejected by server authorization",
+      message: "WriteRejected: AuthorizationDenied",
+    };
+    Object.defineProperty(rejection, "message", { enumerable: false });
+
+    expect(Object.getOwnPropertyDescriptor(rejection, "message")?.enumerable).toBe(false);
+    expect(serializePersistentBrowserWorkerError(rejection)).toEqual({
+      kind: "rejected",
+      batchId,
+      code: "permission_denied",
+      reason: "Write rejected by server authorization",
+    });
+  });
+
+  it("forwards worker mutation errors to the registered runtime callback", async () => {
+    vi.stubGlobal("Worker", FakeWorker);
+
+    const runtime = new PersistentBrowserOpfsRuntime(
+      undefined,
+      schema,
+      "persistent-browser-runtime-mutation-error-test",
+      new Uint8Array(16),
+      new Uint8Array(16),
+    );
+    const worker = FakeWorker.instances[0];
+    const batchId = "00000000000070008000000000000044" as BatchId;
+    const event: MutationErrorEvent = {
+      code: "permission_denied",
+      reason: "write rejected by policy",
+      transaction: {
+        batchId,
+        kind: "mergeable",
+        sealed: true,
+        latestSettlement: {
+          kind: "rejected",
+          batchId,
+          code: "permission_denied",
+          reason: "write rejected by policy",
+        },
+      },
+    };
+    const listener = vi.fn();
+    runtime.onMutationError(listener);
+
+    worker.emitMutationError(event);
+
+    await vi.waitFor(() => expect(listener).toHaveBeenCalledWith(event));
+    await runtime.close();
+  });
+
+  it("buffers worker mutation errors until the runtime callback is registered", async () => {
+    vi.stubGlobal("Worker", FakeWorker);
+
+    const runtime = new PersistentBrowserOpfsRuntime(
+      undefined,
+      schema,
+      "persistent-browser-runtime-buffered-mutation-error-test",
+      new Uint8Array(16),
+      new Uint8Array(16),
+    );
+    const worker = FakeWorker.instances[0];
+    const batchId = "00000000000070008000000000000045" as BatchId;
+    const event: MutationErrorEvent = {
+      code: "permission_denied",
+      reason: "write rejected by policy",
+      transaction: {
+        batchId,
+        kind: "mergeable",
+        sealed: true,
+        latestSettlement: {
+          kind: "rejected",
+          batchId,
+          code: "permission_denied",
+          reason: "write rejected by policy",
+        },
+      },
+    };
+
+    worker.emitMutationError(event);
+    await Promise.resolve();
+    const listener = vi.fn();
+    runtime.onMutationError(listener);
+
+    expect(listener).toHaveBeenCalledWith(event);
     await runtime.close();
   });
 
@@ -982,6 +1122,70 @@ describe("PersistentBrowserOpfsRuntime", () => {
     });
     expect([...updates[0]!.added]).toEqual([...added]);
 
+    await runtime.close();
+  });
+
+  it("round-trips canonical terminal operations through the worker subscription frame", async () => {
+    vi.stubGlobal("Worker", FakeWorker);
+
+    const runtime = new PersistentBrowserOpfsRuntime(
+      undefined,
+      schema,
+      "persistent-browser-runtime-terminal-operations-frame-test",
+      new Uint8Array(16),
+      new Uint8Array(16),
+    );
+    const worker = FakeWorker.instances[0];
+    const subscriptionHandle = runtime.createSubscription(
+      JSON.stringify({ table: "todos" }),
+      null,
+      "local",
+      null,
+    );
+    const updates: NativeRowDelta[] = [];
+    runtime.executeSubscription(subscriptionHandle, (delta: NativeRowDelta) => updates.push(delta));
+
+    await vi.waitFor(() => {
+      expect(
+        worker.messages.some((message) => message.method === "createExecutedSubscription"),
+      ).toBe(true);
+    });
+    worker.respond(
+      worker.messages.find((message) => message.method === "createExecutedSubscription")!.id,
+      7,
+    );
+
+    const rootId = "00000000-0000-0000-0000-000000000123";
+    const childId = "00000000-0000-0000-0000-000000000124";
+    const rootKey = [10, ...uuidBytes(rootId)];
+    const childKey = [10, ...uuidBytes(childId)];
+    // CurrentRow root: key followed by the nullable-carried Text field.
+    const rootPayload = [...uuidBytes(rootId), 1, ...new TextEncoder().encode("root")];
+    const terminalOperations = [
+      {
+        root_key: rootKey,
+        path: [],
+        edit: { Insert: { index: 0, key: rootKey, value: rootPayload } },
+      },
+      {
+        root_key: rootKey,
+        path: [{ Collection: "children" }],
+        edit: { Insert: { index: 0, key: childKey, value: [...uuidBytes(childId), 99] } },
+      },
+    ];
+    worker.emitSubscription(subscriptionHandle, {
+      __jazzNativeRowDelta: true,
+      added: new Uint8Array(),
+      removed: new Uint8Array(),
+      updated: new Uint8Array(),
+      addedCount: 0,
+      removedCount: 0,
+      updatedCount: 0,
+      terminalOperations,
+    });
+
+    await vi.waitFor(() => expect(updates).toHaveLength(1));
+    expect(updates[0]!.terminalOperations).toEqual(terminalOperations);
     await runtime.close();
   });
 

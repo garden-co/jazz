@@ -76,7 +76,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
     author: Uint8Array,
     flushEvery: number,
   ): PersistentBrowserOpfsRuntime {
-    if (!this.persistentOwnerRuntime) {
+    if (!this.persistentOwnerRuntime || this.persistentOwnerRuntime.isClosed()) {
       this.persistentOwnerRuntime = new PersistentBrowserOpfsRuntime(
         config.runtimeSources,
         schema,

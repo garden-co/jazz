@@ -591,7 +591,7 @@ impl VersionRecord {
             Value::Uuid(updated_by.0),
             Value::U64(updated_at.0),
             Value::Nullable(deletion.map(|deletion| {
-                Box::new(Value::Enum(match deletion {
+                Box::new(Value::EnumTag(match deletion {
                     DeletionEvent::Deleted => 0,
                     DeletionEvent::Restored => 1,
                 }))
@@ -862,8 +862,8 @@ fn deletion_from_value(value: Value) -> Result<Option<DeletionEvent>, &'static s
     match value {
         Value::Nullable(None) => Ok(None),
         Value::Nullable(Some(value)) => match *value {
-            Value::Enum(0) => Ok(Some(DeletionEvent::Deleted)),
-            Value::Enum(1) => Ok(Some(DeletionEvent::Restored)),
+            Value::EnumTag(0) => Ok(Some(DeletionEvent::Deleted)),
+            Value::EnumTag(1) => Ok(Some(DeletionEvent::Restored)),
             _ => Err("deletion"),
         },
         _ => Err("deletion"),
@@ -1290,7 +1290,7 @@ fn common_run_table(bundles: &[VersionBundle]) -> Option<groove::Intern<String>>
 }
 
 /// Bytes for one immutable content extent.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct ContentExtent {
     /// Owner/version/read-view context for this immutable extent.
     pub owner: LargeValueOwnerRef,
@@ -1298,6 +1298,16 @@ pub struct ContentExtent {
     pub extent: Extent,
     /// Immutable bytes stored at the extent.
     pub bytes: Vec<u8>,
+}
+
+impl std::fmt::Debug for ContentExtent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ContentExtent")
+            .field("owner", &self.owner)
+            .field("extent", &self.extent)
+            .field("bytes_len", &self.bytes.len())
+            .finish()
+    }
 }
 
 /// Authorized owner context for a binary large value extent.
@@ -2758,7 +2768,7 @@ fn put_value(bytes: &mut Vec<u8>, value: &Value) {
             bytes.push(8);
             bytes.extend_from_slice(value.as_bytes());
         }
-        Value::Enum(value) => {
+        Value::EnumTag(value) => {
             bytes.push(9);
             bytes.push(*value);
         }
@@ -2782,6 +2792,11 @@ fn put_value(bytes: &mut Vec<u8>, value: &Value) {
         }
         Value::Record(_) => {
             panic!("record-valued values have no v3 protocol encoding")
+        }
+        Value::Enum(_) => {
+            panic!(
+                "union-valued values are an internal Groove representation, not a Jazz protocol value"
+            )
         }
     }
 }
@@ -2976,6 +2991,28 @@ mod tests {
 
     fn schema_id(byte: u8) -> SchemaVersionId {
         SchemaVersionId::from_bytes([byte; 16])
+    }
+
+    #[test]
+    fn content_extent_debug_is_bounded_and_content_safe() {
+        let extent = ContentExtent {
+            owner: LargeValueOwnerRef::current_row(RowUuid::from_bytes([2; 16])),
+            extent: Extent {
+                schema: schema_id(1),
+                table: "documents".to_owned(),
+                writer: AuthorId::from_bytes([3; 16]),
+                row: RowUuid::from_bytes([2; 16]),
+                column: "body".to_owned(),
+                offset: 0,
+                len: 1_000_000,
+            },
+            bytes: vec![b'x'; 1_000_000],
+        };
+
+        let debug = format!("{extent:?}");
+        assert!(debug.contains("bytes_len: 1000000"));
+        assert!(debug.len() < 512);
+        assert!(!debug.contains("xxxxx"));
     }
 
     #[test]

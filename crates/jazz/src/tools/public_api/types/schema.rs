@@ -73,7 +73,7 @@ impl PartialEq<String> for TableName {
 
 /// Column data type.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type")]
+#[serde(tag = "type", deny_unknown_fields)]
 pub enum ColumnType {
     /// 4-byte signed integer (i32), like PostgreSQL INTEGER.
     Integer,
@@ -85,6 +85,9 @@ pub enum ColumnType {
     Text,
     /// Enumerated text constrained to a closed set of variants.
     Enum { variants: Vec<String> },
+    /// Discriminated enum whose selected case carries a named record payload.
+    /// This is a column type, never a top-level Jazz row union.
+    EnumPayload { cases: Vec<EnumCaseDescriptor> },
     /// 8-byte unsigned timestamp (microseconds since Unix epoch).
     Timestamp,
     /// 8-byte IEEE 754 double-precision float (f64).
@@ -122,7 +125,7 @@ impl ColumnType {
             ColumnType::Bytea => None,
             ColumnType::Json { .. } => None,
             ColumnType::Enum { variants } if variants.len() <= u8::MAX as usize + 1 => Some(1),
-            ColumnType::Enum { .. } => None,
+            ColumnType::Enum { .. } | ColumnType::EnumPayload { .. } => None,
             ColumnType::Array { .. } => None, // Arrays are variable-length
             ColumnType::Row { .. } => None,   // Rows are variable-length
         }
@@ -148,6 +151,13 @@ impl ColumnType {
             _ => None,
         }
     }
+}
+
+/// One named payload case of a column-local discriminated enum.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnumCaseDescriptor {
+    pub name: String,
+    pub fields: Vec<ColumnDescriptor>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

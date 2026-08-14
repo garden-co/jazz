@@ -51,6 +51,11 @@ function makeTodosQuery(body: {
 
 const sortedByRankAscQuery = makeTodosQuery({ orderBy: [["rank", "asc"]] });
 
+// Browser subscription delivery is asynchronous. Keep this aligned with the
+// rest of this suite's convergence waits: a sub-second deadline flakes when
+// the full browser suite is sharing a worker, without testing a latency SLO.
+const SUBSCRIPTION_CONVERGENCE_TIMEOUT_MS = 10_000;
+
 function uniqueDbName(label: string): string {
   return `db-subscribe-all-sort-${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
@@ -163,7 +168,7 @@ describe("db.subscribeAll sorting browser integration", () => {
 
         await waitForCondition(
           () => deltas.some((delta) => delta.all.length === 3),
-          500,
+          SUBSCRIPTION_CONVERGENCE_TIMEOUT_MS,
           "expected initial sorted snapshot",
         );
 
@@ -174,7 +179,7 @@ describe("db.subscribeAll sorting browser integration", () => {
 
         await waitForCondition(
           () => deltas.some((delta) => hasUpdateForId(delta, idB)),
-          500,
+          SUBSCRIPTION_CONVERGENCE_TIMEOUT_MS,
           "expected update delta for row B",
         );
 

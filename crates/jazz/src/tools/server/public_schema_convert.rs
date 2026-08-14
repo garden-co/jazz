@@ -1,7 +1,9 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use crate::groove::records::{EnumSchema, Value as GrooveValue};
+use crate::groove::records::{
+    EnumCase, EnumSchema, EnumValue, RecordDescriptor, ScalarEnumSchema, Value as GrooveValue,
+};
 use crate::groove::schema::ColumnType as GrooveColumnType;
 use crate::query::{
     InheritsOperation, JoinCorrelation, JoinSourceLookup, JoinTarget, JoinVia, Operand,
@@ -25,6 +27,7 @@ use crate::tools::public_schema::{
 
 const DIRECT_USER_ID_CLAIM: &str = "user_id";
 const PUBLIC_USER_ID_SESSION_PATHS: &[&str] = &["user_id", "userId"];
+const RESERVED_AGGREGATE_OUTPUT_PREFIX: &str = "__jazz_aggregate_";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SchemaConversionError {
@@ -244,6 +247,9 @@ fn coerce_predicate_typed_literals(
             }
         }
         Predicate::IsNull(_) => {}
+        Predicate::EnumMatch { payload, .. } => {
+            coerce_predicate_typed_literals(table, payload, column_types);
+        }
     }
 }
 
@@ -264,7 +270,7 @@ fn coerce_operand_pair_typed_literal(
     if let Some(discriminant) =
         column_enum_literal_discriminant(table, column, literal_operand, column_types)
     {
-        *literal_operand = Operand::Literal(GrooveValue::Enum(discriminant));
+        *literal_operand = Operand::Literal(GrooveValue::EnumTag(discriminant));
         return false;
     }
     if column_is_enum(table, column, column_types) {
@@ -380,7 +386,7 @@ fn column_enum_schema<'a>(
     table: &str,
     column: &str,
     column_types: &'a BTreeMap<String, BTreeMap<String, TypedLiteralTarget>>,
-) -> Option<&'a EnumSchema> {
+) -> Option<&'a ScalarEnumSchema> {
     let column_type = match column_types
         .get(table)
         .and_then(|columns| columns.get(column))?
@@ -391,9 +397,9 @@ fn column_enum_schema<'a>(
     groove_column_type_enum_schema(column_type)
 }
 
-fn groove_column_type_enum_schema(column_type: &GrooveColumnType) -> Option<&EnumSchema> {
+fn groove_column_type_enum_schema(column_type: &GrooveColumnType) -> Option<&ScalarEnumSchema> {
     match column_type {
-        GrooveColumnType::Enum(schema) => Some(schema),
+        GrooveColumnType::EnumTag(schema) => Some(schema),
         GrooveColumnType::Nullable(inner) => groove_column_type_enum_schema(inner),
         _ => None,
     }
@@ -430,6 +436,16 @@ fn convert_table(
     let mut columns = Vec::with_capacity(table.columns.columns.len());
     let mut merge_strategies = BTreeMap::new();
     for column in &table.columns.columns {
+        if column
+            .name
+            .as_str()
+            .starts_with(RESERVED_AGGREGATE_OUTPUT_PREFIX)
+        {
+            return Err(err(
+                format!("$.{}.columns.{}", name.as_str(), column.name.as_str()),
+                "column name uses the reserved aggregate-output namespace",
+            ));
+        }
         let converted = convert_column(name, column)?;
         if let Some(reference) = &column.references {
             references.insert(
@@ -557,6 +573,70 @@ fn convert_default_for_column_type(
             ColumnType::Text | ColumnType::Json { .. } | ColumnType::Enum { .. },
             Value::Text(value),
         ) => Ok(GrooveValue::String(value.clone())),
+        (ColumnType::EnumPayload { cases }, Value::Enum { case, values }) => {
+            let (case_index, entry) = cases
+                .iter()
+                .enumerate()
+                .find(|(_, entry)| entry.name == *case)
+                .ok_or_else(|| {
+                    err(
+                        format!("$.{}.{}", table.as_str(), column),
+                        format!("payload enum default case {case:?} is not declared"),
+                    )
+                })?;
+            if entry.fields.len() != values.len() {
+                return Err(err(
+                    format!("$.{}.{}", table.as_str(), column),
+                    "payload enum default field count does not match its case",
+                ));
+            }
+            let mut fields = Vec::with_capacity(entry.fields.len());
+            let mut converted = Vec::with_capacity(values.len());
+            for (field, value) in entry.fields.iter().zip(values) {
+                let mut value_type =
+                    convert_column_type(table, field.name.as_str(), &field.column_type)?;
+                if field.nullable {
+                    value_type = value_type.nullable();
+                }
+                let value = if matches!(value, Value::Null) {
+                    if !field.nullable {
+                        return Err(err(
+                            format!("$.{}.{}.{}", table.as_str(), column, field.name.as_str()),
+                            "payload enum default cannot use null for a required field",
+                        ));
+                    }
+                    GrooveValue::Nullable(None)
+                } else {
+                    let inner = convert_default_for_column_type(
+                        table,
+                        field.name.as_str(),
+                        &field.column_type,
+                        value,
+                    )?;
+                    if field.nullable {
+                        GrooveValue::Nullable(Some(Box::new(inner)))
+                    } else {
+                        inner
+                    }
+                };
+                fields.push((field.name.as_str().to_owned(), value_type));
+                converted.push(value);
+            }
+            let case_tag = u32::try_from(case_index).map_err(|_| {
+                err(
+                    format!("$.{}.{}", table.as_str(), column),
+                    "payload enum case index exceeds u32",
+                )
+            })?;
+            EnumValue::create(case_tag, RecordDescriptor::new(fields), &converted)
+                .map(GrooveValue::Enum)
+                .map_err(|error| {
+                    err(
+                        format!("$.{}.{}", table.as_str(), column),
+                        error.to_string(),
+                    )
+                })
+        }
         (ColumnType::Timestamp, Value::Timestamp(value)) => Ok(GrooveValue::U64(*value)),
         (ColumnType::Double, Value::Double(value)) => Ok(GrooveValue::F64(*value)),
         (ColumnType::Uuid, Value::Uuid(value)) => Ok(GrooveValue::Uuid(*value.uuid())),
@@ -597,6 +677,39 @@ fn convert_column_type(
         ColumnType::Uuid => Ok(GrooveColumnType::Uuid),
         ColumnType::Bytea => Ok(GrooveColumnType::Bytes),
         ColumnType::Enum { .. } => Ok(GrooveColumnType::String),
+        ColumnType::EnumPayload { cases } => {
+            let mut converted_cases = Vec::with_capacity(cases.len());
+            for case in cases {
+                if case.name.is_empty() {
+                    return Err(err(
+                        format!("$.{}.{}", table.as_str(), column),
+                        "enum case names cannot be empty",
+                    ));
+                }
+                let mut fields = Vec::with_capacity(case.fields.len());
+                for field in &case.fields {
+                    validate_payload_enum_field(table, column, &case.name, field)?;
+                    let mut value_type =
+                        convert_column_type(table, field.name.as_str(), &field.column_type)?;
+                    if field.nullable {
+                        value_type = value_type.nullable();
+                    }
+                    fields.push((field.name.as_str().to_owned(), value_type));
+                }
+                converted_cases.push(EnumCase::new(
+                    case.name.clone(),
+                    RecordDescriptor::new(fields),
+                ));
+            }
+            EnumSchema::new(format!("{}_{}", table.as_str(), column), converted_cases)
+                .map(|schema| GrooveColumnType::Enum(Box::new(schema)))
+                .map_err(|error| {
+                    err(
+                        format!("$.{}.{}", table.as_str(), column),
+                        error.to_string(),
+                    )
+                })
+        }
         ColumnType::Array { element } => {
             Ok(convert_column_type(table, column, element.as_ref())?.array_of())
         }
@@ -614,6 +727,60 @@ fn convert_column_type(
             "nested Row columns are not supported by core schema conversion yet",
         )),
     }
+}
+
+/// Enforce the same v1 payload-enum boundary for raw public-schema ingress as
+/// the TypeScript DSL. Schema JSON can bypass the DSL, so this must reject
+/// unsupported layouts before recursive column conversion admits them.
+fn validate_payload_enum_field(
+    table: &TableName,
+    column: &str,
+    case: &str,
+    field: &ColumnDescriptor,
+) -> Result<(), SchemaConversionError> {
+    let path = format!(
+        "$.{}.{}.{}.{}",
+        table.as_str(),
+        column,
+        case,
+        field.name.as_str()
+    );
+    if field.name.as_str() == "type" {
+        return Err(err(
+            path,
+            "enum payload field name \"type\" is reserved for the discriminant",
+        ));
+    }
+    if field.name.as_str().starts_with('$') {
+        return Err(err(
+            path,
+            "enum payload field names starting with \"$\" are reserved for magic columns",
+        ));
+    }
+    if field.references.is_some() {
+        return Err(err(
+            path,
+            "enum payload fields cannot use references; use UUID values instead",
+        ));
+    }
+    if !matches!(
+        field.column_type,
+        ColumnType::Boolean
+            | ColumnType::Text
+            | ColumnType::Timestamp
+            | ColumnType::Double
+            | ColumnType::Uuid
+            | ColumnType::Bytea
+            | ColumnType::Json { .. }
+            | ColumnType::Integer
+            | ColumnType::BigInt
+    ) {
+        return Err(err(
+            path,
+            "payload enum v1 fields must be scalar columns; arrays, rows, and nested enums are not supported",
+        ));
+    }
+    Ok(())
 }
 
 fn convert_merge_strategy(
@@ -1690,6 +1857,24 @@ fn rel_predicate_to_policy(
                 value: None,
             }])
         }
+        RelPredicateExpr::EnumMatch {
+            column,
+            case,
+            payload,
+        } => {
+            let payload = rel_predicate_to_policy(table, path, payload)?;
+            Ok(vec![LoweredRelPredicate {
+                predicate: Predicate::EnumMatch {
+                    column: column.column.clone(),
+                    case: case.clone(),
+                    payload: Box::new(Predicate::All(
+                        payload.into_iter().map(|part| part.predicate).collect(),
+                    )),
+                },
+                column: Some(column.column.clone()),
+                value: None,
+            }])
+        }
         RelPredicateExpr::In { left, values } => {
             let values = values
                 .iter()
@@ -1872,74 +2057,6 @@ fn append_inherited_policy_expanded_fallback(
         }
         Err(err) => Err(err),
     }
-}
-
-#[allow(dead_code)]
-fn policy_select_expansion_requires_native_inherits(
-    schema: &Schema,
-    table_schema: &TableSchema,
-    table: &TableName,
-    expr: &PolicyExpr,
-) -> bool {
-    fn inner(
-        schema: &Schema,
-        table_schema: &TableSchema,
-        expr: &PolicyExpr,
-        visited: &mut Vec<TableName>,
-    ) -> bool {
-        match expr {
-            PolicyExpr::ExistsRel { .. } => true,
-            PolicyExpr::And(exprs) | PolicyExpr::Or(exprs) => exprs
-                .iter()
-                .any(|expr| inner(schema, table_schema, expr, visited)),
-            PolicyExpr::Not(expr) => inner(schema, table_schema, expr, visited),
-            PolicyExpr::Inherits {
-                operation: Operation::Select,
-                via_column,
-                ..
-            } => table_schema
-                .columns
-                .columns
-                .iter()
-                .find(|column| column.name.as_str() == via_column)
-                .and_then(|column| column.references.as_ref())
-                .and_then(|parent_table| {
-                    if visited.contains(parent_table) {
-                        return None;
-                    }
-                    let parent_schema = schema.get(parent_table)?;
-                    let parent_policy = parent_schema.policies.select.using.as_ref()?;
-                    visited.push(*parent_table);
-                    let requires_native = inner(schema, parent_schema, parent_policy, visited);
-                    visited.pop();
-                    Some(requires_native)
-                })
-                .unwrap_or(false),
-            PolicyExpr::InheritsReferencing {
-                operation: Operation::Select,
-                source_table,
-                ..
-            } => {
-                let source_table = TableName::new(source_table);
-                if visited.contains(&source_table) {
-                    return false;
-                }
-                schema
-                    .get(&source_table)
-                    .and_then(|source_schema| {
-                        let source_policy = source_schema.policies.select.using.as_ref()?;
-                        visited.push(source_table);
-                        let requires_native = inner(schema, source_schema, source_policy, visited);
-                        visited.pop();
-                        Some(requires_native)
-                    })
-                    .unwrap_or(false)
-            }
-            _ => false,
-        }
-    }
-
-    inner(schema, table_schema, expr, &mut vec![*table])
 }
 
 fn append_inherited_policy_branches(
@@ -2252,6 +2369,24 @@ mod tests {
         PredicateExpr as RelPredicateExpr, RecursionBound as RelRecursionBound,
         RelExpr as PublicRelExpr, RowIdRef as RelRowIdRef, ValueRef as RelValueRef,
     };
+    #[test]
+    fn rejects_user_columns_in_the_compiler_aggregate_namespace() {
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("metrics")
+                    .column("__jazz_aggregate_sum_score", ColumnType::Integer),
+            )
+            .build();
+        let error =
+            convert_public_schema(&schema).expect_err("reserved column must fail conversion");
+        assert!(
+            error
+                .to_string()
+                .contains("reserved aggregate-output namespace")
+        );
+    }
+
+    use crate::tools::public_api::types::EnumCaseDescriptor;
     use crate::tools::public_api::types::TableSchemaBuilder;
     use crate::tools::public_schema::{
         ColumnDescriptor, ColumnType, LargeValueKind, PolicyExpr, RowDescriptor, Schema,
@@ -2489,6 +2624,142 @@ mod tests {
     }
 
     #[test]
+    fn converts_payload_enum_default_to_tagged_record() {
+        let schema = SchemaBuilder::new()
+            .table(TableSchema::builder("events").column_with_default(
+                "event",
+                ColumnType::EnumPayload {
+                    cases: vec![
+                        EnumCaseDescriptor {
+                            name: "message".to_owned(),
+                            fields: vec![
+                                ColumnDescriptor::new("text", ColumnType::Text),
+                                ColumnDescriptor::new("level", ColumnType::Integer).nullable(),
+                            ],
+                        },
+                        EnumCaseDescriptor {
+                            name: "closed".to_owned(),
+                            fields: vec![ColumnDescriptor::new("code", ColumnType::Integer)],
+                        },
+                    ],
+                },
+                Value::Enum {
+                    case: "message".to_owned(),
+                    values: vec![Value::Text("hello".to_owned()), Value::Null],
+                },
+            ))
+            .build();
+        let table = convert_public_schema(&schema)
+            .unwrap()
+            .tables
+            .into_iter()
+            .find(|table| table.name == "events")
+            .unwrap();
+        let default = table
+            .columns
+            .iter()
+            .find(|column| column.name == "event")
+            .and_then(|column| column.default.as_ref())
+            .unwrap();
+        let GrooveValue::Enum(value) = default else {
+            panic!("expected a payload enum default");
+        };
+        assert_eq!(value.tag(), 0);
+        assert_eq!(
+            value.record().to_values().unwrap(),
+            vec![
+                GrooveValue::String("hello".to_owned()),
+                GrooveValue::Nullable(None),
+            ]
+        );
+    }
+
+    #[test]
+    fn raw_payload_enum_ingress_rejects_non_scalar_and_reserved_fields() {
+        let nested_row = ColumnType::Row {
+            columns: Box::new(RowDescriptor::new(vec![ColumnDescriptor::new(
+                "nested",
+                ColumnType::Text,
+            )])),
+        };
+        let nested_payload_enum = ColumnType::EnumPayload {
+            cases: vec![EnumCaseDescriptor {
+                name: "nested".to_owned(),
+                fields: vec![ColumnDescriptor::new("value", ColumnType::Text)],
+            }],
+        };
+        let cases = [
+            (
+                ColumnDescriptor::new("type", ColumnType::Text),
+                "reserved for the discriminant",
+            ),
+            (
+                ColumnDescriptor::new("$createdAt", ColumnType::Timestamp),
+                "reserved for magic columns",
+            ),
+            (
+                ColumnDescriptor::new("owner", ColumnType::Uuid).references("users"),
+                "cannot use references",
+            ),
+            (
+                ColumnDescriptor::new(
+                    "owners",
+                    ColumnType::Array {
+                        element: Box::new(ColumnType::Uuid),
+                    },
+                ),
+                "must be scalar columns",
+            ),
+            (
+                ColumnDescriptor::new(
+                    "owner_refs",
+                    ColumnType::Array {
+                        element: Box::new(ColumnType::Uuid),
+                    },
+                )
+                .references("users"),
+                "cannot use references",
+            ),
+            (
+                ColumnDescriptor::new("row", nested_row),
+                "must be scalar columns",
+            ),
+            (
+                ColumnDescriptor::new(
+                    "tag",
+                    ColumnType::Enum {
+                        variants: vec!["a".to_owned()],
+                    },
+                ),
+                "must be scalar columns",
+            ),
+            (
+                ColumnDescriptor::new("nested", nested_payload_enum),
+                "must be scalar columns",
+            ),
+        ];
+
+        for (field, message) in cases {
+            let schema = SchemaBuilder::new()
+                .table(TableSchema::builder("events").column(
+                    "event",
+                    ColumnType::EnumPayload {
+                        cases: vec![EnumCaseDescriptor {
+                            name: "message".to_owned(),
+                            fields: vec![field],
+                        }],
+                    },
+                ))
+                .build();
+            let error = convert_public_schema(&schema).expect_err("raw payload field is rejected");
+            assert!(
+                error.to_string().contains(message),
+                "expected {message:?}, got {error}"
+            );
+        }
+    }
+
+    #[test]
     fn converted_public_integer_records_use_four_core_bytes() {
         // Public clients cannot observe core row width directly; this focused
         // conversion/layout check guards the storage-width contract.
@@ -2532,7 +2803,7 @@ mod tests {
             crate::groove::records::ValueType::String => GrooveValue::String("value".to_owned()),
             crate::groove::records::ValueType::Bytes => GrooveValue::Bytes(vec![8]),
             crate::groove::records::ValueType::Uuid => GrooveValue::Uuid(Uuid::from_bytes([9; 16])),
-            crate::groove::records::ValueType::Enum(_) => GrooveValue::Enum(0),
+            crate::groove::records::ValueType::EnumTag(_) => GrooveValue::EnumTag(0),
             crate::groove::records::ValueType::Tuple(members) => {
                 GrooveValue::Tuple(members.iter().map(sample_groove_value).collect::<Vec<_>>())
             }
@@ -2553,6 +2824,9 @@ mod tests {
                         .unwrap(),
                     **descriptor,
                 ))
+            }
+            crate::groove::records::ValueType::Enum(_) => {
+                panic!("Jazz public schema conversion must not receive whole-row Groove enums")
             }
         }
     }

@@ -11,7 +11,7 @@ use crate::tx::TxId;
 macro_rules! batch_id {
     ($name:ident, $kind:literal, $doc:literal) => {
         #[doc = $doc]
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+        #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
         pub struct $name(pub(crate) [u8; 16]);
 
         impl $name {
@@ -23,6 +23,14 @@ macro_rules! batch_id {
         impl fmt::Display for $name {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                 write!(f, "{}", hex::encode(self.0))
+            }
+        }
+
+        impl fmt::Debug for $name {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                // These are compact semantic identifiers, so retain their
+                // established hex form rather than expanding to a byte array.
+                write!(f, concat!(stringify!($name), "({})"), self)
             }
         }
 
@@ -135,6 +143,23 @@ mod tests {
                 TxTime::from(43),
                 NodeUuid(Uuid::from_bytes([7; 16]))
             ))
+        );
+    }
+
+    #[test]
+    fn batch_id_debug_is_compact_and_stable() {
+        let id = BatchId::from_committed_tx(TxId::new(
+            TxTime::from(42),
+            NodeUuid(Uuid::from_bytes([7; 16])),
+        ));
+        let debug = format!("{id:?}");
+        assert_eq!(debug, format!("BatchId({id})"));
+        assert_eq!(debug.len(), "BatchId()".len() + 32);
+
+        let open = OpenBatchId([0xab; 16]);
+        assert_eq!(
+            format!("{open:?}"),
+            "OpenBatchId(abababababababababababababababab)"
         );
     }
 }

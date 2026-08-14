@@ -1,7 +1,7 @@
 import type { InsertValues, Value, WasmSchema } from "../../drivers/types.js";
 import type { RuntimeSourcesConfig, Session } from "../context.js";
 import type { NativeRowDelta } from "../../drivers/types.js";
-import type { BatchId, OpenBatchId } from "../client.js";
+import type { BatchId, MutationErrorEvent, OpenBatchId } from "../client.js";
 
 type OpenRequest = {
   id: number;
@@ -175,6 +175,7 @@ export type PersistentBrowserSubscriptionFrame = {
   addedCount: number;
   removedCount: number;
   updatedCount: number;
+  terminalLayouts?: NativeRowDelta["terminalLayouts"];
   terminalOperations?: NativeRowDelta["terminalOperations"];
 };
 
@@ -184,6 +185,23 @@ export type PersistentBrowserSubscriptionMessage = {
   | { frame: PersistentBrowserSubscriptionFrame }
   | { error: { name?: string; message?: string; stack?: string } }
 );
+
+export type PersistentBrowserWorkerError =
+  | { kind?: undefined; name?: string; message?: string; stack?: string }
+  | {
+      kind: "rejected";
+      batchId: BatchId;
+      code: string;
+      reason: string;
+      name?: undefined;
+      message?: undefined;
+      stack?: undefined;
+    };
+
+export type PersistentBrowserMutationErrorMessage = {
+  event: "mutationError";
+  payload: MutationErrorEvent;
+};
 
 export function isNativeRowDelta(value: unknown): value is NativeRowDelta {
   return (

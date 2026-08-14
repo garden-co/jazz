@@ -52,7 +52,37 @@ describe("RnDbShim", () => {
     expect(callback).toHaveBeenCalledWith("immediate");
   });
 
-  it("registers the write waiter synchronously before awaiting it", async () => {
+  it("parses mutation errors delivered by the detached native callback", () => {
+    let generatedCallback: { onMutationError(eventJson: string): void } | undefined;
+    const db = shim({
+      onMutationError(callback: { onMutationError(eventJson: string): void }) {
+        generatedCallback = callback;
+      },
+    });
+    const callback = vi.fn();
+    const event = {
+      code: "permission_denied",
+      reason: "Write rejected by server authorization",
+      transaction: {
+        batchId: "batch-1",
+        kind: "mergeable",
+        sealed: true,
+        latestSettlement: {
+          kind: "rejected",
+          batchId: "batch-1",
+          code: "permission_denied",
+          reason: "Write rejected by server authorization",
+        },
+      },
+    };
+
+    db.onMutationError(callback);
+    generatedCallback?.onMutationError(JSON.stringify(event));
+
+    expect(callback).toHaveBeenCalledWith(event);
+  });
+
+  it("forwards asynchronous write settlement without blocking the shim", async () => {
     const order: string[] = [];
     const pending = Promise.resolve().then(() => {
       order.push("settled");
@@ -60,29 +90,23 @@ describe("RnDbShim", () => {
     const write = {
       batchId: () => "committed-batch",
       payload: () => buffer(1),
-      wait: vi.fn(),
+      wait: vi.fn(async (tier: string) => {
+        order.push(`wait:${tier}`);
+        await pending;
+      }),
       writeState: () => JSON.stringify({ kind: "Pending" }),
       close: () => true,
-      registerWriteStateWaiter: () => {
-        order.push("registered");
-        return {
-          wait: () => {
-            order.push("waited");
-            return pending;
-          },
-        };
-      },
     };
     const db = shim({
       insertWithIdEncoded: () => write,
     });
 
     const adapted = db.insertWithIdEncoded("todos", new Uint8Array(16), new Uint8Array());
-    const change = adapted.nextWriteStateChange();
+    const settlement = adapted.wait("edge");
 
-    expect(order).toEqual(["registered", "waited"]);
-    await change;
-    expect(order).toEqual(["registered", "waited", "settled"]);
+    expect(order).toEqual(["wait:edge"]);
+    await settlement;
+    expect(order).toEqual(["wait:edge", "settled"]);
     expect(adapted.writeState()).toEqual({ kind: "Pending" });
     expect(adapted.batchId).toBe("committed-batch");
     expect(adapted.payload).toEqual(new Uint8Array([1]));
@@ -101,8 +125,7 @@ describe("RnDbShim", () => {
       batchId: () => "batch-1",
       close: () => true,
       payload: () => buffer(),
-      registerWriteStateWaiter: () => ({ wait: async () => {} }),
-      wait: vi.fn(),
+      wait: vi.fn(async () => {}),
       writeState: () => JSON.stringify({}),
     }));
     const transport = {
@@ -156,7 +179,7 @@ describe("RnDbShim", () => {
     expect(free).toHaveBeenCalledOnce();
   });
 
-  it("parses subscription events and restores native error markers", () => {
+  it("parses subscription events and restores native error markers", async () => {
     const generatedError = Object.assign(new Error("JazzRnError.Runtime"), {
       tag: "Runtime",
       inner: { message: "NotObserved: write has not reached edge" },
@@ -170,6 +193,7 @@ describe("RnDbShim", () => {
             reset: undefined,
             delta: undefined,
             terminalOperationsJson: undefined,
+            terminalLayoutsJson: undefined,
             settled: undefined,
             tier: undefined,
             reasonJson: undefined,
@@ -181,7 +205,22 @@ describe("RnDbShim", () => {
             reset: true,
             delta: buffer(1, 2),
             terminalOperationsJson: JSON.stringify([
-              { root_key: [1], path: [], edit: { Remove: { key: [2] } } },
+              {
+                rootLayoutId: "todos-v1",
+                root_key: [1],
+                path: [],
+                edit: { Remove: { key: [2] } },
+              },
+            ]),
+            terminalLayoutsJson: JSON.stringify([
+              {
+                id: "todos-v1",
+                rootDescriptor: [3],
+                rootKeySlot: 0,
+                rootKeyFieldName: "id",
+                publicFields: [],
+                carrier: "Logical",
+              },
             ]),
             settled: true,
             tier: "Local",
@@ -192,6 +231,7 @@ describe("RnDbShim", () => {
             reset: undefined,
             delta: undefined,
             terminalOperationsJson: undefined,
+            terminalLayoutsJson: undefined,
             settled: undefined,
             tier: undefined,
             reasonJson: JSON.stringify({
@@ -205,8 +245,7 @@ describe("RnDbShim", () => {
         batchId: () => "error-batch",
         close: () => true,
         payload: () => buffer(),
-        registerWriteStateWaiter: () => ({ wait: async () => {} }),
-        wait: () => {
+        wait: async () => {
           throw generatedError;
         },
         writeState: () => JSON.stringify({}),
@@ -219,7 +258,24 @@ describe("RnDbShim", () => {
         type: "delta",
         reset: true,
         delta: new Uint8Array([1, 2]),
-        terminalOperations: [{ root_key: [1], path: [], edit: { Remove: { key: [2] } } }],
+        terminalOperations: [
+          {
+            rootLayoutId: "todos-v1",
+            root_key: [1],
+            path: [],
+            edit: { Remove: { key: [2] } },
+          },
+        ],
+        terminalLayouts: [
+          {
+            id: "todos-v1",
+            rootDescriptor: [3],
+            rootKeySlot: 0,
+            rootKeyFieldName: "id",
+            publicFields: [],
+            carrier: "Logical",
+          },
+        ],
         settled: true,
         tier: "Local",
       },
@@ -230,15 +286,10 @@ describe("RnDbShim", () => {
     ]);
     expect(subscription.drain?.()).toEqual([{ type: "closed" }]);
     const write = db.insertWithIdEncoded("todos", new Uint8Array(16), new Uint8Array());
-    try {
-      write.wait("edge");
-      expect.unreachable("wait should throw");
-    } catch (error) {
-      expect(error).toMatchObject({
-        message: "NotObserved: write has not reached edge",
-        cause: generatedError,
-        tag: "Runtime",
-      });
-    }
+    await expect(write.wait("edge")).rejects.toMatchObject({
+      message: "NotObserved: write has not reached edge",
+      cause: generatedError,
+      tag: "Runtime",
+    });
   });
 });

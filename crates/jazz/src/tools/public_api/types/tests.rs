@@ -21,6 +21,16 @@ fn column_type_fixed_sizes() {
 }
 
 #[test]
+fn public_enum_schema_rejects_internal_registry_identity() {
+    let error = serde_json::from_str::<ColumnType>(
+        r#"{"type":"Enum","variants":["open","done"],"registry_id":9223372036854775808}"#,
+    )
+    .expect_err("public enum schema must not admit an internal registry identity");
+
+    assert!(error.to_string().contains("registry_id"));
+}
+
+#[test]
 fn column_descriptor_builder() {
     let col = ColumnDescriptor::new("email", ColumnType::Text)
         .nullable()
@@ -274,7 +284,7 @@ fn schema_hash_table_order_independent() {
 }
 
 #[test]
-fn schema_hash_enum_variant_order_independent() {
+fn schema_hash_enum_variant_order_sensitive() {
     let schema1 = SchemaBuilder::new()
         .table(TableSchema::builder("todos").column(
             "status",
@@ -303,7 +313,51 @@ fn schema_hash_enum_variant_order_independent() {
 
     let hash1 = SchemaHash::compute(&schema1);
     let hash2 = SchemaHash::compute(&schema2);
-    assert_eq!(hash1, hash2, "Enum variant order should not affect hash");
+    assert_ne!(
+        hash1, hash2,
+        "Enum variant order assigns durable tag meanings"
+    );
+}
+
+#[test]
+fn schema_hash_matches_ordered_enum_cross_runtime_fixture() {
+    #[derive(serde::Deserialize)]
+    struct EnumHashCase {
+        variants: Vec<String>,
+        hash: String,
+    }
+    #[derive(serde::Deserialize)]
+    struct EnumHashFixture {
+        cases: Vec<EnumHashCase>,
+    }
+
+    let fixture: EnumHashFixture = serde_json::from_str(include_str!(
+        "../../../../../../packages/jazz-tools/src/testing/fixtures/ordered-enum-schema-hashes.json"
+    ))
+    .expect("ordered enum hash fixture is valid JSON");
+
+    let hashes: Vec<_> = fixture
+        .cases
+        .iter()
+        .map(|case| {
+            let schema = SchemaBuilder::new()
+                .table(TableSchema::builder("todos").column(
+                    "status",
+                    ColumnType::Enum {
+                        variants: case.variants.clone(),
+                    },
+                ))
+                .build();
+            let hash = SchemaHash::compute(&schema).to_hex();
+            assert_eq!(hash, case.hash, "fixture hash for {:?}", case.variants);
+            hash
+        })
+        .collect();
+
+    assert_ne!(
+        hashes[0], hashes[1],
+        "reordering variants changes durable tag meaning"
+    );
 }
 
 #[test]

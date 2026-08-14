@@ -10,7 +10,6 @@ use crate::groove::records::Value;
 use crate::ids::AuthorId;
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode};
 use serde::{Deserialize, Serialize};
-use serde_json::Number;
 
 /// Admission policy used by loopback transports.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -383,17 +382,22 @@ fn jwt_json_claims_to_policy_claims(
         }
         if name == "claims" {
             let serde_json::Value::Object(nested) = value else {
-                continue;
+                return Err(AuthAdmissionError::InvalidJwt(
+                    "JWT claims claim must be an object".to_owned(),
+                ));
             };
             for (nested_name, nested_value) in nested {
-                if let Some(nested_value) = json_claim_to_policy_claim(nested_value) {
-                    claims.insert(nested_name, nested_value?);
-                }
+                let value = json_claim_to_policy_claim(nested_value)?.ok_or_else(|| {
+                    AuthAdmissionError::InvalidJwt(
+                        "nested JWT claim objects are not supported".to_owned(),
+                    )
+                })?;
+                claims.insert(nested_name, value);
             }
             continue;
         }
-        if let Some(value) = json_claim_to_policy_claim(value) {
-            claims.insert(name, value?);
+        if let Some(value) = json_claim_to_policy_claim(value)? {
+            claims.insert(name, value);
         }
     }
     Ok(claims)
@@ -401,45 +405,38 @@ fn jwt_json_claims_to_policy_claims(
 
 fn json_claim_to_policy_claim(
     value: serde_json::Value,
-) -> Option<Result<Value, AuthAdmissionError>> {
+) -> Result<Option<Value>, AuthAdmissionError> {
     match value {
-        serde_json::Value::Null => Some(Ok(Value::Nullable(None))),
-        serde_json::Value::Bool(value) => Some(Ok(Value::Bool(value))),
-        serde_json::Value::Number(number) => Some(number_to_policy_claim(number)),
-        serde_json::Value::String(value) => Some(Ok(value
-            .parse()
-            .map(Value::Uuid)
-            .unwrap_or(Value::String(value)))),
+        serde_json::Value::Null => Ok(Some(Value::Nullable(None))),
+        serde_json::Value::Bool(value) => Ok(Some(Value::Bool(value))),
+        serde_json::Value::Number(number) => {
+            crate::tools::policy_claims::json_number_to_policy_claim(
+                number,
+                crate::tools::policy_claims::NumericClaimOrigin::ExactJson,
+            )
+            .map_err(AuthAdmissionError::InvalidJwt)
+            .map(Some)
+        }
+        serde_json::Value::String(value) => Ok(Some(
+            value
+                .parse()
+                .map(Value::Uuid)
+                .unwrap_or(Value::String(value)),
+        )),
         serde_json::Value::Array(values) => {
             let mut claims = Vec::with_capacity(values.len());
             for value in values {
-                let value = json_claim_to_policy_claim(value)?;
-                match value {
-                    Ok(value) => claims.push(value),
-                    Err(error) => return Some(Err(error)),
-                }
+                let Some(value) = json_claim_to_policy_claim(value)? else {
+                    return Ok(None);
+                };
+                claims.push(value);
             }
-            Some(Ok(Value::Array(claims)))
+            Ok(Some(Value::Array(claims)))
         }
-        serde_json::Value::Object(_) => None,
+        // OIDC providers routinely attach unrelated nested metadata. It is not
+        // representable in policy claims, so omit this claim as before.
+        serde_json::Value::Object(_) => Ok(None),
     }
-}
-
-fn number_to_policy_claim(number: Number) -> Result<Value, AuthAdmissionError> {
-    if let Some(value) = number.as_u64() {
-        return Ok(Value::U64(value));
-    }
-    let Some(value) = number.as_f64() else {
-        return Err(AuthAdmissionError::InvalidJwt(
-            "unsupported numeric claim".to_owned(),
-        ));
-    };
-    if !value.is_finite() {
-        return Err(AuthAdmissionError::InvalidJwt(
-            "unsupported numeric claim".to_owned(),
-        ));
-    }
-    Ok(Value::F64(value))
 }
 
 /// Deterministically map an auth subject to a Jazz author id.
@@ -478,6 +475,39 @@ mod tests {
         assert_eq!(
             author_id_from_subject(subject),
             AuthorId::from_bytes(*uuid::Uuid::parse_str(subject).unwrap().as_bytes())
+        );
+    }
+
+    #[test]
+    fn jwt_claim_admission_preserves_exact_integers_and_ignores_oidc_metadata() {
+        let claims = jwt_json_claims_to_policy_claims(BTreeMap::from([
+            ("positive".to_owned(), serde_json::json!(7)),
+            ("negative".to_owned(), serde_json::json!(-7)),
+            (
+                "unsafe".to_owned(),
+                serde_json::json!(9_007_199_254_740_992_u64),
+            ),
+        ]))
+        .unwrap();
+        assert_eq!(claims["positive"], Value::U64(7));
+        assert_eq!(claims["negative"], Value::I64(-7));
+        assert_eq!(claims["unsafe"], Value::U64(9_007_199_254_740_992));
+        let claims = jwt_json_claims_to_policy_claims(BTreeMap::from([(
+            "https://issuer.example/profile".to_owned(),
+            serde_json::json!({ "department": "engineering" }),
+        )]))
+        .unwrap();
+        assert!(
+            claims.is_empty(),
+            "unrepresentable OIDC metadata stays ignored"
+        );
+        assert!(
+            jwt_json_claims_to_policy_claims(BTreeMap::from([(
+                "claims".to_owned(),
+                serde_json::json!({ "profile": { "department": "engineering" } }),
+            )]))
+            .is_err(),
+            "the dedicated policy claims object rejects nested objects"
         );
     }
 }

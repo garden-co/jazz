@@ -1,3 +1,5 @@
+use std::fmt;
+
 use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -11,7 +13,7 @@ use super::*;
 /// `PartialEq`/`Eq` are implemented manually because `f64` does not implement
 /// `Eq`. We use bitwise comparison (`f64::to_bits`) so that NaN == NaN and
 /// -0.0 != 0.0, which is the correct semantics for storage identity.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum Value {
     Integer(i32),
     BigInt(i64),
@@ -34,12 +36,56 @@ pub enum Value {
         id: Option<ObjectId>,
         values: Vec<Value>,
     },
+    /// Selected case and positional payload values for a column-local enum.
+    Enum {
+        case: String,
+        values: Vec<Value>,
+    },
     Null,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LargeValueHandle {
     bytes: Vec<u8>,
+}
+
+impl fmt::Debug for LargeValueHandle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LargeValueHandle")
+            .field("len", &self.bytes.len())
+            .finish()
+    }
+}
+
+impl fmt::Debug for Value {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Integer(value) => f.debug_tuple("Integer").field(value).finish(),
+            Self::BigInt(value) => f.debug_tuple("BigInt").field(value).finish(),
+            Self::Double(value) => f.debug_tuple("Double").field(value).finish(),
+            Self::Boolean(value) => f.debug_tuple("Boolean").field(value).finish(),
+            Self::Text(value) => f.debug_tuple("Text").field(value).finish(),
+            Self::Timestamp(value) => f.debug_tuple("Timestamp").field(value).finish(),
+            Self::Uuid(value) => f.debug_tuple("Uuid").field(value).finish(),
+            // Batch ids are fixed-size semantic identifiers, unlike payloads.
+            Self::BatchId(value) => write!(f, "BatchId({})", hex::encode(value)),
+            Self::Bytea(value) => f.debug_struct("Bytea").field("len", &value.len()).finish(),
+            Self::LargeValue(value) => f.debug_tuple("LargeValue").field(value).finish(),
+            // Avoid a collection of nested byte values making an error log unbounded.
+            Self::Array(values) => f.debug_struct("Array").field("len", &values.len()).finish(),
+            Self::Row { id, values } => f
+                .debug_struct("Row")
+                .field("id", id)
+                .field("values_len", &values.len())
+                .finish(),
+            Self::Enum { case, values } => f
+                .debug_struct("Enum")
+                .field("case", case)
+                .field("values_len", &values.len())
+                .finish(),
+            Self::Null => f.write_str("Null"),
+        }
+    }
 }
 
 impl LargeValueHandle {
@@ -78,6 +124,7 @@ enum ValueHuman {
     LargeValue(LargeValueHandle),
     Array(Vec<ValueHuman>),
     Row(RowHuman),
+    Enum(EnumHuman),
     Null,
 }
 
@@ -87,24 +134,19 @@ struct RowHuman {
     id: Option<ObjectId>,
     values: Vec<ValueHuman>,
 }
-
-/// Use externally-tagged enum for binary serialization (postcard does not support internally-tagged enums).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-enum ValueBinary {
-    Integer(i32),
-    BigInt(i64),
-    Double(f64),
-    Boolean(bool),
-    Text(String),
-    Timestamp(u64),
-    Uuid(ObjectId),
-    BatchId([u8; 16]),
-    Bytea(Vec<u8>),
-    LargeValue(LargeValueHandle),
-    Array(Vec<ValueBinary>),
-    Row(Vec<ValueBinary>),
-    Null,
+struct EnumHuman {
+    case: String,
+    values: Vec<ValueHuman>,
 }
+
+/// Public `Value` is a host-facing shape, not a generic postcard payload.
+///
+/// JSON preserves all row metadata. Production binary row boundaries instead
+/// use the descriptor/raw-record codecs in `admin_catalogue_row_format` and the
+/// native runtime, which carry an optional nested-row id explicitly.
+const NON_HUMAN_VALUE_CODEC_ERROR: &str =
+    "public Value does not support non-human serde codecs; use the descriptor/raw row codec";
 
 fn deserialize_timestamp_value<'de, D>(deserializer: D) -> Result<u64, D::Error>
 where
@@ -224,6 +266,10 @@ impl From<&Value> for ValueHuman {
                 id: *id,
                 values: values.iter().map(ValueHuman::from).collect(),
             }),
+            Value::Enum { case, values } => ValueHuman::Enum(EnumHuman {
+                case: case.clone(),
+                values: values.iter().map(ValueHuman::from).collect(),
+            }),
             Value::Null => ValueHuman::Null,
         }
     }
@@ -247,52 +293,11 @@ impl From<ValueHuman> for Value {
                 id: r.id,
                 values: r.values.into_iter().map(Value::from).collect(),
             },
-            ValueHuman::Null => Value::Null,
-        }
-    }
-}
-
-impl From<&Value> for ValueBinary {
-    fn from(value: &Value) -> Self {
-        match value {
-            Value::Integer(v) => ValueBinary::Integer(*v),
-            Value::BigInt(v) => ValueBinary::BigInt(*v),
-            Value::Double(v) => ValueBinary::Double(*v),
-            Value::Boolean(v) => ValueBinary::Boolean(*v),
-            Value::Text(v) => ValueBinary::Text(v.clone()),
-            Value::Timestamp(v) => ValueBinary::Timestamp(*v),
-            Value::Uuid(v) => ValueBinary::Uuid(*v),
-            Value::BatchId(v) => ValueBinary::BatchId(*v),
-            Value::Bytea(v) => ValueBinary::Bytea(v.clone()),
-            Value::LargeValue(v) => ValueBinary::LargeValue(v.clone()),
-            Value::Array(v) => ValueBinary::Array(v.iter().map(ValueBinary::from).collect()),
-            Value::Row { values, .. } => {
-                ValueBinary::Row(values.iter().map(ValueBinary::from).collect())
-            }
-            Value::Null => ValueBinary::Null,
-        }
-    }
-}
-
-impl From<ValueBinary> for Value {
-    fn from(value: ValueBinary) -> Self {
-        match value {
-            ValueBinary::Integer(v) => Value::Integer(v),
-            ValueBinary::BigInt(v) => Value::BigInt(v),
-            ValueBinary::Double(v) => Value::Double(v),
-            ValueBinary::Boolean(v) => Value::Boolean(v),
-            ValueBinary::Text(v) => Value::Text(v),
-            ValueBinary::Timestamp(v) => Value::Timestamp(v),
-            ValueBinary::Uuid(v) => Value::Uuid(v),
-            ValueBinary::BatchId(v) => Value::BatchId(v),
-            ValueBinary::Bytea(v) => Value::Bytea(v),
-            ValueBinary::LargeValue(v) => Value::LargeValue(v),
-            ValueBinary::Array(v) => Value::Array(v.into_iter().map(Value::from).collect()),
-            ValueBinary::Row(v) => Value::Row {
-                id: None,
-                values: v.into_iter().map(Value::from).collect(),
+            ValueHuman::Enum(e) => Value::Enum {
+                case: e.case,
+                values: e.values.into_iter().map(Value::from).collect(),
             },
-            ValueBinary::Null => Value::Null,
+            ValueHuman::Null => Value::Null,
         }
     }
 }
@@ -305,7 +310,7 @@ impl Serialize for Value {
         if serializer.is_human_readable() {
             ValueHuman::from(self).serialize(serializer)
         } else {
-            ValueBinary::from(self).serialize(serializer)
+            Err(serde::ser::Error::custom(NON_HUMAN_VALUE_CODEC_ERROR))
         }
     }
 }
@@ -318,7 +323,7 @@ impl<'de> Deserialize<'de> for Value {
         if deserializer.is_human_readable() {
             ValueHuman::deserialize(deserializer).map(Value::from)
         } else {
-            ValueBinary::deserialize(deserializer).map(Value::from)
+            Err(serde::de::Error::custom(NON_HUMAN_VALUE_CODEC_ERROR))
         }
     }
 }
@@ -336,6 +341,16 @@ impl PartialEq for Value {
             (Value::BatchId(a), Value::BatchId(b)) => a == b,
             (Value::Bytea(a), Value::Bytea(b)) => a == b,
             (Value::LargeValue(a), Value::LargeValue(b)) => a == b,
+            (
+                Value::Enum {
+                    case: a_case,
+                    values: a_values,
+                },
+                Value::Enum {
+                    case: b_case,
+                    values: b_values,
+                },
+            ) => a_case == b_case && a_values == b_values,
             (Value::Array(a), Value::Array(b)) => a == b,
             (
                 Value::Row {
@@ -381,6 +396,7 @@ impl Value {
             }
             // Row type requires external schema, can't be inferred
             Value::Row { .. } => None,
+            Value::Enum { .. } => None,
             Value::Null => None,
         }
     }
@@ -522,6 +538,36 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
+    #[test]
+    fn binary_value_debug_is_bounded_and_content_safe_even_when_nested() {
+        assert_eq!(format!("{:?}", Value::Bytea(vec![])), "Bytea { len: 0 }");
+        assert_eq!(
+            format!(
+                "{:?}",
+                Value::LargeValue(LargeValueHandle::from_bytes(vec![7; 3]))
+            ),
+            "LargeValue(LargeValueHandle { len: 3 })"
+        );
+
+        let secret = b"do-not-log-this-payload";
+        let nested = Value::Row {
+            id: None,
+            values: vec![Value::Array(vec![Value::Bytea(vec![b'x'; 1_000_000])])],
+        };
+        let debug = format!("{nested:?}");
+        assert_eq!(debug, "Row { id: None, values_len: 1 }");
+        assert!(debug.len() < 64);
+        assert!(!debug.contains(std::str::from_utf8(secret).unwrap()));
+    }
+
+    #[test]
+    fn batch_id_debug_keeps_the_compact_semantic_id() {
+        assert_eq!(
+            format!("{:?}", Value::BatchId([0xab; 16])),
+            "BatchId(abababababababababababababababab)"
+        );
+    }
+
     // ── From<bool> ──────────────────────────────────────────────────
 
     #[test]
@@ -613,6 +659,36 @@ mod tests {
         let json = serde_json::to_string(&value).expect("serialize batch id");
         let decoded: Value = serde_json::from_str(&json).expect("deserialize batch id");
         assert_eq!(decoded, value);
+    }
+
+    #[test]
+    fn json_round_trip_preserves_nested_row_identity() {
+        let value = Value::Array(vec![Value::Row {
+            id: Some(ObjectId::from_uuid(uuid::Uuid::from_u128(0x42))),
+            values: vec![Value::Text("included child".to_owned())],
+        }]);
+
+        let json = serde_json::to_string(&value).expect("serialize public value");
+        let decoded = serde_json::from_str::<Value>(&json).expect("deserialize public value");
+
+        assert_eq!(decoded, value);
+    }
+
+    #[test]
+    fn postcard_rejects_public_values_instead_of_dropping_nested_row_identity() {
+        let value = Value::Array(vec![Value::Row {
+            id: Some(ObjectId::from_uuid(uuid::Uuid::from_u128(0x42))),
+            values: vec![Value::Text("included child".to_owned())],
+        }]);
+
+        assert_eq!(
+            postcard::to_allocvec(&value).unwrap_err(),
+            postcard::Error::SerdeSerCustom
+        );
+        assert_eq!(
+            postcard::from_bytes::<Value>(&[]).unwrap_err(),
+            postcard::Error::SerdeDeCustom
+        );
     }
 
     // ── From<Vec<Value>> ────────────────────────────────────────────

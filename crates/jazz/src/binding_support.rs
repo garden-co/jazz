@@ -16,9 +16,9 @@ use thiserror::Error;
 use crate::db::{
     Db, DbConfig, DbIdentity, Error as DbError, ErrorCode, InitialSyncFlushCadence, LocalUpdates,
     Propagation, ReadOpts, RowCells, SeededRowIdSource, SubscriptionEvent, SubscriptionOutputRow,
-    WriteState, block_on,
+    TerminalRootCarrier, TerminalRootLayout, WriteState, block_on,
 };
-use crate::groove::ivm::TerminalOperation;
+use crate::groove::ivm::{TerminalEdit, TerminalOperation, TerminalPathSegment};
 use crate::groove::records::{BorrowedRecord, RecordDescriptor, Value};
 use crate::groove::storage::{OrderedKvStorage, ReopenableStorage};
 use crate::ids::{AuthorId, NodeUuid, RowUuid};
@@ -113,7 +113,12 @@ pub enum EncodedSubscriptionEvent {
         /// `terminal_operations` carries the change instead.
         delta: Vec<u8>,
         /// Typed structural edits to already hydrated terminal rows.
-        terminal_operations: Vec<TerminalOperation>,
+        terminal_operations: Vec<EncodedTerminalOperation>,
+        /// Producer-owned decoding contracts referenced by the operations.
+        ///
+        /// This stateless encoder returns the event's layout. Streaming
+        /// bindings suppress IDs they have already published per subscription.
+        terminal_layouts: Vec<EncodedTerminalRootLayout>,
         /// Whether the requested read tier is settled.
         settled: bool,
         /// Debug-stable durability-tier spelling used by JavaScript adapters.
@@ -126,6 +131,55 @@ pub enum EncodedSubscriptionEvent {
     },
     /// The producer closed the stream.
     Closed,
+}
+
+/// Terminal operation encoded for JavaScript consumers.
+///
+/// The immutable layout is published separately and referenced by id, so the
+/// physical root descriptor is not repeated on every operation.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct EncodedTerminalOperation {
+    /// Stable id of a layout published in this or an earlier event.
+    #[serde(rename = "rootLayoutId")]
+    pub root_layout_id: String,
+    /// Stable encoded key of the root row.
+    pub root_key: Vec<u8>,
+    /// Path below the root row.
+    pub path: Vec<TerminalPathSegment>,
+    /// Structural edit at `path`.
+    pub edit: TerminalEdit,
+}
+
+/// Immutable terminal-root decoder contract encoded for JavaScript.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EncodedTerminalRootLayout {
+    /// Stable hash of the complete layout.
+    pub id: String,
+    /// Postcard-encoded physical root descriptor.
+    pub root_descriptor: Vec<u8>,
+    /// Descriptor slot containing the stable root UUID.
+    pub root_key_slot: usize,
+    /// Exact descriptor identity of the root UUID slot.
+    pub root_key_field_name: String,
+    /// Public field-to-descriptor slot mappings.
+    pub public_fields: Vec<EncodedTerminalRootPublicField>,
+    /// Physical root representation.
+    pub carrier: String,
+}
+
+/// One public terminal-root field's physical slot identity.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EncodedTerminalRootPublicField {
+    /// Public output name.
+    pub name: String,
+    /// Exact descriptor field name at `slot`.
+    pub descriptor_field_name: String,
+    /// Physical descriptor slot.
+    pub slot: usize,
+    /// Physical field representation.
+    pub carrier: String,
 }
 
 /// Encoded database identity shared by the JavaScript runtimes.
@@ -494,6 +548,7 @@ pub fn encode_subscription_event(
             updated,
             removed,
             terminal_operations,
+            terminal_layout,
             settled,
             tier,
         } => {
@@ -509,10 +564,13 @@ pub fn encode_subscription_event(
             } else {
                 encode_subscription_delta(&[], &[], &empty_removed)?
             };
+            let (terminal_layouts, terminal_operations) =
+                encode_terminal_payload(terminal_operations, terminal_layout.as_ref())?;
             Ok(EncodedSubscriptionEvent::Delta {
                 reset: *reset,
                 delta,
-                terminal_operations: terminal_operations.clone(),
+                terminal_operations,
+                terminal_layouts,
                 settled: *settled,
                 tier: format!("{tier:?}"),
             })
@@ -550,6 +608,7 @@ pub fn subscription_event_to_json(event: &SubscriptionEvent) -> Result<JsonValue
             reset,
             delta,
             terminal_operations,
+            terminal_layouts,
             settled,
             tier,
         } => Ok(serde_json::json!({
@@ -557,6 +616,7 @@ pub fn subscription_event_to_json(event: &SubscriptionEvent) -> Result<JsonValue
             "reset": reset,
             "delta": delta,
             "terminalOperations": terminal_operations,
+            "terminalLayouts": terminal_layouts,
             "settled": settled,
             "tier": tier,
         })),
@@ -564,6 +624,68 @@ pub fn subscription_event_to_json(event: &SubscriptionEvent) -> Result<JsonValue
             Ok(serde_json::json!({ "type": "rejected", "reason": reason }))
         }
         EncodedSubscriptionEvent::Closed => Ok(serde_json::json!({ "type": "closed" })),
+    }
+}
+
+fn encode_terminal_payload(
+    operations: &[TerminalOperation],
+    layout: Option<&TerminalRootLayout>,
+) -> Result<
+    (
+        Vec<EncodedTerminalRootLayout>,
+        Vec<EncodedTerminalOperation>,
+    ),
+    BindingError,
+> {
+    if operations.is_empty() {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    let layout = layout.ok_or_else(|| {
+        BindingError::Encode("terminal operation arrived without a prepared root layout".to_owned())
+    })?;
+    if operations
+        .iter()
+        .any(|operation| operation.root_descriptor != layout.root_descriptor)
+    {
+        return Err(BindingError::Encode(
+            "terminal operation descriptor disagrees with its prepared root layout".to_owned(),
+        ));
+    }
+
+    let encoded_layout = EncodedTerminalRootLayout {
+        id: layout.id.clone(),
+        root_descriptor: postcard::to_allocvec(&layout.root_descriptor)
+            .map_err(|error| BindingError::Encode(format!("encode terminal layout: {error}")))?,
+        root_key_slot: layout.root_key_slot,
+        root_key_field_name: layout.root_key_field_name.clone(),
+        public_fields: layout
+            .public_fields
+            .iter()
+            .map(|field| EncodedTerminalRootPublicField {
+                name: field.name.clone(),
+                descriptor_field_name: field.descriptor_field_name.clone(),
+                slot: field.slot,
+                carrier: terminal_carrier_name(field.carrier).to_owned(),
+            })
+            .collect(),
+        carrier: terminal_carrier_name(layout.carrier).to_owned(),
+    };
+    let encoded_operations = operations
+        .iter()
+        .map(|operation| EncodedTerminalOperation {
+            root_layout_id: layout.id.clone(),
+            root_key: operation.root_key.clone(),
+            path: operation.path.clone(),
+            edit: operation.edit.clone(),
+        })
+        .collect();
+    Ok((vec![encoded_layout], encoded_operations))
+}
+
+fn terminal_carrier_name(carrier: TerminalRootCarrier) -> &'static str {
+    match carrier {
+        TerminalRootCarrier::CurrentRow => "CurrentRow",
+        TerminalRootCarrier::Logical => "Logical",
     }
 }
 
@@ -775,6 +897,7 @@ mod tests {
                 occurrence_id: occurrence(&removed_row),
             }],
             terminal_operations: Vec::new(),
+            terminal_layout: None,
             settled: true,
             tier: DurabilityTier::Local,
         };
@@ -797,10 +920,20 @@ mod tests {
     #[test]
     fn terminal_operations_replace_row_delta_and_use_the_public_json_key() {
         let row = test_row(0x41, "terminal");
+        let root_descriptor = *row.encoded_record().0;
         let operation = TerminalOperation {
+            root_descriptor,
             root_key: vec![1],
             path: Vec::new(),
             edit: TerminalEdit::Remove { key: vec![2] },
+        };
+        let layout = TerminalRootLayout {
+            id: "terminal-layout-1".to_owned(),
+            root_descriptor,
+            root_key_slot: 0,
+            root_key_field_name: "id".to_owned(),
+            public_fields: Vec::new(),
+            carrier: TerminalRootCarrier::Logical,
         };
         let event = SubscriptionEvent::Delta {
             reset: false,
@@ -811,6 +944,7 @@ mod tests {
             updated: Vec::new(),
             removed: Vec::new(),
             terminal_operations: vec![operation.clone()],
+            terminal_layout: Some(layout),
             settled: true,
             tier: DurabilityTier::Local,
         };
@@ -818,6 +952,7 @@ mod tests {
         let EncodedSubscriptionEvent::Delta {
             delta,
             terminal_operations,
+            terminal_layouts,
             ..
         } = encode_subscription_event(&event).expect("encode terminal delta")
         else {
@@ -831,10 +966,26 @@ mod tests {
         assert!(added_keys.is_empty());
         assert!(updated_keys.is_empty());
         assert!(removed_keys.is_empty());
-        assert_eq!(terminal_operations, [operation]);
+        assert_eq!(terminal_operations.len(), 1);
+        assert_eq!(terminal_operations[0].root_layout_id, "terminal-layout-1");
+        assert_eq!(terminal_operations[0].root_key, operation.root_key);
+        assert_eq!(terminal_layouts.len(), 1);
+        assert_eq!(terminal_layouts[0].id, "terminal-layout-1");
+
+        let encoded_operation =
+            serde_json::to_value(&terminal_operations[0]).expect("encode terminal operation");
+        assert_eq!(encoded_operation["rootLayoutId"], "terminal-layout-1");
+        assert!(encoded_operation.get("root_descriptor").is_none());
 
         let json = subscription_event_to_json(&event).expect("encode subscription json");
         assert_eq!(json["terminalOperations"].as_array().map(Vec::len), Some(1));
+        assert_eq!(json["terminalLayouts"].as_array().map(Vec::len), Some(1));
+        assert_eq!(json["terminalLayouts"][0]["id"], "terminal-layout-1");
+        assert!(
+            json["terminalOperations"][0]
+                .get("root_descriptor")
+                .is_none()
+        );
         assert!(json.get("relation_delta").is_none());
     }
 

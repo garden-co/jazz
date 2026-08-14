@@ -32,6 +32,7 @@ import nativeModule, {
   type UniffiForeignFutureCompleteRustBuffer,
   type UniffiForeignFutureResultVoid,
   type UniffiForeignFutureCompleteVoid,
+  type UniffiVTableCallbackInterfaceMutationErrorCallback,
   type UniffiVTableCallbackInterfaceTickSchedulerCallback,
 } from './jazz_rn-ffi';
 import {
@@ -137,6 +138,62 @@ export function mintLocalFirstToken(
 }
 
 /**
+ * Called from the detached notifier for an unhandled rejected write.
+ */
+export interface MutationErrorCallback {
+  /**
+   * Deliver one camelCase `MutationErrorEvent` JSON object.
+   */
+  onMutationError(eventJson: string): void;
+}
+
+// Put the implementation in a struct so we don't pollute the top-level namespace
+const uniffiCallbackInterfaceMutationErrorCallback: {
+  vtable: UniffiVTableCallbackInterfaceMutationErrorCallback;
+  register: () => void;
+} = {
+  // Create the VTable using a series of closures.
+  // ts automatically converts these into C callback functions.
+  vtable: {
+    onMutationError: (uniffiHandle: bigint, eventJson: Uint8Array) => {
+      const uniffiMakeCall = (): void => {
+        const jsCallback =
+          FfiConverterTypeMutationErrorCallback.lift(uniffiHandle);
+        return jsCallback.onMutationError(FfiConverterString.lift(eventJson));
+      };
+      const uniffiResult = UniffiResult.ready<void>();
+      const uniffiHandleSuccess = (obj: any) => {};
+      const uniffiHandleError = (code: number, errBuf: UniffiByteArray) => {
+        UniffiResult.writeError(uniffiResult, code, errBuf);
+      };
+      uniffiTraitInterfaceCall(
+        /*makeCall:*/ uniffiMakeCall,
+        /*handleSuccess:*/ uniffiHandleSuccess,
+        /*handleError:*/ uniffiHandleError,
+        /*lowerString:*/ FfiConverterString.lower
+      );
+      return uniffiResult;
+    },
+    uniffiFree: (uniffiHandle: UniffiHandle): void => {
+      // MutationErrorCallback: this will throw a stale handle error if the handle isn't found.
+      FfiConverterTypeMutationErrorCallback.drop(uniffiHandle);
+    },
+    uniffiClone: (uniffiHandle: UniffiHandle): UniffiHandle => {
+      return FfiConverterTypeMutationErrorCallback.clone(uniffiHandle);
+    },
+  },
+  register: () => {
+    nativeModule().ubrn_uniffi_jazz_rn_fn_init_callback_vtable_mutationerrorcallback(
+      uniffiCallbackInterfaceMutationErrorCallback.vtable
+    );
+  },
+};
+
+// FfiConverter protocol for callback interfaces
+const FfiConverterTypeMutationErrorCallback =
+  new FfiConverterCallback<MutationErrorCallback>();
+
+/**
  * Called from the detached notifier when Jazz needs another core tick.
  */
 export interface TickSchedulerCallback {
@@ -221,6 +278,10 @@ export type RnSubscriptionEvent = {
    */
   terminalOperationsJson: string | undefined;
   /**
+   * Producer-owned terminal root layouts referenced by operations, as JSON.
+   */
+  terminalLayoutsJson: string | undefined;
+  /**
    * Read-tier settlement marker for delta events.
    */
   settled: boolean | undefined;
@@ -273,6 +334,7 @@ const FfiConverterTypeRnSubscriptionEvent = (() => {
         reset: FfiConverterOptionalBool.read(from),
         delta: FfiConverterOptionalArrayBuffer.read(from),
         terminalOperationsJson: FfiConverterOptionalString.read(from),
+        terminalLayoutsJson: FfiConverterOptionalString.read(from),
         settled: FfiConverterOptionalBool.read(from),
         tier: FfiConverterOptionalString.read(from),
         reasonJson: FfiConverterOptionalString.read(from),
@@ -283,6 +345,7 @@ const FfiConverterTypeRnSubscriptionEvent = (() => {
       FfiConverterOptionalBool.write(value.reset, into);
       FfiConverterOptionalArrayBuffer.write(value.delta, into);
       FfiConverterOptionalString.write(value.terminalOperationsJson, into);
+      FfiConverterOptionalString.write(value.terminalLayoutsJson, into);
       FfiConverterOptionalBool.write(value.settled, into);
       FfiConverterOptionalString.write(value.tier, into);
       FfiConverterOptionalString.write(value.reasonJson, into);
@@ -295,6 +358,7 @@ const FfiConverterTypeRnSubscriptionEvent = (() => {
         FfiConverterOptionalString.allocationSize(
           value.terminalOperationsJson
         ) +
+        FfiConverterOptionalString.allocationSize(value.terminalLayoutsJson) +
         FfiConverterOptionalBool.allocationSize(value.settled) +
         FfiConverterOptionalString.allocationSize(value.tier) +
         FfiConverterOptionalString.allocationSize(value.reasonJson)
@@ -908,6 +972,10 @@ export interface RnDbInterface {
     openBatchId: string,
     author: ArrayBuffer
   ) /*throws*/ : RnTxInterface;
+  /**
+   * Register the callback for rejected writes not consumed by an active wait.
+   */
+  onMutationError(callback: MutationErrorCallback) /*throws*/ : void;
   /**
    * Validate and retain a postcard query.
    */
@@ -1760,6 +1828,25 @@ export class RnDb extends UniffiAbstractObject implements RnDbInterface {
         },
         /*liftString:*/ FfiConverterString.lift
       )
+    );
+  }
+
+  /**
+   * Register the callback for rejected writes not consumed by an active wait.
+   */
+  onMutationError(callback: MutationErrorCallback): void /*throws*/ {
+    uniffiCaller.rustCallWithError(
+      /*liftError:*/ FfiConverterTypeJazzRnError.lift.bind(
+        FfiConverterTypeJazzRnError
+      ),
+      /*caller:*/ (callStatus) => {
+        nativeModule().ubrn_uniffi_jazz_rn_fn_method_rndb_on_mutation_error(
+          uniffiTypeRnDbObjectFactory.clonePointer(this),
+          FfiConverterTypeMutationErrorCallback.lower(callback),
+          callStatus
+        );
+      },
+      /*liftString:*/ FfiConverterString.lift
     );
   }
 
@@ -3237,13 +3324,12 @@ export interface RnWriteInterface {
    */
   payload() /*throws*/ : ArrayBuffer;
   /**
-   * Synchronously register a one-shot state-transition waiter.
+   * Wait until the write reaches the requested durability tier or is rejected.
    */
-  registerWriteStateWaiter() /*throws*/ : RnWriteStateWaiterInterface;
-  /**
-   * Check whether the write has reached the requested durability tier.
-   */
-  wait(tier: string) /*throws*/ : void;
+  wait(
+    tier: string,
+    asyncOpts_?: { signal: AbortSignal }
+  ) /*throws*/ : Promise<void>;
   /**
    * Return the current write state as JSON.
    */
@@ -3322,42 +3408,40 @@ export class RnWrite extends UniffiAbstractObject implements RnWriteInterface {
   }
 
   /**
-   * Synchronously register a one-shot state-transition waiter.
+   * Wait until the write reaches the requested durability tier or is rejected.
    */
-  registerWriteStateWaiter(): RnWriteStateWaiterInterface /*throws*/ {
-    return FfiConverterTypeRnWriteStateWaiter.lift(
-      uniffiCaller.rustCallWithError(
-        /*liftError:*/ FfiConverterTypeJazzRnError.lift.bind(
-          FfiConverterTypeJazzRnError
-        ),
-        /*caller:*/ (callStatus) => {
-          return nativeModule().ubrn_uniffi_jazz_rn_fn_method_rnwrite_register_write_state_waiter(
+  async wait(
+    tier: string,
+    asyncOpts_?: { signal: AbortSignal }
+  ): Promise<void> /*throws*/ {
+    const __stack = uniffiIsDebug ? new Error().stack : undefined;
+    try {
+      return await uniffiRustCallAsync(
+        /*rustCaller:*/ uniffiCaller,
+        /*rustFutureFunc:*/ () => {
+          return nativeModule().ubrn_uniffi_jazz_rn_fn_method_rnwrite_wait(
             uniffiTypeRnWriteObjectFactory.clonePointer(this),
-            callStatus
+            FfiConverterString.lower(tier)
           );
         },
-        /*liftString:*/ FfiConverterString.lift
-      )
-    );
-  }
-
-  /**
-   * Check whether the write has reached the requested durability tier.
-   */
-  wait(tier: string): void /*throws*/ {
-    uniffiCaller.rustCallWithError(
-      /*liftError:*/ FfiConverterTypeJazzRnError.lift.bind(
-        FfiConverterTypeJazzRnError
-      ),
-      /*caller:*/ (callStatus) => {
-        nativeModule().ubrn_uniffi_jazz_rn_fn_method_rnwrite_wait(
-          uniffiTypeRnWriteObjectFactory.clonePointer(this),
-          FfiConverterString.lower(tier),
-          callStatus
-        );
-      },
-      /*liftString:*/ FfiConverterString.lift
-    );
+        /*pollFunc:*/ nativeModule().ubrn_ffi_jazz_rn_rust_future_poll_void,
+        /*cancelFunc:*/ nativeModule().ubrn_ffi_jazz_rn_rust_future_cancel_void,
+        /*completeFunc:*/ nativeModule()
+          .ubrn_ffi_jazz_rn_rust_future_complete_void,
+        /*freeFunc:*/ nativeModule().ubrn_ffi_jazz_rn_rust_future_free_void,
+        /*liftFunc:*/ (_v) => {},
+        /*liftString:*/ FfiConverterString.lift,
+        /*asyncOpts:*/ asyncOpts_,
+        /*errorHandler:*/ FfiConverterTypeJazzRnError.lift.bind(
+          FfiConverterTypeJazzRnError
+        )
+      );
+    } catch (__error: any) {
+      if (uniffiIsDebug && __error instanceof Error) {
+        __error.stack = __stack;
+      }
+      throw __error;
+    }
   }
 
   /**
@@ -3464,154 +3548,6 @@ const uniffiTypeRnWriteObjectFactory: UniffiObjectFactory<RnWriteInterface> =
 // FfiConverter for RnWriteInterface
 const FfiConverterTypeRnWrite = new FfiConverterObject(
   uniffiTypeRnWriteObjectFactory
-);
-
-/**
- * An eagerly registered write-state wake primitive.
- */
-export interface RnWriteStateWaiterInterface {
-  /**
-   * Await the already-registered state transition.
-   */
-  wait(asyncOpts_?: { signal: AbortSignal }) /*throws*/ : Promise<void>;
-}
-
-/**
- * An eagerly registered write-state wake primitive.
- */
-export class RnWriteStateWaiter
-  extends UniffiAbstractObject
-  implements RnWriteStateWaiterInterface
-{
-  readonly [uniffiTypeNameSymbol] = 'RnWriteStateWaiter';
-  readonly [destructorGuardSymbol]: UniffiGcObject;
-  readonly [pointerLiteralSymbol]: UniffiHandle;
-  // No primary constructor declared for this class.
-  private constructor(pointer: UniffiHandle) {
-    super();
-    this[pointerLiteralSymbol] = pointer;
-    this[destructorGuardSymbol] =
-      uniffiTypeRnWriteStateWaiterObjectFactory.bless(pointer);
-  }
-
-  /**
-   * Await the already-registered state transition.
-   */
-  async wait(asyncOpts_?: { signal: AbortSignal }): Promise<void> /*throws*/ {
-    const __stack = uniffiIsDebug ? new Error().stack : undefined;
-    try {
-      return await uniffiRustCallAsync(
-        /*rustCaller:*/ uniffiCaller,
-        /*rustFutureFunc:*/ () => {
-          return nativeModule().ubrn_uniffi_jazz_rn_fn_method_rnwritestatewaiter_wait(
-            uniffiTypeRnWriteStateWaiterObjectFactory.clonePointer(this)
-          );
-        },
-        /*pollFunc:*/ nativeModule().ubrn_ffi_jazz_rn_rust_future_poll_void,
-        /*cancelFunc:*/ nativeModule().ubrn_ffi_jazz_rn_rust_future_cancel_void,
-        /*completeFunc:*/ nativeModule()
-          .ubrn_ffi_jazz_rn_rust_future_complete_void,
-        /*freeFunc:*/ nativeModule().ubrn_ffi_jazz_rn_rust_future_free_void,
-        /*liftFunc:*/ (_v) => {},
-        /*liftString:*/ FfiConverterString.lift,
-        /*asyncOpts:*/ asyncOpts_,
-        /*errorHandler:*/ FfiConverterTypeJazzRnError.lift.bind(
-          FfiConverterTypeJazzRnError
-        )
-      );
-    } catch (__error: any) {
-      if (uniffiIsDebug && __error instanceof Error) {
-        __error.stack = __stack;
-      }
-      throw __error;
-    }
-  }
-
-  /**
-   * {@inheritDoc uniffi-bindgen-react-native#UniffiAbstractObject.uniffiDestroy}
-   */
-  uniffiDestroy(): void {
-    const ptr = (this as any)[destructorGuardSymbol];
-    if (ptr !== undefined) {
-      const pointer = uniffiTypeRnWriteStateWaiterObjectFactory.pointer(this);
-      uniffiTypeRnWriteStateWaiterObjectFactory.freePointer(pointer);
-      uniffiTypeRnWriteStateWaiterObjectFactory.unbless(ptr);
-      delete (this as any)[destructorGuardSymbol];
-    }
-  }
-
-  static instanceOf(obj: any): obj is RnWriteStateWaiter {
-    return uniffiTypeRnWriteStateWaiterObjectFactory.isConcreteType(obj);
-  }
-}
-
-const uniffiTypeRnWriteStateWaiterObjectFactory: UniffiObjectFactory<RnWriteStateWaiterInterface> =
-  (() => {
-    return {
-      create(pointer: UniffiHandle): RnWriteStateWaiterInterface {
-        const instance = Object.create(RnWriteStateWaiter.prototype);
-        instance[pointerLiteralSymbol] = pointer;
-        instance[destructorGuardSymbol] = this.bless(pointer);
-        instance[uniffiTypeNameSymbol] = 'RnWriteStateWaiter';
-        return instance;
-      },
-
-      bless(p: UniffiHandle): UniffiGcObject {
-        return uniffiCaller.rustCall(
-          /*caller:*/ (status) =>
-            nativeModule().ubrn_uniffi_internal_fn_method_rnwritestatewaiter_ffi__bless_pointer(
-              p,
-              status
-            ),
-          /*liftString:*/ FfiConverterString.lift
-        );
-      },
-
-      unbless(ptr: UniffiGcObject) {
-        ptr.markDestroyed();
-      },
-
-      pointer(obj: RnWriteStateWaiterInterface): UniffiHandle {
-        if ((obj as any)[destructorGuardSymbol] === undefined) {
-          throw new UniffiInternalError.UnexpectedNullPointer();
-        }
-        return (obj as any)[pointerLiteralSymbol];
-      },
-
-      clonePointer(obj: RnWriteStateWaiterInterface): UniffiHandle {
-        const pointer = this.pointer(obj);
-        return uniffiCaller.rustCall(
-          /*caller:*/ (callStatus) =>
-            nativeModule().ubrn_uniffi_jazz_rn_fn_clone_rnwritestatewaiter(
-              pointer,
-              callStatus
-            ),
-          /*liftString:*/ FfiConverterString.lift
-        );
-      },
-
-      freePointer(pointer: UniffiHandle): void {
-        uniffiCaller.rustCall(
-          /*caller:*/ (callStatus) =>
-            nativeModule().ubrn_uniffi_jazz_rn_fn_free_rnwritestatewaiter(
-              pointer,
-              callStatus
-            ),
-          /*liftString:*/ FfiConverterString.lift
-        );
-      },
-
-      isConcreteType(obj: any): obj is RnWriteStateWaiterInterface {
-        return (
-          obj[destructorGuardSymbol] &&
-          obj[uniffiTypeNameSymbol] === 'RnWriteStateWaiter'
-        );
-      },
-    };
-  })();
-// FfiConverter for RnWriteStateWaiterInterface
-const FfiConverterTypeRnWriteStateWaiter = new FfiConverterObject(
-  uniffiTypeRnWriteStateWaiterObjectFactory
 );
 
 // FfiConverter for boolean | undefined
@@ -3886,6 +3822,14 @@ function uniffiEnsureInitialized() {
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
       'uniffi_jazz_rn_checksum_method_rndb_mergeable_tx_for_identity'
+    );
+  }
+  if (
+    nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rndb_on_mutation_error() !==
+    56039
+  ) {
+    throw new UniffiInternalError.ApiChecksumMismatch(
+      'uniffi_jazz_rn_checksum_method_rndb_on_mutation_error'
     );
   }
   if (
@@ -4164,15 +4108,7 @@ function uniffiEnsureInitialized() {
     );
   }
   if (
-    nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rnwrite_register_write_state_waiter() !==
-    61880
-  ) {
-    throw new UniffiInternalError.ApiChecksumMismatch(
-      'uniffi_jazz_rn_checksum_method_rnwrite_register_write_state_waiter'
-    );
-  }
-  if (
-    nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rnwrite_wait() !== 37055
+    nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rnwrite_wait() !== 58895
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
       'uniffi_jazz_rn_checksum_method_rnwrite_wait'
@@ -4184,14 +4120,6 @@ function uniffiEnsureInitialized() {
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
       'uniffi_jazz_rn_checksum_method_rnwrite_write_state'
-    );
-  }
-  if (
-    nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rnwritestatewaiter_wait() !==
-    38826
-  ) {
-    throw new UniffiInternalError.ApiChecksumMismatch(
-      'uniffi_jazz_rn_checksum_method_rnwritestatewaiter_wait'
     );
   }
   if (
@@ -4211,6 +4139,14 @@ function uniffiEnsureInitialized() {
     );
   }
   if (
+    nativeModule().ubrn_uniffi_jazz_rn_checksum_method_mutationerrorcallback_on_mutation_error() !==
+    61731
+  ) {
+    throw new UniffiInternalError.ApiChecksumMismatch(
+      'uniffi_jazz_rn_checksum_method_mutationerrorcallback_on_mutation_error'
+    );
+  }
+  if (
     nativeModule().ubrn_uniffi_jazz_rn_checksum_method_tickschedulercallback_on_tick_needed() !==
     7734
   ) {
@@ -4219,6 +4155,7 @@ function uniffiEnsureInitialized() {
     );
   }
 
+  uniffiCallbackInterfaceMutationErrorCallback.register();
   uniffiCallbackInterfaceTickSchedulerCallback.register();
 }
 
@@ -4234,6 +4171,5 @@ export default Object.freeze({
     FfiConverterTypeRnTransport,
     FfiConverterTypeRnTx,
     FfiConverterTypeRnWrite,
-    FfiConverterTypeRnWriteStateWaiter,
   },
 });

@@ -10,11 +10,13 @@ WASM and no JavaScript SQLite driver is involved.
 - One dedicated Rust actor thread owns each thread-affine `Db`.
 - UniFFI `Send + Sync` handles marshal work to that actor.
 - The generated bindings expose the full `NativeDb` contract consumed by
-  `NativeRuntimeAdapter`, including transactions, permission probes, waiters,
-  subscriptions, and batched wire frames.
+  `NativeRuntimeAdapter`, including transactions, async write settlement,
+  unhandled-rejection callbacks, terminal-layout subscriptions, and batched
+  wire frames.
 - Persistent opens use bundled SQLite and deterministically reuse node/author
   identity. Reconnect bootstraps restored pending uploads synchronously.
-- Closing the database cancels waiters, checkpoints storage, and joins the actor.
+- Closing the database cancels pending waits and detached callbacks,
+  checkpoints storage, and joins the actor.
 
 The package contains an XCFramework for iOS device and simulator slices and JNI
 libraries for Android arm64-v8a, armeabi-v7a, x86, and x86_64. iOS has a minimum

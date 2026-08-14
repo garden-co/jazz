@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use hdrhistogram::Histogram;
 use jazz::db::{Db, DbConfig, DbIdentity, ReadOpts, SeededRowIdSource, SubscriptionEvent};
-use jazz::groove::records::{EnumSchema, Value};
+use jazz::groove::records::{ScalarEnumSchema, Value};
 use jazz::groove::schema::{ColumnSchema, ColumnType};
 use jazz::groove::storage::{Durability, RocksDbStorage};
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
@@ -1972,7 +1972,7 @@ fn run_failure(ctx: &mut dyn DriverContext, config: &Config) -> FailureSummary {
 
 fn schema() -> JazzSchema {
     let shape_kind =
-        ColumnType::Enum(EnumSchema::new("shape_type", ["circle", "rectangle"]).unwrap());
+        ColumnType::EnumTag(ScalarEnumSchema::new("shape_type", ["circle", "rectangle"]).unwrap());
     let invite_policy = Policy::shape(Query::from(SHAPES).join_via_column(
         INVITES,
         "canvas",
@@ -2555,7 +2555,7 @@ fn canvas_cells() -> BTreeMap<String, Value> {
 fn shape_cells(canvas: RowUuid, idx: usize, x: f64, y: f64) -> BTreeMap<String, Value> {
     BTreeMap::from([
         ("canvas".to_owned(), Value::Uuid(canvas.0)),
-        ("type".to_owned(), Value::Enum((idx % 2) as u8)),
+        ("type".to_owned(), Value::EnumTag((idx % 2) as u8)),
         ("text".to_owned(), Value::String(format!("shape-{idx}"))),
         ("x".to_owned(), Value::F64(x)),
         ("y".to_owned(), Value::F64(y)),

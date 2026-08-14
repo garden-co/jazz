@@ -34,7 +34,7 @@ use napi_derive::napi;
 use serde::Deserialize;
 use serde_json::Value as JsonValue;
 use std::cell::RefCell;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::rc::Rc;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
@@ -45,12 +45,13 @@ use jazz::db::{
     ConnectionSessionContext as CoreConnectionSessionContext, Db as CoreDb,
     DbConfig as CoreDbConfig, DbIdentity as CoreDbIdentity, ExclusiveTxOps,
     InitialSyncFlushCadence as CoreInitialSyncFlushCadence, LocalUpdates as CoreLocalUpdates,
-    MergeableTxOps, PeerConnection as CorePeerConnection, PreparedQuery as PreparedQueryInner,
+    MergeableTxOps, MutationErrorCallback as CoreMutationErrorCallback,
+    PeerConnection as CorePeerConnection, PreparedQuery as PreparedQueryInner,
     Propagation as CorePropagation, QueryAttachment as CoreQueryAttachment,
     ReadOpts as CoreReadOpts, RowCells as CoreRowCells, SeededRowIdSource as CoreSeededRowIdSource,
-    SubscriptionEvent, SubscriptionStream, TickScheduler as CoreTickScheduler,
-    TickUrgency as CoreTickUrgency, WireTransportAdapter as CoreWireTransportAdapter, WriteHandle,
-    block_on as core_block_on,
+    SubscriptionEvent as CoreSubscriptionEvent, SubscriptionStream,
+    TickScheduler as CoreTickScheduler, TickUrgency as CoreTickUrgency,
+    WireTransportAdapter as CoreWireTransportAdapter, WriteHandle, block_on as core_block_on,
 };
 use jazz::groove::records::{
     BorrowedRecord as CoreBorrowedRecord, RecordDescriptor, Value as CoreValue,
@@ -72,7 +73,7 @@ use jazz::tools::server::{
     TestJwtIssuer as JazzTestJwtIssuer, TestJwtOptions,
 };
 use jazz::tools::{AppId, BatchId};
-use jazz::tx::{DurabilityTier as CoreDurabilityTier, Fate as CoreFate, TxId};
+use jazz::tx::{DurabilityTier as CoreDurabilityTier, TxId};
 use jazz::wire::{
     TransportError, WireAuthorityEndpoint as CoreWireAuthorityEndpoint,
     WireTransport as CoreWireTransport,
@@ -225,7 +226,183 @@ pub struct Transport {
 #[napi(js_name = "Subscription")]
 pub struct Subscription {
     inner: Option<NapiSubscription>,
+    /// Layout definitions are installed atomically with the first event that
+    /// references them.  Later terminal operations only carry this stable id.
+    published_terminal_layouts: HashSet<String>,
 }
+
+#[napi(object)]
+pub struct SubscriptionDeltaEvent {
+    #[napi(js_name = "type", ts_type = "'delta'")]
+    pub event_type: String,
+    pub reset: bool,
+    pub delta: Uint8Array,
+    #[napi(js_name = "terminalOperations")]
+    pub terminal_operations: Vec<SubscriptionTerminalOperation>,
+    #[napi(js_name = "terminalLayouts")]
+    pub terminal_layouts: Vec<SubscriptionTerminalLayout>,
+    pub settled: bool,
+    #[napi(ts_type = "'None' | 'Local' | 'Edge' | 'Global'")]
+    pub tier: String,
+}
+
+#[napi(object)]
+pub struct SubscriptionRejectedEvent {
+    #[napi(js_name = "type", ts_type = "'rejected'")]
+    pub event_type: String,
+    pub reason: SubscriptionRejectionReason,
+}
+
+#[napi(object)]
+pub struct SubscriptionClosedEvent {
+    #[napi(js_name = "type", ts_type = "'closed'")]
+    pub event_type: String,
+}
+
+#[napi(object)]
+pub struct SubscriptionUnsupportedShapeCapabilityReason {
+    #[napi(js_name = "type", ts_type = "'UnsupportedShapeCapability'")]
+    pub reason_type: String,
+    pub detail: String,
+}
+
+#[napi(object)]
+pub struct SubscriptionShapeRegistrationPendingReason {
+    #[napi(
+        js_name = "type",
+        ts_type = "'ShapeRegistrationPendingCatalogueAdmission'"
+    )]
+    pub reason_type: String,
+}
+
+#[napi(object)]
+pub struct SubscriptionServerFailureReason {
+    #[napi(js_name = "type", ts_type = "'ServerFailure'")]
+    pub reason_type: String,
+    #[napi(
+        ts_type = "'TableNotFound' | 'SchemaResolution' | 'QueryValidation' | 'QueryLowering' | 'PolicyEvaluation' | 'Internal'"
+    )]
+    pub code: String,
+}
+
+#[napi(object)]
+pub struct SubscriptionTerminalOperation {
+    #[napi(js_name = "rootLayoutId")]
+    pub root_layout_id: String,
+    #[napi(js_name = "root_key")]
+    pub root_key: Vec<u32>,
+    pub path: Vec<SubscriptionTerminalPathSegment>,
+    pub edit: SubscriptionTerminalEdit,
+}
+
+/// Immutable producer-owned root record contract.  The descriptor and public
+/// slots are published once per NAPI subscription, before an operation may
+/// reference `id`; TypeScript never has to infer a CurrentRow/layout family.
+#[napi(object)]
+pub struct SubscriptionTerminalLayout {
+    pub id: String,
+    #[napi(js_name = "rootDescriptor")]
+    pub root_descriptor: Vec<u32>,
+    #[napi(js_name = "rootKeySlot")]
+    pub root_key_slot: f64,
+    #[napi(js_name = "rootKeyFieldName")]
+    pub root_key_field_name: String,
+    #[napi(js_name = "publicFields")]
+    pub public_fields: Vec<SubscriptionTerminalPublicField>,
+    pub carrier: String,
+}
+
+#[napi(object)]
+pub struct SubscriptionTerminalPublicField {
+    pub name: String,
+    #[napi(js_name = "descriptorFieldName")]
+    pub descriptor_field_name: String,
+    pub slot: f64,
+    pub carrier: String,
+}
+
+#[napi(object)]
+pub struct SubscriptionTerminalCollectionPathSegment {
+    #[napi(js_name = "Collection")]
+    pub collection: String,
+}
+
+#[napi(object)]
+pub struct SubscriptionTerminalKeyPathSegment {
+    #[napi(js_name = "Key")]
+    pub key: Vec<u32>,
+}
+
+#[napi(object)]
+pub struct SubscriptionTerminalInsertEdit {
+    #[napi(js_name = "Insert")]
+    pub insert: SubscriptionTerminalInsert,
+}
+
+#[napi(object)]
+pub struct SubscriptionTerminalInsert {
+    pub index: f64,
+    pub key: Vec<u32>,
+    pub value: Vec<u32>,
+}
+
+#[napi(object)]
+pub struct SubscriptionTerminalUpdateEdit {
+    #[napi(js_name = "Update")]
+    pub update: SubscriptionTerminalUpdate,
+}
+
+#[napi(object)]
+pub struct SubscriptionTerminalUpdate {
+    pub key: Vec<u32>,
+    pub value: Vec<u32>,
+}
+
+#[napi(object)]
+pub struct SubscriptionTerminalRemoveEdit {
+    #[napi(js_name = "Remove")]
+    pub remove: SubscriptionTerminalRemove,
+}
+
+#[napi(object)]
+pub struct SubscriptionTerminalRemove {
+    pub key: Vec<u32>,
+}
+
+#[napi(object)]
+pub struct SubscriptionTerminalMoveEdit {
+    #[napi(js_name = "Move")]
+    pub move_edit: SubscriptionTerminalMove,
+}
+
+#[napi(object)]
+pub struct SubscriptionTerminalMove {
+    pub key: Vec<u32>,
+    pub index: f64,
+}
+
+#[napi]
+pub type SubscriptionEvent =
+    Either3<SubscriptionDeltaEvent, SubscriptionRejectedEvent, SubscriptionClosedEvent>;
+
+#[napi]
+pub type SubscriptionRejectionReason = Either3<
+    SubscriptionUnsupportedShapeCapabilityReason,
+    SubscriptionShapeRegistrationPendingReason,
+    SubscriptionServerFailureReason,
+>;
+
+#[napi]
+pub type SubscriptionTerminalPathSegment =
+    Either<SubscriptionTerminalCollectionPathSegment, SubscriptionTerminalKeyPathSegment>;
+
+#[napi]
+pub type SubscriptionTerminalEdit = Either4<
+    SubscriptionTerminalInsertEdit,
+    SubscriptionTerminalUpdateEdit,
+    SubscriptionTerminalRemoveEdit,
+    SubscriptionTerminalMoveEdit,
+>;
 
 enum NapiTransportInner {
     Memory {
@@ -292,6 +469,39 @@ macro_rules! with_napi_exclusive_tx {
     }};
 }
 
+impl Write {
+    fn wait_promise(
+        &self,
+        env: Env,
+        tier: CoreDurabilityTier,
+    ) -> napi::Result<PromiseRaw<'static, ()>> {
+        let Some(write) = &self.inner else {
+            return Err(napi::Error::from_reason("write state is unavailable"));
+        };
+        let mut deferred = std::ptr::null_mut();
+        let mut promise = std::ptr::null_mut();
+        let env = env.raw();
+        let status = unsafe { sys::napi_create_promise(env, &mut deferred, &mut promise) };
+        if status != sys::Status::napi_ok {
+            return Err(napi::Error::from_reason(
+                "failed to create transaction wait promise",
+            ));
+        }
+        let callback = move |result: std::result::Result<TxId, jazz::db::Error>| {
+            finish_wait_promise(env, deferred, result);
+        };
+        match write {
+            NapiWrite::Memory { db, tx_id } => {
+                db.wait_for_transaction_with(*tx_id, tier, callback);
+            }
+            NapiWrite::Persistent { db, tx_id } => {
+                db.wait_for_transaction_with(*tx_id, tier, callback);
+            }
+        }
+        Ok(PromiseRaw::new(env, promise))
+    }
+}
+
 #[napi]
 impl Write {
     #[napi(getter, js_name = "batchId")]
@@ -302,18 +512,6 @@ impl Write {
     #[napi(getter)]
     pub fn payload(&self) -> Uint8Array {
         Uint8Array::new(self.payload.clone())
-    }
-
-    #[napi]
-    pub fn wait(&self, tier: String) -> napi::Result<()> {
-        let tier = core_durability_tier_from_str(&tier)?;
-        if let Some(write) = &self.inner {
-            match write {
-                NapiWrite::Memory { db, tx_id } => core_wait_for_tx(db, *tx_id, tier)?,
-                NapiWrite::Persistent { db, tx_id } => core_wait_for_tx(db, *tx_id, tier)?,
-            }
-        }
-        Ok(())
     }
 
     #[napi(js_name = "writeState")]
@@ -329,33 +527,9 @@ impl Write {
         Ok(core_write_state_to_json(&state))
     }
 
-    #[napi(js_name = "nextWriteStateChange")]
-    pub fn next_write_state_change(&self, env: Env) -> napi::Result<PromiseRaw<'static, ()>> {
-        let Some(write) = &self.inner else {
-            return Err(napi::Error::from_reason("write state is unavailable"));
-        };
-        let mut deferred = std::ptr::null_mut();
-        let mut promise = std::ptr::null_mut();
-        let env = env.raw();
-        let status = unsafe { sys::napi_create_promise(env, &mut deferred, &mut promise) };
-        if status != sys::Status::napi_ok {
-            return Err(napi::Error::from_reason(
-                "failed to create write-state promise",
-            ));
-        }
-        match write {
-            NapiWrite::Memory { db, tx_id } => {
-                db.on_next_write_state_change(*tx_id, move || {
-                    resolve_raw_promise(env, deferred);
-                });
-            }
-            NapiWrite::Persistent { db, tx_id } => {
-                db.on_next_write_state_change(*tx_id, move || {
-                    resolve_raw_promise(env, deferred);
-                });
-            }
-        }
-        Ok(PromiseRaw::new(env, promise))
+    #[napi]
+    pub fn wait(&self, env: Env, tier: String) -> napi::Result<PromiseRaw<'static, ()>> {
+        self.wait_promise(env, core_durability_tier_from_str(&tier)?)
     }
 
     #[napi]
@@ -421,7 +595,7 @@ impl Transport {
 #[napi]
 impl Subscription {
     #[napi(js_name = "readAll")]
-    pub fn read_all(&mut self) -> napi::Result<Vec<serde_json::Value>> {
+    pub fn read_all(&mut self) -> napi::Result<Vec<SubscriptionEvent>> {
         let subscription = self
             .inner
             .as_mut()
@@ -435,13 +609,16 @@ impl Subscription {
             let Some(event) = event else {
                 break;
             };
-            events.push(core_subscription_event_to_json(&event)?);
+            events.push(core_subscription_event_to_napi(
+                &event,
+                &mut self.published_terminal_layouts,
+            )?);
         }
         Ok(events)
     }
 
     #[napi]
-    pub fn drain(&mut self) -> napi::Result<Vec<serde_json::Value>> {
+    pub fn drain(&mut self) -> napi::Result<Vec<SubscriptionEvent>> {
         self.read_all()
     }
 
@@ -841,6 +1018,31 @@ impl NapiDb {
         Ok(())
     }
 
+    #[napi(
+        js_name = "onMutationError",
+        ts_args_type = "callback: (event: any) => void"
+    )]
+    pub fn on_mutation_error(
+        &self,
+        callback: ThreadsafeFunction<JsonValue, ()>,
+    ) -> napi::Result<()> {
+        let callback: CoreMutationErrorCallback = Rc::new(move |event| {
+            let Ok(event) = serde_json::to_value(event) else {
+                return;
+            };
+            let _ = callback.call(Ok(event), ThreadsafeFunctionCallMode::NonBlocking);
+        });
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        match db {
+            NapiDbInnerStorage::Memory(db) => db.on_mutation_error(Rc::clone(&callback)),
+            NapiDbInnerStorage::Persistent(db) => db.on_mutation_error(Rc::clone(&callback)),
+        }
+        Ok(())
+    }
+
     #[napi(js_name = "prepareQuery")]
     pub fn prepare_query(&self, query: Uint8Array) -> napi::Result<PreparedQuery> {
         let query: CoreQuery = postcard::from_bytes(&query)
@@ -1159,7 +1361,10 @@ impl NapiDb {
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
         };
-        Ok(Subscription { inner: Some(inner) })
+        Ok(Subscription {
+            inner: Some(inner),
+            published_terminal_layouts: HashSet::new(),
+        })
     }
 
     #[napi(js_name = "subscribeForIdentity")]
@@ -1188,7 +1393,10 @@ impl NapiDb {
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
         };
-        Ok(Subscription { inner: Some(inner) })
+        Ok(Subscription {
+            inner: Some(inner),
+            published_terminal_layouts: HashSet::new(),
+        })
     }
 
     #[napi(js_name = "subscribeRelationQuery")]
@@ -1216,7 +1424,10 @@ impl NapiDb {
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
         };
-        Ok(Subscription { inner: Some(inner) })
+        Ok(Subscription {
+            inner: Some(inner),
+            published_terminal_layouts: HashSet::new(),
+        })
     }
 
     #[napi(js_name = "subscribeRelationQueryForIdentity")]
@@ -1246,7 +1457,10 @@ impl NapiDb {
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
         };
-        Ok(Subscription { inner: Some(inner) })
+        Ok(Subscription {
+            inner: Some(inner),
+            published_terminal_layouts: HashSet::new(),
+        })
     }
 
     #[napi(js_name = "insertWithIdEncoded")]
@@ -1978,15 +2192,11 @@ fn core_claim_value_from_json(value: JsonValue) -> napi::Result<CoreValue> {
     Ok(match value {
         JsonValue::Null => CoreValue::Nullable(None),
         JsonValue::Bool(value) => CoreValue::Bool(value),
-        JsonValue::Number(value) => {
-            if let Some(value) = value.as_u64() {
-                CoreValue::U64(value)
-            } else if let Some(value) = value.as_f64() {
-                CoreValue::F64(value)
-            } else {
-                return Err(napi::Error::from_reason("unsupported numeric claim value"));
-            }
-        }
+        JsonValue::Number(value) => jazz::tools::policy_claims::json_number_to_policy_claim(
+            value,
+            jazz::tools::policy_claims::NumericClaimOrigin::JavaScript,
+        )
+        .map_err(napi::Error::from_reason)?,
         JsonValue::String(value) => CoreValue::String(value),
         JsonValue::Array(values) => CoreValue::Array(
             values
@@ -2031,37 +2241,6 @@ where
     Ok(stats.subscription_events as u32)
 }
 
-fn core_wait_for_tx<S>(db: &CoreDb<S>, tx_id: TxId, tier: CoreDurabilityTier) -> napi::Result<()>
-where
-    S: CoreOrderedKvStorage + CoreReopenableStorage + 'static,
-{
-    if tier <= CoreDurabilityTier::Local {
-        return Ok(());
-    }
-    let state = db
-        .write_state(tx_id)
-        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-    match state.fate {
-        CoreFate::Rejected(reason) => {
-            return Err(napi::Error::from_reason(format!(
-                "transaction was rejected: {reason:?}"
-            )));
-        }
-        CoreFate::Pending if tier >= CoreDurabilityTier::Edge => {
-            return Err(napi::Error::from_reason(format!(
-                "transaction has not been accepted at requested tier {tier:?}"
-            )));
-        }
-        CoreFate::Pending | CoreFate::Accepted => {}
-    }
-    if state.durability >= tier {
-        return Ok(());
-    }
-    Err(napi::Error::from_reason(format!(
-        "transaction has not reached requested tier {tier:?}"
-    )))
-}
-
 fn core_write_state_to_json(state: &jazz::db::WriteState) -> serde_json::Value {
     serde_json::to_value(state).unwrap_or_else(|_| serde_json::json!({}))
 }
@@ -2072,6 +2251,39 @@ fn resolve_raw_promise(env: sys::napi_env, deferred: sys::napi_deferred) {
     if status == sys::Status::napi_ok {
         let _ = unsafe { sys::napi_resolve_deferred(env, deferred, undefined) };
     }
+}
+
+fn finish_wait_promise(
+    env: sys::napi_env,
+    deferred: sys::napi_deferred,
+    result: std::result::Result<TxId, jazz::db::Error>,
+) {
+    let Err(error) = result else {
+        resolve_raw_promise(env, deferred);
+        return;
+    };
+    let message = error.to_string();
+    let mut js_message = std::ptr::null_mut();
+    let status = unsafe {
+        sys::napi_create_string_utf8(
+            env,
+            message.as_ptr().cast(),
+            message.len() as isize,
+            &mut js_message,
+        )
+    };
+    if status != sys::Status::napi_ok {
+        return;
+    }
+    let mut js_error = std::ptr::null_mut();
+    let status =
+        unsafe { sys::napi_create_error(env, std::ptr::null_mut(), js_message, &mut js_error) };
+    let rejection = if status == sys::Status::napi_ok {
+        js_error
+    } else {
+        js_message
+    };
+    let _ = unsafe { sys::napi_reject_deferred(env, deferred, rejection) };
 }
 
 fn core_commit_tx<S>(db: &CoreDb<S>, open_tx: CoreOpenBatchId) -> napi::Result<TxId>
@@ -2300,14 +2512,18 @@ fn core_row<'a>(row: &jazz::node::CurrentRow, raw: &'a [u8]) -> CoreRow<'a> {
     }
 }
 
-fn core_subscription_event_to_json(event: &SubscriptionEvent) -> napi::Result<serde_json::Value> {
+fn core_subscription_event_to_napi(
+    event: &CoreSubscriptionEvent,
+    published_terminal_layouts: &mut HashSet<String>,
+) -> napi::Result<SubscriptionEvent> {
     match event {
-        SubscriptionEvent::Delta {
+        CoreSubscriptionEvent::Delta {
             reset,
             added,
             updated,
             removed,
             terminal_operations,
+            terminal_layout,
             settled,
             tier,
             ..
@@ -2325,22 +2541,53 @@ fn core_subscription_event_to_json(event: &SubscriptionEvent) -> napi::Result<se
                 },
             )
             .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-            let payload = serde_json::json!({
-                "type": "delta",
-                "reset": reset,
-                "delta": delta,
-                "terminalOperations": terminal_operations,
-                "settled": settled,
-                "tier": format!("{tier:?}"),
-            });
-            Ok(payload)
+            let (terminal_layouts, terminal_operations) = if terminal_operations.is_empty() {
+                (Vec::new(), Vec::new())
+            } else {
+                let terminal_layout = terminal_layout.as_ref().ok_or_else(|| {
+                    napi::Error::from_reason(
+                        "terminal operation arrived without a prepared root layout".to_owned(),
+                    )
+                })?;
+                if terminal_operations
+                    .iter()
+                    .any(|operation| operation.root_descriptor != terminal_layout.root_descriptor)
+                {
+                    return Err(napi::Error::from_reason(
+                        "terminal operation descriptor disagrees with its prepared root layout"
+                            .to_owned(),
+                    ));
+                }
+                let terminal_layouts = published_terminal_layouts
+                    .insert(terminal_layout.id.clone())
+                    .then(|| core_terminal_layout_to_napi(terminal_layout))
+                    .transpose()?
+                    .into_iter()
+                    .collect();
+                let terminal_operations = terminal_operations
+                    .iter()
+                    .map(|operation| {
+                        core_terminal_operation_to_napi(operation, terminal_layout.id.clone())
+                    })
+                    .collect::<std::result::Result<_, _>>()?;
+                (terminal_layouts, terminal_operations)
+            };
+            Ok(Either3::A(SubscriptionDeltaEvent {
+                event_type: "delta".to_string(),
+                reset: *reset,
+                delta: Uint8Array::new(delta),
+                terminal_operations,
+                terminal_layouts,
+                settled: *settled,
+                tier: format!("{tier:?}"),
+            }))
         }
-        SubscriptionEvent::Rejected { reason } => {
+        CoreSubscriptionEvent::Rejected { reason } => {
             let reason = match reason {
                 jazz::protocol::SubscribeRejectReason::UnsupportedShapeCapability { detail } => {
-                    serde_json::json!({
-                        "type": "UnsupportedShapeCapability",
-                        "detail": detail,
+                    Either3::A(SubscriptionUnsupportedShapeCapabilityReason {
+                        reason_type: "UnsupportedShapeCapability".to_string(),
+                        detail: detail.clone(),
                     })
                 }
                 // Transient: the shape is awaiting catalogue admission and may
@@ -2348,24 +2595,151 @@ fn core_subscription_event_to_json(event: &SubscriptionEvent) -> napi::Result<se
                 // it for an unsupported capability, which is permanent — that
                 // conflation is the bug this variant was introduced to fix.
                 jazz::protocol::SubscribeRejectReason::ShapeRegistrationPendingCatalogueAdmission => {
-                    serde_json::json!({
-                        "type": "ShapeRegistrationPendingCatalogueAdmission",
+                    Either3::B(SubscriptionShapeRegistrationPendingReason {
+                        reason_type: "ShapeRegistrationPendingCatalogueAdmission".to_string(),
                     })
                 }
                 jazz::protocol::SubscribeRejectReason::ServerFailure { code } => {
-                    serde_json::json!({
-                        "type": "ServerFailure",
-                        "code": format!("{code:?}"),
+                    Either3::C(SubscriptionServerFailureReason {
+                        reason_type: "ServerFailure".to_string(),
+                        code: format!("{code:?}"),
                     })
                 }
             };
-            Ok(serde_json::json!({
-                "type": "rejected",
-                "reason": reason,
+            Ok(Either3::B(SubscriptionRejectedEvent {
+                event_type: "rejected".to_string(),
+                reason,
             }))
         }
-        SubscriptionEvent::Closed => Ok(serde_json::json!({ "type": "closed" })),
+        CoreSubscriptionEvent::Closed => Ok(Either3::C(SubscriptionClosedEvent {
+            event_type: "closed".to_string(),
+        })),
     }
+}
+
+mod test_fixture_export {
+    #[cfg(debug_assertions)]
+    #[allow(dead_code)]
+    #[napi_derive::napi(js_name = "__testSubscriptionEvents", skip_typescript)]
+    pub fn subscription_events() -> napi::Result<Vec<super::SubscriptionEvent>> {
+        use jazz::db::SubscriptionEvent;
+        use jazz::protocol::{SubscribeRejectReason, SubscribeServerFailureCode};
+
+        [
+            SubscriptionEvent::Rejected {
+                reason: SubscribeRejectReason::UnsupportedShapeCapability {
+                    detail: "fixture unsupported shape".to_owned(),
+                },
+            },
+            SubscriptionEvent::Rejected {
+                reason: SubscribeRejectReason::ShapeRegistrationPendingCatalogueAdmission,
+            },
+            SubscriptionEvent::Rejected {
+                reason: SubscribeRejectReason::ServerFailure {
+                    code: SubscribeServerFailureCode::QueryValidation,
+                },
+            },
+            SubscriptionEvent::Closed,
+        ]
+        .iter()
+        .scan(std::collections::HashSet::new(), |layouts, event| {
+            Some(super::core_subscription_event_to_napi(event, layouts))
+        })
+        .collect()
+    }
+}
+
+/// Convert terminal edits without serde_json so binary subscription deltas keep
+/// their typed-array representation. Root descriptors retain the upstream
+/// postcard encoding; ordered keys and edit payloads retain their number-array
+/// representation for the existing TypeScript terminal consumer.
+fn core_terminal_operation_to_napi(
+    operation: &jazz::groove::ivm::TerminalOperation,
+    root_layout_id: String,
+) -> napi::Result<SubscriptionTerminalOperation> {
+    use jazz::groove::ivm::{TerminalEdit, TerminalPathSegment};
+
+    let path = operation
+        .path
+        .iter()
+        .map(|segment| match segment {
+            TerminalPathSegment::Collection(collection) => {
+                Either::A(SubscriptionTerminalCollectionPathSegment {
+                    collection: collection.clone(),
+                })
+            }
+            TerminalPathSegment::Key(key) => Either::B(SubscriptionTerminalKeyPathSegment {
+                key: terminal_bytes_to_numbers(key),
+            }),
+        })
+        .collect();
+    let edit = match &operation.edit {
+        TerminalEdit::Insert { index, key, value } => Either4::A(SubscriptionTerminalInsertEdit {
+            insert: SubscriptionTerminalInsert {
+                index: *index as f64,
+                key: terminal_bytes_to_numbers(key),
+                value: terminal_bytes_to_numbers(value),
+            },
+        }),
+        TerminalEdit::Update { key, value } => Either4::B(SubscriptionTerminalUpdateEdit {
+            update: SubscriptionTerminalUpdate {
+                key: terminal_bytes_to_numbers(key),
+                value: terminal_bytes_to_numbers(value),
+            },
+        }),
+        TerminalEdit::Remove { key } => Either4::C(SubscriptionTerminalRemoveEdit {
+            remove: SubscriptionTerminalRemove {
+                key: terminal_bytes_to_numbers(key),
+            },
+        }),
+        TerminalEdit::Move { key, index } => Either4::D(SubscriptionTerminalMoveEdit {
+            move_edit: SubscriptionTerminalMove {
+                key: terminal_bytes_to_numbers(key),
+                index: *index as f64,
+            },
+        }),
+    };
+
+    Ok(SubscriptionTerminalOperation {
+        root_layout_id,
+        root_key: terminal_bytes_to_numbers(&operation.root_key),
+        path,
+        edit,
+    })
+}
+
+fn core_terminal_layout_to_napi(
+    layout: &jazz::db::TerminalRootLayout,
+) -> napi::Result<SubscriptionTerminalLayout> {
+    let root_descriptor = postcard::to_allocvec(&layout.root_descriptor)
+        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+    Ok(SubscriptionTerminalLayout {
+        id: layout.id.clone(),
+        root_descriptor: terminal_bytes_to_numbers(&root_descriptor),
+        root_key_slot: layout.root_key_slot as f64,
+        root_key_field_name: layout.root_key_field_name.clone(),
+        public_fields: layout
+            .public_fields
+            .iter()
+            .map(|field| SubscriptionTerminalPublicField {
+                name: field.name.clone(),
+                descriptor_field_name: field.descriptor_field_name.clone(),
+                slot: field.slot as f64,
+                carrier: match field.carrier {
+                    jazz::db::TerminalRootCarrier::CurrentRow => "CurrentRow".to_owned(),
+                    jazz::db::TerminalRootCarrier::Logical => "Logical".to_owned(),
+                },
+            })
+            .collect(),
+        carrier: match layout.carrier {
+            jazz::db::TerminalRootCarrier::CurrentRow => "CurrentRow".to_owned(),
+            jazz::db::TerminalRootCarrier::Logical => "Logical".to_owned(),
+        },
+    })
+}
+
+fn terminal_bytes_to_numbers(bytes: &[u8]) -> Vec<u32> {
+    bytes.iter().copied().map(u32::from).collect()
 }
 
 fn core_relation_query_from_json(query_json: &str) -> napi::Result<CoreRelationQuery> {
@@ -2747,18 +3121,22 @@ pub fn verify_local_first_identity_proof_napi(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, HashSet};
     use std::rc::Rc;
 
     use crate::{
         NapiDbInnerStorage, NapiTxKind, Tx, authority_epoch_from_bigint, core_block_on,
-        core_read_opts_from_json, core_subscription_event_to_json, encode_core_subscription_delta,
+        core_claim_value_from_json, core_read_opts_from_json, core_subscription_event_to_napi,
+        encode_core_subscription_delta, terminal_bytes_to_numbers,
     };
     use jazz::db::{
         Db as CoreDb, DbConfig as CoreDbConfig, DbIdentity as CoreDbIdentity, ExclusiveTxOps,
-        MergeableTxOps, Propagation as CorePropagation, SubscriptionEvent,
+        MergeableTxOps, Propagation as CorePropagation, SubscriptionEvent as CoreSubscriptionEvent,
+        TerminalRootCarrier, TerminalRootLayout, TerminalRootPublicField,
     };
+    use jazz::groove::ivm::{TerminalEdit, TerminalOperation, TerminalPathSegment};
     use jazz::groove::records::Value as CoreValue;
+    use jazz::groove::records::{RecordDescriptor, ValueType};
     use jazz::groove::schema::ColumnType as GrooveColumnType;
     use jazz::groove::storage::MemoryStorage as CoreMemoryStorage;
     use jazz::ids::{AuthorId as CoreAuthorId, NodeUuid as CoreNodeUuid, RowUuid as CoreRowUuid};
@@ -2768,8 +3146,41 @@ mod tests {
     use jazz::tools::OpenBatchId as CoreOpenBatchId;
     use jazz::tools::{ColumnType, Schema, SchemaBuilder, TableName, TableSchema, Value};
     use jazz::tx::DurabilityTier;
-    use napi::bindgen_prelude::BigInt;
+    use napi::bindgen_prelude::{BigInt, Either, Either3, Either4};
     use serde_json::json;
+
+    #[test]
+    fn javascript_numeric_claims_preserve_safe_integers_and_fail_closed_when_lossy() {
+        assert_eq!(
+            core_claim_value_from_json(json!(7)).unwrap(),
+            CoreValue::U64(7)
+        );
+        assert_eq!(
+            core_claim_value_from_json(json!(-7)).unwrap(),
+            CoreValue::I64(-7)
+        );
+        assert_eq!(
+            core_claim_value_from_json(serde_json::Value::Number(
+                serde_json::Number::from_f64(7.0).unwrap()
+            ))
+            .unwrap(),
+            CoreValue::U64(7),
+            "JS-number deserialization must agree with integer JSON"
+        );
+        assert_eq!(
+            core_claim_value_from_json(json!(7.5)).unwrap(),
+            CoreValue::F64(7.5)
+        );
+        assert_eq!(
+            core_claim_value_from_json(json!(9_007_199_254_740_992_u64)).unwrap(),
+            CoreValue::F64(9_007_199_254_740_992.0),
+            "integers beyond Number.MAX_SAFE_INTEGER must not participate in integer policy matching"
+        );
+        assert_eq!(
+            core_claim_value_from_json(json!(-9_007_199_254_740_992_i64)).unwrap(),
+            CoreValue::F64(-9_007_199_254_740_992.0)
+        );
+    }
 
     #[test]
     fn authority_epoch_bigint_rejects_lossy_values_and_preserves_u64() {
@@ -2922,19 +3333,230 @@ mod tests {
 
     #[test]
     fn subscription_payload_exposes_only_terminal_rows() {
-        let payload = core_subscription_event_to_json(&SubscriptionEvent::Delta {
-            reset: false,
-            added: Vec::new(),
-            updated: Vec::new(),
-            removed: Vec::new(),
-            terminal_operations: Vec::new(),
-            settled: true,
-            tier: DurabilityTier::Local,
-        })
+        let payload = core_subscription_event_to_napi(
+            &CoreSubscriptionEvent::Delta {
+                reset: false,
+                added: Vec::new(),
+                updated: Vec::new(),
+                removed: Vec::new(),
+                terminal_operations: Vec::new(),
+                terminal_layout: None,
+                settled: true,
+                tier: DurabilityTier::Local,
+            },
+            &mut HashSet::new(),
+        )
         .expect("encode terminal delta");
 
-        assert!(payload.get("relation_delta").is_none());
-        assert!(payload.get("output_mode").is_none());
+        let Either3::A(payload) = payload else {
+            panic!("expected delta payload");
+        };
+        assert!(!payload.delta.is_empty());
+        assert!(payload.terminal_operations.is_empty());
+        assert_eq!(payload.tier, "Local");
+    }
+
+    #[test]
+    fn subscription_payload_preserves_typed_terminal_operations_and_descriptor() {
+        let descriptor = RecordDescriptor::new([
+            ("row_uuid", ValueType::Uuid),
+            (
+                "user_title",
+                ValueType::Nullable(Box::new(ValueType::String)),
+            ),
+        ]);
+        let expected_descriptor = postcard::to_allocvec(&descriptor).unwrap();
+        let operations = vec![
+            TerminalOperation {
+                root_descriptor: descriptor,
+                root_key: vec![0, 255],
+                path: vec![
+                    TerminalPathSegment::Collection("children".to_owned()),
+                    TerminalPathSegment::Key(vec![1, 254]),
+                ],
+                edit: TerminalEdit::Insert {
+                    index: 3,
+                    key: vec![2, 253],
+                    value: (0_u8..=u8::MAX).collect(),
+                },
+            },
+            TerminalOperation {
+                root_descriptor: descriptor,
+                root_key: vec![4],
+                path: Vec::new(),
+                edit: TerminalEdit::Update {
+                    key: vec![5],
+                    value: vec![6],
+                },
+            },
+            TerminalOperation {
+                root_descriptor: descriptor,
+                root_key: vec![7],
+                path: Vec::new(),
+                edit: TerminalEdit::Remove { key: vec![8] },
+            },
+            TerminalOperation {
+                root_descriptor: descriptor,
+                root_key: vec![9],
+                path: Vec::new(),
+                edit: TerminalEdit::Move {
+                    key: vec![10],
+                    index: 11,
+                },
+            },
+        ];
+        let terminal_layout = TerminalRootLayout {
+            id: "test-terminal-layout".to_owned(),
+            root_descriptor: descriptor,
+            root_key_slot: 0,
+            root_key_field_name: "row_uuid".to_owned(),
+            public_fields: vec![TerminalRootPublicField {
+                name: "title".to_owned(),
+                descriptor_field_name: "user_title".to_owned(),
+                slot: 1,
+                carrier: TerminalRootCarrier::CurrentRow,
+            }],
+            carrier: TerminalRootCarrier::CurrentRow,
+        };
+        let payload = core_subscription_event_to_napi(
+            &CoreSubscriptionEvent::Delta {
+                reset: false,
+                added: Vec::new(),
+                updated: Vec::new(),
+                removed: Vec::new(),
+                terminal_operations: operations,
+                terminal_layout: Some(terminal_layout),
+                settled: false,
+                tier: DurabilityTier::Edge,
+            },
+            &mut HashSet::new(),
+        )
+        .expect("encode terminal operations");
+
+        let Either3::A(payload) = payload else {
+            panic!("expected delta payload");
+        };
+        assert_eq!(payload.tier, "Edge");
+        assert_eq!(payload.terminal_operations.len(), 4);
+        let insert = &payload.terminal_operations[0];
+        assert_eq!(insert.root_layout_id, "test-terminal-layout");
+        assert_eq!(
+            payload.terminal_layouts[0].root_descriptor,
+            terminal_bytes_to_numbers(&expected_descriptor)
+        );
+        assert_eq!(insert.root_key, vec![0, 255]);
+        assert!(matches!(
+            insert.path.as_slice(),
+            [Either::A(collection), Either::B(key)]
+                if collection.collection == "children" && key.key == vec![1, 254]
+        ));
+        assert!(matches!(
+            &insert.edit,
+            Either4::A(edit)
+                if edit.insert.index == 3.0
+                    && edit.insert.key == vec![2, 253]
+                    && edit.insert.value == (0_u32..=u8::MAX.into()).collect::<Vec<_>>()
+        ));
+        assert!(matches!(
+            &payload.terminal_operations[1].edit,
+            Either4::B(edit) if edit.update.key == vec![5] && edit.update.value == vec![6]
+        ));
+        assert!(matches!(
+            &payload.terminal_operations[2].edit,
+            Either4::C(edit) if edit.remove.key == vec![8]
+        ));
+        assert!(matches!(
+            &payload.terminal_operations[3].edit,
+            Either4::D(edit) if edit.move_edit.key == vec![10] && edit.move_edit.index == 11.0
+        ));
+    }
+
+    #[test]
+    fn subscription_payload_preserves_rejection_and_closed_variants() {
+        use jazz::protocol::{SubscribeRejectReason, SubscribeServerFailureCode};
+
+        let unsupported = core_subscription_event_to_napi(
+            &CoreSubscriptionEvent::Rejected {
+                reason: SubscribeRejectReason::UnsupportedShapeCapability {
+                    detail: "unsupported maintained shape".to_owned(),
+                },
+            },
+            &mut HashSet::new(),
+        )
+        .expect("encode unsupported rejection");
+        assert!(matches!(
+            unsupported,
+            Either3::B(crate::SubscriptionRejectedEvent {
+                event_type,
+                reason: Either3::A(crate::SubscriptionUnsupportedShapeCapabilityReason {
+                    reason_type,
+                    detail,
+                }),
+            }) if event_type == "rejected"
+                && reason_type == "UnsupportedShapeCapability"
+                && detail == "unsupported maintained shape"
+        ));
+
+        let pending = core_subscription_event_to_napi(
+            &CoreSubscriptionEvent::Rejected {
+                reason: SubscribeRejectReason::ShapeRegistrationPendingCatalogueAdmission,
+            },
+            &mut HashSet::new(),
+        )
+        .expect("encode pending rejection");
+        assert!(matches!(
+            pending,
+            Either3::B(crate::SubscriptionRejectedEvent {
+                event_type,
+                reason: Either3::B(crate::SubscriptionShapeRegistrationPendingReason {
+                    reason_type,
+                }),
+            }) if event_type == "rejected"
+                && reason_type == "ShapeRegistrationPendingCatalogueAdmission"
+        ));
+
+        let server_failure = core_subscription_event_to_napi(
+            &CoreSubscriptionEvent::Rejected {
+                reason: SubscribeRejectReason::ServerFailure {
+                    code: SubscribeServerFailureCode::QueryValidation,
+                },
+            },
+            &mut HashSet::new(),
+        )
+        .expect("encode server rejection");
+        assert!(matches!(
+            server_failure,
+            Either3::B(crate::SubscriptionRejectedEvent {
+                event_type,
+                reason: Either3::C(crate::SubscriptionServerFailureReason {
+                    reason_type,
+                    code,
+                }),
+            }) if event_type == "rejected"
+                && reason_type == "ServerFailure"
+                && code == "QueryValidation"
+        ));
+
+        let closed =
+            core_subscription_event_to_napi(&CoreSubscriptionEvent::Closed, &mut HashSet::new())
+                .expect("encode closed event");
+        assert!(matches!(
+            closed,
+            Either3::C(crate::SubscriptionClosedEvent { event_type }) if event_type == "closed"
+        ));
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    fn debug_subscription_event_fixture_covers_rejection_and_closed_variants() {
+        let events = crate::test_fixture_export::subscription_events()
+            .expect("encode debug subscription event fixture");
+
+        assert_eq!(events.len(), 4);
+        assert!(matches!(events[0], Either3::B(_)));
+        assert!(matches!(events[1], Either3::B(_)));
+        assert!(matches!(events[2], Either3::B(_)));
+        assert!(matches!(events[3], Either3::C(_)));
     }
     /// A short-lived NAPI schema attachment must not own or abandon the
     /// owner-wide OpenBatch lifetime when its JS wrapper is collected.

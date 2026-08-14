@@ -26,7 +26,7 @@ The v2 runtime already has two bindings driven by the same TypeScript adapter
 which speaks a structural `NativeDb` contract: postcard-encoded rows and
 schemas, JSON option bags, `setTickScheduler`/`tick()`, byte-queue transports
 pumped by a JS-owned WebSocket (`WebSocketCarrier`), non-blocking
-`Write.wait(tier)` plus `nextWriteStateChange(): Promise`, and
+`Write.wait(tier): Promise<void>`, and
 `Subscription.readAll()` polling. Spec `crates/jazz/SPEC/13_db_api.md` §13.13
 requires that bindings not fork query/transaction/sync semantics; the RN
 binding therefore implements this same contract rather than resurrecting the
@@ -262,10 +262,10 @@ config)` spawn one `jazz-rn-core` thread per database. The thread decodes
   `mpsc::Receiver<Job>`.
 - `Job = Box<dyn FnOnce(&mut CoreState) + Send>`. `CoreState` owns the `Db`
   plus id-keyed registries: prepared queries, query attachments, open
-  transactions, writes (`TxId`s), write-state waiters, subscriptions
+  transactions, writes (`TxId`s), pending write waits, subscriptions
   (`SubscriptionStream`s), transports (`PeerConnection` + wire queues). Ids
   mint from an `AtomicU64`.
-- Handle objects (`RnDb`, `RnTx`, `RnWrite`, `RnWriteStateWaiter`,
+- Handle objects (`RnDb`, `RnTx`, `RnWrite`,
   `RnTransport`, `RnSubscription`, `RnPreparedQuery`, `RnQueryAttachment`)
   are uniffi Objects holding `{actor: Arc<ActorHandle>, id: u64}` —
   trivially `Send + Sync`. Sync methods marshal a job plus reply channel and
@@ -304,34 +304,25 @@ Open ──close()──► Closing ──drained──► Closed
   old crate — they cover panics in argument parsing and channel plumbing on
   the caller's thread.
 
-### 4.2 Queries, waits, and the write-state waiter
+### 4.2 Queries and write waits
 
 Queries execute on the core thread with the crate-shared `block_on` (noop
 waker, immediate ticks), exactly as napi runs `core_block_on` on the JS
 thread.
 
-`Db::next_write_state_change` is documented as a **wake primitive, not a
-predicate**: callers must check `write_state` before and after registration
-or wakeups are lost. The adapter does exactly that (check → register →
-re-check → await). A plain uniffi `async fn` cannot guarantee the middle
-step: uniffi async bodies run lazily when the foreign side first polls, so
-the JS Promise can exist — and the adapter's re-check can run — before
-registration has executed. The design therefore splits the primitive:
+The realigned core owns the complete wait operation through
+`Db::wait_for_transaction_with`: it checks the current fate, registers the
+completion callback atomically when the requested tier is still pending, and
+completes with rejection or success. `RnWrite.wait(tier)` is therefore an
+**async** UniFFI method. Its actor job installs the core callback before
+returning the oneshot receiver to the future, so immediate completion and
+subsequent state changes cannot be lost. Actor close/poison completes every
+pending wait with a stable error, and dropping or aborting the foreign future
+releases its actor-side waiter registration.
 
-- `RnWrite.register_write_state_waiter() -> RnWriteStateWaiter` — **sync**;
-  the reply arrives only after the core thread has executed the registration
-  job (`on_next_write_state_change` installing a fire-once channel sender).
-  When this method returns, registration has provably happened.
-- `RnWriteStateWaiter.wait()` — **async**; awaits the already-registered
-  oneshot. Fires on state transition, or errors with `Closed` when `close()`
-  cancels waiters.
-- The TS shim composes them: `nextWriteStateChange = () =>
-write.registerWriteStateWaiter().wait()`, preserving the adapter's
-  check-register-recheck pattern unchanged.
-
-A dedicated Rust test forces a state transition into every boundary
-(before registration, between registration and await, after await) to prove
-no lost wakeup.
+The TypeScript adapter awaits `write.wait(tier)` directly. There is no
+binding-level waiter object or `nextWriteStateChange` handshake after the core
+realignment.
 
 ### 4.3 Tick scheduling and the notifier thread
 
@@ -366,16 +357,15 @@ built-in `WebSocket` (binary `arraybuffer` mode) is sufficient.
 
 ### 4.5 Exported surface (full `NativeDb` contract)
 
-| Object                                 | Methods                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| -------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `RnDb`                                 | `open_memory`, `open_persistent` (constructors); `set_tick_scheduler`, `tick`, `close`; `prepare_query`; `all`, `all_for_identity`; `all_relation_query(_for_identity)`, `all_relation_snapshot(_for_identity)`; `all_in_transaction(_for_identity)`; `local_current_row`; `set_identity_claims`; `can_insert_encoded(_for_identity)`, `can_read_for_identity`, `can_update_encoded_for_identity`, `can_delete_for_identity`; `attach_query(_for_identity)`, `query_attachment_is_covered`, `detach_query`; `subscribe(_for_identity)`, `subscribe_relation_query(_for_identity)`; `insert_with_id_encoded(_for_identity)`, `update_encoded(_for_identity)`, `upsert_encoded(_for_identity)`, `delete(_for_identity)`, `restore_encoded(_for_identity)`; `mergeable_tx(_for_identity)`, `exclusive_tx`; `connect_upstream` |
-| `RnTx`                                 | `insert_with_id_encoded`, `update_encoded`, `upsert_encoded`, `delete`, `restore_encoded`, `commit -> RnWrite`, `rollback`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| `RnWrite`                              | `payload`, `wait(tier)`, `write_state -> String(JSON)`, `register_write_state_waiter -> RnWriteStateWaiter`, `close`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| `RnWriteStateWaiter`                   | `wait()` (async)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
-| `RnTransport`                          | `send_wire_frame(s)`, `recv_wire_frames`, `tick`, `close`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| `RnSubscription`                       | `read_all -> Vec<String(JSON)>`, `drain`, `close`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
-| `RnPreparedQuery`, `RnQueryAttachment` | opaque handles                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| module fns                             | `mint_local_first_token(secret, audience, ttl_seconds, now_seconds)`, `mint_anonymous_token(secret, audience, ttl_seconds, now_seconds)`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| Object                                 | Methods                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| -------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `RnDb`                                 | `open_memory`, `open_persistent` (constructors); `set_tick_scheduler`, `on_mutation_error`, `tick`, `close`; `prepare_query`; `all`, `all_for_identity`; `all_relation_query(_for_identity)`, `all_relation_snapshot(_for_identity)`; `all_in_transaction(_for_identity)`; `local_current_row`; `set_identity_claims`; `can_insert_encoded(_for_identity)`, `can_read_for_identity`, `can_update_encoded_for_identity`, `can_delete_for_identity`; `attach_query(_for_identity)`, `query_attachment_is_covered`, `detach_query`; `subscribe(_for_identity)`, `subscribe_relation_query(_for_identity)`; `insert_with_id_encoded(_for_identity)`, `update_encoded(_for_identity)`, `upsert_encoded(_for_identity)`, `delete(_for_identity)`, `restore_encoded(_for_identity)`; `mergeable_tx(_for_identity)`, `exclusive_tx`; `connect_upstream` |
+| `RnTx`                                 | `insert_with_id_encoded`, `update_encoded`, `upsert_encoded`, `delete`, `restore_encoded`, `commit -> RnWrite`, `rollback`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `RnWrite`                              | `payload`, `wait(tier)` (async), `write_state -> String(JSON)`, `close`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `RnTransport`                          | `send_wire_frame(s)`, `recv_wire_frames`, `tick`, `close`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `RnSubscription`                       | `read_all -> Vec<String(JSON)>`, `drain`, `close`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `RnPreparedQuery`, `RnQueryAttachment` | opaque handles                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| module fns                             | `mint_local_first_token(secret, audience, ttl_seconds, now_seconds)`, `mint_anonymous_token(secret, audience, ttl_seconds, now_seconds)`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 
 The permission probes, `exclusive_tx`, and `all_in_transaction*` are
 implemented against the core `Db` facade (`can_insert`/`can_read`/
@@ -437,8 +427,9 @@ reached requested tier"`, and coverage-pending matches `NotCovered`. The
   from the ubrn-generated classes to the adapter's `NativeDbConstructor` /
   `NativeDb` contract — camelCase mapping, `ArrayBuffer`↔`Uint8Array`
   conversion at the boundary, `setTickScheduler(cb)` registering the uniffi
-  callback interface, `nextWriteStateChange()` composed from the waiter
-  handle (§4.2), `readAll()` parsing the JSON event strings.
+  callback interfaces, async `wait(tier)` forwarding (§4.2), detached
+  mutation-error delivery, and `readAll()` parsing operations plus one-time
+  terminal-layout definitions from the JSON event strings.
 - **Persistent identity is deterministic, or `INV-API-30` breaks.** On
   reopen, locally originated pending transactions are rescheduled only when
   `TxId.node == DbIdentity.node` and `made_by == DbIdentity.author` — a
@@ -482,13 +473,10 @@ reached requested tier"`, and coverage-pending matches `NotCovered`. The
 `db.mergeable_tx…insert_with_id` → `RnWrite` handle returned with settled
 payload → adapter `pumpSubscriptions()`.
 
-**Durability wait.** `waitForTransaction(tier)` loop (adapter, unchanged):
-`write.wait(tier)` round-trips the actor and either returns or throws a
-pending-marker error → adapter calls `nextWriteStateChange()` (shim:
-sync-registered waiter, then async wait) → re-checks `wait(tier)` → awaits →
-retry. Registration-before-return makes the adapter's check-register-recheck
-sound across the FFI; the JS thread is never blocked while frames still need
-pumping.
+**Durability wait.** `waitForTransaction(tier)` awaits `write.wait(tier)`.
+The actor delegates to the core-owned atomic wait and completes the UniFFI
+future when that transaction reaches the requested tier or is rejected. The
+JS thread remains free to pump frames while the future is pending.
 
 **Sync.** Server frame arrives on RN WebSocket → `WebSocketCarrier` →
 `transport.sendWireFrame(bytes)` → core thread ingests → tick scheduler wants
@@ -557,7 +545,7 @@ builders, then encoded with the same helpers the bindings use.
    (open/close/reopen, close-joins-actor, submission-after-close errors
    without hanging, drop-abandons-tx), poisoning (induced job panic →
    in-flight reply completes with error, queued jobs fail, subsequent calls
-   error, no abort), the §4.2 lost-wakeup matrix for the write-state waiter,
+   error, no abort), the §4.2 async write-wait boundary and cancellation matrix,
    write→wait→pending→settle across tiers with the `WriteRejected`-marker
    rendering, exclusive-tx + transaction reads + permission probes asserted
    behaviorally against `jazz-wasm`'s semantics (shared fixtures), tick
@@ -566,8 +554,9 @@ builders, then encoded with the same helpers the bindings use.
    zstd-compressed-payload exchange, and deterministic-identity reopen
    rescheduling (`INV-API-30`).
 5. **TS unit** (`jazz-tools` vitest): shim contract tests over a mocked
-   generated module (tick registration, byte conversions, waiter-handle
-   composition, error-marker mapping, `nowSeconds` passthrough), plus the
+   generated module (tick and mutation-error registration, byte conversions,
+   async wait forwarding, terminal-layout parsing, error-marker mapping,
+   `nowSeconds` passthrough), plus the
    extracted identity-derivation helpers pinned against the current
    persistent-browser values.
 6. **E2E** (§9): the only tier that exercises Hermes + JSI + a simulator or
@@ -635,8 +624,8 @@ Each lands green and independently valuable:
 
 ## 11. Risks and open questions
 
-- ✅ **ubrn 0.30.0-1 ↔ uniffi 0.30 fidelity.** Generated sync methods,
-  callback interfaces, waiter handles, and the live tick callback build and
+- ✅ **ubrn 0.30.0-1 ↔ uniffi 0.30 fidelity.** Generated sync and async
+  methods, callback interfaces, and the live tick callback build and
   execute through Hermes on the iOS simulator.
 - **Carrier feature advertisement is capability-blind (pre-existing).**
   `WebSocketCarrier` and the Rust byte adapter do not share the negotiated

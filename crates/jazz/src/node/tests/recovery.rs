@@ -136,7 +136,7 @@ fn opening_defers_malformed_current_row_to_read() {
             .primary_key_get_raw(&table, &[Value::Uuid(row(0xff).0)])
             .unwrap()
             .unwrap();
-        let schema_version = raw.schema_version();
+        let variant_tag = raw.variant_tag();
         let (key, raw) = raw.into_parts();
         node.database.close().unwrap();
         drop(node);
@@ -150,7 +150,7 @@ fn opening_defers_malformed_current_row_to_read() {
             .set(
                 &table,
                 &key,
-                &groove::records::encode_versioned_record(schema_version, &raw[..1]),
+                &groove::records::encode_variant_record(variant_tag, &raw[..1]),
             )
             .unwrap();
         storage.close().unwrap();
@@ -470,6 +470,82 @@ fn recovery_rebuilds_global_clock_from_accepted_transactions() {
     let reopened = reopen_node_at(&temp_dir, node(1), schema);
     assert_eq!(reopened.clock.applied_global_watermark, GlobalSeq(2));
     assert_eq!(reopened.clock.next_global_seq, GlobalSeq(3));
+}
+
+// This must remain an internal regression: reaching the last sequence requires
+// planting the authority clock at u64::MAX, which ordinary public writes cannot
+// feasibly do. It proves the boundary itself, while the recovery test below
+// proves that a persisted last sequence retains the exhausted state on reopen.
+#[test]
+fn global_sequence_allocates_max_once_then_stays_exhausted() {
+    let schema = schema();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let mut node = open_node_at(&temp_dir, schema);
+    node.clock.next_global_seq = GlobalSeq(u64::MAX);
+
+    let last_tx = node
+        .commit_mergeable(
+            MergeableCommit::new("todos", row(22), 22).cells(title_cells("last sequence")),
+        )
+        .unwrap();
+    node.finalize_local_mergeable_commit(last_tx).unwrap();
+    assert_eq!(
+        node.transaction_state(last_tx).unwrap(),
+        (
+            Fate::Accepted,
+            Some(GlobalSeq(u64::MAX)),
+            DurabilityTier::Global,
+        )
+    );
+    assert!(node.clock.global_seq_exhausted);
+
+    let after_exhaustion = node
+        .commit_mergeable(
+            MergeableCommit::new("todos", row(23), 23).cells(title_cells("after exhaustion")),
+        )
+        .unwrap();
+    assert!(matches!(
+        node.finalize_local_mergeable_commit(after_exhaustion),
+        Err(Error::InvalidStoredValue("global sequence exhausted"))
+    ));
+    assert_eq!(
+        node.transaction_state(after_exhaustion).unwrap(),
+        (Fate::Pending, None, DurabilityTier::Local)
+    );
+}
+
+// This must remain an internal recovery regression: planting a persisted
+// u64::MAX sequence is not reachable through the public allocation API.
+#[test]
+fn recovery_rejects_global_sequence_allocation_after_max() {
+    let schema = schema();
+    let temp_dir = tempfile::tempdir().unwrap();
+    {
+        let mut node = open_node_at(&temp_dir, schema.clone());
+        let tx_id = node
+            .commit_mergeable(
+                MergeableCommit::new("todos", row(24), 24).cells(title_cells("last sequence")),
+            )
+            .unwrap();
+        mark_accepted_without_ahead_cleanup(&mut node, tx_id, GlobalSeq(u64::MAX));
+    }
+
+    let mut reopened = reopen_node_at(&temp_dir, node(1), schema);
+    assert_eq!(
+        reopened.clock.applied_global_above_watermark,
+        BTreeSet::from([GlobalSeq(u64::MAX)])
+    );
+    assert_eq!(reopened.clock.next_global_seq, GlobalSeq(u64::MAX));
+
+    let next_tx = reopened
+        .commit_mergeable(
+            MergeableCommit::new("todos", row(25), 25).cells(title_cells("after exhaustion")),
+        )
+        .unwrap();
+    assert!(matches!(
+        reopened.finalize_local_mergeable_commit(next_tx),
+        Err(Error::InvalidStoredValue("global sequence exhausted"))
+    ));
 }
 
 #[test]

@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -9,9 +9,9 @@ use std::thread::JoinHandle;
 use futures::channel::oneshot;
 use jazz::binding_support::{self as binding, WireQueues};
 use jazz::db::{
-    ConnectionSessionContext, Db, Error as DbError, ExclusiveTxOps, MergeableTxOps, PeerConnection,
-    PreparedQuery, QueryAttachment, SubscriptionStream, WireTransportAdapter, WriteHandle,
-    block_on,
+    ConnectionSessionContext, Db, Error as DbError, ExclusiveTxOps, MergeableTxOps,
+    MutationErrorCallback as CoreMutationErrorCallback, PeerConnection, PreparedQuery,
+    QueryAttachment, SubscriptionStream, WireTransportAdapter, WriteHandle, block_on,
 };
 use jazz::groove::storage::{MemoryStorage, SqliteStorage};
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
@@ -22,10 +22,11 @@ use jazz::wire::{
     WireAuthorityEndpoint, current_wire_features,
 };
 
+use crate::mutation_errors::RnMutationErrorNotifier;
 use crate::scheduler::RnScheduler;
 use crate::{
-    JazzRnError, RnSubscriptionEvent, TickSchedulerCallback, closed_error, core_error,
-    panic_to_jazz_error, poisoned_error,
+    JazzRnError, MutationErrorCallback, RnSubscriptionEvent, TickSchedulerCallback, closed_error,
+    core_error, panic_to_jazz_error, poisoned_error,
 };
 
 /// Runs `body` against whichever storage backend the core was opened with.
@@ -246,6 +247,16 @@ impl ActorHandle {
     ) -> Result<(), JazzRnError> {
         self.call("set_tick_scheduler", move |state| {
             state.set_tick_scheduler(callback)
+        })
+    }
+
+    pub(crate) fn on_mutation_error(
+        &self,
+        view: u64,
+        callback: Box<dyn MutationErrorCallback>,
+    ) -> Result<(), JazzRnError> {
+        self.call("on_mutation_error", move |state| {
+            state.on_mutation_error(view, callback)
         })
     }
 
@@ -697,25 +708,20 @@ impl ActorHandle {
         })
     }
 
-    pub(crate) fn wait_for_write(&self, write: u64, tier: String) -> Result<(), JazzRnError> {
+    pub(crate) fn wait_for_write(
+        &self,
+        write: u64,
+        tier: String,
+    ) -> Result<(u64, oneshot::Receiver<WaiterSignal>), JazzRnError> {
+        let waiter = self.next_id();
         self.call("wait_for_write", move |state| {
-            state.wait_for_write(write, &tier)
+            let receiver = state.wait_for_write(waiter, write, &tier)?;
+            Ok((waiter, receiver))
         })
     }
 
     pub(crate) fn write_state(&self, write: u64) -> Result<String, JazzRnError> {
         self.call("write_state", move |state| state.write_state(write))
-    }
-
-    pub(crate) fn register_write_state_waiter(
-        &self,
-        write: u64,
-    ) -> Result<(u64, oneshot::Receiver<WaiterSignal>), JazzRnError> {
-        let waiter = self.next_id();
-        self.call("register_write_state_waiter", move |state| {
-            let receiver = state.register_write_state_waiter(waiter, write)?;
-            Ok((waiter, receiver))
-        })
     }
 
     pub(crate) fn close_write(&self, write: u64) -> Result<bool, JazzRnError> {
@@ -834,7 +840,7 @@ impl ActorHandle {
             if let Some(waiter) = state.waiters.get(&id)
                 && let Some(sender) = waiter.completion.borrow_mut().take()
             {
-                let _ = sender.send(WaiterSignal::Changed);
+                let _ = sender.send(WaiterSignal::Completed(Ok(())));
             }
             Ok(())
         })
@@ -1048,6 +1054,7 @@ struct QueryAttachmentEntry {
 struct SubscriptionEntry {
     view: u64,
     stream: SubscriptionStream,
+    published_terminal_layouts: HashSet<String>,
 }
 
 /// The ids a completed write exposes. Both are `Copy`, and the postcard
@@ -1070,9 +1077,9 @@ struct WriteArgs<'a> {
     updated_at_ms: Option<u64>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub(crate) enum WaiterSignal {
-    Changed,
+    Completed(Result<(), JazzRnError>),
     Closed,
     Poisoned(String),
 }
@@ -1137,6 +1144,7 @@ impl TransportEntry {
 struct CoreState {
     views: HashMap<u64, CoreDb>,
     scheduler: RnScheduler,
+    mutation_errors: RnMutationErrorNotifier,
     queries: HashMap<u64, PreparedQueryEntry>,
     query_attachments: HashMap<u64, QueryAttachmentEntry>,
     open_batches: HashMap<OpenBatchId, BatchEntry>,
@@ -1198,6 +1206,7 @@ impl CoreState {
         Ok(Self {
             views: HashMap::from([(ROOT_VIEW, db)]),
             scheduler: RnScheduler::default(),
+            mutation_errors: RnMutationErrorNotifier::default(),
             queries: HashMap::new(),
             query_attachments: HashMap::new(),
             open_batches: HashMap::new(),
@@ -1221,6 +1230,22 @@ impl CoreState {
         self.scheduler.set_callback(Some(callback));
         let scheduler = Rc::new(self.scheduler.clone());
         with_db!(self, ROOT_VIEW, |db| db.set_tick_scheduler(Some(scheduler)));
+        Ok(())
+    }
+
+    fn on_mutation_error(
+        &mut self,
+        view: u64,
+        callback: Box<dyn MutationErrorCallback>,
+    ) -> Result<(), JazzRnError> {
+        self.mutation_errors.set_callback(callback);
+        let notifier = self.mutation_errors.clone();
+        let callback: CoreMutationErrorCallback = Rc::new(move |event| {
+            if let Ok(event_json) = serde_json::to_string(event) {
+                notifier.notify(event_json);
+            }
+        });
+        with_db!(self, view, |db| db.on_mutation_error(callback));
         Ok(())
     }
 
@@ -1532,8 +1557,14 @@ impl CoreState {
             None => block_on(db.subscribe(&query, opts)),
         })
         .map_err(core_error)?;
-        self.subscriptions
-            .insert(id, SubscriptionEntry { view, stream });
+        self.subscriptions.insert(
+            id,
+            SubscriptionEntry {
+                view,
+                stream,
+                published_terminal_layouts: HashSet::new(),
+            },
+        );
         Ok(())
     }
 
@@ -1555,8 +1586,14 @@ impl CoreState {
             None => block_on(db.subscribe_relation_query(&query, opts)),
         })
         .map_err(core_error)?;
-        self.subscriptions
-            .insert(id, SubscriptionEntry { view, stream });
+        self.subscriptions.insert(
+            id,
+            SubscriptionEntry {
+                view,
+                stream,
+                published_terminal_layouts: HashSet::new(),
+            },
+        );
         Ok(())
     }
 
@@ -1572,28 +1609,45 @@ impl CoreState {
                     reset,
                     delta,
                     terminal_operations,
+                    terminal_layouts,
                     settled,
                     tier,
-                } => RnSubscriptionEvent {
-                    event_type: "delta".to_owned(),
-                    reset: Some(reset),
-                    delta: Some(delta),
-                    terminal_operations_json: Some(
-                        serde_json::to_string(&terminal_operations).map_err(|error| {
-                            JazzRnError::Internal {
-                                message: format!("encode terminal operations: {error}"),
-                            }
-                        })?,
-                    ),
-                    settled: Some(settled),
-                    tier: Some(tier),
-                    reason_json: None,
-                },
+                } => {
+                    let terminal_layouts = terminal_layouts
+                        .into_iter()
+                        .filter(|layout| {
+                            stream.published_terminal_layouts.insert(layout.id.clone())
+                        })
+                        .collect::<Vec<_>>();
+                    RnSubscriptionEvent {
+                        event_type: "delta".to_owned(),
+                        reset: Some(reset),
+                        delta: Some(delta),
+                        terminal_operations_json: Some(
+                            serde_json::to_string(&terminal_operations).map_err(|error| {
+                                JazzRnError::Internal {
+                                    message: format!("encode terminal operations: {error}"),
+                                }
+                            })?,
+                        ),
+                        terminal_layouts_json: Some(
+                            serde_json::to_string(&terminal_layouts).map_err(|error| {
+                                JazzRnError::Internal {
+                                    message: format!("encode terminal layouts: {error}"),
+                                }
+                            })?,
+                        ),
+                        settled: Some(settled),
+                        tier: Some(tier),
+                        reason_json: None,
+                    }
+                }
                 binding::EncodedSubscriptionEvent::Rejected { reason } => RnSubscriptionEvent {
                     event_type: "rejected".to_owned(),
                     reset: None,
                     delta: None,
                     terminal_operations_json: None,
+                    terminal_layouts_json: None,
                     settled: None,
                     tier: None,
                     reason_json: Some(serde_json::to_string(&reason).map_err(|error| {
@@ -1607,6 +1661,7 @@ impl CoreState {
                     reset: None,
                     delta: None,
                     terminal_operations_json: None,
+                    terminal_layouts_json: None,
                     settled: None,
                     tier: None,
                     reason_json: None,
@@ -2057,10 +2112,29 @@ impl CoreState {
         Ok(())
     }
 
-    fn wait_for_write(&mut self, write: u64, tier: &str) -> Result<(), JazzRnError> {
+    fn wait_for_write(
+        &mut self,
+        waiter: u64,
+        write: u64,
+        tier: &str,
+    ) -> Result<oneshot::Receiver<WaiterSignal>, JazzRnError> {
         let tx_id = self.write(write)?.tx_id;
         let tier = binding::durability_tier_from_str(tier)?;
-        with_db!(self, ROOT_VIEW, |db| binding::wait_for_tx(db, tx_id, tier)).map_err(Into::into)
+        let (sender, receiver) = oneshot::channel();
+        let completion = Rc::new(RefCell::new(Some(sender)));
+        let callback_completion = Rc::clone(&completion);
+        self.waiters.insert(waiter, WaiterEntry { completion });
+        with_db!(self, ROOT_VIEW, |db| db.wait_for_transaction_with(
+            tx_id,
+            tier,
+            move |result| {
+                if let Some(sender) = callback_completion.borrow_mut().take() {
+                    let result = result.map(|_| ()).map_err(core_error);
+                    let _ = sender.send(WaiterSignal::Completed(result));
+                }
+            }
+        ));
+        Ok(receiver)
     }
 
     fn write_state(&mut self, write: u64) -> Result<String, JazzRnError> {
@@ -2071,27 +2145,6 @@ impl CoreState {
                 message: format!("encode write state json: {error}"),
             }
         })
-    }
-
-    fn register_write_state_waiter(
-        &mut self,
-        waiter: u64,
-        write: u64,
-    ) -> Result<oneshot::Receiver<WaiterSignal>, JazzRnError> {
-        let tx_id = self.write(write)?.tx_id;
-        let (sender, receiver) = oneshot::channel();
-        let completion = Rc::new(RefCell::new(Some(sender)));
-        let callback_completion = Rc::clone(&completion);
-        with_db!(self, ROOT_VIEW, |db| db.on_next_write_state_change(
-            tx_id,
-            move || {
-                if let Some(sender) = callback_completion.borrow_mut().take() {
-                    let _ = sender.send(WaiterSignal::Changed);
-                }
-            }
-        ));
-        self.waiters.insert(waiter, WaiterEntry { completion });
-        Ok(receiver)
     }
 
     fn connect_upstream(
@@ -2186,7 +2239,9 @@ impl CoreState {
         }
         self.cancel_waiters(waiter_signal);
         with_db!(self, ROOT_VIEW, |db| db.set_tick_scheduler(None));
+        with_db!(self, ROOT_VIEW, |db| db.clear_mutation_error_callback());
         self.scheduler.shutdown();
+        self.mutation_errors.shutdown();
         for (_, transport) in self.transports.drain() {
             transport.close();
         }
@@ -2371,26 +2426,25 @@ mod tests {
     }
 
     #[test]
-    fn waiter_registration_has_no_lazy_poll_window() {
-        // The eager registration handshake is a binding-only mechanism. These
-        // three cases cover transitions before registration, after registration
-        // but before await, and while await is pending.
+    fn async_wait_completion_crosses_the_actor_boundary() {
+        // Completion delivery and lifecycle cancellation are binding-only
+        // mechanisms, so this exercises the actor-owned channel directly.
         let actor = open_actor();
 
         actor.fire_test_waiter(u64::MAX).unwrap();
         let (before_id, mut before) = actor.register_test_waiter().unwrap();
-        assert_eq!(before.try_recv().unwrap(), None);
+        assert!(before.try_recv().unwrap().is_none());
         actor.fire_test_waiter(before_id).unwrap();
         assert!(matches!(
             futures::executor::block_on(before).unwrap(),
-            WaiterSignal::Changed
+            WaiterSignal::Completed(Ok(()))
         ));
 
         let (between_id, between) = actor.register_test_waiter().unwrap();
         actor.fire_test_waiter(between_id).unwrap();
         assert!(matches!(
             futures::executor::block_on(between).unwrap(),
-            WaiterSignal::Changed
+            WaiterSignal::Completed(Ok(()))
         ));
 
         let (after_id, after) = actor.register_test_waiter().unwrap();
@@ -2398,7 +2452,7 @@ mod tests {
         actor.fire_test_waiter(after_id).unwrap();
         assert!(matches!(
             awaiting.join().unwrap().unwrap(),
-            WaiterSignal::Changed
+            WaiterSignal::Completed(Ok(()))
         ));
         actor.close().unwrap();
     }

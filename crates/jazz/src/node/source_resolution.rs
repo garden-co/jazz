@@ -82,7 +82,11 @@ where
                 continue;
             };
             if projected_table == table {
-                rows.push(current_row_from_cells(&read_table, row_uuid, &cells)?);
+                match current_row_from_cells(&read_table, row_uuid, &cells) {
+                    Ok(row) => rows.push(row),
+                    Err(error) if is_unrepresentable_enum_projection(&error) => {}
+                    Err(error) => return Err(error),
+                }
             }
         }
         sort_current_rows(&mut rows);
@@ -153,7 +157,11 @@ where
                 continue;
             };
             if projected_table == table {
-                rows.push(current_row_from_cells(&read_table, row_uuid, &cells)?);
+                match current_row_from_cells(&read_table, row_uuid, &cells) {
+                    Ok(row) => rows.push(row),
+                    Err(error) if is_unrepresentable_enum_projection(&error) => {}
+                    Err(error) => return Err(error),
+                }
             }
         }
         sort_current_rows(&mut rows);
@@ -239,16 +247,17 @@ where
                         )
                     })
                     .unwrap_or(&version);
-                rows.push((
-                    current_row_from_materialized_cells_with_layer_provenance(
-                        &read_table,
-                        &version,
-                        &version,
-                        updated,
-                        &cells,
-                    )?,
-                    deleted,
-                ));
+                match current_row_from_materialized_cells_with_layer_provenance(
+                    &read_table,
+                    &version,
+                    &version,
+                    updated,
+                    &cells,
+                ) {
+                    Ok(row) => rows.push((row, deleted)),
+                    Err(error) if is_unrepresentable_enum_projection(&error) => {}
+                    Err(error) => return Err(error),
+                }
             }
         }
         rows.sort_by(|(left, _), (right, _)| {

@@ -217,6 +217,11 @@ interface NativeModuleInterface {
     author: Uint8Array,
     uniffi_out_err: UniffiRustCallStatus
   ): bigint;
+  ubrn_uniffi_jazz_rn_fn_method_rndb_on_mutation_error(
+    ptr: bigint,
+    callback: bigint,
+    uniffi_out_err: UniffiRustCallStatus
+  ): void;
   ubrn_uniffi_jazz_rn_fn_method_rndb_prepare_query(
     ptr: bigint,
     query: Uint8Array,
@@ -470,28 +475,17 @@ interface NativeModuleInterface {
     ptr: bigint,
     uniffi_out_err: UniffiRustCallStatus
   ): Uint8Array;
-  ubrn_uniffi_jazz_rn_fn_method_rnwrite_register_write_state_waiter(
-    ptr: bigint,
-    uniffi_out_err: UniffiRustCallStatus
-  ): bigint;
   ubrn_uniffi_jazz_rn_fn_method_rnwrite_wait(
     ptr: bigint,
-    tier: Uint8Array,
-    uniffi_out_err: UniffiRustCallStatus
-  ): void;
+    tier: Uint8Array
+  ): bigint;
   ubrn_uniffi_jazz_rn_fn_method_rnwrite_write_state(
     ptr: bigint,
     uniffi_out_err: UniffiRustCallStatus
   ): Uint8Array;
-  ubrn_uniffi_jazz_rn_fn_clone_rnwritestatewaiter(
-    handle: bigint,
-    uniffi_out_err: UniffiRustCallStatus
-  ): bigint;
-  ubrn_uniffi_jazz_rn_fn_free_rnwritestatewaiter(
-    handle: bigint,
-    uniffi_out_err: UniffiRustCallStatus
+  ubrn_uniffi_jazz_rn_fn_init_callback_vtable_mutationerrorcallback(
+    vtable: UniffiVTableCallbackInterfaceMutationErrorCallback
   ): void;
-  ubrn_uniffi_jazz_rn_fn_method_rnwritestatewaiter_wait(ptr: bigint): bigint;
   ubrn_uniffi_jazz_rn_fn_init_callback_vtable_tickschedulercallback(
     vtable: UniffiVTableCallbackInterfaceTickSchedulerCallback
   ): void;
@@ -670,6 +664,7 @@ interface NativeModuleInterface {
   ubrn_uniffi_jazz_rn_checksum_method_rndb_local_current_row(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rndb_mergeable_tx(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rndb_mergeable_tx_for_identity(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_rndb_on_mutation_error(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rndb_prepare_query(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rndb_query_attachment_is_covered(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rndb_register_schema(): number;
@@ -705,12 +700,11 @@ interface NativeModuleInterface {
   ubrn_uniffi_jazz_rn_checksum_method_rnwrite_batch_id(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnwrite_close(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnwrite_payload(): number;
-  ubrn_uniffi_jazz_rn_checksum_method_rnwrite_register_write_state_waiter(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnwrite_wait(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rnwrite_write_state(): number;
-  ubrn_uniffi_jazz_rn_checksum_method_rnwritestatewaiter_wait(): number;
   ubrn_uniffi_jazz_rn_checksum_constructor_rndb_open_memory(): number;
   ubrn_uniffi_jazz_rn_checksum_constructor_rndb_open_persistent(): number;
+  ubrn_uniffi_jazz_rn_checksum_method_mutationerrorcallback_on_mutation_error(): number;
   ubrn_uniffi_jazz_rn_checksum_method_tickschedulercallback_on_tick_needed(): number;
   ubrn_ffi_jazz_rn_uniffi_contract_version(): number;
   ubrn_uniffi_internal_fn_method_rndb_ffi__bless_pointer(
@@ -738,10 +732,6 @@ interface NativeModuleInterface {
     uniffi_out_err: UniffiRustCallStatus
   ): UniffiGcObject;
   ubrn_uniffi_internal_fn_method_rnwrite_ffi__bless_pointer(
-    pointer: bigint,
-    uniffi_out_err: UniffiRustCallStatus
-  ): UniffiGcObject;
-  ubrn_uniffi_internal_fn_method_rnwritestatewaiter_ffi__bless_pointer(
     pointer: bigint,
     uniffi_out_err: UniffiRustCallStatus
   ): UniffiGcObject;
@@ -863,10 +853,19 @@ export type UniffiForeignFutureCompleteVoid = (
   callbackData: bigint,
   result: UniffiForeignFutureResultVoid
 ) => void;
+type UniffiCallbackInterfaceMutationErrorCallbackMethod0 = (
+  uniffiHandle: bigint,
+  eventJson: Uint8Array
+) => UniffiResult<void>;
 type UniffiCallbackInterfaceTickSchedulerCallbackMethod0 = (
   uniffiHandle: bigint,
   urgency: Uint8Array
 ) => UniffiResult<void>;
+export type UniffiVTableCallbackInterfaceMutationErrorCallback = {
+  uniffiFree: UniffiCallbackInterfaceFree;
+  uniffiClone: UniffiCallbackInterfaceClone;
+  onMutationError: UniffiCallbackInterfaceMutationErrorCallbackMethod0;
+};
 export type UniffiVTableCallbackInterfaceTickSchedulerCallback = {
   uniffiFree: UniffiCallbackInterfaceFree;
   uniffiClone: UniffiCallbackInterfaceClone;

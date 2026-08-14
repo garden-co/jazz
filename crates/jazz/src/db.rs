@@ -5,7 +5,7 @@
 //! [`crate::peer`]. In the layer map this is the top `Db` facade over the node.
 
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::future::Future;
 use std::num::NonZeroUsize;
 use std::pin::{Pin, pin};
@@ -55,10 +55,8 @@ use crate::protocol::{
     SubscriptionKey, SyncMessage, TableLens,
 };
 use crate::protocol_limits::{
-    MAX_FETCH_BRANCH_METADATA, MAX_INFLIGHT_LOGICAL_MESSAGE_BYTES, MAX_INFLIGHT_LOGICAL_MESSAGES,
-    validate_content_extents, validate_fetch_branch_metadata, validate_fetch_row_versions,
-    validate_known_state_declaration, validate_logical_message_len, validate_shape_ast_size,
-    validate_wire_frame_len,
+    MAX_FETCH_BRANCH_METADATA, validate_content_extents, validate_fetch_branch_metadata,
+    validate_fetch_row_versions, validate_known_state_declaration, validate_shape_ast_size,
 };
 use crate::query::{
     Binding, BindingId, Operand, Predicate, Query, QueryError, RelationQuery, ShapeId,
@@ -73,18 +71,14 @@ pub use crate::result_tree::{ResultNode, ResultRelation, ResultTree, ResultTreeR
 use crate::schema::{JazzSchema, TableSchema};
 use crate::time::GlobalSeq;
 use crate::tools::OpenBatchId;
-use crate::tools::{ObjectId, OutputOccurrenceId, ResultKey};
+use crate::tools::{BatchId, ObjectId, OutputOccurrenceId, ResultKey};
 use crate::tx::{DeletionEvent, DurabilityTier, Fate, RejectionReason, TxId, TxKind};
-use crate::wire::{
-    FEATURE_MESSAGE_FRAGMENTATION, TransportError, WIRE_PROTOCOL_VERSION, WireAuthorityEndpoint,
-    WireEnvelope, WireError, WireErrorCode, WireFeatures, WireFrame, WireMessageFragment,
-    WireRetry, WireSession, WireStreamDecoder, WireStreamEncoder, WireTransport,
-    current_wire_features, decode_frame, decode_sync_message_for_features, encode_frame,
-    encode_sync_message, encode_sync_message_for_features,
-};
+use crate::wire::{TransportError, WireAuthorityEndpoint, WireFeatures, encode_sync_message};
 
-const WIRE_FRAGMENT_PAYLOAD_BYTES: usize = 512 * 1024;
-const RECENT_COMPLETED_LOGICAL_MESSAGES: usize = 64;
+mod wire_transport;
+#[cfg(test)]
+use wire_transport::LogicalMessageReassembler;
+pub use wire_transport::WireTransportAdapter;
 
 /// How urgently a runtime should service pending peer-connection work.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -103,6 +97,71 @@ pub trait TickScheduler {
     /// Schedule a future [`Db::tick`] for pending peer-connection work.
     fn schedule_tick(&self, urgency: TickUrgency);
 }
+
+/// A locally-originated transaction rejection that was not consumed by an
+/// active write waiter.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MutationErrorEvent {
+    /// Stable machine-readable rejection code.
+    pub code: String,
+    /// Human-readable rejection reason.
+    pub reason: String,
+    /// The rejected local transaction.
+    pub transaction: LocalTransactionRecord,
+}
+
+/// Binding-facing record for one locally committed transaction.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalTransactionRecord {
+    /// Stable public identity derived from the core transaction id.
+    pub batch_id: BatchId,
+    /// Transaction semantics used by the commit.
+    pub kind: TransactionKind,
+    /// Committed transaction records are immutable.
+    pub sealed: bool,
+    /// Latest authority settlement observed for the transaction.
+    pub latest_settlement: TransactionFate,
+}
+
+/// Binding-facing transaction kind.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TransactionKind {
+    /// CRDT-style mergeable transaction.
+    Mergeable,
+    /// Authority-validated exclusive transaction.
+    Exclusive,
+}
+
+impl From<TxKind> for TransactionKind {
+    fn from(kind: TxKind) -> Self {
+        match kind {
+            TxKind::Mergeable => Self::Mergeable,
+            TxKind::Exclusive => Self::Exclusive,
+        }
+    }
+}
+
+/// Binding-facing authority fate for a rejected transaction.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum TransactionFate {
+    /// The authority rejected the transaction.
+    Rejected {
+        /// Stable public identity derived from the core transaction id.
+        #[serde(rename = "batchId")]
+        batch_id: BatchId,
+        /// Stable machine-readable rejection code.
+        code: String,
+        /// Human-readable rejection reason.
+        reason: String,
+    },
+}
+
+/// Thread-affine callback used by bindings to surface unhandled rejections.
+pub type MutationErrorCallback = Rc<dyn Fn(&MutationErrorEvent) + 'static>;
 
 #[cfg(feature = "sync-autopsy")]
 /// Debug-build sync trace buffer used by integration-test timeout autopsies.
@@ -262,6 +321,7 @@ fn prune_edge_fate_routes(
         !pending.is_empty()
     });
 }
+type SharedMutationErrors = Rc<RefCell<MutationErrorState>>;
 type ShapeRegistrationKey = (ShapeId, ReadViewKey);
 
 /// Per-subscriber state for a shape/read-view registration.
@@ -416,6 +476,12 @@ struct WriteStateWaiter {
 enum WriteStateWaiterNotify {
     Future(oneshot::Sender<()>),
     Callback(Box<dyn FnOnce()>),
+}
+
+#[derive(Default)]
+struct MutationErrorState {
+    callback: Option<MutationErrorCallback>,
+    pending: BTreeMap<TxId, MutationErrorEvent>,
 }
 
 #[derive(Clone)]
@@ -1048,6 +1114,42 @@ where
         Ok(WriteState { fate, durability })
     }
 
+    /// Wait until `tx_id` reaches `tier` or is rejected.
+    ///
+    /// An explicit wait consumes a rejection, preventing the same failure from
+    /// subsequently being delivered through [`Db::on_mutation_error`]. The
+    /// check/register/recheck sequence keeps that ownership decision inside
+    /// the database and closes the race with an already-observed rejection.
+    pub async fn wait_for_transaction(
+        &self,
+        tx_id: TxId,
+        tier: DurabilityTier,
+    ) -> Result<TxId, Error> {
+        loop {
+            if let Some(outcome) = self.node.transaction_wait_outcome(tx_id, tier) {
+                return outcome;
+            }
+            let state_change = self.node.register_write_state_waiter(tx_id);
+            if let Some(outcome) = self.node.transaction_wait_outcome(tx_id, tier) {
+                drop(state_change);
+                return outcome;
+            }
+            state_change.await;
+        }
+    }
+
+    /// Callback form of [`Db::wait_for_transaction`] for bindings that cannot
+    /// drive a thread-affine Rust future directly.
+    pub fn wait_for_transaction_with(
+        &self,
+        tx_id: TxId,
+        tier: DurabilityTier,
+        callback: impl FnOnce(Result<TxId, Error>) + 'static,
+    ) {
+        self.node
+            .wait_for_transaction_with(tx_id, tier, Box::new(callback));
+    }
+
     /// Wait until this database observes another state transition for `tx_id`.
     ///
     /// Callers should always check [`Db::write_state`] before and after
@@ -1056,15 +1158,15 @@ where
         self.node.register_write_state_waiter(tx_id)
     }
 
-    /// Register a one-shot same-thread callback for the next state transition of
-    /// `tx_id`.
-    ///
-    /// This is the callback equivalent of [`Db::next_write_state_change`].
-    /// Callers should still read [`Db::write_state`] before and after
-    /// registration to avoid lost wakeups.
-    pub fn on_next_write_state_change(&self, tx_id: TxId, callback: impl FnOnce() + 'static) {
-        self.node
-            .register_write_state_callback(tx_id, Box::new(callback));
+    /// Register the binding callback for rejected local transactions that no
+    /// active application waiter consumed.
+    pub fn on_mutation_error(&self, callback: MutationErrorCallback) {
+        self.node.set_mutation_error_callback(Some(callback));
+    }
+
+    /// Remove the current mutation-error callback.
+    pub fn clear_mutation_error_callback(&self) {
+        self.node.set_mutation_error_callback(None);
     }
 
     /// Start a query rooted at `table`.
@@ -1969,6 +2071,7 @@ where
                 updated: Vec::new(),
                 removed: Vec::new(),
                 terminal_operations: Vec::new(),
+                terminal_layout: None,
                 settled,
                 tier: read_tier,
             })
@@ -4666,6 +4769,7 @@ where
     edge_fate_routes: EdgeFateRoutes,
     admitted_upstream_authorities: AdmittedUpstreamAuthorities,
     admitted_upstream_authority: Rc<RefCell<Option<AuthorityContext>>>,
+    mutation_errors: SharedMutationErrors,
     next_write_state_waiter_id: Cell<u64>,
     next_subscription_nonce: Cell<u64>,
     subscriber_dirty_epoch: Rc<Cell<u64>>,
@@ -4678,6 +4782,14 @@ where
 {
     /// Wrap a node for serving subscriber links.
     pub fn new(node: NodeState<S>) -> Self {
+        let pending_mutation_errors = node
+            .rejected_transactions()
+            .into_iter()
+            .filter_map(|tx_id| {
+                node.rejected_transaction(tx_id)
+                    .map(|rejected| (tx_id, mutation_error_event(rejected)))
+            })
+            .collect();
         Self {
             node: Rc::new(RefCell::new(node)),
             subscriptions: Rc::new(RefCell::new(Vec::new())),
@@ -4690,6 +4802,10 @@ where
             connections: RefCell::new(Vec::new()),
             scheduler: Rc::new(RefCell::new(None)),
             write_state_waiters: Rc::new(RefCell::new(BTreeMap::new())),
+            mutation_errors: Rc::new(RefCell::new(MutationErrorState {
+                callback: None,
+                pending: pending_mutation_errors,
+            })),
             next_write_state_waiter_id: Cell::new(1),
             next_subscription_nonce: Cell::new(1),
             permission_advice_waiters: Rc::new(RefCell::new(BTreeMap::new())),
@@ -4806,6 +4922,82 @@ where
 
     fn schedule_tick(&self, urgency: TickUrgency) {
         schedule_tick_in(&self.scheduler, urgency);
+    }
+
+    fn set_mutation_error_callback(&self, callback: Option<MutationErrorCallback>) {
+        let should_schedule = {
+            let mut state = self.mutation_errors.borrow_mut();
+            state.callback = callback;
+            state.callback.is_some() && !state.pending.is_empty()
+        };
+        if should_schedule {
+            self.schedule_tick(TickUrgency::Immediate);
+        }
+    }
+
+    fn consume_mutation_error(&self, tx_id: TxId) -> Result<bool, Error> {
+        let pending = self.mutation_errors.borrow_mut().pending.remove(&tx_id);
+        let retained = self.node.borrow().rejected_transaction(tx_id).is_some();
+        if retained {
+            self.node.borrow_mut().discard_rejection(tx_id)?;
+        }
+        Ok(pending.is_some() || retained)
+    }
+
+    fn transaction_wait_outcome(
+        &self,
+        tx_id: TxId,
+        tier: DurabilityTier,
+    ) -> Option<Result<TxId, Error>> {
+        if tier <= DurabilityTier::Local {
+            return Some(Ok(tx_id));
+        }
+        let Some((fate, _, durability)) = self.node.borrow_mut().transaction_state(tx_id) else {
+            return Some(Err(Error::new(
+                ErrorCode::NotObserved,
+                "transaction is not known locally",
+            )));
+        };
+        match fate {
+            Fate::Rejected(reason) => {
+                if let Err(error) = self.consume_mutation_error(tx_id) {
+                    tracing::warn!(?tx_id, %error, "failed to consume waited mutation error");
+                }
+                Some(Err(write_rejected(reason)))
+            }
+            Fate::Pending | Fate::Accepted if durability >= tier => Some(Ok(tx_id)),
+            Fate::Pending | Fate::Accepted => None,
+        }
+    }
+
+    fn wait_for_transaction_with(
+        self: &Rc<Self>,
+        tx_id: TxId,
+        tier: DurabilityTier,
+        callback: Box<dyn FnOnce(Result<TxId, Error>)>,
+    ) {
+        if let Some(outcome) = self.transaction_wait_outcome(tx_id, tier) {
+            callback(outcome);
+            return;
+        }
+        let node = Rc::clone(self);
+        self.register_write_state_callback(
+            tx_id,
+            Box::new(move || node.wait_for_transaction_with(tx_id, tier, callback)),
+        );
+    }
+
+    fn deliver_pending_mutation_errors(&self) {
+        let Some((callback, events)) = take_pending_mutation_error_delivery(&self.mutation_errors)
+        else {
+            return;
+        };
+        for (tx_id, event) in events {
+            if let Err(error) = self.node.borrow_mut().discard_rejection(tx_id) {
+                tracing::warn!(?tx_id, %error, "failed to acknowledge delivered mutation error");
+            }
+            callback(&event);
+        }
     }
 
     fn queue_content_extent_fetch(&self, extent: crate::node::content_store::Extent) {
@@ -5016,6 +5208,7 @@ where
             admitted_upstream_authorities: Rc::clone(&self.admitted_upstream_authorities),
             admitted_upstream_authority: Rc::clone(&self.admitted_upstream_authority),
             downstream_fates: Rc::new(RefCell::new(Vec::new())),
+            mutation_errors: Rc::clone(&self.mutation_errors),
             subscriber_dirty_epoch: Rc::clone(&self.subscriber_dirty_epoch),
             observed_subscriber_dirty_epoch: Cell::new(self.subscriber_dirty_epoch.get()),
             observed_session_claim_revision: Cell::new(0),
@@ -5184,6 +5377,7 @@ where
             admitted_upstream_authorities: Rc::clone(&self.admitted_upstream_authorities),
             admitted_upstream_authority: Rc::clone(&self.admitted_upstream_authority),
             downstream_fates: Rc::new(RefCell::new(Vec::new())),
+            mutation_errors: Rc::clone(&self.mutation_errors),
             subscriber_dirty_epoch: Rc::clone(&self.subscriber_dirty_epoch),
             observed_subscriber_dirty_epoch: Cell::new(self.subscriber_dirty_epoch.get()),
             observed_session_claim_revision: Cell::new(session_claim_revision),
@@ -5302,6 +5496,7 @@ where
 
     /// Service every accepted subscriber connection once.
     pub fn tick(&self) -> Result<DbTickStats, Error> {
+        self.deliver_pending_mutation_errors();
         let mut stats = DbTickStats::default();
         let mut remote_sync_applied = false;
         for connection in self.connections.borrow().iter() {
@@ -5401,6 +5596,34 @@ where
                     }
                 }
             };
+            let stale_subscription_id = {
+                let state = state.borrow();
+                match &state.kind {
+                    SubscriptionKind::Prepared {
+                        maintained_subscription,
+                        ..
+                    } => maintained_subscription
+                        .as_ref()
+                        .map(LocalMaintainedViewSubscription::subscription_id),
+                }
+            };
+            // The Jazz runtime token invalidates prepared plans, while the
+            // Groove runtime itself remains alive. Retire the old maintained
+            // handle before installing its replacement so two descriptor
+            // generations cannot consume the next physical delta.
+            if let Some(subscription_id) = stale_subscription_id {
+                node.borrow_mut()
+                    .unsubscribe_groove_subscription(subscription_id);
+            }
+            let (shape, binding, prepared_plan) = node
+                .borrow_mut()
+                .prepare_query_binding_for_link_in_authorization_mode(
+                    &shape,
+                    &binding,
+                    read_tier,
+                    author,
+                    authorization_mode,
+                )?;
             let (maintained, mut snapshot) = node
                 .borrow_mut()
                 .open_maintained_view_subscription_in_authorization_mode(
@@ -5409,7 +5632,7 @@ where
                     author,
                     read_tier,
                     &read_view,
-                    None,
+                    Some(prepared_plan),
                     authorization_mode,
                 )?;
             let delivered_binding_view = BindingViewKey {
@@ -5536,6 +5759,7 @@ where
                 updated: Vec::new(),
                 removed,
                 terminal_operations: Vec::new(),
+                terminal_layout: None,
                 settled,
                 tier: read_tier,
             };
@@ -5781,6 +6005,9 @@ where
                         )
                     } else {
                         if terminal_rows && !peer_terminal_operations.is_empty() {
+                            let terminal_layout = maintained_subscription
+                                .as_ref()
+                                .and_then(|maintained| maintained.terminal_root_layout().cloned());
                             if let Some(maintained) = maintained_subscription.as_mut() {
                                 // The serving terminal is authoritative for
                                 // structural publication. Advance the local
@@ -5805,6 +6032,7 @@ where
                                 updated: Vec::new(),
                                 removed: Vec::new(),
                                 terminal_operations: peer_terminal_operations,
+                                terminal_layout,
                                 settled,
                                 tier: snapshot_tier,
                             };
@@ -5859,6 +6087,7 @@ where
                                         updated: Vec::new(),
                                         removed: Vec::new(),
                                         terminal_operations: update.terminal_operations,
+                                        terminal_layout: update.terminal_layout,
                                         settled,
                                         tier: snapshot_tier,
                                     };
@@ -6213,542 +6442,6 @@ pub struct ConnectionSessionContext {
     pub negotiated_features: WireFeatures,
 }
 
-/// Adapter from postcard wire frames to the internal sync-message transport.
-struct IncompleteLogicalMessage {
-    protocol_version: u16,
-    features: WireFeatures,
-    session: Option<WireSession>,
-    message_digest: [u8; 32],
-    total_len: usize,
-    received_len: usize,
-    extents: BTreeMap<usize, Vec<u8>>,
-}
-
-#[derive(Default)]
-struct LogicalMessageReassembler {
-    incomplete: HashMap<u64, IncompleteLogicalMessage>,
-    staged_bytes: usize,
-    recently_completed: VecDeque<(u64, [u8; 32])>,
-    highest_completed_message_id: Option<u64>,
-}
-
-impl LogicalMessageReassembler {
-    fn discard(&mut self, message_id: u64) {
-        if let Some(state) = self.incomplete.remove(&message_id) {
-            self.staged_bytes = self.staged_bytes.saturating_sub(state.received_len);
-        }
-    }
-
-    fn push(&mut self, fragment: WireMessageFragment) -> Result<Option<WireEnvelope>, String> {
-        if let Some((_, digest)) = self
-            .recently_completed
-            .iter()
-            .find(|(message_id, _)| *message_id == fragment.message_id)
-        {
-            return if digest == &fragment.message_digest {
-                Ok(None)
-            } else {
-                Err("completed logical message id was reused with another digest".to_owned())
-            };
-        }
-        if self
-            .highest_completed_message_id
-            .is_some_and(|completed| fragment.message_id <= completed)
-        {
-            return Ok(None);
-        }
-        let total_len = usize::try_from(fragment.total_len)
-            .map_err(|_| "logical message length does not fit this receiver".to_owned())?;
-        validate_logical_message_len(total_len)?;
-        let offset = usize::try_from(fragment.offset)
-            .map_err(|_| "logical message fragment offset does not fit this receiver".to_owned())?;
-        let end = offset
-            .checked_add(fragment.payload.len())
-            .ok_or_else(|| "logical message fragment range overflow".to_owned())?;
-        if fragment.payload.is_empty() || end > total_len {
-            return Err("logical message fragment has an empty or out-of-range extent".to_owned());
-        }
-        if !self.incomplete.contains_key(&fragment.message_id) {
-            if self.incomplete.len() >= MAX_INFLIGHT_LOGICAL_MESSAGES {
-                return Err("too many incomplete logical messages for peer".to_owned());
-            }
-            self.incomplete.insert(
-                fragment.message_id,
-                IncompleteLogicalMessage {
-                    protocol_version: fragment.protocol_version,
-                    features: fragment.features,
-                    session: fragment.session.clone(),
-                    message_digest: fragment.message_digest,
-                    total_len,
-                    received_len: 0,
-                    extents: BTreeMap::new(),
-                },
-            );
-        }
-        let state = self
-            .incomplete
-            .get_mut(&fragment.message_id)
-            .expect("logical message state inserted");
-        if state.total_len != total_len
-            || state.protocol_version != fragment.protocol_version
-            || state.features != fragment.features
-            || state.session != fragment.session
-            || state.message_digest != fragment.message_digest
-        {
-            return Err("logical message fragments disagree on metadata".to_owned());
-        }
-        if let Some(existing) = state.extents.get(&offset) {
-            return if existing == &fragment.payload {
-                Ok(None)
-            } else {
-                Err("conflicting duplicate logical message fragment".to_owned())
-            };
-        }
-        if state
-            .extents
-            .range(..=offset)
-            .next_back()
-            .is_some_and(|(start, bytes)| *start + bytes.len() > offset)
-            || state
-                .extents
-                .range(offset..)
-                .next()
-                .is_some_and(|(start, _)| *start < end)
-        {
-            return Err("overlapping logical message fragments".to_owned());
-        }
-        let next_staged = self
-            .staged_bytes
-            .checked_add(fragment.payload.len())
-            .ok_or_else(|| "logical message staging byte count overflow".to_owned())?;
-        if next_staged > MAX_INFLIGHT_LOGICAL_MESSAGE_BYTES {
-            return Err("incomplete logical messages exceed peer staging budget".to_owned());
-        }
-        self.staged_bytes = next_staged;
-        state.received_len += fragment.payload.len();
-        state.extents.insert(offset, fragment.payload);
-        if state.received_len != state.total_len {
-            return Ok(None);
-        }
-
-        let state = self
-            .incomplete
-            .remove(&fragment.message_id)
-            .expect("completed logical message state exists");
-        self.staged_bytes -= state.received_len;
-        let mut cursor = 0;
-        let mut payload = Vec::with_capacity(state.total_len);
-        for (offset, extent) in state.extents {
-            if offset != cursor {
-                return Err(
-                    "logical message fragments do not provide contiguous coverage".to_owned(),
-                );
-            }
-            cursor += extent.len();
-            payload.extend_from_slice(&extent);
-        }
-        if cursor != state.total_len || *blake3::hash(&payload).as_bytes() != state.message_digest {
-            return Err("logical message digest mismatch".to_owned());
-        }
-        self.recently_completed
-            .push_back((fragment.message_id, state.message_digest));
-        self.highest_completed_message_id = Some(fragment.message_id);
-        if self.recently_completed.len() > RECENT_COMPLETED_LOGICAL_MESSAGES {
-            self.recently_completed.pop_front();
-        }
-        Ok(Some(WireEnvelope {
-            protocol_version: state.protocol_version,
-            features: state.features,
-            session: state.session,
-            payload,
-        }))
-    }
-}
-
-/// Converts logical sync messages to negotiated bounded wire frames and back.
-pub struct WireTransportAdapter<T> {
-    inner: T,
-    protocol_version: u16,
-    features: WireFeatures,
-    session: Option<WireSession>,
-    session_context: Option<ConnectionSessionContext>,
-    outbound_stream: WireStreamEncoder,
-    inbound_stream: WireStreamDecoder,
-    reassembler: LogicalMessageReassembler,
-    pending_outbound_frames: VecDeque<Vec<u8>>,
-    next_outbound_message_id: u64,
-}
-
-impl<T> WireTransportAdapter<T>
-where
-    T: WireTransport,
-{
-    /// Wrap a byte transport with the current Jazz wire defaults.
-    pub fn current(inner: T) -> Self {
-        Self::new(inner, WIRE_PROTOCOL_VERSION, current_wire_features(), None)
-    }
-
-    /// Wrap a byte transport with explicit negotiated frame metadata.
-    pub fn new(
-        inner: T,
-        protocol_version: u16,
-        features: WireFeatures,
-        session: Option<WireSession>,
-    ) -> Self {
-        Self::new_with_session_context(inner, protocol_version, features, session, None)
-    }
-
-    /// Wrap a transport after authenticated hello/session admission supplied
-    /// immutable endpoint identities and epochs.
-    pub fn new_with_session_context(
-        inner: T,
-        protocol_version: u16,
-        features: WireFeatures,
-        session: Option<WireSession>,
-        session_context: Option<ConnectionSessionContext>,
-    ) -> Self {
-        let outbound_stream = WireStreamEncoder::new(features)
-            .expect("negotiated wire compression must be compiled into this binary");
-        let inbound_stream = WireStreamDecoder::new(features)
-            .expect("negotiated wire compression must be compiled into this binary");
-        Self {
-            inner,
-            protocol_version,
-            features,
-            session,
-            session_context,
-            outbound_stream,
-            inbound_stream,
-            reassembler: LogicalMessageReassembler::default(),
-            pending_outbound_frames: VecDeque::new(),
-            next_outbound_message_id: 0,
-        }
-    }
-
-    /// Consume the adapter and return the wrapped byte transport.
-    pub fn into_inner(self) -> T {
-        self.inner
-    }
-
-    fn send_wire_error(&mut self, error: WireError) {
-        if let Ok(frame) = encode_frame(&WireFrame::Error(error)) {
-            let _ = self.inner.send_frame(frame);
-        }
-    }
-
-    fn flush_pending_outbound(&mut self) -> Result<(), TransportError> {
-        while let Some(frame) = self.pending_outbound_frames.pop_front() {
-            if let Err(error) = self.inner.send_frame(frame.clone()) {
-                self.pending_outbound_frames.push_front(frame);
-                return Err(error);
-            }
-        }
-        Ok(())
-    }
-
-    fn send_encoded_frames(&mut self, frames: Vec<Vec<u8>>) -> Result<(), TransportError> {
-        for (index, frame) in frames.iter().enumerate() {
-            match self.inner.send_frame(frame.clone()) {
-                Ok(()) => {}
-                Err(TransportError::Backpressure) => {
-                    // Encoding may have advanced a connection-stream compressor. Accept the
-                    // logical message once encoded and retain every unaccepted frame so the
-                    // semantic caller must never retry it against advanced codec state.
-                    self.pending_outbound_frames
-                        .extend(frames[index..].iter().cloned());
-                    return Ok(());
-                }
-                Err(error @ TransportError::Failed(_)) => return Err(error),
-            }
-        }
-        Ok(())
-    }
-
-    fn validate_inbound_session(&self, envelope: &WireEnvelope) -> Result<(), WireError> {
-        let Some(expected) = &self.session else {
-            return Ok(());
-        };
-        let Some(actual) = &envelope.session else {
-            return Err(WireError::new(
-                WireErrorCode::AuthFailed,
-                WireRetry::AfterAuth,
-                "missing wire session metadata",
-            ));
-        };
-        if actual.session_id != expected.session_id {
-            return Err(WireError::new(
-                WireErrorCode::AuthFailed,
-                WireRetry::AfterResume,
-                "wire session id does not match this connection",
-            ));
-        }
-        if actual.identity != expected.identity {
-            return Err(WireError::new(
-                WireErrorCode::AuthFailed,
-                WireRetry::AfterAuth,
-                "wire session identity does not match this connection",
-            ));
-        }
-        if actual.epoch < expected.epoch {
-            return Err(WireError::new(
-                WireErrorCode::AuthFailed,
-                WireRetry::AfterResume,
-                "stale wire session epoch",
-            ));
-        }
-        if actual.epoch != expected.epoch {
-            return Err(WireError::new(
-                WireErrorCode::AuthFailed,
-                WireRetry::AfterResume,
-                "wire session epoch does not match this connection",
-            ));
-        }
-        Ok(())
-    }
-
-    fn validate_inbound_metadata(&self, envelope: &WireEnvelope) -> Result<(), WireError> {
-        if envelope.protocol_version != self.protocol_version {
-            return Err(WireError::new(
-                WireErrorCode::UnsupportedProtocolVersion,
-                WireRetry::AfterResume,
-                format!(
-                    "wire message protocol version {} does not match negotiated {}",
-                    envelope.protocol_version, self.protocol_version
-                ),
-            ));
-        }
-        let unnegotiated = envelope.features & !self.features;
-        if unnegotiated != 0 {
-            return Err(WireError::new(
-                WireErrorCode::UnsupportedFeature,
-                WireRetry::AfterResume,
-                format!("wire message declares unnegotiated features {unnegotiated:#x}"),
-            ));
-        }
-        Ok(())
-    }
-
-    fn decode_inbound_envelope(
-        &mut self,
-        envelope: WireEnvelope,
-    ) -> Result<SyncMessage, WireError> {
-        self.validate_inbound_metadata(&envelope)?;
-        self.validate_inbound_session(&envelope)?;
-        let payload = self
-            .inbound_stream
-            .decode_message(&envelope.payload, envelope.features)
-            .map_err(|message| {
-                WireError::new(WireErrorCode::MalformedFrame, WireRetry::Never, message)
-            })?;
-        validate_logical_message_len(payload.len()).map_err(|message| {
-            WireError::new(WireErrorCode::MalformedFrame, WireRetry::Never, message)
-        })?;
-        let message =
-            decode_sync_message_for_features(&payload, self.features).map_err(|error| {
-                WireError::new(
-                    error.code,
-                    error.retry,
-                    format!(
-                        "{}; payload_bytes={}; payload_hex={}",
-                        error.message,
-                        payload.len(),
-                        hex_diagnostic(&payload)
-                    ),
-                )
-            })?;
-        Ok(message)
-    }
-}
-
-impl<T> Transport for WireTransportAdapter<T>
-where
-    T: WireTransport,
-{
-    fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
-        self.flush_pending_outbound()?;
-        let payload = match encode_sync_message_for_features(&message, self.features) {
-            Ok(payload) => payload,
-            Err(error) => {
-                self.send_wire_error(error);
-                return Ok(());
-            }
-        };
-        if let Err(message) = validate_logical_message_len(payload.len()) {
-            return Err(TransportError::Failed(message));
-        }
-        let payload = match self.outbound_stream.encode_message(&payload) {
-            Ok(payload) => payload,
-            Err(message) => return Err(TransportError::Failed(message)),
-        };
-        let active_features = (self.features
-            & !(crate::wire::FEATURE_PAYLOAD_LZ4 | crate::wire::FEATURE_PAYLOAD_ZSTD))
-            | self.outbound_stream.active_feature();
-        let mut envelope = WireEnvelope::new(self.protocol_version, active_features, payload);
-        if let Some(session) = self.session.clone() {
-            envelope = envelope.with_session(session);
-        }
-        match encode_frame(&WireFrame::Message(envelope.clone())) {
-            Ok(frame) if frame.len() <= WIRE_FRAGMENT_PAYLOAD_BYTES => {
-                self.send_encoded_frames(vec![frame])
-            }
-            Ok(_) if self.features & FEATURE_MESSAGE_FRAGMENTATION == 0 => {
-                Err(TransportError::Failed(
-                    "peer did not negotiate logical-message fragmentation".to_owned(),
-                ))
-            }
-            Ok(_) => {
-                let message_digest = *blake3::hash(&envelope.payload).as_bytes();
-                let message_id = self.next_outbound_message_id;
-                self.next_outbound_message_id = self
-                    .next_outbound_message_id
-                    .checked_add(1)
-                    .ok_or_else(|| {
-                        TransportError::Failed("logical message id space exhausted".to_owned())
-                    })?;
-                let total_len = u64::try_from(envelope.payload.len()).map_err(|_| {
-                    TransportError::Failed("logical message is too large".to_owned())
-                })?;
-                let mut frames = Vec::new();
-                for (index, payload) in envelope
-                    .payload
-                    .chunks(WIRE_FRAGMENT_PAYLOAD_BYTES)
-                    .enumerate()
-                {
-                    let offset = u64::try_from(index * WIRE_FRAGMENT_PAYLOAD_BYTES)
-                        .expect("fragment offset is bounded by logical message size");
-                    let fragment = WireMessageFragment {
-                        protocol_version: envelope.protocol_version,
-                        features: envelope.features,
-                        session: envelope.session.clone(),
-                        message_id,
-                        message_digest,
-                        total_len,
-                        offset,
-                        payload: payload.to_vec(),
-                    };
-                    let frame =
-                        encode_frame(&WireFrame::MessageFragment(fragment)).map_err(|error| {
-                            TransportError::Failed(format!(
-                                "failed to encode logical message fragment: {error}"
-                            ))
-                        })?;
-                    validate_wire_frame_len(frame.len()).map_err(TransportError::Failed)?;
-                    frames.push(frame);
-                }
-                self.send_encoded_frames(frames)
-            }
-            Err(err) => {
-                self.send_wire_error(WireError::new(
-                    WireErrorCode::Internal,
-                    WireRetry::Never,
-                    format!("failed to encode wire frame: {err}"),
-                ));
-                Ok(())
-            }
-        }
-    }
-
-    fn try_recv(&mut self) -> Option<SyncMessage> {
-        let _ = self.flush_pending_outbound();
-        while let Some(bytes) = self.inner.try_recv_frame() {
-            if let Err(message) = validate_wire_frame_len(bytes.len()) {
-                self.send_wire_error(WireError::new(
-                    WireErrorCode::MalformedFrame,
-                    WireRetry::Never,
-                    message,
-                ));
-                continue;
-            }
-            let frame = match decode_frame(&bytes) {
-                Ok(frame) => frame,
-                Err(err) => {
-                    self.send_wire_error(WireError::new(
-                        WireErrorCode::MalformedFrame,
-                        WireRetry::Never,
-                        format!("failed to decode wire frame: {err}"),
-                    ));
-                    continue;
-                }
-            };
-            match frame {
-                WireFrame::Message(envelope) => match self.decode_inbound_envelope(envelope) {
-                    Ok(message) => return Some(message),
-                    Err(error) => self.send_wire_error(error),
-                },
-                WireFrame::MessageFragment(fragment) => {
-                    let fragment_message_id = fragment.message_id;
-                    let metadata = WireEnvelope {
-                        protocol_version: fragment.protocol_version,
-                        features: fragment.features,
-                        session: fragment.session.clone(),
-                        payload: Vec::new(),
-                    };
-                    if let Err(error) = self.validate_inbound_metadata(&metadata) {
-                        self.send_wire_error(error);
-                        continue;
-                    }
-                    if let Err(error) = self.validate_inbound_session(&metadata) {
-                        self.send_wire_error(error);
-                        continue;
-                    }
-                    if self.features & FEATURE_MESSAGE_FRAGMENTATION == 0
-                        || fragment.features & FEATURE_MESSAGE_FRAGMENTATION == 0
-                    {
-                        self.send_wire_error(WireError::new(
-                            WireErrorCode::UnsupportedFeature,
-                            WireRetry::Never,
-                            "fragment does not declare logical-message fragmentation",
-                        ));
-                        continue;
-                    }
-                    match self.reassembler.push(fragment) {
-                        Ok(Some(envelope)) => match self.decode_inbound_envelope(envelope) {
-                            Ok(message) => return Some(message),
-                            Err(error) => self.send_wire_error(error),
-                        },
-                        Ok(None) => {}
-                        Err(message) => {
-                            self.reassembler.discard(fragment_message_id);
-                            self.send_wire_error(WireError::new(
-                                WireErrorCode::MalformedFrame,
-                                WireRetry::AfterResume,
-                                message,
-                            ));
-                        }
-                    }
-                }
-                WireFrame::Hello(_) => self.send_wire_error(WireError::new(
-                    WireErrorCode::UnsupportedFeature,
-                    WireRetry::AfterResume,
-                    "hello frames must be handled before constructing a peer connection",
-                )),
-                WireFrame::Error(_) => {}
-            }
-        }
-        None
-    }
-
-    fn connection_session_context(&self) -> Option<ConnectionSessionContext> {
-        self.session_context
-    }
-}
-
-fn hex_diagnostic(bytes: &[u8]) -> String {
-    if bytes.len() <= 128 {
-        return hex_prefix(bytes, bytes.len());
-    }
-    hex_prefix(bytes, 16)
-}
-
-fn hex_prefix(bytes: &[u8], max: usize) -> String {
-    bytes
-        .iter()
-        .take(max)
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<Vec<_>>()
-        .join("")
-}
-
 /// A live link between this `Db` and one peer, owned by the `Db`.
 ///
 /// Two link shapes — a client/backend attached to an upstream, or a server
@@ -6770,6 +6463,7 @@ where
     admitted_upstream_authorities: AdmittedUpstreamAuthorities,
     admitted_upstream_authority: Rc<RefCell<Option<AuthorityContext>>>,
     downstream_fates: PendingDownstreamFates,
+    mutation_errors: SharedMutationErrors,
     subscriber_dirty_epoch: Rc<Cell<u64>>,
     observed_subscriber_dirty_epoch: Cell<u64>,
     observed_session_claim_revision: Cell<u64>,
@@ -7970,30 +7664,35 @@ where
                             if let Some((tx_id, fate)) = routed_fate {
                                 let authority = *expected_scope_authority;
                                 let mut routes = self.edge_fate_routes.borrow_mut();
-                                let Some(pending) = routes.get_mut(&tx_id) else {
-                                    continue;
-                                };
-                                let mut remaining = Vec::new();
-                                for route in std::mem::take(pending) {
-                                    if Some(route.authority) == authority {
-                                        if let Some(queue) = route.queue.upgrade() {
-                                            queue.borrow_mut().push(fate.clone());
+                                if let Some(pending) = routes.get_mut(&tx_id) {
+                                    let mut remaining = Vec::new();
+                                    for route in std::mem::take(pending) {
+                                        if Some(route.authority) == authority {
+                                            if let Some(queue) = route.queue.upgrade() {
+                                                queue.borrow_mut().push(fate.clone());
+                                            }
+                                        } else {
+                                            remaining.push(route);
                                         }
-                                    } else {
-                                        remaining.push(route);
                                     }
-                                }
-                                if remaining.is_empty() {
-                                    routes.remove(&tx_id);
-                                } else {
-                                    *routes.get_mut(&tx_id).expect("route remains present") =
-                                        remaining;
+                                    if remaining.is_empty() {
+                                        routes.remove(&tx_id);
+                                    } else {
+                                        *routes.get_mut(&tx_id).expect("route remains present") =
+                                            remaining;
+                                    }
                                 }
                             }
                         }
                     }
                     if let Some(tx_id) = write_state_tx_id {
-                        notify_write_state_waiters(&self.write_state_waiters, tx_id);
+                        handle_write_state_update(
+                            &self.node,
+                            &self.write_state_waiters,
+                            &self.mutation_errors,
+                            &self.scheduler,
+                            tx_id,
+                        );
                     }
                     applied = true;
                 }
@@ -8948,7 +8647,13 @@ where
                                     )?,
                             };
                             if let Some(tx_id) = write_state_tx_id {
-                                notify_write_state_waiters(&self.write_state_waiters, tx_id);
+                                handle_write_state_update(
+                                    &self.node,
+                                    &self.write_state_waiters,
+                                    &self.mutation_errors,
+                                    &self.scheduler,
+                                    tx_id,
+                                );
                             }
                             for response in responses {
                                 send_with_content_extents(
@@ -9761,6 +9466,9 @@ fn predicate_references_id(predicate: &Predicate) -> bool {
             operand_is_id(operand) || values.iter().any(operand_is_id)
         }
         Predicate::IsNull(operand) => operand_is_id(operand),
+        Predicate::EnumMatch {
+            column, payload, ..
+        } => column == "id" || predicate_references_id(payload),
     }
 }
 
@@ -10029,17 +9737,120 @@ fn write_state_update_tx_id(message: &SyncMessage) -> Option<TxId> {
     }
 }
 
-fn notify_write_state_waiters(waiters: &WriteStateWaiters, tx_id: TxId) {
+fn notify_write_state_waiters(waiters: &WriteStateWaiters, tx_id: TxId) -> bool {
     let Some(waiters) = waiters.borrow_mut().remove(&tx_id) else {
-        return;
+        return false;
     };
+    let mut handled_mutation_error = false;
     for waiter in waiters {
         match waiter.notify {
             WriteStateWaiterNotify::Future(sender) => {
-                let _ = sender.send(());
+                if sender.send(()).is_ok() {
+                    handled_mutation_error = true;
+                }
             }
-            WriteStateWaiterNotify::Callback(callback) => callback(),
+            WriteStateWaiterNotify::Callback(callback) => {
+                callback();
+                handled_mutation_error = true;
+            }
         }
+    }
+    handled_mutation_error
+}
+
+fn handle_write_state_update<S>(
+    node: &Rc<RefCell<NodeState<S>>>,
+    waiters: &WriteStateWaiters,
+    mutation_errors: &SharedMutationErrors,
+    scheduler: &SharedTickScheduler,
+    tx_id: TxId,
+) where
+    S: OrderedKvStorage + ReopenableStorage + 'static,
+{
+    let handled_by_waiter = notify_write_state_waiters(waiters, tx_id);
+    let rejected = node.borrow().rejected_transaction(tx_id);
+    let Some(rejected) = rejected else {
+        return;
+    };
+
+    if handled_by_waiter {
+        mutation_errors.borrow_mut().pending.remove(&tx_id);
+        if let Err(error) = node.borrow_mut().discard_rejection(tx_id) {
+            tracing::warn!(?tx_id, %error, "failed to acknowledge waited mutation error");
+        }
+        return;
+    }
+
+    let should_schedule = {
+        let mut state = mutation_errors.borrow_mut();
+        state
+            .pending
+            .entry(tx_id)
+            .or_insert_with(|| mutation_error_event(rejected));
+        state.callback.is_some()
+    };
+    if should_schedule {
+        schedule_tick_in(scheduler, TickUrgency::Immediate);
+    }
+}
+
+fn take_pending_mutation_error_delivery(
+    mutation_errors: &SharedMutationErrors,
+) -> Option<(MutationErrorCallback, BTreeMap<TxId, MutationErrorEvent>)> {
+    let mut state = mutation_errors.borrow_mut();
+    let callback = state.callback.clone()?;
+    if state.pending.is_empty() {
+        return None;
+    }
+    Some((callback, std::mem::take(&mut state.pending)))
+}
+
+fn mutation_error_event(rejected: crate::tx::RejectedTransaction) -> MutationErrorEvent {
+    let tx_id = rejected.tx_id();
+    let batch_id = BatchId::from_committed_tx(tx_id);
+    let (code, reason) = mutation_error_details(&rejected.reason());
+    MutationErrorEvent {
+        code: code.clone(),
+        reason: reason.clone(),
+        transaction: LocalTransactionRecord {
+            batch_id,
+            kind: rejected.kind().into(),
+            sealed: true,
+            latest_settlement: TransactionFate::Rejected {
+                batch_id,
+                code,
+                reason,
+            },
+        },
+    }
+}
+
+fn mutation_error_details(reason: &RejectionReason) -> (String, String) {
+    match reason {
+        RejectionReason::ClientClockTooFarAhead => (
+            "client_clock_too_far_ahead".to_owned(),
+            "Client clock is too far ahead".to_owned(),
+        ),
+        RejectionReason::AuthorizationDenied => (
+            "permission_denied".to_owned(),
+            "Write rejected by server authorization".to_owned(),
+        ),
+        RejectionReason::ExclusiveConflict => (
+            "exclusive_conflict".to_owned(),
+            "Exclusive transaction conflicted with another write".to_owned(),
+        ),
+        RejectionReason::CausalityViolation => (
+            "causality_violation".to_owned(),
+            "Transaction violated causal ordering".to_owned(),
+        ),
+        RejectionReason::Cascade { root } => (
+            "cascade_rejected".to_owned(),
+            format!("Transaction was rejected because ancestor {root:?} was rejected"),
+        ),
+        RejectionReason::MalformedCommit(reason) => (
+            "write_rejected".to_owned(),
+            format!("Malformed transaction: {reason}"),
+        ),
     }
 }
 
@@ -10522,8 +10333,8 @@ fn send_subscription_rejection(
 
 fn server_failure_code(error: &crate::node::Error) -> SubscribeServerFailureCode {
     match error {
-        crate::node::Error::TableNotFound(_)
-        | crate::node::Error::Query(QueryError::UnknownTable(_)) => {
+        crate::node::Error::TableNotFound(_) => SubscribeServerFailureCode::TableNotFound,
+        crate::node::Error::Query(error) if matches!(**error, QueryError::UnknownTable(_)) => {
             SubscribeServerFailureCode::TableNotFound
         }
         crate::node::Error::Query(_) => SubscribeServerFailureCode::QueryValidation,
@@ -11371,6 +11182,51 @@ pub struct SubscriptionOutputRow {
     pub row: CurrentRow,
 }
 
+/// Immutable producer-owned decoding contract for a structured terminal root.
+///
+/// The maintained query compiler creates this alongside its app-row terminal.
+/// Consumers install it before applying operations which name `id`; the
+/// descriptor remains the source of truth for encoded types while these slots
+/// map public fields to their physical record positions.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TerminalRootLayout {
+    /// Stable hash of the descriptor, slots, identities and carrier.
+    pub id: String,
+    /// Exact physical root descriptor used to decode packed bytes.
+    pub root_descriptor: RecordDescriptor,
+    /// Descriptor slot containing the stable root UUID.
+    pub root_key_slot: usize,
+    /// Exact descriptor identity of the root UUID slot.
+    pub root_key_field_name: String,
+    /// Public field-to-descriptor slot mappings, in public output order.
+    pub public_fields: Vec<TerminalRootPublicField>,
+    /// Physical representation used for public cells.
+    pub carrier: TerminalRootCarrier,
+}
+
+/// One public root field's immutable physical slot identity.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TerminalRootPublicField {
+    /// Public column name.
+    pub name: String,
+    /// Physical descriptor field name at `slot`.
+    pub descriptor_field_name: String,
+    /// Physical descriptor slot.
+    pub slot: usize,
+    /// Encoded representation of this individual slot.
+    pub carrier: TerminalRootCarrier,
+}
+
+/// The producer representation applied around declared public column types.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TerminalRootCarrier {
+    /// A physical `CurrentRow`: each application cell has one extra nullable
+    /// carrier around its declared storage type.
+    CurrentRow,
+    /// A logical collector/projection record with declared storage types.
+    Logical,
+}
+
 impl std::ops::Deref for SubscriptionOutputRow {
     type Target = CurrentRow;
 
@@ -11396,6 +11252,9 @@ pub enum SubscriptionEvent {
         removed: Vec<RemovedRow>,
         /// Typed structural edits to already hydrated terminal rows.
         terminal_operations: Vec<groove::ivm::TerminalOperation>,
+        /// Immutable root decoding contract for `terminal_operations`, when
+        /// this event carries structured terminal changes.
+        terminal_layout: Option<TerminalRootLayout>,
         /// Whether the result is complete at the requested read tier.
         settled: bool,
         /// Read tier used to materialize the rows.
@@ -11592,6 +11451,7 @@ fn subscription_terminal_delta_event(
         updated,
         removed,
         terminal_operations: Vec::new(),
+        terminal_layout: None,
         settled,
         tier,
     }
@@ -11645,6 +11505,7 @@ fn subscription_delta_event_with_reset(
         updated,
         removed,
         terminal_operations: Vec::new(),
+        terminal_layout: None,
         settled,
         tier,
     }
@@ -11664,6 +11525,7 @@ fn apply_maintained_update_to_snapshot(
         added_edges: update_added_edges,
         removed_edges: update_removed_edges,
         terminal_operations,
+        terminal_layout,
     } = update;
 
     if snapshot.rows.is_empty()
@@ -11692,6 +11554,7 @@ fn apply_maintained_update_to_snapshot(
                 updated: Vec::new(),
                 removed: Vec::new(),
                 terminal_operations: terminal_operations.clone(),
+                terminal_layout: terminal_layout.clone(),
                 settled,
                 tier,
             };
@@ -11742,6 +11605,7 @@ fn apply_maintained_update_to_snapshot(
             updated: Vec::new(),
             removed: Vec::new(),
             terminal_operations: terminal_operations.clone(),
+            terminal_layout: terminal_layout.clone(),
             settled,
             tier,
         };
@@ -11870,6 +11734,7 @@ fn apply_maintained_update_to_snapshot(
         updated,
         removed,
         terminal_operations,
+        terminal_layout,
         settled,
         tier,
     }

@@ -1,6 +1,7 @@
 import type {
   BatchId,
   InsertResult,
+  MutationErrorEvent,
   MutationResult,
   OpenBatchId,
   PermissionAdvice,
@@ -11,10 +12,12 @@ import type { NativeRowDelta } from "../../drivers/types.js";
 import type { RuntimeSourcesConfig, Session } from "../context.js";
 import type { InsertValues, Value, WasmSchema } from "../../drivers/types.js";
 import type {
+  PersistentBrowserMutationErrorMessage,
   PersistentBrowserSubscriptionMessage,
   PersistentBrowserOpfsOwnerRequest,
   PersistentBrowserRequestArgs,
   PersistentBrowserWorkerMethod,
+  PersistentBrowserWorkerError,
   PersistentBrowserWriteRequest,
 } from "./persistent-browser-protocol.js";
 import {
@@ -33,8 +36,9 @@ type PendingCall = {
 
 type WorkerResponse =
   | { id: number; ok: true; result: unknown }
-  | { id: number; ok: false; error: { name?: string; message?: string; stack?: string } }
+  | { id: number; ok: false; error: PersistentBrowserWorkerError }
   | PersistentBrowserSubscriptionMessage
+  | PersistentBrowserMutationErrorMessage
   | { event: "authFailure"; reason: string };
 
 type CompletedTxState = "committed" | "rolled_back";
@@ -114,6 +118,8 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     return this.shared.remoteSubscriptions;
   }
   private authFailureCallback: ((reason: string) => void) | undefined;
+  private mutationErrorCallback: ((event: MutationErrorEvent) => void) | undefined;
+  private readonly pendingMutationErrorEvents: MutationErrorEvent[] = [];
   // Server-tier operations capture this gate while intentionally disconnected.
   // Reconnect resolves that same gate, so outstanding operations survive instead
   // of observing a replacement promise that can never settle.
@@ -132,6 +138,11 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
   private closed = false;
   private closing = false;
   private readonly opened: Promise<void>;
+
+  /** @internal */
+  isClosed(): boolean {
+    return this.closed;
+  }
 
   constructor(
     private readonly runtimeSources: RuntimeSourcesConfig | undefined,
@@ -637,6 +648,14 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     this.authFailureCallback = callback;
   }
 
+  onMutationError(callback: (event: MutationErrorEvent) => void): void {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.onMutationError(callback);
+    this.mutationErrorCallback = callback;
+    while (this.pendingMutationErrorEvents.length > 0) {
+      callback(this.pendingMutationErrorEvents.shift()!);
+    }
+  }
+
   private rejectConnectionWaiters(): void {
     this.waitingForReconnect = false;
     this.connectionReady.reject(new Error("Persistent browser native runtime is closed"));
@@ -819,7 +838,15 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
   private handleWorkerMessage(message: WorkerResponse): void {
     if ("event" in message) {
       try {
-        this.authFailureCallback?.(message.reason);
+        if (message.event === "mutationError") {
+          if (this.mutationErrorCallback) {
+            this.mutationErrorCallback(message.payload);
+          } else {
+            this.pendingMutationErrorEvents.push(message.payload);
+          }
+        } else {
+          this.authFailureCallback?.(message.reason);
+        }
       } catch (error) {
         setTimeout(() => {
           throw error;
@@ -844,6 +871,8 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
     if (message.ok) {
       setNamedRowValuesEnumerable(message.result, false);
       pending.resolve(message.result);
+    } else if (message.error.kind === "rejected") {
+      pending.reject(message.error);
     } else {
       const error = new Error(message.error.message ?? "Persistent browser worker call failed");
       if (message.error.stack) error.stack = message.error.stack;
@@ -874,6 +903,7 @@ function nativeDeltaFromFrame(
     addedCount: message.frame.addedCount,
     removedCount: message.frame.removedCount,
     updatedCount: message.frame.updatedCount,
+    terminalLayouts: message.frame.terminalLayouts,
     terminalOperations: message.frame.terminalOperations,
   };
 }
