@@ -328,11 +328,10 @@ implements NativeDb` makes the 26-member contract a typecheck.
   `ts-wire-codec.sh` so generated WASM declarations are fresh rather than
   whatever the last local build left behind.
 - Landing tier: the corrected canonical set, smoke (storage touched),
-  oracle, canaries, and the jazz-private sensitive-data guard — **currently
-  a silent no-op on this machine because `jazz-private` is not cloned; per
-  the M1 plan its absence blocks push absent an explicit owner exception.**
-  The four failures recorded during design review were stale by implementation
-  time. The current, reproduced landing blockers are listed in §13.
+  oracle, canaries, and the jazz-private sensitive-data guard. A shallow
+  `jazz-private` checkout now exists at the hook's expected path and the guard
+  passes over the public worktree. The reproduced post-merge blockers and
+  their resolutions are recorded in §13.
 
 ### Milestones
 
@@ -340,10 +339,10 @@ implements NativeDb` makes the 26-member contract a typecheck.
   §6 deletions, and §7 session connect; `cargo test -p jazz-rn` is green.
 - ✅ **R2 — bindings + TS**: ubrn regen, shim realign (incl. §11 P2 fix),
   `tsc`/vitest green.
-- ◐ **R3 — land**: `run-canonical.sh`, the changeset, carrier benchmark, and
-  fresh iOS E2E receipt are complete. Commit/push were explicitly approved on
-  2026-08-13; the merged-core blockers in §13 still prevent a green landing
-  tier.
+- ◐ **R3 — land**: `run-canonical.sh`, the changeset, carrier benchmark, fresh
+  iOS E2E receipt, post-merge repairs, full smoke, and sensitive-data guard are
+  complete. Commit/push were explicitly approved on 2026-08-13; only the final
+  exact-head gate rerun and remote PR update remain.
 
 ## 11. Pre-existing PR blockers folded into this change (v2)
 
@@ -387,7 +386,7 @@ implements NativeDb` makes the 26-member contract a typecheck.
    simulator receipt didn't cover, R3 absorbs the fixes — the scenario
    itself is unchanged.
 
-## 13. Implementation receipt — 2026-08-12
+## 13. Implementation receipt — 2026-08-12, updated 2026-08-14
 
 Implemented surfaces:
 
@@ -419,27 +418,32 @@ Green validation:
   under the carrier-specific 1.043× bound, an explicit relaxation from the
   prior 1.025× gate; absolute median allocation bytes still fell from roughly
   487–495 KiB to 361–373 KiB;
-- final smoke receipt `20260812T170500Z`: 14/16 scenarios passed, including
-  the corrected relation-delivery lane; the two red scenarios are below;
+- post-merge smoke receipt `20260814T125537Z`: all 16 scenarios passed on
+  clean code commit `2ad02c2d3`, including relation/include delivery, the
+  parameterized route curve, SaaS structured delivery, and migrations;
 - fresh iOS 26.0 / iPhone 17 Pro simulator flow: `created; rows: 1`, process
   restart `reused; rows: 1`, then the second client printed
   `{"observedOfflineTitle":"offline-seed","insertedRemoteTitle":"remote-seed","rowCount":2}`
   and the simulator displayed both rows.
 
-Current landing blockers outside the RN bridge:
+Post-merge blocker resolutions:
 
-- both full Jazz feature shapes reproduce five policy failures
-  (`db_sync_surface_blob_values_follow_ordinary_row_permissions`,
-  `inherited_child_insert_uses_parent_update_where_old_only`,
-  `session_delete_uses_current_row_for_owner_write_policy`, and the two
-  trusted-backend claim-context cases) plus a hanging
-  `write_state_waiter_resolves_on_remote_fate_update`;
-- the now-honest invariant registry reports 32 stale test citations and three
-  covered invariants without a cited test;
-- smoke still catches a below-window route emitted as an add/remove pair and
-  `jazz-sim/s7_migrations` failing with `UnauthorizedCatalogueUpdate`;
-- `../jazz-private/dev/gates` is absent, so the required sensitive-data guard
-  cannot run on this machine.
+- both full Jazz feature shapes now pass; the five policy failures and remote
+  fate waiter hang were resolved while realigning the merged core ownership;
+- the invariant registry validates all 461 rows with zero missing citations
+  and zero covered rows lacking a test (12 `now` + `untested` rows remain as
+  documented, non-failing debt);
+- prepared windows now resolve application columns before same-named physical
+  provenance fields, so an `updated_at` value below a finite boundary stays
+  quiet; the public parameterized-routing test pins the case;
+- structured collection lowering restores nullable root carriers after a
+  filter narrows them, keeping terminal operation descriptors equal to their
+  public layouts; a black-box array-subscription test pins the case;
+- the S7 harness now publishes each non-genesis schema and lens atomically via
+  the trusted catalogue path; and
+- the jazz-private sensitive-data guard passes over the complete public
+  worktree and is installed at the pre-commit hook's expected path.
 
-Tooling friction: a canonical runner with per-gate timeouts/live logs and a
-versioned known-red baseline would have saved substantial wall-clock time.
+Tooling friction: a cache-preserving single-command landing harness that also
+runs workspace tests and the sensitive-data guard would have saved substantial
+orchestration wall-clock time.
