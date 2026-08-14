@@ -103,6 +103,8 @@ pub mod authorization_scope;
 pub mod binding_codec;
 /// Atomic embedded manifests for content backed by immutable graphs.
 pub mod content_manifest;
+/// Text adapter for embedded manifests backed by immutable UTF-8 ropes.
+pub mod text_content;
 
 /// Disabled-by-default counters used by the native cold-settle attribution bench.
 #[cfg(feature = "cold-settle-attribution")]
