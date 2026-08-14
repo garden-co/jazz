@@ -1,9 +1,37 @@
 import { describe, expect, it } from "vitest";
 import { createJazzContext } from "../backend/create-jazz-context.js";
+import { deploy } from "../dev/catalogue.js";
 import { schema as s } from "../index.js";
-import { createTextStore, textTableDefinitions, textTablesFromApp } from "./index.js";
+import { startLocalJazzServer } from "../testing/index.js";
+import {
+  createTextStore,
+  TEXT_FRONTIER_MAX_BYTES,
+  TEXT_FRONTIER_MAX_PATCHES,
+  textTableDefinitions,
+  textTablesFromApp,
+} from "./index.js";
 
 const app = s.defineApp({ ...textTableDefinitions });
+
+const readInsertOnlyPermissions = s.definePermissions(app, ({ policy }) => [
+  policy.jazz_text_documents.allowRead.always(),
+  policy.jazz_text_documents.allowInsert.always(),
+  policy.jazz_text_documents.allowUpdate.never(),
+  policy.jazz_text_versions.allowRead.always(),
+  policy.jazz_text_versions.allowInsert.always(),
+  policy.jazz_text_nodes.allowRead.always(),
+  policy.jazz_text_nodes.allowInsert.always(),
+]);
+
+const readWritePermissions = s.definePermissions(app, ({ policy }) => [
+  policy.jazz_text_documents.allowRead.always(),
+  policy.jazz_text_documents.allowInsert.always(),
+  policy.jazz_text_documents.allowUpdate.always(),
+  policy.jazz_text_versions.allowRead.always(),
+  policy.jazz_text_versions.allowInsert.always(),
+  policy.jazz_text_nodes.allowRead.always(),
+  policy.jazz_text_nodes.allowInsert.always(),
+]);
 
 function setup(options: Parameters<typeof createTextStore>[2] = {}) {
   const context = createJazzContext({
@@ -36,6 +64,161 @@ describe("ordinary-row text", () => {
       await context.shutdown();
     }
   });
+
+  it("rejects a non-string insert without poisoning the document transaction", async () => {
+    const { context, db, text } = setup();
+    try {
+      const snapshot = await text.create("safe");
+      const before = await Promise.all([
+        db.all(app.jazz_text_documents, { tier: "local" }),
+        db.all(app.jazz_text_versions, { tier: "local" }),
+        db.all(app.jazz_text_nodes, { tier: "local" }),
+      ]);
+
+      await expect(text.insert(snapshot, 0, 0 as unknown as string)).rejects.toThrow(
+        "Text insertion must be a string",
+      );
+
+      const after = await Promise.all([
+        db.all(app.jazz_text_documents, { tier: "local" }),
+        db.all(app.jazz_text_versions, { tier: "local" }),
+        db.all(app.jazz_text_nodes, { tier: "local" }),
+      ]);
+      expect(after).toEqual(before);
+      await expect(text.read(snapshot.documentId)).resolves.toEqual(snapshot);
+    } finally {
+      await context.shutdown();
+    }
+  });
+
+  it("rolls back the complete edit when ordinary row permissions deny the head update", async () => {
+    const appId = crypto.randomUUID();
+    const adminSecret = `ordinary-text-permission-${appId}`;
+    const backendSecret = `ordinary-text-backend-${appId}`;
+    const server = await startLocalJazzServer({
+      appId,
+      adminSecret,
+      backendSecret,
+      inMemory: true,
+    });
+    await deploy({
+      appId,
+      serverUrl: server.url,
+      adminSecret,
+      schema: app,
+      permissions: readInsertOnlyPermissions,
+    });
+    const context = createJazzContext({
+      appId,
+      app,
+      permissions: readInsertOnlyPermissions,
+      driver: { type: "memory" },
+      serverUrl: server.url,
+      backendSecret,
+      tier: "global",
+    });
+    const db = context.forSession({
+      user_id: "ordinary-text-writer",
+      claims: {},
+      authMode: "external",
+    });
+    const text = createTextStore(db, textTablesFromApp(app), { durability: "global" });
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      const initial = await text.create("safe");
+      const before = await Promise.all([
+        db.all(app.jazz_text_documents, { tier: "global" }),
+        db.all(app.jazz_text_versions, { tier: "global" }),
+        db.all(app.jazz_text_nodes, { tier: "global" }),
+      ]);
+
+      await expect(text.insert(initial, 4, "!")).rejects.toMatchObject({
+        code: "permission_denied",
+      });
+
+      const after = await Promise.all([
+        db.all(app.jazz_text_documents, { tier: "global" }),
+        db.all(app.jazz_text_versions, { tier: "global" }),
+        db.all(app.jazz_text_nodes, { tier: "global" }),
+      ]);
+      expect(after).toEqual(before);
+      await expect(text.read(initial.documentId)).resolves.toEqual(initial);
+    } finally {
+      await context.shutdown();
+      await server.stop();
+    }
+  }, 20_000);
+
+  it("syncs the ordinary current head across clients and branch writers", async () => {
+    const appId = crypto.randomUUID();
+    const adminSecret = `ordinary-text-branches-${appId}`;
+    const backendSecret = `ordinary-text-branches-backend-${appId}`;
+    const server = await startLocalJazzServer({
+      appId,
+      adminSecret,
+      backendSecret,
+      inMemory: true,
+    });
+    await deploy({
+      appId,
+      serverUrl: server.url,
+      adminSecret,
+      schema: app,
+      permissions: readWritePermissions,
+    });
+    const makeClient = (userBranch: string) => {
+      const context = createJazzContext({
+        appId,
+        app,
+        permissions: readWritePermissions,
+        driver: { type: "memory" },
+        serverUrl: server.url,
+        backendSecret,
+        userBranch,
+        tier: "global",
+      });
+      const db = context.forSession({
+        user_id: "ordinary-text-writer",
+        claims: {},
+        authMode: "external",
+      });
+      return {
+        context,
+        text: createTextStore(db, textTablesFromApp(app), { durability: "global" }),
+      };
+    };
+    const first = makeClient("main");
+    const second = makeClient("main");
+    const draft = makeClient("draft");
+    try {
+      const initial = await first.text.create("shared");
+      const observed = await second.text.read(initial.documentId);
+      expect(observed.text).toBe("shared");
+      const mainEdit = await second.text.insert(observed, observed.length, "!");
+      await expect(first.text.read(initial.documentId)).resolves.toMatchObject({
+        versionId: mainEdit.versionId,
+        text: "shared!",
+      });
+
+      const draftBase = await draft.text.read(initial.documentId);
+      const draftEdit = await draft.text.insert(draftBase, draftBase.length, "?");
+      await expect(draft.text.read(initial.documentId)).resolves.toMatchObject({
+        versionId: draftEdit.versionId,
+        text: "shared!?",
+      });
+      await expect(first.text.read(initial.documentId)).resolves.toMatchObject({
+        versionId: draftEdit.versionId,
+        text: "shared!?",
+      });
+    } finally {
+      await Promise.all([
+        first.context.shutdown(),
+        second.context.shutdown(),
+        draft.context.shutdown(),
+      ]);
+      await server.stop();
+    }
+  }, 20_000);
 
   it("consolidates synchronously while old versions remain independently readable", async () => {
     const { context, db, text } = setup({ maxPatches: 2, maxPatchBytes: 1024, leafBytes: 4 });
@@ -156,7 +339,10 @@ describe("ordinary-row text", () => {
   });
 
   it("enforces both frontier bounds", async () => {
-    const { context, text } = setup({ maxPatches: 100, maxPatchBytes: 40 });
+    const { context, text } = setup({
+      maxPatches: TEXT_FRONTIER_MAX_PATCHES,
+      maxPatchBytes: 40,
+    });
     try {
       const initial = await text.create("");
       const first = await text.insert(initial, 0, "12345678901234567890");
@@ -165,6 +351,63 @@ describe("ordinary-row text", () => {
       expect(second.patchCount).toBe(0);
       expect(second.patchBytes).toBe(2);
       expect(second.text).toBe("1234567890123456789012345678901234567890");
+    } finally {
+      await context.shutdown();
+    }
+  });
+
+  it("enforces format-level frontier limits on replicated rows", async () => {
+    const { context, db, text } = setup({ maxPatches: 4, maxPatchBytes: 128 });
+    try {
+      expect(() =>
+        createTextStore(db, textTablesFromApp(app), {
+          maxPatches: TEXT_FRONTIER_MAX_PATCHES + 1,
+        }),
+      ).toThrow(`maxPatches cannot exceed ${TEXT_FRONTIER_MAX_PATCHES}`);
+      expect(() =>
+        createTextStore(db, textTablesFromApp(app), {
+          maxPatchBytes: TEXT_FRONTIER_MAX_BYTES + 1,
+        }),
+      ).toThrow(`maxPatchBytes cannot exceed ${TEXT_FRONTIER_MAX_BYTES}`);
+
+      const snapshot = await text.create("safe");
+      const oversizedBytes = db.update(app.jazz_text_versions, snapshot.versionId, {
+        patches: " ".repeat(TEXT_FRONTIER_MAX_BYTES + 1),
+      });
+      await oversizedBytes.wait({ tier: "local" });
+      await expect(text.readVersion(snapshot.versionId)).rejects.toThrow(
+        "exceeds the persisted byte limit",
+      );
+
+      const oversizedCount = db.update(app.jazz_text_versions, snapshot.versionId, {
+        patches: JSON.stringify(
+          Array.from({ length: TEXT_FRONTIER_MAX_PATCHES + 1 }, () => ({ at: 0, text: "" })),
+        ),
+      });
+      await oversizedCount.wait({ tier: "local" });
+      await expect(text.readVersion(snapshot.versionId)).rejects.toThrow(
+        "exceeds the persisted count limit",
+      );
+    } finally {
+      await context.shutdown();
+    }
+  });
+
+  it("reads valid frontiers independently of local writer thresholds", async () => {
+    const { context, db, text: writer } = setup({ maxPatches: 4, maxPatchBytes: 128 });
+    try {
+      const initial = await writer.create("base");
+      const first = await writer.insert(initial, 4, "1");
+      const second = await writer.insert(first, 5, "2");
+      const stricterReader = createTextStore(db, textTablesFromApp(app), {
+        maxPatches: 1,
+        maxPatchBytes: 16,
+      });
+
+      await expect(stricterReader.readVersion(second.versionId)).resolves.toMatchObject({
+        text: "base12",
+        patchCount: 2,
+      });
     } finally {
       await context.shutdown();
     }

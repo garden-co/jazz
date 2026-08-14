@@ -30,7 +30,12 @@ other row writes.
 ## 12.2 Bounded frontier
 
 Small inserts append to the version's patch frontier. The library MUST bound
-both patch count and encoded patch bytes. Crossing either bound synchronously
+the persisted format to at most 64 patches and 16 KiB of UTF-8 encoded patch
+JSON. Every reader MUST reject encoded bytes above the byte cap before parsing
+and MUST reject decoded arrays above the count cap. These are format limits,
+not reader configuration: writer thresholds may be lower but never higher, and
+a conforming reader accepts every otherwise-valid frontier within both format
+limits. Crossing either configured writer bound synchronously
 materializes a new immutable rope root in the same transaction as the new
 version and document-pointer update. No application batching is required: one
 Unicode-safe insertion may be one durable Jazz transaction.
@@ -48,7 +53,10 @@ The first API supports create, current read, exact-version read, and insertion
 at a Unicode code-point offset. It deliberately does not claim automatic
 semantic merging of concurrent document heads. Competing document-pointer
 writes use ordinary Jazz merge behavior, while both immutable versions remain
-in history for a future format-aware merge layer.
+in history for a future format-aware merge layer. A writer configured for
+another Jazz branch still participates in that ordinary merged current-head
+behavior; the text library does not manufacture isolated per-branch head
+storage of its own.
 
 Applications include the exported three-table definitions in their schema and
 define ordinary permissions for documents, versions, and nodes. The library
@@ -66,12 +74,19 @@ snapshot = await text.insert(snapshot, 5, "!");
 
 Snapshots returned by the module are immutable capability objects. `insert`
 rejects fabricated snapshots so caller mutation cannot make persisted patch
-coordinates disagree with the materialized base.
+coordinates disagree with the materialized base. It also rejects non-string
+insertion payloads before the empty-string shortcut or any transaction begins.
 
 ## 12.4 Required evidence
 
 - inserts before, inside, and after non-ASCII text never split a scalar value;
 - threshold crossings keep patch count and bytes bounded;
+- oversized replicated patch encodings fail before parsing, and oversized
+  decoded patch arrays fail before materialization;
+- an authority-denied head update rolls back the complete ordinary-row edit
+  transaction, including its new immutable version and nodes;
+- independent clients and branch-configured writers observe the current head
+  through ordinary Jazz synchronization and merge behavior;
 - sampled old versions remain readable after later consolidation;
 - deleting or corrupting lineage metadata cannot be necessary for a read;
 - a planted missing base node makes the read fail rather than fall back to

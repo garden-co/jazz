@@ -119,6 +119,10 @@ type RopeBranch = {
 type RopeNode = RopeLeaf | RopeBranch;
 
 const encoder = new TextEncoder();
+/** Hard format limit applied by every reader, independent of writer tuning. */
+export const TEXT_FRONTIER_MAX_PATCHES = 64;
+/** Hard UTF-8 format limit applied before parsing a persisted frontier. */
+export const TEXT_FRONTIER_MAX_BYTES = 16 * 1024;
 const snapshotPatches = new WeakMap<TextSnapshot, readonly TextPatch[]>();
 const snapshotRoots = new WeakMap<TextSnapshot, RopeNode>();
 
@@ -145,8 +149,14 @@ function encodePatches(patches: readonly TextPatch[]): string {
 }
 
 function decodePatches(encoded: string): TextPatch[] {
+  if (byteLength(encoded) > TEXT_FRONTIER_MAX_BYTES) {
+    throw new Error("Text patch frontier exceeds the persisted byte limit");
+  }
   const value: unknown = JSON.parse(encoded);
   if (!Array.isArray(value)) throw new Error("Invalid text patch frontier");
+  if (value.length > TEXT_FRONTIER_MAX_PATCHES) {
+    throw new Error("Text patch frontier exceeds the persisted count limit");
+  }
   return value.map((entry) => {
     if (
       typeof entry !== "object" ||
@@ -335,8 +345,14 @@ export class TextStore {
     if (!Number.isInteger(this.maxPatches) || this.maxPatches < 1) {
       throw new RangeError("maxPatches must be a positive integer");
     }
+    if (this.maxPatches > TEXT_FRONTIER_MAX_PATCHES) {
+      throw new RangeError(`maxPatches cannot exceed ${TEXT_FRONTIER_MAX_PATCHES}`);
+    }
     if (!Number.isInteger(this.maxPatchBytes) || this.maxPatchBytes < 2) {
       throw new RangeError("maxPatchBytes must be an integer of at least 2");
+    }
+    if (this.maxPatchBytes > TEXT_FRONTIER_MAX_BYTES) {
+      throw new RangeError(`maxPatchBytes cannot exceed ${TEXT_FRONTIER_MAX_BYTES}`);
     }
     if (!Number.isInteger(this.leafBytes) || this.leafBytes < 4) {
       throw new RangeError("leafBytes must be an integer of at least 4");
@@ -398,6 +414,7 @@ export class TextStore {
   }
 
   async insert(snapshot: TextSnapshot, at: number, inserted: string): Promise<TextSnapshot> {
+    if (typeof inserted !== "string") throw new TypeError("Text insertion must be a string");
     if (!inserted) return snapshot;
     const text = insertAtCodePoint(snapshot.text, at, inserted);
     let root = snapshot.baseRoot;
