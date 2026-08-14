@@ -2377,8 +2377,8 @@ mod tests {
     use crate::tools::public_api::types::EnumCaseDescriptor;
     use crate::tools::public_api::types::TableSchemaBuilder;
     use crate::tools::public_schema::{
-        ColumnDescriptor, ColumnType, LargeValueKind, PolicyExpr, RowDescriptor, Schema,
-        SchemaBuilder, TablePolicies, TableSchema,
+        ColumnDescriptor, ColumnType, PolicyExpr, RowDescriptor, Schema, SchemaBuilder,
+        TablePolicies, TableSchema,
     };
     use std::path::PathBuf;
     use uuid::Uuid;

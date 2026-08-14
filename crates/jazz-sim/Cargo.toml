@@ -63,10 +63,6 @@ name = "s5_durable_stream"
 harness = false
 
 [[bench]]
-name = "s6_text_traces"
-harness = false
-
-[[bench]]
 name = "s7_migrations"
 harness = false
 

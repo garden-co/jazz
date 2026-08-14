@@ -20,6 +20,8 @@ use groove::db::{
 };
 use groove::ivm::PreparedShapeId;
 use groove::ivm::ProjectField;
+#[cfg(test)]
+use groove::queries::{Query, Select, SelectItem, TableRef};
 use groove::records::{self, BorrowedRecord, OwnedRecord, Value};
 use groove::storage::{self, OrderedKvStorage, ReopenableStorage, StorageLayout};
 use thiserror::Error;
@@ -1877,7 +1879,7 @@ where
     ///
     /// Used by the `Db` sync surface to upload a client's local writes upstream
     /// on a connection. Unlike [`NodeState::commit_mergeable_unit`] this reads the
-    /// stored versions (carrying any large-value extent refs), so the shipped
+    /// stored versions, so the shipped
     /// unit matches what the author actually stored.
     pub fn commit_unit_for(&mut self, tx_id: TxId) -> Result<SyncMessage, Error> {
         let tx = self
@@ -5075,8 +5077,6 @@ pub struct SyncMetrics {
     /// Receiver ignored a peer complete-transaction inventory claim because the
     /// transaction was not yet available on this link.
     pub peer_payload_inventory_missing_fallbacks: u64,
-    /// Rung-3 text strategies that degraded to the builtin char-walk merge.
-    pub rung3_text_merge_fallbacks: u64,
 }
 
 /// Deterministic counters for query-engine read authorization.
@@ -5327,6 +5327,13 @@ fn validate_mergeable_write_shape(cells_empty: bool, deletion_present: bool) -> 
             "mergeable commits must carry content cells or a deletion-register event",
         )),
     }
+}
+
+#[cfg(test)]
+fn select_all(table: &str) -> Query {
+    Query::Select(Box::new(
+        Select::new([SelectItem::Wildcard]).from([TableRef::named(table)]),
+    ))
 }
 
 fn known_state_fact_key(binding_view_key: BindingViewKey) -> [Value; 3] {

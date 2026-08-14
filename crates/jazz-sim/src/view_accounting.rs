@@ -166,7 +166,6 @@ mod tests {
                     user_metadata_json: None,
                     target_lineage: BranchLineage::Root,
                     branch_merge: None,
-                    merge_strategy: None,
                 },
                 versions: vec![version],
                 fate: Fate::Accepted,

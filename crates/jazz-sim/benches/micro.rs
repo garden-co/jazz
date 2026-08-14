@@ -242,7 +242,6 @@ fn run_commit_unit(config: &Config) {
                 predicate_read_set: None,
                 user_metadata_json: None,
                 target_lineage: BranchLineage::Root,
-                merge_strategy: None,
             };
             let unit = SyncMessage::CommitUnit {
                 tx: tx.clone(),

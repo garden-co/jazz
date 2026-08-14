@@ -209,12 +209,15 @@ groove::define_record! {
         10 => target_lineage: Vec<u8>,
         11 => branch_merge: Option<Vec<u8>>,
         12 => permission_subject: Option<AuthorId>,
-        13 => fate: FateTag,
-        14 => global_seq: Option<GlobalSeq>,
-        15 => rejection_reason: Option<RejectionReasonTag>,
-        16 => cascade_root: Option<Value>,
-        17 => reason_detail: Option<String>,
-        18 => durability: DurabilityTier,
+        // Retained as an inert physical slot so existing transaction records
+        // keep their fixed descriptor alignment. No core API writes or reads it.
+        13 => merge_strategy: Option<String>,
+        14 => fate: FateTag,
+        15 => global_seq: Option<GlobalSeq>,
+        16 => rejection_reason: Option<RejectionReasonTag>,
+        17 => cascade_root: Option<Value>,
+        18 => reason_detail: Option<String>,
+        19 => durability: DurabilityTier,
     }
 }
 
@@ -1031,6 +1034,7 @@ pub(super) fn transaction_values(
             ))
         })),
         Value::Nullable(tx.permission_subject.map(|id| Box::new(Value::Uuid(id.0)))),
+        Value::Nullable(None),
         Value::String(fate_string(&fate)),
         Value::Nullable(global_seq.map(|seq| Box::new(Value::U64(seq.0)))),
         Value::Nullable(rejection_reason_tag(&fate).map(|reason| Box::new(Value::String(reason)))),
@@ -1659,10 +1663,7 @@ pub(super) fn sort_current_rows(rows: &mut [CurrentRow]) {
 
 /// Build a current row from cells that are already app-facing values.
 ///
-/// Stored version cells for large-value columns contain operation payloads, not
-/// materialized bytes. App-facing rows built from `VersionRow` must go through
-/// `NodeState::current_row_from_materialized_version` or materialize the cells
-/// before calling this helper.
+/// Build a row from ordinary app-facing cells.
 pub(super) fn current_row_from_cells(
     table: &TableSchema,
     row_uuid: RowUuid,

@@ -5116,7 +5116,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn validates_aggregate_columns_types_grouping_and_ordering() {
         let validated = Query::from("issues")
             .aggregate([

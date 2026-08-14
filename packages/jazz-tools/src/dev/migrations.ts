@@ -99,8 +99,7 @@ function baseBuilderExpression(columnType: WasmColumnType, references?: string):
 
 function builderExpressionForColumn(column: ColumnDescriptor): string {
   const base = baseBuilderExpression(column.column_type, column.references);
-  const withLargeValue = column.large_value === "Blob" ? `${base}.large()` : base;
-  const withOptional = column.nullable ? `${withLargeValue}.optional()` : withLargeValue;
+  const withOptional = column.nullable ? `${base}.optional()` : base;
   if (column.merge_strategy === "Counter") {
     return `${withOptional}.merge("counter")`;
   }

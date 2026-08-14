@@ -180,7 +180,7 @@ fn attributed_write_checkpoint_error_cleans_up_terminal_permission_subject() {
         .unwrap();
 
     // The first six transaction reads are part of validation and acceptance;
-    // checkpoint_large_values_for_tx makes the seventh after Accepted persists.
+    // The seventh after Accepted persists.
     storage.fail_after_transaction_reads(6);
     let error = core.finalize_local_mergeable_commit(tx_id).unwrap_err();
     assert!(error.to_string().contains("injected transaction read failure"));

@@ -7729,7 +7729,7 @@ where
             rows
         };
         // The graph used for synchronous materialization intentionally retains
-        // physical provenance fields so large values and policy witnesses can
+        // physical provenance fields so policy witnesses can
         // be resolved above.  Do not let that internal descriptor cross the
         // public CurrentRow boundary: subscriptions use the public terminal
         // shape, and native/WASM consumers must see the same layout from both

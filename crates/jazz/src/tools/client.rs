@@ -168,9 +168,6 @@ enum TickDriverErrorClass {
 fn classify_tick_driver_error(error: &CoreDbError) -> TickDriverErrorClass {
     match error.code {
         CoreDbErrorCode::Backpressure => TickDriverErrorClass::Retry,
-        CoreDbErrorCode::Protocol if error.message.starts_with("missing content extent:") => {
-            TickDriverErrorClass::Retry
-        }
         CoreDbErrorCode::Protocol if error.message == "websocket pump is closed" => {
             TickDriverErrorClass::Reconnect
         }

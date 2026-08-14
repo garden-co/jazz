@@ -5,7 +5,7 @@
 
 use super::*;
 use crate::oracle::{ModelRowVersion, Oracle, OracleTxState, ParallelMaterializationOracle};
-use crate::peer::{PeerMetrics, PeerState};
+use crate::peer::{PeerEvictionPins, PeerMetrics, PeerState};
 use crate::protocol::{
     CurrentWriteSchema, LensOp, MigrationLens, RegisterShapeOptions, SchemaLineagePublication,
     SchemaVersion, TableLens, VersionRecord,

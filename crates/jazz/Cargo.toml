@@ -181,10 +181,6 @@ name = "cold_subscription"
 harness = false
 
 [[bench]]
-name = "large_value_checkpointing"
-harness = false
-
-[[bench]]
 name = "merge_back_cost"
 harness = false
 
@@ -231,10 +227,6 @@ harness = false
 required-features = ["testing"]
 
 [[test]]
-name = "large_blob_permissions"
-required-features = ["test"]
-
-[[test]]
 name = "branch_claims_integration"
 required-features = ["test"]
 
@@ -252,10 +244,6 @@ required-features = ["test-utils"]
 
 [[test]]
 name = "transactions"
-required-features = ["test-utils"]
-
-[[test]]
-name = "text_document_merge"
 required-features = ["test-utils"]
 
 [[test]]

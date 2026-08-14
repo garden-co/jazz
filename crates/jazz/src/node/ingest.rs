@@ -1099,7 +1099,7 @@ where
     /// This is the authority's self-acceptance of its own write — the path a
     /// `Core` `Db` takes when it commits through the facade (a client instead
     /// commits Pending/Local and learns its fate from upstream). It reuses the
-    /// stored versions, so it is large-value-safe and does not re-run the
+    /// stored versions and does not re-run the
     /// authority validation the node already performed when it authored the
     /// commit. Idempotent: a non-pending transaction is left untouched.
     pub fn finalize_local_mergeable_commit(&mut self, tx_id: TxId) -> Result<(), Error> {
@@ -2851,6 +2851,26 @@ where
             });
         }
         Ok(updates)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn transaction_ids(&self) -> Result<Vec<TxId>, Error> {
+        let mut tx_ids = Vec::new();
+        for raw in self
+            .database
+            .primary_key_scan_raw("jazz_transactions", &[])?
+        {
+            let record = raw.record();
+            let time = TxTime(record.get_u64(TransactionRowRecord::FIELD_TIME_IDX)?);
+            let alias = NodeAlias(record.get_u64(TransactionRowRecord::FIELD_NODE_ID_IDX)?);
+            let node = self.node_for_alias(alias).ok_or(Error::InvalidStoredValue(
+                "transaction node alias must exist",
+            ))?;
+            tx_ids.push(TxId::new(time, node));
+        }
+        tx_ids.sort();
+        tx_ids.dedup();
+        Ok(tx_ids)
     }
 
     pub(super) fn local_cascade_descendants(

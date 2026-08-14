@@ -61,50 +61,6 @@ export function readSchemaPolicyBranches(
   return policy!;
 }
 
-export function readSchemaColumnLargeValues(
-  schemaBytes: Uint8Array,
-  tableName: string,
-): Array<{ name: string; largeValue: "Text" | "Blob" | null }> {
-  const reader = new PostcardReader(schemaBytes);
-  const tables = reader.readVec((tableReader) => {
-    const table = tableReader.string();
-    const columns = tableReader.readVec((columnReader) => {
-      const name = columnReader.string();
-      skipSchemaValueType(columnReader);
-      const largeValue =
-        columnReader.option((kindReader) => {
-          const tag = kindReader.u64();
-          if (tag === 0) return "Text" as const;
-          if (tag === 1) return "Blob" as const;
-          throw new Error(`unsupported large value kind ${tag}`);
-        }) ?? null;
-      columnReader.option(() => undefined);
-      columnReader.option(skipGrooveValue);
-      return { name, largeValue };
-    });
-    const referenceCount = tableReader.u64();
-    for (let index = 0; index < referenceCount; index += 1) {
-      tableReader.string();
-      tableReader.string();
-    }
-    tableReader.option(readPolicyQueryForTest);
-    tableReader.option(readPolicyQueryForTest);
-    tableReader.option(readPolicyQueryForTest);
-    tableReader.option(readPolicyQueryForTest);
-    tableReader.option(readPolicyQueryForTest);
-    tableReader.u64();
-    const indexCount = tableReader.u64();
-    for (let index = 0; index < indexCount; index += 1) {
-      tableReader.string();
-      tableReader.readVec((indexReader) => indexReader.string());
-    }
-    return { table, columns };
-  });
-  reader.option(() => undefined);
-  reader.option(() => undefined);
-  return tables.find((table) => table.table === tableName)?.columns ?? [];
-}
-
 export function readSchemaTableMetadata(
   schemaBytes: Uint8Array,
   tableName: string,

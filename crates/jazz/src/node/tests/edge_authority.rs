@@ -32,6 +32,52 @@ fn edge_accept_mergeable_unit(
     (tx, versions, updates)
 }
 
+fn titles_at(
+    node: &mut NodeState<RocksDbStorage>,
+    tier: DurabilityTier,
+) -> BTreeMap<RowUuid, Value> {
+    node.current_rows("todos", tier)
+        .unwrap()
+        .into_iter()
+        .map(|row| {
+            (
+                row.row_uuid(),
+                row.cell(&node.catalogue.schema.tables[0], "title")
+                    .unwrap()
+                    .to_owned(),
+            )
+        })
+        .collect()
+}
+
+fn assert_current_title(
+    node: &mut NodeState<RocksDbStorage>,
+    tier: DurabilityTier,
+    row_uuid: RowUuid,
+    title: &str,
+) {
+    assert_eq!(
+        titles_at(node, tier),
+        BTreeMap::from([(row_uuid, Value::String(title.to_owned()))])
+    );
+}
+
+fn global_promote_edge_unit(
+    core: &mut NodeState<RocksDbStorage>,
+    tx: Transaction,
+    versions: Vec<VersionRecord>,
+) -> SyncMessage {
+    let [fate] = core
+        .finalize_edge_accepted_mergeable_commit_unit_once(
+            tx.clone(),
+            versions,
+            u64::MAX - SKEW_TOLERANCE_MS,
+        )
+        .unwrap()
+        .try_into()
+        .unwrap();
+    fate
+}
 
 #[test]
 fn edge_accepted_mergeable_promotes_to_global_without_revalidating_write_policy() {

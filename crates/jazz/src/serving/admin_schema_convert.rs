@@ -161,7 +161,7 @@ fn convert_column(
     if object.contains_key("large_value") {
         return Err(err(
             format!("{path}.large_value"),
-            "large values have been removed from this core version",
+            "this column extension has been removed from this core version",
         ));
     }
     if object
@@ -171,7 +171,7 @@ fn convert_column(
     {
         return Err(err(
             format!("{path}.large"),
-            "large values have been removed from this core version",
+            "this column extension has been removed from this core version",
         ));
     }
     if object

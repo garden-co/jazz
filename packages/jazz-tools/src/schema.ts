@@ -104,7 +104,6 @@ export interface Column {
   default?: unknown;
   references?: string; // Target table name for foreign key
   mergeStrategy?: ColumnMergeStrategy;
-  largeValue?: "blob" | "text";
 }
 
 export type EnumValueFromCases<Cases extends readonly EnumCaseSqlType[]> = {

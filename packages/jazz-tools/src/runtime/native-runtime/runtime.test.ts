@@ -24,7 +24,6 @@ import {
 } from "./native-runtime-adapter.js";
 import { encodeSchema } from "./schema-codec.js";
 import {
-  readSchemaColumnLargeValues,
   readSchemaSelectPolicyBranches,
   readSchemaTableMetadata,
 } from "./native-runtime-policy.test-support.js";
@@ -62,27 +61,6 @@ async function waitForFakeWebSocketNegotiation(): Promise<void> {
 describe("NativeRuntimeAdapter server transport", () => {
   afterEach(() => {
     globalThis.WebSocket = previousWebSocket;
-  });
-
-  it("encodes binary large value columns in native schemas", () => {
-    const schemaBytes = encodeSchema({
-      files: {
-        columns: [
-          { name: "inline", column_type: { type: "Bytea" }, nullable: false },
-          {
-            name: "data",
-            column_type: { type: "Bytea" },
-            nullable: false,
-            large_value: "Blob",
-          },
-        ],
-      },
-    });
-
-    expect(readSchemaColumnLargeValues(schemaBytes, "files")).toEqual([
-      { name: "inline", largeValue: null },
-      { name: "data", largeValue: "Blob" },
-    ]);
   });
 
   it("encodes indexed columns and counter merge strategies in native schemas", () => {
@@ -995,7 +973,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            all: () => encodeBinaryLargeValueRows(),
+            all: () => encodeArrayRows(),
             prepareQuery: () => ({}),
             tick: () => undefined,
           }),
@@ -1003,16 +981,16 @@ describe("NativeRuntimeAdapter server transport", () => {
           throw new Error("not used");
         },
       } as never,
-      binaryLargeValueSchema,
+      arraySchema,
       new Uint8Array(16),
       new Uint8Array(16),
       1,
       true,
     );
 
-    await expect(runtime.query(JSON.stringify({ table: "binary_large_values" }))).resolves.toEqual([
+    await expect(runtime.query(JSON.stringify({ table: "arrays" }))).resolves.toEqual([
       {
-        table: "binary_large_values",
+        table: "arrays",
         id: "00000000-0000-0000-0000-000000000010",
         values: [
           {
@@ -4525,8 +4503,8 @@ function unsupportedProjectRelationIr(): unknown {
   };
 }
 
-const binaryLargeValueSchema = {
-  binary_large_values: {
+const arraySchema = {
+  arrays: {
     columns: [
       {
         name: "chunk_refs",
@@ -5053,14 +5031,14 @@ function presentBytes(bytes: Uint8Array): Uint8Array {
   return output;
 }
 
-function encodeBinaryLargeValueRows(): Uint8Array {
+function encodeArrayRows(): Uint8Array {
   const descriptor = [
     { name: "chunk_refs", valueType: { tag: 13, inner: { tag: 10 } } },
     { name: "chunk_sizes", valueType: { tag: 13, inner: { tag: 6 } } },
   ];
   const writer = new PostcardWriter();
   writer.vec((batch) => {
-    batch.string("binary_large_values");
+    batch.string("arrays");
     writeDescriptor(batch, descriptor);
     batch.vec((row) => {
       row.bytes(uuidBytes("00000000-0000-0000-0000-000000000010"));
