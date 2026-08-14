@@ -44,6 +44,13 @@ type FollowerPeer = {
 
 const followerPeers = new Map<string, FollowerPeer>();
 
+function broadcastAuthRestored(): void {
+  postEvent({ type: "auth-restored" });
+  for (const peer of followerPeers.values()) {
+    peer.port.postMessage({ type: "auth-restored" } satisfies BrowserFollowerPortEvent);
+  }
+}
+
 workerScope.onmessage = (event) => {
   const message = event.data;
   if (message.type === "init") {
@@ -132,6 +139,7 @@ async function handleAfterInitialization(message: Exclude<BrowserWorkerMessage, 
     case "update-auth":
       subscriber?.updateAuthenticatedClaims?.(message.sessionClaims);
       await activeRuntime.updateAuth(message.authJson);
+      broadcastAuthRestored();
       break;
     case "disconnect":
       await activeRuntime.disconnect({ rejectWaiters: false });
@@ -279,6 +287,7 @@ async function handleFollowerMessage(
       }
       peer.subscriber.updateAuthenticatedClaims?.(message.sessionClaims);
       await activeRuntime.updateAuth(message.authJson);
+      broadcastAuthRestored();
       return;
     }
     await activeRuntime.waitForUpstreamServerConnection();

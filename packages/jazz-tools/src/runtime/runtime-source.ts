@@ -51,6 +51,7 @@ export interface BrowserWorkerConnectionContext<RuntimeConfig extends DbConfig =
   leadershipId: number;
   workerLockName: string;
   onAuthFailure: (reason: AuthFailureReason) => void;
+  onAuthRestored: () => void;
   onFailure: (error: unknown) => void;
   onFollowerPortClosed: (followerTabId: string, leadershipId: number) => void;
 }
@@ -61,6 +62,7 @@ export interface BrowserFollowerConnectionContext<RuntimeConfig extends DbConfig
   leadershipId: number;
   port: MessagePort;
   onAuthFailure: (reason: AuthFailureReason) => void;
+  onAuthRestored: () => void;
   onFailure: (error: unknown) => void;
 }
 

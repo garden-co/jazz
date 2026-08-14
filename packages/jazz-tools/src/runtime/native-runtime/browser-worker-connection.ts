@@ -32,7 +32,7 @@ export class DedicatedBrowserWorkerConnection implements BrowserWorkerConnection
     options: BrowserWorkerInitOptions,
     private readonly callbacks: Pick<
       BrowserWorkerConnectionContext,
-      "onAuthFailure" | "onFailure" | "onFollowerPortClosed"
+      "onAuthFailure" | "onAuthRestored" | "onFailure" | "onFollowerPortClosed"
     >,
   ) {
     this.onFailure = callbacks.onFailure;
@@ -153,6 +153,10 @@ export class DedicatedBrowserWorkerConnection implements BrowserWorkerConnection
     }
     if (message.type === "auth-failure") {
       onAuthFailure(message.reason as AuthFailureReason);
+      return;
+    }
+    if (message.type === "auth-restored") {
+      this.callbacks.onAuthRestored();
       return;
     }
     if (message.type === "follower-port-closed") {

@@ -53,90 +53,98 @@ describe("Db auth refresh browser integration", () => {
     await ctx.cleanup();
   });
 
-  it("recovers from auth loss after updateAuthToken and flushes queued local writes", async () => {
-    const { appId, serverUrl, adminSecret } = await getJazzServerInfo();
+  it.each([
+    { mode: "main-thread memory", driver: { type: "memory" } as const },
+    {
+      mode: "persistent worker leader",
+      driver: { type: "persistent", dbName: uniqueDbName("auth-refresh-worker") } as const,
+    },
+  ])(
+    "recovers from auth loss in $mode after updateAuthToken and flushes queued local writes",
+    async ({ mode, driver }) => {
+      const { appId, serverUrl, adminSecret } = await getJazzServerInfo();
 
-    const dbNameA = uniqueDbName("auth-refresh-a");
-    const dbNameB = uniqueDbName("auth-refresh-b");
-    const userId = "00000000-0000-0000-0000-00000000a111";
-    const invalidJwt = makeFakeJwt({
-      sub: userId,
-      claims: { role: "member" },
-      exp: Math.floor(Date.now() / 1000) + 3600,
-    });
-    const validJwt = await getJazzServerJwtForUser(userId, { role: "member" });
+      const dbNameB = uniqueDbName("auth-refresh-b");
+      const userId = "00000000-0000-0000-0000-00000000a111";
+      const invalidJwt = makeFakeJwt({
+        sub: userId,
+        claims: { role: "member" },
+        exp: Math.floor(Date.now() / 1000) + 3600,
+      });
+      const validJwt = await getJazzServerJwtForUser(userId, { role: "member" });
 
-    const writer = ctx.track(
-      await createDb({
+      const writer = ctx.track(
+        await createDb({
+          appId,
+          serverUrl,
+          jwtToken: invalidJwt,
+          driver,
+        }),
+      );
+      const reader = ctx.track(
+        await createDb({
+          appId,
+          serverUrl,
+          jwtToken: validJwt,
+          driver: { type: "persistent", dbName: dbNameB },
+        }),
+      );
+
+      await deploy({
         appId,
         serverUrl,
-        jwtToken: invalidJwt,
-        driver: { type: "persistent", dbName: dbNameA },
-      }),
-    );
-    const reader = ctx.track(
-      await createDb({
-        appId,
-        serverUrl,
-        jwtToken: validJwt,
-        driver: { type: "persistent", dbName: dbNameB },
-      }),
-    );
-
-    await deploy({
-      appId,
-      serverUrl,
-      adminSecret,
-      schema,
-      permissions: {
-        todos: {
-          select: { using: { type: "True" } },
-          insert: { with_check: { type: "True" } },
-          update: {
-            using: { type: "True" },
-            with_check: { type: "True" },
+        adminSecret,
+        schema,
+        permissions: {
+          todos: {
+            select: { using: { type: "True" } },
+            insert: { with_check: { type: "True" } },
+            update: {
+              using: { type: "True" },
+              with_check: { type: "True" },
+            },
+            delete: { using: { type: "True" } },
           },
-          delete: { using: { type: "True" } },
         },
-      },
-    });
+      });
 
-    const marker = `queued-after-auth-loss-${Date.now()}`;
-    writer.insert(todos, {
-      title: marker,
-      done: false,
-    });
+      const marker = `queued-after-auth-loss-${mode}-${Date.now()}`;
+      writer.insert(todos, {
+        title: marker,
+        done: false,
+      });
 
-    await waitForCondition(
-      async () => writer.getAuthState().error === "invalid",
-      20_000,
-      "writer should transition to unauthenticated after invalid JWT auth failure",
-    );
+      await waitForCondition(
+        async () => writer.getAuthState().error === "invalid",
+        20_000,
+        "writer should transition to unauthenticated after invalid JWT auth failure",
+      );
 
-    expect(writer.getAuthState()).toMatchObject({
-      error: "invalid",
-      session: {
-        user_id: userId,
-      },
-    });
+      expect(writer.getAuthState()).toMatchObject({
+        error: "invalid",
+        session: {
+          user_id: userId,
+        },
+      });
 
-    writer.updateAuthToken(validJwt);
+      writer.updateAuthToken(validJwt);
 
-    await waitForCondition(
-      async () => writer.getAuthState().error === undefined,
-      20_000,
-      "writer should return to authenticated after updateAuthToken",
-    );
+      await waitForCondition(
+        async () => writer.getAuthState().error === undefined,
+        20_000,
+        "writer should return to authenticated after updateAuthToken",
+      );
 
-    await waitForQuery(
-      reader,
-      allTodos,
-      (rows) => rows.some((row) => row.title === marker),
-      "queued write should flush after auth refresh",
-      20_000,
-      "edge",
-    );
-  });
+      await waitForQuery(
+        reader,
+        allTodos,
+        (rows) => rows.some((row) => row.title === marker),
+        "queued write should flush after auth refresh",
+        20_000,
+        "edge",
+      );
+    },
+  );
 });
 
 function toBase64Url(value: unknown): string {

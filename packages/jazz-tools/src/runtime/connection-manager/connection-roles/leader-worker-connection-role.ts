@@ -38,6 +38,7 @@ export class LeaderWorkerConnectionRole implements BrowserConnectionRole {
       leadershipId: this.leadershipId,
       workerLockName: this.workerLockName,
       onAuthFailure: (reason) => this.host.markUnauthenticated(reason),
+      onAuthRestored: () => this.host.clearAuthError(),
       onFailure: (error) => {
         if (this.workerBridge !== bridge) return;
         this.callbacks.onFailure(error, this, this.leadershipId);

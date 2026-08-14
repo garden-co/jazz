@@ -2225,7 +2225,7 @@ describe("Worker Bridge with OPFS", () => {
     expect(Array.isArray(rows)).toBe(true);
   });
 
-  it("fans out an auth failure to follower tabs", async () => {
+  it("fans out auth loss and accepts same-principal refresh from a follower tab", async () => {
     const { appId, serverUrl } = await getJazzServerInfo(uniqueDbName("auth-fanout"));
     const dbName = uniqueDbName("auth-fanout");
     const userId = "00000000-0000-0000-0000-00000000fa01";
@@ -2277,6 +2277,19 @@ describe("Worker Bridge with OPFS", () => {
       async () => follower.getAuthState().error === "invalid",
       20000,
       "Follower should turn unauthenticated through the worker auth fan-out",
+    );
+
+    follower.updateAuthToken(validJwt);
+
+    await waitForCondition(
+      async () => follower.getAuthState().error === undefined,
+      20000,
+      "Follower should recover after submitting a same-principal token refresh",
+    );
+    await waitForCondition(
+      async () => leader.getAuthState().error === undefined,
+      20000,
+      "Leader should receive the refreshed auth state from the shared worker",
     );
   }, 60000);
 

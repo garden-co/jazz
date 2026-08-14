@@ -43,6 +43,7 @@ export type BrowserWorkerEvent =
   | { type: "result"; id: number; error?: string }
   | { type: "frames"; frames: Uint8Array[] }
   | { type: "auth-failure"; reason: string }
+  | { type: "auth-restored" }
   | { type: "follower-port-closed"; followerTabId: string; leadershipId: number }
   | { type: "error"; message: string };
 
@@ -57,4 +58,5 @@ export type BrowserFollowerPortEvent =
   | { type: "frames"; frames: Uint8Array[] }
   | { type: "result"; id: number; error?: string }
   | { type: "auth-failure"; reason: string }
+  | { type: "auth-restored" }
   | { type: "error"; message: string };
