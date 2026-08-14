@@ -111,6 +111,6 @@ export function mountTodoWidget(
     //       { kind: Removed, id, index }         // row gone at `index`
     // Iterate delta.delta to apply per-row DOM patches instead of a full
     // swap, e.g. to keep focus, preserve animations, or avoid reflow cost.
-    renderTodos(delta.all);
+    renderTodos(delta.all ?? []);
   });
 }

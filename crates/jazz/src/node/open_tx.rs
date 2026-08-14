@@ -673,7 +673,7 @@ where
             versions.clone(),
             Fate::Pending,
             None,
-            DurabilityTier::Local,
+            self.authored_commit_durability,
         )?;
         self.open_tx.open_transactions.remove(&open_batch_id);
         self.open_tx.closed_batches.insert(open_batch_id);

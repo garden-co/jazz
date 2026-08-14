@@ -251,7 +251,7 @@ afterEach(async () => {
 });
 
 describe("raw websocket private read gate", () => {
-  it("delivers async-channel subscription updates for $createdBy-scoped inserts", async () => {
+  it("delivers main-thread subscription updates for $createdBy-scoped inserts", async () => {
     const { appId, serverUrl, adminSecret } = await getJazzServerInfo(
       uniqueDbName("created-by-async-channel-subscription"),
     );
@@ -271,7 +271,6 @@ describe("raw websocket private read gate", () => {
         type: "persistent",
         dbName: uniqueDbName("created-by-async-channel-client"),
       },
-      asyncSubscriptionsOnly: true,
     });
     ctx.track({
       shutdown: client.shutdown,
@@ -295,15 +294,14 @@ describe("raw websocket private read gate", () => {
     );
     await sleep(500);
 
+    const write = client.db.insert(createdByApp.todos, {
+      title: "Alice-created async channel row",
+      done: false,
+    });
     const inserted = await withTimeout(
-      client.db
-        .insert(createdByApp.todos, {
-          title: "Alice-created async channel row",
-          done: false,
-        })
-        .then((write) => write.wait({ tier: "global" })),
+      write.wait({ tier: "global" }),
       15_000,
-      "async-channel $createdBy insert global wait",
+      "$createdBy insert global wait",
     );
 
     await waitForCondition(

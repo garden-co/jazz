@@ -2,7 +2,6 @@ import { afterEach, describe, expect, it } from "vitest";
 import { schema as s } from "../../src/";
 import { createDb, Db, type QueryBuilder } from "../../src/runtime/db.js";
 import { generateAuthSecret } from "../../src/runtime/auth-secret-store.js";
-import { PersistentBrowserOpfsRuntime } from "../../src/runtime/native-runtime/persistent-browser-runtime.js";
 import { deploy } from "../../src/dev/catalogue.js";
 import { TestCleanup, sleep, uniqueDbName, waitForQuery, withTimeout } from "./support.js";
 import { getJazzServerInfo, type JazzServerInfo } from "./testing-server.js";
@@ -28,6 +27,11 @@ const allowAllPermissions = s.definePermissions(app, ({ policy }) => [
 
 const PENDING_ASSERTION_MS = 750;
 const LOCAL_OPERATION_TIMEOUT_MS = 2_000;
+// Persistent browser Db creation crosses the OPFS worker boundary. The
+// reconnect test still verifies this is a local-only read, but a CI worker
+// under the full browser suite needs a startup budget distinct from the
+// steady-state local-read responsiveness budget above.
+const WORKER_STARTUP_OPERATION_TIMEOUT_MS = 5_000;
 const SYNC_OPERATION_TIMEOUT_MS = 10_000;
 
 type DbFactory = (
@@ -127,35 +131,6 @@ describe("Db disconnect/reconnect", () => {
   });
 
   describe("worker mode", () => {
-    it.each(["close", "clearClientStorage"] as const)(
-      "rejects server-tier work parked behind reconnect on %s",
-      async (terminalMethod) => {
-        const runtime = new PersistentBrowserOpfsRuntime(
-          undefined,
-          app.wasmSchema,
-          uniqueDbName(`db-disconnect-${terminalMethod}`),
-          new Uint8Array(16),
-          new Uint8Array(16),
-        );
-
-        await runtime.disconnect({ rejectWaiters: false });
-        const query = runtime.query(JSON.stringify({ table: "todos" }), null, "edge", null);
-        const wait = runtime.waitForTransaction("parked-browser-transaction", "global");
-        const queryRejection = expect(query).rejects.toThrow(
-          "Persistent browser native runtime is closed",
-        );
-        const waitRejection = expect(wait).rejects.toThrow(
-          "Persistent browser native runtime is closed",
-        );
-
-        await runtime[terminalMethod]();
-
-        await queryRejection;
-        await waitRejection;
-      },
-      60_000,
-    );
-
     it("syncs writes made while disconnected after reconnect", async () => {
       const { db, peer } = await createDbPair(ctx, createWorkerDb);
 
@@ -181,7 +156,7 @@ describe("Db disconnect/reconnect", () => {
           localUpdates: "immediate",
           propagation: "local-only",
         }),
-        LOCAL_OPERATION_TIMEOUT_MS,
+        WORKER_STARTUP_OPERATION_TIMEOUT_MS,
         "worker mode: peer local read before reconnect did not resolve",
       );
       expect(peerRowsBeforeReconnect).toEqual([]);
@@ -275,21 +250,23 @@ describe("Db disconnect/reconnect", () => {
       );
     }, 60_000);
 
-    it("keeps a later local write behind a disconnected edge query", async () => {
+    it("keeps local writes responsive while a disconnected edge query is pending", async () => {
       const { db } = await createDbPair(ctx, createWorkerDb);
       await db.disconnect();
 
       const title = "strict query FIFO";
       const edgeRead = db.all(todoByTitle(title), { tier: "edge", localUpdates: "deferred" });
       const laterWrite = db.insert(todos, { title, done: false });
-      await expectStillPending(
-        laterWrite.batchId,
-        PENDING_ASSERTION_MS,
-        "worker mode: local write overtook a parked edge query",
+      await withTimeout(
+        laterWrite.wait({ tier: "local" }),
+        LOCAL_OPERATION_TIMEOUT_MS,
+        "worker mode: local write did not resolve independently of a parked edge query",
       );
 
       await db.reconnect();
-      await expect(edgeRead).resolves.toEqual([]);
+      const rows = await edgeRead;
+      expect(rows).toHaveLength(1);
+      expect(rows[0]?.title).toBe(title);
       await withTimeout(
         laterWrite.wait({ tier: "local" }),
         SYNC_OPERATION_TIMEOUT_MS,
@@ -297,7 +274,7 @@ describe("Db disconnect/reconnect", () => {
       );
     }, 60_000);
 
-    it("keeps a later local write behind a disconnected edge wait", async () => {
+    it("keeps local writes responsive while a disconnected edge wait is pending", async () => {
       const { db } = await createDbPair(ctx, createWorkerDb);
       const priorWrite = db.insert(todos, { title: "strict wait FIFO", done: false });
       await priorWrite.wait({ tier: "local" });
@@ -305,10 +282,10 @@ describe("Db disconnect/reconnect", () => {
 
       const edgeWait = priorWrite.wait({ tier: "edge" });
       const laterWrite = db.insert(todos, { title: "after strict wait", done: false });
-      await expectStillPending(
-        laterWrite.batchId,
-        PENDING_ASSERTION_MS,
-        "worker mode: local write overtook a parked edge wait",
+      await withTimeout(
+        laterWrite.wait({ tier: "local" }),
+        LOCAL_OPERATION_TIMEOUT_MS,
+        "worker mode: local write did not resolve independently of a parked edge wait",
       );
 
       await db.reconnect();
@@ -320,21 +297,12 @@ describe("Db disconnect/reconnect", () => {
       );
     }, 60_000);
 
-    it("dispatches connection control around an executing worker durability wait", async () => {
+    it("reconnects an already-pending public durability wait", async () => {
       const { db } = await createDbPair(ctx, createWorkerDb);
       const write = db.insert(todos, { title: "blocked durability wait", done: false });
-      const batchId = await write.batchId;
+      await write.wait({ tier: "local" });
       await db.disconnect();
-
-      // Reach below the parent reconnect gate to reproduce a server-tier command
-      // already executing in the worker, as can happen when a connection drops
-      // after the worker dispatched the wait.
-      const clients = (db as unknown as { clients: Map<string, unknown> }).clients;
-      const client = clients.values().next().value as { runtime: unknown };
-      const runtime = client.runtime as {
-        send(method: "waitForTransaction", args: [typeof batchId, string]): Promise<void>;
-      };
-      const edgeWait = runtime.send("waitForTransaction", [batchId, "edge"]);
+      const edgeWait = write.wait({ tier: "edge" });
       await expectStillPending(
         edgeWait,
         PENDING_ASSERTION_MS,

@@ -26,15 +26,39 @@ function classBody(source, name) {
 }
 
 function arityFromDeclaration(body, method) {
-  const match = body.match(new RegExp(`(?:^|\\n)\\s*(?:static\\s+)?${method}\\(([^)]*)\\)`, "m"));
-  if (!match) throw new Error(`missing WasmDb.${method}`);
-  return match[1].trim() === "" ? 0 : match[1].split(",").length;
+  return parameterCount(methodParameters(body, method, `missing WasmDb.${method}`));
 }
 
 function arityFromGlue(body, method) {
-  const match = body.match(new RegExp(`\\n\\s*${method}\\(([^)]*)\\)\\s*\\{`, "m"));
-  if (!match) throw new Error(`generated JS is missing WasmDb.${method}`);
-  return match[1].trim() === "" ? 0 : match[1].split(",").length;
+  return parameterCount(methodParameters(body, method, `generated JS is missing WasmDb.${method}`));
+}
+
+function methodParameters(body, method, error) {
+  const match = new RegExp(`(?:^|\\n)\\s*(?:static\\s+)?${method}\\s*\\(`, "m").exec(body);
+  if (!match) throw new Error(error);
+  const start = match.index + match[0].length;
+  let depth = 1;
+  for (let index = start; index < body.length; index++) {
+    if (body[index] === "(") depth++;
+    else if (body[index] === ")" && --depth === 0) return body.slice(start, index);
+  }
+  throw new Error(`unterminated WasmDb.${method} parameters`);
+}
+
+// TypeScript parameter types may contain commas in generic, tuple, function,
+// or object types. Count only commas at the parameter-list top level, so an
+// ABI check measures runtime arguments rather than type syntax.
+function parameterCount(parameters) {
+  if (parameters.trim() === "") return 0;
+  let count = 1;
+  const closes = { "<": ">", "(": ")", "[": "]", "{": "}" };
+  const stack = [];
+  for (const character of parameters) {
+    if (closes[character]) stack.push(closes[character]);
+    else if (stack.at(-1) === character) stack.pop();
+    else if (character === "," && stack.length === 0) count++;
+  }
+  return count;
 }
 
 export function verifyCorrectnessTestArtifacts(rootDir = root) {

@@ -16,6 +16,12 @@ interface Entry {
   releaseTimer: ReturnType<typeof setTimeout> | null;
   /** Resolver for the in-flight `releaseClient` promise, if a teardown is scheduled. */
   pendingRelease: (() => void) | null;
+  /**
+   * Set once teardown has started. A later acquire must wait for this before
+   * constructing a replacement, otherwise two browser workers can open the
+   * same persistent storage at once.
+   */
+  closing: Promise<void> | null;
 }
 
 const registry = new Map<string, Entry>();
@@ -26,12 +32,31 @@ export function acquireClient<T extends RegisteredClient>(
   holder: object,
 ): Promise<T> {
   let entry = registry.get(key);
+  if (entry?.closing) {
+    const previous = entry;
+    const previousClosing = previous.closing!;
+    const created: Entry = {
+      promise: previousClosing.then(() => create()),
+      holders: new Set(),
+      releaseTimer: null,
+      pendingRelease: null,
+      closing: null,
+    };
+    created.promise.catch(() => {
+      if (registry.get(key) === created) {
+        registry.delete(key);
+      }
+    });
+    registry.set(key, created);
+    entry = created;
+  }
   if (!entry) {
     const created: Entry = {
       promise: create(),
       holders: new Set(),
       releaseTimer: null,
       pendingRelease: null,
+      closing: null,
     };
     // Evict on failure so the next acquire re-creates instead of re-rejecting.
     created.promise.catch(() => {
@@ -80,13 +105,15 @@ export function releaseClient(key: string, holder: object): Promise<void> {
         resolve();
         return;
       }
-      if (registry.get(key) === entry) {
-        registry.delete(key);
-      }
-      entry.promise
+      entry.closing = entry.promise
         .then((client) => client.shutdown())
         .catch(() => {})
-        .finally(() => resolve());
+        .finally(() => {
+          if (registry.get(key) === entry) {
+            registry.delete(key);
+          }
+          resolve();
+        });
     }, 0);
   });
 }

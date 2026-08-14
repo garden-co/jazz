@@ -123,15 +123,11 @@ function getBrowserConnection(db: Db): any {
 }
 
 function getActiveRoleBridge(db: Db): any {
-  return getBrowserConnection(db)?.activeRoleBridge ?? null;
-}
-
-function getPersistentBrowserRuntime(db: Db): any {
-  return (db as any).runtimeSource?.persistentOwnerRuntime ?? null;
+  return getBrowserConnection(db)?.bridge ?? null;
 }
 
 function getPrivateWorker(db: Db): Worker | null {
-  return getPersistentBrowserRuntime(db)?.worker ?? getActiveRoleBridge(db)?.worker ?? null;
+  return getActiveRoleBridge(db)?.worker ?? null;
 }
 
 function getFollowerPortBridge(db: Db): any {

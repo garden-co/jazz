@@ -4281,7 +4281,9 @@ fn propagated_structured_subscription_rehydrates_after_membership_scoped_one_sho
 
     let mut subscription =
         block_on(client.subscribe(&prepared_query, edge_subscribe_opts())).unwrap();
-    assert!(opened_rows(block_on(subscription.next_event()).unwrap()).is_empty());
+    // Client-local subscriptions suppress the provisional empty opening until
+    // their authority has supplied a settled result set.
+    assert!(subscription.try_next_event().is_none());
     client.tick().unwrap();
     server.tick().unwrap();
     client.tick().unwrap();
@@ -10237,6 +10239,7 @@ fn subscriber_connection_serves_single_branch_read_view_subscription() {
     let opts = RegisterShapeOptions {
         tier: DurabilityTier::Global,
         read_view: read_opts.read_view,
+        ..RegisterShapeOptions::default()
     };
     let subscription = SubscriptionKey {
         shape_id: shape.shape_id(),
@@ -10299,6 +10302,7 @@ fn subscriber_connection_rejects_one_gapped_subscription_and_keeps_serving_other
     let branch_opts = RegisterShapeOptions {
         tier: DurabilityTier::Global,
         read_view: branch_read_opts().read_view,
+        ..RegisterShapeOptions::default()
     };
     let branch_subscription = SubscriptionKey {
         shape_id: shape.shape_id(),
@@ -10607,6 +10611,7 @@ fn subscriber_connection_rejects_local_tier_register_shape() {
     let opts = RegisterShapeOptions {
         tier: DurabilityTier::Local,
         read_view: ReadViewSpec::default(),
+        ..RegisterShapeOptions::default()
     };
     let rejected_read_view = opts.read_view_key();
 
@@ -10982,6 +10987,7 @@ fn subscriber_connection_rejects_non_global_register_shape_options() {
     let edge_opts = RegisterShapeOptions {
         tier: DurabilityTier::Edge,
         read_view: ReadViewSpec::default(),
+        ..RegisterShapeOptions::default()
     };
     let rejected_read_view = edge_opts.read_view_key();
 
@@ -11982,6 +11988,7 @@ fn authoritative_reset_rebuilds_occurrence_sidecar_after_order_and_count_change(
         RegisterShapeOptions {
             tier: opts.tier,
             read_view: opts.read_view,
+            ..RegisterShapeOptions::default()
         }
         .read_view_key(),
     );
@@ -12017,6 +12024,14 @@ fn authoritative_reset_rebuilds_occurrence_sidecar_after_order_and_count_change(
         reset,
         SubscriptionEvent::Delta { reset: true, .. }
     ));
+    let SubscriptionEvent::Delta { added, .. } = &reset else {
+        unreachable!("reset was checked above");
+    };
+    assert_eq!(
+        added.iter().map(|row| row.row_uuid()).collect::<Vec<_>>(),
+        vec![last, first],
+        "the reset wire payload must preserve the maintained snapshot order"
+    );
 
     let state = subscription._state.borrow();
     let SubscriptionKind::Prepared {
@@ -12083,6 +12098,7 @@ fn authoritative_reset_with_missing_payload_falls_back_to_refresh() {
         RegisterShapeOptions {
             tier: opts.tier,
             read_view: opts.read_view,
+            ..RegisterShapeOptions::default()
         }
         .read_view_key(),
     );
@@ -12154,6 +12170,7 @@ fn authoritative_reset_skips_stale_member_without_falling_back() {
         RegisterShapeOptions {
             tier: opts.tier,
             read_view: opts.read_view,
+            ..RegisterShapeOptions::default()
         }
         .read_view_key(),
     );
@@ -12501,6 +12518,7 @@ fn propagated_authoritative_reset_uses_delivered_binding_view() {
         RegisterShapeOptions {
             tier: opts.tier,
             read_view: opts.read_view,
+            ..RegisterShapeOptions::default()
         }
         .read_view_key(),
     );
@@ -17209,6 +17227,7 @@ fn authorization_scope_requires_canonical_current_global_support_options() {
                 },
                 ..ReadViewSpec::default()
             },
+            ..RegisterShapeOptions::default()
         },
         RegisterShapeOptions {
             tier: DurabilityTier::Global,
@@ -17223,10 +17242,12 @@ fn authorization_scope_requires_canonical_current_global_support_options() {
                 },
                 ..ReadViewSpec::default()
             },
+            ..RegisterShapeOptions::default()
         },
         RegisterShapeOptions {
             tier: DurabilityTier::Local,
             read_view: ReadViewSpec::default(),
+            ..RegisterShapeOptions::default()
         },
     ];
     for actual in variants {
@@ -17261,6 +17282,7 @@ fn legacy_authorization_scope_subscribe_rejects_every_read_view() {
             },
             ..ReadViewSpec::default()
         },
+        ..RegisterShapeOptions::default()
     };
     let variants = [
         RegisterShapeOptions {
@@ -17271,11 +17293,13 @@ fn legacy_authorization_scope_subscribe_rejects_every_read_view() {
                 },
                 ..ReadViewSpec::default()
             },
+            ..RegisterShapeOptions::default()
         },
         historical,
         RegisterShapeOptions {
             tier: DurabilityTier::Local,
             read_view: ReadViewSpec::default(),
+            ..RegisterShapeOptions::default()
         },
     ];
 

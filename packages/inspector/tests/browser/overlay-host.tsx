@@ -1,8 +1,8 @@
 // Browser-test fixture for the NEW overlay model: a real host app connects to
 // the test sync server, publishes the `window.__jazzInspectorHost` handle (the
 // same shape the loader's installInspectorHost builds), pushes its active
-// subscription list to the embedded inspector iframe, and the overlay opens its
-// OWN worker connection from the published config. No devtools bridge.
+// subscription list to the embedded inspector iframe, and the overlay opens an
+// isolated direct in-memory connection from the published config. No devtools bridge.
 //
 // Exercised by overlay.spec.ts.
 import { StrictMode, useEffect, useRef } from "react";

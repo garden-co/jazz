@@ -8,13 +8,11 @@ const providerJwt = "<provider-jwt>";
 const hasJwt = ref(false);
 
 const localClient = createJazzClient({
-  asyncSubscriptionsOnly: false,
   appId,
   serverUrl,
 });
 
 const jwtClient = createJazzClient({
-  asyncSubscriptionsOnly: false,
   appId,
   serverUrl,
   jwtToken: providerJwt,

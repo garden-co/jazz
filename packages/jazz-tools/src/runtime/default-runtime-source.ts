@@ -7,15 +7,18 @@ import {
 import { resolveDefaultPersistentDbName, type DbConfig } from "./db.js";
 import {
   RuntimeSource,
+  type BrowserWorkerConnection,
+  type BrowserWorkerConnectionContext,
   type RuntimeClientContext,
   type RuntimeTelemetryContext,
   type RuntimeTokenOptions,
 } from "./runtime-source.js";
 import { NativeRuntimeAdapter } from "./native-runtime/native-runtime-adapter.js";
-import { PersistentBrowserOpfsRuntime } from "./native-runtime/persistent-browser-runtime.js";
+import { DedicatedBrowserWorkerConnection } from "./native-runtime/browser-worker-connection.js";
 import { installWasmTelemetry } from "./sync-telemetry.js";
-import { parseJwtPayload } from "./client-session.js";
+import { parseJwtPayload, resolveClientSessionSync } from "./client-session.js";
 import type { WasmSchema } from "../drivers/types.js";
+import { httpUrlToWs } from "./url.js";
 
 const DEFAULT_WASM_LOG_LEVEL = "warn";
 
@@ -81,9 +84,9 @@ function initialSyncFlushEvery(config: DbConfig): number {
 }
 
 export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
+  override readonly supportsBrowserWorker = true;
   private module: WasmModule | null = null;
   private ownerRuntime: NativeRuntimeAdapter | null = null;
-  private persistentOwnerRuntime: PersistentBrowserOpfsRuntime | null = null;
 
   private get wasmModule(): WasmModule {
     if (!this.module) {
@@ -108,21 +111,29 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
     };
 
     const subject = subjectFromConfig(config);
-    const persistentBrowserDbName =
-      isBrowserRuntime() && (config.driver?.type ?? "persistent") === "persistent"
-        ? resolveDefaultPersistentDbName(config)
-        : undefined;
     const identitySeed = persistentIdentitySeed(config, subject);
-    const node = persistentBrowserDbName
-      ? deterministicBytes(`${identitySeed}:${persistentBrowserDbName}:node`)
+    // A persistent worker may replay a main-thread-authored transaction after
+    // the page has reopened. Keep that logical client's node identity stable
+    // for the persistence namespace so the fresh in-memory runtime still owns
+    // the transaction's eventual rejection/settlement notifications.
+    const node = isPersistentBrowserConfig(config)
+      ? deterministicBytes(`${identitySeed}:${resolveDefaultPersistentDbName(config)}:main-node`)
       : randomBytes();
     const author = subject
       ? authorBytesForSubject(subject, identitySeed)
       : deterministicBytes(`${identitySeed}:author`);
     const flushEvery = initialSyncFlushEvery(config);
-    const mainThreadPeerRuntime = persistentBrowserDbName
-      ? this.persistentSchemaView(config, schema, persistentBrowserDbName, node, author, flushEvery)
-      : this.nativeSchemaView(schema, node, author, flushEvery);
+    const browserMode = isPersistentBrowserConfig(config);
+    const mainThreadPeerRuntime = this.nativeSchemaView(
+      schema,
+      node,
+      author,
+      flushEvery,
+      !browserMode,
+    );
+    if (browserMode) {
+      mainThreadPeerRuntime.setNonDurableClient();
+    }
 
     return JazzClient.connectWithRuntime(
       mainThreadPeerRuntime,
@@ -143,28 +154,41 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
     );
   }
 
-  private persistentSchemaView(
-    config: DbConfig,
-    schema: WasmSchema,
-    dbName: string,
-    node: Uint8Array,
-    author: Uint8Array,
-    flushEvery: number,
-  ): PersistentBrowserOpfsRuntime {
-    if (!this.persistentOwnerRuntime || this.persistentOwnerRuntime.isClosed()) {
-      this.persistentOwnerRuntime = new PersistentBrowserOpfsRuntime(
-        config.runtimeSources,
+  override createBrowserWorkerConnection({
+    config,
+    schema,
+    client,
+    onAuthFailure,
+    onFailure,
+  }: BrowserWorkerConnectionContext<DbConfig>): BrowserWorkerConnection {
+    const runtime = client.getRuntime();
+    if (!(runtime instanceof NativeRuntimeAdapter)) {
+      throw new Error("Browser worker connections require the native runtime adapter");
+    }
+    const subject = subjectFromConfig(config);
+    const identitySeed = persistentIdentitySeed(config, subject);
+    const dbName = resolveDefaultPersistentDbName(config);
+    const author = subject
+      ? authorBytesForSubject(subject, identitySeed)
+      : deterministicBytes(`${identitySeed}:author`);
+    return new DedicatedBrowserWorkerConnection(
+      runtime,
+      {
+        runtimeSources: config.runtimeSources,
         schema,
         dbName,
-        node,
+        node: deterministicBytes(`${identitySeed}:${dbName}:node`),
         author,
-        flushEvery,
-      );
-      return this.persistentOwnerRuntime;
-    }
-    return Object.keys(schema).length === 0
-      ? this.persistentOwnerRuntime
-      : this.persistentOwnerRuntime.registerSchemaView(schema);
+        initialSyncFlushEvery: initialSyncFlushEvery(config),
+        appId: config.appId,
+        serverUrl: config.serverUrl ? httpUrlToWs(config.serverUrl, config.appId) : undefined,
+        authJson: JSON.stringify(runtimeAuth(config)),
+        sessionClaims: resolveClientSessionSync(config)?.claims ?? {},
+        logLevel: config.logLevel,
+        telemetryCollectorUrl: config.telemetryCollectorUrl,
+      },
+      { onAuthFailure, onFailure },
+    );
   }
 
   private nativeSchemaView(
@@ -172,15 +196,16 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
     node: Uint8Array,
     author: Uint8Array,
     flushEvery: number,
+    historyComplete: boolean,
   ): NativeRuntimeAdapter {
-    if (!this.ownerRuntime) {
+    if (!this.ownerRuntime || this.ownerRuntime.isClosed()) {
       this.ownerRuntime = new NativeRuntimeAdapter(
         this.wasmModule.WasmDb,
         schema,
         node,
         author,
         1,
-        true,
+        historyComplete,
         { initialSyncFlushEvery: flushEvery },
       );
       return this.ownerRuntime;
@@ -224,4 +249,17 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
 
 function isBrowserRuntime(): boolean {
   return typeof window !== "undefined" && typeof Worker !== "undefined";
+}
+
+function isPersistentBrowserConfig(config: DbConfig): boolean {
+  return isBrowserRuntime() && (config.driver?.type ?? "persistent") === "persistent";
+}
+
+function runtimeAuth(config: DbConfig): Record<string, unknown> {
+  return {
+    jwt_token: config.jwtToken ?? null,
+    ...(config.adminSecret ? { admin_secret: config.adminSecret } : {}),
+    ...(config.backendSecret ? { backend_secret: config.backendSecret } : {}),
+    ...(config.cookieSession ? { backend_session: config.cookieSession } : {}),
+  };
 }

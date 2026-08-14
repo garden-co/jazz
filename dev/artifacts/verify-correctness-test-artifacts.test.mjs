@@ -18,11 +18,11 @@ function fixture() {
   // checks and prove their planted drift is reported alongside provenance.
   writeFileSync(
     join(root, "packages/jazz-tools/src/types/jazz-wasm.d.ts"),
-    `declare module "jazz-wasm" { export class WasmDb {\nconnectUpstream(): any;\nconnectUpstreamWithSession(a: number): any;\nacceptSubscriber(a: Uint8Array, claims: any): any;\n} }`,
+    `declare module "jazz-wasm" { export class WasmDb {\nconnectUpstream(): any;\nconnectUpstreamWithSession(a: number): any;\nacceptSubscriber(a: Uint8Array, claims: Record<string, (value: unknown, source: string) => void>): any;\n} }`,
   );
   writeFileSync(
     join(root, "crates/jazz-wasm/pkg/jazz_wasm.d.ts"),
-    `export class WasmDb {\nconnectUpstream(): any;\nconnectUpstreamWithSession(a: number): any;\nacceptSubscriber(a: Uint8Array, claims: any): any;\n}`,
+    `export class WasmDb {\nconnectUpstream(): any;\nconnectUpstreamWithSession(a: number): any;\nacceptSubscriber(a: Uint8Array, claims: Record<string, (value: unknown, source: string) => void>): any;\n}`,
   );
   writeFileSync(
     join(root, "crates/jazz-wasm/pkg/jazz_wasm.js"),

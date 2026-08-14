@@ -36,10 +36,7 @@ use crate::protocol::{
 use crate::protocol_limits::validate_fetch_row_versions;
 use crate::query::{Binding, ValidatedQuery};
 use crate::schema::TableSchema;
-use crate::tools::OutputOccurrenceId;
 use crate::tx::{DurabilityTier, Transaction, TxId, TxKind};
-
-type RowKey = OutputOccurrenceId;
 
 mod subscription_state;
 
@@ -48,7 +45,7 @@ use subscription_state::fast_cursor_membership_mismatch;
 use subscription_state::{
     CachedPeerQueryPlan, DeferredEdgeFate, MaintainedRehydrateRequest,
     MaintainedSubscriptionViewSubscription, MemberIndexKey, MemberSlot, PeerSubscriptionState,
-    RehydratePurpose, edge_scope_ttl_ms, fast_authorization_progress,
+    RehydratePurpose, RowKey, edge_scope_ttl_ms, fast_authorization_progress,
     fast_current_membership_position, fast_cursor_requires_authoritative_reset,
     member_settle_position,
 };
@@ -534,22 +531,8 @@ impl PeerState {
                 },
             );
         }
-        for added in &result_member_adds {
-            let ResultMemberEntry::Synthetic { table, row, .. } = added else {
-                continue;
-            };
-            result_member_removes.extend(previous_member_result_set.iter().filter_map(
-                |previous| match previous {
-                    ResultMemberEntry::Synthetic {
-                        table: previous_table,
-                        row: previous_row,
-                        ..
-                    } if previous_table == table && previous_row == row && previous != added => {
-                        Some(previous.clone())
-                    }
-                    _ => None,
-                },
-            ));
+        if let Some(state) = self.subscriptions.get(&subscription) {
+            result_member_removes.extend(replacement_removals(state, &result_member_adds));
         }
         result_member_removes = result_member_removes
             .into_iter()
@@ -2133,12 +2116,12 @@ impl PeerState {
         // (this sat under the measured record_outgoing_view_update hotspot).
         #[cfg(debug_assertions)]
         {
-            if let Some((occurrence_id, first, second)) =
-                duplicate_output_occurrence_result_set(&state.result_member_set)
+            if let Some((row_key, first, second)) =
+                duplicate_physical_row_result_set(&state.result_member_set)
             {
                 debug_assert!(
                     first == second,
-                    "peer subscription {subscription:?} has multiple content versions for output occurrence {occurrence_id:?}: {first:?} and {second:?}"
+                    "peer subscription {subscription:?} has multiple content versions for physical output row {row_key:?}: {first:?} and {second:?}"
                 );
             }
         }
@@ -2508,6 +2491,166 @@ mod tests {
             [crate::tools::ObjectId::from_uuid(joined.0)],
         ))
         .into()
+    }
+
+    fn indexed_members(members: &[ResultMemberEntry]) -> PeerSubscriptionState {
+        let mut state = PeerSubscriptionState::default();
+        apply_contribution_add(&mut state, members.iter(), &mut Vec::new(), &mut Vec::new());
+        state
+    }
+
+    #[test]
+    fn incremental_delivery_removes_a_superseded_output_occurrence() {
+        let root = row(0x31);
+        let previous = output_member(root, row(0x32), 10);
+        let replacement = output_member(root, row(0x32), 11);
+
+        assert_eq!(
+            replacement_removals(&indexed_members(&[previous.clone()]), &[replacement]),
+            vec![previous],
+            "a newer current-row version must replace the version already sent for the same output occurrence"
+        );
+    }
+
+    #[test]
+    fn incremental_delivery_finds_replacements_by_physical_member_key() {
+        let root = row(0x34);
+        let previous = output_member(root, row(0x35), 10);
+        let replacement = output_member(root, row(0x35), 11);
+        let mut members = Vec::with_capacity(4_097);
+        members.push(previous.clone());
+        for value in 0..4_096u64 {
+            members.push(output_member(
+                row_from_u64(value + 0x1_000),
+                row_from_u64(value + 0x2_000),
+                10,
+            ));
+        }
+
+        assert_eq!(
+            replacement_removals(&indexed_members(&members), &[replacement]),
+            vec![previous],
+            "unrelated live members must not participate in replacement lookup"
+        );
+    }
+
+    #[test]
+    fn incremental_delivery_keeps_terminal_children_with_their_root() {
+        let root = row(0x41);
+        let occurrence =
+            crate::tools::OutputOccurrenceId::new(crate::tools::ObjectId::from_uuid(root.0), []);
+        let root_member: ResultMemberEntry = RealRowMemberEntry::current_content((
+            "users".to_owned().into(),
+            root,
+            TxId::new(crate::time::TxTime(10), node(0xee)),
+        ))
+        .with_occurrence_id(occurrence.clone())
+        .into();
+        let child_member: ResultMemberEntry = RealRowMemberEntry::current_content((
+            "todos".to_owned().into(),
+            row(0x42),
+            TxId::new(crate::time::TxTime(11), node(0xee)),
+        ))
+        .with_occurrence_id(occurrence)
+        .into();
+
+        assert!(
+            replacement_removals(
+                &indexed_members(&[root_member.clone()]),
+                &[child_member.clone()]
+            )
+            .is_empty()
+        );
+
+        let subscription = SubscriptionKey {
+            shape_id: crate::query::ShapeId(uuid::Uuid::from_u128(41)),
+            binding_id: crate::query::BindingId(uuid::Uuid::from_u128(42)),
+            read_view: Default::default(),
+        };
+        let update = |adds, removes| SyncMessage::ViewUpdate {
+            subscription,
+            settled_through: GlobalSeq(0),
+            reset_result_set: false,
+            version_carriers: Vec::new(),
+            version_bundles: Vec::new(),
+            peer_payload_inventory: Default::default(),
+            result_member_adds: adds,
+            result_member_removes: removes,
+            terminal_operations: Vec::new(),
+            program_fact_adds: Vec::new(),
+            program_fact_removes: Vec::new(),
+        };
+        let mut peer = PeerState::default();
+        peer.apply_outgoing_view_update_result_set(&update(
+            vec![root_member.clone(), child_member.clone()],
+            Vec::new(),
+        ));
+        peer.apply_outgoing_view_update_result_set(&update(Vec::new(), vec![child_member]));
+
+        let state = &peer.subscriptions[&subscription];
+        assert_eq!(state.result_member_set, BTreeSet::from([root_member]));
+        assert_eq!(state.member_index.len(), 1);
+    }
+
+    #[test]
+    fn incremental_delivery_replaces_equal_tx_with_a_new_rendered_revision() {
+        let root = row(0x51);
+        let previous: ResultMemberEntry = RealRowMemberEntry::current_content((
+            "todos".to_owned().into(),
+            root,
+            TxId::new(crate::time::TxTime(10), node(0xee)),
+        ))
+        .with_row_digest(vec![1])
+        .into();
+        let replacement: ResultMemberEntry = RealRowMemberEntry::current_content((
+            "todos".to_owned().into(),
+            root,
+            TxId::new(crate::time::TxTime(10), node(0xee)),
+        ))
+        .with_row_digest(vec![2])
+        .into();
+
+        assert_eq!(
+            replacement_removals(&indexed_members(&[previous.clone()]), &[replacement]),
+            vec![previous],
+        );
+    }
+
+    #[test]
+    fn maintained_delivery_does_not_leak_intermediate_replacement_refcounts() {
+        let root = row(0x61);
+        let tx10 = output_member(root, row(0x62), 10);
+        let tx11 = output_member(root, row(0x62), 11);
+        let tx12 = output_member(root, row(0x62), 12);
+        let subscription = SubscriptionKey {
+            shape_id: crate::query::ShapeId(uuid::Uuid::from_u128(11)),
+            binding_id: crate::query::BindingId(uuid::Uuid::from_u128(12)),
+            read_view: Default::default(),
+        };
+        let update = |adds, removes| SyncMessage::ViewUpdate {
+            subscription,
+            settled_through: GlobalSeq(0),
+            reset_result_set: false,
+            version_carriers: Vec::new(),
+            version_bundles: Vec::new(),
+            peer_payload_inventory: Default::default(),
+            result_member_adds: adds,
+            result_member_removes: removes,
+            terminal_operations: Vec::new(),
+            program_fact_adds: Vec::new(),
+            program_fact_removes: Vec::new(),
+        };
+        let mut peer = PeerState::default();
+        peer.apply_outgoing_view_update_result_set(&update(vec![tx10.clone()], Vec::new()));
+        peer.apply_outgoing_view_update_result_set(&update(
+            vec![tx11.clone(), tx12.clone()],
+            vec![tx10, tx11],
+        ));
+        peer.apply_outgoing_view_update_result_set(&update(Vec::new(), vec![tx12]));
+
+        let state = &peer.subscriptions[&subscription];
+        assert!(state.result_member_set.is_empty());
+        assert!(state.member_index.is_empty());
     }
 
     // This exercises the maintained protocol boundary directly: public joined

@@ -11,6 +11,7 @@ import {
   WIRE_PROTOCOL_VERSION,
 } from "./websocket.js";
 import { NativeRuntimeAdapter, type Transport } from "./native-runtime-adapter.js";
+import { type BatchId, type WriteReceipt } from "../client.js";
 
 const previousWebSocket = globalThis.WebSocket;
 
@@ -22,8 +23,7 @@ async function waitForFakeWebSocketNegotiation(): Promise<void> {
   for (let turn = 0; turn < 6; turn += 1) await Promise.resolve();
 }
 
-async function committedBatchId(receiptPromise: Promise<unknown>): Promise<string> {
-  const receipt = (await receiptPromise) as { kind: string; batchId: Promise<string> };
+async function committedBatchId(receipt: WriteReceipt): Promise<BatchId> {
   if (receipt.kind !== "committed") throw new Error("expected committed write receipt");
   return await receipt.batchId;
 }
@@ -198,15 +198,13 @@ describe("NativeRuntimeAdapter server transport", () => {
     const transport = new FakeTransport([]);
     transport.tick = () => {
       transportTicks += 1;
-      if (transportTicks >= 3) settled = true;
+      if (transportTicks >= 2) settled = true;
       return 0;
     };
     const write = {
       batchId: "00000000000070008000000000000007",
       payload: new Uint8Array(),
-      wait: () => {
-        if (!settled) throw new Error("transaction has not reached requested tier Edge");
-      },
+      wait: () => (settled ? Promise.resolve() : new Promise<void>(() => {})),
       writeState: () => ({}),
       nextWriteStateChange: () => new Promise<void>(() => {}),
     };
@@ -244,12 +242,12 @@ describe("NativeRuntimeAdapter server transport", () => {
     const wait = runtime.waitForTransaction(await committedBatchId(inserted), "edge");
     await Promise.resolve();
     await Promise.resolve();
-    expect(transportTicks).toBe(2);
+    expect(transportTicks).toBe(1);
 
     sockets[0]!.emitMessage(encodeWebSocketFrameBatch([Uint8Array.from([1, 42])]));
     await wait;
 
-    expect(transportTicks).toBe(3);
+    expect(transportTicks).toBe(2);
   });
 
   it("uses the binding scheduler to drive native db ticks outside server pumps", async () => {

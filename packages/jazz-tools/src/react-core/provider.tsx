@@ -204,7 +204,10 @@ export function JazzProvider({
   // initializer and useEffect don't double-count the same provider.
   const holder = useRef({}).current;
 
-  const configKey = JSON.stringify(config);
+  // Keep the framework-level lease distinct from createJazzClient's own shared
+  // client lease. Both use the generic registry; sharing an unqualified key
+  // makes provider teardown recursively release itself instead of the runtime.
+  const configKey = `react:${JSON.stringify(config)}`;
 
   const [clientPromise, setClientPromise] = useState(() => {
     return acquireClient<CoreJazzClient>(configKey, config, createJazzClient, holder);

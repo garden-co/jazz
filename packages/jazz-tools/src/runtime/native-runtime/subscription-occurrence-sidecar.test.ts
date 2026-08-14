@@ -43,6 +43,8 @@ it("preserves typed occurrence keys in the native subscription wire sidecar", ()
   const direct = typedKey("direct");
   const inherited = typedKey("inherited");
   const encoded = encodeSubscriptionDelta({
+    added: [],
+    updated: [],
     addedOccurrenceKeys: [],
     updatedOccurrenceKeys: [],
     removed: [

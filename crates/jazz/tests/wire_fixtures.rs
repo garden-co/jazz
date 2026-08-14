@@ -592,7 +592,7 @@ fn fixture_manifest() -> Manifest {
         .collect();
 
     Manifest {
-        fixture_set: "jazz-wire-message-frames-v8",
+        fixture_set: "jazz-wire-message-frames-v9",
         codec: "postcard WireFrame::Message(WireEnvelope { payload: encode_sync_message(..) })",
         protocol_version: WIRE_PROTOCOL_VERSION,
         features: FEATURE_SYNC_MESSAGE_PAYLOAD,
@@ -615,7 +615,8 @@ fn wire_message_frame_fixtures_are_current() {
     assert_eq!(
         actual, expected,
         "wire fixtures changed; review compatibility and run \
-         `JAZZ_UPDATE_WIRE_FIXTURES=1 cargo test -p jazz --test wire_fixtures` to accept"
+         `JAZZ_UPDATE_WIRE_FIXTURES=1 cargo test -p jazz --test wire_fixtures \
+         wire_message_frame_fixtures_are_current -- --ignored --exact` to accept"
     );
 }
 

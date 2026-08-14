@@ -87,6 +87,11 @@ type RichTodo = RowOf<typeof richApp.todos>;
 
 const ctx = new TestCleanup();
 
+// These flows can perform two independent edge/local convergence stages, each
+// with its own 45-second diagnostic timeout. The enclosing test leaves room
+// for both bounded observations plus setup and durability/reopen work.
+const MULTI_STAGE_REMOTE_FLOW_TIMEOUT_MS = 120_000;
+
 afterEach(async () => {
   await ctx.cleanup();
 });
@@ -478,151 +483,170 @@ describe("alpha public package flow", () => {
     expect(snapshots.some((rows) => rows.some((todo) => todo.id === created.id))).toBe(true);
   });
 
-  it("converges memory writer to persistent OPFS reader over websocket and reopens locally", async () => {
-    const requestedAppId = uniqueDbName("alpha-public-mixed-websocket-flow");
-    const { appId, serverUrl, adminSecret } = await getJazzServerInfo(requestedAppId);
-    await publishSchemaAndPermissions(appId, serverUrl, adminSecret, richPermissions, richApp);
+  it(
+    "converges memory writer to persistent OPFS reader over websocket and reopens locally",
+    async () => {
+      const requestedAppId = uniqueDbName("alpha-public-mixed-websocket-flow");
+      const { appId, serverUrl, adminSecret } = await getJazzServerInfo(requestedAppId);
+      await publishSchemaAndPermissions(appId, serverUrl, adminSecret, richPermissions, richApp);
 
-    const sharedSecret = generateAuthSecret();
-    const readerDbName = uniqueDbName("alpha-public-mixed-reader-opfs");
-    const writer = await openAlphaMemoryDb(appId, serverUrl, adminSecret, sharedSecret);
-    let reader = await openAlphaDb(appId, serverUrl, adminSecret, readerDbName, sharedSecret, {
-      uniqueLabel: false,
-    });
-    const richQuery = richApp.todos.where({ tags: { contains: "mixed-boundary" } });
+      const sharedSecret = generateAuthSecret();
+      const readerDbName = uniqueDbName("alpha-public-mixed-reader-opfs");
+      const writer = await openAlphaMemoryDb(appId, serverUrl, adminSecret, sharedSecret);
+      let reader = await openAlphaDb(appId, serverUrl, adminSecret, readerDbName, sharedSecret, {
+        uniqueLabel: false,
+      });
+      const richQuery = richApp.todos.where({ tags: { contains: "mixed-boundary" } });
+      // This case exercises propagation to an already-connected persistent
+      // reader. The following reconnect case covers opening after an offline
+      // write. Make the readiness boundary explicit so a failed worker/server
+      // handshake is diagnosed separately from row convergence.
+      expect(
+        await withTimeout(
+          reader.all(richQuery, { tier: "edge" }),
+          10_000,
+          "mixed persistent reader did not establish its upstream server link",
+        ),
+      ).toEqual([]);
 
-    const snapshots: RichTodo[][] = [];
-    const unsubscribe = ctx.trackSubscription(
-      reader.subscribeAll(richQuery, (delta) => {
-        snapshots.push([...delta.all]);
-      }),
-    );
+      const snapshots: RichTodo[][] = [];
+      const unsubscribe = ctx.trackSubscription(
+        reader.subscribeAll(richQuery, (delta) => {
+          snapshots.push([...delta.all]);
+        }),
+      );
 
-    const created = await withTimeout(
-      writer
-        .insert(richApp.todos, {
-          title: "Adopt mixed alpha boundary",
-          done: false,
-          list: "launch",
-          priority: 9,
-          tags: ["alpha", "mixed-boundary"],
-          payload: new Uint8Array([9, 8, 7, 6, 5]),
-          ownerId: null,
-        })
-        .wait({ tier: "edge" }),
-      10_000,
-      "mixed memory writer insert was not accepted at the server",
-    );
+      const created = await withTimeout(
+        writer
+          .insert(richApp.todos, {
+            title: "Adopt mixed alpha boundary",
+            done: false,
+            list: "launch",
+            priority: 9,
+            tags: ["alpha", "mixed-boundary"],
+            payload: new Uint8Array([9, 8, 7, 6, 5]),
+            ownerId: null,
+          })
+          .wait({ tier: "edge" }),
+        10_000,
+        "mixed memory writer insert was not accepted at the server",
+      );
 
-    const [rowOnReader] = await waitForRichTodos(
-      reader,
-      richQuery,
-      (todos) => todos.length === 1 && todos[0]?.id === created.id,
-      "mixed persistent reader websocket convergence",
-    );
-    expect(rowOnReader).toMatchObject({
-      id: created.id,
-      title: "Adopt mixed alpha boundary",
-      priority: 9,
-      tags: ["alpha", "mixed-boundary"],
-      ownerId: null,
-    });
-    expect(Array.from(rowOnReader.payload ?? [])).toEqual([9, 8, 7, 6, 5]);
-    expect(snapshots.some((rows) => rows.some((todo) => todo.id === created.id))).toBe(true);
+      const [rowOnReader] = await waitForRichTodos(
+        reader,
+        richQuery,
+        (todos) => todos.length === 1 && todos[0]?.id === created.id,
+        "mixed persistent reader websocket convergence",
+      );
+      expect(rowOnReader).toMatchObject({
+        id: created.id,
+        title: "Adopt mixed alpha boundary",
+        priority: 9,
+        tags: ["alpha", "mixed-boundary"],
+        ownerId: null,
+      });
+      expect(Array.from(rowOnReader.payload ?? [])).toEqual([9, 8, 7, 6, 5]);
+      expect(snapshots.some((rows) => rows.some((todo) => todo.id === created.id))).toBe(true);
 
-    unsubscribe();
-    await reader.shutdown();
-    ctx.untrack(reader);
+      unsubscribe();
+      await reader.shutdown();
+      ctx.untrack(reader);
 
-    reader = await openAlphaDb(appId, serverUrl, adminSecret, readerDbName, sharedSecret, {
-      uniqueLabel: false,
-    });
-    const [reopenedRow] = await waitForQuery(
-      reader,
-      richQuery,
-      (todos) => todos.length === 1 && todos[0]?.id === created.id,
-      "mixed persistent reader local reopen",
-      45_000,
-      "local",
-    );
-    expect(reopenedRow).toMatchObject({
-      id: created.id,
-      title: "Adopt mixed alpha boundary",
-      priority: 9,
-      tags: ["alpha", "mixed-boundary"],
-      ownerId: null,
-    });
-    expect(Array.from(reopenedRow.payload ?? [])).toEqual([9, 8, 7, 6, 5]);
-  });
+      reader = await openAlphaDb(appId, serverUrl, adminSecret, readerDbName, sharedSecret, {
+        uniqueLabel: false,
+      });
+      const [reopenedRow] = await waitForQuery(
+        reader,
+        richQuery,
+        (todos) => todos.length === 1 && todos[0]?.id === created.id,
+        "mixed persistent reader local reopen",
+        45_000,
+        "local",
+      );
+      expect(reopenedRow).toMatchObject({
+        id: created.id,
+        title: "Adopt mixed alpha boundary",
+        priority: 9,
+        tags: ["alpha", "mixed-boundary"],
+        ownerId: null,
+      });
+      expect(Array.from(reopenedRow.payload ?? [])).toEqual([9, 8, 7, 6, 5]);
+    },
+    MULTI_STAGE_REMOTE_FLOW_TIMEOUT_MS,
+  );
 
-  it("reopens a public persistent websocket client and catches up writes made while offline", async () => {
-    const requestedAppId = uniqueDbName("alpha-public-reconnect-canary");
-    const { appId, serverUrl, adminSecret } = await getJazzServerInfo(requestedAppId);
-    await publishSchemaAndPermissions(appId, serverUrl, adminSecret, permissions);
+  it(
+    "reopens a public persistent websocket client and catches up writes made while offline",
+    async () => {
+      const requestedAppId = uniqueDbName("alpha-public-reconnect-canary");
+      const { appId, serverUrl, adminSecret } = await getJazzServerInfo(requestedAppId);
+      await publishSchemaAndPermissions(appId, serverUrl, adminSecret, permissions);
 
-    const sharedSecret = generateAuthSecret();
-    const readerDbName = uniqueDbName("alpha-public-reconnect-reader-opfs");
-    const writer = await openAlphaMemoryDb(appId, serverUrl, adminSecret, sharedSecret);
-    let reader = await openAlphaDb(appId, serverUrl, adminSecret, readerDbName, sharedSecret, {
-      uniqueLabel: false,
-    });
+      const sharedSecret = generateAuthSecret();
+      const readerDbName = uniqueDbName("alpha-public-reconnect-reader-opfs");
+      const writer = await openAlphaMemoryDb(appId, serverUrl, adminSecret, sharedSecret);
+      let reader = await openAlphaDb(appId, serverUrl, adminSecret, readerDbName, sharedSecret, {
+        uniqueLabel: false,
+      });
 
-    const initial = await withTimeout(
-      writer
-        .insert(app.todos, {
-          title: "Online before alpha reconnect",
-          done: false,
-          list: "reconnect",
-        })
-        .wait({ tier: "edge" }),
-      10_000,
-      "online insert before reconnect was not accepted at the server",
-    );
-    expect(
-      await waitForSubscribedTodoSummaries(reader, ["Online before alpha reconnect:open"]),
-    ).toEqual([initial]);
+      const initial = await withTimeout(
+        writer
+          .insert(app.todos, {
+            title: "Online before alpha reconnect",
+            done: false,
+            list: "reconnect",
+          })
+          .wait({ tier: "edge" }),
+        10_000,
+        "online insert before reconnect was not accepted at the server",
+      );
+      expect(
+        await waitForSubscribedTodoSummaries(reader, ["Online before alpha reconnect:open"]),
+      ).toEqual([initial]);
 
-    await reader.shutdown();
-    ctx.untrack(reader);
+      await reader.shutdown();
+      ctx.untrack(reader);
 
-    const offlineWrite = await withTimeout(
-      writer
-        .insert(app.todos, {
-          title: "Written while alpha client offline",
-          done: true,
-          list: "reconnect",
-        })
-        .wait({ tier: "edge" }),
-      10_000,
-      "offline-window insert was not accepted at the server",
-    );
+      const offlineWrite = await withTimeout(
+        writer
+          .insert(app.todos, {
+            title: "Written while alpha client offline",
+            done: true,
+            list: "reconnect",
+          })
+          .wait({ tier: "edge" }),
+        10_000,
+        "offline-window insert was not accepted at the server",
+      );
 
-    reader = await openAlphaDb(appId, serverUrl, adminSecret, readerDbName, sharedSecret, {
-      uniqueLabel: false,
-    });
+      reader = await openAlphaDb(appId, serverUrl, adminSecret, readerDbName, sharedSecret, {
+        uniqueLabel: false,
+      });
 
-    const summaries = [
-      "Online before alpha reconnect:open",
-      "Written while alpha client offline:done",
-    ];
-    const subscribedRows = await waitForSubscribedTodoSummaries(reader, summaries);
-    expect(subscribedRows.map((todo) => todo.id).sort()).toEqual(
-      [initial.id, offlineWrite.id].sort(),
-    );
+      const summaries = [
+        "Online before alpha reconnect:open",
+        "Written while alpha client offline:done",
+      ];
+      const subscribedRows = await waitForSubscribedTodoSummaries(reader, summaries);
+      expect(subscribedRows.map((todo) => todo.id).sort()).toEqual(
+        [initial.id, offlineWrite.id].sort(),
+      );
 
-    const allRows = await waitForQuery(
-      reader,
-      app.todos.orderBy("title"),
-      (todos) => summariesEqual(todos, summaries),
-      "reopened public websocket client catches up via all",
-      45_000,
-      "local",
-    );
-    expect(allRows).toEqual([initial, offlineWrite]);
-    expect(await reader.one(app.todos.where({ id: offlineWrite.id }), { tier: "local" })).toEqual(
-      offlineWrite,
-    );
-  });
+      const allRows = await waitForQuery(
+        reader,
+        app.todos.orderBy("title"),
+        (todos) => summariesEqual(todos, summaries),
+        "reopened public websocket client catches up via all",
+        45_000,
+        "local",
+      );
+      expect(allRows).toEqual([initial, offlineWrite]);
+      expect(await reader.one(app.todos.where({ id: offlineWrite.id }), { tier: "local" })).toEqual(
+        offlineWrite,
+      );
+    },
+    MULTI_STAGE_REMOTE_FLOW_TIMEOUT_MS,
+  );
 
   it("opens public createDb with persistent OPFS and websocket server config, then converges todo CRUD", async () => {
     const requestedAppId = uniqueDbName("alpha-public-flow");

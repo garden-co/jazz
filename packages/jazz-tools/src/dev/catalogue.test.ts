@@ -62,12 +62,15 @@ describe("dev catalogue API exports", () => {
     expect(typeof dev.deploy).toBe("function");
   });
 
+  // These public entrypoints load the native dev-server module transitively.
+  // The assertion is import identity, so give that one-time native module
+  // initialization a lifecycle budget without relaxing catalogue operations.
   it("keeps deploy compatible across dev and testing entrypoints", async () => {
     const dev = await import("./index.js");
     const testing = await import("../testing/index.js");
 
     expect(testing.deploy).toBe(dev.deploy);
-  });
+  }, 15_000);
 });
 
 describe("dev catalogue runtime schema identity", () => {

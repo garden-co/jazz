@@ -201,6 +201,7 @@ type NativeDb = {
       | ((error: Error | null, urgency: string) => void),
   ): void;
   onMutationError(callback: (event: MutationErrorEvent) => void): void;
+  setNonDurableClient?(): void;
   connectUpstream(): Transport;
   connectUpstreamWithSession?(
     protocolVersion: number,
@@ -210,6 +211,7 @@ type NativeDb = {
     localNode: Uint8Array,
     localEpoch: bigint,
   ): Transport;
+  acceptSubscriber?(author: Uint8Array, claims: Record<string, unknown>): Transport;
   tick(): void;
   close?(): void;
   free?(): void;
@@ -272,6 +274,8 @@ export type Transport = {
   sendWireFrame(frame: Uint8Array): void;
   sendWireFrames?(frames: readonly Uint8Array[]): void;
   tick(): number;
+  updateAuthenticatedClaims?(claims: Record<string, unknown>): void;
+  free?(): void;
 };
 
 type PendingTx = {
@@ -405,6 +409,8 @@ export class NativeRuntimeAdapter implements Runtime {
   private readonly subscriptions = new Map<number, SubscriptionState>();
   private authFailureCallback: ((reason: string) => void) | null = null;
   private serverTransport: Transport | null = null;
+  private peerUpstreamAttached = false;
+  private nonDurableClient = false;
   private serverCarrier: WebSocketCarrier | null = null;
   private serverCarrierPromise: Promise<WebSocketCarrier> | null = null;
   private serverTransportError: Error | null = null;
@@ -415,6 +421,8 @@ export class NativeRuntimeAdapter implements Runtime {
   private serverEndpointUrl: string | null = null;
   private readonly queuedServerFrames: Uint8Array[] = [];
   private readonly pendingInboundServerFrames: Uint8Array[] = [];
+  private readonly peerTransportWorkListeners = new Set<() => void>();
+  private peerTransportActivityEpoch = 0;
   private coreTickScheduled = false;
   private coreTickRunning = false;
   private coreTickAgain = false;
@@ -503,7 +511,52 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   connectUpstreamPeer(): Transport {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.connectUpstreamPeer();
+    this.peerUpstreamAttached = true;
     return this.db.connectUpstream();
+  }
+
+  onPeerTransportWork(listener: () => void): () => void {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.onPeerTransportWork(listener);
+    this.peerTransportWorkListeners.add(listener);
+    return () => {
+      this.peerTransportWorkListeners.delete(listener);
+    };
+  }
+
+  notifyPeerTransportActivity(): void {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.notifyPeerTransportActivity();
+    this.peerTransportActivityEpoch += 1;
+  }
+
+  setNonDurableClient(): void {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.setNonDurableClient();
+    if (!this.db.setNonDurableClient) {
+      throw new Error("Native runtime does not expose non-durable client mode");
+    }
+    this.db.setNonDurableClient();
+    this.nonDurableClient = true;
+  }
+
+  acceptPeer(claims: Record<string, unknown> = {}): Transport {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.acceptPeer(claims);
+    if (!this.db.acceptSubscriber) {
+      throw new Error("Native runtime does not expose subscriber links");
+    }
+    return this.db.acceptSubscriber(this.peerIdentity, claims);
+  }
+
+  async waitForUpstreamServerConnection(): Promise<void> {
+    if (this !== this.ownerRuntime) {
+      return await this.ownerRuntime.waitForUpstreamServerConnection();
+    }
+    if (!this.serverCarrierPromise) return;
+    await this.serverCarrierPromise;
+  }
+
+  /** @internal */
+  isClosed(): boolean {
+    return this.ownerRuntime.closed;
   }
 
   close(): void {
@@ -528,10 +581,12 @@ export class NativeRuntimeAdapter implements Runtime {
     this.writes.clear();
     this.clearServerTransportErrorWaiters();
     this.resolveServerTransportWorkWaiters();
+    this.peerTransportWorkListeners.clear();
     this.queuedServerFrames.length = 0;
     this.pendingInboundServerFrames.length = 0;
     this.serverTransport?.close();
     this.serverTransport = null;
+    this.peerUpstreamAttached = false;
     this.serverCarrier?.close();
     this.serverCarrier = null;
     this.db.close?.();
@@ -809,11 +864,17 @@ export class NativeRuntimeAdapter implements Runtime {
         "Commit transaction failed: empty mergeable batch has no committed unit; roll it back instead",
       );
     }
-    const write = this.db.commitTransaction(openBatchId, pending.kind);
+    let write: Write;
+    try {
+      write = this.db.commitTransaction(openBatchId, pending.kind);
+    } catch (error) {
+      return Promise.reject(error);
+    }
     this.pendingTxs.delete(openBatchId);
     this.completedTxs.set(openBatchId, { kind: pending.kind, state: "committed" });
     this.pumpSubscriptions();
     this.scheduleServerPump();
+    this.notifyPeerTransportWork();
     return Promise.resolve(recordWrite(write, this.writes));
   }
 
@@ -881,7 +942,11 @@ export class NativeRuntimeAdapter implements Runtime {
     this.applySessionClaims(session);
     assertNoUnsupportedPermissionIntrospection(queryJson);
     const coreQueryJson = addNestedOuterColumns(queryJson);
-    const opts = readOptions(tier, queryIncludesDeleted(coreQueryJson), optionsJson);
+    // In browser mode the requested tier gates hydration through the worker,
+    // while the main-thread Db remains an in-memory materialized cache. Once
+    // coverage is confirmed, evaluate that cache at its Local tier.
+    const materializedTier = this.nonDurableClient ? "local" : tier;
+    const opts = readOptions(materializedTier, queryIncludesDeleted(coreQueryJson), optionsJson);
     if (queryUsesNativeRelationApi(coreQueryJson)) {
       if (this.readAuthorizationHost === "trusted-serving") {
         if (!this.db.allRelationQueryForIdentity) {
@@ -902,6 +967,7 @@ export class NativeRuntimeAdapter implements Runtime {
     }
     const query = this.prepareQuery(coreQueryJson);
     const attachment = await this.attachQueryIfNeeded(tier, optionsJson, query, session);
+    if (this.closed) return [];
     this.attachLocalReadCoverageInBackground(tier, optionsJson, query, session);
     try {
       if (queryHasArraySubqueries(coreQueryJson)) {
@@ -935,12 +1001,13 @@ export class NativeRuntimeAdapter implements Runtime {
       let rowStates = rowsFromBatches(readRowBatches(rows), this.schema);
       if (!pendingTx && (tier === "edge" || tier === "global") && rowStates.length > 0) {
         await this.refreshRowsFromEdge(session, rowStates);
+        if (this.closed) return [];
         rows = this.readPlainRows(query, opts, session ?? undefined, pendingTx);
         rowStates = rowsFromBatches(readRowBatches(rows), this.schema);
       }
       return rowStates;
     } finally {
-      if (attachment !== undefined) this.db.detachQuery?.(attachment);
+      if (attachment !== undefined && !this.closed) this.db.detachQuery?.(attachment);
     }
   }
 
@@ -1163,6 +1230,7 @@ export class NativeRuntimeAdapter implements Runtime {
     const batchId = recordWrite(write, this.writes);
     this.pumpSubscriptions();
     this.scheduleServerPump();
+    this.notifyPeerTransportWork();
     const row = this.rowStateFromValues(table, rowId, values);
     return { id: row.id, values: row.values, kind: "committed", batchId };
   }
@@ -1171,6 +1239,7 @@ export class NativeRuntimeAdapter implements Runtime {
     const batchId = recordWrite(write, this.writes);
     this.pumpSubscriptions();
     this.scheduleServerPump();
+    this.notifyPeerTransportWork();
     return { kind: "committed", batchId };
   }
 
@@ -1323,7 +1392,7 @@ export class NativeRuntimeAdapter implements Runtime {
     session: RuntimeSession | null,
     rows: RowState[],
   ): Promise<void> {
-    if (!this.serverTransport || rows.length === 0) return;
+    if (!this.hasUpstream() || rows.length === 0) return;
     const seen = new Set<string>();
     for (const row of rows) {
       const key = rowKey(row.table, row.id);
@@ -1338,10 +1407,11 @@ export class NativeRuntimeAdapter implements Runtime {
       let attachment: unknown;
       try {
         attachment = await this.attachQueryIfNeeded("edge", null, query, session);
+        if (this.closed) return;
         const opts = readOptions("edge", false, null);
         this.readRowsForHost(query, opts, session?.identity);
       } finally {
-        if (attachment !== undefined) this.db.detachQuery?.(attachment);
+        if (attachment !== undefined && !this.closed) this.db.detachQuery?.(attachment);
       }
     }
   }
@@ -1367,10 +1437,10 @@ export class NativeRuntimeAdapter implements Runtime {
     query: PreparedQuery,
     session: RuntimeSession | null,
   ): Promise<unknown | undefined> {
-    if (tier == null || tier === "local") return;
-    const options = optionsJson == null ? {} : (JSON.parse(optionsJson) as Record<string, unknown>);
-    if (options.propagation != null && options.propagation !== "full") return;
-    if (!this.serverTransport) return;
+    if (this.closed) return;
+    if (tier == null || (tier === "local" && !this.nonDurableClient)) return;
+    if (!readPropagationIsFull(optionsJson) && !this.nonDurableClient) return;
+    if (!this.hasUpstream()) return;
     if (!this.db.attachQuery) return;
     const opts = readOptions(tier, false, optionsJson);
     let attachment: unknown;
@@ -1387,11 +1457,15 @@ export class NativeRuntimeAdapter implements Runtime {
       attachment = this.db.attachQuery(query, opts);
     }
     if (!this.db.queryAttachmentIsCovered) return attachment;
+    const minimumPeerActivityEpoch = this.nonDurableClient
+      ? this.peerTransportActivityEpoch
+      : undefined;
     await this.waitForQueryCoverage(
       attachment,
       query,
       readOptions(tier, false, optionsJson),
       session?.identity,
+      minimumPeerActivityEpoch,
     );
     return attachment;
   }
@@ -1404,13 +1478,14 @@ export class NativeRuntimeAdapter implements Runtime {
   ): void {
     if (tier != null && tier !== "local") return;
     if (!readPropagationIsFull(optionsJson)) return;
-    if (!this.serverTransport || !this.db.attachQuery) return;
+    if (this.nonDurableClient || !this.serverTransport || !this.db.attachQuery) return;
 
     const refresh = async () => {
       await this.serverCarrierPromise;
+      if (this.closed) return;
       const edgeOptionsJson = JSON.stringify({ propagation: "full" });
       const attachment = await this.attachQueryIfNeeded("edge", edgeOptionsJson, query, session);
-      if (attachment !== undefined) this.db.detachQuery?.(attachment);
+      if (attachment !== undefined && !this.closed) this.db.detachQuery?.(attachment);
     };
 
     void refresh().catch((error: unknown) => {
@@ -1432,15 +1507,24 @@ export class NativeRuntimeAdapter implements Runtime {
     query: PreparedQuery,
     opts: unknown,
     identity?: Uint8Array,
+    minimumPeerActivityEpoch?: number,
   ): Promise<void> {
     const deadline = Date.now() + 15_000;
     const tier = (opts as { tier?: string }).tier ?? "";
     while (Date.now() < deadline) {
+      // A query can still be waiting for an upstream coverage response while
+      // its owning browser runtime is being torn down. `close()` frees the
+      // WASM Db, so this background wait must not touch its attachment after
+      // that boundary.
+      if (this.closed) return;
       this.throwServerTransportErrorForTier(tier);
       this.pumpServerTransport();
       this.throwServerTransportErrorForTier(tier);
       if (this.db.queryAttachmentIsCovered) {
-        if (this.db.queryAttachmentIsCovered(attachment)) return;
+        const peerHasResponded =
+          minimumPeerActivityEpoch == null ||
+          this.peerTransportActivityEpoch > minimumPeerActivityEpoch;
+        if (peerHasResponded && this.db.queryAttachmentIsCovered(attachment)) return;
       }
       try {
         this.readRowsForHost(query, opts, identity);
@@ -1559,6 +1643,7 @@ export class NativeRuntimeAdapter implements Runtime {
 
   private scheduleCoreWake(urgency: "immediate" | "deferred"): void {
     if (this.closed) return;
+    this.notifyPeerTransportWork();
     if (urgency === "immediate") {
       this.scheduleCoreTick();
       return;
@@ -1589,6 +1674,7 @@ export class NativeRuntimeAdapter implements Runtime {
       this.db.tick();
       this.pumpSubscriptions();
       this.scheduleServerPump();
+      this.notifyPeerTransportWork();
     } finally {
       this.coreTickRunning = false;
     }
@@ -1668,6 +1754,7 @@ export class NativeRuntimeAdapter implements Runtime {
       this.failSubscription(subscription, subscriptionRejectionError(chunk.reason));
       return;
     }
+    if (chunk.type === "delta" && chunk.publishable === false) return;
     if (chunk.type === "snapshot") {
       const previousRows = subscription.rows;
       const wasOpened = subscription.opened;
@@ -1861,7 +1948,8 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   private subscriptionCallbacksAreSettledGated(subscription: SubscriptionState): boolean {
-    return (subscription.opts as { tier?: unknown }).tier === "global";
+    const tier = (subscription.opts as { tier?: unknown }).tier;
+    return tier === "global" || (this.nonDurableClient && tier === "edge");
   }
 
   private deferSubscriptionRows(
@@ -1904,6 +1992,16 @@ export class NativeRuntimeAdapter implements Runtime {
         this.scheduleServerPump();
       }
     }, SERVER_PUMP_DEBOUNCE_MS);
+  }
+
+  private notifyPeerTransportWork(): void {
+    for (const listener of this.peerTransportWorkListeners) {
+      listener();
+    }
+  }
+
+  private hasUpstream(): boolean {
+    return this.serverTransport != null || this.peerUpstreamAttached;
   }
 
   private pumpServerTransport(): void {
@@ -4192,6 +4290,7 @@ function normalizeSubscriptionChunk(chunk: unknown):
       terminalOperations?: NativeTerminalOperation[];
       terminalLayouts?: NativeTerminalRootLayout[];
       settled?: boolean;
+      publishable?: boolean;
     }
   | {
       type: "rejected";
@@ -4209,6 +4308,7 @@ function normalizeSubscriptionChunk(chunk: unknown):
     reason?: unknown;
     reset?: unknown;
     settled?: unknown;
+    publishable?: unknown;
     terminalOperations?: unknown;
     terminalLayouts?: unknown;
   };
@@ -4236,6 +4336,7 @@ function normalizeSubscriptionChunk(chunk: unknown):
         ? (record.terminalLayouts as NativeTerminalRootLayout[])
         : undefined,
       settled: typeof record.settled === "boolean" ? record.settled : undefined,
+      publishable: typeof record.publishable === "boolean" ? record.publishable : undefined,
     };
   }
   if (record.type === "rejected" || record.type === "Rejected") {

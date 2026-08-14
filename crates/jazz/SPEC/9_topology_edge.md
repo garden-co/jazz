@@ -105,6 +105,13 @@ benches may collapse this into in-process nodes while preserving the same role
 boundaries; browser OPFS and worker ownership are integrability concerns, not
 alternate semantics.
 
+The main-thread client is deliberately non-durable: its authored transactions
+start at `Pending`/`None`. The worker relay persists the unchanged commit unit and
+returns `Pending`/`Local`; that durability acknowledgement does not assign fate.
+The relay forwards later Edge/Global durability and authority fates back over the
+same client-worker link. A worker without an upstream can therefore satisfy
+`Local` waits while Edge/Global waits remain unavailable.
+
 ### 9.3 Relays
 
 Relays provide unopinionated transport and caching. A relay link uses

@@ -4461,6 +4461,7 @@ fn maintained_old_enum_subscriptions_omit_rows_that_require_new_cases() {
     let status_options = crate::protocol::RegisterShapeOptions {
         tier: DurabilityTier::Local,
         read_view: Default::default(),
+        ..crate::protocol::RegisterShapeOptions::default()
     };
     let status_subscription = SubscriptionKey {
         shape_id: status_required.shape_id(),

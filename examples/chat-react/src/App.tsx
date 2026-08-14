@@ -14,21 +14,14 @@ import { RouterScope } from "@/hooks/useRouter";
 
 const appId = import.meta.env.VITE_JAZZ_APP_ID;
 const serverUrl = import.meta.env.VITE_JAZZ_SERVER_URL;
-const subscriptionMode = import.meta.env.VITE_JAZZ_SUBSCRIPTION_MODE ?? "async";
 
-function defaultConfig(
-  secret: string,
-  overrides: Partial<DbConfig> = {},
-): DbConfig & {
-  asyncSubscriptionsOnly: boolean;
-} {
+function defaultConfig(secret: string, overrides: Partial<DbConfig> = {}): DbConfig {
   return {
     appId,
     env: "dev",
     userBranch: "main",
     serverUrl,
     secret,
-    asyncSubscriptionsOnly: subscriptionMode !== "sync",
     ...overrides,
   };
 }

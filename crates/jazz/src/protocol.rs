@@ -1429,7 +1429,7 @@ pub struct CoverageKey {
     pub shape_id: ShapeId,
     /// Deterministic binding id derived from canonical binding values.
     pub binding_id: BindingId,
-    /// Registration options that affect which rows can cover this view.
+    /// Registration options that affect the view or its upstream routing.
     pub opts: RegisterShapeOptions,
 }
 
@@ -1500,6 +1500,9 @@ pub struct RegisterShapeOptions {
     /// Semantic read-view request for this shape registration.
     #[serde(default)]
     pub read_view: ReadViewSpec,
+    /// Whether the serving node may register matching coverage with its own upstream.
+    #[serde(default = "default_propagate_upstream")]
+    pub propagate_upstream: bool,
 }
 
 impl Default for RegisterShapeOptions {
@@ -1507,6 +1510,7 @@ impl Default for RegisterShapeOptions {
         Self {
             tier: default_register_shape_tier(),
             read_view: ReadViewSpec::default(),
+            propagate_upstream: default_propagate_upstream(),
         }
     }
 }
@@ -1525,6 +1529,10 @@ impl RegisterShapeOptions {
 
 fn default_register_shape_tier() -> DurabilityTier {
     DurabilityTier::Global
+}
+
+fn default_propagate_upstream() -> bool {
+    true
 }
 
 /// Semantic read-view request carried over the wire before local resolution.
@@ -1560,7 +1568,8 @@ impl ReadViewSpec {
 /// Stable identity for read/serving options used by subscription coverage grouping.
 ///
 /// Despite the historical name, this key is derived from the full
-/// [`RegisterShapeOptions`], including durability tier and semantic read view.
+/// [`RegisterShapeOptions`], including durability tier, semantic read view, and
+/// upstream-routing intent.
 #[derive(
     Clone,
     Copy,
@@ -1581,7 +1590,7 @@ pub struct ReadViewKey {
 }
 
 impl ReadViewKey {
-    /// Derive a stable key for one semantic read-view request.
+    /// Derive a stable key for one registration request.
     pub fn from_register_shape_options(opts: &RegisterShapeOptions) -> Self {
         let canonical = opts.canonical();
         if canonical == RegisterShapeOptions::default() {

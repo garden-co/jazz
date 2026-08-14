@@ -59,6 +59,7 @@ export declare class NapiDb {
   restoreEncoded(table: string, rowId: Uint8Array, cells: Uint8Array, updatedAtMs?: number | undefined | null): Write
   restoreEncodedForIdentity(table: string, rowId: Uint8Array, cells: Uint8Array, author: Uint8Array, updatedAtMs?: number | undefined | null): Write
   tick(): void
+  setNonDurableClient(): void
   connectUpstream(): Transport
   connectUpstreamWithSession(protocolVersion: number, features: number, remoteNode: Buffer, remoteEpoch: bigint, localNode: Buffer, localEpoch: bigint): Transport
   mergeableTx(openBatchId: string): Tx
