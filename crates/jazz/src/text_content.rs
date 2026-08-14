@@ -6,7 +6,10 @@
 //! mutable identity and every historical row version already retains a complete
 //! text snapshot.
 
-use std::collections::BTreeMap;
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, OnceLock},
+};
 
 use crate::content_manifest::{
     ContentAddress, ContentDomainId, ContentId, ContentManifest, ContentManifestAdapter,
@@ -20,6 +23,10 @@ pub const TEXT_ADAPTER_KIND: &str = "text-v1";
 pub const TEXT_MAX_TAIL_ENTRIES: u32 = 64;
 /// Format, rather than tuning, limit: every reader applies this bound.
 pub const TEXT_MAX_TAIL_BYTES: u32 = 16 * 1024;
+/// Maximum canonical bytes in a remotely supplied immutable leaf.
+pub const TEXT_MAX_LEAF_BYTES: usize = 4096;
+/// Maximum accepted root-to-leaf depth for a remotely supplied rope.
+pub const TEXT_MAX_ROPE_DEPTH: u32 = 64;
 
 const LEAF_TAG: &[u8; 5] = b"TXT1L";
 const NODE_TAG: &[u8; 5] = b"TXT1N";
@@ -147,9 +154,19 @@ impl TextContentAdapter {
         if text.is_empty() {
             return Ok(manifest.clone());
         }
-        let current = self.materialize(manifest, &MaterializationRequest::Full, context, store)?;
-        let current = std::str::from_utf8(&current).map_err(|_| ManifestError::Malformed)?;
-        let updated = insert_at_code_point(current, at_code_point, text)?;
+        manifest.validate(&self.schema)?;
+        let root = self.load_root(manifest.root, context, store)?;
+        let mut logical_length = root.length();
+        for operation in &manifest.edit_tail {
+            let edit = decode_edit(operation)?;
+            validate_edit_offset(logical_length, &edit)?;
+            logical_length = logical_length
+                .checked_add(scalar_len(&edit.text))
+                .ok_or(ManifestError::Malformed)?;
+        }
+        if at_code_point > logical_length {
+            return Err(ManifestError::Malformed);
+        }
         let encoded = encode_edit(&TextEdit {
             at_code_point,
             text: text.to_owned(),
@@ -163,7 +180,26 @@ impl TextContentAdapter {
         if candidate.validate(&self.schema).is_ok() {
             return Ok(candidate);
         }
-        let root = self.build_root(&updated, context.domain, store)?;
+        let mut promoted = root;
+        for operation in &candidate.edit_tail {
+            let edit = decode_edit(operation)?;
+            promoted = self.insert_into_rope(
+                promoted,
+                edit.at_code_point,
+                &edit.text,
+                context.domain,
+                store,
+            )?;
+        }
+        let payload = root_payload(promoted.id(), promoted.length(), promoted.height());
+        let root = store.put_if_absent_or_identical(
+            ContentAddress {
+                domain: context.domain,
+                adapter_kind: TEXT_ADAPTER_KIND,
+                kind: ImmutableContentKind::Root,
+            },
+            payload,
+        )?;
         Ok(ContentManifest {
             root,
             edit_tail: Vec::new(),
@@ -181,7 +217,7 @@ impl TextContentAdapter {
         domain: ContentDomainId,
         store: &mut dyn ImmutableContentStore,
     ) -> Result<ContentId, ManifestError> {
-        let leaves = split_utf8(text, 4096)?
+        let leaves = split_utf8(text, TEXT_MAX_LEAF_BYTES)?
             .into_iter()
             .map(|part| self.store_leaf(&part, domain, store))
             .collect::<Result<Vec<_>, _>>()?;
@@ -256,6 +292,9 @@ impl TextContentAdapter {
             .max(right.height())
             .checked_add(1)
             .ok_or(ManifestError::Malformed)?;
+        if height > TEXT_MAX_ROPE_DEPTH {
+            return Err(ManifestError::Malformed);
+        }
         let id = store.put_if_absent_or_identical(
             ContentAddress {
                 domain,
@@ -273,6 +312,100 @@ impl TextContentAdapter {
         })
     }
 
+    fn insert_into_rope(
+        &self,
+        rope: Rope,
+        at: u64,
+        inserted: &str,
+        domain: ContentDomainId,
+        store: &mut dyn ImmutableContentStore,
+    ) -> Result<Rope, ManifestError> {
+        if at > rope.length() {
+            return Err(ManifestError::Malformed);
+        }
+        match rope {
+            Rope::Leaf { text, .. } => {
+                let updated = insert_at_code_point(&text, at, inserted)?;
+                let leaves = split_utf8(&updated, TEXT_MAX_LEAF_BYTES)?
+                    .into_iter()
+                    .map(|part| self.store_leaf(part, domain, store))
+                    .collect::<Result<Vec<_>, _>>()?;
+                self.build_balanced(leaves, domain, store)
+            }
+            Rope::Branch { left, right, .. } if at <= left.length() => {
+                let left = self.insert_into_rope(*left, at, inserted, domain, store)?;
+                self.balance(left, *right, domain, store)
+            }
+            Rope::Branch { left, right, .. } => {
+                let offset = at
+                    .checked_sub(left.length())
+                    .ok_or(ManifestError::Malformed)?;
+                let right = self.insert_into_rope(*right, offset, inserted, domain, store)?;
+                self.balance(*left, right, domain, store)
+            }
+        }
+    }
+
+    fn balance(
+        &self,
+        left: Rope,
+        right: Rope,
+        domain: ContentDomainId,
+        store: &mut dyn ImmutableContentStore,
+    ) -> Result<Rope, ManifestError> {
+        if left.height() > right.height().saturating_add(1) {
+            let Rope::Branch {
+                left: ll,
+                right: lr,
+                ..
+            } = left
+            else {
+                return Err(ManifestError::Malformed);
+            };
+            if ll.height() >= lr.height() {
+                let new_right = self.store_branch(*lr, right, domain, store)?;
+                return self.store_branch(*ll, new_right, domain, store);
+            }
+            let Rope::Branch {
+                left: lrl,
+                right: lrr,
+                ..
+            } = *lr
+            else {
+                return Err(ManifestError::Malformed);
+            };
+            let new_left = self.store_branch(*ll, *lrl, domain, store)?;
+            let new_right = self.store_branch(*lrr, right, domain, store)?;
+            return self.store_branch(new_left, new_right, domain, store);
+        }
+        if right.height() > left.height().saturating_add(1) {
+            let Rope::Branch {
+                left: rl,
+                right: rr,
+                ..
+            } = right
+            else {
+                return Err(ManifestError::Malformed);
+            };
+            if rr.height() >= rl.height() {
+                let new_left = self.store_branch(left, *rl, domain, store)?;
+                return self.store_branch(new_left, *rr, domain, store);
+            }
+            let Rope::Branch {
+                left: rll,
+                right: rlr,
+                ..
+            } = *rl
+            else {
+                return Err(ManifestError::Malformed);
+            };
+            let new_left = self.store_branch(left, *rll, domain, store)?;
+            let new_right = self.store_branch(*rlr, *rr, domain, store)?;
+            return self.store_branch(new_left, new_right, domain, store);
+        }
+        self.store_branch(left, right, domain, store)
+    }
+
     fn load_root(
         &self,
         root: ContentId,
@@ -281,7 +414,10 @@ impl TextContentAdapter {
     ) -> Result<Rope, ManifestError> {
         let payload = checked_get(store, context, root, ImmutableContentKind::Root)?;
         let (child, length, height) = parse_root(payload)?;
-        let tree = self.load_tree(child, context, store)?;
+        if height == 0 || height > TEXT_MAX_ROPE_DEPTH {
+            return Err(ManifestError::Malformed);
+        }
+        let tree = self.load_tree(child, 1, context, store)?;
         if tree.length() != length || tree.height() != height {
             return Err(ManifestError::Malformed);
         }
@@ -291,9 +427,13 @@ impl TextContentAdapter {
     fn load_tree(
         &self,
         id: ContentId,
+        depth: u32,
         context: ContentReadContext,
         store: &dyn ImmutableContentStore,
     ) -> Result<Rope, ManifestError> {
+        if depth == 0 || depth > TEXT_MAX_ROPE_DEPTH {
+            return Err(ManifestError::Malformed);
+        }
         let bytes = store.get(context, id).ok_or(ManifestError::Malformed)?;
         if bytes.starts_with(LEAF_TAG) {
             let payload = checked_get(store, context, id, ImmutableContentKind::Leaf)?;
@@ -302,13 +442,18 @@ impl TextContentAdapter {
         }
         let payload = checked_get(store, context, id, ImmutableContentKind::Node)?;
         let (left_id, right_id, length, height) = parse_branch(payload)?;
-        let left = self.load_tree(left_id, context, store)?;
-        let right = self.load_tree(right_id, context, store)?;
+        if height <= 1 || height > TEXT_MAX_ROPE_DEPTH {
+            return Err(ManifestError::Malformed);
+        }
+        let next_depth = depth.checked_add(1).ok_or(ManifestError::Malformed)?;
+        let left = self.load_tree(left_id, next_depth, context, store)?;
+        let right = self.load_tree(right_id, next_depth, context, store)?;
         if length
             != left
                 .length()
                 .checked_add(right.length())
                 .ok_or(ManifestError::Malformed)?
+            || left.height().abs_diff(right.height()) > 1
             || height
                 != left
                     .height()
@@ -336,6 +481,17 @@ impl TextContentAdapter {
         }
         Ok(text)
     }
+}
+
+/// Register the production `text-v1` adapter through the process-wide
+/// foundation registry. Registration is append-only and idempotent.
+pub fn register_text_content_adapter() -> Result<Arc<TextContentAdapter>, ManifestError> {
+    static ADAPTER: OnceLock<Arc<TextContentAdapter>> = OnceLock::new();
+    let adapter = ADAPTER
+        .get_or_init(|| Arc::new(TextContentAdapter::default()))
+        .clone();
+    crate::content_manifest::global_content_manifest_adapters().register(adapter.clone())?;
+    Ok(adapter)
 }
 
 impl Default for TextContentAdapter {
@@ -484,6 +640,13 @@ fn insert_at_code_point(base: &str, at: u64, inserted: &str) -> Result<String, M
     Ok(output)
 }
 
+fn validate_edit_offset(current_length: u64, edit: &TextEdit) -> Result<(), ManifestError> {
+    if edit.at_code_point > current_length {
+        return Err(ManifestError::Malformed);
+    }
+    Ok(())
+}
+
 fn range_at_code_points(text: &str, offset: u64, length: u64) -> Result<String, ManifestError> {
     let total = scalar_len(text);
     let end = offset.checked_add(length).ok_or(ManifestError::Malformed)?;
@@ -556,7 +719,7 @@ fn parse_leaf(bytes: &[u8]) -> Result<(String, u64), ManifestError> {
             .try_into()
             .map_err(|_| ManifestError::Malformed)?,
     ) as usize;
-    if bytes.len() != 17 + byte_len {
+    if byte_len > TEXT_MAX_LEAF_BYTES || bytes.len() != 17 + byte_len {
         return Err(ManifestError::Malformed);
     }
     let text = std::str::from_utf8(&bytes[17..])
@@ -637,7 +800,39 @@ mod tests {
     // adapter/store seam, not a public client-level adapter registry. They are
     // black-box tests of that public seam and use no rope internals.
     use super::*;
-    use crate::content_manifest::MemoryImmutableContentStore;
+    use crate::content_manifest::{
+        ContentManifestRuntime, ContentManifestRuntimeProvider, MemoryImmutableContentStore,
+        global_content_manifest_adapters,
+    };
+    use crate::{
+        ids::NodeUuid,
+        node::NodeState,
+        schema::{ColumnSchema, JazzSchema, TableSchema},
+    };
+    use groove::{records::Value, schema::ColumnType, storage::MemoryStorage};
+    use std::collections::BTreeSet;
+
+    #[derive(Default)]
+    struct CountingStore {
+        inner: MemoryImmutableContentStore,
+        puts: usize,
+        ids: BTreeSet<ContentId>,
+    }
+    impl ImmutableContentStore for CountingStore {
+        fn get(&self, context: ContentReadContext, id: ContentId) -> Option<&[u8]> {
+            self.inner.get(context, id)
+        }
+        fn put_if_absent_or_identical(
+            &mut self,
+            address: ContentAddress<'_>,
+            bytes: Vec<u8>,
+        ) -> Result<ContentId, ManifestError> {
+            self.puts += 1;
+            let id = self.inner.put_if_absent_or_identical(address, bytes)?;
+            self.ids.insert(id);
+            Ok(id)
+        }
+    }
 
     fn context() -> ContentReadContext {
         ContentReadContext {
@@ -781,6 +976,243 @@ mod tests {
             adapter
                 .merge(&[promoted, stale], context(), &store)
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn promotion_path_copies_only_the_edited_path_and_reuses_untouched_subtrees() {
+        let adapter = TextContentAdapter::new(64, 1).unwrap();
+        let mut store = CountingStore::default();
+        let initial = format!("{}{}tail", "a".repeat(4096), "b".repeat(4096));
+        let base = adapter.create(&initial, context(), &mut store).unwrap();
+        let old = adapter.load_root(base.root, context(), &store).unwrap();
+        let old_left = match old {
+            Rope::Branch { left, .. } => left.id(),
+            Rope::Leaf { .. } => panic!("fixture must have multiple leaves"),
+        };
+        store.puts = 0;
+        store.ids.clear();
+
+        let promoted = adapter
+            .insert(&base, scalar_len(&initial), "!", context(), &mut store)
+            .unwrap();
+        assert!(promoted.edit_tail.is_empty());
+        assert_eq!(
+            text(&adapter, &promoted, &store.inner),
+            format!("{initial}!")
+        );
+        let new = adapter.load_root(promoted.root, context(), &store).unwrap();
+        let new_left = match new {
+            Rope::Branch { left, .. } => left.id(),
+            Rope::Leaf { .. } => panic!("fixture must remain multi-leaf"),
+        };
+        assert_eq!(new_left, old_left, "untouched left subtree must be reused");
+        assert_eq!(store.puts, 3, "one leaf, one path node, and one root");
+        assert_eq!(store.ids.len(), 3);
+    }
+
+    fn store_raw(
+        store: &mut MemoryImmutableContentStore,
+        kind: ImmutableContentKind,
+        payload: Vec<u8>,
+    ) -> ContentId {
+        store
+            .put_if_absent_or_identical(
+                ContentAddress {
+                    domain: context().domain,
+                    adapter_kind: TEXT_ADAPTER_KIND,
+                    kind,
+                },
+                payload,
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn content_valid_oversize_skewed_and_deep_remote_ropes_fail_closed() {
+        let adapter = TextContentAdapter::default();
+
+        let mut oversized_store = MemoryImmutableContentStore::default();
+        let oversized_text = "x".repeat(TEXT_MAX_LEAF_BYTES + 1);
+        let leaf = store_raw(
+            &mut oversized_store,
+            ImmutableContentKind::Leaf,
+            leaf_payload(&oversized_text, scalar_len(&oversized_text)),
+        );
+        let root = store_raw(
+            &mut oversized_store,
+            ImmutableContentKind::Root,
+            root_payload(leaf, scalar_len(&oversized_text), 1),
+        );
+        assert!(
+            adapter
+                .materialize(
+                    &ContentManifest {
+                        root,
+                        edit_tail: vec![]
+                    },
+                    &MaterializationRequest::Full,
+                    context(),
+                    &oversized_store
+                )
+                .is_err()
+        );
+
+        let mut skewed_store = MemoryImmutableContentStore::default();
+        let leaf = store_raw(
+            &mut skewed_store,
+            ImmutableContentKind::Leaf,
+            leaf_payload("x", 1),
+        );
+        let pair = store_raw(
+            &mut skewed_store,
+            ImmutableContentKind::Node,
+            branch_payload(leaf, leaf, 2, 2),
+        );
+        let balanced = store_raw(
+            &mut skewed_store,
+            ImmutableContentKind::Node,
+            branch_payload(pair, leaf, 3, 3),
+        );
+        let skewed = store_raw(
+            &mut skewed_store,
+            ImmutableContentKind::Node,
+            branch_payload(balanced, leaf, 4, 4),
+        );
+        let root = store_raw(
+            &mut skewed_store,
+            ImmutableContentKind::Root,
+            root_payload(skewed, 4, 4),
+        );
+        assert!(
+            adapter
+                .materialize(
+                    &ContentManifest {
+                        root,
+                        edit_tail: vec![]
+                    },
+                    &MaterializationRequest::Full,
+                    context(),
+                    &skewed_store
+                )
+                .is_err()
+        );
+
+        let mut deep_store = MemoryImmutableContentStore::default();
+        let leaf = store_raw(
+            &mut deep_store,
+            ImmutableContentKind::Leaf,
+            leaf_payload("x", 1),
+        );
+        let mut child = leaf;
+        let mut length = 1;
+        for height in 2..=TEXT_MAX_ROPE_DEPTH + 1 {
+            length += 1;
+            child = store_raw(
+                &mut deep_store,
+                ImmutableContentKind::Node,
+                branch_payload(child, leaf, length, height),
+            );
+        }
+        let root = store_raw(
+            &mut deep_store,
+            ImmutableContentKind::Root,
+            root_payload(child, length, TEXT_MAX_ROPE_DEPTH + 1),
+        );
+        assert!(
+            adapter
+                .materialize(
+                    &ContentManifest {
+                        root,
+                        edit_tail: vec![]
+                    },
+                    &MaterializationRequest::Full,
+                    context(),
+                    &deep_store
+                )
+                .is_err()
+        );
+    }
+
+    struct Provider(MemoryImmutableContentStore);
+    impl ContentManifestRuntimeProvider for Provider {
+        fn read_context(&self, _: NodeUuid) -> ContentReadContext {
+            context()
+        }
+        fn immutable_store(&self) -> &dyn ImmutableContentStore {
+            &self.0
+        }
+    }
+
+    #[test]
+    fn registered_text_schema_runs_through_node_materialize_merge_and_index_seams() {
+        let registered = register_text_content_adapter().unwrap();
+        let manifest_schema = registered.schema().clone();
+        let column = ColumnSchema::content_manifest("body", manifest_schema.clone());
+        let schema = JazzSchema::new([TableSchema::new(
+            "documents",
+            [
+                ColumnSchema::new("title", ColumnType::String),
+                column.clone(),
+            ],
+        )]);
+        let mut store = MemoryImmutableContentStore::default();
+        let base = registered.create("root", context(), &mut store).unwrap();
+        let tailed = registered
+            .insert(&base, 4, " tail", context(), &mut store)
+            .unwrap();
+        let equivalent = registered
+            .create("root tail", context(), &mut store)
+            .unwrap();
+        let tailed_value = Value::Bytes(tailed.encode(&manifest_schema).unwrap());
+        let equivalent_value = Value::Bytes(equivalent.encode(&manifest_schema).unwrap());
+
+        crate::node::codec::validate_cell_value(&column, &tailed_value).unwrap();
+        let refs = schema.column_families();
+        let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
+        let provider = Arc::new(Provider(store));
+        let node = NodeState::new_with_content_manifest_provider(
+            NodeUuid(uuid::Uuid::from_bytes([99; 16])),
+            schema,
+            MemoryStorage::new(&refs),
+            provider.clone(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            node.materialize_content_manifest(
+                "documents",
+                "body",
+                &tailed_value,
+                &MaterializationRequest::Full
+            )
+            .unwrap(),
+            b"root tail"
+        );
+        assert_eq!(
+            node.content_manifest_index_values(
+                "documents",
+                "body",
+                &tailed_value,
+                &["text".into()]
+            )
+            .unwrap()["text"],
+            b"root tail"
+        );
+
+        let runtime = ContentManifestRuntime::new(
+            global_content_manifest_adapters(),
+            context(),
+            provider.immutable_store(),
+        );
+        let merged = runtime
+            .merge_cells(&manifest_schema, &[tailed_value, equivalent_value])
+            .unwrap();
+        assert_eq!(
+            runtime
+                .materialize_cell(&manifest_schema, &merged, &MaterializationRequest::Full)
+                .unwrap(),
+            b"root tail"
         );
     }
 }

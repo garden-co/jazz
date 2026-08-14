@@ -29,11 +29,14 @@ adapter; it does not grant authority to read that row.
 
 ## 12.2 Immutable rope rows
 
-The adapter stores a UTF-8 rope in immutable ordinary rows. A leaf contains
-bounded UTF-8 text and its Unicode scalar (code-point) length. A branch
+The adapter stores a UTF-8 rope in immutable ordinary rows. A leaf contains at
+most 4 KiB of UTF-8 text and its Unicode scalar (code-point) length. A branch
 contains its ordered child IDs, the children’s subtree scalar lengths, and the
-height needed to validate balancing. The root is a complete snapshot: readers
-MUST NOT replay older manifests or Jazz row history to reconstruct it.
+height needed to validate balancing. Readers reject a root-to-leaf depth above
+64 and any branch whose child heights differ by more than one, even when every
+row has a valid content-derived ID and internally consistent metadata. The root
+is a complete snapshot: readers MUST NOT replay older manifests or Jazz row
+history to reconstruct it.
 
 Leaf and branch IDs are content-derived from a domain-scoped canonical encoding
 that includes the format version, node kind, all semantic metadata, and the
