@@ -40,8 +40,9 @@ file before slicing; that is correct but not the final large-range I/O path.
 JAZZ_FILE_DISK_APPEND_BYTES=4096 cargo bench -p groove --bench
 file_layout_storage` on the native lane reported p50 7 µs and p95 29 µs for
 32,768 logical bytes (eight ordinary root transactions and eight parts), with
-Zstd enabled. Directory bytes were 103,746 apparent / 78,102,528 allocated
-before and after flush, and 112,328 apparent / 78,110,720 allocated after full
+LZ4 current-root metadata, Zstd append parts, and Zstd bottommost compression.
+Directory bytes were 103,671 apparent / 78,102,528 allocated before and after
+flush, and 112,251 apparent / 78,110,720 allocated after full
 compaction. This deliberately small receipt is a correctness/lifecycle sample,
 not a capacity claim: allocated blocks include RocksDB's preallocation,
 metadata and WAL; compaction timing and space reuse are backend-dependent.

@@ -95,10 +95,17 @@ fn main() {
     let mut opts = Options::default();
     opts.create_if_missing(true);
     opts.create_missing_column_families(true);
-    opts.set_compression_type(DBCompressionType::Zstd);
+    opts.set_compression_type(DBCompressionType::Lz4);
+    opts.set_bottommost_compression_type(DBCompressionType::Zstd);
+    let mut history = Options::default();
+    history.set_compression_type(DBCompressionType::Zstd);
+    history.set_bottommost_compression_type(DBCompressionType::Zstd);
+    let mut current_meta = Options::default();
+    current_meta.set_compression_type(DBCompressionType::Lz4);
+    current_meta.set_bottommost_compression_type(DBCompressionType::Zstd);
     let cfs = [
-        ColumnFamilyDescriptor::new("roots", Options::default()),
-        ColumnFamilyDescriptor::new("parts", Options::default()),
+        ColumnFamilyDescriptor::new("roots", current_meta),
+        ColumnFamilyDescriptor::new("parts", history),
     ];
     let db = DB::open_cf_descriptors(&opts, dir.path(), cfs).expect("rocksdb");
     let payload = vec![b'x'; append_bytes];
@@ -132,5 +139,5 @@ fn main() {
     db.compact_range::<&[u8], &[u8]>(None, None);
     let compacted = bytes(dir.path());
     let pct = |n: usize| times[(times.len() - 1) * n / 100];
-    println!("{}",serde_json::to_string(&Receipt{appends,append_bytes,logical_bytes:appends*append_bytes,p50_us:pct(50),p95_us:pct(95),root_rows:appends,part_rows:appends*payload.len().div_ceil(PART),compression:"zstd",before_flush:before,after_flush:flushed,after_compaction:compacted,caveat:"apparent/allocated bytes include RocksDB metadata and WAL; compaction timing is backend-dependent"}).unwrap());
+    println!("{}",serde_json::to_string(&Receipt{appends,append_bytes,logical_bytes:appends*append_bytes,p50_us:pct(50),p95_us:pct(95),root_rows:appends,part_rows:appends*payload.len().div_ceil(PART),compression:"roots_lz4_parts_zstd_bottommost_zstd",before_flush:before,after_flush:flushed,after_compaction:compacted,caveat:"apparent/allocated bytes include RocksDB metadata and WAL; compaction timing is backend-dependent"}).unwrap());
 }
