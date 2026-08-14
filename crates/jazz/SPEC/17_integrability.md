@@ -105,7 +105,7 @@ same conformance scenarios with topology-specific configuration only.**
   and eviction; protocol behavior stays shared.
 - **Conformance matrix.** Add black-box tests that run the same API scenarios
   against Rust-only, WASM, NAPI, browser-worker, local server, and edge/core
-  layouts. Cover mergeable/exclusive transactions, RLS, large values,
+  layouts. Cover mergeable/exclusive transactions, RLS,
   subscription deltas, branches, and lenses.
 - **Operational surface.** Standardize config, logging, metrics, health checks,
   storage migration reporting, sync lag, full-recompute counters, and protocol
@@ -161,7 +161,7 @@ Milestone: **integrators can adopt jazz incrementally without bespoke glue.**
    The alpha TS/WASM gate now spawns the WebSocket listener as a Rust process
    and proves two-client todo convergence through that boundary.
 4. **Storage slice** — prove the storage contract with durable and in-memory
-   backends, including large-value hooks and migration metadata.
+   backends, including migration metadata.
 5. **Subscription slice** — bridge maintained subscription deltas into stable
    TypeScript events and measure every full-diff full recompute.
 6. **Lens/branch slice** — expose branch and lens facades across Rust,

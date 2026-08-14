@@ -34,8 +34,7 @@ Invariant digest:
 - `INV-LOWER-14`: Sync query updates SHOULD consume maintained terminal facts for result membership, path/correlation coverage, payload/replacement/version witnesses, policy witnesses, and read-frontier settlement; query-row recompute paths are migration/oracle debt, not an alternate production engine.
 - `INV-LOWER-15`: Whole-table current-row sync views MUST be represented as the normal table-rooted row-set shape, not a separate current-row serving engine; their result set must match the node's lowered `current_rows` result while migration code still exists.
 - `INV-LOWER-16`: Exclusive predicate validation for non-degenerate shape predicates MUST compare predicate-output-set terminal facts for the shape+binding at `base_snapshot.global_base` to the corresponding current predicate-output-set facts.
-- `INV-LOWER-17`: `ColumnSchema::text` and `ColumnSchema::blob` MUST lower user cell storage to nullable `GrooveColumnType::Bytes`.
-- `INV-LOWER-18`: Counter merge strategy MUST NOT be accepted for nullable, non-integer, or large-value columns.
+- `INV-LOWER-18`: Counter merge strategy MUST NOT be accepted for nullable or non-integer columns.
 - `INV-LOWER-19`: Lowered record wrapper field indexes MUST match the groove schema record descriptors used at node open.
 - `INV-LOWER-20`: RLS policy declarations MUST be valid Jazz query shapes; read policy MUST lower through the query engine as part of the policy-composed read graph, while write-time acceptance MAY continue to evaluate policy predicates directly in `node/policy.rs` until write-policy prepared-shape lowering lands.
 - `INV-LOWER-21`: One-shot reads, live subscriptions, sync views, and transaction-validation reads MUST consume the same lowered semantic query program; callback/reset/retry/propagation behavior MUST NOT select a second evaluator or become part of query shape identity. Runtime consumers request compiler evidence as app rows plus named terminal facts.
@@ -60,16 +59,6 @@ _above_ that substrate; it defines no independent storage or query engine for
 those concerns. A node opens its `groove::db::Database` from a lowered `groove`
 schema and never bypasses it for queryable record storage, current-row
 maintenance, or query/sync evaluation (`INV-LOWER-1`).
-
-There is one deliberate exception: **large-value content bytes** do not lower to
-groove's IVM machinery. Op-log _metadata_ lowers normally (it rides commit units
-as ordinary cells), but content bytes live in direct extent, metadata, and
-checkpoint stores below the IVM layer (ch. 12). The boundary is precise:
-anything queryable lowers to groove; anything only ever ranged-read lives in the
-content stores. Query and sync row results carry large-value handles, not bodies. Value-returning APIs
-materialize those handles by pulling authorized content extents and folding
-op-log extents at the access boundary; encoded ops and content handles do not
-escape as application cell bytes.
 
 ### 14.2 Schema → groove
 
@@ -156,9 +145,8 @@ downstream operator can turn it into a runtime failure.
 _Further invariants._ `INV-LOWER-2`, `INV-LOWER-4` — content and deletion lower
 to distinct tables belonging to the resolved `PhysicalTableId`, each with PK
 `(row_uuid, tx_time, tx_node_id)`, never mixing user cells and `_deletion`.
-`INV-LOWER-17` — `text`/`blob` lower their cell type to nullable groove `Bytes`.
-`INV-LOWER-18` — `Counter` is rejected on nullable/non-integer/large-value
-columns. `INV-LOWER-19` — lowered record-wrapper field indices match the groove
+`INV-LOWER-18` — `Counter` is rejected on nullable/non-integer columns.
+`INV-LOWER-19` — lowered record-wrapper field indices match the groove
 descriptors (debug-asserted).
 
 ### 14.3 Current rows → groove
@@ -210,7 +198,7 @@ read may choose different callback, reset, retry, propagation, and waiting
 behavior, but the compiler-facing way to ask for evidence is only app rows plus
 named terminal facts such as result membership, relation edges, read-frontier
 settlement, payload witnesses, policy decisions/witnesses, predicate output
-sets, and large-value extents.
+sets.
 Those runtime choices MUST consume the same lowered program. They must not
 select a second evaluator or make coverage state part of the query shape
 identity (`INV-LOWER-21`).

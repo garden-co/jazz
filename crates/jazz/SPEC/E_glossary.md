@@ -35,7 +35,7 @@ Invariant digest: no `INV-*` ids are defined or cited by this chapter.
 ### Schema (ch. 2, ch. 10)
 
 - **`JazzSchema` / `TableSchema` / `ColumnSchema`** — the logical schema.
-- **`MergeStrategy::{Lww, Counter}`** · **`LargeValueKind::{Text, Blob}`**.
+- **`MergeStrategy::{Lww, Counter}`**.
 - **schema version** — a content-addressed `SchemaVersionId`; **migration lens**
   — bidirectional translation between versions; **catalogue** — the published
   schema, lens, and pointer store; **current write schema** — the moving write

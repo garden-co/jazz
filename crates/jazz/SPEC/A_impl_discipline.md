@@ -49,8 +49,8 @@ through exhaustive, serializable message enums with a wire version field from
 day one (ch. 8), and every concept is reachable through a protocol message,
 node storage, or both (`INV-DISC-2`). The `SyncMessage` set is `CommitUnit`,
 `FateUpdate`, `RegisterShape`, `Subscribe`, `SubscribeRejected`, `Unsubscribe`,
-`PublishSchema`, `PublishLens`, `SetCurrentWriteSchema`, `CatalogueAck`,
-`ViewUpdate`, `FetchContentExtent`, and `ContentExtents`.
+`PublishSchema`, `PublishLens`, `SetCurrentWriteSchema`, `CatalogueAck`, and
+`ViewUpdate`.
 
 **Implementation status (verified).** `wire_fixture_messages` covers the
 serializable `SyncMessage` fixtures.

@@ -40,7 +40,6 @@ Invariant digest:
 - `INV-API-22`: Db::tick() MUST service every registered connection exactly once.
 - `INV-API-23`: A client binding tick driver MUST classify `Db::tick()` failures. A recoverable protocol condition MUST NOT terminate the driver; the driver MUST continue through its documented repair or reconnect path with bounded backoff. A fatal failure, or exhausted recovery, MUST stop the driver and be surfaced to the caller as an error rather than appearing as a stalled sync operation.
 - `INV-API-24`: The query builder exposed through Db::table MUST expose the schema-validated query construction capabilities defined in ch. 6.
-- `INV-API-25`: `TextEdit` operations MUST use byte offsets relative to the current local parent value for the column and MUST lower to `LargeValueEditOp::Insert`/`LargeValueEditOp::Delete`.
 - `INV-API-26`: `Db::mergeable_tx()` MUST group multiple facade writes under one mergeable `TxId`, and the produced commit unit MUST set `Transaction.n_total_writes` to the number of grouped versions.
 - `INV-API-27`: `Db::exclusive_tx()` MUST expose serializable exclusive transactions on the facade, preserving snapshot reads and returning `WriteRejected` when authority validation detects a conflict.
 - `INV-API-28`: Permission advice is a three-valued, authority-scoped dry run: only the serving authority may issue definitive `Allowed`/`Denied`; client-local, offline, incomplete, not-ready, and timed-out requests yield `Unknown`. Advice is non-mutating and does not reserve a later mutation; its authenticated request/response exchange exposes no policy evidence and is correlation-, cancellation-, replay-, and dedup-safe.
@@ -269,8 +268,6 @@ _Further invariants._ `INV-API-10` — `upsert` merges over current cells when t
 row exists locally, else writes the supplied cells. `INV-API-11` — `delete`
 lowers to a mergeable `DeletionEvent::Deleted`. `INV-API-12` — `restore` rejects
 empty data and lowers to content + `DeletionEvent::Restored`. `INV-API-25` —
-`TextEdit` uses byte offsets relative to the current parent, lowering to
-`LargeValueEditOp` (ch. 12).
 
 #### Permission advice dry runs
 
@@ -336,8 +333,7 @@ registered subscriptions (ch. 8).
 
 Bindings that schedule `Db::tick()` in a background client driver own the
 driver's lifecycle. They classify a returned error before deciding whether to
-stop: bounded-queue backpressure retries, a missing content extent follows the
-content-repair path, and a closed upstream WebSocket detaches and reconnects.
+stop: bounded-queue backpressure retries, and a closed upstream WebSocket detaches and reconnects.
 Other errors are terminal because no repair is defined for them. Recovery uses
 bounded exponential backoff; when it exhausts, the binding records a terminal
 sync error. Queries, hydration, and durability waits must observe that error
@@ -432,8 +428,7 @@ ABI shapes are implementation choices rather than a second public API.
 Subscriptions cross the boundary as host streams/callbacks built on
 `Db::subscribe`, with postcard-encoded chunks if a byte payload is needed.
 Transport code moves encoded `WireFrame` bytes; it does not
-decode `SyncMessage` as product API. Catalogue, branch, lens, and large-value
-APIs should be added only when their core runtime APIs and binding ergonomics are
+decode `SyncMessage` as product API. Catalogue, branch, and lens APIs should be added only when their core runtime APIs and binding ergonomics are
 settled.
 
 #### 13.7.1 Binding Responsibilities
@@ -540,7 +535,6 @@ the client `Db` facade.
 | auth/session admission           |         P |               Y |        P |        P |              P |          Shell |
 | branch/time-travel facade        |         P |               P |        P |        P |              P |          Shell |
 | lens/catalogue facade            |         P |               P |        P |        P |              P |          Shell |
-| large-value read/edit handles    |         P |               P |        P |        P |              P |          Shell |
 | structured errors/events         |         P |               Y |        Y |        Y |              Y |          Shell |
 | durability tier waits            |         Y |               Y |        Y |        Y |              Y |          Shell |
 | worker/thread proxying           |         N |               Y |        N |        N |              Y |          Shell |
@@ -562,8 +556,8 @@ browser harness proves worker-owned `WasmDb`/transport objects through a Web
 Worker, Record-encoded rows/cells, permission probes, write-state/wait, reads,
 subscription stream snapshots, OPFS via `WasmDb.openBrowser`, websocket byte
 batches, and a headless Chromium smoke gate. `db_read_at` and
-`db_edit_text` remain typed/API-surface-only in the TS harness until there is a
-serving-node or stable large-value setup for those paths.
+`db_edit_text` remains typed/API-surface-only in the TS harness until there is a
+serving-node setup for that path.
 
 ### 13.12 Subsumed client, backend, and binding notes
 
