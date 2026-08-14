@@ -1501,53 +1501,6 @@ impl PeerState {
             .count()
     }
 
-    #[cfg(test)]
-    pub(crate) fn retain_edge_scope_subscription_for_test(
-        &mut self,
-        subscription: SubscriptionKey,
-    ) {
-        self.retain_edge_scope_subscription(subscription);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn release_edge_scope_subscription_for_test(
-        &mut self,
-        subscription: SubscriptionKey,
-        now_ms: u64,
-    ) {
-        let Some(refcount) = self.edge_scope_subscription_refs.get_mut(&subscription) else {
-            return;
-        };
-        *refcount -= 1;
-        if *refcount == 0 {
-            self.edge_scope_subscription_refs.remove(&subscription);
-            if edge_scope_ttl_ms() != 0 {
-                self.idle_edge_scope_subscriptions
-                    .insert(subscription, now_ms);
-            }
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn defer_edge_fate_for_test(
-        &mut self,
-        tx: Transaction,
-        versions: Vec<VersionRecord>,
-        now_ms: u64,
-    ) {
-        let permission_identity = self.identity();
-        self.deferred_edge_fates.insert(
-            tx.tx_id,
-            DeferredEdgeFate {
-                tx,
-                versions,
-                now_ms,
-                permission_identity,
-                scope_subscriptions: Vec::new(),
-            },
-        );
-    }
-
     /// Serve exact row-version repair fetches for this peer.
     pub fn handle_row_versions_fetch<S>(
         &mut self,
