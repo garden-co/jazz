@@ -54,19 +54,14 @@ impl Default for StreamManifestAdapter {
 }
 
 impl StreamManifestAdapter {
-    pub fn new(inline_tail_bytes: usize, fanout: usize) -> Result<Self, ManifestError> {
-        if inline_tail_bytes == 0 || inline_tail_bytes > MAX_STREAM_PART_BYTES {
-            return Err(ManifestError::Conflict(
-                "stream inline tail bound is invalid",
-            ));
-        }
-        if !(4..=256).contains(&fanout) || !fanout.is_multiple_of(2) {
-            return Err(ManifestError::Conflict("stream tree fanout is invalid"));
-        }
-        Ok(Self {
+    #[cfg(test)]
+    fn with_layout_for_test(inline_tail_bytes: usize, fanout: usize) -> Self {
+        assert!((1..=MAX_STREAM_PART_BYTES).contains(&inline_tail_bytes));
+        assert!((4..=256).contains(&fanout) && fanout.is_multiple_of(2));
+        Self {
             inline_tail_bytes,
             fanout,
-        })
+        }
     }
 
     /// Create an empty immutable root and the manifest stored in an owner row.
@@ -229,7 +224,11 @@ impl StreamManifestAdapter {
         context: ContentReadContext,
         store: &dyn ImmutableContentStore,
     ) -> Result<StreamNode, ManifestError> {
-        decode_node(self.get_object(context, id, ImmutableContentKind::Node, store)?)
+        let node = decode_node(self.get_object(context, id, ImmutableContentKind::Node, store)?)?;
+        if node.children.len() > self.fanout {
+            return Err(ManifestError::Malformed);
+        }
+        Ok(node)
     }
 
     fn get_object<'a>(
@@ -653,7 +652,7 @@ mod tests {
 
     #[test]
     fn tail_is_part_of_every_materialized_owner_snapshot() {
-        let adapter = StreamManifestAdapter::new(4, 4).unwrap();
+        let adapter = StreamManifestAdapter::with_layout_for_test(4, 4);
         let mut store = MemoryImmutableContentStore::default();
         let empty = adapter.empty_manifest(context(), &mut store).unwrap();
         let first = adapter
@@ -695,7 +694,7 @@ mod tests {
 
     #[test]
     fn promotion_is_content_addressed_and_keeps_one_logical_tail() {
-        let adapter = StreamManifestAdapter::new(3, 4).unwrap();
+        let adapter = StreamManifestAdapter::with_layout_for_test(3, 4);
         let mut store = MemoryImmutableContentStore::default();
         let empty = adapter.empty_manifest(context(), &mut store).unwrap();
         let tail = adapter
@@ -715,7 +714,7 @@ mod tests {
 
     #[test]
     fn merge_and_index_see_the_complete_manifest_not_only_its_root() {
-        let adapter = StreamManifestAdapter::new(8, 4).unwrap();
+        let adapter = StreamManifestAdapter::with_layout_for_test(8, 4);
         let mut store = MemoryImmutableContentStore::default();
         let empty = adapter.empty_manifest(context(), &mut store).unwrap();
         let tail = adapter
@@ -738,7 +737,7 @@ mod tests {
 
     #[test]
     fn corrupted_tree_cannot_return_bytes() {
-        let adapter = StreamManifestAdapter::new(1, 4).unwrap();
+        let adapter = StreamManifestAdapter::with_layout_for_test(1, 4);
         let mut store = MemoryImmutableContentStore::default();
         let empty = adapter.empty_manifest(context(), &mut store).unwrap();
         let manifest = adapter
@@ -786,6 +785,156 @@ mod tests {
                     &store
                 )
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn correctly_hashed_oversized_node_is_rejected_by_every_read_path() {
+        let adapter = StreamManifestAdapter::with_layout_for_test(1, 4);
+        let mut store = MemoryImmutableContentStore::default();
+        let children = (0..5)
+            .map(|byte| {
+                Ok(TreeRef {
+                    id: adapter.put_part(context(), &mut store, &[byte])?,
+                    length: 1,
+                    height: 0,
+                })
+            })
+            .collect::<Result<Vec<_>, ManifestError>>()
+            .unwrap();
+        let oversized = StreamNode {
+            height: 0,
+            children,
+        };
+        // Bypass the writer-side guard to model a correctly content-addressed
+        // node received from an untrusted or differently configured writer.
+        let node_id = store
+            .put_if_absent_or_identical(
+                ContentAddress {
+                    domain: context().domain,
+                    adapter_kind: ADAPTER_KIND,
+                    kind: ImmutableContentKind::Node,
+                },
+                encode_node(&oversized),
+            )
+            .unwrap();
+        let root = adapter
+            .put_root(
+                context(),
+                &mut store,
+                StreamRoot {
+                    tree: Some(TreeRef {
+                        id: node_id,
+                        length: 5,
+                        height: 1,
+                    }),
+                    prefix_bytes: 5,
+                },
+            )
+            .unwrap();
+        let manifest = ContentManifest {
+            root,
+            edit_tail: Vec::new(),
+        };
+
+        let full = adapter.materialize(&manifest, &MaterializationRequest::Full, context(), &store);
+        let range = adapter.materialize(
+            &manifest,
+            &MaterializationRequest::Range {
+                offset: 1,
+                length: 2,
+            },
+            context(),
+            &store,
+        );
+        let append = adapter.append(&manifest, b"xy", context(), &mut store);
+        assert_eq!(
+            (full, range, append),
+            (
+                Err(ManifestError::Malformed),
+                Err(ManifestError::Malformed),
+                Err(ManifestError::Malformed),
+            ),
+            "full reads, ranges, and later appends must all enforce the fetched-node fanout"
+        );
+    }
+
+    #[test]
+    fn multi_leaf_split_reuses_unchanged_spine_and_ranges_across_parts() {
+        let adapter = StreamManifestAdapter::with_layout_for_test(1, 4);
+        let mut store = MemoryImmutableContentStore::default();
+        let mut manifest = adapter.empty_manifest(context(), &mut store).unwrap();
+        let mut after_five = None;
+        for byte in 1..=6 {
+            manifest = adapter
+                .append(
+                    &manifest,
+                    &vec![byte; MAX_STREAM_PART_BYTES],
+                    context(),
+                    &mut store,
+                )
+                .unwrap();
+            if byte == 5 {
+                after_five = Some(manifest.clone());
+            }
+        }
+
+        let after_five = after_five.unwrap();
+        let five_root = adapter
+            .get_root(after_five.root, context(), &store)
+            .unwrap()
+            .tree
+            .unwrap();
+        let six_root = adapter
+            .get_root(manifest.root, context(), &store)
+            .unwrap()
+            .tree
+            .unwrap();
+        assert_eq!(five_root.height, 2, "the fifth leaf must split fanout four");
+        assert_eq!(six_root.height, 2);
+        let five_children = adapter
+            .get_node(five_root.id, context(), &store)
+            .unwrap()
+            .children;
+        let six_children = adapter
+            .get_node(six_root.id, context(), &store)
+            .unwrap()
+            .children;
+        assert_eq!(five_children.len(), 2);
+        assert_eq!(six_children.len(), 2);
+        assert_eq!(
+            five_children[0].id, six_children[0].id,
+            "appending on the right must reuse the untouched left subtree"
+        );
+
+        assert_eq!(
+            adapter
+                .materialize(
+                    &manifest,
+                    &MaterializationRequest::Range {
+                        offset: MAX_STREAM_PART_BYTES as u64 - 2,
+                        length: 4,
+                    },
+                    context(),
+                    &store,
+                )
+                .unwrap(),
+            [1, 1, 2, 2]
+        );
+        assert_eq!(
+            adapter
+                .materialize(
+                    &after_five,
+                    &MaterializationRequest::Range {
+                        offset: 5 * MAX_STREAM_PART_BYTES as u64 - 2,
+                        length: 2,
+                    },
+                    context(),
+                    &store,
+                )
+                .unwrap(),
+            [5, 5],
+            "the older root remains directly readable after right-spine copying"
         );
     }
 }

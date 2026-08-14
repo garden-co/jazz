@@ -74,10 +74,12 @@ does not include `editTail`.
 - **subscribe(owner):** subscribe to the owning row/column. Each observed
   version supplies a full manifest that can be materialized independently.
 
-The initial cap should be selected for common appends, not as a universal
-constant. Existing physical receipts make 128--256 B a good initial
-small-append candidate; the foundation should allow the stream codec to state
-its cap so the public default remains revisable.
+`stream-v1` fixes the inline-tail cap at 256 B and tree fanout at 32. These are
+part of that adapter kind's replicated meaning even though they are not repeated
+in each payload. A different cap or fanout requires a new adapter kind/version;
+allowing runtime configuration under `stream-v1` would let equal logical input
+canonicalize to different roots. Existing physical receipts place 256 B in the
+best observed range for common small appends.
 
 ## Foundation hooks consumed by this adapter
 

@@ -42,16 +42,21 @@ fn registered_stream_manifest_runs_through_a_real_node() {
     let node_uuid = NodeUuid::from_bytes([0x51; 16]);
     let domain = ContentDomainId(node_uuid.0);
     let context = ContentReadContext { domain };
-    let adapter = StreamManifestAdapter::new(4, 4).unwrap();
+    let adapter = StreamManifestAdapter::default();
     let mut store = MemoryImmutableContentStore::default();
 
     let empty = adapter.empty_manifest(context, &mut store).unwrap();
+    let immutable_bytes = (0..257)
+        .map(|index| (index % 251) as u8)
+        .collect::<Vec<_>>();
     let immutable_history = adapter
-        .append(&empty, b"abcde", context, &mut store)
+        .append(&empty, &immutable_bytes, context, &mut store)
         .unwrap();
     let current = adapter
         .append(&immutable_history, b"fg", context, &mut store)
         .unwrap();
+    let mut current_bytes = immutable_bytes.clone();
+    current_bytes.extend_from_slice(b"fg");
 
     // The schema bound is deliberately wider than stream-v1's production
     // bound so row admission proves the registered adapter also validates it.
@@ -129,7 +134,7 @@ fn registered_stream_manifest_runs_through_a_real_node() {
             &MaterializationRequest::Full,
         )
         .unwrap(),
-        b"abcdefg"
+        current_bytes
     );
     assert_eq!(
         node.materialize_content_manifest(
@@ -137,12 +142,12 @@ fn registered_stream_manifest_runs_through_a_real_node() {
             "attachment",
             visible_cell,
             &MaterializationRequest::Range {
-                offset: 3,
+                offset: 255,
                 length: 4,
             },
         )
         .unwrap(),
-        b"defg"
+        [4, 5, b'f', b'g']
     );
     assert_eq!(
         node.materialize_content_manifest(
@@ -152,7 +157,7 @@ fn registered_stream_manifest_runs_through_a_real_node() {
             &MaterializationRequest::Full,
         )
         .unwrap(),
-        b"abcde",
+        immutable_bytes,
         "a direct historical manifest must not consult current row history"
     );
     let index = node
@@ -160,7 +165,7 @@ fn registered_stream_manifest_runs_through_a_real_node() {
         .unwrap();
     assert_eq!(
         u64::from_le_bytes(index["length"].as_slice().try_into().unwrap()),
-        7
+        259
     );
 
     let maximum_tail = ContentManifest {
