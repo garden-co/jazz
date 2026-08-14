@@ -188,24 +188,12 @@ const internalHelperRuntimeExports = [
 ] as const;
 
 const packageRootDir = dirname(fileURLToPath(import.meta.url));
-const removedBrowserRuntimePrefix = ["browser", "broker"].join("-");
 const removedPostMessagePathName = ["worker", "bridge"].join("-");
-const removedLeaderLockName = ["leader", "lock"].join("-");
 const removedBrowserRuntimeBuildArtifacts = [
-  `runtime/${removedBrowserRuntimePrefix}-client.js`,
-  `runtime/${removedBrowserRuntimePrefix}-client.d.ts`,
-  `runtime/${removedBrowserRuntimePrefix}-errors.js`,
-  `runtime/${removedBrowserRuntimePrefix}-errors.d.ts`,
-  `runtime/${removedBrowserRuntimePrefix}-protocol.js`,
-  `runtime/${removedBrowserRuntimePrefix}-protocol.d.ts`,
-  `runtime/${removedLeaderLockName}.js`,
-  `runtime/${removedLeaderLockName}.d.ts`,
   "runtime/sync-transport.js",
   "runtime/sync-transport.d.ts",
   `runtime/${removedPostMessagePathName}.js`,
   `runtime/${removedPostMessagePathName}.d.ts`,
-  `worker/jazz-${removedBrowserRuntimePrefix.split("-")[1]}-worker.js`,
-  `worker/jazz-${removedBrowserRuntimePrefix.split("-")[1]}-worker.d.ts`,
   "worker/jazz-worker.js",
   "worker/jazz-worker.d.ts",
 ] as const;
@@ -238,6 +226,10 @@ const removedBrowserRuntimeExportPathFragments = [
 ] as const;
 
 const removedRuntimeBuildPathFragments = [
+  ["direct", "wasm"].join("-"),
+  "sync-transport",
+  "worker-bridge",
+  "jazz-worker",
   "runtime/core-runtime/",
   "core-codec",
   "runtime/native-row-format",
@@ -431,9 +423,8 @@ describe("package root public API", () => {
     const distFiles = listDistFiles(distDir);
     const unexpectedRuntimeFiles = distFiles.filter(
       (file) =>
-        [...removedBrowserRuntimeExportPathFragments, ...removedRuntimeBuildPathFragments].some(
-          (fragment) => file.includes(fragment),
-        ) && !file.includes(".test."),
+        removedRuntimeBuildPathFragments.some((fragment) => file.includes(fragment)) &&
+        !file.includes(".test."),
     );
 
     expect(unexpectedRuntimeFiles).toEqual([]);

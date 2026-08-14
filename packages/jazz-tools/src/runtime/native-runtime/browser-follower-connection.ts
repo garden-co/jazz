@@ -1,0 +1,155 @@
+import type { AuthFailureReason } from "../auth-state.js";
+import type {
+  BrowserFollowerConnection,
+  BrowserFollowerConnectionContext,
+} from "../runtime-source.js";
+import { BrowserWorkerTransportPump, transferableFrames } from "./browser-worker-transport.js";
+import type {
+  BrowserFollowerPortEvent,
+  BrowserFollowerPortRequest,
+} from "./browser-worker-protocol.js";
+import type { NativeRuntimeAdapter } from "./native-runtime-adapter.js";
+
+type PendingRequest = {
+  resolve: () => void;
+  reject: (error: Error) => void;
+};
+
+type BrowserFollowerPortRpcRequest =
+  | { type: "init"; sessionClaims: Record<string, unknown> }
+  | { type: "wait-server" };
+
+/** Connects one tab's non-durable in-memory runtime to the elected worker. */
+export class MessagePortBrowserFollowerConnection implements BrowserFollowerConnection {
+  private readonly pump: BrowserWorkerTransportPump;
+  private readonly readyPromise: Promise<void>;
+  private readonly pending = new Map<number, PendingRequest>();
+  private nextRequestId = 1;
+  private closed = false;
+  private failed: Error | null = null;
+
+  constructor(
+    runtime: NativeRuntimeAdapter,
+    private readonly port: MessagePort,
+    sessionClaims: Record<string, unknown>,
+    private readonly callbacks: Pick<
+      BrowserFollowerConnectionContext,
+      "onAuthFailure" | "onFailure"
+    >,
+  ) {
+    port.addEventListener("message", this.onMessage);
+    port.addEventListener("messageerror", this.onMessageError);
+    port.start();
+
+    // Establish the accepted peer with this tab's claims before any runtime
+    // frames can be delivered. MessagePort ordering keeps the handshake ahead
+    // of the pump's first outbound frame.
+    this.readyPromise = this.request({ type: "init", sessionClaims });
+    void this.readyPromise.catch((error: unknown) => this.fail(asError(error)));
+
+    const transport = runtime.connectUpstreamPeer();
+    this.pump = new BrowserWorkerTransportPump(runtime, transport, (frames) => {
+      const copies = transferableFrames(frames);
+      this.port.postMessage(
+        { type: "frames", frames: copies } satisfies BrowserFollowerPortRequest,
+        copies.map((frame) => frame.buffer),
+      );
+    });
+  }
+
+  async ready(): Promise<void> {
+    await this.readyPromise;
+    if (this.failed) throw this.failed;
+    if (this.closed) throw new Error("Browser follower connection is closed");
+  }
+
+  async waitForServerConnection(): Promise<void> {
+    await this.ready();
+    await this.request({ type: "wait-server" });
+  }
+
+  updateAuth(authJson: string, sessionClaims: Record<string, unknown>): void {
+    if (this.closed || this.failed) return;
+    void this.ready()
+      .then(() => {
+        this.port.postMessage({
+          type: "update-auth",
+          authJson,
+          sessionClaims,
+        } satisfies BrowserFollowerPortRequest);
+      })
+      .catch((error: unknown) => this.fail(asError(error)));
+  }
+
+  async shutdown(): Promise<void> {
+    if (this.closed) return;
+    this.port.postMessage({ type: "close" } satisfies BrowserFollowerPortRequest);
+    this.dispose(new Error("Browser follower connection is closed"));
+  }
+
+  private request(request: BrowserFollowerPortRpcRequest): Promise<void> {
+    if (this.failed) return Promise.reject(this.failed);
+    if (this.closed) return Promise.reject(new Error("Browser follower connection is closed"));
+    const id = this.nextRequestId++;
+    const message = { ...request, id };
+    const promise = new Promise<void>((resolve, reject) => {
+      this.pending.set(id, { resolve, reject });
+    });
+    this.port.postMessage(message satisfies BrowserFollowerPortRequest);
+    return promise;
+  }
+
+  private readonly onMessage = (event: MessageEvent<BrowserFollowerPortEvent>): void => {
+    const message = event.data;
+    if (message.type === "frames") {
+      this.pump.receive(message.frames);
+      return;
+    }
+    if (message.type === "auth-failure") {
+      this.callbacks.onAuthFailure(message.reason as AuthFailureReason);
+      return;
+    }
+    if (message.type === "error") {
+      this.fail(new Error(message.message));
+      return;
+    }
+    const pending = this.pending.get(message.id);
+    if (!pending) return;
+    this.pending.delete(message.id);
+    if (message.error) pending.reject(new Error(message.error));
+    else pending.resolve();
+  };
+
+  private readonly onMessageError = (): void => {
+    this.fail(new Error("Browser follower port message error"));
+  };
+
+  private fail(error: Error): void {
+    if (this.failed || this.closed) return;
+    this.failed = error;
+    // Tell the worker that this endpoint is gone so it can notify the broker,
+    // which will issue a fresh channel while the leadership is still valid.
+    try {
+      this.port.postMessage({ type: "close" } satisfies BrowserFollowerPortRequest);
+    } catch {
+      // The port may already be unusable; disposal below is still required.
+    }
+    this.callbacks.onFailure(error);
+    this.dispose(error);
+  }
+
+  private dispose(error: Error): void {
+    if (this.closed) return;
+    this.closed = true;
+    this.port.removeEventListener("message", this.onMessage);
+    this.port.removeEventListener("messageerror", this.onMessageError);
+    this.pump.close();
+    this.port.close();
+    for (const pending of this.pending.values()) pending.reject(error);
+    this.pending.clear();
+  }
+}
+
+function asError(error: unknown): Error {
+  return error instanceof Error ? error : new Error(String(error));
+}

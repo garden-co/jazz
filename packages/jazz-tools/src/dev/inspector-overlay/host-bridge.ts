@@ -1,4 +1,6 @@
+import { resolveBrokerWorkerUrl } from "../../runtime/browser-broker-client.js";
 import type { Db, DbConfig } from "../../runtime/db.js";
+import { resolveDefaultPersistentDbName } from "../../runtime/db.js";
 import { getRegisteredWasmSchema } from "../../typed-app.js";
 import {
   INSPECTOR_HOST_GLOBAL,
@@ -8,9 +10,8 @@ import {
 } from "./inspector-host-types.js";
 
 /**
- * Build an isolated direct-mode config for the overlay. Until tab leadership
- * is restored, the overlay must not open a second persistent worker against
- * the host's OPFS namespace.
+ * Build a config that lets the overlay join the host's browser broker as an
+ * ordinary tab, including when the host is offline.
  */
 function buildOverlayDbConfig(config: DbConfig): DbConfig {
   const identityCredential = config.jwtToken
@@ -28,7 +29,8 @@ function buildOverlayDbConfig(config: DbConfig): DbConfig {
     userBranch: config.userBranch,
     ...identityCredential,
     ...(config.adminSecret ? { adminSecret: config.adminSecret } : {}),
-    driver: { type: "memory" },
+    driver: { type: "persistent", dbName: resolveDefaultPersistentDbName(config) },
+    runtimeSources: { brokerWorkerUrl: resolveBrokerWorkerUrl(config.runtimeSources) },
   };
 }
 

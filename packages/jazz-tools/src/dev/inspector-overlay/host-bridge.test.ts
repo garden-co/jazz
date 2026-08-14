@@ -8,7 +8,6 @@ function makeFakeDb(overrides: Record<string, unknown> = {}) {
   return {
     db: {
       setDevMode: vi.fn(),
-      subscribeAll: () => () => {},
       getConfig: () => ({
         appId: "app1",
         serverUrl: "http://server",
@@ -93,7 +92,7 @@ describe("installInspectorHost", () => {
     expect((window as any)[INSPECTOR_HOST_GLOBAL]).toBeUndefined();
   });
 
-  it("publishes an isolated direct-mode config for the overlay", () => {
+  it("publishes a persistent config that joins the host broker", () => {
     const iframeWindow = { postMessage: () => {} } as unknown as Window;
     const fake = makeFakeDb({
       getConfig: () => ({
@@ -112,8 +111,9 @@ describe("installInspectorHost", () => {
       serverUrl: "http://server",
       secret: "seed",
       adminSecret: "adm",
-      driver: { type: "memory" },
+      driver: { type: "persistent", dbName: "a" },
     });
     expect(config.cookieSession).toBeUndefined();
+    expect(typeof config.runtimeSources.brokerWorkerUrl).toBe("string");
   });
 });
