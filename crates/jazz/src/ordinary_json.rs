@@ -887,10 +887,18 @@ impl ContentManifestAdapter for OrdinaryJsonAdapter {
                 JsonOperation::decode(bytes).is_ok_and(|operation| emitted.insert(operation.id()))
             })
             .collect();
-        Ok(ContentManifest {
+        let merged = ContentManifest {
             root: first.root,
             edit_tail,
-        })
+        };
+        // Validate the exact deterministic tail being returned, not only each
+        // authored candidate in isolation. Cross-candidate created IDs and
+        // dependencies become visible only in this combined sequence.
+        let mut combined = root;
+        for operation in Self::decoded_tail(&merged)? {
+            self.apply(&mut combined, &operation)?;
+        }
+        Ok(merged)
     }
     fn index_values(
         &self,
@@ -1410,6 +1418,68 @@ mod tests {
                 .materialize(&candidate, &MaterializationRequest::Full, context(), &store)
                 .unwrap(),
             br#"{"items":[1],"status":"second"}"#
+        );
+    }
+
+    #[test]
+    fn cross_candidate_created_ids_must_be_distinct_even_at_different_anchors() {
+        let (adapter, store, base, node) = seeded();
+        let (array, anchor) = match &node.value {
+            MaterializedValue::Object(values) => match &values["items"].value {
+                MaterializedValue::Array(items) => (values["items"].id, items[0].id),
+                _ => unreachable!(),
+            },
+            _ => unreachable!(),
+        };
+        let candidate = |op, element, anchor, after| ContentManifest {
+            root: base.root,
+            edit_tail: vec![
+                JsonOperation::InsertArray {
+                    op,
+                    array,
+                    element,
+                    anchor,
+                    after,
+                    value: JsonLiteral::Scalar(JsonScalar::Number(2)),
+                }
+                .encode()
+                .unwrap(),
+            ],
+        };
+        let shared = Uuid::from_bytes([0x83; 16]);
+        let front = candidate(Uuid::from_bytes([0x84; 16]), shared, None, false);
+        let after = candidate(Uuid::from_bytes([0x85; 16]), shared, Some(anchor), true);
+        assert_eq!(
+            adapter.merge(&[front, after], context(), &store),
+            Err(ManifestError::Conflict(
+                "inserted JSON literal logical id already exists"
+            ))
+        );
+
+        let distinct = adapter
+            .merge(
+                &[
+                    candidate(
+                        Uuid::from_bytes([0x86; 16]),
+                        Uuid::from_bytes([0x87; 16]),
+                        None,
+                        false,
+                    ),
+                    candidate(
+                        Uuid::from_bytes([0x88; 16]),
+                        Uuid::from_bytes([0x89; 16]),
+                        Some(anchor),
+                        true,
+                    ),
+                ],
+                context(),
+                &store,
+            )
+            .unwrap();
+        assert!(
+            adapter
+                .materialize(&distinct, &MaterializationRequest::Full, context(), &store)
+                .is_ok()
         );
     }
 
