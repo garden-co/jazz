@@ -12,6 +12,8 @@ import {
   TEXT_FRONTIER_MAX_PATCHES,
   textTableDefinitions,
   textTablesFromApp,
+  type TextSnapshot,
+  type TextStore,
 } from "./index.js";
 
 const app = s.defineApp({ ...textTableDefinitions });
@@ -35,6 +37,27 @@ const readWritePermissions = s.definePermissions(app, ({ policy }) => [
   policy.jazz_text_nodes.allowRead.always(),
   policy.jazz_text_nodes.allowInsert.always(),
 ]);
+
+async function waitForTextSnapshot(
+  text: TextStore,
+  documentId: string,
+  accept: (snapshot: TextSnapshot) => boolean,
+  description: string,
+): Promise<TextSnapshot> {
+  const deadline = performance.now() + 5_000;
+  let lastError: unknown;
+  while (performance.now() < deadline) {
+    try {
+      const snapshot = await text.read(documentId);
+      if (accept(snapshot)) return snapshot;
+    } catch (error) {
+      if (!(error instanceof Error) || !error.message.includes("was not found")) throw error;
+      lastError = error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error(`Timed out waiting for ${description}`, { cause: lastError });
+}
 
 function setup(options: Parameters<typeof createTextStore>[2] = {}) {
   const dataPath = mkdtempSync(join(tmpdir(), "jazz-ordinary-text-test-"));
@@ -203,18 +226,42 @@ describe("ordinary-row text", () => {
     const draft = makeClient("draft");
     try {
       const initial = await first.text.create("shared");
-      const mainBase = await second.text.read(initial.documentId);
-      const draftBase = await draft.text.read(initial.documentId);
+      const mainBase = await waitForTextSnapshot(
+        second.text,
+        initial.documentId,
+        (snapshot) => snapshot.versionId === initial.versionId,
+        "the initial main-client text head",
+      );
+      const draftBase = await waitForTextSnapshot(
+        draft.text,
+        initial.documentId,
+        (snapshot) => snapshot.versionId === initial.versionId,
+        "the initial branch-writer text head",
+      );
       expect(mainBase.versionId).toBe(initial.versionId);
       expect(draftBase.versionId).toBe(initial.versionId);
 
       const mainEdit = await second.text.insert(mainBase, mainBase.length, "!");
       const draftEdit = await draft.text.insert(draftBase, draftBase.length, "?");
-      await expect(first.text.read(initial.documentId)).resolves.toMatchObject({
+      await expect(
+        waitForTextSnapshot(
+          first.text,
+          initial.documentId,
+          (snapshot) => snapshot.versionId === draftEdit.versionId,
+          "the merged current text head on the first client",
+        ),
+      ).resolves.toMatchObject({
         versionId: draftEdit.versionId,
         text: "shared?",
       });
-      await expect(second.text.read(initial.documentId)).resolves.toMatchObject({
+      await expect(
+        waitForTextSnapshot(
+          second.text,
+          initial.documentId,
+          (snapshot) => snapshot.versionId === draftEdit.versionId,
+          "the merged current text head on the second client",
+        ),
+      ).resolves.toMatchObject({
         versionId: draftEdit.versionId,
         text: "shared?",
       });
