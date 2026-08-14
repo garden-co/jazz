@@ -27,7 +27,8 @@ export function uniqueDbName(label: string): string {
 
 /** Abruptly terminate a Db's OPFS worker without running its normal close path. */
 export function simulateCrash(db: Db): void {
-  const bridge = (db as any).connection?.bridge;
+  const role = (db as any).connection?.activeRoleBridge;
+  const bridge = role?.workerBridge;
   const worker = bridge?.worker as Worker | undefined;
   if (!bridge || !worker) {
     throw new Error("persistent browser worker is unavailable");

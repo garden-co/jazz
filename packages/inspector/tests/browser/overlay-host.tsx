@@ -2,7 +2,8 @@
 // the test sync server, publishes the `window.__jazzInspectorHost` handle (the
 // same shape the loader's installInspectorHost builds), pushes its active
 // subscription list to the embedded inspector iframe, and the overlay opens an
-// isolated direct in-memory connection from the published config. No devtools bridge.
+// independent browser client that joins the host's broker SharedWorker from the
+// published config. No devtools bridge.
 //
 // Exercised by overlay.spec.ts.
 import { StrictMode, useEffect, useRef } from "react";

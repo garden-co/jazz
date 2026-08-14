@@ -17,7 +17,7 @@ function resolveBrowserAssetBase(locationHref: string): string {
   return new URL("/", locationHref).href;
 }
 
-function resolveConfiguredUrl(url: string, locationHref: string | undefined): string {
+export function resolveConfiguredUrl(url: string, locationHref: string | undefined): string {
   // If `url` is already absolute, ignore the base. Workers under some bundlers
   // (Turbopack) expose a non-URL `self.location.href`, and `new URL(absolute,
   // badBase)` still throws because the base is validated.
@@ -101,4 +101,24 @@ export function resolveRuntimeConfigWasmUrl(
   // from a non-HTTP origin (e.g. file://) — a static HTML page with the WASM
   // copied to the same directory.
   return resolveDerivedWasmUrl(runtimeModuleUrl, locationHref, false);
+}
+
+export function resolveRuntimeConfigBrokerWorkerUrl(
+  runtimeModuleUrl: string,
+  locationHref: string | undefined,
+  runtime?: RuntimeSourcesConfig,
+): string {
+  if (runtime?.brokerWorkerUrl) {
+    return resolveConfiguredUrl(runtime.brokerWorkerUrl, locationHref);
+  }
+  if (runtime?.baseUrl) {
+    const baseUrl = resolveConfiguredBaseUrl(runtime.baseUrl, locationHref);
+    if (baseUrl) {
+      return new URL("worker/jazz-broker-worker.js", baseUrl).href;
+    }
+  }
+  if (!locationHref || isHttpUrl(runtimeModuleUrl)) {
+    return new URL("../worker/jazz-broker-worker.js", runtimeModuleUrl).href;
+  }
+  return new URL("worker/jazz-broker-worker.js", resolveBrowserAssetBase(locationHref)).href;
 }

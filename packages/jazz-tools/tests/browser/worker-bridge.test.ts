@@ -123,15 +123,25 @@ function getBrowserConnection(db: Db): any {
 }
 
 function getActiveRoleBridge(db: Db): any {
-  return getBrowserConnection(db)?.bridge ?? null;
+  return getBrowserConnection(db)?.activeRoleBridge ?? null;
 }
 
 function getPrivateWorker(db: Db): Worker | null {
-  return getActiveRoleBridge(db)?.worker ?? null;
+  return getActiveRoleBridge(db)?.workerBridge?.worker ?? null;
 }
 
 function getFollowerPortBridge(db: Db): any {
   return getActiveRoleBridge(db)?.followerPortBridge ?? null;
+}
+
+function clearPrivateWorkerBridge(db: Db): void {
+  const role = getActiveRoleBridge(db);
+  const bridge = role?.workerBridge;
+  if (!bridge) return;
+  bridge.closed = true;
+  bridge.pump?.close();
+  role.workerBridge = null;
+  role.bridgeReady = null;
 }
 
 function summarizeWorkerMessage(
@@ -669,7 +679,7 @@ describe("Worker Bridge with OPFS", () => {
     expect(await db.all(allTodos, { tier: "local" })).toHaveLength(1);
   });
 
-  it.fails("resolves a fresh-namespace storage reset while a second fresh tab is open", async () => {
+  it("resolves a fresh-namespace storage reset while a second fresh tab is open", async () => {
     const dbName = uniqueDbName("delete-storage-fresh-two-tabs");
     const dbA = track(
       await createDb({ appId: "test-app", driver: { type: "persistent", dbName } }),
@@ -693,7 +703,7 @@ describe("Worker Bridge with OPFS", () => {
     );
   });
 
-  it.fails("retries OPFS storage deletion after a transient browser lock", async () => {
+  it("retries OPFS storage deletion after a transient browser lock", async () => {
     const dbName = uniqueDbName("delete-storage-transient-lock");
     const db = track(
       await createDb({
@@ -741,7 +751,7 @@ describe("Worker Bridge with OPFS", () => {
     expect(await db.all(allTodos, { tier: "local" })).toEqual([]);
   });
 
-  it.fails("deletes OPFS storage across leader and follower tabs when requested from a follower", async () => {
+  it("deletes OPFS storage across leader and follower tabs when requested from a follower", async () => {
     const dbName = uniqueDbName("delete-storage-follower");
     const dbA = track(
       await createDb({
@@ -2007,7 +2017,7 @@ describe("Worker Bridge with OPFS", () => {
   // 8. Leader election + cross-tab peer routing
   // -------------------------------------------------------------------------
 
-  it.fails("routes follower writes through the elected leader", async () => {
+  it("routes follower writes through the elected leader", async () => {
     const dbName = uniqueDbName("leader-route");
     const dbA = track(
       await createDb({
@@ -2022,6 +2032,12 @@ describe("Worker Bridge with OPFS", () => {
       }),
     );
     const { leader, follower } = await waitForLeaderAndFollower(dbA, dbB);
+
+    // Browser persistence is initialized lazily on first schema use.
+    await Promise.all([
+      leader.all(allTodos, { tier: "local" }),
+      follower.all(allTodos, { tier: "local" }),
+    ]);
 
     await waitForCondition(
       async () => getPrivateWorker(leader) !== null && getPrivateWorker(follower) === null,
@@ -2063,7 +2079,7 @@ describe("Worker Bridge with OPFS", () => {
     unsubscribe();
   });
 
-  it.fails("syncs a follower opened after the leader is already ready", async () => {
+  it("syncs a follower opened after the leader is already ready", async () => {
     const dbName = uniqueDbName("late-follower-route");
     const leader = track(
       await createDb({
@@ -2107,7 +2123,7 @@ describe("Worker Bridge with OPFS", () => {
     expect(followerRows.some((row) => row.title === "Created before second tab")).toBe(true);
   });
 
-  it.fails("gates a late follower subscription's first snapshot on the leader data port", async () => {
+  it("hydrates a late follower subscription through the leader data port", async () => {
     const dbName = uniqueDbName("late-follower-subscribe");
     const leader = track(
       await createDb({
@@ -2146,12 +2162,10 @@ describe("Worker Bridge with OPFS", () => {
     );
 
     await waitForCondition(
-      async () => snapshots.length > 0,
+      async () => snapshots.some((rows) => rows.some((row) => row.title === title)),
       8000,
-      "Late follower subscription should produce an initial snapshot",
+      "Late follower subscription should hydrate the persisted row",
     );
-
-    expect(snapshots[0].some((row) => row.title === title)).toBe(true);
 
     unsubscribe();
   });
@@ -2211,11 +2225,12 @@ describe("Worker Bridge with OPFS", () => {
     expect(Array.isArray(rows)).toBe(true);
   });
 
-  it.fails("fans out an auth failure to follower tabs", async () => {
+  it("fans out an auth failure to follower tabs", async () => {
     const { appId, serverUrl } = await getJazzServerInfo(uniqueDbName("auth-fanout"));
     const dbName = uniqueDbName("auth-fanout");
-    const validJwt = await getJazzServerJwtForUser("auth-fanout-user", undefined, appId);
-    const invalidJwt = makeStructurallyValidJwt("auth-fanout-user");
+    const userId = "00000000-0000-0000-0000-00000000fa01";
+    const validJwt = await getJazzServerJwtForUser(userId, undefined, appId);
+    const invalidJwt = makeStructurallyValidJwt(userId);
 
     const dbA = track(
       await createDb({
@@ -2252,7 +2267,6 @@ describe("Worker Bridge with OPFS", () => {
     expect(follower.getAuthState().error).toBeUndefined();
 
     leader.updateAuthToken(invalidJwt);
-    getActiveRoleBridge(leader)?.replayServerConnection?.();
 
     await waitForCondition(
       async () => leader.getAuthState().error === "invalid",
@@ -2266,7 +2280,7 @@ describe("Worker Bridge with OPFS", () => {
     );
   }, 60000);
 
-  it.fails("fails over to follower after leader shutdown", async () => {
+  it("fails over to follower after leader shutdown", async () => {
     const dbName = uniqueDbName("leader-failover");
     const dbA = track(
       await createDb({
@@ -2304,7 +2318,7 @@ describe("Worker Bridge with OPFS", () => {
     );
   });
 
-  it.fails("reconciles a follower write that was pending when the leader crashes", async () => {
+  it("reconciles a follower write that was pending when the leader crashes", async () => {
     const dbName = uniqueDbName("leader-crash-pending-follower-write");
     const dbA = track(
       await createDb({
@@ -2323,12 +2337,12 @@ describe("Worker Bridge with OPFS", () => {
     const marker = `pending-follower-write-${Date.now()}`;
     let pendingWrite!: Promise<unknown>;
     let pendingWriteState: "pending" | "resolved" | "rejected" = "pending";
+    await leader.all(allTodos, { tier: "local" });
     await waitForCondition(
       async () => getPrivateWorker(leader) !== null && getPrivateWorker(follower) === null,
       8000,
       "Broker should keep the follower bridged through the elected leader",
     );
-    await leader.all(allTodos, { tier: "local" });
     await waitForCondition(
       async () => {
         void getBrowserConnection(follower)?.followerReady?.catch(() => {});
@@ -2404,7 +2418,7 @@ describe("Worker Bridge with OPFS", () => {
     expect(rows.some((row) => row.title === marker)).toBe(true);
   });
 
-  it.fails("resolves a pending follower local-wait when the bridged leader crashes with the write in flight", async () => {
+  it("resolves a pending follower local-wait when the bridged leader crashes with the write in flight", async () => {
     // Faithful version of the failover-during-pending-write case. Unlike a write
     // made while the follower is detached (which only ever buffers locally and
     // replays on self-promotion), here the follower stays *bridged* to the
@@ -2535,7 +2549,7 @@ describe("Worker Bridge with OPFS", () => {
     expect(reopenedRows.some((row) => row.title === marker)).toBe(true);
   });
 
-  it.fails("re-elects cleanly when a closed leader tab is reopened", async () => {
+  it("re-elects cleanly when a closed leader tab is reopened", async () => {
     const dbName = uniqueDbName("leader-reopen");
     const dbA = track(
       await createDb({

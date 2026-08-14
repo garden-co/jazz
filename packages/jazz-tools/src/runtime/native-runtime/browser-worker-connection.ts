@@ -30,7 +30,10 @@ export class DedicatedBrowserWorkerConnection implements BrowserWorkerConnection
   constructor(
     runtime: NativeRuntimeAdapter,
     options: BrowserWorkerInitOptions,
-    callbacks: Pick<BrowserWorkerConnectionContext, "onAuthFailure" | "onFailure">,
+    private readonly callbacks: Pick<
+      BrowserWorkerConnectionContext,
+      "onAuthFailure" | "onFailure" | "onFollowerPortClosed"
+    >,
   ) {
     this.onFailure = callbacks.onFailure;
     this.worker = new Worker(new URL("./browser-connection-worker.js", import.meta.url), {
@@ -50,7 +53,9 @@ export class DedicatedBrowserWorkerConnection implements BrowserWorkerConnection
     };
 
     this.readyPromise = this.request({ type: "init", ...options });
-    this.readyPromise.catch(callbacks.onFailure);
+    this.readyPromise.catch((error: unknown) => {
+      if (!this.failed) callbacks.onFailure(error);
+    });
 
     const transport = runtime.connectUpstreamPeer();
     this.pump = new BrowserWorkerTransportPump(runtime, transport, (frames) => {
@@ -73,6 +78,20 @@ export class DedicatedBrowserWorkerConnection implements BrowserWorkerConnection
       .catch((error: unknown) => this.fail(asError(error)));
   }
 
+  async attachFollowerPort(
+    followerTabId: string,
+    leadershipId: number,
+    port: MessagePort,
+  ): Promise<void> {
+    await this.ready();
+    await this.request({ type: "attach-follower", followerTabId, leadershipId, port }, [port]);
+  }
+
+  async detachFollowerPort(followerTabId: string, leadershipId: number): Promise<void> {
+    await this.ready();
+    await this.request({ type: "detach-follower", followerTabId, leadershipId });
+  }
+
   async disconnect(): Promise<void> {
     await this.ready();
     await this.request({ type: "disconnect" });
@@ -89,6 +108,11 @@ export class DedicatedBrowserWorkerConnection implements BrowserWorkerConnection
     this.dispose();
   }
 
+  async simulateCrash(): Promise<void> {
+    await this.ready();
+    await this.request({ type: "simulate-crash" });
+  }
+
   async shutdown(): Promise<void> {
     if (this.closed) return;
     try {
@@ -99,14 +123,14 @@ export class DedicatedBrowserWorkerConnection implements BrowserWorkerConnection
     }
   }
 
-  private request(request: BrowserWorkerRequest): Promise<void> {
+  private request(request: BrowserWorkerRequest, transfer: Transferable[] = []): Promise<void> {
     if (this.failed) return Promise.reject(this.failed);
     if (this.closed) return Promise.reject(new Error("Browser persistence worker is closed"));
     const id = this.nextRequestId++;
     const promise = new Promise<void>((resolve, reject) => {
       this.pending.set(id, { resolve, reject });
     });
-    this.worker.postMessage({ id, ...request } satisfies BrowserWorkerMessage);
+    this.worker.postMessage({ id, ...request } satisfies BrowserWorkerMessage, transfer);
     return promise;
   }
 
@@ -129,6 +153,10 @@ export class DedicatedBrowserWorkerConnection implements BrowserWorkerConnection
     }
     if (message.type === "auth-failure") {
       onAuthFailure(message.reason as AuthFailureReason);
+      return;
+    }
+    if (message.type === "follower-port-closed") {
+      this.callbacks.onFollowerPortClosed(message.followerTabId, message.leadershipId);
       return;
     }
     if (message.type === "error") {

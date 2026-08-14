@@ -137,6 +137,7 @@ export function resolveDefaultPersistentDbName(config: DbConfig): string {
   const session = resolveClientSessionSync({
     appId: config.appId,
     jwtToken: config.jwtToken,
+    cookieSession: config.cookieSession,
   });
 
   if (!session?.user_id || session.authMode === "anonymous") {

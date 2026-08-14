@@ -9,12 +9,15 @@ import {
   RuntimeSource,
   type BrowserWorkerConnection,
   type BrowserWorkerConnectionContext,
+  type BrowserFollowerConnection,
+  type BrowserFollowerConnectionContext,
   type RuntimeClientContext,
   type RuntimeTelemetryContext,
   type RuntimeTokenOptions,
 } from "./runtime-source.js";
 import { NativeRuntimeAdapter } from "./native-runtime/native-runtime-adapter.js";
 import { DedicatedBrowserWorkerConnection } from "./native-runtime/browser-worker-connection.js";
+import { MessagePortBrowserFollowerConnection } from "./native-runtime/browser-follower-connection.js";
 import { installWasmTelemetry } from "./sync-telemetry.js";
 import { parseJwtPayload, resolveClientSessionSync } from "./client-session.js";
 import type { WasmSchema } from "../drivers/types.js";
@@ -158,8 +161,11 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
     config,
     schema,
     client,
+    leadershipId,
+    workerLockName,
     onAuthFailure,
     onFailure,
+    onFollowerPortClosed,
   }: BrowserWorkerConnectionContext<DbConfig>): BrowserWorkerConnection {
     const runtime = client.getRuntime();
     if (!(runtime instanceof NativeRuntimeAdapter)) {
@@ -184,11 +190,33 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
         serverUrl: config.serverUrl ? httpUrlToWs(config.serverUrl, config.appId) : undefined,
         authJson: JSON.stringify(runtimeAuth(config)),
         sessionClaims: resolveClientSessionSync(config)?.claims ?? {},
+        leadershipId,
+        workerLockName,
         logLevel: config.logLevel,
         telemetryCollectorUrl: config.telemetryCollectorUrl,
       },
-      { onAuthFailure, onFailure },
+      { onAuthFailure, onFailure, onFollowerPortClosed },
     );
+  }
+
+  override createBrowserFollowerConnection({
+    config,
+    client,
+    port,
+    onAuthFailure,
+    onFailure,
+  }: BrowserFollowerConnectionContext<DbConfig>): BrowserFollowerConnection {
+    const runtime = client.getRuntime();
+    if (!(runtime instanceof NativeRuntimeAdapter)) {
+      throw new Error("Browser follower connections require the native runtime adapter");
+    }
+    const sessionClaims = resolveClientSessionSync(config)?.claims ?? {};
+    const connection = new MessagePortBrowserFollowerConnection(runtime, port, sessionClaims, {
+      onAuthFailure,
+      onFailure,
+    });
+    connection.updateAuth(JSON.stringify(runtimeAuth(config)), sessionClaims);
+    return connection;
   }
 
   private nativeSchemaView(

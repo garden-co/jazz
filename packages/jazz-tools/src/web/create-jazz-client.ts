@@ -4,7 +4,6 @@ import type { Db, DbConfig } from "../runtime/db.js";
 import { createDb } from "../runtime/db.js";
 import { SubscriptionsOrchestrator, trackPromise } from "../subscriptions-orchestrator.js";
 import { attachSubscriptionStore, getSubscriptionStore } from "../subscription-store-internal.js";
-import { createDbFromInspectedPage } from "../dev-tools/index.js";
 import { registerWindowJazzStorageClient } from "../window-client-storage.js";
 
 export type JazzClientConfig = DbConfig;
@@ -69,38 +68,4 @@ export function createJazzClient(config: DbConfig): Promise<JazzClient> {
       ),
     ),
   );
-}
-
-async function createExtensionJazzClientInternal(): Promise<JazzClient> {
-  const db = await createDbFromInspectedPage();
-  const connectedConfig = db.getConfig();
-  if (!connectedConfig) {
-    throw new Error("DevTools bridge did not provide an inspected page config.");
-  }
-  let session = db.getAuthState().session;
-  const manager = new SubscriptionsOrchestrator({ appId: connectedConfig.appId }, db, session);
-  await manager.init();
-  const stopSessionSync = db.onAuthChanged(({ session: nextSession }) => {
-    session = nextSession ?? null;
-    manager.setSession(nextSession ?? null);
-  });
-
-  return attachSubscriptionStore(
-    {
-      db,
-      get session() {
-        return session;
-      },
-      async shutdown() {
-        stopSessionSync?.();
-        await manager.shutdown();
-        await db.shutdown();
-      },
-    },
-    manager,
-  );
-}
-
-export function createExtensionJazzClient(): Promise<JazzClient> {
-  return trackPromise(createExtensionJazzClientInternal());
 }

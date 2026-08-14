@@ -1,5 +1,4 @@
 export {
-  createExtensionJazzClient,
   createJazzClient,
   type JazzClient,
   type JazzClientConfig,

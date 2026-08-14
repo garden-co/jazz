@@ -1,4 +1,6 @@
+import { resolveBrokerWorkerUrl } from "../../runtime/browser-broker-client.js";
 import type { Db, DbConfig } from "../../runtime/db.js";
+import { resolveDefaultPersistentDbName } from "../../runtime/db.js";
 import { getRegisteredWasmSchema } from "../../typed-app.js";
 import {
   INSPECTOR_HOST_GLOBAL,
@@ -8,9 +10,9 @@ import {
 } from "./inspector-host-types.js";
 
 /**
- * Build an isolated direct-mode config for the overlay. Until tab leadership
- * is restored, the overlay must not open a second persistent worker against
- * the host's OPFS namespace.
+ * Build the ready-to-use browser config in the host bundle, where the host's
+ * resolved storage coordinates and worker URL are known. The overlay passes it
+ * to its provider verbatim instead of duplicating those resolution rules.
  */
 function buildOverlayDbConfig(config: DbConfig): DbConfig {
   const identityCredential = config.jwtToken
@@ -28,11 +30,20 @@ function buildOverlayDbConfig(config: DbConfig): DbConfig {
     userBranch: config.userBranch,
     ...identityCredential,
     ...(config.adminSecret ? { adminSecret: config.adminSecret } : {}),
-    driver: { type: "memory" },
+    // `persistent` selects BrowserConnectionManager so this client joins the
+    // host's broker/OPFS store. Its main-thread Db is still in-memory; storage
+    // remains owned by the broker's leader worker.
+    driver: { type: "persistent", dbName: resolveDefaultPersistentDbName(config) },
+    // A SharedWorker is identified by URL + name. Forward the exact resolved
+    // URL so the separately-built overlay joins the existing worker.
+    runtimeSources: { brokerWorkerUrl: resolveBrokerWorkerUrl(config.runtimeSources) },
   };
 }
 
-/** Publish the host metadata and active-subscription feed to the overlay. */
+/**
+ * Publish the same-origin host handle and the one-way active-subscription feed.
+ * No live Db crosses the iframe boundary and no devtools protocol is involved.
+ */
 export function installInspectorHost(db: Db, iframeWindow: Window, origin: string): () => void {
   db.setDevMode(true);
 

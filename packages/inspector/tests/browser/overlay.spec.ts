@@ -68,19 +68,23 @@ test.describe("inspector overlay (embedded, own worker connection end-to-end)", 
 
     const inspector = page.frameLocator('iframe[title="jazz-inspector"]');
 
-    // The overlay gets an isolated in-memory config, so it does not open a
-    // competing persistent worker against the host's OPFS namespace.
-    const overlayConfig = await page.evaluate(() => {
-      const host = (
+    // The host publishes the resolved broker-worker URL, so the overlay's
+    // persistent browser config joins the host's SharedWorker/OPFS store rather
+    // than creating a separate local store.
+    const overlayConfig = await page.evaluate(() =>
+      (
         window as unknown as {
           __jazzInspectorHost?: {
-            getConnectionConfig(): { driver?: { type?: string } };
+            getConnectionConfig(): {
+              driver?: { type?: string };
+              runtimeSources?: { brokerWorkerUrl?: string };
+            };
           };
         }
-      ).__jazzInspectorHost;
-      return host?.getConnectionConfig() ?? null;
-    });
-    expect(overlayConfig?.driver?.type).toBe("memory");
+      ).__jazzInspectorHost?.getConnectionConfig(),
+    );
+    expect(overlayConfig?.driver?.type).toBe("persistent");
+    expect(overlayConfig?.runtimeSources?.brokerWorkerUrl).toBeTruthy();
 
     // The overlay reads the handle, opens its connection joining that store, and
     // leaves the connecting state.
