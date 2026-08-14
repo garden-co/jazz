@@ -163,13 +163,26 @@ fn registered_stream_manifest_runs_through_a_real_node() {
         7
     );
 
+    let maximum_tail = ContentManifest {
+        root: current.root,
+        edit_tail: vec![vec![0; 256]],
+    };
+    let boundary = node
+        .commit_mergeable(
+            MergeableCommit::new("documents", RowUuid::from_bytes([0x53; 16]), 30).cells(
+                BTreeMap::from([("attachment".into(), cell(&maximum_tail, &manifest_schema))]),
+            ),
+        )
+        .expect("stream-v1's exact 256-byte operation bound must be admitted");
+    node.finalize_local_mergeable_commit(boundary).unwrap();
+
     let invalid = ContentManifest {
         root: current.root,
         edit_tail: vec![vec![0; 257]],
     };
     assert!(
         node.commit_mergeable(
-            MergeableCommit::new("documents", RowUuid::from_bytes([0x53; 16]), 30).cells(
+            MergeableCommit::new("documents", RowUuid::from_bytes([0x54; 16]), 31).cells(
                 BTreeMap::from([("attachment".into(), cell(&invalid, &manifest_schema))]),
             ),
         )
