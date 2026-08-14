@@ -67,6 +67,47 @@ fn open_db() -> Db<MemoryStorage> {
     .expect("open test database")
 }
 
+fn open_nullable_root_db() -> Db<MemoryStorage> {
+    let schema = JazzSchema::new([
+        TableSchema::new(
+            "assignments",
+            [
+                ColumnSchema::new("assignee", ColumnType::Uuid.nullable()),
+                ColumnSchema::new("title", ColumnType::String),
+            ],
+        )
+        .with_read_policy(Policy::public())
+        .with_write_policy(Policy::public()),
+        TableSchema::new(
+            "notes",
+            [
+                ColumnSchema::new("assignment_id", ColumnType::Uuid),
+                ColumnSchema::new("body", ColumnType::String),
+            ],
+        )
+        .with_reference("assignment_id", "assignments")
+        .with_read_policy(Policy::public())
+        .with_write_policy(Policy::public()),
+    ]);
+    let column_families = schema.column_families();
+    let references = column_families
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    block_on(Db::open(
+        DbConfig::new(
+            schema,
+            MemoryStorage::new(&references),
+            DbIdentity {
+                node: NodeUuid::from_bytes([0x81; 16]),
+                author: AuthorId::from_bytes([0x82; 16]),
+            },
+        )
+        .with_id_source(SeededRowIdSource::new(83)),
+    ))
+    .expect("open nullable-root test database")
+}
+
 fn child_query(bound: ArraySubquery) -> Query {
     Query::from("parents")
         .order_by("rank", OrderDirection::Asc)
@@ -310,6 +351,92 @@ fn maintained_array_subscription_with_root_parameter_lowers_and_delivers() {
             ..
         }] if path == &[jazz::groove::ivm::TerminalPathSegment::Collection(
             "children".to_owned()
+        )]
+    ));
+}
+
+#[test]
+fn maintained_array_subscription_restores_nullable_root_carriers_after_filtering() {
+    let db = open_nullable_root_db();
+    let assignee = NodeUuid::from_bytes([0x83; 16]).0;
+    let assignment = db
+        .insert(
+            "assignments",
+            BTreeMap::from([
+                (
+                    "assignee".to_owned(),
+                    Value::Nullable(Some(Box::new(Value::Uuid(assignee)))),
+                ),
+                ("title".to_owned(), Value::String("assigned".to_owned())),
+            ]),
+        )
+        .expect("insert assignment")
+        .row_uuid();
+    db.insert(
+        "notes",
+        BTreeMap::from([
+            ("assignment_id".to_owned(), Value::Uuid(assignment.0)),
+            ("body".to_owned(), Value::String("initial".to_owned())),
+        ]),
+    )
+    .expect("insert initial note");
+
+    let query = Query::from("assignments")
+        .filter(eq(col("assignee"), param("assignee")))
+        .array_subquery(
+            ArraySubquery::new("notes", "notes", "assignment_id", "id").select(["body"]),
+        );
+    let prepared = db
+        .prepare_query_bound(
+            &query,
+            BTreeMap::from([(
+                "assignee".to_owned(),
+                Value::Nullable(Some(Box::new(Value::Uuid(assignee)))),
+            )]),
+        )
+        .expect("prepare nullable-root array query");
+    let mut subscription = block_on(db.subscribe(&prepared, ReadOpts::default()))
+        .expect("subscribe nullable-root array query");
+    let SubscriptionEvent::Delta {
+        reset: true, added, ..
+    } = block_on(subscription.next_event()).expect("initial nullable-root reset")
+    else {
+        panic!("expected nullable-root reset");
+    };
+    assert_eq!(added.len(), 1);
+    assert_eq!(added[0].row_uuid(), assignment);
+
+    db.insert(
+        "notes",
+        BTreeMap::from([
+            ("assignment_id".to_owned(), Value::Uuid(assignment.0)),
+            ("body".to_owned(), Value::String("later".to_owned())),
+        ]),
+    )
+    .expect("insert later note");
+    let SubscriptionEvent::Delta {
+        reset,
+        added,
+        updated,
+        removed,
+        terminal_operations,
+        ..
+    } = block_on(subscription.next_event()).expect("nullable-root incremental delivery")
+    else {
+        panic!("expected nullable-root incremental delta");
+    };
+    assert!(!reset);
+    assert!(added.is_empty());
+    assert!(updated.is_empty());
+    assert!(removed.is_empty());
+    assert!(matches!(
+        terminal_operations.as_slice(),
+        [jazz::groove::ivm::TerminalOperation {
+            path,
+            edit: jazz::groove::ivm::TerminalEdit::Insert { index: 1, .. },
+            ..
+        }] if path == &[jazz::groove::ivm::TerminalPathSegment::Collection(
+            "notes".to_owned()
         )]
     ));
 }

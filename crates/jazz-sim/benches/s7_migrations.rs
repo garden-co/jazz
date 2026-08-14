@@ -14,7 +14,8 @@ use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::node::{CurrentRow, NodeState};
 use jazz::peer::PeerState;
 use jazz::protocol::{
-    CurrentWriteSchema, LensOp, MigrationLens, SchemaVersion, SyncMessage, TableLens,
+    CurrentWriteSchema, LensOp, MigrationLens, SchemaLineagePublication, SchemaVersion,
+    SyncMessage, TableLens,
 };
 use jazz::query::Query;
 use jazz::schema::{JazzSchema, TableSchema};
@@ -114,21 +115,21 @@ fn publish_chain(
     schemas: &[JazzSchema; 4],
     lenses: &[MigrationLens],
 ) {
-    for schema in schemas.iter().skip(1) {
-        core.apply_sync_message(SyncMessage::PublishSchema {
+    for (index, (schema, lens)) in schemas.iter().skip(1).zip(lenses).enumerate() {
+        let publication = SchemaLineagePublication::new(
+            SchemaVersion::new(schema.clone()),
+            lens.clone(),
+            Vec::<String>::new(),
+            Vec::<String>::new(),
+        );
+        core.apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
             author: AuthorId::SYSTEM,
-            schema: Box::new(SchemaVersion::new(schema.clone())),
+            catalogue_seq: index as u64 + 1,
+            publication: Box::new(publication),
         })
         .unwrap();
     }
-    for lens in lenses {
-        core.apply_sync_message(SyncMessage::PublishLens {
-            author: AuthorId::SYSTEM,
-            lens: lens.clone(),
-        })
-        .unwrap();
-    }
-    core.apply_sync_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 4,

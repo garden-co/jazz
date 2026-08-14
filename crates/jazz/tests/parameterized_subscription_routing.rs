@@ -267,6 +267,24 @@ fn parameterized_top_by_is_partitioned_per_active_binding() {
         "team B after team A insert",
     );
 
+    insert_document(&db, row(105), team_a, 0);
+    let team_a_after_outside = apply_pending_events(
+        "team A after outside-window insert",
+        &mut stream_a,
+        &mut rows_a,
+    );
+    assert_eq!(
+        team_a_after_outside.count, 0,
+        "an insert below the finite TopBy boundary must stay quiet"
+    );
+    assert_eq!(rows_a, BTreeSet::from([row(103), row(104)]));
+    assert_ordered_rows(
+        &db,
+        &prepared_a,
+        &[row(104), row(103)],
+        "team A after outside-window insert",
+    );
+
     insert_document(&db, row(204), team_b, 31);
     let team_b_delta = apply_pending_events("team B mutation", &mut stream_b, &mut rows_b);
     assert_eq!(

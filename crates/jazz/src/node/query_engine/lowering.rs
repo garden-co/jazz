@@ -5282,10 +5282,20 @@ fn lower_value_ref(
             source: value_source,
             field,
         } if value_source == source_id => {
-            let field = if source.row_shape.descriptor.field_index(field).is_some() {
-                field.clone()
+            // SourceField is the application-column namespace. Provenance has
+            // its own NormalizedValueRef variant, so a user column named like
+            // a physical metadata field (for example `updated_at`) must win
+            // that collision in both prepared and one-shot plans.
+            let user_field = user_column_field(field);
+            let field = if source
+                .row_shape
+                .descriptor
+                .field_index(&user_field)
+                .is_some()
+            {
+                user_field
             } else {
-                user_column_field(field)
+                field.clone()
             };
             Ok(LoweredValueRef::Field(require_source_field(
                 source, &field,
@@ -6247,17 +6257,20 @@ fn collect_root_input_for_value(
     value: &NormalizedValueRef,
 ) -> CapabilityResult<String> {
     match value {
-        NormalizedValueRef::SourceField { field, .. } => layout
-            .root_fields
-            .iter()
-            .find(|candidate| {
-                candidate.source_field.as_deref() == Some(field)
-                    || candidate
-                        .source_field
-                        .as_deref()
-                        .is_some_and(|source| logical_user_column(source) == field)
-            })
-            .map(|candidate| candidate.input.clone()),
+        NormalizedValueRef::SourceField { field, .. } => {
+            let user_field = user_column_field(field);
+            layout
+                .root_fields
+                .iter()
+                .find(|candidate| candidate.source_field.as_deref() == Some(&user_field))
+                .or_else(|| {
+                    layout
+                        .root_fields
+                        .iter()
+                        .find(|candidate| candidate.source_field.as_deref() == Some(field))
+                })
+                .map(|candidate| candidate.input.clone())
+        }
         NormalizedValueRef::RowId(RowIdRef::Source(_)) => layout
             .root_fields
             .iter()
@@ -6277,17 +6290,18 @@ fn collect_slot_input_for_value(
     value: &NormalizedValueRef,
 ) -> CapabilityResult<String> {
     match value {
-        NormalizedValueRef::SourceField { field, .. } => slot
-            .fields
-            .iter()
-            .find(|candidate| {
-                candidate.source_field.as_deref() == Some(field)
-                    || candidate
-                        .source_field
-                        .as_deref()
-                        .is_some_and(|source| logical_user_column(source) == field)
-            })
-            .map(|candidate| candidate.input.clone()),
+        NormalizedValueRef::SourceField { field, .. } => {
+            let user_field = user_column_field(field);
+            slot.fields
+                .iter()
+                .find(|candidate| candidate.source_field.as_deref() == Some(&user_field))
+                .or_else(|| {
+                    slot.fields
+                        .iter()
+                        .find(|candidate| candidate.source_field.as_deref() == Some(field))
+                })
+                .map(|candidate| candidate.input.clone())
+        }
         NormalizedValueRef::RowId(RowIdRef::Source(_)) => Some(slot.row_id_input.clone()),
         _ => None,
     }
@@ -6645,12 +6659,29 @@ fn root_collect_context_graph(
                 .as_ref()
                 .expect("root collector fields retain their source field");
             [
-                ProjectField::named(source_field),
-                ProjectField::renamed(source_field, &field.input),
+                collect_root_carrier_field(source_field, source_field, &field.value_type),
+                collect_root_carrier_field(source_field, &field.input, &field.value_type),
             ]
         })
         .collect::<Vec<_>>();
     Ok(graph.project_fields(fields))
+}
+
+fn collect_root_carrier_field(
+    source: impl Into<String>,
+    output: impl Into<String>,
+    value_type: &ValueType,
+) -> ProjectField {
+    if matches!(value_type, ValueType::Nullable(_)) {
+        // Equality filters and join keys may narrow a nullable storage field
+        // while it is inside the relational graph. The structured terminal is
+        // a public schema boundary, so restore that outer carrier here. The
+        // flat form preserves sources that are already nullable and wraps only
+        // the narrowed case.
+        ProjectField::nullable_flat(source, output)
+    } else {
+        ProjectField::renamed(source, output)
+    }
 }
 
 fn collect_anchor_graph(
@@ -6734,12 +6765,13 @@ fn collect_flat_projection(
         .iter()
         .map(|field| match current_slot {
             Some(_) => ProjectField::renamed(left_field(&field.input), &field.input),
-            None => ProjectField::renamed(
+            None => collect_root_carrier_field(
                 field
                     .source_field
                     .as_ref()
                     .expect("root collector fields retain their source field"),
                 &field.input,
+                &field.value_type,
             ),
         })
         .collect::<Vec<_>>();
