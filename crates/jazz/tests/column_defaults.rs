@@ -41,7 +41,6 @@ fn open_db() -> Db<MemoryStorage> {
             author: AuthorId::from_bytes([0xa1; 16]),
         },
         id_source: None,
-        large_value_checkpoint_op_interval: 1024,
     }))
     .expect("open db")
 }

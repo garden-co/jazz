@@ -2914,28 +2914,6 @@ mod tests {
     }
 
     #[test]
-    fn content_extent_debug_is_bounded_and_content_safe() {
-        let extent = ContentExtent {
-            owner: LargeValueOwnerRef::current_row(RowUuid::from_bytes([2; 16])),
-            extent: Extent {
-                schema: schema_id(1),
-                table: "documents".to_owned(),
-                writer: AuthorId::from_bytes([3; 16]),
-                row: RowUuid::from_bytes([2; 16]),
-                column: "body".to_owned(),
-                offset: 0,
-                len: 1_000_000,
-            },
-            bytes: vec![b'x'; 1_000_000],
-        };
-
-        let debug = format!("{extent:?}");
-        assert!(debug.contains("bytes_len: 1000000"));
-        assert!(debug.len() < 512);
-        assert!(!debug.contains("xxxxx"));
-    }
-
-    #[test]
     fn result_member_transport_preserves_typed_union_occurrence() {
         let root = ObjectId::from_uuid(uuid::Uuid::from_bytes([1; 16]));
         let joined = ObjectId::from_uuid(uuid::Uuid::from_bytes([2; 16]));

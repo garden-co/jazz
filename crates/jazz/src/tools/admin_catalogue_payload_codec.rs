@@ -19,7 +19,6 @@ use crate::tools::schema_lens::{LensOp, LensTransform};
 /// Current encoding version.
 const SCHEMA_VERSION: u8 = 8;
 const LENS_VERSION: u8 = 3;
-const LENS_VERSION_WITHOUT_LARGE_VALUE: u8 = 2;
 const PERMISSIONS_VERSION: u8 = 1;
 const PERMISSIONS_BUNDLE_VERSION: u8 = 2;
 const PERMISSIONS_HEAD_VERSION: u8 = 2;
@@ -464,7 +463,7 @@ pub fn decode_lens_transform(data: &[u8]) -> Result<LensTransform, CatalogueEnco
     }
 
     let version = data[0];
-    if version != LENS_VERSION && version != LENS_VERSION_WITHOUT_LARGE_VALUE {
+    if version != LENS_VERSION {
         return Err(CatalogueEncodingError::UnsupportedVersion {
             found: version,
             expected: LENS_VERSION,
@@ -1422,9 +1421,6 @@ fn encode_value(buf: &mut Vec<u8>, value: &Value) {
             write_u32(buf, bytes.len() as u32);
             buf.extend_from_slice(bytes);
         }
-        Value::LargeValue(_) => {
-            panic!("large-value handles cannot be encoded into catalogue payloads")
-        }
         Value::Array(elements) => {
             buf.push(VALUE_ARRAY);
             write_u32(buf, elements.len() as u32);
@@ -1781,26 +1777,6 @@ mod tests {
         let column = table.columns.column("value").expect("counter column");
 
         assert_eq!(column.merge_strategy, Some(ColumnMergeStrategy::Counter));
-    }
-
-    #[test]
-    fn schema_roundtrip_preserves_large_value_columns() {
-        let mut schema = Schema::new();
-        schema.insert(
-            TableName::new("files"),
-            TableSchema::new(RowDescriptor::new(vec![
-                ColumnDescriptor::new("data", ColumnType::Bytea).large_value(LargeValueKind::Blob),
-            ])),
-        );
-
-        let encoded = encode_schema(&schema);
-        let decoded = decode_schema(&encoded).unwrap();
-        let table = decoded
-            .get(&TableName::new("files"))
-            .expect("decoded files table");
-        let column = table.columns.column("data").expect("data column");
-
-        assert_eq!(column.large_value, Some(LargeValueKind::Blob));
     }
 
     #[test]

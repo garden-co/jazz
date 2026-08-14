@@ -7050,7 +7050,7 @@ where
                         &update,
                     )
                 });
-                send_with_content_extents(&self.node, peer, self.transport.as_mut(), update)?;
+                send_with_sync_context(&self.node, peer, self.transport.as_mut(), update)?;
                 if let Some((subscription, receipt)) = receipt {
                     self.transport
                         .send(SyncMessage::AuthorizationScopeReceipt {
@@ -7066,7 +7066,7 @@ where
                 let mut node = self.node.borrow_mut();
                 peer.current_rows_update(&mut node, table)?
             };
-            send_with_content_extents(&self.node, peer, self.transport.as_mut(), update)?;
+            send_with_sync_context(&self.node, peer, self.transport.as_mut(), update)?;
         }
 
         self.observed_session_claim_revision.set(current_revision);
@@ -7224,7 +7224,7 @@ where
                         &update,
                     )
                 });
-                send_with_content_extents(&self.node, peer, self.transport.as_mut(), update)?;
+                send_with_sync_context(&self.node, peer, self.transport.as_mut(), update)?;
                 if let Some((subscription, receipt)) = receipt {
                     self.transport
                         .send(SyncMessage::AuthorizationScopeReceipt {
@@ -7478,7 +7478,7 @@ where
                             .map_err(transport_error)?;
                     }
                     if let Err(error) =
-                        send_with_local_content_extents(&self.node, self.transport.as_mut(), unit)
+                        send_with_local_sync_context(&self.node, self.transport.as_mut(), unit)
                     {
                         if handle_db_backpressure(&self.node, &self.scheduler, &error) {
                             return Ok(stats);
@@ -8144,7 +8144,7 @@ where
                                 SyncMessage::BranchMetadata(metadata.clone()),
                             )?;
                             for response in responses {
-                                send_with_content_extents(
+                                send_with_sync_context(
                                     &self.node,
                                     peer,
                                     self.transport.as_mut(),
@@ -8161,7 +8161,7 @@ where
                 let mut scheduled_immediate = false;
                 let mut sent_view_update = false;
                 for fate in std::mem::take(&mut *self.downstream_fates.borrow_mut()) {
-                    send_with_content_extents(&self.node, peer, self.transport.as_mut(), fate)?;
+                    send_with_sync_context(&self.node, peer, self.transport.as_mut(), fate)?;
                 }
                 while let Some(message) = self.transport.try_recv() {
                     // Authorization support is authority-owned in Phase 3.
@@ -8781,7 +8781,7 @@ where
                                             &update,
                                         )
                                     });
-                                send_with_content_extents(
+                                send_with_sync_context(
                                     &self.node,
                                     peer,
                                     self.transport.as_mut(),
@@ -8858,7 +8858,7 @@ where
                                 peer.serve_row_versions(&mut node, &requests)?
                             };
                             for response in responses {
-                                send_with_content_extents(
+                                send_with_sync_context(
                                     &self.node,
                                     peer,
                                     self.transport.as_mut(),
@@ -8973,7 +8973,7 @@ where
                                     global_seq: None,
                                     durability: None,
                                 };
-                                send_with_content_extents(
+                                send_with_sync_context(
                                     &self.node,
                                     peer,
                                     self.transport.as_mut(),
@@ -9132,7 +9132,7 @@ where
                                 );
                             }
                             for response in responses {
-                                send_with_content_extents(
+                                send_with_sync_context(
                                     &self.node,
                                     peer,
                                     self.transport.as_mut(),
@@ -9270,7 +9270,7 @@ where
                                     "subscriber send group delta {}",
                                     summarize_sync_message(&update)
                                 ));
-                                send_with_content_extents(
+                                send_with_sync_context(
                                     &self.node,
                                     peer,
                                     self.transport.as_mut(),
@@ -9294,7 +9294,7 @@ where
                             peer.current_rows_update(&mut node, table)?
                         };
                         if !view_update_is_empty(&update) {
-                            send_with_content_extents(
+                            send_with_sync_context(
                                 &self.node,
                                 peer,
                                 self.transport.as_mut(),
@@ -10156,7 +10156,7 @@ fn summarize_sync_message(message: &SyncMessage) -> String {
     }
 }
 
-fn send_with_content_extents<S>(
+fn send_with_sync_context<S>(
     node: &Rc<RefCell<NodeState<S>>>,
     peer: &mut PeerState,
     transport: &mut dyn Transport,
@@ -10201,7 +10201,7 @@ fn send_sync_message_chunked(
     transport.send(message).map_err(transport_error)
 }
 
-fn send_with_local_content_extents<S>(
+fn send_with_local_sync_context<S>(
     node: &Rc<RefCell<NodeState<S>>>,
     transport: &mut dyn Transport,
     message: SyncMessage,

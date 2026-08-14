@@ -10,8 +10,8 @@ pub use crate::tools::public_api::relation_ir::{
 };
 pub use crate::tools::public_api::session::{AuthMode, Session, WriteContext};
 pub use crate::tools::public_api::types::{
-    ColumnDescriptor, ColumnMergeStrategy, ColumnType, LargeValueHandle, OrderedRowDelta,
-    QueryResult, QueryResultField, Row, RowDelta, RowDescriptor, Schema, SchemaBuilder, SchemaHash,
-    TableName, TablePolicies, TableSchema, Value, permissions, policy_expr,
+    ColumnDescriptor, ColumnMergeStrategy, ColumnType, OrderedRowDelta, QueryResult,
+    QueryResultField, Row, RowDelta, RowDescriptor, Schema, SchemaBuilder, SchemaHash, TableName,
+    TablePolicies, TableSchema, Value, permissions, policy_expr,
 };
 pub use crate::tools::transaction::{BatchId, OpenBatchId};

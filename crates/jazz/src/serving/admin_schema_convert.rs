@@ -410,46 +410,6 @@ mod tests {
     }
 
     #[test]
-    fn converts_public_large_value_marker() {
-        let schema = convert_admin_schema(&json!({
-            "files": {
-                "columns": [
-                    {
-                        "name": "data",
-                        "column_type": { "type": "Bytea" },
-                        "large_value": "Blob"
-                    }
-                ]
-            }
-        }))
-        .expect("schema converts");
-
-        let column = &schema.tables[0].columns[0];
-        assert_eq!(column.column_type, ColumnType::Bytes);
-        assert_eq!(column.large_value, Some(LargeValueKind::Blob));
-    }
-
-    #[test]
-    fn converts_public_text_large_value_marker() {
-        let schema = convert_admin_schema(&json!({
-            "docs": {
-                "columns": [
-                    {
-                        "name": "body",
-                        "column_type": { "type": "Bytea" },
-                        "large_value": "Text"
-                    }
-                ]
-            }
-        }))
-        .expect("schema converts");
-
-        let column = &schema.tables[0].columns[0];
-        assert_eq!(column.column_type, ColumnType::Bytes);
-        assert_eq!(column.large_value, Some(LargeValueKind::Text));
-    }
-
-    #[test]
     fn converts_public_counter_merge_strategy() {
         let schema = convert_admin_schema(&json!({
             "counters": {

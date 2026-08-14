@@ -2466,31 +2466,6 @@ mod tests {
     }
 
     #[test]
-    fn converts_large_value_columns() {
-        let schema = [(
-            TableName::new("files"),
-            TableSchema::new(RowDescriptor::new(vec![
-                ColumnDescriptor::new("data", ColumnType::Bytea).large_value(LargeValueKind::Blob),
-            ])),
-        )]
-        .into_iter()
-        .collect();
-
-        let converted = convert_public_schema(&schema).unwrap();
-        let column = converted.tables[0]
-            .columns
-            .iter()
-            .find(|column| column.name == "data")
-            .unwrap();
-
-        assert_eq!(column.column_type, GrooveColumnType::Bytes);
-        assert_eq!(
-            column.large_value,
-            Some(crate::schema::LargeValueKind::Blob)
-        );
-    }
-
-    #[test]
     fn converts_public_integer_as_core_i32_and_column_defaults() {
         let integer_schema = SchemaBuilder::new()
             .table(TableSchema::builder("todos").column("count", ColumnType::Integer))

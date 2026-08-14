@@ -21,7 +21,6 @@ use crate::groove::storage::MemoryStorage as CoreMemoryStorage;
 #[cfg(feature = "rocksdb")]
 use crate::groove::storage::RocksDbStorage as CoreRocksDbStorage;
 use crate::ids::{AuthorId as CoreAuthorId, NodeUuid as CoreNodeUuid, RowUuid as CoreRowUuid};
-use crate::node::LARGE_VALUE_HANDLE_MAGIC;
 use crate::protocol::{
     ReadViewSourceSpec as CoreReadViewSourceSpec, ReadViewSpec as CoreReadViewSpec,
 };
@@ -34,9 +33,7 @@ use crate::tools::public_api::types::{
 };
 use crate::tools::public_schema::Schema;
 use crate::tools::public_schema::TableName;
-use crate::tools::public_schema::{
-    ColumnType, LargeValueHandle, Query, Session, TableSchema, Value, WriteContext,
-};
+use crate::tools::public_schema::{ColumnType, Query, Session, TableSchema, Value, WriteContext};
 use crate::tools::public_schema::{OrderedRowDelta, QueryResult, Row};
 use crate::tools::server::core_websocket_transport::WebSocketTransport;
 use crate::tools::server::public_schema_convert::convert_public_schema;
@@ -316,17 +313,6 @@ impl Backend {
             Self::Memory(db) => db.tick(),
             #[cfg(feature = "rocksdb")]
             Self::RocksDb(db) => db.tick(),
-        }
-    }
-
-    fn hydrate_large_value_handle(
-        &self,
-        handle: &[u8],
-    ) -> std::result::Result<Vec<u8>, CoreDbError> {
-        match self {
-            Self::Memory(db) => db.hydrate_large_value_handle(handle),
-            #[cfg(feature = "rocksdb")]
-            Self::RocksDb(db) => db.hydrate_large_value_handle(handle),
         }
     }
 
@@ -1023,14 +1009,6 @@ impl ClientDb {
             .transactions
             .insert(batch_id, ExclusiveTransactionState { writes: Vec::new() });
         Ok(batch_id)
-    }
-
-    fn hydrate_large_value_handle(&self, handle: &LargeValueHandle) -> Result<Vec<u8>> {
-        self.inner
-            .borrow()
-            .db
-            .hydrate_large_value_handle(handle.as_bytes())
-            .map_err(|error| JazzError::Query(error.to_string()))
     }
 
     fn commit_transaction(&self, batch_id: OpenBatchId) -> Result<BatchId> {
@@ -1746,10 +1724,6 @@ fn public_to_core_value(value: Value) -> Result<CoreValue> {
         Value::Timestamp(value) => Ok(CoreValue::U64(value)),
         Value::Uuid(value) => Ok(CoreValue::Uuid(*value.uuid())),
         Value::Bytea(value) => Ok(CoreValue::Bytes(value)),
-        Value::LargeValue(_) => Err(JazzError::Write(
-            "large-value handles are read-only query results; write Bytea content instead"
-                .to_string(),
-        )),
         Value::Null => Ok(CoreValue::Nullable(None)),
         Value::Array(values) => values
             .into_iter()
@@ -1819,9 +1793,6 @@ fn core_to_public_value(value: CoreValue) -> Result<Value> {
         CoreValue::U64(value) => Ok(Value::Timestamp(value)),
         CoreValue::F64(value) => Ok(Value::Double(value)),
         CoreValue::Uuid(value) => Ok(Value::Uuid(ObjectId::from_uuid(value))),
-        CoreValue::Bytes(value) if value.starts_with(LARGE_VALUE_HANDLE_MAGIC) => {
-            Ok(Value::LargeValue(LargeValueHandle::from_bytes(value)))
-        }
         CoreValue::Bytes(value) => Ok(Value::Bytea(value)),
         CoreValue::Nullable(None) => Ok(Value::Null),
         CoreValue::Nullable(Some(value)) => core_to_public_value(*value),
@@ -3117,24 +3088,6 @@ impl JazzClient {
 
     pub async fn wait_for_batch(&self, batch_id: BatchId, tier: DurabilityTier) -> Result<()> {
         self.db.wait_for_batch(batch_id, tier).await
-    }
-
-    /// Fetch and materialize the bytes behind a large-value handle returned by a query.
-    pub async fn hydrate_large_value(&self, handle: &LargeValueHandle) -> Result<Vec<u8>> {
-        self.db.ensure_tick_driver_running()?;
-        let deadline = tokio::time::Instant::now() + QUERY_COVERAGE_TIMEOUT;
-        loop {
-            self.db.ensure_tick_driver_running()?;
-            match self.db.hydrate_large_value_handle(handle) {
-                Ok(bytes) => return Ok(bytes),
-                Err(error) => {
-                    if tokio::time::Instant::now() >= deadline {
-                        return Err(error);
-                    }
-                }
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
     }
 
     /// Unsubscribe from a subscription.

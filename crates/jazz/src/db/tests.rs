@@ -3562,7 +3562,6 @@ fn attached_schema_mergeable_batch_is_queryable_after_owner_commit() {
             author: AuthorId::SYSTEM,
         },
         id_source: Some(Box::new(SeededRowIdSource::new(91))),
-        large_value_checkpoint_op_interval: crate::node::LARGE_VALUE_CHECKPOINT_OP_INTERVAL,
     }))
     .unwrap();
     let schema = JazzSchema::new([TableSchema::new(
@@ -5803,7 +5802,6 @@ fn db_facade_local_subscription_reports_initial_and_changed_results() {
             author: AuthorId::from_bytes([0xa1; 16]),
         },
         id_source: Some(Box::new(SeededRowIdSource::new(0x1111))),
-        large_value_checkpoint_op_interval: crate::node::LARGE_VALUE_CHECKPOINT_OP_INTERVAL,
     }))
     .unwrap();
     let query = db.table("todos");
@@ -6154,7 +6152,6 @@ fn db_facade_runs_saas_shaped_local_lane_end_to_end() {
             author: owner,
         },
         id_source: Some(Box::new(SeededRowIdSource::new(0x11))),
-        large_value_checkpoint_op_interval: crate::node::LARGE_VALUE_CHECKPOINT_OP_INTERVAL,
     }))
     .unwrap();
 
@@ -8285,7 +8282,6 @@ fn open_db(node: u8, author: AuthorId, schema: &JazzSchema) -> Db<RocksDbStorage
             author,
         },
         id_source: Some(Box::new(SeededRowIdSource::new(node as u64))),
-        large_value_checkpoint_op_interval: crate::node::LARGE_VALUE_CHECKPOINT_OP_INTERVAL,
     }))
     .unwrap()
 }
@@ -9587,7 +9583,6 @@ fn empty_branch_metadata_retries_after_unacked_reopen() {
             author: identity,
         },
         id_source: None,
-        large_value_checkpoint_op_interval: crate::node::LARGE_VALUE_CHECKPOINT_OP_INTERVAL,
     }))
     .unwrap();
     client.create_branch_with_id(branch).unwrap();
@@ -9611,7 +9606,6 @@ fn empty_branch_metadata_retries_after_unacked_reopen() {
             author: identity,
         },
         id_source: None,
-        large_value_checkpoint_op_interval: crate::node::LARGE_VALUE_CHECKPOINT_OP_INTERVAL,
     }))
     .unwrap();
     assert_eq!(
@@ -9665,7 +9659,6 @@ fn acknowledged_open_accepts_remote_discard_and_recovers_it() {
             author: identity,
         },
         id_source: None,
-        large_value_checkpoint_op_interval: crate::node::LARGE_VALUE_CHECKPOINT_OP_INTERVAL,
     }))
     .unwrap();
     let authority = open_core(0x5e, AuthorId::SYSTEM, &schema);
@@ -9717,7 +9710,6 @@ fn acknowledged_open_accepts_remote_discard_and_recovers_it() {
             author: identity,
         },
         id_source: None,
-        large_value_checkpoint_op_interval: crate::node::LARGE_VALUE_CHECKPOINT_OP_INTERVAL,
     }))
     .unwrap();
     assert_eq!(
@@ -9963,7 +9955,6 @@ fn locally_created_branch_and_commit_survive_rocks_reopen() {
             author: identity,
         },
         id_source: Some(Box::new(SeededRowIdSource::new(0xc1))),
-        large_value_checkpoint_op_interval: crate::node::LARGE_VALUE_CHECKPOINT_OP_INTERVAL,
     }))
     .unwrap();
     client.create_branch_with_id(branch).unwrap();
@@ -9989,7 +9980,6 @@ fn locally_created_branch_and_commit_survive_rocks_reopen() {
             author: identity,
         },
         id_source: Some(Box::new(SeededRowIdSource::new(0xc2))),
-        large_value_checkpoint_op_interval: crate::node::LARGE_VALUE_CHECKPOINT_OP_INTERVAL,
     }))
     .unwrap();
     assert_eq!(
@@ -11457,7 +11447,6 @@ fn malformed_authority_opening_keeps_shared_coverage_provisional() {
                 user_metadata_json: None,
                 target_lineage: crate::tx::BranchLineage::Root,
                 branch_merge: None,
-                merge_strategy: None,
             },
             versions: Vec::new(),
             fate: crate::tx::Fate::Accepted,
@@ -14140,7 +14129,6 @@ fn string_grant_role_access_filter_matches_uuid_literal_in_list() {
             author: AuthorId::SYSTEM,
         },
         id_source: Some(Box::new(SeededRowIdSource::new(0x6f))),
-        large_value_checkpoint_op_interval: crate::node::LARGE_VALUE_CHECKPOINT_OP_INTERVAL,
     }))
     .unwrap();
     for (table, row_id, cells) in [
@@ -15845,7 +15833,6 @@ fn undelivered_mutation_error_is_recovered_after_reopen() {
         storage,
         identity,
         id_source: Some(Box::new(SeededRowIdSource::new(0xc3))),
-        large_value_checkpoint_op_interval: crate::node::LARGE_VALUE_CHECKPOINT_OP_INTERVAL,
     }))
     .unwrap();
     let (client_transport, mut authority_transport) = duplex();
@@ -15875,7 +15862,6 @@ fn undelivered_mutation_error_is_recovered_after_reopen() {
         storage,
         identity,
         id_source: Some(Box::new(SeededRowIdSource::new(0xc3))),
-        large_value_checkpoint_op_interval: crate::node::LARGE_VALUE_CHECKPOINT_OP_INTERVAL,
     }))
     .unwrap();
     let events = Rc::new(RefCell::new(Vec::new()));
@@ -15900,7 +15886,6 @@ fn undelivered_mutation_error_is_recovered_after_reopen() {
         storage,
         identity,
         id_source: Some(Box::new(SeededRowIdSource::new(0xc3))),
-        large_value_checkpoint_op_interval: crate::node::LARGE_VALUE_CHECKPOINT_OP_INTERVAL,
     }))
     .unwrap();
     let replayed_events = Rc::new(RefCell::new(Vec::new()));
@@ -16438,7 +16423,6 @@ fn db_large_text_values_round_trip_across_edit_chain() {
             author: AuthorId::from_bytes([0x44; 16]),
         },
         id_source: Some(Box::new(SeededRowIdSource::new(0x33))),
-        large_value_checkpoint_op_interval: crate::node::LARGE_VALUE_CHECKPOINT_OP_INTERVAL,
     }))
     .unwrap();
     let table = &schema.tables[0];
@@ -16494,7 +16478,6 @@ fn db_large_blob_values_round_trip_binary_from_empty_parent() {
             author: AuthorId::from_bytes([0x66; 16]),
         },
         id_source: Some(Box::new(SeededRowIdSource::new(0x55))),
-        large_value_checkpoint_op_interval: crate::node::LARGE_VALUE_CHECKPOINT_OP_INTERVAL,
     }))
     .unwrap();
     let table = &schema.tables[0];
@@ -16545,7 +16528,6 @@ fn db_text_edit_ops_materialize_expected_value() {
             author: AuthorId::from_bytes([0x88; 16]),
         },
         id_source: Some(Box::new(SeededRowIdSource::new(0x77))),
-        large_value_checkpoint_op_interval: crate::node::LARGE_VALUE_CHECKPOINT_OP_INTERVAL,
     }))
     .unwrap();
     let table = &schema.tables[0];
@@ -16590,7 +16572,6 @@ fn db_text_dump_and_edit_paths_interleave() {
             author: AuthorId::from_bytes([0x89; 16]),
         },
         id_source: Some(Box::new(SeededRowIdSource::new(0x78))),
-        large_value_checkpoint_op_interval: crate::node::LARGE_VALUE_CHECKPOINT_OP_INTERVAL,
     }))
     .unwrap();
     let table = &schema.tables[0];
@@ -16653,7 +16634,6 @@ fn db_blob_edit_ops_handle_binary_and_multibyte_bytes() {
             author: AuthorId::from_bytes([0x8a; 16]),
         },
         id_source: Some(Box::new(SeededRowIdSource::new(0x79))),
-        large_value_checkpoint_op_interval: crate::node::LARGE_VALUE_CHECKPOINT_OP_INTERVAL,
     }))
     .unwrap();
     let table = &schema.tables[0];
@@ -16704,7 +16684,6 @@ fn db_query_builder_expresses_s1_shaped_filters_and_include_modes() {
             author: alice,
         },
         id_source: Some(Box::new(SeededRowIdSource::new(0x22))),
-        large_value_checkpoint_op_interval: crate::node::LARGE_VALUE_CHECKPOINT_OP_INTERVAL,
     }))
     .unwrap();
 

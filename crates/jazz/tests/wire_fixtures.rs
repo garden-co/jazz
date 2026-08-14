@@ -356,7 +356,6 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
                     user_metadata_json: Some("{\"fixture\":\"wire\"}".to_owned()),
                     target_lineage: jazz::tx::BranchLineage::Root,
                     branch_merge: None,
-                    merge_strategy: None,
                 },
                 versions: Vec::new(),
             },
@@ -380,7 +379,6 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
                         [0x42; 16],
                     )),
                     branch_merge: None,
-                    merge_strategy: None,
                 },
                 versions: Vec::new(),
             },
@@ -533,7 +531,6 @@ fn mixed_version_carriers(
                     user_metadata_json: None,
                     target_lineage: jazz::tx::BranchLineage::Root,
                     branch_merge: None,
-                    merge_strategy: None,
                 },
                 versions: vec![
                     VersionRecord::from_cells(

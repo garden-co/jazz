@@ -33,7 +33,6 @@ fn open_db(identity: AuthorId) -> Db<MemoryStorage> {
             author: identity,
         },
         id_source: None,
-        large_value_checkpoint_op_interval: 1024,
     }))
     .expect("open db")
 }

@@ -130,8 +130,6 @@ pub mod result_tree;
 pub mod schema;
 /// Operational server-shell APIs formerly provided by jazz-server.
 pub mod serving;
-/// Pure plaintext operation substrate and deterministic text-merge walk.
-pub mod text_merge;
 /// Logical time and sequence counters.
 pub mod time;
 /// Public client, server, and CLI support APIs formerly provided by jazz-tools.

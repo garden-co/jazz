@@ -2699,7 +2699,6 @@ fn open_db(
             author,
         },
         id_source: Some(Box::new(SeededRowIdSource::new(seed))),
-        large_value_checkpoint_op_interval: 1024,
     }))
     .unwrap();
     (dir, db)

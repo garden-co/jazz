@@ -2339,7 +2339,6 @@ fn open_db(
                 .try_into()
                 .expect("node seed bytes"),
         )))),
-        large_value_checkpoint_op_interval: 1024,
     }))
     .expect("db open");
     (dir, db)
