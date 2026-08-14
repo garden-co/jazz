@@ -1335,7 +1335,6 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       inserted.id,
       {
         title: { type: "Text", value: "direct napi tx upserted row" },
-        done: { type: "Boolean", value: true },
       },
       JSON.stringify({ batch_id: tx }),
     );

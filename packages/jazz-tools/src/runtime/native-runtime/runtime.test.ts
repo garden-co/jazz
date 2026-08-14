@@ -1919,7 +1919,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(listener).not.toHaveBeenCalled();
   });
 
-  it("passes caller-supplied updatedAt into staged mergeable transaction writes", () => {
+  it("passes updatedAt and routes staged upserts through insert or update staging", () => {
     const updatedAt = 1_704_067_200_123_000;
     const expectedUpdatedAtMs = Math.trunc(updatedAt / 1_000);
     const staged: Array<{ op: string; updatedAtMs: number | null | undefined }> = [];
@@ -1960,13 +1960,20 @@ describe("NativeRuntimeAdapter server transport", () => {
     runtime.insert("todos", { title: { type: "Text", value: "inserted" } }, context, rowId);
     runtime.update("todos", rowId, { title: { type: "Text", value: "updated" } }, context);
     runtime.upsert("todos", rowId, { title: { type: "Text", value: "upserted" } }, context);
+    runtime.upsert(
+      "todos",
+      "00000000-0000-0000-0000-000000000002",
+      { title: { type: "Text", value: "inserted by upsert" } },
+      context,
+    );
     runtime.restore("todos", rowId, { title: { type: "Text", value: "restored" } }, context);
     runtime.delete("todos", rowId, context);
 
     expect(staged).toEqual([
       { op: "insert", updatedAtMs: expectedUpdatedAtMs },
       { op: "update", updatedAtMs: expectedUpdatedAtMs },
-      { op: "upsert", updatedAtMs: expectedUpdatedAtMs },
+      { op: "update", updatedAtMs: expectedUpdatedAtMs },
+      { op: "insert", updatedAtMs: expectedUpdatedAtMs },
       { op: "restore", updatedAtMs: expectedUpdatedAtMs },
       { op: "delete", updatedAtMs: expectedUpdatedAtMs },
     ]);

@@ -38,7 +38,7 @@ describe("RnDbShim", () => {
   });
 
   it("copies large-value handles and hydrated bytes across the generated boundary", () => {
-    const hydrateLargeValue = vi.fn(() => buffer(4, 5, 6));
+    const hydrateLargeValue = vi.fn((_handle: ArrayBuffer) => buffer(4, 5, 6));
     const db = shim({ hydrateLargeValue });
     const backing = new Uint8Array([0, 1, 2, 3, 0]);
 

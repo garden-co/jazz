@@ -672,7 +672,12 @@ export class NativeRuntimeAdapter implements Runtime {
       throw writeError("Upsert", normalizeWriteSetupMessage(errorMessage(error)));
     }
     if (tx) {
-      this.txForWrite(tx, writeIdentity).upsertEncoded(table, rowId, cells, updatedAtMs);
+      const nativeTx = this.txForWrite(tx, writeIdentity);
+      if (existing) {
+        nativeTx.updateEncoded(table, rowId, cells, updatedAtMs);
+      } else {
+        nativeTx.insertWithIdEncoded(table, rowId, cells, updatedAtMs);
+      }
       tx.writes.push({
         table,
         rowId,
