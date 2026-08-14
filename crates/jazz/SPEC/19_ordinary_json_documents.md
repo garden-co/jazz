@@ -17,7 +17,7 @@ Invariant digest:
 - `INV-JDOC-1`: A JSON document commit MUST be one ordinary Jazz transaction containing the new immutable document nodes, the document-root update, and every affected declared-path projection update.
 - `INV-JDOC-2`: Every committed document root MUST name a complete immutable logical snapshot; reconstructing that snapshot MUST traverse ordinary rows reachable from that root and MUST NOT scan or replay parent Jazz row versions.
 - `INV-JDOC-3`: JSON document rows, nodes, and projections MUST use ordinary application tables and MUST NOT introduce a special value, operation, protocol frame, storage table, authorization path, fate path, or sync path in core.
-- `INV-JDOC-4`: Declared-path projection rows MUST be derived from the exact root committed in the same transaction; a query observing that root MUST NOT observe projection values from another root.
+- `INV-JDOC-4`: Declared-path projection rows MUST equal the scalar at that path in the current root; an edit changing a declared path MUST update that projection in the same transaction as the root.
 - `INV-JDOC-5`: Historical roots and their reachable immutable nodes MUST remain readable for as long as the ordinary Jazz rows that reference them remain retained and authorized.
 - `INV-JDOC-6`: Localized JSON edits SHOULD create a bounded root-to-leaf path of immutable nodes plus affected projection versions rather than rewriting the full logical document.
 
@@ -82,7 +82,9 @@ independent of the depth of the document row's history.
 Cross-document filters over declared scalar paths use ordinary projection rows.
 A declaration associates a canonical JSON path with a typed projection. A
 localized edit reports changed paths, and the same transaction that advances the
-root updates only affected projections (`INV-JDOC-4`).
+root updates only affected projections (`INV-JDOC-4`). Projection rows deliberately
+do not copy `root_id`: doing so would force an unrelated version for every declared
+path on every edit and contradict the affected-path write-amplification contract.
 
 Projection rows are ordinary replicated data, not node-local hidden indexes.
 Consequently their authorization, offline writes, history, branch overlays,
@@ -91,11 +93,11 @@ model. A future general secondary-index facility may optimize the physical
 query without changing this logical representation.
 
 For each declared `(document_id, path)`, the mutation API requires exactly one
-current projection row. Before advancing a root it verifies that row names the
-observed old root and contains the scalar represented by that root. Missing,
-duplicate, stale-root, or stale-value projection rows MUST fail closed before a
-transaction opens; selecting an arbitrary duplicate and advancing only that row
-would leave cross-document filters inconsistent with the document root.
+current projection row. Before advancing a root it reconstructs and validates the
+observed old root, then verifies that the projection contains the scalar represented
+at that path. Missing, duplicate, or stale-value projection rows MUST fail closed
+before a transaction opens; selecting an arbitrary duplicate and advancing only
+that row would leave cross-document filters inconsistent with the document root.
 
 Ad-hoc arbitrary-path queryability is not promised by the first API. An
 application can declare more paths or explicitly opt into an all-scalar-path

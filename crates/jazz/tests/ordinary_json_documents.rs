@@ -102,8 +102,8 @@ async fn ordinary_json_document_create_edit_query_and_retained_root_are_consiste
                 .expect("query stale path");
             assert!(stale.is_empty());
 
-            // Root and projections changed in one ordinary commit, so an
-            // ordinary query sees the same new root identity in both tables.
+            // The document root and only the affected projection value change
+            // in one ordinary commit.
             let document_rows = client
                 .query(
                     QueryBuilder::new(&documents.names.documents)
@@ -115,7 +115,6 @@ async fn ordinary_json_document_create_edit_query_and_retained_root_are_consiste
                 .await
                 .expect("query document root");
             assert_eq!(document_rows[0].1, vec![Value::Uuid(edited.root_id)]);
-            assert_eq!(matches[0].1[1], Value::Uuid(edited.root_id));
 
             let underscored_id_rows = client
                 .query(
@@ -170,7 +169,6 @@ async fn duplicate_projection_fails_closed_without_advancing_root_or_leaving_new
                     &documents.names.projections,
                     row_input!(
                         "document_id" => created.document_id,
-                        "root_id" => created.root_id,
                         "pointer" => "/metadata/status",
                         "scalar_json" => "\"draft\""
                     ),
@@ -222,6 +220,98 @@ async fn duplicate_projection_fails_closed_without_advancing_root_or_leaving_new
                 .await
                 .expect("query planted duplicate");
             assert_eq!(draft.len(), 2, "fixture retains both planted stale rows");
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn duplicate_part_pointer_fails_closed_before_rebuild_or_mutation() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let (schema, documents) = schema_and_documents();
+            let client = JazzClient::test_client(schema).await;
+            let store = JsonDocumentStore::new(&client, &documents);
+            let created = store
+                .create(&json!({
+                    "metadata": {"status": "draft", "priority": 3},
+                    "body": "unchanged"
+                }))
+                .expect("create document");
+            let parts = client
+                .query(
+                    QueryBuilder::new(&documents.names.parts)
+                        .filter_eq("document_id", Value::Uuid(created.document_id))
+                        .select(&["pointer"])
+                        .build(),
+                    None,
+                )
+                .await
+                .expect("query initial parts");
+            let mut part_ids: Vec<_> = parts
+                .iter()
+                .map(|(part_id, _)| Value::Uuid(*part_id))
+                .collect();
+            let duplicate_id = client
+                .insert(
+                    &documents.names.parts,
+                    row_input!(
+                        "document_id" => created.document_id,
+                        "pointer" => "/metadata/status",
+                        "kind" => "scalar",
+                        "scalar_json" => "\"draft\""
+                    ),
+                )
+                .expect("plant duplicate status part")
+                .0;
+            part_ids.push(Value::Uuid(duplicate_id));
+            client
+                .update(
+                    created.root_id,
+                    vec![("part_ids".to_owned(), Value::Array(part_ids))],
+                )
+                .expect("corrupt immutable root fixture");
+
+            let load_error = store
+                .load(created.document_id)
+                .await
+                .expect_err("duplicate pointer must fail before rebuild");
+            assert!(
+                load_error
+                    .to_string()
+                    .contains("JSON document root contains a duplicate pointer: /metadata/status"),
+                "unexpected load error: {load_error}"
+            );
+            let edit_error = store
+                .set_scalar(created.document_id, "/metadata/status", &json!("published"))
+                .await
+                .expect_err("duplicate pointer must fail before mutation");
+            assert!(
+                edit_error
+                    .to_string()
+                    .contains("JSON document root contains a duplicate pointer: /metadata/status"),
+                "unexpected edit error: {edit_error}"
+            );
+            let document = client
+                .query(
+                    QueryBuilder::new(&documents.names.documents)
+                        .filter_eq("id", Value::Uuid(created.document_id))
+                        .select(&["root_id"])
+                        .build(),
+                    None,
+                )
+                .await
+                .expect("query unchanged document");
+            assert_eq!(document[0].1, vec![Value::Uuid(created.root_id)]);
+            let published = client
+                .query(
+                    documents
+                        .query_scalar("/metadata/status", &json!("published"))
+                        .expect("published query"),
+                    None,
+                )
+                .await
+                .expect("query rejected value");
+            assert!(published.is_empty());
         })
         .await;
 }

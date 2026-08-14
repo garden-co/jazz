@@ -31,19 +31,25 @@ struct DiskBytes {
 }
 
 impl DiskBytes {
-    fn subtract(self, baseline: Self) -> Self {
-        Self {
-            apparent: self.apparent.saturating_sub(baseline.apparent),
-            allocated: self.allocated.saturating_sub(baseline.allocated),
+    fn subtract(self, baseline: Self) -> DiskGrowth {
+        DiskGrowth {
+            apparent: i128::from(self.apparent) - i128::from(baseline.apparent),
+            allocated: i128::from(self.allocated) - i128::from(baseline.allocated),
         }
     }
 }
 
 #[derive(Clone, Copy, Debug)]
+struct DiskGrowth {
+    apparent: i128,
+    allocated: i128,
+}
+
+#[derive(Clone, Copy, Debug)]
 struct StorageReceipt {
-    seeded: DiskBytes,
-    edited: DiskBytes,
-    edited_closed: DiskBytes,
+    seeded: DiskGrowth,
+    edited: DiskGrowth,
+    edited_closed: DiskGrowth,
 }
 
 fn comparison_schema() -> (Schema, JsonDocumentSchema) {
@@ -394,7 +400,7 @@ async fn ordinary_json_compressed_rocksdb_storage_receipt() {
             .await;
 
             eprintln!(
-                "ORDINARY_JSON_ROCKSDB_RECEIPT docs={docs} edits_per_doc={edits} logical_bytes_per_doc={bytes} compression=history:zstd,current:lz4,bottommost:zstd baseline_open_apparent={} baseline_open_allocated={} baseline_closed_apparent={} baseline_closed_allocated={} whole_seed_open_apparent={} whole_seed_open_allocated={} whole_edited_open_apparent={} whole_edited_open_allocated={} whole_edited_closed_apparent={} whole_edited_closed_allocated={} mutable_seed_open_apparent={} mutable_seed_open_allocated={} mutable_edited_open_apparent={} mutable_edited_open_allocated={} mutable_edited_closed_apparent={} mutable_edited_closed_allocated={} persistent_seed_open_apparent={} persistent_seed_open_allocated={} persistent_edited_open_apparent={} persistent_edited_open_allocated={} persistent_edited_closed_apparent={} persistent_edited_closed_allocated={} measurement=open_wal_and_closed_db_no_manual_flush_or_compaction",
+                "ORDINARY_JSON_ROCKSDB_RECEIPT docs={docs} edits_per_doc={edits} logical_bytes_per_doc={bytes} compression=history:zstd,current:lz4,bottommost:zstd baseline_open_apparent={} baseline_open_allocated={} baseline_closed_apparent={} baseline_closed_allocated={} whole_seed_open_apparent={} whole_seed_open_allocated_delta={} whole_edited_open_apparent={} whole_edited_open_allocated_delta={} whole_edited_closed_apparent={} whole_edited_closed_allocated={} mutable_seed_open_apparent={} mutable_seed_open_allocated_delta={} mutable_edited_open_apparent={} mutable_edited_open_allocated_delta={} mutable_edited_closed_apparent={} mutable_edited_closed_allocated={} persistent_seed_open_apparent={} persistent_seed_open_allocated_delta={} persistent_edited_open_apparent={} persistent_edited_open_allocated_delta={} persistent_edited_closed_apparent={} persistent_edited_closed_allocated={} lifecycle=warm_handle_only restart_receipt=blocked_by_post_reopen_transaction_conflict measurement=open_wal_and_closed_db_no_manual_flush_or_compaction",
                 open_baseline.apparent,
                 open_baseline.allocated,
                 closed_baseline.apparent,

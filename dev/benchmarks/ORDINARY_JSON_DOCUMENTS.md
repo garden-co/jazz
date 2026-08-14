@@ -40,8 +40,8 @@ latency claims.
 |        50 |    24.721 ms |          74.514 ms |             7.424 ms |         95.224 ms |          73.689 ms |
 
 One localized scalar edit creates one new part and one new immutable root, then
-versions the document row and both declared projection rows: two new rows plus
-three ordinary row versions in this fixture. The old root remains readable and
+versions the document row and the one affected declared projection row: two new
+rows plus two ordinary row versions in this fixture. The old root remains readable and
 still reconstructs the old scalar value.
 
 ## Findings
@@ -113,31 +113,33 @@ manual flush or compaction operation, so none was forced or claimed.
 
 | Workload                  | Representation               | Seed open apparent | Edited open apparent | Edited closed apparent | Edited closed allocated |
 | ------------------------- | ---------------------------- | -----------------: | -------------------: | ---------------------: | ----------------------: |
-| 20 × 10 KiB, 10 edits/doc | whole-row rewrite            |          443,910 B |          4,912,298 B |            4,890,952 B |             4,886,528 B |
-| 20 × 10 KiB, 10 edits/doc | mutable parts + projections  |        1,008,386 B |          1,762,776 B |            1,741,430 B |             1,736,704 B |
-| 20 × 10 KiB, 10 edits/doc | immutable root + projections |        1,111,192 B |          2,434,900 B |            2,434,852 B |             2,433,024 B |
-| 10 × 100 KiB, 5 edits/doc | whole-row rewrite            |        2,065,573 B |         12,400,737 B |           12,379,391 B |            12,374,016 B |
-| 10 × 100 KiB, 5 edits/doc | mutable parts + projections  |        2,347,771 B |          2,536,330 B |            2,514,984 B |             2,510,848 B |
-| 10 × 100 KiB, 5 edits/doc | immutable root + projections |        2,399,393 B |          2,730,339 B |            2,708,993 B |             2,703,360 B |
+| 20 × 10 KiB, 10 edits/doc | whole-row rewrite            |          443,531 B |          4,908,068 B |            4,886,731 B |             4,882,432 B |
+| 20 × 10 KiB, 10 edits/doc | mutable parts + projections  |        1,008,186 B |          1,759,089 B |            1,737,752 B |             1,732,608 B |
+| 20 × 10 KiB, 10 edits/doc | immutable root + projections |        1,109,372 B |          2,245,573 B |            2,245,534 B |             2,244,608 B |
+| 10 × 100 KiB, 5 edits/doc | whole-row rewrite            |        2,065,381 B |         12,399,585 B |           12,378,246 B |            12,374,016 B |
+| 10 × 100 KiB, 5 edits/doc | mutable parts + projections  |        2,347,553 B |          2,535,162 B |            2,513,823 B |             2,510,848 B |
+| 10 × 100 KiB, 5 edits/doc | immutable root + projections |        2,398,555 B |          2,682,614 B |            2,661,275 B |             2,658,304 B |
 
 For 10 KiB documents and ten localized edits, mutable parts used 35% and the
-immutable-root model 50% of the whole-row representation's closed apparent
+immutable-root model 46% of the whole-row representation's closed apparent
 growth. For 100 KiB documents and five edits, those ratios fell to 20% and 22%.
 The immutable model pays modest extra root/part metadata for independent retained
 roots, while still avoiding repeated large-value bytes for localized edits.
 
 RocksDB preallocates live files: the empty open database had 78,184,448 allocated
 bytes, larger than these populated open stores, so independently measured
-baseline-subtracted open _allocated_ values saturate at zero and are not useful.
+baseline-subtracted open _allocated_ values can be negative and are not useful.
 Closed allocated values track apparent values and are the meaningful disk receipt.
-The empty baselines were 157,501 apparent/78,184,448 allocated bytes while open
-and 179,031 apparent/204,800 allocated bytes after close.
+The empty baselines were 157,399 apparent/78,184,448 allocated bytes while open
+and about 178,920 apparent/204,800 allocated bytes after close.
 
 An early version closed and reopened between seeding and edits. That uncovered a
 separate persistent-client conflict (`row visible parent changed since transaction
 write was staged`) on the first post-reopen mutable update. The receipt now keeps
-one client open through both phases so it measures representation cost rather
-than that lifecycle issue. Chromium OPFS was not added: reproducing the same
+one warm client handle through both phases so it measures representation cost
+rather than that lifecycle issue. It is not a cold-restart correctness receipt;
+the restart conflict is a tracked prerequisite for adding that lifecycle gate.
+Chromium OPFS was not added: reproducing the same
 three low-level layouts through the browser facade would add a different runtime
 and persistence implementation, whereas this question is specifically answered
 by the production RocksDB compression profile.

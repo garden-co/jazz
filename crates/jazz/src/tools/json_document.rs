@@ -5,7 +5,7 @@
 //! immutable complete root containing the ordered part references, a mutable
 //! document root pointer, and ordinary declared-path projection rows.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde_json::{Map, Value as JsonValue};
 
@@ -22,7 +22,6 @@ const PART_POINTER_COLUMN: &str = "pointer";
 const PART_KIND_COLUMN: &str = "kind";
 const PART_SCALAR_COLUMN: &str = "scalar_json";
 const PROJECTION_DOCUMENT_COLUMN: &str = "document_id";
-const PROJECTION_ROOT_COLUMN: &str = "root_id";
 const PROJECTION_POINTER_COLUMN: &str = "pointer";
 const PROJECTION_SCALAR_COLUMN: &str = "scalar_json";
 
@@ -110,7 +109,6 @@ impl JsonDocumentSchema {
                 .build_named(),
             TableSchema::builder(&self.names.projections)
                 .fk_column(PROJECTION_DOCUMENT_COLUMN, &self.names.documents)
-                .fk_column(PROJECTION_ROOT_COLUMN, &self.names.roots)
                 .column(PROJECTION_POINTER_COLUMN, ColumnType::Text)
                 .column(PROJECTION_SCALAR_COLUMN, ColumnType::Text)
                 .index_only([
@@ -149,7 +147,7 @@ impl JsonDocumentSchema {
                 PROJECTION_SCALAR_COLUMN,
                 Value::Text(serde_json::to_string(value)?),
             )
-            .select(&[PROJECTION_DOCUMENT_COLUMN, PROJECTION_ROOT_COLUMN])
+            .select(&[PROJECTION_DOCUMENT_COLUMN])
             .build())
     }
 }
@@ -244,7 +242,6 @@ impl<'a> JsonDocumentStore<'a> {
                             PROJECTION_DOCUMENT_COLUMN.to_owned(),
                             Value::Uuid(document_id),
                         ),
-                        (PROJECTION_ROOT_COLUMN.to_owned(), Value::Uuid(root_id)),
                         (
                             PROJECTION_POINTER_COLUMN.to_owned(),
                             Value::Text(pointer.clone()),
@@ -307,14 +304,7 @@ impl<'a> JsonDocumentStore<'a> {
         }
         let part_ids = expect_uuid_array(root.get(1), "root parts")?;
         let available_parts = self.parts_for_document(document_id).await?;
-        let mut records = Vec::with_capacity(part_ids.len());
-        for part_id in &part_ids {
-            records.push(available_parts.get(part_id).cloned().ok_or_else(|| {
-                JazzError::Query(format!(
-                    "JSON document root references an unavailable part: {part_id}"
-                ))
-            })?);
-        }
+        let records = validate_root_records(&part_ids, &available_parts)?;
         Ok(JsonDocumentSnapshot {
             document_id,
             root_id,
@@ -361,43 +351,26 @@ impl<'a> JsonDocumentStore<'a> {
         }
         let mut part_ids = expect_uuid_array(root.get(1), "root parts")?;
         let available_parts = self.parts_for_document(document_id).await?;
-        let mut replacement_index = None;
-        for (index, part_id) in part_ids.iter().enumerate() {
-            let part = available_parts.get(part_id).ok_or_else(|| {
-                JazzError::Query(format!(
-                    "JSON document root references an unavailable part: {part_id}"
-                ))
-            })?;
-            if part.pointer == pointer {
-                if part.kind != PartKind::Scalar {
-                    return Err(JazzError::Write(format!(
-                        "JSON pointer does not name a scalar: {pointer}"
-                    )));
-                }
-                replacement_index = Some(index);
-                break;
-            }
-        }
+        let records = validate_root_records(&part_ids, &available_parts)?;
+        let replacement_index = records.iter().position(|part| part.pointer == pointer);
         let replacement_index = replacement_index.ok_or_else(|| {
             JazzError::Write(format!("JSON pointer is absent from document: {pointer}"))
         })?;
-        let mut projection_updates = Vec::with_capacity(self.schema.projected_pointers.len());
+        if records[replacement_index].kind != PartKind::Scalar {
+            return Err(JazzError::Write(format!(
+                "JSON pointer does not name a scalar: {pointer}"
+            )));
+        }
+        let mut affected_projection = None;
         for projected in &self.schema.projected_pointers {
-            let mut matching_parts = part_ids.iter().filter_map(|part_id| {
-                available_parts
-                    .get(part_id)
-                    .filter(|part| part.pointer == *projected)
-            });
-            let projected_part = matching_parts.next().ok_or_else(|| {
-                JazzError::Write(format!(
-                    "declared projection is absent from current root: {projected}"
-                ))
-            })?;
-            if matching_parts.next().is_some() {
-                return Err(JazzError::Write(format!(
-                    "declared projection occurs more than once in current root: {projected}"
-                )));
-            }
+            let projected_part = records
+                .iter()
+                .find(|part| part.pointer == *projected)
+                .ok_or_else(|| {
+                    JazzError::Write(format!(
+                        "declared projection is absent from current root: {projected}"
+                    ))
+                })?;
             if projected_part.kind != PartKind::Scalar {
                 return Err(JazzError::Write(format!(
                     "declared projection is not scalar in current root: {projected}"
@@ -408,7 +381,6 @@ impl<'a> JsonDocumentStore<'a> {
                 .filter_eq(PROJECTION_POINTER_COLUMN, Value::Text(projected.clone()))
                 .select(&[
                     PROJECTION_DOCUMENT_COLUMN,
-                    PROJECTION_ROOT_COLUMN,
                     PROJECTION_POINTER_COLUMN,
                     PROJECTION_SCALAR_COLUMN,
                 ])
@@ -422,16 +394,17 @@ impl<'a> JsonDocumentStore<'a> {
             }
             let (projection_id, projection) = &rows[0];
             if expect_uuid(projection.first(), "projection document")? != document_id
-                || expect_uuid(projection.get(1), "projection root")? != old_root
-                || expect_text(projection.get(2), "projection pointer")? != projected
-                || expect_text(projection.get(3), "projection scalar")?
+                || expect_text(projection.get(1), "projection pointer")? != projected
+                || expect_text(projection.get(2), "projection scalar")?
                     != projected_part.scalar_json
             {
                 return Err(JazzError::Write(format!(
                     "declared projection does not match current root: {projected}"
                 )));
             }
-            projection_updates.push((*projection_id, projected == pointer));
+            if projected == pointer {
+                affected_projection = Some(*projection_id);
+            }
         }
         let replacement_id = ObjectId::new();
         part_ids[replacement_index] = replacement_id;
@@ -473,15 +446,14 @@ impl<'a> JsonDocumentStore<'a> {
                 document_id,
                 vec![(DOCUMENT_ROOT_COLUMN.to_owned(), Value::Uuid(root_id))],
             )?;
-            for (projection_id, changed) in projection_updates {
-                let mut patch = vec![(PROJECTION_ROOT_COLUMN.to_owned(), Value::Uuid(root_id))];
-                if changed {
-                    patch.push((
+            if let Some(projection_id) = affected_projection {
+                transaction.update(
+                    projection_id,
+                    vec![(
                         PROJECTION_SCALAR_COLUMN.to_owned(),
                         Value::Text(scalar_json.clone()),
-                    ));
-                }
-                transaction.update(projection_id, patch)?;
+                    )],
+                )?;
             }
             Ok(())
         })();
@@ -582,6 +554,135 @@ struct PartRecord {
     pointer: String,
     kind: PartKind,
     scalar_json: String,
+}
+
+fn validate_root_records(
+    part_ids: &[ObjectId],
+    available_parts: &HashMap<ObjectId, PartRecord>,
+) -> Result<Vec<PartRecord>> {
+    let mut ids = HashSet::with_capacity(part_ids.len());
+    let mut pointers = HashSet::with_capacity(part_ids.len());
+    let mut records = Vec::with_capacity(part_ids.len());
+    for part_id in part_ids {
+        if !ids.insert(*part_id) {
+            return Err(JazzError::Query(format!(
+                "JSON document root contains a duplicate part id: {part_id}"
+            )));
+        }
+        let part = available_parts.get(part_id).ok_or_else(|| {
+            JazzError::Query(format!(
+                "JSON document root references an unavailable part: {part_id}"
+            ))
+        })?;
+        let tokens = pointer_tokens(&part.pointer)?;
+        let canonical = if tokens.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "/{}",
+                tokens
+                    .iter()
+                    .map(|token| escape_pointer_token(token))
+                    .collect::<Vec<_>>()
+                    .join("/")
+            )
+        };
+        if canonical != part.pointer {
+            return Err(JazzError::Query(format!(
+                "JSON document part pointer is not canonical: {}",
+                part.pointer
+            )));
+        }
+        if !pointers.insert(part.pointer.clone()) {
+            return Err(JazzError::Query(format!(
+                "JSON document root contains a duplicate pointer: {}",
+                part.pointer
+            )));
+        }
+        match part.kind {
+            PartKind::Scalar => {
+                let value: JsonValue = serde_json::from_str(&part.scalar_json)?;
+                if !is_scalar(&value) {
+                    return Err(JazzError::Query(format!(
+                        "JSON scalar part contains a container payload: {}",
+                        part.pointer
+                    )));
+                }
+            }
+            PartKind::Object | PartKind::Array if !part.scalar_json.is_empty() => {
+                return Err(JazzError::Query(format!(
+                    "JSON container part contains a scalar payload: {}",
+                    part.pointer
+                )));
+            }
+            PartKind::Object | PartKind::Array => {}
+        }
+        records.push(part.clone());
+    }
+    if !pointers.contains("") {
+        return Err(JazzError::Query(
+            "JSON document root part is missing".to_owned(),
+        ));
+    }
+    let by_pointer: HashMap<_, _> = records
+        .iter()
+        .map(|record| (record.pointer.as_str(), record))
+        .collect();
+    let mut array_children: HashMap<&str, Vec<usize>> = HashMap::new();
+    for record in records.iter().filter(|record| !record.pointer.is_empty()) {
+        let mut tokens = pointer_tokens(&record.pointer)?;
+        let child = tokens.pop().expect("non-root pointer has a token");
+        let parent_pointer = if tokens.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "/{}",
+                tokens
+                    .iter()
+                    .map(|token| escape_pointer_token(token))
+                    .collect::<Vec<_>>()
+                    .join("/")
+            )
+        };
+        let parent = by_pointer.get(parent_pointer.as_str()).ok_or_else(|| {
+            JazzError::Query(format!("JSON document parent is missing: {parent_pointer}"))
+        })?;
+        match parent.kind {
+            PartKind::Object => {}
+            PartKind::Array => {
+                let index: usize = child.parse().map_err(|_| {
+                    JazzError::Query(format!(
+                        "invalid JSON array index in pointer: {}",
+                        record.pointer
+                    ))
+                })?;
+                if child != index.to_string() {
+                    return Err(JazzError::Query(format!(
+                        "non-canonical JSON array index in pointer: {}",
+                        record.pointer
+                    )));
+                }
+                array_children
+                    .entry(parent.pointer.as_str())
+                    .or_default()
+                    .push(index);
+            }
+            PartKind::Scalar => {
+                return Err(JazzError::Query(format!(
+                    "JSON pointer parent is scalar: {parent_pointer}"
+                )));
+            }
+        }
+    }
+    for (pointer, mut indices) in array_children {
+        indices.sort_unstable();
+        if indices.iter().copied().ne(0..indices.len()) {
+            return Err(JazzError::Query(format!(
+                "JSON array children are not contiguous: {pointer}"
+            )));
+        }
+    }
+    Ok(records)
 }
 
 fn flatten(value: &JsonValue) -> Result<Vec<PartRecord>> {
@@ -779,6 +880,81 @@ fn expect_text<'a>(value: Option<&'a Value>, label: &str) -> Result<&'a str> {
     match value {
         Some(Value::Text(value)) => Ok(value),
         _ => Err(JazzError::Query(format!("{label} is not text"))),
+    }
+}
+
+#[cfg(test)]
+mod integrity_tests {
+    use super::*;
+
+    fn validate(records: Vec<PartRecord>, ids: Vec<ObjectId>) -> Result<Vec<PartRecord>> {
+        let available = ids.iter().copied().zip(records).collect();
+        validate_root_records(&ids, &available)
+    }
+
+    fn part(pointer: &str, kind: PartKind, scalar_json: &str) -> PartRecord {
+        PartRecord {
+            pointer: pointer.to_owned(),
+            kind,
+            scalar_json: scalar_json.to_owned(),
+        }
+    }
+
+    #[test]
+    fn root_validation_rejects_duplicate_ids_and_missing_or_duplicate_root_pointers() {
+        let id = ObjectId::new();
+        let error = validate(vec![part("", PartKind::Object, "")], vec![id, id])
+            .expect_err("duplicate id must fail");
+        assert!(error.to_string().contains("duplicate part id"));
+
+        let error = validate(
+            vec![part("/child", PartKind::Scalar, "1")],
+            vec![ObjectId::new()],
+        )
+        .expect_err("missing root must fail");
+        assert!(error.to_string().contains("root part is missing"));
+
+        let error = validate(
+            vec![
+                part("", PartKind::Object, ""),
+                part("", PartKind::Object, ""),
+            ],
+            vec![ObjectId::new(), ObjectId::new()],
+        )
+        .expect_err("duplicate root pointer must fail");
+        assert!(error.to_string().contains("duplicate pointer"));
+    }
+
+    #[test]
+    fn root_validation_rejects_payload_and_structure_corruption() {
+        let error = validate(
+            vec![part("", PartKind::Scalar, "{}")],
+            vec![ObjectId::new()],
+        )
+        .expect_err("scalar container payload must fail");
+        assert!(error.to_string().contains("container payload"));
+
+        let error = validate(
+            vec![
+                part("", PartKind::Object, ""),
+                part("/parent", PartKind::Scalar, "1"),
+                part("/parent/child", PartKind::Scalar, "2"),
+            ],
+            vec![ObjectId::new(), ObjectId::new(), ObjectId::new()],
+        )
+        .expect_err("child beneath scalar must fail");
+        assert!(error.to_string().contains("parent is scalar"));
+
+        let error = validate(
+            vec![part("", PartKind::Object, "payload")],
+            vec![ObjectId::new()],
+        )
+        .expect_err("container scalar payload must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("container part contains a scalar payload")
+        );
     }
 }
 
