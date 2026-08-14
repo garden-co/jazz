@@ -295,6 +295,132 @@ export function createConventionalFileStorage<
     });
     return wait ? r.wait() : r.value;
   };
+  // Equal-length overwrites retain every untouched part and copy only the
+  // affected leaf-to-root paths. Insert is deliberately kept on the generic
+  // splice path below until tree concatenation/rebalancing lands.
+  const overwritePersistent = async (
+    file: string | F,
+    start: number,
+    bytes: Uint8Array,
+    wait: boolean,
+  ) => {
+    const id = typeof file === "string" ? file : file.id;
+    const replacement = bytes.slice();
+    const result = await db.exclusiveTransaction(async (tx) => {
+      const current = await tx.one(app.files.where({ id }), {
+        tier: "local",
+        propagation: "local-only",
+      });
+      if (!current) throw new FileNotFoundError(id);
+      checked(start, "Overwrite offset");
+      if (start + replacement.length > current.byteLength)
+        throw new RangeError("Overwrite range is outside file.");
+      // A tail is small; materializing it first preserves the root invariant.
+      if (!current.rootId || current.inlineBytes.length !== 0) {
+        const old = await fromSnapshot(snapshot(current), {
+          tier: "local",
+          propagation: "local-only",
+        });
+        const next = join([
+          old.slice(0, start),
+          replacement,
+          old.slice(start + replacement.length),
+        ]);
+        tx.update(app.files, id, {
+          rootId: "",
+          byteLength: next.length,
+          inlineBytes: next,
+        } as Partial<Omit<F, "id">>);
+        return {
+          fileId: id,
+          rootId: "",
+          byteLength: next.length,
+          inlineBytes: next,
+        } satisfies FileSnapshot;
+      }
+      const validated = await tree(
+        current.rootId,
+        async (nodeId) => {
+          const node = await db.one(app.file_nodes.where({ id: nodeId }), {
+            tier: "local",
+            propagation: "local-only",
+          });
+          if (!node) throw new InvalidFileDataError(`File node "${nodeId}" is missing.`);
+          return node;
+        },
+        async (partId) => {
+          const part = await db.one(app.file_parts.where({ id: partId }), {
+            tier: "local",
+            propagation: "local-only",
+          });
+          if (!part) throw new InvalidFileDataError(`File part "${partId}" is missing.`);
+          return part.data;
+        },
+      );
+      if (validated.length !== current.byteLength)
+        throw new InvalidFileDataError("File root length is corrupt.");
+      const rewrite = async (nodeId: string, at: number): Promise<Ref> => {
+        const node = validated.nodes.get(nodeId)!;
+        let cursor = at,
+          changed = false;
+        const children: Ref[] = [];
+        for (let index = 0; index < node.childIds.length; index += 1) {
+          const childId = node.childIds[index]!,
+            length = node.childLengths[index]!;
+          const childEnd = cursor + length;
+          if (childEnd <= start || cursor >= start + replacement.length)
+            children.push({ id: childId, length, height: node.height - 1 });
+          else if (node.height > 0) {
+            const rewritten = await rewrite(childId, cursor);
+            children.push(rewritten);
+            changed ||= rewritten.id !== childId;
+          } else {
+            const part = await db.one(app.file_parts.where({ id: childId }), {
+              tier: "local",
+              propagation: "local-only",
+            });
+            if (!part) throw new InvalidFileDataError(`File part "${childId}" is missing.`);
+            const localStart = Math.max(0, start - cursor),
+              localEnd = Math.min(length, start + replacement.length - cursor);
+            const data = part.data.slice();
+            data.set(
+              replacement.slice(cursor + localStart - start, cursor + localEnd - start),
+              localStart,
+            );
+            const inserted = tx.insert(app.file_parts, { data } as Omit<P, "id">);
+            children.push({ id: inserted.id, length, height: -1 });
+            changed = true;
+          }
+          cursor = childEnd;
+        }
+        if (!changed)
+          return {
+            id: nodeId,
+            length: node.childLengths.reduce((sum, length) => sum + length, 0),
+            height: node.height,
+          };
+        const inserted = tx.insert(app.file_nodes, {
+          childIds: children.map((child) => child.id),
+          childLengths: children.map((child) => child.length),
+          height: node.height,
+        } as Omit<N, "id">);
+        return {
+          id: inserted.id,
+          length: children.reduce((sum, child) => sum + child.length, 0),
+          height: node.height,
+        };
+      };
+      const root = await rewrite(current.rootId, 0);
+      tx.update(app.files, id, { rootId: root.id } as Partial<Omit<F, "id">>);
+      return {
+        fileId: id,
+        rootId: root.id,
+        byteLength: current.byteLength,
+        inlineBytes: new Uint8Array(),
+      } satisfies FileSnapshot;
+    });
+    return wait ? result.wait() : result.value;
+  };
   return {
     async create(o = {}) {
       const r = db.insert(app.files, {
@@ -329,17 +455,7 @@ export function createConventionalFileStorage<
       return mutate(f, (x) => join([x, copy]), o.waitForAuthority !== false);
     },
     async overwrite(f, start, b, o = {}) {
-      const copy = b.slice();
-      return mutate(
-        f,
-        (x) => {
-          checked(start, "Overwrite offset");
-          if (start > x.length || start + copy.length > x.length)
-            throw new RangeError("Overwrite range is outside file.");
-          return join([x.slice(0, start), copy, x.slice(start + copy.length)]);
-        },
-        o.waitForAuthority !== false,
-      );
+      return overwritePersistent(f, start, b, o.waitForAuthority !== false);
     },
     async insert(f, start, b, o = {}) {
       const copy = b.slice();

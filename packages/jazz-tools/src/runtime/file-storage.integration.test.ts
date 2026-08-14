@@ -73,6 +73,23 @@ describe("ordinary-row files", () => {
       (await db.one(app.file_nodes.where({ id: saved.rootId }), { tier: "local" }))?.height,
     ).toBeGreaterThan(0);
   });
+  it("path-copies only an overwritten leaf and its ancestors", async () => {
+    const { db, storage } = await setup(0);
+    const file = await storage.create({ tier: "edge" });
+    const input = new Uint8Array(MAX_FILE_PART_BYTES * 4);
+    input.fill(1);
+    const before = await storage.append(file, input);
+    const oldParts = await db.all(app.file_parts.where({}), { tier: "local" });
+    const oldNodes = await db.all(app.file_nodes.where({}), { tier: "local" });
+    const oldRoot = await db.one(app.file_nodes.where({ id: before.rootId }), { tier: "local" });
+    const after = await storage.overwrite(file, MAX_FILE_PART_BYTES + 1, Uint8Array.of(9));
+    const newParts = await db.all(app.file_parts.where({}), { tier: "local" });
+    const newNodes = await db.all(app.file_nodes.where({}), { tier: "local" });
+    expect(newParts).toHaveLength(oldParts.length + 1);
+    expect(newNodes.length - oldNodes.length).toBeLessThanOrEqual((oldRoot?.height ?? 0) + 1);
+    expect(Array.from(await storage.read(before))).toEqual(Array.from(input));
+    expect((await storage.read(after))[MAX_FILE_PART_BYTES + 1]).toBe(9);
+  });
   it("rejects corruption before returning a range and never advances a corrupt head", async () => {
     const { db, storage } = await setup(0);
     const file = await storage.create({ tier: "edge" });
