@@ -10,7 +10,7 @@ import {
 } from "./file-storage.js";
 
 const app = s.defineApp({
-  files: s.table({ rootId: s.string(), byteLength: s.int(), inlineBytes: s.bytes() }),
+  file_roots: s.table({ rootId: s.string(), byteLength: s.int(), inlineBytes: s.bytes() }),
   file_nodes: s.table({
     childIds: s.array(s.string()),
     childLengths: s.array(s.int()),
@@ -25,12 +25,18 @@ async function setup(inlineBytes = 4) {
     adminSecret = "ordinary-file-admin";
   const server = await startLocalJazzServer({ appId, adminSecret });
   servers.push(server);
+  const allow = {
+    select: { using: { type: "True" as const } },
+    insert: { with_check: { type: "True" as const } },
+    update: { using: { type: "True" as const }, with_check: { type: "True" as const } },
+    delete: { using: { type: "True" as const } },
+  };
   await deploy({
     serverUrl: server.url,
     appId,
     adminSecret,
     schema: app.wasmSchema,
-    permissions: {},
+    permissions: { file_roots: allow, file_nodes: allow, file_parts: allow },
   });
   const db = await createDb({
     appId,
@@ -39,7 +45,14 @@ async function setup(inlineBytes = 4) {
     driver: { type: "memory" },
   });
   databases.push(db);
-  return { db, storage: createConventionalFileStorage(db, app, { inlineBytes, fanout: 2 }) };
+  return {
+    db,
+    storage: createConventionalFileStorage(
+      db,
+      { files: app.file_roots, file_nodes: app.file_nodes, file_parts: app.file_parts },
+      { inlineBytes, fanout: 2 },
+    ),
+  };
 }
 afterEach(async () => {
   await Promise.all(databases.splice(0).map((db) => db.shutdown()));
@@ -51,10 +64,12 @@ describe("ordinary-row files", () => {
     const { storage } = await setup();
     const file = await storage.create({ tier: "edge" });
     const initial = await storage.append(file, Uint8Array.from([1, 2, 3, 4, 5]));
+    expect((await storage.snapshot(file.id)).byteLength).toBe(5);
     await storage.overwrite(file, 1, Uint8Array.of(9, 8));
+    expect((await storage.snapshot(file.id)).byteLength).toBe(5);
     await storage.insert(file, 3, Uint8Array.of(7));
-    expect(Array.from(await storage.read(file))).toEqual([1, 9, 8, 7, 4, 5]);
-    expect(Array.from(await storage.readRange(file, 2, 5))).toEqual([8, 7, 4]);
+    expect(Array.from(await storage.read(file.id))).toEqual([1, 9, 8, 7, 4, 5]);
+    expect(Array.from(await storage.readRange(file.id, 2, 5))).toEqual([8, 7, 4]);
     expect(Array.from(await storage.read(initial))).toEqual([1, 2, 3, 4, 5]);
   });
   it("uses bounded immutable parts and a fanout tree", async () => {
@@ -107,7 +122,7 @@ describe("ordinary-row files", () => {
       storage.append(file, Uint8Array.of(1)),
       storage.append(file, Uint8Array.of(2)),
     ]);
-    const bytes = await storage.read(file);
+    const bytes = await storage.read(file.id);
     expect(bytes.length).toBe(results.filter((x) => x.status === "fulfilled").length);
   });
 });

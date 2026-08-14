@@ -137,9 +137,13 @@ export function createConventionalFileStorage<
     throw new RangeError(`inlineBytes must be between 0 and ${MAX_FILE_PART_BYTES}.`);
   if (!Number.isSafeInteger(fanout) || fanout < 2 || fanout > 32)
     throw new RangeError("fanout must be between 2 and 32.");
+  // A file head is an ordinary local row. Reading it at edge by default can
+  // deliberately return an older authority snapshot while a local write is
+  // still settling, which is surprising for a mutable file API.
+  const local = (queryOptions?: QueryOptions): QueryOptions => queryOptions ?? { tier: "local" };
   const load = async (file: string | F, q?: QueryOptions) => {
     if (typeof file !== "string") return file;
-    const row = await db.one(app.files.where({ id: file }), q);
+    const row = await db.one(app.files.where({ id: file }), local(q));
     if (!row) throw new FileNotFoundError(file);
     return row;
   };
@@ -431,14 +435,15 @@ export function createConventionalFileStorage<
       return o.tier ? r.wait({ tier: o.tier }) : r.value;
     },
     async snapshot(f, q) {
-      return snapshot(await load(f, q));
+      return snapshot(await load(f, local(q)));
     },
     async read(f, o = {}) {
       const { start = 0, end, ...q } = o;
       return this.readRange(f, start, end, q);
     },
     async readRange(f, start, end, q) {
-      const s = typeof f === "object" && "fileId" in f ? f : await this.snapshot(f, q);
+      const options = local(q);
+      const s = typeof f === "object" && "fileId" in f ? f : await this.snapshot(f, options);
       const e = end ?? s.byteLength;
       if (
         !Number.isSafeInteger(start) ||
@@ -448,7 +453,7 @@ export function createConventionalFileStorage<
         e > s.byteLength
       )
         throw new RangeError(`Invalid file range [${start}, ${e}) for ${s.byteLength} bytes.`);
-      return (await fromSnapshot(s, q)).slice(start, e);
+      return (await fromSnapshot(s, options)).slice(start, e);
     },
     async append(f, b, o = {}) {
       const copy = b.slice();
