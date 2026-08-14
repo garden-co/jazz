@@ -20,7 +20,7 @@ const app = s.defineApp({
 });
 const databases: Db[] = [],
   servers: LocalJazzServerHandle[] = [];
-async function setup(inlineBytes = 4, denyRootUpdate = false) {
+async function setup(inlineBytes = 4, denyRootUpdate = false, immutableChildren = false) {
   const appId = randomUUID(),
     adminSecret = "ordinary-file-admin";
   const server = await startLocalJazzServer({ appId, adminSecret });
@@ -43,8 +43,20 @@ async function setup(inlineBytes = 4, denyRootUpdate = false) {
             update: { using: { type: "False" as const }, with_check: { type: "False" as const } },
           }
         : allow,
-      file_nodes: allow,
-      file_parts: allow,
+      file_nodes: immutableChildren
+        ? {
+            ...allow,
+            update: { using: { type: "False" as const }, with_check: { type: "False" as const } },
+            delete: { using: { type: "False" as const } },
+          }
+        : allow,
+      file_parts: immutableChildren
+        ? {
+            ...allow,
+            update: { using: { type: "False" as const }, with_check: { type: "False" as const } },
+            delete: { using: { type: "False" as const } },
+          }
+        : allow,
     },
   });
   const db = await createDb({
@@ -148,5 +160,21 @@ describe("ordinary-row files", () => {
     expect(await db.all(app.file_parts.where({}), { tier: "local" })).toHaveLength(0);
     expect(await db.all(app.file_nodes.where({}), { tier: "local" })).toHaveLength(0);
     expect(Array.from(await storage.read(before))).toEqual([]);
+  });
+  it("authority rejects immutable part updates and node deletes", async () => {
+    const { db, storage } = await setup(0, false, true);
+    const file = await storage.create({ tier: "edge" });
+    const saved = await storage.append(file.id, Uint8Array.of(1));
+    const node = await db.one(app.file_nodes.where({ id: saved.rootId }), { tier: "local" });
+    await expect(
+      db
+        .update(app.file_parts, node!.childIds[0]!, { data: Uint8Array.of(9) })
+        .wait({ tier: "edge" }),
+    ).rejects.toThrow("permission_denied");
+    await expect(db.delete(app.file_nodes, saved.rootId).wait({ tier: "edge" })).rejects.toThrow(
+      "permission_denied",
+    );
+    expect(Array.from(await storage.read(saved))).toEqual([1]);
+    expect(Array.from(await storage.read(file.id))).toEqual([1]);
   });
 });
