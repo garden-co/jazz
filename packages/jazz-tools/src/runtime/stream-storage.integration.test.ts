@@ -168,7 +168,31 @@ describe("ordinary-row stream storage", () => {
     await db
       .update(app.stream_nodes, snapshot!.rootId, { childLengths: [1, 4] })
       .wait({ tier: "local" });
-    await expect(storage.read(snapshot!)).rejects.toBeInstanceOf(InvalidStreamDataError);
+    await expect(storage.readRange(snapshot!, 0, 2)).rejects.toBeInstanceOf(InvalidStreamDataError);
+  });
+
+  it("rejects corrupted current-tree metadata instead of advancing the stream head", async () => {
+    const { db, storage } = await setup({ inlineTailBytes: 0, fanout: 4 });
+    const stream = await storage.create({ tier: "edge" });
+    let snapshot: StreamSnapshot | undefined;
+    for (let value = 0; value < 5; value += 1) {
+      snapshot = await storage.append(stream, Uint8Array.of(value), { waitForAuthority: true });
+    }
+    const root = await db.one(app.stream_nodes.where({ id: snapshot!.rootId }), { tier: "local" });
+    expect(root?.childLengths).toEqual([2, 3]);
+    await db
+      .update(app.stream_nodes, snapshot!.rootId, { childLengths: [1, 4] })
+      .wait({ tier: "edge" });
+    const before = await db.one(app.streams.where({ id: stream.id }), { tier: "local" });
+
+    await expect(storage.append(stream.id, Uint8Array.of(5))).rejects.toBeInstanceOf(
+      InvalidStreamDataError,
+    );
+
+    const after = await db.one(app.streams.where({ id: stream.id }), { tier: "local" });
+    expect(after?.rootId).toBe(before?.rootId);
+    expect(after?.prefixBytes).toBe(before?.prefixBytes);
+    expect(after?.inlineTail).toEqual(before?.inlineTail);
   });
 
   it("rejects malformed descendant heights before reading a stream", async () => {

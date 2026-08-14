@@ -186,9 +186,7 @@ export function createConventionalStreamStorage<
     return stream;
   };
 
-  const readNode = async (id: string, queryOptions?: QueryOptions): Promise<TNode> => {
-    const node = await db.one(app.stream_nodes.where({ id }), queryOptions);
-    if (!node) throw new InvalidStreamDataError(`Stream tree node "${id}" is missing.`);
+  const validateNode = (id: string, node: TNode): TNode => {
     if (
       !Number.isSafeInteger(node.height) ||
       node.height < 0 ||
@@ -204,6 +202,12 @@ export function createConventionalStreamStorage<
     return node;
   };
 
+  const readNode = async (id: string, queryOptions?: QueryOptions): Promise<TNode> => {
+    const node = await db.one(app.stream_nodes.where({ id }), queryOptions);
+    if (!node) throw new InvalidStreamDataError(`Stream tree node "${id}" is missing.`);
+    return validateNode(id, node);
+  };
+
   const readPart = async (id: string, expectedLength: number, queryOptions?: QueryOptions) => {
     const part = await db.one(app.stream_parts.where({ id }), queryOptions);
     if (!part) throw new InvalidStreamDataError(`Stream part "${id}" is missing.`);
@@ -217,7 +221,8 @@ export function createConventionalStreamStorage<
 
   const validateTree = async (
     nodeId: string,
-    queryOptions?: QueryOptions,
+    loadNode: (id: string) => Promise<TNode>,
+    loadPartLength?: (id: string) => Promise<number>,
   ): Promise<{ length: number; nodes: Map<string, TNode> }> => {
     const visiting = new Set<string>();
     const nodes = new Map<string, TNode>();
@@ -234,7 +239,7 @@ export function createConventionalStreamStorage<
       }
       visiting.add(id);
       try {
-        const node = await readNode(id, queryOptions);
+        const node = await loadNode(id);
         nodes.set(id, node);
         if (expectedHeight !== undefined && node.height !== expectedHeight) {
           throw new InvalidStreamDataError(
@@ -245,7 +250,11 @@ export function createConventionalStreamStorage<
         for (let index = 0; index < node.childIds.length; index += 1) {
           const childLength = node.childLengths[index]!;
           const actualLength =
-            node.height === 0 ? childLength : await visit(node.childIds[index]!, node.height - 1);
+            node.height === 0
+              ? loadPartLength
+                ? await loadPartLength(node.childIds[index]!)
+                : childLength
+              : await visit(node.childIds[index]!, node.height - 1);
           if (childLength !== actualLength) {
             throw new InvalidStreamDataError(
               `Stream tree node "${id}" child ${index} promises ${childLength} bytes, but its subtree contains ${actualLength}.`,
@@ -326,6 +335,41 @@ export function createConventionalStreamStorage<
           propagation: "local-only",
         });
         if (!current) throw new StreamNotFoundError(streamId);
+        validateLength(current.prefixBytes, "Stream prefixBytes");
+        if (!(current.inlineTail instanceof Uint8Array)) {
+          throw new InvalidStreamDataError("Stream inlineTail must be a Uint8Array.");
+        }
+        if (!current.rootId && current.prefixBytes !== 0) {
+          throw new InvalidStreamDataError(
+            "A stream without a root cannot have a non-zero prefix.",
+          );
+        }
+        const validatedTree = current.rootId
+          ? await validateTree(
+              current.rootId,
+              async (id) => {
+                const node = await tx.one(app.stream_nodes.where({ id }), {
+                  tier: "local",
+                  propagation: "local-only",
+                });
+                if (!node) throw new InvalidStreamDataError(`Stream tree node "${id}" is missing.`);
+                return validateNode(id, node);
+              },
+              async (id) => {
+                const part = await tx.one(app.stream_parts.where({ id }), {
+                  tier: "local",
+                  propagation: "local-only",
+                });
+                if (!part) throw new InvalidStreamDataError(`Stream part "${id}" is missing.`);
+                return part.data.length;
+              },
+            )
+          : undefined;
+        if (validatedTree && validatedTree.length !== current.prefixBytes) {
+          throw new InvalidStreamDataError(
+            `Stream root "${current.rootId}" contains ${validatedTree.length} bytes, but prefixBytes is ${current.prefixBytes}.`,
+          );
+        }
         const combinedTail = concat([current.inlineTail, bytes]);
         if (combinedTail.length <= inlineTailBytes) {
           tx.update(app.streams, streamId, { inlineTail: combinedTail } as Partial<
@@ -341,11 +385,9 @@ export function createConventionalStreamStorage<
         const getNode = async (id: string) => {
           const inserted = insertedNodes.get(id);
           if (inserted) return inserted;
-          const node = await tx.one(app.stream_nodes.where({ id }), {
-            tier: "local",
-            propagation: "local-only",
-          });
-          if (!node) throw new InvalidStreamDataError(`Stream tree node "${id}" is missing.`);
+          const node = validatedTree?.nodes.get(id);
+          if (!node)
+            throw new InvalidStreamDataError(`Validated stream tree node "${id}" is missing.`);
           return { ...node, length: node.childLengths.reduce((sum, length) => sum + length, 0) };
         };
         const insertNode = (children: TreeRef[], height: number) => {
@@ -465,7 +507,7 @@ export function createConventionalStreamStorage<
         );
       }
       const validatedRoot = snapshot.rootId
-        ? await validateTree(snapshot.rootId, queryOptions)
+        ? await validateTree(snapshot.rootId, (id) => readNode(id, queryOptions))
         : undefined;
       if (validatedRoot && validatedRoot.length !== snapshot.prefixBytes) {
         throw new InvalidStreamDataError(
