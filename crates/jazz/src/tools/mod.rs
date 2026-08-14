@@ -5,6 +5,8 @@ pub mod app_id;
 #[cfg(feature = "cli")]
 pub mod commands;
 pub mod identity;
+#[cfg(feature = "client")]
+pub mod json_document;
 pub mod metadata;
 #[cfg(any(feature = "cli", feature = "server"))]
 pub mod middleware;
@@ -47,6 +49,11 @@ pub use transaction::OpenBatchId;
 
 #[cfg(feature = "client")]
 pub use client::{JazzClient, JazzTransaction};
+#[cfg(feature = "client")]
+pub use json_document::{
+    JsonDocumentCommit, JsonDocumentNames, JsonDocumentSchema, JsonDocumentSnapshot,
+    JsonDocumentStore,
+};
 
 pub(crate) use object::OutputOccurrenceId;
 pub use object::{BranchName, ObjectId, ResultKey};
