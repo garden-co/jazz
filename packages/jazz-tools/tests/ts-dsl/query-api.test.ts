@@ -19,6 +19,12 @@ function makeFriends(db: Db, user1: User, user2: User) {
 const readModes = ["direct", "mergeable-tx", "exclusive-tx"] as const;
 type ReadMode = (typeof readModes)[number];
 
+const orderedIds = {
+  low: "00000000-0000-4000-8000-000000000101",
+  middle: "00000000-0000-4000-8000-000000000102",
+  high: "00000000-0000-4000-8000-000000000103",
+} as const;
+
 describe.each(readModes)("TS Query API (%s reads)", (readMode: ReadMode) => {
   let db: Db;
 
@@ -58,6 +64,92 @@ describe.each(readModes)("TS Query API (%s reads)", (readMode: ReadMode) => {
       tx.rollback();
     }
   }
+
+  describe("default ordering", () => {
+    it("orders one-shot roots and pagination by canonical row id, not insertion order", async () => {
+      db.upsert(app.projects, { name: "High" }, { id: orderedIds.high });
+      db.upsert(app.projects, { name: "Low" }, { id: orderedIds.low });
+      db.upsert(app.projects, { name: "Middle" }, { id: orderedIds.middle });
+
+      const all = await readAll(app.projects);
+      expect(all.map((project) => project.id)).toEqual([
+        orderedIds.low,
+        orderedIds.middle,
+        orderedIds.high,
+      ]);
+
+      const window = await readAll(app.projects.offset(1).limit(1));
+      expect(window.map((project) => project.id)).toEqual([orderedIds.middle]);
+    });
+
+    it("uses canonical row id as the implicit tie-break for explicit ordering", async () => {
+      db.upsert(app.projects, { name: "Same" }, { id: orderedIds.high });
+      db.upsert(app.projects, { name: "Same" }, { id: orderedIds.low });
+      db.upsert(app.projects, { name: "Same" }, { id: orderedIds.middle });
+
+      const results = await readAll(app.projects.orderBy("name", "asc"));
+      expect(results.map((project) => project.id)).toEqual([
+        orderedIds.low,
+        orderedIds.middle,
+        orderedIds.high,
+      ]);
+    });
+
+    it("orders forward-array and reverse-relation payloads by child row id", async () => {
+      db.upsert(app.users, { name: "High", friendsIds: [] }, { id: orderedIds.high });
+      db.upsert(app.users, { name: "Low", friendsIds: [] }, { id: orderedIds.low });
+      db.upsert(app.users, { name: "Middle", friendsIds: [] }, { id: orderedIds.middle });
+      const project = insertProject(db, "Relations");
+      const todoIds = {
+        low: "00000000-0000-4000-8000-000000000201",
+        high: "00000000-0000-4000-8000-000000000203",
+      } as const;
+      db.upsert(
+        app.todos,
+        {
+          title: "High",
+          done: false,
+          tags: [],
+          projectId: project.id,
+          ownerId: null,
+          assigneesIds: [orderedIds.high, orderedIds.low, orderedIds.middle],
+        },
+        { id: todoIds.high },
+      );
+      db.upsert(
+        app.todos,
+        {
+          title: "Low",
+          done: false,
+          tags: [],
+          projectId: project.id,
+          ownerId: null,
+          assigneesIds: [],
+        },
+        { id: todoIds.low },
+      );
+
+      const todo = await readOne(
+        app.todos
+          .where({ id: { eq: todoIds.high } })
+          .include({ assignees: app.users.select("id") }),
+      );
+      assert(todo, "Todo is not defined");
+      expect(todo.assignees.map((user) => user.id)).toEqual([
+        orderedIds.low,
+        orderedIds.middle,
+        orderedIds.high,
+      ]);
+
+      const parent = await readOne(
+        app.projects
+          .where({ id: { eq: project.id } })
+          .include({ todosViaProject: app.todos.select("id") }),
+      );
+      assert(parent, "Project is not defined");
+      expect(parent.todosViaProject.map((child) => child.id)).toEqual([todoIds.low, todoIds.high]);
+    });
+  });
 
   describe("filtering", () => {
     it("queries by id", async () => {
@@ -134,11 +226,7 @@ describe.each(readModes)("TS Query API (%s reads)", (readMode: ReadMode) => {
       expect(resultsEqNull.map((todo) => todo.id)).toEqual([todoWithoutOwner.id]);
     });
 
-    // Order-sensitive assertion over unordered default results; default
-    // ordering (ascending id) is specced in crates/jazz/SPEC/6_queries.md
-    // (2026-07-18) with implementation scheduled — unskip and assert ordered
-    // equality once it lands.
-    it.skip("filters with explicit undefined values are no-ops", async () => {
+    it("filters with explicit undefined values are no-ops", async () => {
       const todoWithoutOwner = insertTodo(db, {
         title: "Todo without owner",
         ownerId: null,
@@ -149,7 +237,9 @@ describe.each(readModes)("TS Query API (%s reads)", (readMode: ReadMode) => {
       });
 
       const results = await readAll(app.todos.where({ ownerId: undefined }));
-      expect(results.map((todo) => todo.id)).toEqual([todoWithoutOwner.id, todoWithOwner.id]);
+      expect(results.map((todo) => todo.id)).toEqual(
+        [todoWithoutOwner.id, todoWithOwner.id].sort(),
+      );
     });
 
     describe("in operator", () => {
@@ -734,11 +824,7 @@ describe.each(readModes)("TS Query API (%s reads)", (readMode: ReadMode) => {
         expect(aliceFriend.friends.map((f) => f.id)).toEqual([alice.id]);
       });
 
-      // Order-sensitive over unordered default results (deterministically red since
-      // the policy-union lowering fix changed evaluation order); default ordering
-      // (ascending id) is specced in crates/jazz/SPEC/6_queries.md — unskip with
-      // ordered assertions when the implementation lands.
-      it.skip("rows skipped by requireIncludes affect limit-offset pagination", async () => {
+      it("rows skipped by requireIncludes affect limit-offset pagination", async () => {
         const alice = insertUser(db);
         const bob = insertUser(db);
         const deletedUser = insertUser(db);
@@ -749,7 +835,7 @@ describe.each(readModes)("TS Query API (%s reads)", (readMode: ReadMode) => {
         const results = await readAll(
           app.users.include({ friends: true }).requireIncludes().limit(1).offset(1),
         );
-        expect(results.map((u) => u.id)).toEqual([bob.id]);
+        expect(results.map((u) => u.id)).toEqual([[alice.id, bob.id, deletedUser.id].sort()[1]]);
 
         await db.delete(app.users, deletedUser.id);
 
