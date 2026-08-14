@@ -29,8 +29,6 @@ export function readSchemaPolicyBranches(
     tableReader.readVec((columnReader) => {
       columnReader.string();
       skipSchemaValueType(columnReader);
-      columnReader.option(() => undefined);
-      columnReader.option(() => undefined);
       columnReader.option(skipGrooveValue);
     });
     const referenceCount = tableReader.u64();
@@ -74,8 +72,6 @@ export function readSchemaTableMetadata(
     tableReader.readVec((columnReader) => {
       columnReader.string();
       skipSchemaValueType(columnReader);
-      columnReader.option(() => undefined);
-      columnReader.option(() => undefined);
       columnReader.option(skipGrooveValue);
     });
     const referenceCount = tableReader.u64();

@@ -23,7 +23,7 @@ describe("structuralSchemaHash", () => {
       new URL("../testing/fixtures/ordered-enum-schema-hashes.json", import.meta.url),
       "utf8",
     ),
-  ) as { cases: Array<{ variants: string[]; hash: string }> };
+  ) as { schemaLayoutVersion: number; cases: Array<{ variants: string[]; hash: string }> };
 
   it("treats enum declaration order as durable tag meaning", () => {
     expect(structuralSchemaHash(enumSchema(["draft", "active"]))).not.toBe(
@@ -35,6 +35,7 @@ describe("structuralSchemaHash", () => {
   });
 
   it("matches the Rust ordered-enum structural hash fixture", () => {
+    expect(orderedEnumFixture.schemaLayoutVersion).toBe(9);
     const hashes = orderedEnumFixture.cases.map(({ variants, hash }) => {
       const actual = structuralSchemaHash(enumSchema(variants));
       expect(actual).toBe(hash);
