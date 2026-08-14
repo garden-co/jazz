@@ -6,9 +6,13 @@ const app = s.defineApp({
   users: s.table({
     name: s.string(),
   }),
+  projects: s.table({
+    name: s.string(),
+  }),
   todos: s.table({
     title: s.string(),
     done: s.boolean(),
+    projectId: s.ref("projects"),
     ownerId: s.ref("users").optional(),
   }),
   events: s.table({
@@ -155,5 +159,19 @@ describe("translateQuery", () => {
     // the public relation field directly.
     expect(translated.array_subqueries).toMatchObject([{ column_name: "owner" }]);
     expect(translated.array_subqueries[0]).not.toHaveProperty("public_name");
+  });
+
+  it("leaves required-include pagination at the core query boundary", () => {
+    const translated = JSON.parse(
+      translateQuery(
+        app.todos.include({ project: true }).requireIncludes().offset(2).limit(1)._build(),
+        app.wasmSchema,
+      ),
+    );
+
+    expect(translated).toMatchObject({ limit: 1, offset: 2 });
+    expect(translated.array_subqueries).toMatchObject([{ requirement: "AtLeastOne" }]);
+    expect(translated).not.toHaveProperty("__jazz_client_limit");
+    expect(translated).not.toHaveProperty("__jazz_client_offset");
   });
 });

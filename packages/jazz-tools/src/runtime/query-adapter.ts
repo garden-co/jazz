@@ -205,19 +205,6 @@ function visibleSelectColumns(resolvedSelect: readonly string[]): string[] | nul
   return resolvedSelect.length > 0 ? [...resolvedSelect] : null;
 }
 
-function hasRequiredArraySubquery(subqueries: readonly object[]): boolean {
-  return subqueries.some((subquery) => {
-    const record = subquery as { requirement?: unknown; nested_arrays?: unknown };
-    if (
-      record.requirement === "AtLeastOne" ||
-      record.requirement === "MatchCorrelationCardinality"
-    ) {
-      return true;
-    }
-    return Array.isArray(record.nested_arrays) && hasRequiredArraySubquery(record.nested_arrays);
-  });
-}
-
 function validateIncludeBuilderSpec(
   relation: Relation,
   spec: NormalizedIncludeEntry,
@@ -935,12 +922,6 @@ export function translateQuery(builderJson: string, schema: WasmSchema): string 
   }
 
   const orderBy = toRuntimeOrderBy(builder.orderBy, schema, builder.table);
-  const clientPagesAfterRequiredIncludes =
-    arraySubqueries.length > 0 &&
-    hasRequiredArraySubquery(arraySubqueries) &&
-    typeof builder.limit === "number" &&
-    typeof builder.offset === "number" &&
-    builder.offset > 0;
   const clientLimit = typeof builder.limit === "number" ? builder.limit : undefined;
   const clientOffset = typeof builder.offset === "number" ? builder.offset : undefined;
   const query = {
@@ -950,17 +931,8 @@ export function translateQuery(builderJson: string, schema: WasmSchema): string 
     ...(builder.includeDeleted ? { include_deleted: true } : {}),
     ...(projectedColumns ? { select_columns: projectedColumns } : {}),
     ...(orderBy.length > 0 ? { order_by: orderBy } : {}),
-    ...(clientPagesAfterRequiredIncludes
-      ? {
-          limit: clientLimit! + clientOffset!,
-          offset: 0,
-          __jazz_client_limit: clientLimit,
-          __jazz_client_offset: clientOffset,
-        }
-      : {
-          ...(clientLimit !== undefined ? { limit: clientLimit } : {}),
-          ...(clientOffset !== undefined ? { offset: clientOffset } : {}),
-        }),
+    ...(clientLimit !== undefined ? { limit: clientLimit } : {}),
+    ...(clientOffset !== undefined ? { offset: clientOffset } : {}),
   };
 
   return JSON.stringify(query);
