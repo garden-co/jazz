@@ -105,6 +105,8 @@ pub mod binding_codec;
 pub mod content_manifest;
 /// Mutable file adapter for embedded manifests backed by immutable extents.
 pub mod file_content;
+/// JSON adapter for embedded ordinary-content manifests.
+pub mod ordinary_json;
 /// Text adapter for embedded manifests backed by immutable UTF-8 ropes.
 pub mod text_content;
 
