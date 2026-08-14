@@ -945,4 +945,50 @@ mod tests {
             Err(ManifestError::Malformed)
         );
     }
+
+    #[test]
+    fn array_over_fanout_is_a_ranked_immutable_order_tree() {
+        let adapter = OrdinaryJsonAdapter;
+        let mut store = MemoryImmutableContentStore::default();
+        let root = adapter
+            .publish_literal(
+                &JsonLiteral::Array(
+                    (0..=ORDER_FANOUT)
+                        .map(|value| JsonLiteral::Scalar(JsonScalar::Number(value as i64)))
+                        .collect(),
+                ),
+                None,
+                context(),
+                &mut store,
+            )
+            .unwrap();
+        let StoredObject::Root { document, .. } = adapter.get(root, context(), &store).unwrap()
+        else {
+            unreachable!()
+        };
+        let StoredObject::Node(StoredNode {
+            kind: StoredKind::Array(order),
+            ..
+        }) = adapter.get(document, context(), &store).unwrap()
+        else {
+            unreachable!()
+        };
+        assert!(
+            matches!(adapter.get(order, context(), &store).unwrap(), StoredObject::Order(OrderNode::Branch(children)) if children.iter().map(|(_, count)| *count).sum::<u32>() == 33)
+        );
+        assert_eq!(
+            adapter
+                .materialize(
+                    &ContentManifest {
+                        root,
+                        edit_tail: Vec::new()
+                    },
+                    &MaterializationRequest::Full,
+                    context(),
+                    &store
+                )
+                .unwrap(),
+            serde_json::to_vec(&(0..=ORDER_FANOUT).collect::<Vec<_>>()).unwrap()
+        );
+    }
 }
