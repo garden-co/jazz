@@ -220,6 +220,7 @@ export * from "./drivers/index.js";
 
 // Runtime client
 export * from "./runtime/index.js";
+export * from "./text/index.js";
 
 // Permissions DSL
 export * from "./permissions/index.js";
