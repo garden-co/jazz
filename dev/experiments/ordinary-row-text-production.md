@@ -18,10 +18,10 @@ artifact. These are single-machine receipts and not stable release thresholds.
 
 | Workload | Representation   | durable p50 / p95 | row mutations/edit | logical bytes | RocksDB dir | consolidations p50 / p95 | exact-version materialization p50 |
 | -------- | ---------------- | ----------------: | -----------------: | ------------: | ----------: | -----------------------: | --------------------------------: |
-| end      | whole string     |  29.56 / 48.51 ms |               1.00 |      30.87 MB |    62.43 MB |                       -- |                       not exposed |
-| end      | bounded frontier |  13.18 / 32.26 ms |               2.15 |       ≥246 KB |     2.66 MB |        67.58 / 107.38 ms |                         171.96 ms |
-| middle   | whole string     |  30.06 / 56.11 ms |               1.00 |      30.87 MB |    62.43 MB |                       -- |                       not exposed |
-| middle   | bounded frontier |  12.70 / 24.17 ms |               3.53 |      ≥1.17 MB |     4.89 MB |       182.74 / 292.44 ms |                         578.91 ms |
+| end      | whole string     |  15.50 / 27.21 ms |               1.00 |      30.87 MB |    62.43 MB |                       -- |                       not exposed |
+| end      | bounded frontier |   6.82 / 13.24 ms |               2.21 |       ≥248 KB |     2.67 MB |         26.29 / 28.51 ms |                          85.37 ms |
+| middle   | whole string     |  16.43 / 26.26 ms |               1.00 |      30.87 MB |    62.41 MB |                       -- |                       not exposed |
+| middle   | bounded frontier |   6.52 / 11.40 ms |               3.53 |      ≥1.17 MB |     4.89 MB |         66.36 / 74.83 ms |                         237.01 ms |
 
 `logical bytes` for the frontier is deliberately marked as a lower bound: it
 counts encoded patch frontiers, ids, leaf text, and child references, but not
@@ -46,7 +46,7 @@ version insert and document-head update plus amortized new rope nodes.
   mutations per edit and explicit-version metadata dominates. A production API
   should keep the representation choice visible or use a size crossover rather
   than claiming the rope is universally cheaper.
-- Localized end edits share well (2.15 rows/edit at 100 KiB). Scattered edits
+- Localized end edits share well (2.21 rows/edit at 100 KiB). Scattered edits
   choose bounded full-tree rebuilding and cost 3.53 rows/edit, still avoiding a
   100 KiB string rewrite on every keystroke.
 - Exact historical reads perform no Jazz-history replay, but the current public
