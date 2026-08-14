@@ -74,6 +74,10 @@
       "types": "./dist/_dev/schema-hash.d.ts",
       "default": "./dist/_dev/schema-hash.js"
     },
+    "./_dev/client-registry": {
+      "types": "./dist/_dev/client-registry.d.ts",
+      "default": "./dist/_dev/client-registry.js"
+    },
     "./dev/next": {
       "types": "./dist/dev/next.d.ts",
       "default": "./dist/dev/next.js"

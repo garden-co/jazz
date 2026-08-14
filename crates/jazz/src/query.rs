@@ -778,6 +778,7 @@ fn build_relation_path_join(
         table: join_table,
         on_column: right_column,
         target: JoinTarget::Column,
+        uncorrelated: false,
         source_column: (left_column != "id").then_some(left_column),
         source_lookup: None,
         correlated_filters: Vec::new(),
@@ -1380,6 +1381,7 @@ impl Query {
             table: table.into(),
             on_column: on_column.into(),
             target: JoinTarget::Column,
+            uncorrelated: false,
             source_column: None,
             source_lookup: None,
             correlated_filters: Vec::new(),
@@ -1403,6 +1405,7 @@ impl Query {
             table: table.into(),
             on_column: on_column.into(),
             target: JoinTarget::Column,
+            uncorrelated: false,
             source_column: Some(source_column.into()),
             source_lookup: None,
             correlated_filters: Vec::new(),
@@ -1425,6 +1428,7 @@ impl Query {
             table: table.into(),
             on_column: on_column.into(),
             target: JoinTarget::Column,
+            uncorrelated: false,
             source_column: Some(source_column.into()),
             source_lookup: None,
             correlated_filters: correlated_filters.into_iter().collect(),
@@ -1468,6 +1472,7 @@ impl Query {
             table: table.into(),
             on_column: on_column.into(),
             target,
+            uncorrelated: false,
             source_column: Some(source_lookup.value_column.clone()),
             source_lookup: Some(source_lookup),
             correlated_filters: Vec::new(),
@@ -1489,6 +1494,7 @@ impl Query {
             table: table.into(),
             on_column: on_column.into(),
             target: JoinTarget::Column,
+            uncorrelated: false,
             source_column: None,
             source_lookup: None,
             correlated_filters: Vec::new(),
@@ -1511,9 +1517,32 @@ impl Query {
             table: table.into(),
             on_column: "id".to_owned(),
             target: JoinTarget::RowId,
+            uncorrelated: false,
             source_column: Some(source_column.into()),
             source_lookup: None,
             correlated_filters: Vec::new(),
+            filters: filters.into_iter().collect(),
+            nested_joins: Vec::new(),
+        });
+        self
+    }
+
+    /// Add a row-id traversal with extra source-row equality correlations.
+    pub fn join_via_row_id_with_correlations(
+        mut self,
+        table: impl Into<String>,
+        source_column: impl Into<String>,
+        correlated_filters: impl IntoIterator<Item = JoinCorrelation>,
+        filters: impl IntoIterator<Item = Predicate>,
+    ) -> Self {
+        self.joins.push(JoinVia {
+            table: table.into(),
+            on_column: "id".to_owned(),
+            target: JoinTarget::RowId,
+            uncorrelated: false,
+            source_column: Some(source_column.into()),
+            source_lookup: None,
+            correlated_filters: correlated_filters.into_iter().collect(),
             filters: filters.into_iter().collect(),
             nested_joins: Vec::new(),
         });
@@ -1611,7 +1640,7 @@ impl Query {
     pub fn inherits(mut self, parent_column: impl Into<String>) -> Self {
         self.inherits.push(InheritsVia {
             parent_column: parent_column.into(),
-            operation: InheritsOperation::Select,
+            operation: InheritsOperation::Contextual,
             max_depth: None,
         });
         self
@@ -1627,7 +1656,7 @@ impl Query {
     ) -> Self {
         self.inherits.push(InheritsVia {
             parent_column: parent_column.into(),
-            operation: InheritsOperation::Select,
+            operation: InheritsOperation::Contextual,
             max_depth: Some(max_depth),
         });
         self
@@ -2183,6 +2212,10 @@ pub struct JoinVia {
     /// Which target-table field `on_column` names.
     #[serde(default)]
     pub target: JoinTarget,
+    /// Whether this policy-only join gates every root row on the existence of
+    /// any matching row on the right, without a root-row correlation.
+    #[serde(default)]
+    pub uncorrelated: bool,
     /// Optional root-table column used for row-correlated policy joins.
     #[serde(default)]
     pub source_column: Option<String>,
@@ -2312,7 +2345,6 @@ pub struct InheritsVia {
 )]
 pub enum InheritsOperation {
     /// Parent row must be readable.
-    #[default]
     Select,
     /// Parent row must be insertable.
     Insert,
@@ -2320,6 +2352,10 @@ pub enum InheritsOperation {
     Update,
     /// Parent row must be deletable.
     Delete,
+    /// Use read authorization for ordinary rows and parent update-using
+    /// authorization when the containing policy admits a child insert.
+    #[default]
+    Contextual,
 }
 
 /// Recursion semantics for reachability and relation gather.
@@ -2948,6 +2984,25 @@ fn validate_join(
     params: &mut BTreeMap<String, ColumnType>,
 ) -> Result<(), QueryError> {
     let join_table = table(schema, &join.table)?;
+    if join.uncorrelated {
+        if join.source_column.is_some()
+            || join.source_lookup.is_some()
+            || !join.correlated_filters.is_empty()
+        {
+            return Err(QueryError::JoinNotRefCompatible {
+                join_table: join.table.clone(),
+                column: join.on_column.clone(),
+                target_table: "uncorrelated policy support".to_owned(),
+            });
+        }
+        for predicate in &join.filters {
+            validate_predicate(&join_table, predicate, params)?;
+        }
+        for nested in &join.nested_joins {
+            validate_join(schema, &join_table, &join.table, nested, params)?;
+        }
+        return Ok(());
+    }
     match join.target {
         JoinTarget::Column => {
             planner_column_type(&join_table, &join.on_column)?;
@@ -4011,6 +4066,7 @@ fn canonical_inherits_key(inherits: &InheritsVia) -> Vec<u8> {
     let mut bytes = Vec::new();
     put_str(&mut bytes, &inherits.parent_column);
     bytes.push(match inherits.operation {
+        InheritsOperation::Contextual => b'c',
         InheritsOperation::Select => b's',
         InheritsOperation::Insert => b'i',
         InheritsOperation::Update => b'u',
@@ -4033,6 +4089,9 @@ fn canonical_join_key(join: &JoinVia) -> Vec<u8> {
     match join.target {
         JoinTarget::Column => {}
         JoinTarget::RowId => bytes.push(b'r'),
+    }
+    if join.uncorrelated {
+        bytes.push(b'u');
     }
     if let Some(column) = &join.source_column {
         bytes.push(b's');

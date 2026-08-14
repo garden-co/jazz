@@ -2,9 +2,9 @@
  * SyncManager — all Jazz writes for the game.
  *
  * Jazz write APIs used here:
- *   db.insert(table, data, { tier })    — create a new row (fires WHERE ENTRY cross-client)
- *   db.update(table, id, data, { tier }) — update fields (fires WHERE EXIT/ENTRY cross-client)
- *   db.delete(table, id, { tier })  — delete a row (local only — server can't forward deleted objects)
+ *   await db.insert(table, data)    — create a new row (fires WHERE ENTRY cross-client)
+ *   await db.update(table, id, data) — update fields (fires WHERE EXIT/ENTRY cross-client)
+ *   await db.delete(table, id)       — delete a row (local only — server can't forward deleted objects)
  *
  * The "edge" tier broadcasts the write to all connected clients' live
  * subscriptions, triggering WHERE ENTRY / WHERE EXIT events remotely.
@@ -101,7 +101,9 @@ export class SyncManager {
     // Uses db.update (not db.update(...).wait({ tier: "edge" })) so the write
     // is emitted to the bridge outbox immediately — waiting for an edge-tier
     // ack on the main thread never resolves here (main thread has no durability tier).
-    this.db.update(app.fuel_deposits, id, { collected: true, collectedBy: this.playerId });
+    void this.db
+      .update(app.fuel_deposits, id, { collected: true, collectedBy: this.playerId })
+      .catch(console.error);
   }
 
   refuel(fuelType: FuelType): void {
@@ -124,7 +126,9 @@ export class SyncManager {
     if (!shareId) return;
     this.collectedByThis.delete(shareId);
     // Sync update: same reason as collectDeposit — waiting on edge durability hangs on main thread.
-    this.db.update(app.fuel_deposits, shareId, { collectedBy: receiverPlayerId });
+    void this.db
+      .update(app.fuel_deposits, shareId, { collectedBy: receiverPlayerId })
+      .catch(console.error);
   }
 
   burstDeposit(fuelType: string): void {
@@ -132,13 +136,13 @@ export class SyncManager {
   }
 
   sendMessage(text: string): void {
-    this.db
+    void this.db
       .insert(app.chat_messages, {
         playerId: this.playerId,
         message: text,
         createdAt: Math.floor(Date.now() / 1000),
       })
-      .wait({ tier: "edge" })
+      .then((write) => write.wait({ tier: "edge" }))
       .catch(console.error);
   }
 
@@ -147,7 +151,10 @@ export class SyncManager {
     if (!this.dbRowId) return;
     if (this.lastSynced && !playerStateChanged(this.lastSynced, state)) return;
     this.lastSynced = { ...state };
-    this.db.update(app.players, this.dbRowId, state).wait({ tier: "edge" }).catch(console.error);
+    void this.db
+      .update(app.players, this.dbRowId, state)
+      .then((write) => write.wait({ tier: "edge" }))
+      .catch(console.error);
   }
 
   setInputs(inputs: SyncInputs): void {
@@ -158,9 +165,9 @@ export class SyncManager {
       this.dbRowId = inputs.localPlayerRows[0].id;
       if (this.latestState) {
         this.lastSynced = { ...this.latestState };
-        this.db
+        void this.db
           .update(app.players, this.dbRowId, this.latestState)
-          .wait({ tier: "edge" })
+          .then((write) => write.wait({ tier: "edge" }))
           .catch(console.error);
       }
     }
@@ -178,9 +185,9 @@ export class SyncManager {
       if (!this.dbRowId && !this.insertingPlayer && this.latestState) {
         this.insertingPlayer = true;
         const state = this.latestState;
-        this.db
+        void this.db
           .insert(app.players, state)
-          .wait({ tier: "edge" })
+          .then((write) => write.wait({ tier: "edge" }))
           .then((row) => {
             if (!this.dbRowId) {
               this.dbRowId = row.id;
@@ -201,9 +208,9 @@ export class SyncManager {
         if (d.collected && d.collectedBy === this.playerId && !this.releasingIds.has(d.id)) {
           this.releasingIds.add(d.id);
           this.collectedByThis.delete(d.id);
-          this.db
+          void this.db
             .update(app.fuel_deposits, d.id, { collected: false, collectedBy: "" })
-            .wait({ tier: "edge" })
+            .then((write) => write.wait({ tier: "edge" }))
             .finally(() => this.releasingIds.delete(d.id))
             .catch(console.error);
         }
@@ -212,9 +219,9 @@ export class SyncManager {
         if (!this.releasingIds.has(id)) {
           this.releasingIds.add(id);
           this.collectedByThis.delete(id);
-          this.db
+          void this.db
             .update(app.fuel_deposits, id, { collected: false, collectedBy: "" })
-            .wait({ tier: "edge" })
+            .then((write) => write.wait({ tier: "edge" }))
             .finally(() => this.releasingIds.delete(id))
             .catch(console.error);
         }
@@ -266,14 +273,16 @@ export class SyncManager {
       // firing WHERE ENTRY on the where({collected:false}) subscription without
       // waiting for a durability ack that never arrives on the main thread.
       // forward_update_to_servers still propagates both ops cross-client.
-      this.db.delete(app.fuel_deposits, depId);
-      this.db.insert(app.fuel_deposits, {
-        fuelType,
-        positionX,
-        createdAt: Math.floor(Date.now() / 1000),
-        collected: false,
-        collectedBy: "",
-      });
+      await Promise.all([
+        this.db.delete(app.fuel_deposits, depId),
+        this.db.insert(app.fuel_deposits, {
+          fuelType,
+          positionX,
+          createdAt: Math.floor(Date.now() / 1000),
+          collected: false,
+          collectedBy: "",
+        }),
+      ]);
     } finally {
       this.releasingIds.delete(depId);
     }
@@ -328,7 +337,7 @@ export async function reconcileDeposits(
               collected: false,
               collectedBy: "",
             })
-            .wait({ tier: "edge" }),
+            .then((write) => write.wait({ tier: "edge" })),
         );
       }
     } else if (diff < 0) {
@@ -341,7 +350,7 @@ export async function reconcileDeposits(
               collected: true,
               collectedBy: "__trimmed__",
             })
-            .wait({ tier: "edge" }),
+            .then((write) => write.wait({ tier: "edge" })),
         );
       }
     }

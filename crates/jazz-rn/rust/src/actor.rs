@@ -354,6 +354,16 @@ impl ActorHandle {
         })
     }
 
+    pub(crate) fn hydrate_large_value(
+        &self,
+        view: u64,
+        handle: Vec<u8>,
+    ) -> Result<Vec<u8>, JazzRnError> {
+        self.call("hydrate_large_value", move |state| {
+            state.hydrate_large_value(view, &handle)
+        })
+    }
+
     pub(crate) fn set_identity_claims(
         &self,
         view: u64,
@@ -1468,6 +1478,10 @@ impl CoreState {
         let row =
             with_db!(self, view, |db| db.local_current_row(table, row_id)).map_err(core_error)?;
         binding::encode_rows(&row.into_iter().collect::<Vec<_>>()).map_err(Into::into)
+    }
+
+    fn hydrate_large_value(&mut self, view: u64, handle: &[u8]) -> Result<Vec<u8>, JazzRnError> {
+        with_db!(self, view, |db| db.hydrate_large_value_handle(handle)).map_err(core_error)
     }
 
     fn set_identity_claims(

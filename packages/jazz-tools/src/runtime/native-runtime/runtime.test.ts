@@ -36,6 +36,7 @@ import {
 } from "../subscription-manager.js";
 import { definePermissions } from "../../permissions/index.js";
 import { mergePermissionsIntoWasmSchema } from "../../schema-permissions.js";
+import { schema as s } from "../../index.js";
 import { setNamedRowValuesEnumerable } from "./row-values-transport.js";
 import { encodeNativeNullValue, storageColumnValueType } from "./native-row-codec.js";
 import {
@@ -2141,6 +2142,43 @@ describe("NativeRuntimeAdapter server transport", () => {
         ],
       },
     ]);
+  });
+
+  it("hydrates large-value handles in one-shot native rows", async () => {
+    const handle = Uint8Array.from([0x4a, 0x4c, 0x56, 0x48, 0x32, 1, 2, 3]);
+    const payload = Uint8Array.from([10, 20, 30, 40]);
+    const hydrateLargeValue = vi.fn((received: Uint8Array) => {
+      expect(received).toEqual(handle);
+      return payload;
+    });
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            all: () => encodeLargeValueRows(handle),
+            hydrateLargeValue,
+            prepareQuery: () => ({}),
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      largeValueHydrationSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+
+    await expect(runtime.query(JSON.stringify({ table: "large_files" }))).resolves.toEqual([
+      {
+        table: "large_files",
+        id: "00000000-0000-0000-0000-000000000011",
+        values: [{ type: "Bytea", value: payload }],
+      },
+    ]);
+    expect(hydrateLargeValue).toHaveBeenCalledOnce();
   });
 
   it("lowers scalar comparison relation IR into the prepared native query", async () => {
@@ -4745,8 +4783,9 @@ describe("NativeRuntimeAdapter server transport", () => {
     await Promise.resolve();
 
     expect(callbacks).toHaveLength(1);
-    expect(callbacks[0]?.[0]).toBeInstanceOf(Error);
-    expect((callbacks[0]?.[0] as Error).message).toContain(
+    const callbackError = callbacks[0]?.[0];
+    expect(callbackError).toBeInstanceOf(Error);
+    expect((callbackError as Error).message).toContain(
       "settled relation subscription chunk retained unresolved placeholder rows",
     );
     runtime.close();
@@ -4862,8 +4901,9 @@ describe("NativeRuntimeAdapter server transport", () => {
     await Promise.resolve();
 
     expect(callbacks).toHaveLength(1);
-    expect(callbacks[0]?.[0]).toBeInstanceOf(Error);
-    expect((callbacks[0]?.[0] as Error).message).toContain(
+    const callbackError = callbacks[0]?.[0];
+    expect(callbackError).toBeInstanceOf(Error);
+    expect((callbackError as Error).message).toContain(
       "relation subscription buffered unresolved placeholder rows beyond bounded limits",
     );
     runtime.close();
@@ -5218,6 +5258,49 @@ describe("NativeRuntimeAdapter server transport", () => {
           ],
         },
       ],
+    });
+  });
+
+  it("serializes an uncorrelated public Exists policy as a bounded existence gate", () => {
+    const app = s.defineApp({
+      bands: s.table({ name: s.string() }),
+      members: s.table({
+        bandId: s.ref("bands"),
+        userId: s.string(),
+      }),
+    });
+    const permissions = definePermissions(app, ({ policy, session }) => {
+      const isMember = policy.members.exists.where({ userId: session.user_id });
+      policy.bands.allowRead.where(isMember);
+    });
+
+    const policy = readSchemaSelectPolicyBranches(
+      encodeSchema(mergePermissionsIntoWasmSchema(app.wasmSchema, permissions)),
+      "bands",
+    );
+
+    expect(policy).toEqual({
+      table: "bands",
+      filters: [],
+      joins: [
+        {
+          table: "members",
+          onColumn: "id",
+          targetTag: 1,
+          uncorrelated: true,
+          sourceColumn: undefined,
+          sourceLookup: undefined,
+          filters: [
+            {
+              tag: 3,
+              column: "userId",
+              operand: { tag: 2, claim: "user_id" },
+            },
+          ],
+          nestedJoins: [],
+        },
+      ],
+      branches: [],
     });
   });
 
@@ -6911,6 +6994,7 @@ function readPolicyJoinForTest(reader: PostcardReader): TestPolicyJoin {
   const table = reader.string();
   const onColumn = reader.string();
   const targetTag = reader.u64();
+  const uncorrelated = reader.bool();
   const sourceColumn = reader.option((sourceReader) => sourceReader.string());
   const sourceLookup = reader.option((lookupReader) => ({
     table: lookupReader.string(),
@@ -6923,7 +7007,16 @@ function readPolicyJoinForTest(reader: PostcardReader): TestPolicyJoin {
   });
   const filters = reader.readVec(readPolicyPredicateForTest);
   const nestedJoins = reader.readVec(readPolicyJoinForTest);
-  return { table, onColumn, targetTag, sourceColumn, sourceLookup, filters, nestedJoins };
+  return {
+    table,
+    onColumn,
+    targetTag,
+    ...(uncorrelated ? { uncorrelated } : {}),
+    sourceColumn,
+    sourceLookup,
+    filters,
+    nestedJoins,
+  };
 }
 
 function skipPolicyReachableForTest(reader: PostcardReader): void {
@@ -7104,6 +7197,7 @@ type TestPolicyJoin = {
   table: string;
   onColumn: string;
   targetTag: number;
+  uncorrelated?: boolean;
   sourceColumn: string | undefined;
   sourceLookup: { table: string; rowIdSourceColumn: string; valueColumn: string } | undefined;
   filters: TestPolicyPredicate[];
@@ -7177,6 +7271,19 @@ const binaryLargeValueSchema = {
         name: "chunk_sizes",
         column_type: { type: "Array", element: { type: "Double" } },
         nullable: false,
+      },
+    ],
+  },
+} satisfies WasmSchema;
+
+const largeValueHydrationSchema = {
+  large_files: {
+    columns: [
+      {
+        name: "data",
+        column_type: { type: "Bytea" },
+        nullable: false,
+        large_value: "Blob",
       },
     ],
   },
@@ -7656,6 +7763,39 @@ it("keeps same-row union occurrences distinct through apply, removal, and reopen
   );
 });
 
+it("hydrates large-value handles in native subscription deltas", () => {
+  const handle = Uint8Array.from([0x4a, 0x4c, 0x56, 0x48, 0x32, 4, 5, 6]);
+  const payload = Uint8Array.from([50, 60, 70]);
+  const hydrateLargeValue = vi.fn((received: Uint8Array) => {
+    expect(received).toEqual(handle);
+    return payload;
+  });
+  const delta = readNativeSubscriptionDelta(
+    new PostcardReader(encodeLargeValueSubscriptionDelta(handle)),
+  );
+
+  const applied = applySubscriptionDeltaWithWireDelta(
+    [],
+    new Map(),
+    delta,
+    largeValueHydrationSchema,
+    false,
+    null,
+    hydrateLargeValue,
+  );
+
+  expect(applied.rows).toEqual([
+    {
+      table: "large_files",
+      id: "00000000-0000-0000-0000-000000000011",
+      values: [{ type: "Bytea", value: payload }],
+      resultKey: "00000000-0000-0000-0000-000000000011",
+      resultKeyBytes: Uint8Array.from([1, ...uuidBytes("00000000-0000-0000-0000-000000000011")]),
+    },
+  ]);
+  expect(hydrateLargeValue).toHaveBeenCalledOnce();
+});
+
 function encodeUserWrappedSubscriptionDelta(row: {
   table: string;
   rowId: Uint8Array;
@@ -7802,6 +7942,39 @@ function encodeBinaryLargeValueRows(): Uint8Array {
       );
     }, 1);
   }, 1);
+  return writer.finish();
+}
+
+function writeLargeValueRowBatches(writer: PostcardWriter, handle: Uint8Array): void {
+  const descriptor = [{ name: "data", valueType: { tag: 9 } }];
+  writer.vec((batch) => {
+    batch.string("large_files");
+    writeDescriptor(batch, descriptor);
+    batch.vec((row) => {
+      row.bytes(uuidBytes("00000000-0000-0000-0000-000000000011"));
+      row.bool(false);
+      row.bytes(createRecord(descriptor, [handle]));
+    }, 1);
+  }, 1);
+}
+
+function encodeLargeValueRows(handle: Uint8Array): Uint8Array {
+  const writer = new PostcardWriter();
+  writeLargeValueRowBatches(writer, handle);
+  return writer.finish();
+}
+
+function encodeLargeValueSubscriptionDelta(handle: Uint8Array): Uint8Array {
+  const writer = new PostcardWriter();
+  writeLargeValueRowBatches(writer, handle);
+  writer.vec(() => undefined, 0);
+  writer.vec(() => undefined, 0);
+  writer.vec(
+    (key) => key.bytes(Uint8Array.from([1, ...uuidBytes("00000000-0000-0000-0000-000000000011")])),
+    1,
+  );
+  writer.vec(() => undefined, 0);
+  writer.vec(() => undefined, 0);
   return writer.finish();
 }
 

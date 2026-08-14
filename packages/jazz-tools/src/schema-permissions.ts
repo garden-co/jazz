@@ -499,11 +499,27 @@ export function normalizePermissionsForWasm(
 ): Record<string, WasmTablePolicies> {
   const normalized: Record<string, WasmTablePolicies> = {};
   for (const [tableName, tablePolicies] of Object.entries(compiledPermissions)) {
+    const select = normalizeOperationPolicyForWasm(tablePolicies.select) ?? {};
+    select.using ??= { type: "False" };
+
+    const insert = normalizeOperationPolicyForWasm(tablePolicies.insert) ?? {};
+    insert.with_check ??= { type: "False" };
+
+    const update = normalizeOperationPolicyForWasm(tablePolicies.update) ?? {};
+    const deleteFallback = update.using;
+    if (!update.using && !update.with_check) {
+      update.using = { type: "False" };
+      update.with_check = { type: "False" };
+    }
+
+    const deletePolicy = normalizeOperationPolicyForWasm(tablePolicies.delete) ?? {};
+    deletePolicy.using ??= deleteFallback ?? { type: "False" };
+
     normalized[tableName] = {
-      select: normalizeOperationPolicyForWasm(tablePolicies.select),
-      insert: normalizeOperationPolicyForWasm(tablePolicies.insert),
-      update: normalizeOperationPolicyForWasm(tablePolicies.update),
-      delete: normalizeOperationPolicyForWasm(tablePolicies.delete),
+      select,
+      insert,
+      update,
+      delete: deletePolicy,
     };
   }
   return normalized;

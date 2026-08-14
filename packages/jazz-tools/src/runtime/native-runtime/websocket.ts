@@ -72,9 +72,54 @@ export function webSocketUrl(serverUrl: string, appId: string): string {
 }
 
 export function encodeWebSocketFrameBatch(frames: readonly Uint8Array[]): Uint8Array {
-  const writer = new PostcardWriter();
-  writer.vec((itemWriter, index) => itemWriter.bytes(frames[index]!), frames.length);
-  return writer.finish();
+  // Postcard encodes Vec<ByteBuf> as a varint item count followed by each
+  // varint byte length and payload. Build the result in one allocation: the
+  // general PostcardWriter stores individual numbers, which is prohibitively
+  // expensive for websocket batches approaching the one-MiB transport limit.
+  let encodedLength = postcardU64ByteLength(frames.length);
+  for (const frame of frames) {
+    encodedLength += postcardU64ByteLength(frame.byteLength) + frame.byteLength;
+  }
+  if (!Number.isSafeInteger(encodedLength)) {
+    throw new Error("websocket frame batch is too large to encode safely");
+  }
+
+  const encoded = new Uint8Array(encodedLength);
+  let offset = writePostcardU64(encoded, 0, frames.length);
+  for (const frame of frames) {
+    offset = writePostcardU64(encoded, offset, frame.byteLength);
+    encoded.set(frame, offset);
+    offset += frame.byteLength;
+  }
+  return encoded;
+}
+
+function postcardU64ByteLength(value: number): number {
+  assertPostcardU64Number(value);
+  let length = 1;
+  while (value >= 0x80) {
+    value = Math.floor(value / 0x80);
+    length += 1;
+  }
+  return length;
+}
+
+function writePostcardU64(target: Uint8Array, offset: number, value: number): number {
+  assertPostcardU64Number(value);
+  do {
+    let byte = value & 0x7f;
+    value = Math.floor(value / 0x80);
+    if (value !== 0) byte |= 0x80;
+    target[offset] = byte;
+    offset += 1;
+  } while (value !== 0);
+  return offset;
+}
+
+function assertPostcardU64Number(value: number): void {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new Error(`postcard u64 must be a non-negative safe integer, got ${value}`);
+  }
 }
 
 export function decodeWebSocketFrameBatch(batch: Uint8Array): Uint8Array[] {

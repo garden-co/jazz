@@ -7,6 +7,7 @@
 
 import { act } from "react";
 import type { Root } from "react-dom/client";
+import { waitForClientRegistryIdleForTest } from "jazz-tools/_dev/client-registry";
 
 export type MountEntry = { root: Root; container: HTMLDivElement };
 
@@ -21,6 +22,11 @@ export async function unmountAll(mounts: MountEntry[]): Promise<void> {
     container.remove();
   }
   mounts.length = 0;
+
+  // Jazz clients are ref-counted through deferred-release layers so a same-tick
+  // React remount can reuse them. Wait for the complete shutdown chain before a
+  // test tears down its temporary server.
+  await waitForClientRegistryIdleForTest();
 }
 
 /** Poll until a condition is true, or throw after timeout. */

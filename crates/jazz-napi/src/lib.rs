@@ -1083,6 +1083,20 @@ impl NapiDb {
             .map_err(|error| napi::Error::from_reason(error.to_string()))
     }
 
+    #[napi(js_name = "hydrateLargeValue")]
+    pub fn hydrate_large_value(&self, handle: Uint8Array) -> napi::Result<Uint8Array> {
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        let bytes = match db {
+            NapiDbInnerStorage::Memory(db) => db.hydrate_large_value_handle(&handle),
+            NapiDbInnerStorage::Persistent(db) => db.hydrate_large_value_handle(&handle),
+        }
+        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+        Ok(Uint8Array::new(bytes))
+    }
+
     #[napi(js_name = "setIdentityClaims")]
     pub fn set_identity_claims(
         &self,

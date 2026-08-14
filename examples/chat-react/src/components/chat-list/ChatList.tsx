@@ -83,10 +83,23 @@ export const ChatList = () => {
   return (
     <div className="p-2 flex flex-col gap-2">
       <div className="grid grid-cols-2 gap-2">
-        <Button onClick={() => void createPublicChat()}>
+        <Button
+          onClick={() =>
+            void createPublicChat().catch((error) => {
+              console.error("failed to create public chat", error);
+            })
+          }
+        >
           <MessageSquarePlusIcon /> New Chat
         </Button>
-        <Button variant="outline" onClick={() => void createPrivateChat()}>
+        <Button
+          variant="outline"
+          onClick={() =>
+            void createPrivateChat().catch((error) => {
+              console.error("failed to create private chat", error);
+            })
+          }
+        >
           <LockIcon /> New Private Chat
         </Button>
       </div>

@@ -1258,6 +1258,11 @@ where
         *revision = revision
             .checked_add(1)
             .expect("session claim revision overflow must stop authorization delivery");
+        // Trusted-serving prepared plans can retain the set of claim-bound
+        // branches that existed when they were lowered. A later request for
+        // the same subject may add or remove a claim, so the old graph is no
+        // longer reusable even when the public query binding is unchanged.
+        self.query.query_shape_cache.clear();
         self.query.read_policy_authorization_request_cache.clear();
         self.query.policy_authorization_graph_cache.clear();
     }

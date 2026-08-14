@@ -153,6 +153,7 @@ interface GeneratedDb {
     author: ArrayBuffer,
     updatedAtMs: number | undefined,
   ): GeneratedWrite;
+  hydrateLargeValue(handle: ArrayBuffer): ArrayBuffer;
   localCurrentRow(table: string, rowId: ArrayBuffer): ArrayBuffer;
   mergeableTx(openBatchId: string): GeneratedTx;
   mergeableTxForIdentity(openBatchId: string, author: ArrayBuffer): GeneratedTx;
@@ -572,6 +573,10 @@ export class RnDbShim implements NativeDb {
     return toUint8Array(
       this.db.allForIdentity(generatedQuery(query), toArrayBuffer(author), jsonArgument(opts)),
     );
+  }
+
+  hydrateLargeValue(handle: Uint8Array): Uint8Array {
+    return toUint8Array(this.db.hydrateLargeValue(toArrayBuffer(handle)));
   }
 
   allRelationQuery(queryJson: string, opts: unknown): Uint8Array {

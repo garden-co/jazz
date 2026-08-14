@@ -126,7 +126,6 @@ export const ChatView = ({ chatId }: ChatViewProps) => {
   const { data: messages = [] } = useAll(
     app.messages
       .where({ chatId: canReadChatContents ? chatId : "00000000-0000-0000-0000-000000000000" })
-      .include({ sender: true })
       .orderBy("createdAt", "desc")
       .limit(showNLastMessages + 1),
   );
@@ -175,8 +174,7 @@ export const ChatView = ({ chatId }: ChatViewProps) => {
               <ChatMessage
                 key={msg.id}
                 message={msg}
-                sender={msg.sender ?? undefined}
-                isMe={msg.senderId === myProfile?.id || msg.sender?.userId === userId}
+                isMe={msg.senderId === myProfile?.id}
                 onDelete={() => handleDelete(msg.id)}
               />
             ))

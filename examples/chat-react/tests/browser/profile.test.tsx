@@ -10,6 +10,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { App } from "../../src/App.js";
 import { resetProfileGuard } from "../../src/hooks/useMyProfile.js";
 import { TEST_SERVER_URL, APP_ID } from "./test-constants.js";
+import { cleanupBrowserMounts } from "./client-cleanup.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -72,17 +73,8 @@ describe("Profile E2E", () => {
 
   afterEach(async () => {
     resetProfileGuard();
-    for (const { root, container } of mounts) {
-      try {
-        root.unmount();
-      } catch {
-        /* best effort */
-      }
-      container.remove();
-    }
-    mounts.length = 0;
+    await cleanupBrowserMounts(mounts);
     window.location.hash = "";
-    await window.__jazz?.shutdown();
   });
 
   // -------------------------------------------------------------------------

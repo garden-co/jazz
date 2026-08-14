@@ -11104,6 +11104,143 @@ fn one_shot_edge_query_attaches_fresh_claim_bound_usage_subscription_for_covered
 }
 
 #[test]
+fn trusted_backend_refreshes_covered_query_after_session_claims_change() {
+    let schema = JazzSchema::new([
+        TableSchema::new(
+            "chats",
+            [
+                ColumnSchema::new("title", ColumnType::String),
+                ColumnSchema::new("isPublic", ColumnType::Bool),
+                ColumnSchema::new("joinCode", ColumnType::String.nullable()),
+            ],
+        )
+        .with_read_policy(Policy::shape(
+            Query::from("chats")
+                .filter(any_of([]))
+                .policy_branch(crate::query::PolicyBranch::single_alternative_from_query(
+                    Query::from("chats").filter(eq(col("isPublic"), lit(true))),
+                ))
+                .policy_branch(crate::query::PolicyBranch::single_alternative_from_query(
+                    Query::from("chats").join_via_column(
+                        "chatMembers",
+                        "chatId",
+                        "id",
+                        [eq(col("userId"), crate::query::claim("user_id"))],
+                    ),
+                ))
+                .policy_branch(crate::query::PolicyBranch::single_alternative_from_query(
+                    Query::from("chats")
+                        .filter(eq(col("joinCode"), crate::query::claim("join_code"))),
+                )),
+        ))
+        .with_write_policy(Policy::public()),
+        TableSchema::new(
+            "chatMembers",
+            [
+                ColumnSchema::new("chatId", ColumnType::Uuid),
+                ColumnSchema::new("userId", ColumnType::String),
+            ],
+        )
+        .with_reference("chatId", "chats")
+        .with_write_policy(Policy::public()),
+    ]);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let backend_author = AuthorId::from_bytes([0xb0; 16]);
+    let reader = AuthorId::from_bytes([0xc1; 16]);
+    let backend = open_db(0xb0, backend_author, &schema);
+    let join_code = "invite-code-123";
+    let chat = seed(
+        &server,
+        "chats",
+        BTreeMap::from([
+            ("title".to_owned(), Value::String("private".to_owned())),
+            ("isPublic".to_owned(), Value::Bool(false)),
+            (
+                "joinCode".to_owned(),
+                Value::Nullable(Some(Box::new(Value::String(join_code.to_owned())))),
+            ),
+        ]),
+    );
+
+    let (backend_transport, server_transport) = duplex();
+    let _upstream = backend.connect_upstream(backend_transport);
+    let _subscriber = server.accept_subscriber_with_trust(
+        server_transport,
+        backend_author,
+        CommitUnitTrust::TrustedBackend,
+    );
+    let query = Query::from("chats");
+    let backend_prepared = prepared(&backend, &query);
+
+    let base_claims = BTreeMap::from([
+        ("user_id".to_owned(), Value::String("bob".to_owned())),
+        ("userId".to_owned(), Value::String("bob".to_owned())),
+    ]);
+    backend.set_identity_claims(reader, base_claims.clone());
+    let denied_attachment = backend
+        .attach_query_with_opts_for_identity(&backend_prepared, edge_subscribe_opts(), reader)
+        .unwrap();
+    backend.tick().unwrap();
+    server.tick().unwrap();
+    backend.tick().unwrap();
+    assert!(backend.query_attachment_is_covered(&denied_attachment));
+    assert!(
+        block_on(backend.all_for_identity(&backend_prepared, edge_subscribe_opts(), reader,))
+            .unwrap()
+            .is_empty()
+    );
+    backend.detach_query(denied_attachment);
+
+    backend.set_identity_claims(
+        reader,
+        base_claims
+            .into_iter()
+            .chain([("join_code".to_owned(), Value::String(join_code.to_owned()))])
+            .collect(),
+    );
+    let invited_attachment = backend
+        .attach_query_with_opts_for_identity(&backend_prepared, edge_subscribe_opts(), reader)
+        .unwrap();
+    backend.tick().unwrap();
+    server.tick().unwrap();
+    let server_shape = query.validate(&schema).unwrap();
+    let server_binding = server_shape.bind(BTreeMap::new()).unwrap();
+    assert_eq!(
+        row_ids(
+            &server
+                .node()
+                .borrow_mut()
+                .query_rows_for_link(&server_shape, &server_binding, DurabilityTier::Edge, reader,)
+                .unwrap()
+        ),
+        vec![chat],
+        "the trusted claims update must change direct serving evaluation"
+    );
+    backend.tick().unwrap();
+    assert!(backend.query_attachment_is_covered(&invited_attachment));
+    assert_eq!(
+        row_ids(
+            &block_on(backend.all_for_identity(
+                &backend_prepared,
+                edge_subscribe_opts(),
+                AuthorId::SYSTEM,
+            ))
+            .unwrap()
+        ),
+        vec![chat],
+        "the refreshed view must materialize the authorized row locally"
+    );
+    assert_eq!(
+        row_ids(
+            &block_on(backend.all_for_identity(&backend_prepared, edge_subscribe_opts(), reader,))
+                .unwrap()
+        ),
+        vec![chat]
+    );
+    backend.detach_query(invited_attachment);
+}
+
+#[test]
 fn edge_subscription_with_claim_bound_policy_emits_later_matching_server_write() {
     let schema = JazzSchema::new([TableSchema::new(
         "chats",
@@ -15787,6 +15924,46 @@ fn db_large_blob_values_round_trip_binary_from_empty_parent() {
         prepared_large_value_cell(&db, &Query::from("files"), table, "data"),
         second
     );
+}
+
+#[test]
+fn trusted_claim_filtered_large_blob_keeps_materialization_witnesses() {
+    let schema = JazzSchema::new([TableSchema::new(
+        "files",
+        [
+            crate::schema::ColumnSchema::new("owner", ColumnType::String),
+            crate::schema::ColumnSchema::blob("data"),
+        ],
+    )
+    .with_read_policy(Policy::shape(
+        Query::from("files").filter(eq(col("owner"), claim("user_id"))),
+    ))
+    .with_write_policy(Policy::public())]);
+    let db = open_db(0x56, AuthorId::SYSTEM, &schema);
+    let reader = AuthorId::from_bytes([0x57; 16]);
+    db.set_identity_claims(
+        reader,
+        BTreeMap::from([("user_id".to_owned(), Value::String("reader".to_owned()))]),
+    );
+    let mut payload = vec![0; 128 * 1024 + 7];
+    payload[..2].copy_from_slice(b"hi");
+    db.insert(
+        "files",
+        BTreeMap::from([
+            ("owner".to_owned(), Value::String("reader".to_owned())),
+            ("data".to_owned(), Value::Bytes(payload.clone())),
+        ]),
+    )
+    .unwrap();
+
+    let prepared = prepared(&db, &Query::from("files"));
+    let rows = block_on(db.all_for_identity(&prepared, ReadOpts::default(), reader)).unwrap();
+    assert_eq!(rows.len(), 1);
+    let table = &schema.tables[0];
+    let Some(Value::Bytes(handle)) = rows[0].cell(table, "data") else {
+        panic!("trusted claim-filtered read must expose a large-value handle");
+    };
+    assert_eq!(db.hydrate_large_value_handle(&handle).unwrap(), payload);
 }
 
 #[test]

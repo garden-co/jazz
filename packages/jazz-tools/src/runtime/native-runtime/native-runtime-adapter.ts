@@ -1,4 +1,4 @@
-import { deterministicRuntimeBytes as deterministicBytes } from "../runtime-identity.js";
+import { runtimeAuthorBytesForSubject } from "../runtime-identity.js";
 import type {
   ColumnDescriptor,
   ColumnType,
@@ -86,6 +86,7 @@ export type NativeDb = {
   attachExclusiveTx?(openBatchId: string): Tx;
   all(query: PreparedQuery, opts: unknown): Uint8Array;
   allForIdentity(query: PreparedQuery, author: Uint8Array, opts: unknown): Uint8Array;
+  hydrateLargeValue?(handle: Uint8Array): Uint8Array;
   allRelationQuery?(queryJson: string, opts: unknown): Uint8Array;
   allRelationQueryForIdentity?(queryJson: string, author: Uint8Array, opts: unknown): Uint8Array;
   allRelationSnapshot?(query: PreparedQuery, opts: unknown): Uint8Array;
@@ -367,9 +368,14 @@ type NativeRowFieldPlan = {
   name: string;
   index: number;
   type?: ColumnType;
+  largeValue?: "Blob" | "Text";
   storageType: ValueType;
   includeInValues: boolean;
 };
+
+type LargeValueHydrator = (handle: Uint8Array) => Uint8Array;
+
+const LARGE_VALUE_HANDLE_MAGIC = Uint8Array.from([0x4a, 0x4c, 0x56, 0x48, 0x32]); // JLVH2
 
 const textDecoder = new TextDecoder();
 const byteHex = Array.from({ length: 256 }, (_, byte) => byte.toString(16).padStart(2, "0"));
@@ -423,6 +429,14 @@ export class NativeRuntimeAdapter implements Runtime {
   private serverPumpAgain = false;
   private closed = false;
   private nextSubscriptionId = 1;
+
+  private readonly hydrateLargeValue = (handle: Uint8Array): Uint8Array => {
+    const hydrate = this.db.hydrateLargeValue;
+    if (!hydrate) {
+      throw new Error("Native runtime cannot hydrate a large-value row handle");
+    }
+    return hydrate.call(this.db, handle);
+  };
 
   static fromDb(
     db: NativeDb,
@@ -881,13 +895,25 @@ export class NativeRuntimeAdapter implements Runtime {
           session?.identity ?? this.peerIdentity,
           opts,
         );
-        return rowsFromBatches(readRowBatches(payload), this.schema);
+        return rowsFromBatches(
+          readRowBatches(payload),
+          this.schema,
+          undefined,
+          "full-record",
+          this.hydrateLargeValue,
+        );
       }
       if (!this.db.allRelationQuery) {
         throw new Error("Native runtime does not support relation queries");
       }
       const payload = this.db.allRelationQuery(coreQueryJson, opts);
-      return rowsFromBatches(readRowBatches(payload), this.schema);
+      return rowsFromBatches(
+        readRowBatches(payload),
+        this.schema,
+        undefined,
+        "full-record",
+        this.hydrateLargeValue,
+      );
     }
     const query = this.prepareQuery(coreQueryJson);
     const attachment = await this.attachQueryIfNeeded(tier, optionsJson, query, session);
@@ -907,6 +933,8 @@ export class NativeRuntimeAdapter implements Runtime {
             readRelationSnapshot(payload),
             this.schema,
             subscriptionOutputColumns(coreQueryJson, this.schema).rootColumns,
+            "full-record",
+            this.hydrateLargeValue,
           );
         }
         if (!this.db.allRelationSnapshot) {
@@ -917,15 +945,29 @@ export class NativeRuntimeAdapter implements Runtime {
           readRelationSnapshot(payload),
           this.schema,
           subscriptionOutputColumns(coreQueryJson, this.schema).rootColumns,
+          "full-record",
+          this.hydrateLargeValue,
         );
       }
       const pendingTx = pendingTxFromOptions(optionsJson, this.pendingTxs);
       let rows = this.readPlainRows(query, opts, session ?? undefined, pendingTx);
-      let rowStates = rowsFromBatches(readRowBatches(rows), this.schema);
+      let rowStates = rowsFromBatches(
+        readRowBatches(rows),
+        this.schema,
+        undefined,
+        "full-record",
+        this.hydrateLargeValue,
+      );
       if (!pendingTx && (tier === "edge" || tier === "global") && rowStates.length > 0) {
         await this.refreshRowsFromEdge(session, rowStates);
         rows = this.readPlainRows(query, opts, session ?? undefined, pendingTx);
-        rowStates = rowsFromBatches(readRowBatches(rows), this.schema);
+        rowStates = rowsFromBatches(
+          readRowBatches(rows),
+          this.schema,
+          undefined,
+          "full-record",
+          this.hydrateLargeValue,
+        );
       }
       return rowStates;
     } finally {
@@ -1177,9 +1219,13 @@ export class NativeRuntimeAdapter implements Runtime {
     if (!identity) return this.readRowForWriteMerge(table, rowId);
     const query = this.prepareQuery(JSON.stringify({ table }));
     const rows = this.readRowsForHost(query, readOptions(), identity);
-    return rowsFromBatches(readRowBatches(rows), this.schema).find(
-      (row) => row.table === table && row.id === formatUuid(rowId),
-    );
+    return rowsFromBatches(
+      readRowBatches(rows),
+      this.schema,
+      undefined,
+      "full-record",
+      this.hydrateLargeValue,
+    ).find((row) => row.table === table && row.id === formatUuid(rowId));
   }
 
   private readRowForWriteMerge(table: string, rowId: Uint8Array): RowState | undefined {
@@ -1190,14 +1236,21 @@ export class NativeRuntimeAdapter implements Runtime {
       const rows = rowsFromBatches(
         readRowBatches(exactReader.call(this.db, table, rowId)),
         this.schema,
+        undefined,
+        "full-record",
+        this.hydrateLargeValue,
       );
       return rows[0];
     }
     const query = this.prepareQuery(JSON.stringify({ table }));
     const rows = this.db.all(query, readOptions());
-    return rowsFromBatches(readRowBatches(rows), this.schema).find(
-      (row) => row.table === table && row.id === formatUuid(rowId),
-    );
+    return rowsFromBatches(
+      readRowBatches(rows),
+      this.schema,
+      undefined,
+      "full-record",
+      this.hydrateLargeValue,
+    ).find((row) => row.table === table && row.id === formatUuid(rowId));
   }
 
   private rowStateFromValues(
@@ -1665,6 +1718,7 @@ export class NativeRuntimeAdapter implements Runtime {
         this.schema,
         subscription.outputColumns?.rootColumns,
         "full-record",
+        this.hydrateLargeValue,
       );
       subscription.rowIndexByKey = indexRowsByKey(subscription.rows);
       subscription.opened = true;
@@ -1703,7 +1757,7 @@ export class NativeRuntimeAdapter implements Runtime {
         packedResetRows.terminalLayouts = chunk.terminalLayouts;
         this.publishSubscriptionRows(subscription, packedResetRows, chunk.settled, true);
       } else {
-        materializePackedResetRows(subscription, this.schema);
+        materializePackedResetRows(subscription, this.schema, this.hydrateLargeValue);
         let applied;
         try {
           applied = applySubscriptionDeltaWithWireDelta(
@@ -1713,6 +1767,7 @@ export class NativeRuntimeAdapter implements Runtime {
             this.schema,
             chunk.reset === true,
             subscription.outputColumns,
+            this.hydrateLargeValue,
           );
         } catch (error) {
           const buffered = applySubscriptionDeltaToState(
@@ -1722,6 +1777,7 @@ export class NativeRuntimeAdapter implements Runtime {
             this.schema,
             chunk.reset === true,
             subscription.outputColumns,
+            this.hydrateLargeValue,
           );
           if (
             subscriptionRowsRequireBufferedPublication(
@@ -3594,6 +3650,7 @@ export function rowsFromBatches(
   schema: WasmSchema,
   projectedColumns?: readonly ColumnDescriptor[],
   nestedRowCarrier: NestedRowCarrier = "full-record",
+  hydrateLargeValue?: LargeValueHydrator,
 ): RowState[] {
   const rows: RowState[] = [];
   for (const batch of batches) {
@@ -3604,7 +3661,13 @@ export function rowsFromBatches(
       const valuesByColumn = new Map<string, Value>();
 
       for (const field of fieldPlans) {
-        const value = decodePlannedField(field, decodeRecord, row.raw, nestedRowCarrier);
+        const value = decodePlannedField(
+          field,
+          decodeRecord,
+          row.raw,
+          nestedRowCarrier,
+          hydrateLargeValue,
+        );
         valuesByColumn.set(field.name, value);
         if (field.includeInValues) {
           values.push(value);
@@ -3649,14 +3712,16 @@ function nativeRowFieldPlans(
     if (!fieldName || isInternalField(fieldName) || isCurrentRowPhysicalField(fieldName)) continue;
 
     const name = publicFieldName(fieldName);
+    const column = columnsByName.get(name);
     const type =
       name === "$createdBy" || name === "$updatedBy"
         ? ({ type: "Uuid" } as const)
-        : (magicColumnType(name) ?? columnsByName.get(name)?.column_type);
+        : (magicColumnType(name) ?? column?.column_type);
     plans.push({
       name,
       index,
       type,
+      largeValue: column?.large_value,
       storageType: batch.descriptor[index]!.valueType,
       includeInValues: !isHiddenIncludeColumn(name) && !isProvenanceMagicColumn(name),
     });
@@ -3680,9 +3745,10 @@ function rowsFromRelationSnapshot(
   schema: WasmSchema,
   projectedColumns?: readonly ColumnDescriptor[],
   nestedRowCarrier: NestedRowCarrier = "full-record",
+  hydrateLargeValue?: LargeValueHydrator,
 ): RowState[] {
   const rows = stripRelationSnapshotMetadata(
-    rowsFromBatches(snapshot.rows, schema, projectedColumns, nestedRowCarrier),
+    rowsFromBatches(snapshot.rows, schema, projectedColumns, nestedRowCarrier, hydrateLargeValue),
     schema,
   );
   return rows.slice(0, snapshot.rootCount);
@@ -3739,6 +3805,7 @@ export function applySubscriptionDeltaWithWireDelta(
   schema: WasmSchema,
   reset = false,
   outputColumns: SubscriptionOutputColumns | null = null,
+  hydrateLargeValue?: LargeValueHydrator,
 ): { rows: RowState[]; rowIndexByKey: Map<string, number>; wireDelta: NativeRowDelta } {
   const { addedRows, updatedRows, removedEntries, rows, rowIndexByKey } =
     applySubscriptionDeltaToState(
@@ -3748,6 +3815,7 @@ export function applySubscriptionDeltaWithWireDelta(
       schema,
       reset,
       outputColumns,
+      hydrateLargeValue,
     );
   return {
     rows,
@@ -3773,6 +3841,7 @@ function applySubscriptionDeltaToState(
   schema: WasmSchema,
   reset = false,
   outputColumns: SubscriptionOutputColumns | null = null,
+  hydrateLargeValue?: LargeValueHydrator,
 ): {
   addedRows: RowState[];
   updatedRows: RowState[];
@@ -3797,8 +3866,20 @@ function applySubscriptionDeltaToState(
 
   const projectedColumns = outputColumns?.rootColumns;
   const nestedRowCarrier: NestedRowCarrier = "full-record";
-  const addedRows = rowsFromBatches(delta.added, schema, projectedColumns, nestedRowCarrier);
-  const updatedRows = rowsFromBatches(delta.updated, schema, projectedColumns, nestedRowCarrier);
+  const addedRows = rowsFromBatches(
+    delta.added,
+    schema,
+    projectedColumns,
+    nestedRowCarrier,
+    hydrateLargeValue,
+  );
+  const updatedRows = rowsFromBatches(
+    delta.updated,
+    schema,
+    projectedColumns,
+    nestedRowCarrier,
+    hydrateLargeValue,
+  );
   attachOccurrenceKeys(addedRows, delta.addedOccurrenceKeys);
   attachOccurrenceKeys(updatedRows, delta.updatedOccurrenceKeys);
   for (const row of addedRows.concat(updatedRows)) {
@@ -3859,17 +3940,37 @@ function decodePlannedField(
   decodeRecord: (raw: Uint8Array, logicalIndex: number) => Uint8Array | null,
   raw: Uint8Array,
   nestedRowCarrier: NestedRowCarrier,
+  hydrateLargeValue?: LargeValueHydrator,
 ): Value {
   const bytes = decodeRecord(raw, field.index);
   if (bytes == null) return { type: "Null" };
   if (!field.type) return { type: "Bytea", value: bytes };
   try {
-    return decodeBytes(field.type, bytes, field.name, field.storageType, nestedRowCarrier);
+    const value = decodeBytes(field.type, bytes, field.name, field.storageType, nestedRowCarrier);
+    if (
+      field.largeValue &&
+      value.type === "Bytea" &&
+      startsWithBytes(value.value, LARGE_VALUE_HANDLE_MAGIC)
+    ) {
+      if (!hydrateLargeValue) {
+        throw new Error(`large-value handle for ${field.name} has no native hydrator`);
+      }
+      return { type: "Bytea", value: hydrateLargeValue(value.value) };
+    }
+    return value;
   } catch (error) {
     throw new Error(
       `${String(error)} while decoding ${field.name} as ${field.type.type} from storage tag ${field.storageType.tag} (${bytes.byteLength} bytes)`,
     );
   }
+}
+
+function startsWithBytes(value: Uint8Array, prefix: Uint8Array): boolean {
+  if (value.byteLength < prefix.byteLength) return false;
+  for (let index = 0; index < prefix.byteLength; index += 1) {
+    if (value[index] !== prefix[index]) return false;
+  }
+  return true;
 }
 
 function decodeBytes(
@@ -4338,7 +4439,15 @@ function plainResetChunkCanStayPacked(
   const sourceRowKeysOnly = chunk.delta.addedOccurrenceKeys.every(
     (key) => key.length === 17 && key[0] === 1,
   );
-  const canStayPacked = reset && noUpdated && noRemoved && identityProjection && sourceRowKeysOnly;
+  const hasLargeValues = chunk.delta.added.some((batch) => {
+    const columns =
+      subscription.outputColumns?.rootTable === batch.table
+        ? subscription.outputColumns.rootColumns
+        : schema[batch.table]?.columns;
+    return columns?.some((column) => column.large_value != null) ?? false;
+  });
+  const canStayPacked =
+    reset && noUpdated && noRemoved && identityProjection && sourceRowKeysOnly && !hasLargeValues;
   return canStayPacked;
 }
 
@@ -4410,13 +4519,18 @@ function nativeDescriptorMatchesColumns(
   });
 }
 
-function materializePackedResetRows(subscription: SubscriptionState, schema: WasmSchema): void {
+function materializePackedResetRows(
+  subscription: SubscriptionState,
+  schema: WasmSchema,
+  hydrateLargeValue?: LargeValueHydrator,
+): void {
   if (!subscription.packedResetBatches) return;
   subscription.rows = rowsFromBatches(
     subscription.packedResetBatches,
     schema,
     subscription.outputColumns?.rootColumns,
     "full-record",
+    hydrateLargeValue,
   );
   subscription.rowIndexByKey = indexRowsByKey(subscription.rows);
   subscription.packedResetBatches = null;
@@ -4630,16 +4744,8 @@ export function parseUuid(value: string): Uint8Array {
   return bytes;
 }
 
-function uuidBytes(value: string): Uint8Array | null {
-  try {
-    return parseUuid(value);
-  } catch {
-    return null;
-  }
-}
-
 function authorBytesForSubject(subject: string): Uint8Array {
-  return uuidBytes(subject) ?? deterministicBytes(`session:${subject}:author`);
+  return runtimeAuthorBytesForSubject(subject);
 }
 
 export function formatUuid(bytes: Uint8Array): string {

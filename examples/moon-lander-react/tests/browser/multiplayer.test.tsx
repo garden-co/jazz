@@ -43,6 +43,10 @@ const SYNC_TIMEOUT = 20_000;
 
 const mounts: MountEntry[] = [];
 
+function uniqueDbName(label: string): string {
+  return `moon-lander-${label}-${crypto.randomUUID()}`;
+}
+
 async function mountApp(opts: {
   appId?: string;
   dbName?: string;
@@ -121,6 +125,7 @@ describe("Moon Lander — Cross-Client Sync", () => {
 
       const el = await mountApp({
         appId: APP_ID_MULTI,
+        dbName: uniqueDbName("inventory"),
         serverUrl,
         playerId,
         physicsSpeed: 10,
@@ -158,6 +163,7 @@ describe("Moon Lander — Cross-Client Sync", () => {
         expect((FUEL_TYPES as readonly string[]).includes(type)).toBe(true);
       }
     } finally {
+      await unmountAll(mounts);
       await commands.stopFreshTestServer("inv-176");
     }
   });
@@ -184,6 +190,7 @@ describe("Moon Lander — Cross-Client Sync", () => {
     try {
       const elA = await mountApp({
         appId: APP_ID_MULTI,
+        dbName: uniqueDbName("cross-player-a"),
         serverUrl,
         adminSecret: ADMIN_SECRET,
         physicsSpeed: 10,
@@ -197,6 +204,7 @@ describe("Moon Lander — Cross-Client Sync", () => {
       // Mount B after A exits — B starts in "landed" mode and stays there.
       const elB = await mountApp({
         appId: APP_ID_MULTI,
+        dbName: uniqueDbName("cross-player-b"),
         serverUrl,
         adminSecret: ADMIN_SECRET,
         physicsSpeed: 10,
@@ -257,6 +265,7 @@ describe("Moon Lander — Cross-Client Sync", () => {
         `Player B sync-uncollected should drop below ${countBefore}`,
       );
     } finally {
+      await unmountAll(mounts);
       await commands.stopFreshTestServer("cross-coll").catch(() => {});
     }
   });
@@ -277,6 +286,7 @@ describe("Moon Lander — Cross-Client Sync", () => {
 
       const el = await mountApp({
         appId: APP_ID,
+        dbName: uniqueDbName("burst"),
         serverUrl,
         playerId,
         physicsSpeed: 10,
@@ -365,6 +375,7 @@ describe("Moon Lander — Cross-Client Sync", () => {
     try {
       const elA = await mountApp({
         appId: APP_ID_MULTI,
+        dbName: uniqueDbName("full-sync-player-a"),
         serverUrl,
         adminSecret: ADMIN_SECRET,
         physicsSpeed: 10,
@@ -372,6 +383,7 @@ describe("Moon Lander — Cross-Client Sync", () => {
 
       const elB = await mountApp({
         appId: APP_ID_MULTI,
+        dbName: uniqueDbName("full-sync-player-b"),
         serverUrl,
         adminSecret: ADMIN_SECRET,
         physicsSpeed: 10,
@@ -411,6 +423,7 @@ describe("Moon Lander — Cross-Client Sync", () => {
         "Instance B should still see Instance A after mode change",
       );
     } finally {
+      await unmountAll(mounts);
       await commands.stopFreshTestServer("full-phase2");
     }
   });

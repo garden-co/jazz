@@ -15,7 +15,7 @@ Receipts remain local test artifacts rather than committed bulk output. The fina
 
 A future fix must remove both the matching visible skip marker and this entry, then include a focused green receipt. Never delete or weaken the test. New known reds require both a source annotation and one row. Executable gates enforce the active annotation/entry bijection.
 
-## Active Rust quarantine (44)
+## Active Rust quarantine (43)
 
 | Test                                                                                                                     | Definition                                            | Status        | Category                    | Theory                                                        | Owner  |
 | ------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------- | ------------- | --------------------------- | ------------------------------------------------------------- | ------ |
@@ -34,7 +34,6 @@ A future fix must remove both the matching visible skip marker and this entry, t
 | `jazz::edge_server_mode::subscription_orders_by_unprojected_field`                                                       | `crates/jazz/tests/edge_server_mode.rs`               | FAIL          | Edge/global delivery        | Durability or ordered subscription propagation is incomplete. | Anselm |
 | `jazz::aggregate_subscriptions::maintained_integer_sum_accumulates_multiple_deltas_and_retracts_empty_group`             | `crates/jazz/tests/aggregate_subscriptions.rs`        | FAIL          | Maintained aggregates       | Incremental aggregate replacement diverges from full state.   | Anselm |
 | `jazz::aggregate_subscriptions::maintained_min_and_max_replace_multi_row_groups`                                         | `crates/jazz/tests/aggregate_subscriptions.rs`        | FAIL          | Maintained aggregates       | Incremental aggregate replacement diverges from full state.   | Anselm |
-| `jazz::large_blob_permissions::large_blob_values_follow_ordinary_row_permissions`                                        | `crates/jazz/tests/large_blob_permissions.rs`         | FAIL          | Blob permissions            | Blob path diverges from ordinary row permissions.             | Anselm |
 | `jazz::output_occurrence_id::flat_join_output_occurrence_identity_addresses_additions_removals_and_replacements`         | `crates/jazz/tests/output_occurrence_id.rs`           | FAIL          | Output occurrence identity  | Join output occurrence netting is incorrect.                  | Anselm |
 | `jazz::output_occurrence_id::flat_join_payload_netting_drops_add_then_remove_in_one_transaction_batch`                   | `crates/jazz/tests/output_occurrence_id.rs`           | FAIL          | Output occurrence identity  | Join output occurrence netting is incorrect.                  | Anselm |
 | `jazz::rename_write_authorization::renamed_table_update_policy_uses_projected_parent_version`                            | `crates/jazz/tests/rename_write_authorization.rs`     | FAIL          | Authorization/claims        | Policy-scoped maintained result differs or fails to settle.   | Anselm |

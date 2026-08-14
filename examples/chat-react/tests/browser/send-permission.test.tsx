@@ -34,6 +34,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { App } from "../../src/App.js";
 import { TEST_SERVER_URL, APP_ID, testSecret } from "./test-constants.js";
 import { resetProfileGuard } from "../../src/hooks/useMyProfile.js";
+import { cleanupBrowserMounts, unmountBrowserApp } from "./client-cleanup.js";
 
 // ---------------------------------------------------------------------------
 // Helpers (same conventions as chat-app.test.tsx)
@@ -85,27 +86,13 @@ describe("Send permission — private chat INSERT policy", () => {
   }
 
   async function unmountApp(el: HTMLDivElement): Promise<void> {
-    const idx = mounts.findIndex((m) => m.container === el);
-    if (idx === -1) return;
-    const { root } = mounts[idx];
-    root.unmount();
-    el.remove();
-    mounts.splice(idx, 1);
-    await new Promise((r) => setTimeout(r, 200));
+    await unmountBrowserApp(mounts, el);
   }
 
   afterEach(async () => {
     resetProfileGuard();
     window.location.hash = "";
-    for (const { root, container } of mounts) {
-      try {
-        root.unmount();
-      } catch {
-        /* best effort */
-      }
-      container.remove();
-    }
-    mounts.length = 0;
+    await cleanupBrowserMounts(mounts);
   });
 
   /**
@@ -209,6 +196,14 @@ describe("Send permission — private chat INSERT policy", () => {
       () => aliceContainer.textContent?.includes("Alice's private message") ?? false,
       5000,
       "Alice's message should appear in the private chat",
+    );
+    await waitFor(
+      () =>
+        aliceContainer
+          .querySelector('[data-testid="message-composer"]')
+          ?.getAttribute("data-pending-sends") === "0",
+      10000,
+      "Alice's message should reach the configured durability tier",
     );
   });
 
@@ -319,6 +314,14 @@ describe("Send permission — private chat INSERT policy", () => {
       () => bobContainer.textContent?.includes("Bob's reply to the private chat") ?? false,
       5000,
       "Bob's message should appear in the private chat",
+    );
+    await waitFor(
+      () =>
+        bobContainer
+          .querySelector('[data-testid="message-composer"]')
+          ?.getAttribute("data-pending-sends") === "0",
+      10000,
+      "Bob's message should reach the configured durability tier",
     );
   });
 });

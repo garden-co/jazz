@@ -746,14 +746,19 @@ export class PersistentBrowserOpfsRuntime implements Runtime {
       return { kind: "staged", openBatchId: batchId as OpenBatchId };
     }
     void write.catch(() => undefined);
+    const committedBatchId = write.then((result) => {
+      if (result.kind !== "committed") {
+        throw new Error(`Worker returned staged batch ${result.openBatchId} for ordinary write`);
+      }
+      return result.batchId;
+    });
+    // A caller may intentionally fire-and-forget a write handle. Mark the
+    // derived promise as observed without changing its rejected state for a
+    // later handle.wait() or batchId consumer.
+    void committedBatchId.catch(() => undefined);
     return {
       kind: "committed",
-      batchId: write.then((result) => {
-        if (result.kind !== "committed") {
-          throw new Error(`Worker returned staged batch ${result.openBatchId} for ordinary write`);
-        }
-        return result.batchId;
-      }),
+      batchId: committedBatchId,
     };
   }
 

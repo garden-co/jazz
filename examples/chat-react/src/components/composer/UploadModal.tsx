@@ -5,6 +5,7 @@ import { Button, buttonVariants } from "@/components/ui/button";
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
@@ -49,6 +50,9 @@ export function UploadModal({ open, onOpenChange, accept, title, onUpload }: Upl
       <DialogContent>
         <DialogHeader>
           <DialogTitle>{title}</DialogTitle>
+          <DialogDescription className="sr-only">
+            Choose a file to upload to this chat.
+          </DialogDescription>
         </DialogHeader>
 
         <Label

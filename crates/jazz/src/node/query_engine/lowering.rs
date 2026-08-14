@@ -131,11 +131,8 @@ pub(crate) fn lower_query_program(
                 .is_some_and(|_| parameters.claim_params.contains_key(field))
     });
 
-    let internal_app_rows_graph = (request.output.app_rows.is_some()
-        && root_aggregate_step(&plan).is_none())
-    .then(|| lowered.graph.clone());
     let terminals = lowered_terminals(
-        lowered.graph,
+        lowered.graph.clone(),
         &request,
         &plan,
         &resolved_root,
@@ -143,6 +140,28 @@ pub(crate) fn lower_query_program(
         &parameters.routing_params,
         &lowered.fields,
     )?;
+    let materialization_input = if public_root_owns_membership(&request) {
+        terminals
+            .iter()
+            .find(|terminal| terminal.sink == "app_rows")
+            .map(|terminal| &terminal.graph)
+            .unwrap_or(&lowered.graph)
+    } else {
+        &lowered.graph
+    };
+    let internal_app_rows_graph = internal_materialization_app_rows_graph(
+        &request,
+        &plan,
+        &lowered.fields,
+        materialization_input,
+        &resolved_root,
+    )
+    .map_err(|gap| {
+        Box::new(CapabilityReport {
+            gaps: vec![gap],
+            explain: explain_with_request(&request, explain.clone()),
+        })
+    })?;
     verify_routed_terminal_outputs(&terminals, &parameters, &request, &explain)?;
     let output = ProgramOutputSchemas::RowSet(
         terminals
@@ -181,6 +200,115 @@ pub(crate) fn lower_query_program(
         request,
         explain,
     })
+}
+
+fn internal_materialization_app_rows_graph(
+    request: &QueryProgramRequest,
+    plan: &AnalyzedQueryPlan,
+    fallback_fields: &BTreeSet<String>,
+    graph: &GraphBuilder,
+    root_source: &ResolvedSource,
+) -> Result<Option<GraphBuilder>, UnsupportedReason> {
+    if request.output.app_rows.is_none() || root_aggregate_step(plan).is_some() {
+        return Ok(None);
+    }
+
+    // Structured app rows already end in the public collector graph. Collectors
+    // are terminal-only in Groove, so they cannot be followed by the canonical
+    // row reattachment below. Their materializer intentionally consumes the
+    // public terminal unchanged.
+    if graph_contains_collect_by(graph) {
+        return Ok(None);
+    }
+
+    // Flat joins deliberately publish a wide, occurrence-addressed tuple and
+    // are decoded by their own materializer. Ordinary row queries, however,
+    // must retain the canonical current-row shape even when a policy or output
+    // projection narrows the relational result to membership fields.
+    if !flat_join_payload_fields(plan).is_empty() {
+        return Ok(Some(graph.clone()));
+    }
+
+    let canonical_fields = root_source
+        .row_shape
+        .descriptor
+        .fields()
+        .iter()
+        .filter_map(|field| field.name.clone())
+        .collect::<BTreeSet<_>>();
+    let lowered_output_fields =
+        graph_declared_output_fields(graph).unwrap_or_else(|| fallback_fields.clone());
+    if canonical_fields
+        .iter()
+        .all(|field| lowered_output_fields.contains(field))
+    {
+        return Ok(Some(graph.clone()));
+    }
+
+    let row_uuid_field = &root_source.row_shape.row_uuid_field;
+    if !lowered_output_fields.contains(row_uuid_field) {
+        return Err(UnsupportedReason::Operator(format!(
+            "app-row materialization lost root identity field {row_uuid_field}"
+        )));
+    }
+
+    let mut projection = project_source_fields_from_prefix(root_source, RIGHT_JOIN_PREFIX);
+    projection.extend(
+        lowered_output_fields
+            .iter()
+            .filter(|field| !canonical_fields.contains(*field))
+            .map(|field| ProjectField::renamed(left_field(field), field.clone())),
+    );
+    Ok(Some(
+        GraphBuilder::join(
+            graph.clone(),
+            root_source.graph.clone(),
+            [row_uuid_field.clone()],
+            [row_uuid_field.clone()],
+        )
+        .project_fields(projection),
+    ))
+}
+
+fn public_root_owns_membership(request: &QueryProgramRequest) -> bool {
+    request.input.shape.closure_paths.iter().any(|path| {
+        matches!(
+            path,
+            ClosurePath::ExplicitInclude {
+                root_gate: Some(_),
+                ..
+            }
+        )
+    })
+}
+
+fn graph_contains_collect_by(graph: &GraphBuilder) -> bool {
+    match graph {
+        GraphBuilder::CollectBy { .. } => true,
+        GraphBuilder::Recursive { seed, step, .. } => {
+            graph_contains_collect_by(seed) || graph_contains_collect_by(step)
+        }
+        GraphBuilder::Filter { input, .. }
+        | GraphBuilder::UnwrapNullable { input, .. }
+        | GraphBuilder::Unnest { input, .. }
+        | GraphBuilder::VariantProject { input, .. }
+        | GraphBuilder::Project { input, .. }
+        | GraphBuilder::ArgMaxBy { input, .. }
+        | GraphBuilder::ArgMinBy { input, .. }
+        | GraphBuilder::TopBy { input, .. }
+        | GraphBuilder::Aggregate { input, .. } => graph_contains_collect_by(input),
+        GraphBuilder::Union { inputs } => inputs.iter().any(graph_contains_collect_by),
+        GraphBuilder::Join { left, right, .. }
+        | GraphBuilder::SemiJoin { left, right, .. }
+        | GraphBuilder::AntiJoin { left, right, .. } => {
+            graph_contains_collect_by(left) || graph_contains_collect_by(right)
+        }
+        GraphBuilder::Table { .. }
+        | GraphBuilder::InlineRecords { .. }
+        | GraphBuilder::Index { .. }
+        | GraphBuilder::FrontierSource { .. }
+        | GraphBuilder::BindingSource { .. } => false,
+    }
 }
 
 fn verify_routed_terminal_outputs(
@@ -3212,15 +3340,46 @@ fn lower_linear_plan_steps(
                     ));
                 }
                 let lowered_right = lower_relation_input(right, resolved_sources, request)?;
-                let (left_keys, right_keys) = lower_linear_join_key_pairs(
-                    on,
-                    &plan.root,
-                    root_source,
-                    right,
-                    &lowered_right,
-                    &accumulated_join_fields,
-                    request,
-                )?;
+                let uncorrelated_literal = uncorrelated_join_literal(on)?;
+                let (left_keys, right_keys, mut right_graph) =
+                    if let Some(value) = uncorrelated_literal {
+                        if *mode != JoinMode::Semi {
+                            return Err(UnsupportedReason::Operator(
+                                "uncorrelated existence gates must use a semi join".to_owned(),
+                            ));
+                        }
+                        let marker = format!("__jazz_uncorrelated_exists_{step_index}");
+                        let mut left_projection = fields
+                            .iter()
+                            .map(|field| ProjectField::named(field.clone()))
+                            .collect::<Vec<_>>();
+                        left_projection.push(ProjectField::literal(marker.clone(), value.clone()));
+                        graph = graph.project_fields(left_projection);
+                        fields.insert(marker.clone());
+
+                        let mut right_projection = lowered_right
+                            .fields
+                            .iter()
+                            .map(|field| ProjectField::named(field.clone()))
+                            .collect::<Vec<_>>();
+                        right_projection.push(ProjectField::literal(marker.clone(), value));
+                        (
+                            vec![marker.clone()],
+                            vec![marker],
+                            lowered_right.graph.project_fields(right_projection),
+                        )
+                    } else {
+                        let (left_keys, right_keys) = lower_linear_join_key_pairs(
+                            on,
+                            &plan.root,
+                            root_source,
+                            right,
+                            &lowered_right,
+                            &accumulated_join_fields,
+                            request,
+                        )?;
+                        (left_keys, right_keys, lowered_right.graph)
+                    };
                 if matches!(&plan.root, LinearRoot::Source { .. }) {
                     let mut unwrapped_left_keys = BTreeSet::new();
                     for left_key in &left_keys {
@@ -3237,7 +3396,6 @@ fn lower_linear_plan_steps(
                 }
                 let right_nullable_fields = lowered_right.nullable_fields.clone();
                 let right_nullable_field_depths = lowered_right.nullable_field_depths.clone();
-                let mut right_graph = lowered_right.graph;
                 let mut unwrapped_right_keys = BTreeSet::new();
                 for right_key in &right_keys {
                     if lowered_right.nullable_fields.contains(right_key)
@@ -3388,7 +3546,25 @@ fn lower_linear_plan_steps(
                                 occurrence_fields.insert(output.clone());
                             }
                         }
-                        if let Some(right_source_id) = right.root_source() {
+                        if let Some((arm_field, row_field)) =
+                            &lowered_right.union_occurrence_carrier
+                        {
+                            // A single-arm union can still report a root source.
+                            // Prefer its explicit arm/row occurrence carrier so
+                            // the graph agrees with result-membership schemas.
+                            let arm_output = format!("__root_join_arm_{step_index}");
+                            let row_output = format!("__root_join_row_{step_index}");
+                            projection.push(ProjectField::renamed(
+                                right_field(arm_field),
+                                arm_output.clone(),
+                            ));
+                            projection.push(ProjectField::renamed(
+                                right_field(row_field),
+                                row_output.clone(),
+                            ));
+                            occurrence_fields.insert(arm_output);
+                            occurrence_fields.insert(row_output);
+                        } else if let Some(right_source_id) = right.root_source() {
                             let right_source = resolved_sources.get(right_source_id).ok_or_else(|| {
                                 UnsupportedReason::Operator(format!(
                                     "inner join occurrence source {right_source_id:?} was not resolved"
@@ -3411,21 +3587,6 @@ fn lower_linear_plan_steps(
                                 ));
                                 occurrence_fields.insert(output);
                             }
-                        } else if let Some((arm_field, row_field)) =
-                            &lowered_right.union_occurrence_carrier
-                        {
-                            let arm_output = format!("__root_join_arm_{step_index}");
-                            let row_output = format!("__root_join_row_{step_index}");
-                            projection.push(ProjectField::renamed(
-                                right_field(arm_field),
-                                arm_output.clone(),
-                            ));
-                            projection.push(ProjectField::renamed(
-                                right_field(row_field),
-                                row_output.clone(),
-                            ));
-                            occurrence_fields.insert(arm_output);
-                            occurrence_fields.insert(row_output);
                         }
                     }
                     graph = graph.project_fields(projection);
@@ -3987,6 +4148,27 @@ fn lower_linear_join_key_pairs(
         ));
     }
     Ok(pairs.into_iter().unzip())
+}
+
+fn uncorrelated_join_literal(
+    predicate: &PredicateExpr,
+) -> Result<Option<Value>, UnsupportedReason> {
+    let PredicateExpr::Compare {
+        left: NormalizedValueRef::Literal(left),
+        op: ComparisonOp::Eq,
+        right: NormalizedValueRef::Literal(right),
+    } = predicate
+    else {
+        return Ok(None);
+    };
+    if left != right {
+        return Ok(None);
+    }
+    postcard::from_bytes(left).map(Some).map_err(|error| {
+        UnsupportedReason::Operator(format!(
+            "uncorrelated existence marker could not be decoded: {error}"
+        ))
+    })
 }
 
 fn lower_root_to_relation_key_pair(

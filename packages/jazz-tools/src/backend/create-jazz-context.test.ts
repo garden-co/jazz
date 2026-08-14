@@ -376,7 +376,7 @@ describe("backend/create-jazz-context", () => {
     });
   });
 
-  it("BC-U04: merges compiled permissions into the runtime schema", () => {
+  it("BC-U04: merges compiled permissions and default-denies omitted operations", () => {
     const context = createJazzContext({
       appId: "server-app",
       app: {
@@ -395,7 +395,15 @@ describe("backend/create-jazz-context", () => {
     expect(mocks.nativeRuntimeCtor.mock.calls[0]![1]).toEqual({
       todos: {
         columns: [],
-        policies: TODO_PERMISSIONS.todos as any,
+        policies: {
+          select: { using: { type: "True" } },
+          insert: { with_check: { type: "False" } },
+          update: {
+            using: { type: "False" },
+            with_check: { type: "False" },
+          },
+          delete: { using: { type: "False" } },
+        },
       },
     });
   });
@@ -468,6 +476,12 @@ describe("backend/create-jazz-context", () => {
               },
             },
           },
+          insert: { with_check: { type: "False" } },
+          update: {
+            using: { type: "False" },
+            with_check: { type: "False" },
+          },
+          delete: { using: { type: "False" } },
         },
       },
     });

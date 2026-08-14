@@ -36,11 +36,32 @@ describe("normalizePermissionsForWasm", () => {
             },
           },
         },
-        insert: undefined,
-        update: undefined,
-        delete: undefined,
+        insert: { with_check: { type: "False" } },
+        update: {
+          using: { type: "False" },
+          with_check: { type: "False" },
+        },
+        delete: { using: { type: "False" } },
       },
     });
+  });
+
+  it("uses update.using as the enforcing delete fallback", () => {
+    const permissions: CompiledPermissionsMap = {
+      todos: {
+        update: {
+          using: {
+            type: "Cmp",
+            column: "ownerId",
+            op: "Eq",
+            value: { type: "SessionRef", path: ["user_id"] },
+          },
+        },
+      },
+    };
+
+    const normalized = normalizePermissionsForWasm(permissions);
+    expect(normalized.todos?.delete?.using).toEqual(normalized.todos?.update?.using);
   });
 
   it("encodes nested relation literals inside ExistsRel filters", () => {
@@ -141,9 +162,12 @@ describe("normalizePermissionsForWasm", () => {
             },
           },
         },
-        insert: undefined,
-        update: undefined,
-        delete: undefined,
+        insert: { with_check: { type: "False" } },
+        update: {
+          using: { type: "False" },
+          with_check: { type: "False" },
+        },
+        delete: { using: { type: "False" } },
       },
     });
   });

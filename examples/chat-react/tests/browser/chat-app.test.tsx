@@ -9,6 +9,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { App } from "../../src/App.js";
 import { TEST_SERVER_URL, APP_ID, testSecret } from "./test-constants.js";
 import { resetProfileGuard } from "../../src/hooks/useMyProfile.js";
+import { cleanupBrowserMounts, unmountBrowserApp } from "./client-cleanup.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -160,32 +161,15 @@ describe("Chat App E2E", () => {
   }
 
   async function unmountApp(el: HTMLDivElement): Promise<void> {
-    const idx = mounts.findIndex((m) => m.container === el);
-    if (idx === -1) return;
-    const { root } = mounts[idx];
-    root.unmount();
-    el.remove();
-    mounts.splice(idx, 1);
-    await new Promise((r) => setTimeout(r, 200));
+    await unmountBrowserApp(mounts, el);
   }
 
   afterEach(async () => {
     resetProfileGuard();
-    for (const { root, container } of mounts) {
-      try {
-        root.unmount();
-      } catch {
-        /* best effort */
-      }
-      container.remove();
-    }
-    mounts.length = 0;
+    await cleanupBrowserMounts(mounts);
     // Reset the hash so the next test starts at the root path, which
     // triggers CreateChatRedirect to create a fresh chat.
     window.location.hash = "";
-    // Wait for the JazzProvider's async shutdown (worker termination,
-    // OPFS lock release) to complete before starting the next test.
-    await window.__jazz?.shutdown();
   });
 
   // -------------------------------------------------------------------------
@@ -303,7 +287,7 @@ describe("Chat App E2E", () => {
   // 4. Delete a message
   // -------------------------------------------------------------------------
 
-  it.fails("deletes a message via the dropdown menu", async () => {
+  it("deletes a message via the dropdown menu", async () => {
     const el = await mountApp();
 
     await waitFor(

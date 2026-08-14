@@ -76,7 +76,6 @@ fn user_client_context(
 /// mallory --spoof owner-------> server --row policy--x rejected
 /// ```
 #[tokio::test(flavor = "current_thread")]
-#[ignore = "known red; tracked in TEST_BURNDOWN.md"]
 async fn large_blob_values_follow_ordinary_row_permissions() {
     tokio::task::LocalSet::new()
         .run_until(async {
@@ -142,7 +141,10 @@ async fn large_blob_values_follow_ordinary_row_permissions() {
                 )
                 .expect("alice creates blob asset");
             alice
-                .wait_for_batch(alice_batch_id.expect("ordinary mutation commits immediately"), DurabilityTier::EdgeServer)
+                .wait_for_batch(
+                    alice_batch_id.expect("ordinary mutation commits immediately"),
+                    DurabilityTier::EdgeServer,
+                )
                 .await
                 .expect("alice blob asset reaches edge");
 
@@ -182,15 +184,20 @@ async fn large_blob_values_follow_ordinary_row_permissions() {
                 "Bob should not see Alice's blob asset without row SELECT permission"
             );
 
-            mallory
+            let (_, _, mallory_batch_id) = mallory
                 .for_session(Session::new(mallory_user_id))
                 .insert(
                     "assets",
                     asset_values(alice_owner_id, "spoofed.bin", b"spoofed".to_vec()),
                 )
-                .expect_err(
-                    "mallory spoofed blob asset should be rejected immediately by row INSERT permission",
-                );
+                .expect("mallory spoofed blob asset stages optimistically");
+            mallory
+                .wait_for_batch(
+                    mallory_batch_id.expect("ordinary mutation commits immediately"),
+                    DurabilityTier::EdgeServer,
+                )
+                .await
+                .expect_err("mallory spoofed blob asset is rejected by row INSERT permission");
 
             alice.shutdown().await.expect("shutdown alice");
             bob.shutdown().await.expect("shutdown bob");

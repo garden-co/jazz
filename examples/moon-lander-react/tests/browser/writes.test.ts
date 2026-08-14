@@ -138,7 +138,8 @@ function makeDeposit(overrides: Partial<FuelDeposit> & { fuelType: string }): Fu
 /**
  * Minimal db mock that captures insert and update calls.
  *
- * reconcileDeposits only uses these two methods, both returning a promise.
+ * reconcileDeposits only uses these two methods. Both return a promise for a
+ * write handle whose wait method records the requested durability tier.
  */
 function mockDb() {
   const inserts: Array<{ table: unknown; data: Record<string, unknown>; tier: string }> = [];
@@ -151,23 +152,21 @@ function mockDb() {
 
   return {
     db: {
-      insertDurable: vi.fn(
-        async (table: unknown, data: Record<string, unknown>, options?: { tier?: string }) => {
-          const id = `new-${inserts.length}`;
-          inserts.push({ table, data, tier: options?.tier ?? "edge" });
-          return { id, ...data };
-        },
-      ),
-      updateDurable: vi.fn(
-        async (
-          table: unknown,
-          id: string,
-          data: Record<string, unknown>,
-          options?: { tier?: string },
-        ) => {
+      insert: vi.fn(async (table: unknown, data: Record<string, unknown>) => {
+        const id = `new-${inserts.length}`;
+        return {
+          value: { id, ...data },
+          wait: async (options?: { tier?: string }) => {
+            inserts.push({ table, data, tier: options?.tier ?? "edge" });
+            return { id, ...data };
+          },
+        };
+      }),
+      update: vi.fn(async (table: unknown, id: string, data: Record<string, unknown>) => ({
+        wait: async (options?: { tier?: string }) => {
           updates.push({ table, id, data, tier: options?.tier ?? "edge" });
         },
-      ),
+      })),
     } as any,
     inserts,
     updates,

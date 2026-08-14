@@ -1722,6 +1722,128 @@ fn current_join_via_can_use_union_relation_input() {
 }
 
 #[test]
+fn single_arm_union_join_retains_its_occurrence_carrier() {
+    let root_node = RowSetNodeId("root".to_owned());
+    let policy_source_node = RowSetNodeId("policy-source".to_owned());
+    let policy_project_node = RowSetNodeId("policy-project".to_owned());
+    let policy_union_node = RowSetNodeId("policy-union".to_owned());
+    let authorize_node = RowSetNodeId("authorize".to_owned());
+    let root_source = source("todos", SourceRole::Root);
+    let request = QueryProgramRequest {
+        authorization_mode: QueryAuthorizationMode::TrustedServing,
+        reads: QueryReadSet::primary(ReadView {
+            read_schema: schema(0x10),
+            policy_schema: schema(0x11),
+            sources: BTreeMap::from([(
+                root_source.clone(),
+                requested_current_source(DurabilityTier::Global),
+            )]),
+        }),
+        policy: system_policy_context(),
+        input: RowSetProgramInput {
+            shape: NormalizedRowSetShape {
+                identity: NormalizedShapeIdentity {
+                    shape_id: shape(0x7b),
+                    canonical: vec![0x7b],
+                },
+                root: authorize_node.clone(),
+                result: ResultId::RealRow {
+                    table: "todos".to_owned(),
+                    row: ResultRowRef::Source(root_source.clone()),
+                },
+                auxiliary_sources: BTreeSet::new(),
+                closure_paths: Vec::new(),
+                join_contributions: Vec::new(),
+                reachable_contributions: Vec::new(),
+                nodes: BTreeMap::from([
+                    (
+                        root_node.clone(),
+                        RowSetExpr::Source {
+                            source: root_source.clone(),
+                            visibility: RowVisibility::Visible,
+                        },
+                    ),
+                    (
+                        policy_source_node.clone(),
+                        RowSetExpr::Source {
+                            source: root_source.clone(),
+                            visibility: RowVisibility::Visible,
+                        },
+                    ),
+                    (
+                        policy_project_node.clone(),
+                        RowSetExpr::Project {
+                            input: policy_source_node,
+                            columns: vec![RowProjection {
+                                output: TypedOutputField {
+                                    name: "row_uuid".to_owned(),
+                                    ty: ColumnType::Uuid,
+                                },
+                                value: NormalizedValueRef::RowId(RowIdRef::Source(
+                                    root_source.clone(),
+                                )),
+                            }],
+                        },
+                    ),
+                    (
+                        policy_union_node.clone(),
+                        RowSetExpr::Union {
+                            inputs: vec![UnionInput {
+                                node: policy_project_node,
+                                label: "policy:only".to_owned(),
+                            }],
+                        },
+                    ),
+                    (
+                        authorize_node,
+                        RowSetExpr::Join {
+                            left: root_node,
+                            right: policy_union_node,
+                            mode: JoinMode::Inner,
+                            on: PredicateExpr::Compare {
+                                left: NormalizedValueRef::RowId(RowIdRef::Source(
+                                    root_source.clone(),
+                                )),
+                                op: ComparisonOp::Eq,
+                                right: NormalizedValueRef::SourceField {
+                                    source: root_source,
+                                    field: "row_uuid".to_owned(),
+                                },
+                            },
+                        },
+                    ),
+                ]),
+            },
+            binding: ProgramBinding {
+                id: BindingId(uuid::Uuid::from_bytes([0x7b; 16])),
+                source_shape: None,
+                extra_user_params: BTreeMap::new(),
+                param_types: BTreeMap::new(),
+                claim_params: BTreeMap::new(),
+                values: BTreeMap::new(),
+            },
+        },
+        output: row_set_output(BTreeSet::from([ProgramFactKey::ResultMembership])),
+    };
+
+    let program = lower_query_program(request, &mut FakeSourceResolver::default())
+        .expect("single-arm policy union should lower");
+    let membership = program
+        .lowered
+        .terminals
+        .iter()
+        .find(|terminal| terminal.sink == "maintained.result_current")
+        .expect("result-membership terminal");
+    assert!(graph_any(&membership.graph, &|graph| matches!(
+        graph,
+        GraphBuilder::Project { input, fields }
+            if matches!(input.as_ref(), GraphBuilder::Join { .. })
+                && fields.iter().any(|field| field.output_name == "__root_join_arm_0")
+                && fields.iter().any(|field| field.output_name == "__root_join_row_0")
+    )));
+}
+
+#[test]
 fn union_occurrence_labels_survive_reorder_and_unrelated_arm_insertion() {
     fn analyzed_labels(inputs: Vec<(&str, &str)>) -> Vec<String> {
         let nodes = inputs

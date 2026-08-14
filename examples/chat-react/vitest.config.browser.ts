@@ -7,6 +7,12 @@ import { playwright } from "@vitest/browser-playwright";
 
 export default defineConfig({
   plugins: [wasm(), topLevelAwait(), react()],
+  server: {
+    forwardConsole: {
+      unhandledErrors: false,
+      logLevels: ["error", "warn"],
+    },
+  },
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),
@@ -23,6 +29,7 @@ export default defineConfig({
     },
     include: ["tests/browser/**/*.test.tsx"],
     globalSetup: ["tests/browser/global-setup.ts"],
+    setupFiles: ["tests/browser/setup.ts"],
     fileParallelism: false,
     testTimeout: 30000,
   },

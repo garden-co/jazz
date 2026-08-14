@@ -26,6 +26,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { App } from "../../src/App.js";
 import { TEST_SERVER_URL, APP_ID, testSecret } from "./test-constants.js";
 import { resetProfileGuard } from "../../src/hooks/useMyProfile.js";
+import { cleanupBrowserMounts, unmountBrowserApp } from "./client-cleanup.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -89,29 +90,13 @@ describe("auto-join race on first message send", () => {
   }
 
   async function unmountApp(container: HTMLDivElement): Promise<void> {
-    const idx = mounts.findIndex((mount) => mount.container === container);
-    if (idx === -1) return;
-    const [{ root }] = mounts.splice(idx, 1);
-    root.unmount();
-    container.remove();
-    await new Promise((r) => setTimeout(r, 200));
+    await unmountBrowserApp(mounts, container);
   }
 
   afterEach(async () => {
     resetProfileGuard();
-    for (const { root, container } of mounts) {
-      try {
-        root.unmount();
-      } catch {
-        /* best effort */
-      }
-      container.remove();
-    }
-    mounts.length = 0;
+    await cleanupBrowserMounts(mounts);
     window.location.hash = "";
-    // Allow JazzProvider's async shutdown (worker termination, OPFS lock
-    // release) to complete before the next test starts.
-    await window.__jazz?.shutdown();
   });
 
   it("composer is disabled until membership is confirmed, then message delivers", async () => {

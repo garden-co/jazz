@@ -296,9 +296,10 @@ into the policy-pinned schema, selects the matching insert/update/delete clause,
 and supplies that row as an inline root source to the identity-aware
 authorization subplan. Branch writes use the same program over the branch read
 view. Plain child-insert `inherits(parent_col)` selects the parent's
-`update_using` clause; explicit `InheritsOperation::{Insert, Update, Delete}`
-selects the matching parent write clause. There is no direct predicate
-interpreter fallback (`INV-LOWER-20`).
+`update_using` clause; explicit `InheritsOperation::{Select, Insert, Update,
+Delete}` selects the named parent clause, including parent read authorization
+for `Select`. There is no direct predicate interpreter fallback
+(`INV-LOWER-20`).
 
 Identity and execution are separate concerns: aggregation and non-maintained
 `order_by` are part of a shape's _semantic identity_ (canonicalized into the

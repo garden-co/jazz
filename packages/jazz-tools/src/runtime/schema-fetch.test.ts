@@ -307,6 +307,12 @@ describe("schema-fetch", () => {
               },
             },
           },
+          insert: { with_check: { type: "False" } },
+          update: {
+            using: { type: "False" },
+            with_check: { type: "False" },
+          },
+          delete: { using: { type: "False" } },
         },
       },
     });

@@ -101,9 +101,10 @@ export class PolicyTestApp {
    * to the edge tier, so local staging alone can otherwise race their first
    * policy-evaluated query.
    */
-  async seed<T>(callback: (db: Db) => SeedWrite<T>): Promise<T> {
+  async seed<T>(callback: (db: Db) => SeedWrite<T> | PromiseLike<SeedWrite<T>>): Promise<T> {
     const db = this.jazzContext.asBackend();
-    return settlePolicySeedForSessionReads(callback(db));
+    const write = await callback(db);
+    return settlePolicySeedForSessionReads(write);
   }
 
   /**

@@ -75,6 +75,10 @@ export function MessageComposer({ chatId, disabled = false }: MessageComposerPro
       );
       const message = messageWriteResult.value;
 
+      // The attachment policy follows messageId. Persist the parent before
+      // submitting the dependent row so server authorization can resolve it.
+      await messageWriteResult.wait(sharedWriteOptions);
+
       const attachmentWriteResult = await Promise.resolve(
         db.insert(app.attachments, {
           messageId: message.id,
@@ -84,14 +88,7 @@ export function MessageComposer({ chatId, disabled = false }: MessageComposerPro
           size: attachment.file.size,
         }),
       );
-
-      if (sharedWriteOptions) {
-        await Promise.all(
-          [messageWriteResult, attachmentWriteResult].map((handle) =>
-            handle.wait(sharedWriteOptions),
-          ),
-        );
-      }
+      await attachmentWriteResult.wait(sharedWriteOptions);
     },
     [userId, chatId, db, myProfile, sharedWriteOptions],
   );

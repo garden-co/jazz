@@ -19,6 +19,7 @@ interface Entry {
 }
 
 const registry = new Map<string, Entry>();
+const pendingReleases = new Set<Promise<void>>();
 
 export function acquireClient<T extends RegisteredClient>(
   key: string,
@@ -71,7 +72,7 @@ export function releaseClient(key: string, holder: object): Promise<void> {
   if (entry.holders.size > 0) return Promise.resolve();
   if (entry.releaseTimer !== null) return Promise.resolve();
 
-  return new Promise<void>((resolve) => {
+  const release = new Promise<void>((resolve) => {
     entry.pendingRelease = resolve;
     entry.releaseTimer = setTimeout(() => {
       entry.releaseTimer = null;
@@ -89,12 +90,23 @@ export function releaseClient(key: string, holder: object): Promise<void> {
         .finally(() => resolve());
     }, 0);
   });
+  pendingReleases.add(release);
+  void release.then(() => pendingReleases.delete(release));
+  return release;
+}
+
+/** Test-only: wait for every deferred client teardown that has been scheduled. */
+export async function waitForClientRegistryIdleForTest(): Promise<void> {
+  while (pendingReleases.size > 0) {
+    await Promise.all(pendingReleases);
+  }
 }
 
 /** Test-only: drop all entries without shutting them down. */
 export function resetClientRegistryForTest(): void {
   for (const entry of registry.values()) {
     if (entry.releaseTimer !== null) clearTimeout(entry.releaseTimer);
+    entry.pendingRelease?.();
   }
   registry.clear();
 }

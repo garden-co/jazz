@@ -59,7 +59,11 @@ describe("websocket frame carrier", () => {
 
     await carrier.ready();
     socket!.sent.length = 0;
-    const frames = [new Uint8Array(600_000), new Uint8Array(600_000), new Uint8Array(600_000)];
+    const frames = [
+      new Uint8Array(600_000).fill(1),
+      new Uint8Array(600_000).fill(2),
+      new Uint8Array(600_000).fill(3),
+    ];
     await carrier.sendBatch(frames);
 
     const batches = socket!.sent.filter(
@@ -67,7 +71,14 @@ describe("websocket frame carrier", () => {
     );
     expect(batches).toHaveLength(3);
     expect(batches.every((batch) => batch.byteLength <= 1 << 20)).toBe(true);
-    expect(batches.flatMap((batch) => decodeWebSocketFrameBatch(batch))).toEqual(frames);
+    const decoded = batches.flatMap((batch) => decodeWebSocketFrameBatch(batch));
+    expect(decoded).toHaveLength(frames.length);
+    for (let index = 0; index < frames.length; index += 1) {
+      const expected = frames[index]!;
+      const actual = decoded[index]!;
+      expect(actual.byteLength).toBe(expected.byteLength);
+      expect(actual.every((byte, byteIndex) => byte === expected[byteIndex])).toBe(true);
+    }
   });
 
   it("uses app-scoped websocket URLs without identity query parameters", () => {

@@ -660,6 +660,36 @@ fn lowered_write_policy_operation_matrix() {
         );
     }
 
+    let explicit_inherited_select = Query::from("children").inherits_operation(
+        "parent_id",
+        crate::query::InheritsOperation::Select,
+    );
+    for (label, identity, expected) in [
+        (
+            "explicit inherited select insert allows the parent reader",
+            owner,
+            true,
+        ),
+        (
+            "explicit inherited select insert denies a parent non-reader",
+            editor,
+            false,
+        ),
+    ] {
+        assert_lowered_write_policy_case(
+            &mut core,
+            label,
+            WritePolicyOperation::Insert,
+            &children,
+            &explicit_inherited_select,
+            old_child,
+            Some(&allowed),
+            None,
+            identity,
+            expected,
+        );
+    }
+
     for (
         label,
         inherited_operation,

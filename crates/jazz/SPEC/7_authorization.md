@@ -356,20 +356,22 @@ client-supplied values must not widen those facts.
   to `SubscribeRejected` on the read path) so denied writes fail fast. Exposed
   by the auth example denial tests (both auth examples excluded from CI until
   this lands; see `dev/CI_NOTES.md` 2026-07-19).
-- 🔶 **Non-claims session references (`session.authMode`).** Policy conversion
-  supports only `session.user_id` and `session.claims.*`; the betterauth
-  example references `session.authMode`. Decide: promote to a first-class
-  session attribute, or migrate such policies to claims.
+- ✅ **Non-claims session references (`session.authMode`).** Policy conversion
+  lowers `session.authMode` (and the Rust-facing `session.auth_mode` alias) to
+  the trusted built-in `authMode` policy claim injected from admitted session
+  state. It is first-class alongside `session.user_id`; user JWT claims cannot
+  override it.
 - 🔶 **String claim validation.** String claim type mismatches in seeded lookups
   should become loud validation errors instead of depending on runtime
   empty-result behavior.
-- 🔶 **Uncorrelated policy `EXISTS`.** Server-shell policy conversion currently
-  rejects `policy.<table>.exists.where({ userId: session.user_id })` when the
-  predicate is used from another table and has no equality against the outer row
-  (`__jazz_outer_row`). Decide whether intentionally uncorrelated membership
-  checks are valid policy atoms, how to bound them, and how to lower them
-  without creating accidental whole-table authority scans. Exposed by
-  `world-tour`'s band-member policy.
+- ✅ **Uncorrelated policy `EXISTS`.** A single filtered table scan such as
+  `policy.<table>.exists.where({ userId: session.user_id })` is a valid global
+  membership atom even when it has no equality against `__jazz_outer_row`.
+  Conversion marks the join as uncorrelated and lowering implements it as a
+  semi-join over a synthetic constant key, reducing the support side to one
+  maintained presence row per route before joining. This gates all root rows
+  without producing a Cartesian result. Uncorrelated relational forms with
+  joins or reachability remain rejected at the server-shell boundary.
 - ✅ **Permission introspection is an authority dry-run API, not magic
   columns.** `$can*` columns cannot express _can-insert_ or richer probes. The
   facade methods (`can_insert`, `can_read`, `can_update`, `can_delete`, ch. 13)

@@ -104,13 +104,13 @@ export function mountTodoWidget(
     // (no inline editing, no focused inputs inside rows).
     //
     // If you need finer-grained updates, the delta gives you everything:
-    //   delta.all   — the full current result set (Todo[]) after this tick
+    //   delta.all   — the full current result set (Todo[]) when available
     //   delta.delta — ordered row-level changes:
     //       { kind: Added,   id, index, item }   // new row at `index`
     //       { kind: Updated, id, index, item }   // row content changed
     //       { kind: Removed, id, index }         // row gone at `index`
     // Iterate delta.delta to apply per-row DOM patches instead of a full
     // swap, e.g. to keep focus, preserve animations, or avoid reflow cost.
-    renderTodos(delta.all);
+    if (delta.all) renderTodos(delta.all);
   });
 }

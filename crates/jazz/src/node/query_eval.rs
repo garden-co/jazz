@@ -43,8 +43,8 @@ use super::query_engine::{
     StorageSchemaSelection, TypedOutputField, UnionInput, ValueSourceColumn, ValueSourceMode,
     VersionIdentityFields, VersionedRowRefSchema, aggregate_output_app_field,
     aggregate_output_column, aggregate_output_field, claim_param_field,
-    claim_path_from_param_field, left_field, lower_query_program, right_field, route_param_field,
-    user_column_field,
+    claim_path_from_param_field, graph_declared_output_fields, left_field, lower_query_program,
+    right_field, route_param_field, user_column_field,
 };
 use crate::protocol::{
     AuthorizationOperationKey, AuthorizationScopeOperation, AuthorizationSupportScopeKey,
@@ -317,6 +317,36 @@ fn app_row_terminal_fields(output: &ProgramOutputSchemas) -> Result<Vec<String>,
     })
 }
 
+fn materialization_app_row_fields(
+    output: &ProgramOutputSchemas,
+    graph: &GraphBuilder,
+) -> Result<Vec<String>, Error> {
+    let mut fields = app_row_terminal_fields(output)?;
+    let Some(available_fields) = graph_declared_output_fields(graph) else {
+        return Ok(fields);
+    };
+
+    // Groove's bound prepared terminal projects to its declared public fields.
+    // One-shot row materialization additionally needs the root version witness,
+    // and provenance normalization needs the author/time witnesses. Keep these
+    // internal fields until `normalize_public_current_rows` rebuilds the public
+    // descriptor. This is intentionally narrower than every hidden route or
+    // occurrence carrier exposed by the lowered graph.
+    for field in [
+        "$createdBy",
+        "$createdAt",
+        "$updatedBy",
+        "$updatedAt",
+        "tx_time",
+        "tx_node_id",
+    ] {
+        if available_fields.contains(field) && !fields.iter().any(|existing| existing == field) {
+            fields.push(field.to_owned());
+        }
+    }
+    Ok(fields)
+}
+
 fn app_row_terminal_route_eligible_fields(
     output: &ProgramOutputSchemas,
 ) -> Result<Vec<String>, Error> {
@@ -374,7 +404,9 @@ fn lowered_materialization_app_rows_graph(program: &QueryProgram) -> Result<Grap
                     }
                 )
             });
-    if publishes_structured_tree || public_root_owns_membership {
+    if publishes_structured_tree
+        || (public_root_owns_membership && program.lowered.internal_app_rows_graph.is_none())
+    {
         return lowered_app_rows_graph(program);
     }
     program
@@ -4131,7 +4163,11 @@ fn normalize_join_via_right(
             RowSetExpr::Join {
                 left: current,
                 right: nested_right,
-                mode: NormalizedJoinMode::Inner,
+                mode: if nested.uncorrelated {
+                    NormalizedJoinMode::Semi
+                } else {
+                    NormalizedJoinMode::Inner
+                },
                 on: join_via_predicate(&join_source, &nested_source, nested),
             },
         );
@@ -4529,6 +4565,17 @@ fn join_via_predicate(
     right_source: &SourceId,
     join: &JoinVia,
 ) -> NormalizedPredicateExpr {
+    if join.uncorrelated {
+        let marker = NormalizedValueRef::Literal(
+            postcard::to_allocvec(&Value::Bool(true))
+                .expect("boolean uncorrelated-exists marker is serializable"),
+        );
+        return NormalizedPredicateExpr::Compare {
+            left: marker.clone(),
+            op: NormalizedComparisonOp::Eq,
+            right: marker,
+        };
+    }
     let mut key_pairs = vec![if let Some(lookup) = &join.source_lookup {
         (
             NormalizedValueRef::SourceField {
@@ -4743,7 +4790,11 @@ fn normalize_filter_join_chain(
             RowSetExpr::Join {
                 left: current,
                 right,
-                mode: NormalizedJoinMode::Inner,
+                mode: if join.uncorrelated {
+                    NormalizedJoinMode::Semi
+                } else {
+                    NormalizedJoinMode::Inner
+                },
                 on: join_predicate,
             },
         );
@@ -4860,7 +4911,9 @@ fn normalize_inherited_parent_policy(
     );
     let mut parent_current = parent_source_node;
     let parent_policy = match inherits.operation {
-        crate::query::InheritsOperation::Select => parent_table.read_policy.as_ref(),
+        crate::query::InheritsOperation::Contextual | crate::query::InheritsOperation::Select => {
+            parent_table.read_policy.as_ref()
+        }
         crate::query::InheritsOperation::Insert => {
             parent_table.write_policies.insert_check.as_ref()
         }
@@ -7447,9 +7500,9 @@ where
 
     /// Authorize an inline old/candidate row through the query program.
     ///
-    /// Insert candidates reinterpret plain `inherits(parent)` as parent
-    /// update-using authorization. Existing/update-check rows retain ordinary
-    /// read inheritance unless the policy names an explicit write operation.
+    /// Insert candidates reinterpret contextual `inherits(parent)` as parent
+    /// update-using authorization. Explicit `InheritsOperation::Select` atoms
+    /// retain parent read authorization for every containing operation.
     pub(super) fn write_policy_query_allows_candidate(
         &mut self,
         table: &TableSchema,
@@ -7508,13 +7561,13 @@ where
         let mut policy = policy.clone();
         if insert_candidate {
             for inherits in &mut policy.inherits {
-                if inherits.operation == crate::query::InheritsOperation::Select {
+                if inherits.operation == crate::query::InheritsOperation::Contextual {
                     inherits.operation = crate::query::InheritsOperation::Update;
                 }
             }
             for branch in &mut policy.policy_branches {
                 for inherits in &mut branch.inherits {
-                    if inherits.operation == crate::query::InheritsOperation::Select {
+                    if inherits.operation == crate::query::InheritsOperation::Contextual {
                         inherits.operation = crate::query::InheritsOperation::Update;
                     }
                 }
@@ -10926,8 +10979,8 @@ where
         _shape: &ValidatedQuery,
         _binding: &Binding,
     ) -> Result<PreparedQueryPlan, Error> {
-        let app_row_fields = app_row_terminal_fields(&program.lowered.output)?;
         let graph = lowered_materialization_app_rows_graph(&program)?;
+        let app_row_fields = materialization_app_row_fields(&program.lowered.output, &graph)?;
         let params = prepared_params_from_domain(&program.lowered.parameters);
         let route_eligible_fields =
             app_row_terminal_route_eligible_fields(&program.lowered.output)?;
@@ -12439,6 +12492,7 @@ fn rewrite_claim_join_for_binding(
         table: join.table,
         on_column: join.on_column,
         target: join.target,
+        uncorrelated: join.uncorrelated,
         source_column: join.source_column,
         source_lookup: join.source_lookup,
         correlated_filters: join.correlated_filters,
@@ -15125,6 +15179,7 @@ mod tests {
             table: "nested_junction".to_owned(),
             on_column: "target".to_owned(),
             target: Default::default(),
+            uncorrelated: false,
             source_column: None,
             source_lookup: Some(JoinSourceLookup {
                 table: "nested_lookup".to_owned(),
@@ -15139,6 +15194,7 @@ mod tests {
             table: "root_junction".to_owned(),
             on_column: "target".to_owned(),
             target: Default::default(),
+            uncorrelated: false,
             source_column: None,
             source_lookup: Some(JoinSourceLookup {
                 table: "root_lookup".to_owned(),

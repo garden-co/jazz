@@ -310,8 +310,8 @@ fn ws_peer_identity(identity: &str) -> Result<AuthorId, String> {
 
 fn ws_validate_session_identity(user_id: &str, peer_identity: AuthorId) -> Result<(), String> {
     let session_identity = uuid::Uuid::parse_str(user_id.trim())
-        .map(|uuid| AuthorId::from_bytes(*uuid.as_bytes()))
-        .map_err(|_| "websocket session user_id must be a UUID".to_owned())?;
+        .unwrap_or_else(|_| uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, user_id.as_bytes()));
+    let session_identity = AuthorId::from_bytes(*session_identity.as_bytes());
     if session_identity != peer_identity {
         return Err("websocket peer_identity must match authenticated session user_id".to_owned());
     }
@@ -953,7 +953,12 @@ mod tests {
 
         assert!(ws_validate_session_identity(&matching, peer).is_ok());
         assert!(ws_validate_session_identity(&mismatching, peer).is_err());
-        assert!(ws_validate_session_identity("not-a-uuid", peer).is_err());
+
+        let symbolic = "better-auth-user-1";
+        let derived = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, symbolic.as_bytes());
+        let derived = AuthorId::from_bytes(*derived.as_bytes());
+        assert!(ws_validate_session_identity(symbolic, derived).is_ok());
+        assert!(ws_validate_session_identity(symbolic, peer).is_err());
     }
 
     #[test]

@@ -27,7 +27,7 @@ describe("resolveRuntimeIdentity", () => {
     const reopened = resolveRuntimeIdentity(config, "chat-app::alice%40example.com");
 
     expect(hex(first.node)).toBe("7f91c233519ca38bdfafcc8dad0875e3");
-    expect(hex(first.author)).toBe("7a9ff4bb935ff658482e00073916d9b9");
+    expect(hex(first.author)).toBe("aa006163b22e5d268740b3bfb50ec29c");
     expect(reopened).toEqual(first);
   });
 
@@ -52,5 +52,17 @@ describe("resolveRuntimeIdentity", () => {
     );
 
     expect(hex(identity.author)).toBe("00112233445566778899aabbccddeeff");
+  });
+
+  it("derives non-UUID subjects with the canonical URL-namespace UUID v5", () => {
+    const identity = resolveRuntimeIdentity(
+      {
+        appId: "chat-app",
+        jwtToken: makeJwt({ sub: "better-auth-user-1" }),
+      },
+      "chat-app",
+    );
+
+    expect(hex(identity.author)).toBe("8bcef93bc5d153a0ab81d3eb64b487d0");
   });
 });

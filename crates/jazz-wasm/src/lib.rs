@@ -1371,6 +1371,11 @@ impl WasmDb {
         encode_rows(&rows).map_err(to_js_error)
     }
 
+    #[wasm_bindgen(js_name = hydrateLargeValue)]
+    pub fn hydrate_large_value(&self, handle: Vec<u8>) -> Result<Vec<u8>, JsValue> {
+        with_wasm_db!(&self.inner, |db| db.hydrate_large_value_handle(&handle)).map_err(to_js_error)
+    }
+
     #[wasm_bindgen(js_name = one)]
     pub fn one(&self, query: &WasmPreparedQuery, opts: JsValue) -> Result<Vec<u8>, JsValue> {
         let opts = read_opts_from_js(opts)?;

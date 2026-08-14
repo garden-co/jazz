@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { resetClientRegistryForTest, acquireClient, releaseClient } from "./client-registry.js";
+import {
+  resetClientRegistryForTest,
+  acquireClient,
+  releaseClient,
+  waitForClientRegistryIdleForTest,
+} from "./client-registry.js";
 
 function fakeClient() {
   return { shutdown: vi.fn(async () => undefined) };
@@ -53,6 +58,35 @@ describe("client-registry", () => {
     expect(client.shutdown).not.toHaveBeenCalled();
     expect(create).toHaveBeenCalledTimes(1);
     expect(reacquired).toBe(client);
+  });
+
+  it("lets tests wait for deferred async teardown to finish", async () => {
+    let finishShutdown!: () => void;
+    const client = {
+      shutdown: vi.fn(
+        () =>
+          new Promise<void>((resolve) => {
+            finishShutdown = resolve;
+          }),
+      ),
+    };
+    const holder = {};
+    await acquireClient("k", async () => client, holder);
+
+    void releaseClient("k", holder);
+    const idle = waitForClientRegistryIdleForTest();
+    await vi.waitFor(() => expect(client.shutdown).toHaveBeenCalledOnce());
+
+    let idleResolved = false;
+    void idle.then(() => {
+      idleResolved = true;
+    });
+    await Promise.resolve();
+    expect(idleResolved).toBe(false);
+
+    finishShutdown();
+    await idle;
+    expect(idleResolved).toBe(true);
   });
 
   it("evicts a failed creation so the next acquire retries", async () => {

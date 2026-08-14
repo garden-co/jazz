@@ -63,10 +63,15 @@ function scope(label: string): Scope {
  * prior one — both for policy checks (`isBandMember`) and for relation
  * includes that need the related row to be visible at the server.
  */
-async function inserted<T>(handle: {
+type EdgeWriteHandle<T> = {
   readonly value: T;
   wait(options: { tier: "local" | "edge" | "global" }): Promise<unknown>;
-}): Promise<T> {
+};
+
+async function inserted<T>(
+  pending: EdgeWriteHandle<T> | PromiseLike<EdgeWriteHandle<T>>,
+): Promise<T> {
+  const handle = await pending;
   await handle.wait({ tier: "edge" });
   return handle.value;
 }

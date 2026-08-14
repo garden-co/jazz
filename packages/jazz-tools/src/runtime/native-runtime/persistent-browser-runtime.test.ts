@@ -731,6 +731,35 @@ describe("PersistentBrowserOpfsRuntime", () => {
     await runtime.close();
   });
 
+  it("contains worker write rejection when the returned receipt is ignored", async () => {
+    vi.stubGlobal("Worker", FakeWorker);
+
+    const runtime = new PersistentBrowserOpfsRuntime(
+      undefined,
+      schema,
+      "persistent-browser-runtime-ignored-write-failure-test",
+      new Uint8Array(16),
+      new Uint8Array(16),
+    );
+    const worker = FakeWorker.instances[0];
+
+    runtime.update(
+      "todos",
+      "00000000-0000-0000-0000-000000000001",
+      { title: { type: "Text", value: "ignored rejection" } },
+      undefined,
+    );
+
+    await vi.waitFor(() => {
+      expect(worker.messages.some((message) => message.method === "update")).toBe(true);
+    });
+    const updateMessage = worker.messages.find((message) => message.method === "update");
+    worker.reject(updateMessage!.id, "native runtime rejected ignored write");
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+    await runtime.close();
+  });
+
   it("waits for the worker connect command before edge durability waits", async () => {
     vi.stubGlobal("Worker", FakeWorker);
 

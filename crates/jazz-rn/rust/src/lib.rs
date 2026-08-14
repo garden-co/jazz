@@ -469,6 +469,13 @@ impl RnDb {
         })
     }
 
+    /// Hydrate a large-value handle returned in a row payload.
+    pub fn hydrate_large_value(&self, handle: Vec<u8>) -> Result<Vec<u8>, JazzRnError> {
+        with_panic_boundary("RnDb.hydrate_large_value", || {
+            self.actor.hydrate_large_value(self.view, handle)
+        })
+    }
+
     /// Set policy claims for an author from a JSON object.
     pub fn set_identity_claims(
         &self,
@@ -1433,7 +1440,7 @@ mod tests {
     use jazz::ids::{AuthorId, NodeUuid, RowUuid};
     use jazz::protocol::SyncMessage;
     use jazz::query::Query;
-    use jazz::schema::{JazzSchema, Policy, TableSchema};
+    use jazz::schema::{ColumnSchema as JazzColumnSchema, JazzSchema, Policy, TableSchema};
     use jazz::serving::{InMemoryServerShell, InMemoryServerShellConfig, NodeRole, ServerSession};
     use jazz::tools::OpenBatchId;
     use jazz::tx::TxId;
@@ -1466,6 +1473,16 @@ mod tests {
         postcard::to_allocvec(&JazzSchema::new([])).expect("encode empty schema")
     }
 
+    fn encoded_blob_schema() -> Vec<u8> {
+        postcard::to_allocvec(&JazzSchema::new([TableSchema::new(
+            "files",
+            [JazzColumnSchema::blob("data")],
+        )
+        .with_read_policy(Policy::public())
+        .with_write_policy(Policy::public())]))
+        .expect("encode blob schema")
+    }
+
     fn encoded_config(node: [u8; 16], author: [u8; 16]) -> Vec<u8> {
         postcard::to_allocvec(&OpenDbConfig {
             identity: OpenDbIdentity {
@@ -1489,6 +1506,14 @@ mod tests {
 
     fn encoded_cells() -> Vec<u8> {
         encoded_cells_with_title("survives restart")
+    }
+
+    fn encoded_blob_cells(payload: &[u8]) -> Vec<u8> {
+        let descriptor = RecordDescriptor::new([("data", ValueType::Bytes)]);
+        let record = descriptor
+            .create(&[Value::Bytes(payload.to_vec())])
+            .expect("encode blob row");
+        postcard::to_allocvec(&(descriptor, record)).expect("encode blob cells")
     }
 
     fn open_memory_with(schema: Vec<u8>, node: u8) -> Arc<RnDb> {
@@ -1590,6 +1615,64 @@ mod tests {
                 },
             )
             .collect()
+    }
+
+    #[test]
+    fn large_value_handles_hydrate_through_the_public_rn_db_surface() {
+        let db = open_memory_with(encoded_blob_schema(), 0x18);
+        let row_id = RowUuid::from_bytes([0x19; 16]);
+        let mut payload = vec![0; 128 * 1024 + 7];
+        payload[..4].copy_from_slice(b"blob");
+        let write = db
+            .insert_with_id_encoded(
+                "files".to_owned(),
+                row_id.to_bytes(),
+                encoded_blob_cells(&payload),
+                None,
+            )
+            .expect("insert large blob");
+        futures::executor::block_on(write.wait("local".to_owned()))
+            .expect("large blob reaches local durability");
+
+        let rows = db
+            .all(prepared_table(&db, "files"), None)
+            .expect("read large blob row");
+        let mut handle = None;
+        for (_, descriptor, rows) in decode_rows(&rows) {
+            let data = descriptor
+                .field_index("user_data")
+                .or_else(|| descriptor.field_index("data"))
+                .expect("large blob field in native row");
+            for (candidate_id, _, raw) in rows {
+                if candidate_id == row_id {
+                    handle = Some(
+                        match BorrowedRecord::new(&raw, &descriptor)
+                            .get_idx(data)
+                            .expect("decode large blob handle")
+                        {
+                            Value::Bytes(handle) => handle,
+                            Value::Nullable(Some(value)) => match *value {
+                                Value::Bytes(handle) => handle,
+                                other => panic!(
+                                    "large blob nullable payload must be a handle, got {other:?}"
+                                ),
+                            },
+                            other => {
+                                panic!("large blob must materialize as a handle, got {other:?}")
+                            }
+                        },
+                    );
+                }
+            }
+        }
+        let handle = handle.expect("large blob row is present");
+        assert!(handle.starts_with(b"JLVH2"));
+        assert_eq!(
+            db.hydrate_large_value(handle)
+                .expect("hydrate large blob through RnDb"),
+            payload
+        );
+        db.close().expect("close blob binding");
     }
 
     #[test]

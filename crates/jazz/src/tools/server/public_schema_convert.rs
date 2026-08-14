@@ -26,6 +26,7 @@ use crate::tools::public_schema::{
 };
 
 const DIRECT_USER_ID_CLAIM: &str = "user_id";
+const DIRECT_AUTH_MODE_CLAIM: &str = "authMode";
 const PUBLIC_USER_ID_SESSION_PATHS: &[&str] = &["user_id", "userId"];
 const RESERVED_AGGREGATE_OUTPUT_PREFIX: &str = "__jazz_aggregate_";
 
@@ -823,10 +824,10 @@ fn convert_policy(
     convert_policy_with_native_select_inherits(schema, table_schema, table, path, expr, true)
 }
 
-/// Convert a policy for a location where native SELECT inherits may or may not
-/// be representable. A top-level policy keeps the native atom so lowering can
-/// use derivation collapse. An `INHERITS_REFERENCING` source policy is embedded
-/// in a join, where that atom applies to the wrong row and must be expanded.
+/// Convert a policy for a location where native inherits may or may not be
+/// representable. A top-level policy keeps the native atom so lowering can use
+/// derivation collapse. An `INHERITS_REFERENCING` source policy is embedded in
+/// a join, where that atom applies to the wrong row and must be expanded.
 fn convert_policy_with_native_select_inherits(
     schema: &Schema,
     table_schema: &TableSchema,
@@ -1154,6 +1155,12 @@ fn append_inherited_referencing_policy_branches(
                 "core schema policies do not support INHERITS_REFERENCING through reachability yet",
             ));
         }
+        if !branch.inherits.is_empty() {
+            return Err(err(
+                format!("$.{source_table}.InheritsReferencing"),
+                "core schema policies must expand inherited source operations before embedding them under INHERITS_REFERENCING",
+            ));
+        }
         let branch_query = Query::from(query.table.as_str()).join_via_with_nested_joins(
             source_table,
             via_column,
@@ -1218,16 +1225,30 @@ fn append_exists_policy_clause(
         }
     }
 
-    let join_column = join_column.ok_or_else(|| {
-        err(
-            format!("$.{}.{}", table.as_str(), path),
-            "core schema policies require EXISTS to include an equality against __jazz_outer_row",
-        )
-    })?;
+    let Some(join_column) = join_column else {
+        let mut query = query;
+        query.joins.push(JoinVia {
+            table: exists_table.to_owned(),
+            on_column: "id".to_owned(),
+            target: JoinTarget::RowId,
+            uncorrelated: true,
+            source_column: None,
+            source_lookup: None,
+            correlated_filters: Vec::new(),
+            filters,
+            nested_joins: Vec::new(),
+        });
+        return Ok(query);
+    };
     let source_column = source_column.expect("join_column and source_column are set together");
 
     if join_column == "id" {
-        Ok(query.join_via_row_id(exists_table, source_column, filters))
+        Ok(query.join_via_row_id_with_correlations(
+            exists_table,
+            source_column,
+            correlated_filters,
+            filters,
+        ))
     } else if correlated_filters.is_empty() {
         Ok(query.join_via_column(exists_table, join_column, source_column, filters))
     } else {
@@ -1284,13 +1305,35 @@ fn append_exists_rel_policy_clause(
     let correlation_index = lowered
         .filters
         .iter()
-        .position(|filter| matches!(filter.value, Some(LoweredRelValue::OuterRow(_))))
-        .ok_or_else(|| {
-            err(
+        .position(|filter| matches!(filter.value, Some(LoweredRelValue::OuterRow(_))));
+    let Some(correlation_index) = correlation_index else {
+        if !lowered.joins.is_empty()
+            || !lowered.reachable.is_empty()
+            || lowered.pending_reachable.is_some()
+        {
+            return Err(err(
                 format!("$.{}.{}", table.as_str(), path),
-                "core schema ExistsRel policies must include an outer row equality",
-            )
-        })?;
+                "core schema uncorrelated ExistsRel policies support one filtered table scan",
+            ));
+        }
+        let filters = lowered
+            .filters
+            .into_iter()
+            .map(|filter| filter.predicate)
+            .collect();
+        query.joins.push(JoinVia {
+            table: lowered.table,
+            on_column: "id".to_owned(),
+            target: JoinTarget::RowId,
+            uncorrelated: true,
+            source_column: None,
+            source_lookup: None,
+            correlated_filters: Vec::new(),
+            filters,
+            nested_joins: Vec::new(),
+        });
+        return Ok(query);
+    };
     let correlation = lowered.filters.remove(correlation_index);
     let Some(correlation_column) = correlation.column.clone() else {
         return Err(err(
@@ -1469,6 +1512,7 @@ fn lower_exists_rel(
                 } else {
                     JoinTarget::Column
                 },
+                uncorrelated: false,
                 source_column: Some(on.left.column.clone()),
                 source_lookup: None,
                 correlated_filters: Vec::new(),
@@ -1984,15 +2028,15 @@ fn append_inherited_policy(
             format!("INHERITS via_column '{via_column}' references table '{parent_table}' without a {operation:?} policy"),
         )
     })?;
-    // A top-level SELECT inherit lowers through derivation collapse. When its
-    // policy is embedded under INHERITS_REFERENCING, though, an inherit atom
-    // would be evaluated against the outer row; expand it into the source join
-    // chain instead.
-    if operation == Operation::Select && !native_select_inherits {
+    // A top-level inherit lowers through derivation collapse. When its policy
+    // is embedded under INHERITS_REFERENCING, though, an inherit atom would be
+    // evaluated against the outer row; expand it into the source join chain
+    // instead, for every operation (including update and delete).
+    if !native_select_inherits {
         if max_depth.is_some() {
             return Err(err(
                 format!("$.{}.{}", table.as_str(), path),
-                "bounded SELECT INHERITS under INHERITS_REFERENCING is unsupported because its expanded join chain cannot preserve max_depth",
+                "bounded INHERITS under INHERITS_REFERENCING is unsupported because its expanded join chain cannot preserve max_depth",
             ));
         }
         return append_inherited_policy_expanded_fallback(
@@ -2109,12 +2153,27 @@ fn inherited_parent_branch_to_child_query(
             table: join_table,
             on_column,
             target,
+            uncorrelated,
             source_column,
             source_lookup,
             correlated_filters,
             filters,
             nested_joins,
         } = join;
+        if uncorrelated {
+            query.joins.push(JoinVia {
+                table: join_table,
+                on_column,
+                target,
+                uncorrelated: true,
+                source_column: None,
+                source_lookup: None,
+                correlated_filters: Vec::new(),
+                filters,
+                nested_joins,
+            });
+            continue;
+        }
         let source_column = source_lookup
             .as_ref()
             .map(|lookup| lookup.row_id_source_column.clone())
@@ -2132,6 +2191,7 @@ fn inherited_parent_branch_to_child_query(
                         table: join_table,
                         on_column,
                         target: JoinTarget::Column,
+                        uncorrelated: false,
                         source_column: Some(source_lookup.value_column.clone()),
                         source_lookup: Some(source_lookup),
                         correlated_filters,
@@ -2165,6 +2225,7 @@ fn inherited_parent_branch_to_child_query(
                         table: join_table,
                         on_column,
                         target: JoinTarget::RowId,
+                        uncorrelated: false,
                         source_column: Some(source_lookup.value_column.clone()),
                         source_lookup: Some(source_lookup),
                         correlated_filters,
@@ -2321,13 +2382,16 @@ fn convert_session_path_operand(
     {
         return Ok(Operand::Claim(DIRECT_USER_ID_CLAIM.to_owned()));
     }
+    if matches!(path_segments, [segment] if segment == "authMode" || segment == "auth_mode") {
+        return Ok(Operand::Claim(DIRECT_AUTH_MODE_CLAIM.to_owned()));
+    }
     if path_segments.len() == 2 && path_segments[0] == "claims" {
         return Ok(Operand::Claim(path_segments[1].clone()));
     }
     Err(err(
         format!("$.{}.{}", table.as_str(), path),
         format!(
-            "core schema policies only support session.user_id and session.claims.* references, got session.{}",
+            "core schema policies only support session.user_id, session.authMode, and session.claims.* references, got session.{}",
             path_segments.join(".")
         ),
     ))
@@ -3071,6 +3135,62 @@ mod tests {
         );
     }
 
+    // This stays internal because the server-shell conversion marker is not
+    // exposed by the public client API; World Tour's browser test covers its
+    // user-visible authorization behavior end to end.
+    #[test]
+    fn converts_uncorrelated_exists_rel_policy_to_bounded_semi_join() {
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("bands")
+                    .column("name", ColumnType::Text)
+                    .policies(TablePolicies::new().with_delete(PolicyExpr::ExistsRel {
+                        rel: PublicRelExpr::Filter {
+                            input: Box::new(PublicRelExpr::TableScan {
+                                table: "members".into(),
+                                alias: None,
+                            }),
+                            predicate: RelPredicateExpr::Cmp {
+                                left: RelColumnRef {
+                                    scope: Some("members".to_owned()),
+                                    column: "userId".to_owned(),
+                                },
+                                op: RelPredicateCmpOp::Eq,
+                                right: RelValueRef::SessionRef(vec!["userId".to_owned()]),
+                            },
+                        },
+                    })),
+            )
+            .table(
+                TableSchemaBuilder::new("members")
+                    .fk_column("bandId", "bands")
+                    .column("userId", ColumnType::Text),
+            )
+            .build();
+
+        let converted = convert_public_schema(&schema).unwrap();
+        let bands = converted
+            .tables
+            .iter()
+            .find(|table| table.name == "bands")
+            .unwrap();
+        let policy = bands.write_policies.delete_using.as_ref().unwrap();
+        assert!(policy.filters.is_empty());
+        assert_eq!(policy.joins.len(), 1);
+        let join = &policy.joins[0];
+        assert_eq!(join.table, "members");
+        assert!(join.uncorrelated);
+        assert_eq!(join.target, JoinTarget::RowId);
+        assert!(join.source_column.is_none());
+        assert_eq!(
+            join.filters,
+            vec![Predicate::Eq(
+                Operand::Column("userId".to_owned()),
+                Operand::Claim(DIRECT_USER_ID_CLAIM.to_owned()),
+            )]
+        );
+    }
+
     #[test]
     fn converts_correlated_exists_against_id_to_row_id_join() {
         let schema = SchemaBuilder::new()
@@ -3124,6 +3244,73 @@ mod tests {
                 Operand::Column("isPublic".to_owned()),
                 Operand::Literal(GrooveValue::Bool(true)),
             )]
+        );
+    }
+
+    #[test]
+    fn preserves_extra_correlations_on_row_id_exists_update_check() {
+        let unchanged_row = PolicyExpr::Exists {
+            table: "chats".to_owned(),
+            condition: Box::new(PolicyExpr::And(vec![
+                PolicyExpr::Cmp {
+                    column: "id".to_owned(),
+                    op: CmpOp::Eq,
+                    value: PolicyValue::SessionRef(vec![
+                        "__jazz_outer_row".to_owned(),
+                        "id".to_owned(),
+                    ]),
+                },
+                PolicyExpr::Cmp {
+                    column: "createdBy".to_owned(),
+                    op: CmpOp::Eq,
+                    value: PolicyValue::SessionRef(vec![
+                        "__jazz_outer_row".to_owned(),
+                        "createdBy".to_owned(),
+                    ]),
+                },
+                PolicyExpr::Cmp {
+                    column: "isPublic".to_owned(),
+                    op: CmpOp::Eq,
+                    value: PolicyValue::SessionRef(vec![
+                        "__jazz_outer_row".to_owned(),
+                        "isPublic".to_owned(),
+                    ]),
+                },
+            ])),
+        };
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("chats")
+                    .column("createdBy", ColumnType::Text)
+                    .column("isPublic", ColumnType::Boolean)
+                    .policies(
+                        TablePolicies::new().with_update(Some(PolicyExpr::True), unchanged_row),
+                    ),
+            )
+            .build();
+
+        let converted = convert_public_schema(&schema).unwrap();
+        let check = converted.tables[0]
+            .write_policies
+            .update_check
+            .as_ref()
+            .unwrap();
+        assert_eq!(check.joins.len(), 1);
+        let join = &check.joins[0];
+        assert_eq!(join.target, JoinTarget::RowId);
+        assert_eq!(join.source_column.as_deref(), Some("id"));
+        assert_eq!(
+            join.correlated_filters,
+            vec![
+                JoinCorrelation {
+                    join_column: "createdBy".to_owned(),
+                    source_column: "createdBy".to_owned(),
+                },
+                JoinCorrelation {
+                    join_column: "isPublic".to_owned(),
+                    source_column: "isPublic".to_owned(),
+                },
+            ]
         );
     }
 
@@ -3463,6 +3650,38 @@ mod tests {
                 Operand::Literal(GrooveValue::String("admin".to_owned())),
             )]
         );
+    }
+
+    #[test]
+    fn converts_auth_mode_session_cmp_to_builtin_claim_equality() {
+        for path in ["authMode", "auth_mode"] {
+            let schema = SchemaBuilder::new()
+                .table(
+                    TableSchemaBuilder::new("messages")
+                        .column("body", ColumnType::Text)
+                        .policies(TablePolicies::new().with_select(PolicyExpr::SessionCmp {
+                            path: vec![path.to_owned()],
+                            op: CmpOp::Eq,
+                            value: Value::Text("external".to_owned()),
+                        })),
+                )
+                .build();
+
+            let converted = convert_public_schema(&schema).unwrap();
+            let messages = converted
+                .tables
+                .iter()
+                .find(|table| table.name == "messages")
+                .unwrap();
+            let policy = messages.read_policy.as_ref().unwrap();
+            assert_eq!(
+                policy.filters,
+                vec![Predicate::Eq(
+                    Operand::Claim(DIRECT_AUTH_MODE_CLAIM.to_owned()),
+                    Operand::Literal(GrooveValue::String("external".to_owned())),
+                )]
+            );
+        }
     }
 
     #[test]
@@ -4003,6 +4222,90 @@ mod tests {
         );
     }
 
+    #[test]
+    fn expands_reverse_inherited_delete_through_the_source_delete_policy() {
+        let schema = SchemaBuilder::new()
+            .table(TableSchemaBuilder::new("profiles").column("userId", ColumnType::Text))
+            .table(
+                TableSchemaBuilder::new("messages")
+                    .fk_column("senderId", "profiles")
+                    .policies(TablePolicies::new().with_delete(PolicyExpr::Exists {
+                        table: "profiles".to_owned(),
+                        condition: Box::new(PolicyExpr::And(vec![
+                            PolicyExpr::Cmp {
+                                column: "id".to_owned(),
+                                op: CmpOp::Eq,
+                                value: PolicyValue::SessionRef(vec![
+                                    "__jazz_outer_row".to_owned(),
+                                    "senderId".to_owned(),
+                                ]),
+                            },
+                            PolicyExpr::Cmp {
+                                column: "userId".to_owned(),
+                                op: CmpOp::Eq,
+                                value: PolicyValue::SessionRef(vec!["user_id".to_owned()]),
+                            },
+                        ])),
+                    })),
+            )
+            .table(
+                TableSchemaBuilder::new("attachments")
+                    .fk_column("messageId", "messages")
+                    .fk_column("fileId", "files")
+                    .policies(TablePolicies::new().with_delete(PolicyExpr::Inherits {
+                        operation: Operation::Delete,
+                        via_column: "messageId".to_owned(),
+                        max_depth: None,
+                    })),
+            )
+            .table(
+                TableSchemaBuilder::new("files").policies(TablePolicies::new().with_delete(
+                    PolicyExpr::InheritsReferencing {
+                        operation: Operation::Delete,
+                        source_table: "attachments".to_owned(),
+                        via_column: "fileId".to_owned(),
+                        max_depth: None,
+                    },
+                )),
+            )
+            .build();
+
+        let converted = convert_public_schema(&schema).unwrap();
+        let files = converted
+            .tables
+            .iter()
+            .find(|table| table.name == "files")
+            .unwrap();
+        let policy = files.write_policies.delete_using.as_ref().unwrap();
+        assert_eq!(policy.policy_branches.len(), 1);
+        let branch = &policy.policy_branches[0];
+        assert!(branch.inherits.is_empty());
+        assert_eq!(branch.joins.len(), 1);
+        let attachment_join = &branch.joins[0];
+        assert_eq!(attachment_join.table, "attachments");
+        assert_eq!(attachment_join.on_column, "fileId");
+        assert_eq!(attachment_join.nested_joins.len(), 1);
+        let profile_join = &attachment_join.nested_joins[0];
+        assert_eq!(profile_join.table, "profiles");
+        assert_eq!(profile_join.target, JoinTarget::RowId);
+        assert_eq!(profile_join.source_column.as_deref(), Some("senderId"));
+        assert_eq!(
+            profile_join.source_lookup.as_ref(),
+            Some(&JoinSourceLookup {
+                table: "messages".to_owned(),
+                row_id_source_column: "messageId".to_owned(),
+                value_column: "senderId".to_owned(),
+            })
+        );
+        assert_eq!(
+            profile_join.filters,
+            vec![Predicate::Eq(
+                Operand::Column("userId".to_owned()),
+                Operand::Claim(DIRECT_USER_ID_CLAIM.to_owned()),
+            )]
+        );
+    }
+
     // This conversion-boundary test is intentionally internal: the important
     // contract is that an unrepresentable public policy is rejected before it
     // can be published as a native schema with different traversal semantics.
@@ -4037,7 +4340,7 @@ mod tests {
 
         let error = convert_public_schema(&schema).unwrap_err();
         assert!(error.to_string().contains(
-            "bounded SELECT INHERITS under INHERITS_REFERENCING is unsupported because its expanded join chain cannot preserve max_depth"
+            "bounded INHERITS under INHERITS_REFERENCING is unsupported because its expanded join chain cannot preserve max_depth"
         ));
     }
 

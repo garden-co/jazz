@@ -38,6 +38,7 @@ type PolicyJoin = {
   scope?: string;
   onColumn: string;
   target: "Column" | "RowId";
+  uncorrelated?: boolean;
   sourceColumn?: string;
   sourceLookup?: {
     table: string;
@@ -491,6 +492,7 @@ function writePolicyJoin(writer: PostcardWriter, join: PolicyJoin): void {
   writer.string(join.table);
   writer.string(join.onColumn);
   writer.u64(join.target === "Column" ? 0 : 1);
+  writer.bool(join.uncorrelated ?? false);
   if (join.sourceColumn == null) {
     writer.none();
   } else {
@@ -761,7 +763,22 @@ function policyExistsRelLoweredToJoin(
     }
   }
   if (correlationIndex === -1) {
-    throw new Error("Core runtime schema ExistsRel policies must include an outer row equality.");
+    if (
+      lowered.joins.length > 0 ||
+      lowered.reachable.length > 0 ||
+      lowered.pendingReachable != null
+    ) {
+      throw new Error(
+        "Core runtime schema uncorrelated ExistsRel policies support one filtered table scan.",
+      );
+    }
+    return normalizePolicyJoinTable(schema, {
+      table: lowered.table,
+      onColumn: "id",
+      target: "RowId",
+      uncorrelated: true,
+      filters,
+    });
   }
   const [rawCorrelation] = filters.splice(correlationIndex, 1);
   if (!rawCorrelation || rawCorrelation.type !== "Cmp" || rawCorrelation.op !== "Eq") {
@@ -1344,7 +1361,13 @@ function policyExistsToJoin(
   const filters = [...condition.filters];
   const correlationIndex = filters.findIndex(isOuterRowEquality);
   if (correlationIndex === -1) {
-    throw new Error("Core runtime schema Exists policies must include an outer row equality.");
+    return {
+      table: expr.table,
+      onColumn: "id",
+      target: "RowId",
+      uncorrelated: true,
+      filters,
+    };
   }
   const [correlation] = filters.splice(correlationIndex, 1);
   if (!correlation || correlation.type !== "Cmp" || correlation.op !== "Eq") {
