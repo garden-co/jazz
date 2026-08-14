@@ -5,6 +5,8 @@ import type { SubscriptionDelta } from "./subscription-manager.js";
 export const DEFAULT_STREAM_INLINE_TAIL_BYTES = 64 * 1024;
 export const DEFAULT_STREAM_TREE_FANOUT = 32;
 export const MAX_STREAM_PART_BYTES = 1_048_576;
+const MAX_STREAM_TREE_FANOUT = 256;
+const MAX_STREAM_TREE_NODES = 1_000_000;
 
 type WhereTable<Row, Init> = TableProxy<Row, Init> & {
   where(conditions: Record<string, unknown>): QueryBuilder<Row>;
@@ -137,6 +139,12 @@ function asSnapshot(stream: StreamRow): StreamSnapshot {
   };
 }
 
+function validateLength(value: number, description: string): void {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new InvalidStreamDataError(`${description} must be a finite, non-negative integer.`);
+  }
+}
+
 function validateOptions(options: StreamStorageOptions) {
   const inlineTailBytes = options.inlineTailBytes ?? DEFAULT_STREAM_INLINE_TAIL_BYTES;
   const fanout = options.fanout ?? DEFAULT_STREAM_TREE_FANOUT;
@@ -149,7 +157,12 @@ function validateOptions(options: StreamStorageOptions) {
       `inlineTailBytes must be an integer between 0 and ${MAX_STREAM_PART_BYTES}.`,
     );
   }
-  if (!Number.isSafeInteger(fanout) || fanout < 4 || fanout > 256 || fanout % 2 !== 0) {
+  if (
+    !Number.isSafeInteger(fanout) ||
+    fanout < 4 ||
+    fanout > MAX_STREAM_TREE_FANOUT ||
+    fanout % 2 !== 0
+  ) {
     throw new RangeError("fanout must be an even integer between 4 and 256.");
   }
   return { inlineTailBytes, fanout };
@@ -176,9 +189,18 @@ export function createConventionalStreamStorage<
   const readNode = async (id: string, queryOptions?: QueryOptions): Promise<TNode> => {
     const node = await db.one(app.stream_nodes.where({ id }), queryOptions);
     if (!node) throw new InvalidStreamDataError(`Stream tree node "${id}" is missing.`);
-    if (node.childIds.length === 0 || node.childIds.length !== node.childLengths.length) {
+    if (
+      !Number.isSafeInteger(node.height) ||
+      node.height < 0 ||
+      node.childIds.length === 0 ||
+      node.childIds.length !== node.childLengths.length ||
+      node.childIds.length > MAX_STREAM_TREE_FANOUT
+    ) {
       throw new InvalidStreamDataError(`Stream tree node "${id}" has invalid child metadata.`);
     }
+    node.childLengths.forEach((length, index) =>
+      validateLength(length, `Stream tree node "${id}" child length ${index}`),
+    );
     return node;
   };
 
@@ -193,13 +215,64 @@ export function createConventionalStreamStorage<
     return part.data;
   };
 
+  const validateTree = async (
+    nodeId: string,
+    queryOptions?: QueryOptions,
+  ): Promise<{ length: number; nodes: Map<string, TNode> }> => {
+    const visiting = new Set<string>();
+    const nodes = new Map<string, TNode>();
+    let visitedNodes = 0;
+    const visit = async (id: string, expectedHeight?: number): Promise<number> => {
+      if (visiting.has(id)) {
+        throw new InvalidStreamDataError(`Stream tree contains a cycle at node "${id}".`);
+      }
+      visitedNodes += 1;
+      if (visitedNodes > MAX_STREAM_TREE_NODES) {
+        throw new InvalidStreamDataError(
+          `Stream tree exceeds the ${MAX_STREAM_TREE_NODES}-node validation limit.`,
+        );
+      }
+      visiting.add(id);
+      try {
+        const node = await readNode(id, queryOptions);
+        nodes.set(id, node);
+        if (expectedHeight !== undefined && node.height !== expectedHeight) {
+          throw new InvalidStreamDataError(
+            `Stream tree node "${id}" has height ${node.height}, expected ${expectedHeight}.`,
+          );
+        }
+        let length = 0;
+        for (let index = 0; index < node.childIds.length; index += 1) {
+          const childLength = node.childLengths[index]!;
+          const actualLength =
+            node.height === 0 ? childLength : await visit(node.childIds[index]!, node.height - 1);
+          if (childLength !== actualLength) {
+            throw new InvalidStreamDataError(
+              `Stream tree node "${id}" child ${index} promises ${childLength} bytes, but its subtree contains ${actualLength}.`,
+            );
+          }
+          length += childLength;
+          validateLength(length, `Stream tree node "${id}" extent`);
+        }
+        return length;
+      } finally {
+        visiting.delete(id);
+      }
+    };
+    return { length: await visit(nodeId), nodes };
+  };
+
   const readTreeRange = async (
     nodeId: string,
     start: number,
     end: number,
+    nodes: ReadonlyMap<string, TNode>,
     queryOptions?: QueryOptions,
   ): Promise<Uint8Array[]> => {
-    const node = await readNode(nodeId, queryOptions);
+    const node = nodes.get(nodeId);
+    if (!node) {
+      throw new InvalidStreamDataError(`Validated stream tree node "${nodeId}" is missing.`);
+    }
     const chunks: Uint8Array[] = [];
     let cursor = 0;
     for (let index = 0; index < node.childIds.length; index += 1) {
@@ -213,7 +286,13 @@ export function createConventionalStreamStorage<
           chunks.push(part.slice(localStart, localEnd));
         } else {
           chunks.push(
-            ...(await readTreeRange(node.childIds[index]!, localStart, localEnd, queryOptions)),
+            ...(await readTreeRange(
+              node.childIds[index]!,
+              localStart,
+              localEnd,
+              nodes,
+              queryOptions,
+            )),
           );
         }
       }
@@ -360,6 +439,19 @@ export function createConventionalStreamStorage<
         typeof streamOrSnapshot === "object" && "streamId" in streamOrSnapshot
           ? streamOrSnapshot
           : await this.snapshot(streamOrSnapshot, queryOptions);
+      validateLength(snapshot.prefixBytes, "Stream prefixBytes");
+      if (!(snapshot.inlineTail instanceof Uint8Array)) {
+        throw new InvalidStreamDataError("Stream inlineTail must be a Uint8Array.");
+      }
+      if (!snapshot.rootId && snapshot.prefixBytes !== 0) {
+        throw new InvalidStreamDataError("A stream without a root cannot have a non-zero prefix.");
+      }
+      if (!Number.isSafeInteger(snapshot.prefixBytes + snapshot.inlineTail.length)) {
+        throw new InvalidStreamDataError("Stream length exceeds the safe integer range.");
+      }
+      if (snapshot.length !== snapshot.prefixBytes + snapshot.inlineTail.length) {
+        throw new InvalidStreamDataError("Stream snapshot length does not match its root tuple.");
+      }
       const effectiveEnd = end ?? snapshot.length;
       if (
         !Number.isSafeInteger(start) ||
@@ -372,6 +464,14 @@ export function createConventionalStreamStorage<
           `Invalid stream range [${start}, ${effectiveEnd}) for ${snapshot.length} bytes.`,
         );
       }
+      const validatedRoot = snapshot.rootId
+        ? await validateTree(snapshot.rootId, queryOptions)
+        : undefined;
+      if (validatedRoot && validatedRoot.length !== snapshot.prefixBytes) {
+        throw new InvalidStreamDataError(
+          `Stream root "${snapshot.rootId}" contains ${validatedRoot.length} bytes, but prefixBytes is ${snapshot.prefixBytes}.`,
+        );
+      }
       const chunks: Uint8Array[] = [];
       if (start < snapshot.prefixBytes && snapshot.rootId) {
         chunks.push(
@@ -379,6 +479,7 @@ export function createConventionalStreamStorage<
             snapshot.rootId,
             start,
             Math.min(effectiveEnd, snapshot.prefixBytes),
+            validatedRoot!.nodes,
             queryOptions,
           )),
         );

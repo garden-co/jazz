@@ -155,19 +155,52 @@ describe("ordinary-row stream storage", () => {
     expect(observed.at(-1)?.inlineTail).toEqual(Uint8Array.from([4, 5, 6]));
   });
 
-  it("detects corrupted child-length metadata before returning wrong bytes", async () => {
+  it("rejects exact [2, 3] to [1, 4] child-length corruption before returning bytes", async () => {
     const { db, storage } = await setup({ inlineTailBytes: 0, fanout: 4 });
     const stream = await storage.create({ tier: "edge" });
-    const snapshot = await storage.append(stream, Uint8Array.from([1, 2, 3]), {
-      waitForAuthority: true,
-    });
-    const root = await db.one(app.stream_nodes.where({ id: snapshot.rootId }), { tier: "local" });
-    expect(root).toBeTruthy();
+    let snapshot: StreamSnapshot | undefined;
+    for (let value = 0; value < 5; value += 1) {
+      snapshot = await storage.append(stream, Uint8Array.of(value), { waitForAuthority: true });
+    }
+    const root = await db.one(app.stream_nodes.where({ id: snapshot!.rootId }), { tier: "local" });
+    expect(root?.childLengths).toEqual([2, 3]);
 
     await db
-      .update(app.stream_nodes, snapshot.rootId, { childLengths: [2] })
+      .update(app.stream_nodes, snapshot!.rootId, { childLengths: [1, 4] })
       .wait({ tier: "local" });
-    await expect(storage.read(snapshot)).rejects.toBeInstanceOf(InvalidStreamDataError);
+    await expect(storage.read(snapshot!)).rejects.toBeInstanceOf(InvalidStreamDataError);
+  });
+
+  it("rejects malformed descendant heights before reading a stream", async () => {
+    const { db, storage } = await setup({ inlineTailBytes: 0, fanout: 4 });
+    const stream = await storage.create({ tier: "edge" });
+    let snapshot: StreamSnapshot | undefined;
+    for (let value = 0; value < 5; value += 1) {
+      snapshot = await storage.append(stream, Uint8Array.of(value), { waitForAuthority: true });
+    }
+    const root = await db.one(app.stream_nodes.where({ id: snapshot!.rootId }), { tier: "local" });
+    expect(root?.height).toBe(1);
+
+    await db.update(app.stream_nodes, root!.childIds[0]!, { height: 1 }).wait({ tier: "local" });
+    await expect(storage.read(snapshot!)).rejects.toThrow("expected 0");
+  });
+
+  it("rejects cyclic stream trees without recursing indefinitely", async () => {
+    const { db, storage } = await setup({ inlineTailBytes: 0, fanout: 4 });
+    const stream = await storage.create({ tier: "edge" });
+    let snapshot: StreamSnapshot | undefined;
+    for (let value = 0; value < 5; value += 1) {
+      snapshot = await storage.append(stream, Uint8Array.of(value), { waitForAuthority: true });
+    }
+    const root = await db.one(app.stream_nodes.where({ id: snapshot!.rootId }), { tier: "local" });
+    expect(root?.height).toBe(1);
+
+    await db
+      .update(app.stream_nodes, snapshot!.rootId, {
+        childIds: [snapshot!.rootId, ...root!.childIds.slice(1)],
+      })
+      .wait({ tier: "local" });
+    await expect(storage.read(snapshot!)).rejects.toThrow("contains a cycle");
   });
 
   it("rejects invalid ranges instead of silently truncating", async () => {
