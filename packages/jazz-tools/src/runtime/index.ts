@@ -63,3 +63,19 @@ export {
 } from "./subscription-manager.js";
 export { generateAuthSecret, BrowserAuthSecretStore } from "./auth-secret-store.js";
 export type { AuthSecretStore, BrowserAuthSecretStoreOptions } from "./auth-secret-store.js";
+export {
+  createConventionalFileStorage,
+  DEFAULT_FILE_INLINE_BYTES,
+  FileNotFoundError,
+  InvalidFileDataError,
+  MAX_FILE_PART_BYTES,
+  type ConventionalFileApp,
+  type CreateFileOptions,
+  type FileNodeRow,
+  type FilePartRow,
+  type FileRow,
+  type FileSnapshot,
+  type FileStorage,
+  type FileStorageOptions,
+  type WriteFileOptions,
+} from "./file-storage.js";
