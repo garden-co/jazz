@@ -43,7 +43,9 @@ export type BrowserWebSocket = {
   ): void;
 };
 
-export const WIRE_PROTOCOL_VERSION = 9;
+// v10 changes binary SchemaVersion payload encoding. Do not negotiate v9:
+// catalogue publications would otherwise fail after a successful handshake.
+export const WIRE_PROTOCOL_VERSION = 10;
 export const MIN_WIRE_PROTOCOL_VERSION = WIRE_PROTOCOL_VERSION;
 export const MAX_WIRE_PROTOCOL_VERSION = WIRE_PROTOCOL_VERSION;
 export const FEATURE_SYNC_MESSAGE_PAYLOAD = 1 << 0;

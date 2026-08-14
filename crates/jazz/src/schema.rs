@@ -8,6 +8,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use thiserror::Error;
+
 use groove::records::{
     RecordDescriptor, ScalarEnumSchema, SystemVariantRegistry, Value, ValueType,
 };
@@ -18,6 +20,7 @@ use groove::schema::{
 };
 use groove::storage::StorageLayout;
 
+use crate::content_manifest::ContentManifestSchema;
 use crate::ids::SchemaVersionId;
 use crate::query::{Query, claim, col, eq};
 
@@ -56,6 +59,177 @@ pub struct JazzSchema {
     pub branch_write_policy: Option<Query>,
 }
 
+const CONTENT_MANIFEST_SCHEMA_WIRE_V1: &[u8] = b"JAZZ-CONTENT-MANIFEST-SCHEMA-V1\0";
+
+/// The manifest metadata has a dedicated transport DTO so postcard evolution
+/// remains explicitly bounded at the envelope boundary.  The domain type is
+/// still serde-serializable for JSON schema tooling, but is not itself the
+/// wire-versioning mechanism.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ContentManifestSchemaWireV1 {
+    adapter_kind: String,
+    max_tail_entries: u32,
+    max_tail_bytes: u32,
+}
+
+/// The pre-manifest postcard representation.  Keep this separate from the
+/// serde-facing domain types: postcard has no durable struct-field evolution
+/// contract, while JSON schema tooling intentionally serializes the domain
+/// `ColumnSchema` including its optional manifest metadata.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct LegacyJazzSchemaWireV1 {
+    tables: Vec<LegacyTableSchemaWireV1>,
+    branch_read_policy: Option<Query>,
+    branch_write_policy: Option<Query>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct LegacyTableSchemaWireV1 {
+    name: String,
+    columns: Vec<LegacyColumnSchemaWireV1>,
+    references: BTreeMap<String, String>,
+    read_policy: Option<Query>,
+    write_policies: WritePolicies,
+    indexed_columns: BTreeSet<String>,
+    merge_strategies: BTreeMap<String, MergeStrategy>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct LegacyColumnSchemaWireV1 {
+    name: String,
+    column_type: GrooveColumnType,
+    default: Option<Value>,
+}
+
+impl From<&JazzSchema> for LegacyJazzSchemaWireV1 {
+    fn from(schema: &JazzSchema) -> Self {
+        Self {
+            tables: schema
+                .tables
+                .iter()
+                .map(|table| LegacyTableSchemaWireV1 {
+                    name: table.name.clone(),
+                    columns: table
+                        .columns
+                        .iter()
+                        .map(|column| LegacyColumnSchemaWireV1 {
+                            name: column.name.clone(),
+                            column_type: column.column_type.clone(),
+                            default: column.default.clone(),
+                        })
+                        .collect(),
+                    references: table.references.clone(),
+                    read_policy: table.read_policy.clone(),
+                    write_policies: table.write_policies.clone(),
+                    indexed_columns: table.indexed_columns.clone(),
+                    merge_strategies: table.merge_strategies.clone(),
+                })
+                .collect(),
+            branch_read_policy: schema.branch_read_policy.clone(),
+            branch_write_policy: schema.branch_write_policy.clone(),
+        }
+    }
+}
+
+impl From<LegacyJazzSchemaWireV1> for JazzSchema {
+    fn from(schema: LegacyJazzSchemaWireV1) -> Self {
+        Self {
+            tables: schema
+                .tables
+                .into_iter()
+                .map(|table| TableSchema {
+                    name: table.name,
+                    columns: table
+                        .columns
+                        .into_iter()
+                        .map(|column| ColumnSchema {
+                            name: column.name,
+                            column_type: column.column_type,
+                            default: column.default,
+                            content_manifest: None,
+                        })
+                        .collect(),
+                    references: table.references,
+                    read_policy: table.read_policy,
+                    write_policies: table.write_policies,
+                    indexed_columns: table.indexed_columns,
+                    merge_strategies: table.merge_strategies,
+                })
+                .collect(),
+            branch_read_policy: schema.branch_read_policy,
+            branch_write_policy: schema.branch_write_policy,
+        }
+    }
+}
+
+impl From<ContentManifestSchema> for ContentManifestSchemaWireV1 {
+    fn from(value: ContentManifestSchema) -> Self {
+        Self {
+            adapter_kind: value.adapter_kind,
+            max_tail_entries: value.max_tail_entries,
+            max_tail_bytes: value.max_tail_bytes,
+        }
+    }
+}
+
+impl TryFrom<ContentManifestSchemaWireV1> for ContentManifestSchema {
+    type Error = crate::content_manifest::ManifestError;
+
+    fn try_from(value: ContentManifestSchemaWireV1) -> Result<Self, Self::Error> {
+        Self::new(
+            value.adapter_kind,
+            value.max_tail_entries,
+            value.max_tail_bytes,
+        )
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ContentManifestWireV1 {
+    legacy_schema: LegacyJazzSchemaWireV1,
+    manifests: Vec<(String, String, ContentManifestSchemaWireV1)>,
+}
+
+/// Errors decoding an explicit content-manifest schema envelope.
+#[derive(Debug, Error)]
+pub enum SchemaWireError {
+    /// Postcard could not decode the selected schema wire representation.
+    #[error("schema postcard payload is malformed: {0}")]
+    Postcard(#[from] postcard::Error),
+    /// A manifest entry names no column in the embedded legacy schema.
+    #[error("content manifest target does not exist: {table}.{column}")]
+    UnknownManifestTarget {
+        /// Logical table name from the malformed entry.
+        table: String,
+        /// Logical column name from the malformed entry.
+        column: String,
+    },
+    /// More than one entry names the same manifest column.
+    #[error("content manifest target is duplicated: {table}.{column}")]
+    DuplicateManifestTarget {
+        /// Logical table name from the duplicate entry.
+        table: String,
+        /// Logical column name from the duplicate entry.
+        column: String,
+    },
+    /// A manifest entry names a column whose storage type is not `Bytes`.
+    #[error("content manifest target is not a Bytes column: {table}.{column}")]
+    ManifestTargetIsNotBytes {
+        /// Logical table name from the malformed entry.
+        table: String,
+        /// Logical column name from the malformed entry.
+        column: String,
+    },
+    /// A manifest entry has an empty adapter kind or a zero tail bound.
+    #[error("content manifest metadata is invalid: {table}.{column}")]
+    InvalidManifestMetadata {
+        /// Logical table name from the malformed entry.
+        table: String,
+        /// Logical column name from the malformed entry.
+        column: String,
+    },
+}
+
 impl JazzSchema {
     /// Construct a schema from application tables.
     pub fn new(tables: impl IntoIterator<Item = TableSchema>) -> Self {
@@ -65,6 +239,119 @@ impl JazzSchema {
             branch_write_policy: None,
         }
         .validated()
+    }
+
+    /// Encode schema transport bytes without changing the legacy postcard
+    /// representation. Schemas without manifests remain byte-for-byte legacy;
+    /// v1 puts manifest metadata behind an explicit envelope.
+    pub fn encode_wire(&self) -> Result<Vec<u8>, postcard::Error> {
+        let manifests = self
+            .tables
+            .iter()
+            .flat_map(|table| {
+                table.columns.iter().filter_map(move |column| {
+                    column.content_manifest.clone().map(|manifest| {
+                        (
+                            table.name.clone(),
+                            column.name.clone(),
+                            ContentManifestSchemaWireV1::from(manifest),
+                        )
+                    })
+                })
+            })
+            .collect::<Vec<_>>();
+        if manifests.is_empty() {
+            return postcard::to_allocvec(self);
+        }
+        let mut bytes = CONTENT_MANIFEST_SCHEMA_WIRE_V1.to_vec();
+        bytes.extend(postcard::to_allocvec(&ContentManifestWireV1 {
+            legacy_schema: LegacyJazzSchemaWireV1::from(self),
+            manifests,
+        })?);
+        Ok(bytes)
+    }
+
+    /// Decode either the legacy postcard schema or the explicit manifest v1
+    /// envelope.  `serde(default)` is deliberately not used as a wire-version
+    /// mechanism: postcard struct evolution is not a durable compatibility
+    /// contract.
+    pub fn decode_wire(bytes: &[u8]) -> Result<Self, SchemaWireError> {
+        let Some(payload) = bytes.strip_prefix(CONTENT_MANIFEST_SCHEMA_WIRE_V1) else {
+            return Ok(JazzSchema::from(postcard::from_bytes::<
+                LegacyJazzSchemaWireV1,
+            >(bytes)?));
+        };
+        let ContentManifestWireV1 {
+            legacy_schema,
+            manifests,
+        } = postcard::from_bytes(payload)?;
+        let mut legacy_schema = JazzSchema::from(legacy_schema);
+
+        // Validate the complete envelope before assigning metadata.  In
+        // particular, do not let an unrecognized entry vanish or let a later
+        // malformed entry leave a partially annotated schema behind.
+        let mut seen_targets = BTreeSet::new();
+        let mut assignments = Vec::with_capacity(manifests.len());
+        for (table_name, column_name, manifest) in manifests {
+            let target = (table_name.clone(), column_name.clone());
+            if !seen_targets.insert(target) {
+                return Err(SchemaWireError::DuplicateManifestTarget {
+                    table: table_name,
+                    column: column_name,
+                });
+            }
+            let Some((table_index, table)) = legacy_schema
+                .tables
+                .iter()
+                .enumerate()
+                .find(|(_, table)| table.name == table_name)
+            else {
+                return Err(SchemaWireError::UnknownManifestTarget {
+                    table: table_name,
+                    column: column_name,
+                });
+            };
+            let Some((column_index, column)) = table
+                .columns
+                .iter()
+                .enumerate()
+                .find(|(_, column)| column.name == column_name)
+            else {
+                return Err(SchemaWireError::UnknownManifestTarget {
+                    table: table_name,
+                    column: column_name,
+                });
+            };
+            if !matches!(column.column_type, GrooveColumnType::Bytes) {
+                return Err(SchemaWireError::ManifestTargetIsNotBytes {
+                    table: table_name,
+                    column: column_name,
+                });
+            }
+            let manifest = ContentManifestSchema::try_from(manifest).map_err(|_| {
+                SchemaWireError::InvalidManifestMetadata {
+                    table: table_name.clone(),
+                    column: column_name.clone(),
+                }
+            })?;
+            assignments.push((table_index, column_index, table_name, column_name, manifest));
+        }
+        for (table_index, column_index, table_name, column_name, manifest) in assignments {
+            let table = legacy_schema.tables.get_mut(table_index).ok_or_else(|| {
+                SchemaWireError::UnknownManifestTarget {
+                    table: table_name.clone(),
+                    column: column_name.clone(),
+                }
+            })?;
+            let column = table.columns.get_mut(column_index).ok_or({
+                SchemaWireError::UnknownManifestTarget {
+                    table: table_name,
+                    column: column_name,
+                }
+            })?;
+            column.content_manifest = Some(manifest);
+        }
+        Ok(legacy_schema)
     }
 
     /// Set the read policy for branch metadata rows.
@@ -110,6 +397,28 @@ impl JazzSchema {
                             column.name
                         );
                     }
+                }
+            }
+            for column in &table.columns {
+                if let Some(manifest) = &column.content_manifest {
+                    assert!(
+                        matches!(column.column_type, GrooveColumnType::Bytes),
+                        "content manifest must lower to one Bytes column: {}.{}",
+                        table.name,
+                        column.name
+                    );
+                    assert!(
+                        !manifest.adapter_kind.is_empty(),
+                        "content manifest adapter kind must not be empty: {}.{}",
+                        table.name,
+                        column.name
+                    );
+                    assert!(
+                        manifest.max_tail_entries > 0 && manifest.max_tail_bytes > 0,
+                        "content manifest tail bounds must be non-zero: {}.{}",
+                        table.name,
+                        column.name
+                    );
                 }
             }
             if let Some(policy) = &table.read_policy {
@@ -354,6 +663,9 @@ pub struct ColumnSchema {
     /// Literal value used when an insert omits this column.
     #[serde(default)]
     pub default: Option<Value>,
+    /// Adapter metadata for a single atomic `{ root, editTail }` bytes cell.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_manifest: Option<ContentManifestSchema>,
 }
 
 impl ColumnSchema {
@@ -363,6 +675,18 @@ impl ColumnSchema {
             name: name.into(),
             column_type,
             default: None,
+            content_manifest: None,
+        }
+    }
+
+    /// Declare a bounded content-manifest column. Root and tail are encoded as
+    /// one value, so normal column-LWW remains an atomic conflict unit.
+    pub fn content_manifest(name: impl Into<String>, manifest: ContentManifestSchema) -> Self {
+        Self {
+            name: name.into(),
+            column_type: GrooveColumnType::Bytes,
+            default: None,
+            content_manifest: Some(manifest),
         }
     }
 
@@ -379,6 +703,7 @@ impl From<groove::schema::ColumnSchema> for ColumnSchema {
             name: column.name,
             column_type: column.column_type,
             default: None,
+            content_manifest: None,
         }
     }
 }
@@ -1120,7 +1445,22 @@ fn transactions_table() -> GrooveTableSchema {
 
 fn canonical_schema_bytes(schema: &JazzSchema) -> Vec<u8> {
     let mut bytes = Vec::new();
-    put_str(&mut bytes, "jazz-schema-v0");
+    let has_content_manifests = schema.tables.iter().any(|table| {
+        table
+            .columns
+            .iter()
+            .any(|column| column.content_manifest.is_some())
+    });
+    // v0 bytes (and therefore ids) are an immutable compatibility boundary.
+    // Only a schema that actually declares a manifest opts into v1 metadata.
+    put_str(
+        &mut bytes,
+        if has_content_manifests {
+            "jazz-schema-v1"
+        } else {
+            "jazz-schema-v0"
+        },
+    );
     let mut tables = schema.tables.iter().collect::<Vec<_>>();
     tables.sort_by(|left, right| left.name.cmp(&right.name));
     put_u64(&mut bytes, tables.len() as u64);
@@ -1131,6 +1471,17 @@ fn canonical_schema_bytes(schema: &JazzSchema) -> Vec<u8> {
             put_str(&mut bytes, &column.name);
             put_column_type(&mut bytes, &column.column_type);
             put_merge_strategy(&mut bytes, table.merge_strategy(&column.name));
+            if has_content_manifests {
+                match &column.content_manifest {
+                    None => bytes.push(0),
+                    Some(manifest) => {
+                        bytes.push(1);
+                        put_str(&mut bytes, &manifest.adapter_kind);
+                        put_u64(&mut bytes, manifest.max_tail_entries.into());
+                        put_u64(&mut bytes, manifest.max_tail_bytes.into());
+                    }
+                }
+            }
         }
         put_u64(&mut bytes, table.references.len() as u64);
         for (column, target) in &table.references {
@@ -1588,5 +1939,185 @@ mod tests {
             registry(right.history_storage_table(), "user_state"),
             "structurally identical user enums must retain independent registries"
         );
+    }
+
+    #[test]
+    fn content_manifest_is_one_bytes_cell_and_changes_schema_identity() {
+        let text = JazzSchema::new([TableSchema::new(
+            "documents",
+            [
+                ColumnSchema::new("title", ColumnType::String),
+                ColumnSchema::content_manifest(
+                    "body",
+                    ContentManifestSchema::new("fixture-text-v1", 8, 1024).unwrap(),
+                ),
+            ],
+        )]);
+        let other_bound = JazzSchema::new([TableSchema::new(
+            "documents",
+            [
+                ColumnSchema::new("title", ColumnType::String),
+                ColumnSchema::content_manifest(
+                    "body",
+                    ContentManifestSchema::new("fixture-text-v1", 9, 1024).unwrap(),
+                ),
+            ],
+        )]);
+        assert_eq!(
+            text.tables[0].columns[1].column_type,
+            GrooveColumnType::Bytes
+        );
+        assert_ne!(text.version_id(), other_bound.version_id());
+        let wire = text.encode_wire().unwrap();
+        assert_eq!(JazzSchema::decode_wire(&wire).unwrap(), text);
+        let json = serde_json::to_string(&text).unwrap();
+        assert!(json.contains("content_manifest"));
+        assert_eq!(serde_json::from_str::<JazzSchema>(&json).unwrap(), text);
+    }
+
+    #[test]
+    fn legacy_postcard_schema_without_manifest_decodes_through_wire_api() {
+        // Internal because this proves compatibility with historical native
+        // postcard schema bytes, which public builders intentionally do not
+        // expose as a serialization choice.
+        let schema = JazzSchema::new([TableSchema::new(
+            "documents",
+            [ColumnSchema::new("title", ColumnType::String)],
+        )]);
+        let legacy = postcard::to_allocvec(&LegacyJazzSchemaWireV1::from(&schema)).unwrap();
+        assert_eq!(JazzSchema::decode_wire(&legacy).unwrap(), schema);
+    }
+
+    fn encode_manifest_wire_v1(
+        legacy_schema: JazzSchema,
+        manifests: Vec<(String, String, ContentManifestSchemaWireV1)>,
+    ) -> Vec<u8> {
+        // Internal because these malformed bytes exercise a private wire
+        // envelope boundary that cannot be produced through the public schema
+        // builders.
+        let mut bytes = CONTENT_MANIFEST_SCHEMA_WIRE_V1.to_vec();
+        bytes.extend(
+            postcard::to_allocvec(&ContentManifestWireV1 {
+                legacy_schema: LegacyJazzSchemaWireV1::from(&legacy_schema),
+                manifests,
+            })
+            .unwrap(),
+        );
+        bytes
+    }
+
+    fn manifest_metadata(
+        adapter_kind: &str,
+        entries: u32,
+        bytes: u32,
+    ) -> ContentManifestSchemaWireV1 {
+        ContentManifestSchemaWireV1 {
+            adapter_kind: adapter_kind.into(),
+            max_tail_entries: entries,
+            max_tail_bytes: bytes,
+        }
+    }
+
+    #[test]
+    fn manifest_wire_v1_rejects_unknown_and_duplicate_targets_without_downgrading() {
+        // Internal because public schema builders cannot construct a malformed
+        // versioned postcard envelope.
+        let schema = JazzSchema::new([TableSchema::new(
+            "documents",
+            [ColumnSchema::content_manifest(
+                "body",
+                ContentManifestSchema::new("text-v1", 1, 1).unwrap(),
+            )],
+        )]);
+        let unknown = encode_manifest_wire_v1(
+            schema.clone(),
+            vec![(
+                "missing".into(),
+                "body".into(),
+                manifest_metadata("text-v1", 1, 1),
+            )],
+        );
+        let result = JazzSchema::decode_wire(&unknown);
+        assert!(
+            matches!(
+                &result,
+                Err(SchemaWireError::UnknownManifestTarget { table, column })
+                    if table == "missing" && column == "body"
+            ),
+            "unexpected schema-wire result: {result:?}"
+        );
+
+        let duplicate = encode_manifest_wire_v1(
+            schema,
+            vec![
+                (
+                    "documents".into(),
+                    "body".into(),
+                    manifest_metadata("text-v1", 1, 1),
+                ),
+                (
+                    "documents".into(),
+                    "body".into(),
+                    manifest_metadata("text-v1", 2, 2),
+                ),
+            ],
+        );
+        assert!(matches!(
+            JazzSchema::decode_wire(&duplicate),
+            Err(SchemaWireError::DuplicateManifestTarget { table, column })
+                if table == "documents" && column == "body"
+        ));
+    }
+
+    #[test]
+    fn manifest_wire_v1_rejects_non_bytes_targets_and_invalid_metadata() {
+        // Internal because public schema builders reject neither wire corruption
+        // nor impossible v1 target/type combinations before serialization.
+        let non_bytes_schema = JazzSchema::new([TableSchema::new(
+            "documents",
+            [
+                ColumnSchema::content_manifest(
+                    "manifest_anchor",
+                    ContentManifestSchema::new("text-v1", 1, 1).unwrap(),
+                ),
+                ColumnSchema::new("body", ColumnType::String),
+            ],
+        )]);
+        let non_bytes = encode_manifest_wire_v1(
+            non_bytes_schema,
+            vec![(
+                "documents".into(),
+                "body".into(),
+                manifest_metadata("text-v1", 1, 1),
+            )],
+        );
+        assert!(matches!(
+            JazzSchema::decode_wire(&non_bytes),
+            Err(SchemaWireError::ManifestTargetIsNotBytes { table, column })
+                if table == "documents" && column == "body"
+        ));
+
+        let schema = JazzSchema::new([TableSchema::new(
+            "documents",
+            [ColumnSchema::content_manifest(
+                "body",
+                ContentManifestSchema::new("text-v1", 1, 1).unwrap(),
+            )],
+        )]);
+        for metadata in [
+            manifest_metadata("", 1, 1),
+            manifest_metadata("text-v1", 0, 1),
+            manifest_metadata("text-v1", 1, 0),
+        ] {
+            let invalid = encode_manifest_wire_v1(
+                schema.clone(),
+                vec![("documents".into(), "body".into(), metadata)],
+            );
+            assert!(matches!(
+                JazzSchema::decode_wire(&invalid),
+                Err(SchemaWireError::InvalidManifestMetadata { table, column })
+                    if table == "documents" && column == "body"
+            ));
+        }
     }
 }

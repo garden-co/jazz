@@ -2461,12 +2461,76 @@ pub const SCHEMA_LINEAGE_PUBLICATION_NAMESPACE: uuid::Uuid =
 pub const READ_VIEW_NAMESPACE: uuid::Uuid = uuid::uuid!("1a87cf70-f8f0-5ae7-a574-1f9b5e4517f1");
 
 /// Published immutable schema-version payload.
-#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct SchemaVersion {
     /// Content-addressed id, equal to `schema.version_id()`.
     pub id: SchemaVersionId,
     /// Full schema payload.
     pub schema: JazzSchema,
+}
+
+impl serde::Serialize for SchemaVersion {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        if serializer.is_human_readable() {
+            #[derive(serde::Serialize)]
+            struct HumanReadable<'a> {
+                id: SchemaVersionId,
+                schema: &'a JazzSchema,
+            }
+            return HumanReadable {
+                id: self.id,
+                schema: &self.schema,
+            }
+            .serialize(serializer);
+        }
+        #[derive(serde::Serialize)]
+        struct Binary<'a> {
+            id: SchemaVersionId,
+            schema: &'a [u8],
+        }
+        let schema = self
+            .schema
+            .encode_wire()
+            .map_err(serde::ser::Error::custom)?;
+        Binary {
+            id: self.id,
+            schema: &schema,
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for SchemaVersion {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        if deserializer.is_human_readable() {
+            #[derive(serde::Deserialize)]
+            struct HumanReadable {
+                id: SchemaVersionId,
+                schema: JazzSchema,
+            }
+            let decoded = HumanReadable::deserialize(deserializer)?;
+            return Ok(Self {
+                id: decoded.id,
+                schema: decoded.schema,
+            });
+        }
+        #[derive(serde::Deserialize)]
+        struct Binary {
+            id: SchemaVersionId,
+            schema: Vec<u8>,
+        }
+        let decoded = Binary::deserialize(deserializer)?;
+        Ok(Self {
+            id: decoded.id,
+            schema: JazzSchema::decode_wire(&decoded.schema).map_err(serde::de::Error::custom)?,
+        })
+    }
 }
 
 /// Atomic catalogue payload that admits one non-genesis schema.

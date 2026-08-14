@@ -228,7 +228,7 @@ fn run_loopback_websocket_schema(
             return ExitCode::from(2);
         }
     };
-    let schema = match postcard::from_bytes::<JazzSchema>(&schema_bytes) {
+    let schema = match JazzSchema::decode_wire(&schema_bytes) {
         Ok(schema) => schema,
         Err(error) => {
             eprintln!("error=decode_schema: {error}");

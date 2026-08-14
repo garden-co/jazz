@@ -276,7 +276,7 @@ impl SchemaViewId {
     }
 
     fn for_schema(schema: &JazzSchema) -> Self {
-        let bytes = postcard::to_allocvec(schema).expect("JazzSchema always serializes");
+        let bytes = schema.encode_wire().expect("JazzSchema always serializes");
         Self(blake3::derive_key("jazz typed schema view id v1", &bytes))
     }
 }

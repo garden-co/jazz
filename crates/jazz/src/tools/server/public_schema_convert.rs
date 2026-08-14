@@ -2401,7 +2401,7 @@ mod tests {
     fn policy_graph_perf_fixture_native_schema() -> JazzSchema {
         let bytes = std::fs::read(policy_graph_perf_fixture_dir().join("schema.native.bin"))
             .expect("read policy graph perf native schema fixture");
-        postcard::from_bytes(&bytes).expect("decode policy graph perf native schema fixture")
+        JazzSchema::decode_wire(&bytes).expect("decode policy graph perf native schema fixture")
     }
 
     #[test]

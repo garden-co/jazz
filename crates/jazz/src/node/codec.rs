@@ -1965,6 +1965,13 @@ pub(super) fn nullable_value(value: Value) -> Result<Option<Value>, Error> {
 pub(super) fn validate_cell_value(column: &ColumnSchema, value: &Value) -> Result<(), Error> {
     records::RecordDescriptor::new([("cell", column.column_type.clone())])
         .create(std::slice::from_ref(value))?;
+    if let Some(manifest_schema) = &column.content_manifest {
+        let Value::Bytes(bytes) = value else {
+            return Err(Error::InvalidStoredValue("content manifest must be bytes"));
+        };
+        crate::content_manifest::ContentManifest::decode(bytes, manifest_schema)
+            .map_err(|_| Error::InvalidStoredValue("invalid content manifest"))?;
+    }
     Ok(())
 }
 

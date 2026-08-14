@@ -89,6 +89,11 @@ The default merge strategy is column last-writer-wins by HLC
 (`MergeStrategy::Lww`). A counter declaration is accepted only on a non-nullable
 integer column (`U8`/`U16`/`U32`/`U64`) (`INV-DATA-9`).
 
+An embedded content-manifest column is likewise an ordinary atomic user cell;
+its root and bounded edit tail are never separate relational columns. The
+content-specific abstraction and its immutable identity rules are specified in
+chapter 19.
+
 **Implementation status.** The reference implementation currently provides
 `MergeStrategy::Counter` as its non-LWW built-in strategy. Its declaration
 constraints are covered by

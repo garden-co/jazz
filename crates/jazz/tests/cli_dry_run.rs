@@ -48,7 +48,8 @@ fn jazz_server_command() -> Command {
 }
 
 fn schema_hex(schema: &JazzSchema) -> String {
-    postcard::to_allocvec(schema)
+    schema
+        .encode_wire()
         .expect("encode schema")
         .into_iter()
         .map(|byte| format!("{byte:02x}"))

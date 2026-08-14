@@ -2031,7 +2031,7 @@ fn policy_graph_perf_schema_fixture() -> JazzSchema {
     let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../packages/jazz-tools/src/testing/fixtures/policy-graph-perf/schema.native.bin");
     let bytes = std::fs::read(path).unwrap();
-    postcard::from_bytes(&bytes).unwrap()
+    JazzSchema::decode_wire(&bytes).unwrap()
 }
 
 fn policy_graph_uuid(kind: u8, idx: u32) -> uuid::Uuid {

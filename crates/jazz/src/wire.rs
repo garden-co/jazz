@@ -20,10 +20,11 @@ use crate::protocol::SyncMessage;
 use crate::protocol_limits::{validate_logical_message_len, validate_wire_frame_len};
 
 /// Current Jazz wire protocol version.
-/// Version 9 removes the specialized large-value sync messages and schema
-/// metadata. This is an intentional breaking baseline: older peers cannot
-/// safely decode the reduced payload vocabulary, so negotiation rejects them.
-pub const WIRE_PROTOCOL_VERSION: u16 = 9;
+/// Version 10 encodes schema publications as versioned schema bytes inside
+/// `SchemaVersion`. This is an intentional breaking baseline: version 9 peers
+/// would otherwise negotiate successfully and then fail to decode catalogue
+/// payloads, so negotiation rejects them before any sync message is sent.
+pub const WIRE_PROTOCOL_VERSION: u16 = 10;
 
 /// No optional features.
 pub const FEATURE_NONE: WireFeatures = 0;
@@ -752,13 +753,13 @@ mod tests {
     use crate::ids::{NodeUuid, RowUuid};
     use crate::protocol::{
         AuthorizationScopePurpose, PermissionAdviceAction, RegisterShapeOptions, ResultRowEntry,
-        ShapeAst, Subscribe, SubscribeRejectReason, SubscriptionKey, VersionBundle,
+        SchemaVersion, ShapeAst, Subscribe, SubscribeRejectReason, SubscriptionKey, VersionBundle,
         VersionBundleRun, VersionBundleRunError, VersionCarrier, VersionRecord,
         build_version_bundle_runs_from_singletons,
     };
     use crate::protocol_limits::MAX_WIRE_FRAME_BYTES;
     use crate::query::{BindingId, Query, ShapeId};
-    use crate::schema::{ColumnSchema, TableSchema};
+    use crate::schema::{ColumnSchema, JazzSchema, TableSchema};
     use crate::time::{GlobalSeq, TxTime};
     use crate::tx::{DurabilityTier, Fate, RejectionReason, Transaction, TxId, TxKind};
 
@@ -907,6 +908,26 @@ mod tests {
         let decoded = decode_sync_message(&encoded).unwrap();
 
         assert_eq!(decoded, message);
+    }
+
+    #[test]
+    fn schema_publication_uses_versioned_schema_bytes_inside_postcard_sync_message() {
+        let schema = JazzSchema::new([TableSchema::new(
+            "documents",
+            [ColumnSchema::new("title", ColumnType::String)],
+        )]);
+        let message = SyncMessage::PublishSchema {
+            author: crate::ids::AuthorId::SYSTEM,
+            schema: Box::new(SchemaVersion::new(schema)),
+        };
+
+        let direct = postcard::to_allocvec(&message).unwrap();
+        assert_eq!(
+            postcard::from_bytes::<SyncMessage>(&direct).unwrap(),
+            message
+        );
+        let encoded = encode_sync_message(&message).unwrap();
+        assert_eq!(decode_sync_message(&encoded).unwrap(), message);
     }
 
     #[test]
@@ -1460,6 +1481,28 @@ mod tests {
             FEATURE_SYNC_MESSAGE_PAYLOAD,
         )
         .expect_err("current wire protocol must not negotiate with an old peer");
+
+        assert_eq!(error.code, WireErrorCode::UnsupportedProtocolVersion);
+        assert_eq!(error.retry, WireRetry::Never);
+    }
+
+    #[test]
+    fn schema_version_wire_change_rejects_v9_before_catalogue_payload_decode() {
+        let v9_peer = WireHello {
+            min_protocol_version: 9,
+            max_protocol_version: 9,
+            features: FEATURE_SYNC_MESSAGE_PAYLOAD,
+            role: WirePeerRole::Core,
+            authority: None,
+        };
+
+        let error = negotiate_wire(
+            &v9_peer,
+            WIRE_PROTOCOL_VERSION,
+            WIRE_PROTOCOL_VERSION,
+            FEATURE_SYNC_MESSAGE_PAYLOAD,
+        )
+        .expect_err("v9 cannot decode v10 SchemaVersion payloads");
 
         assert_eq!(error.code, WireErrorCode::UnsupportedProtocolVersion);
         assert_eq!(error.retry, WireRetry::Never);

@@ -51,7 +51,7 @@ fn policy_graph_perf_fixture_version_layouts_round_trip_all_storage_records() {
         let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../packages/jazz-tools/src/testing/fixtures/policy-graph-perf/schema.native.bin");
         let bytes = std::fs::read(path).unwrap();
-        postcard::from_bytes(&bytes).unwrap()
+        JazzSchema::decode_wire(&bytes).unwrap()
     }
 
     fn sample_value(column_type: &groove::schema::ColumnType, seed: u8) -> Value {
