@@ -49,12 +49,6 @@ import { toWriteRecord } from "./value-converter.js";
 import { SubscriptionManager, type SubscriptionDelta } from "./subscription-manager.js";
 import { createAuthStateStore, type AuthState, type AuthStateStoreOptions } from "./auth-state.js";
 import { resolveClientSessionSync } from "./client-session.js";
-import {
-  createBinaryLargeValueFileStorage,
-  type BinaryLargeValueFileApp,
-  type FileReadOptions,
-  type FileWriteOptions,
-} from "./file-storage.js";
 import { analyzeRelations } from "../codegen/relation-analyzer.js";
 import { isPermissionIntrospectionColumn, magicColumnType } from "../magic-columns.js";
 import {
@@ -1530,50 +1524,6 @@ export class Db {
   async one<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T | null> {
     const results = await this.all(limitQueryToOne(query), options);
     return results[0] ?? null;
-  }
-
-  /**
-   * Create a `files` row whose `data` column stores the whole Blob as a binary large value.
-   */
-  async createFileFromBlob<FileRow extends { id: string }, FileInit>(
-    app: BinaryLargeValueFileApp<FileRow, FileInit>,
-    blob: Blob,
-    options?: FileWriteOptions,
-  ): Promise<FileRow> {
-    return createBinaryLargeValueFileStorage(this, app).fromBlob(blob, options);
-  }
-
-  /**
-   * Create a `files` row whose `data` column stores the whole stream as a binary large value.
-   */
-  async createFileFromStream<FileRow extends { id: string }, FileInit>(
-    app: BinaryLargeValueFileApp<FileRow, FileInit>,
-    stream: ReadableStream<unknown>,
-    options?: FileWriteOptions,
-  ): Promise<FileRow> {
-    return createBinaryLargeValueFileStorage(this, app).fromStream(stream, options);
-  }
-
-  /**
-   * Load a binary-large-value file row as a browser ReadableStream.
-   */
-  async loadFileAsStream<FileRow extends { id: string }, FileInit>(
-    app: BinaryLargeValueFileApp<FileRow, FileInit>,
-    fileOrId: string | FileRow,
-    options?: FileReadOptions,
-  ): Promise<ReadableStream<Uint8Array>> {
-    return createBinaryLargeValueFileStorage(this, app).toStream(fileOrId, options);
-  }
-
-  /**
-   * Load a binary-large-value file row as a Blob.
-   */
-  async loadFileAsBlob<FileRow extends { id: string }, FileInit>(
-    app: BinaryLargeValueFileApp<FileRow, FileInit>,
-    fileOrId: string | FileRow,
-    options?: FileReadOptions,
-  ): Promise<Blob> {
-    return createBinaryLargeValueFileStorage(this, app).toBlob(fileOrId, options);
   }
 
   /**
