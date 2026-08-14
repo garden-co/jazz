@@ -25,6 +25,7 @@ function defaultConfig(secret: string, overrides: Partial<DbConfig> = {}): DbCon
 type AppProps = {
   config?: Partial<DbConfig>;
   fallback?: React.ReactNode;
+  children?: React.ReactNode;
 };
 
 function DevToolsRegistration() {
@@ -52,7 +53,7 @@ function DevToolsRegistration() {
 }
 
 // #region context-setup-react
-export function App({ config, fallback }: AppProps = {}) {
+export function App({ config, fallback, children }: AppProps = {}) {
   const { secret, isLoading } = useLocalFirstAuth();
 
   if (isLoading || !secret) {
@@ -65,6 +66,7 @@ export function App({ config, fallback }: AppProps = {}) {
       <DevToolsRegistration />
       <h1>Todos</h1>
       <TodoList />
+      {children}
     </JazzProvider>
   );
 }
