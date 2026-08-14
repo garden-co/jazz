@@ -151,9 +151,16 @@ describe("ordinary-row files", () => {
     const file = await storage.create({ tier: "edge" });
     const before = await storage.snapshot(file.id);
     const errors: unknown[] = [];
-    const unsubscribe = db.onMutationError((error) => errors.push(error));
+    let settle!: () => void;
+    const settled = new Promise<void>((resolve) => {
+      settle = resolve;
+    });
+    const unsubscribe = db.onMutationError((error) => {
+      errors.push(error);
+      settle();
+    });
     await storage.append(file.id, Uint8Array.of(1), { waitForAuthority: false });
-    await new Promise((resolve) => setTimeout(resolve, 150));
+    await settled;
     unsubscribe();
     expect(errors).not.toHaveLength(0);
     expect(await storage.snapshot(file.id)).toEqual(before);
