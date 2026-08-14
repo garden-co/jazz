@@ -12,7 +12,7 @@ const NODE_TABLE = "jazz_text_nodes";
 /** Ordinary table definitions required by {@link createTextStore}. */
 export const textTableDefinitions = {
   [DOCUMENT_TABLE]: s.table({
-    current_version: s.string(),
+    current_version: s.ref(VERSION_TABLE),
     text_length: s.int(),
   }),
   [VERSION_TABLE]: s.table({
@@ -25,8 +25,11 @@ export const textTableDefinitions = {
   [NODE_TABLE]: s.table({
     document: s.ref(DOCUMENT_TABLE),
     kind: s.string(),
-    payload: s.string(),
+    text: s.string().optional(),
+    left: s.ref(NODE_TABLE).optional(),
+    right: s.ref(NODE_TABLE).optional(),
     text_length: s.int(),
+    height: s.int(),
   }),
 } as const;
 
@@ -49,8 +52,11 @@ export type TextNodeRow = {
   id: string;
   document: string;
   kind: string;
-  payload: string;
+  text: string | null;
+  left: string | null;
+  right: string | null;
   text_length: number;
+  height: number;
 };
 
 type TextTable<Row, Init> = TableProxy<Row, Init> & {
@@ -63,7 +69,20 @@ export interface TextTables {
     TextVersionRow,
     Omit<TextVersionRow, "id" | "previous_version"> & { previous_version?: string | null }
   >;
-  nodes: TextTable<TextNodeRow, Omit<TextNodeRow, "id">>;
+  nodes: TextTable<
+    TextNodeRow,
+    Omit<TextNodeRow, "id" | "text" | "left" | "right"> & {
+      text?: string | null;
+      left?: string | null;
+      right?: string | null;
+    }
+  >;
+}
+
+export interface TextAppTables {
+  jazz_text_documents: TextTables["documents"];
+  jazz_text_versions: TextTables["versions"];
+  jazz_text_nodes: TextTables["nodes"];
 }
 
 export interface TextStoreOptions {
@@ -78,22 +97,30 @@ export interface TextStoreOptions {
 }
 
 export interface TextSnapshot {
-  documentId: string;
-  versionId: string;
-  text: string;
-  length: number;
-  baseRoot: string;
-  patchCount: number;
-  patchBytes: number;
+  readonly documentId: string;
+  readonly versionId: string;
+  readonly text: string;
+  readonly length: number;
+  readonly baseRoot: string;
+  readonly patchCount: number;
+  readonly patchBytes: number;
 }
 
 type TextPatch = { at: number; text: string };
-type PendingNode = Omit<TextNodeRow, "document">;
-type LeafPayload = { text: string };
-type BranchPayload = { left: string; right: string };
+type RopeLeaf = { id: string; kind: "leaf"; text: string; length: number; height: number };
+type RopeBranch = {
+  id: string;
+  kind: "branch";
+  left: RopeNode;
+  right: RopeNode;
+  length: number;
+  height: number;
+};
+type RopeNode = RopeLeaf | RopeBranch;
 
 const encoder = new TextEncoder();
 const snapshotPatches = new WeakMap<TextSnapshot, readonly TextPatch[]>();
+const snapshotRoots = new WeakMap<TextSnapshot, RopeNode>();
 
 function byteLength(value: string): number {
   return encoder.encode(value).byteLength;
@@ -158,14 +185,61 @@ function splitUtf8(value: string, maximumBytes: number): string[] {
   return leaves;
 }
 
-function buildRope(value: string, leafBytes: number): { root: string; nodes: PendingNode[] } {
-  const nodes: PendingNode[] = splitUtf8(value, leafBytes).map((text) => ({
+function makeLeaf(text: string, created: Map<string, RopeNode>): RopeLeaf {
+  const node: RopeLeaf = {
     id: crypto.randomUUID(),
     kind: "leaf",
-    payload: JSON.stringify({ text } satisfies LeafPayload),
-    text_length: codePointLength(text),
-  }));
-  let level = nodes.map((node) => ({ id: node.id, length: node.text_length }));
+    text,
+    length: codePointLength(text),
+    height: 1,
+  };
+  created.set(node.id, node);
+  return node;
+}
+
+function makeBranch(left: RopeNode, right: RopeNode, created: Map<string, RopeNode>): RopeBranch {
+  const node: RopeBranch = {
+    id: crypto.randomUUID(),
+    kind: "branch",
+    left,
+    right,
+    length: left.length + right.length,
+    height: Math.max(left.height, right.height) + 1,
+  };
+  created.set(node.id, node);
+  return node;
+}
+
+function balance(left: RopeNode, right: RopeNode, created: Map<string, RopeNode>): RopeNode {
+  if (left.height > right.height + 1 && left.kind === "branch") {
+    if (left.left.height >= left.right.height) {
+      return makeBranch(left.left, makeBranch(left.right, right, created), created);
+    }
+    if (left.right.kind === "branch") {
+      return makeBranch(
+        makeBranch(left.left, left.right.left, created),
+        makeBranch(left.right.right, right, created),
+        created,
+      );
+    }
+  }
+  if (right.height > left.height + 1 && right.kind === "branch") {
+    if (right.right.height >= right.left.height) {
+      return makeBranch(makeBranch(left, right.left, created), right.right, created);
+    }
+    if (right.left.kind === "branch") {
+      return makeBranch(
+        makeBranch(left, right.left.left, created),
+        makeBranch(right.left.right, right.right, created),
+        created,
+      );
+    }
+  }
+  return makeBranch(left, right, created);
+}
+
+function buildBalanced(nodes: RopeNode[], created: Map<string, RopeNode>): RopeNode {
+  let level = nodes;
   while (level.length > 1) {
     const next: typeof level = [];
     for (let index = 0; index < level.length; index += 2) {
@@ -175,18 +249,80 @@ function buildRope(value: string, leafBytes: number): { root: string; nodes: Pen
         next.push(left);
         continue;
       }
-      const node: PendingNode = {
-        id: crypto.randomUUID(),
-        kind: "branch",
-        payload: JSON.stringify({ left: left.id, right: right.id } satisfies BranchPayload),
-        text_length: left.length + right.length,
-      };
-      nodes.push(node);
-      next.push({ id: node.id, length: node.text_length });
+      next.push(makeBranch(left, right, created));
     }
     level = next;
   }
-  return { root: level[0]!.id, nodes };
+  return level[0]!;
+}
+
+function buildRope(value: string, leafBytes: number): { root: RopeNode; nodes: RopeNode[] } {
+  const created = new Map<string, RopeNode>();
+  const leaves = splitUtf8(value, leafBytes).map((text) => makeLeaf(text, created));
+  const root = buildBalanced(leaves, created);
+  return { root, nodes: [...created.values()] };
+}
+
+function insertIntoRope(
+  node: RopeNode,
+  at: number,
+  inserted: string,
+  leafBytes: number,
+  created: Map<string, RopeNode>,
+): RopeNode {
+  if (node.kind === "leaf") {
+    const value = insertAtCodePoint(node.text, at, inserted);
+    const leaves = splitUtf8(value, leafBytes).map((text) => makeLeaf(text, created));
+    return buildBalanced(leaves, created);
+  }
+  if (at <= node.left.length) {
+    return balance(
+      insertIntoRope(node.left, at, inserted, leafBytes, created),
+      node.right,
+      created,
+    );
+  }
+  return balance(
+    node.left,
+    insertIntoRope(node.right, at - node.left.length, inserted, leafBytes, created),
+    created,
+  );
+}
+
+function reachableCreatedNodes(root: RopeNode, created: Map<string, RopeNode>): RopeNode[] {
+  const reachable: RopeNode[] = [];
+  const visit = (node: RopeNode) => {
+    if (!created.has(node.id)) return;
+    reachable.push(node);
+    if (node.kind === "branch") {
+      visit(node.left);
+      visit(node.right);
+    }
+  };
+  visit(root);
+  return reachable;
+}
+
+function nodeInsert(node: RopeNode, document: string): Omit<TextNodeRow, "id"> {
+  return node.kind === "leaf"
+    ? {
+        document,
+        kind: "leaf",
+        text: node.text,
+        left: null,
+        right: null,
+        text_length: node.length,
+        height: node.height,
+      }
+    : {
+        document,
+        kind: "branch",
+        text: null,
+        left: node.left.id,
+        right: node.right.id,
+        text_length: node.length,
+        height: node.height,
+      };
 }
 
 export class TextStore {
@@ -226,13 +362,13 @@ export class TextStore {
         { id: documentId },
       );
       for (const node of rope.nodes) {
-        tx.insert(this.tables.nodes, { ...node, document: documentId }, { id: node.id });
+        tx.insert(this.tables.nodes, nodeInsert(node, documentId), { id: node.id });
       }
       tx.insert(
         this.tables.versions,
         {
           document: documentId,
-          base_root: rope.root,
+          base_root: rope.root.id,
           patches: "[]",
           text_length: codePointLength(initialText),
         },
@@ -257,33 +393,50 @@ export class TextStore {
     });
     if (!version) throw new Error(`Text version ${versionId} was not found`);
     const patches = decodePatches(version.patches);
-    const text = applyPatches(await this.readNode(version.base_root), patches);
+    const root = await this.readNode(version.base_root);
+    const text = applyPatches(this.materialize(root), patches);
     if (codePointLength(text) !== version.text_length) {
       throw new Error(`Text version ${versionId} length does not match its content`);
     }
-    return this.snapshot(version.document, version.id, text, version.base_root, patches);
+    return this.snapshot(version.document, version.id, text, root, patches);
   }
 
   async insert(snapshot: TextSnapshot, at: number, inserted: string): Promise<TextSnapshot> {
     if (!inserted) return snapshot;
     const text = insertAtCodePoint(snapshot.text, at, inserted);
     let root = snapshot.baseRoot;
-    const retainedPatches = snapshotPatches.get(snapshot) ?? (await this.loadPatches(snapshot));
+    let rootNode = snapshotRoots.get(snapshot);
+    const retainedPatches = snapshotPatches.get(snapshot);
+    if (!retainedPatches) {
+      throw new Error("Text insert requires a snapshot returned by this module");
+    }
     let patches = [...retainedPatches, { at, text: inserted }];
     const encoded = encodePatches(patches);
     const consolidate =
       patches.length > this.maxPatches || byteLength(encoded) > this.maxPatchBytes;
-    const rope = consolidate ? buildRope(text, this.leafBytes) : null;
-    if (rope) {
-      root = rope.root;
+    let createdNodes: RopeNode[] = [];
+    if (consolidate) {
+      rootNode ??= await this.readNode(snapshot.baseRoot);
+      const created = new Map<string, RopeNode>();
+      for (const patch of patches) {
+        rootNode = insertIntoRope(rootNode, patch.at, patch.text, this.leafBytes, created);
+      }
+      createdNodes = reachableCreatedNodes(rootNode, created);
+      // A scattered frontier can retain O(patches * depth) path-copied nodes.
+      // Rebuilding a balanced root is cheaper once that exceeds the complete
+      // leaf tree; localized typing still keeps the structurally shared path.
+      const rebuilt = buildRope(text, this.leafBytes);
+      if (rebuilt.nodes.length < createdNodes.length) {
+        rootNode = rebuilt.root;
+        createdNodes = rebuilt.nodes;
+      }
+      root = rootNode.id;
       patches = [];
     }
     const versionId = crypto.randomUUID();
     const result = await this.db.transaction((tx) => {
-      if (rope) {
-        for (const node of rope.nodes) {
-          tx.insert(this.tables.nodes, { ...node, document: snapshot.documentId }, { id: node.id });
-        }
+      for (const node of createdNodes) {
+        tx.insert(this.tables.nodes, nodeInsert(node, snapshot.documentId), { id: node.id });
       }
       tx.insert(
         this.tables.versions,
@@ -302,17 +455,18 @@ export class TextStore {
       });
     });
     await result.wait({ tier: this.durability });
-    return this.snapshot(snapshot.documentId, versionId, text, root, patches);
+    return this.snapshot(snapshot.documentId, versionId, text, rootNode ?? root, patches);
   }
 
   private snapshot(
     documentId: string,
     versionId: string,
     text: string,
-    baseRoot: string,
+    root: RopeNode | string,
     patches: readonly TextPatch[],
   ): TextSnapshot {
-    const snapshot = {
+    const baseRoot = typeof root === "string" ? root : root.id;
+    const snapshot: TextSnapshot = {
       documentId,
       versionId,
       text,
@@ -322,42 +476,57 @@ export class TextStore {
       patchBytes: byteLength(encodePatches(patches)),
     };
     snapshotPatches.set(snapshot, [...patches]);
-    return snapshot;
+    if (typeof root !== "string") snapshotRoots.set(snapshot, root);
+    return Object.freeze(snapshot);
   }
 
-  private async loadPatches(snapshot: TextSnapshot): Promise<TextPatch[]> {
-    const version = await this.db.one(this.tables.versions.where({ id: snapshot.versionId }), {
-      tier: this.durability,
-    });
-    if (!version) throw new Error(`Text version ${snapshot.versionId} was not found`);
-    return decodePatches(version.patches);
-  }
-
-  private async readNode(id: string): Promise<string> {
+  private async readNode(id: string): Promise<RopeNode> {
     const node = await this.db.one(this.tables.nodes.where({ id }), {
       tier: this.durability,
     });
     if (!node) throw new Error(`Text rope node ${id} was not found`);
     if (node.kind === "leaf") {
-      const payload = JSON.parse(node.payload) as LeafPayload;
-      if (typeof payload.text !== "string") throw new Error(`Invalid text leaf ${id}`);
-      return payload.text;
+      if (typeof node.text !== "string") throw new Error(`Invalid text leaf ${id}`);
+      if (node.text_length !== codePointLength(node.text) || node.height !== 1) {
+        throw new Error(`Text leaf ${id} metadata does not match its content`);
+      }
+      return { id, kind: "leaf", text: node.text, length: node.text_length, height: node.height };
     }
     if (node.kind === "branch") {
-      const payload = JSON.parse(node.payload) as BranchPayload;
-      if (typeof payload.left !== "string" || typeof payload.right !== "string") {
+      if (typeof node.left !== "string" || typeof node.right !== "string") {
         throw new Error(`Invalid text branch ${id}`);
       }
       const [left, right] = await Promise.all([
-        this.readNode(payload.left),
-        this.readNode(payload.right),
+        this.readNode(node.left),
+        this.readNode(node.right),
       ]);
-      return left + right;
+      if (node.text_length !== left.length + right.length) {
+        throw new Error(`Text branch ${id} length does not match its children`);
+      }
+      if (node.height !== Math.max(left.height, right.height) + 1) {
+        throw new Error(`Text branch ${id} height does not match its children`);
+      }
+      return { id, kind: "branch", left, right, length: node.text_length, height: node.height };
     }
     throw new Error(`Unknown text rope node kind ${node.kind}`);
+  }
+
+  private materialize(node: RopeNode): string {
+    return node.kind === "leaf"
+      ? node.text
+      : this.materialize(node.left) + this.materialize(node.right);
   }
 }
 
 export function createTextStore(db: Db, tables: TextTables, options?: TextStoreOptions): TextStore {
   return new TextStore(db, tables, options);
+}
+
+/** Select the text table handles from an app containing {@link textTableDefinitions}. */
+export function textTablesFromApp(app: TextAppTables): TextTables {
+  return {
+    documents: app.jazz_text_documents,
+    versions: app.jazz_text_versions,
+    nodes: app.jazz_text_nodes,
+  };
 }

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createJazzContext } from "../backend/create-jazz-context.js";
 import { schema as s } from "../index.js";
-import { createTextStore, textTableDefinitions } from "./index.js";
+import { createTextStore, textTableDefinitions, textTablesFromApp } from "./index.js";
 
 const app = s.defineApp({ ...textTableDefinitions });
 
@@ -15,15 +15,7 @@ function setup(options: Parameters<typeof createTextStore>[2] = {}) {
     tier: "local",
   });
   const db = context.asBackend();
-  const text = createTextStore(
-    db,
-    {
-      documents: app.jazz_text_documents,
-      versions: app.jazz_text_versions,
-      nodes: app.jazz_text_nodes,
-    },
-    options,
-  );
+  const text = createTextStore(db, textTablesFromApp(app), options);
   return { context, db, text };
 }
 
@@ -82,6 +74,35 @@ describe("ordinary-row text", () => {
     }
   });
 
+  it("path-copies consolidation and retains untouched ordinary rope rows", async () => {
+    const { context, db, text } = setup({ maxPatches: 2, maxPatchBytes: 1024, leafBytes: 4 });
+    try {
+      const initialText = "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+      const initial = await text.create(initialText);
+      const initialNodes = await db.all(app.jazz_text_nodes, { tier: "local" });
+      const initialIds = new Set(initialNodes.map((node) => node.id));
+      let snapshot = await text.insert(initial, 0, "X");
+      snapshot = await text.insert(snapshot, 0, "Y");
+      snapshot = await text.insert(snapshot, 0, "Z");
+      expect(snapshot.patchCount).toBe(0);
+
+      const reachable = new Set<string>();
+      const visit = async (id: string): Promise<void> => {
+        if (reachable.has(id)) return;
+        reachable.add(id);
+        const node = await db.one(app.jazz_text_nodes.where({ id }), { tier: "local" });
+        if (node?.left) await visit(node.left);
+        if (node?.right) await visit(node.right);
+      };
+      await visit(snapshot.baseRoot);
+
+      expect([...reachable].some((id) => initialIds.has(id))).toBe(true);
+      expect((await text.readVersion(snapshot.versionId)).text).toBe(`ZYX${initialText}`);
+    } finally {
+      await context.shutdown();
+    }
+  });
+
   it("fails closed on a missing base node instead of replaying version ancestry", async () => {
     const { context, db, text } = setup();
     try {
@@ -108,6 +129,19 @@ describe("ordinary-row text", () => {
       expect(second.patchCount).toBe(0);
       expect(second.patchBytes).toBe(2);
       expect(second.text).toBe("1234567890123456789012345678901234567890");
+    } finally {
+      await context.shutdown();
+    }
+  });
+
+  it("rejects fabricated snapshots before they can author inconsistent patches", async () => {
+    const { context, text } = setup();
+    try {
+      const snapshot = await text.create("safe");
+      expect(Object.isFrozen(snapshot)).toBe(true);
+      await expect(text.insert({ ...snapshot, text: "forged" }, 1, "x")).rejects.toThrow(
+        "snapshot returned by this module",
+      );
     } finally {
       await context.shutdown();
     }

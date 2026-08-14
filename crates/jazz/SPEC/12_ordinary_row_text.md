@@ -36,8 +36,11 @@ version and document-pointer update. No application batching is required: one
 Unicode-safe insertion may be one durable Jazz transaction.
 
 Rope nodes are immutable ordinary rows. Leaves contain bounded UTF-8 text;
-branch nodes contain child references and subtree code-point lengths. A root is
-a complete snapshot, not a checkpoint that requires ancestor replay.
+branch nodes contain child references, subtree code-point lengths, and balanced
+tree heights. A localized consolidation path-copies and shares untouched
+subtrees. If scattered edits would retain more new path nodes than a complete
+balanced tree, consolidation writes the smaller complete tree instead. A root
+is a complete snapshot, not a checkpoint that requires ancestor replay.
 
 ## 12.3 Initial public scope
 
@@ -50,6 +53,20 @@ in history for a future format-aware merge layer.
 Applications include the exported three-table definitions in their schema and
 define ordinary permissions for documents, versions, and nodes. The library
 does not add a privileged ownership or content protocol.
+
+```ts
+const app = schema.defineApp({
+  ...textTableDefinitions,
+  // application tables may reference jazz_text_documents normally
+});
+const text = createTextStore(db, textTablesFromApp(app));
+let snapshot = await text.create("hello");
+snapshot = await text.insert(snapshot, 5, "!");
+```
+
+Snapshots returned by the module are immutable capability objects. `insert`
+rejects fabricated snapshots so caller mutation cannot make persisted patch
+coordinates disagree with the materialized base.
 
 ## 12.4 Required evidence
 

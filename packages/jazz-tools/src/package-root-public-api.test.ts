@@ -314,6 +314,15 @@ describe("package root public API", () => {
       );
     }
 
+    for (const textExport of [
+      "TextStore",
+      "createTextStore",
+      "textTableDefinitions",
+      "textTablesFromApp",
+    ]) {
+      expect(packageRoot, `ordinary text export ${textExport}`).toHaveProperty(textExport);
+    }
+
     for (const internalRuntimeExport of internalRuntimeExports) {
       expect(runtime, `runtime internal export ${internalRuntimeExport}`).not.toHaveProperty(
         internalRuntimeExport,
