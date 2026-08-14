@@ -393,7 +393,7 @@ export class TextStore {
     });
     if (!version) throw new Error(`Text version ${versionId} was not found`);
     const patches = decodePatches(version.patches);
-    const root = await this.readNode(version.base_root);
+    const root = await this.readNode(version.base_root, version.document);
     const text = applyPatches(this.materialize(root), patches);
     if (codePointLength(text) !== version.text_length) {
       throw new Error(`Text version ${versionId} length does not match its content`);
@@ -416,7 +416,7 @@ export class TextStore {
       patches.length > this.maxPatches || byteLength(encoded) > this.maxPatchBytes;
     let createdNodes: RopeNode[] = [];
     if (consolidate) {
-      rootNode ??= await this.readNode(snapshot.baseRoot);
+      rootNode ??= await this.readNode(snapshot.baseRoot, snapshot.documentId);
       const created = new Map<string, RopeNode>();
       for (const patch of patches) {
         rootNode = insertIntoRope(rootNode, patch.at, patch.text, this.leafBytes, created);
@@ -480,11 +480,20 @@ export class TextStore {
     return Object.freeze(snapshot);
   }
 
-  private async readNode(id: string): Promise<RopeNode> {
+  private async readNode(
+    id: string,
+    expectedDocument: string,
+    ancestors: ReadonlySet<string> = new Set(),
+  ): Promise<RopeNode> {
+    if (ancestors.has(id)) throw new Error(`Text rope contains a cycle at node ${id}`);
+    const nextAncestors = new Set(ancestors).add(id);
     const node = await this.db.one(this.tables.nodes.where({ id }), {
       tier: this.durability,
     });
     if (!node) throw new Error(`Text rope node ${id} was not found`);
+    if (node.document !== expectedDocument) {
+      throw new Error(`Text rope node ${id} belongs to a different document`);
+    }
     if (node.kind === "leaf") {
       if (typeof node.text !== "string") throw new Error(`Invalid text leaf ${id}`);
       if (node.text_length !== codePointLength(node.text) || node.height !== 1) {
@@ -497,14 +506,17 @@ export class TextStore {
         throw new Error(`Invalid text branch ${id}`);
       }
       const [left, right] = await Promise.all([
-        this.readNode(node.left),
-        this.readNode(node.right),
+        this.readNode(node.left, expectedDocument, nextAncestors),
+        this.readNode(node.right, expectedDocument, nextAncestors),
       ]);
       if (node.text_length !== left.length + right.length) {
         throw new Error(`Text branch ${id} length does not match its children`);
       }
       if (node.height !== Math.max(left.height, right.height) + 1) {
         throw new Error(`Text branch ${id} height does not match its children`);
+      }
+      if (Math.abs(left.height - right.height) > 1) {
+        throw new Error(`Text branch ${id} is not balanced`);
       }
       return { id, kind: "branch", left, right, length: node.text_length, height: node.height };
     }
