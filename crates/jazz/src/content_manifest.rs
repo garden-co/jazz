@@ -425,6 +425,9 @@ pub fn global_content_manifest_adapters() -> &'static ContentManifestAdapterRegi
             .register(Arc::new(crate::file_content::FileContentAdapter))
             .expect("built-in file content adapter registers exactly once");
         registry
+            .register(Arc::new(crate::ordinary_json::OrdinaryJsonAdapter))
+            .expect("built-in json-v1 adapter registration must be unique");
+        registry
     })
 }
 
