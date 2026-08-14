@@ -4,9 +4,7 @@
 //! semantic requests recoverable. Server shells may eventually surface these as
 //! configuration, but the core owns the default contract.
 
-use crate::protocol::{
-    ContentExtent, KnownStateDeclaration, RowVersionRef, ShapeAst, VersionRecord,
-};
+use crate::protocol::{KnownStateDeclaration, RowVersionRef, ShapeAst, VersionRecord};
 
 /// Maximum encoded `WireFrame` bytes accepted before postcard decode.
 ///
@@ -55,13 +53,6 @@ pub const MAX_FETCH_BRANCH_METADATA: usize = 1024;
 /// would silently overclaim.
 pub const MAX_KNOWN_STATE_EXACT_REFS: usize = MAX_FETCH_ROW_VERSIONS;
 
-/// Maximum bytes in one `ContentExtent` response payload.
-///
-/// Source: ch. 12's content lane has 64 KiB blob chunk targets and 64 MiB bundle
-/// targets; 1 MiB comfortably exceeds legitimate current chunks while bounding a
-/// single bulk-lane allocation.
-pub const MAX_CONTENT_EXTENT_BYTES: usize = 1024 * 1024;
-
 /// Validate raw frame bytes before postcard can allocate from declared lengths.
 pub fn validate_wire_frame_len(len: usize) -> Result<(), String> {
     validate_len("wire frame", len, MAX_WIRE_FRAME_BYTES)
@@ -77,18 +68,6 @@ pub fn validate_shape_ast_size(ast: &ShapeAst) -> Result<(), String> {
     let bytes = postcard::to_allocvec(ast)
         .map_err(|err| format!("failed to measure shape AST payload: {err}"))?;
     validate_len("shape AST", bytes.len(), MAX_SHAPE_AST_BYTES)
-}
-
-/// Validate content extent payloads after sync-message decode.
-pub fn validate_content_extents(extents: &[ContentExtent]) -> Result<(), String> {
-    for extent in extents {
-        validate_len(
-            "content extent bytes",
-            extent.bytes.len(),
-            MAX_CONTENT_EXTENT_BYTES,
-        )?;
-    }
-    Ok(())
 }
 
 /// Validate row-version repair request size after sync-message decode.

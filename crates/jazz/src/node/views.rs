@@ -1286,7 +1286,6 @@ where
             user_metadata_json,
             target_lineage,
             branch_merge,
-            merge_strategy,
             ..
         } = stored_tx.tx.clone();
         let tx_payload = Transaction {
@@ -1302,7 +1301,6 @@ where
             user_metadata_json,
             target_lineage,
             branch_merge,
-            merge_strategy,
         };
         let mut versions = Vec::with_capacity(tx_versions.len());
         for version in tx_versions {

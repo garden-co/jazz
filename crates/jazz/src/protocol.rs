@@ -16,7 +16,6 @@ use crate::ids::{
     AuthorId, BranchId, MigrationLensId, NodeUuid, RowUuid, SchemaLineagePublicationId,
     SchemaVersionId,
 };
-use crate::node::content_store::Extent;
 use crate::query::{BindingId, Query, RelationQuery, ShapeId};
 use crate::schema::{JazzSchema, TableSchema};
 use crate::time::GlobalSeq;
@@ -163,18 +162,6 @@ pub enum SyncMessage {
         program_fact_adds: Vec<ProgramFactEntry>,
         /// Non-row program fact removals, such as relation edges.
         program_fact_removes: Vec<ProgramFactEntry>,
-    },
-    /// Bulk-lane request for bytes backing one content extent.
-    FetchContentExtent {
-        /// Owner/version/read-view context used for authorization and membership checks.
-        owner: LargeValueOwnerRef,
-        /// Requested content extent.
-        extent: Extent,
-    },
-    /// Bulk-lane response carrying bytes for content extents.
-    ContentExtents {
-        /// Shipped extent payloads.
-        extents: Vec<ContentExtent>,
     },
     /// Repair-lane request for exact row-version payloads referenced by known-state dedup.
     FetchRowVersions {
@@ -1294,72 +1281,6 @@ fn common_run_table(bundles: &[VersionBundle]) -> Option<groove::Intern<String>>
     table.map(|table| groove::Intern::new(table.to_owned()))
 }
 
-/// Bytes for one immutable content extent.
-#[derive(Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
-pub struct ContentExtent {
-    /// Owner/version/read-view context for this immutable extent.
-    pub owner: LargeValueOwnerRef,
-    /// Extent name.
-    pub extent: Extent,
-    /// Immutable bytes stored at the extent.
-    pub bytes: Vec<u8>,
-}
-
-impl std::fmt::Debug for ContentExtent {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ContentExtent")
-            .field("owner", &self.owner)
-            .field("extent", &self.extent)
-            .field("bytes_len", &self.bytes.len())
-            .finish()
-    }
-}
-
-/// Authorized owner context for a binary large value extent.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
-pub struct LargeValueOwnerRef {
-    /// Optional table qualifier when the request is tied to a materialized row shape.
-    pub table: Option<groove::Intern<String>>,
-    /// Row that owns the large value column.
-    pub row: RowUuid,
-    /// Row-version state the value was observed through.
-    pub version: LargeValueVersionRef,
-    /// Serving-options identity that authorized observing this value.
-    pub read_view: ReadViewKey,
-}
-
-impl LargeValueOwnerRef {
-    /// Current/default read-view owner used by existing row-only fetch paths.
-    pub fn current_row(row: RowUuid) -> Self {
-        Self {
-            table: None,
-            row,
-            version: LargeValueVersionRef::CurrentVisible,
-            read_view: ReadViewKey::default(),
-        }
-    }
-}
-
-/// Version witness used to authorize a large value fetch.
-#[derive(
-    Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize,
-)]
-pub enum LargeValueVersionRef {
-    /// Resolve against the row version visible in the associated read view.
-    #[default]
-    CurrentVisible,
-    /// Resolve against a concrete content-version transaction.
-    Content {
-        /// Transaction that wrote the visible content value.
-        tx: TxId,
-    },
-    /// Resolve against a concrete deletion-register transaction.
-    Deletion {
-        /// Transaction that wrote the visible deletion register.
-        tx: TxId,
-    },
-}
-
 /// Wire handle for one usage-site subscription.
 ///
 /// This key addresses `Subscribe`, `ViewUpdate`, and `Unsubscribe` messages on
@@ -2207,8 +2128,6 @@ pub enum ProgramFactEntry {
     PredicateOutputSet(PredicateOutputSetEntry),
     /// Point row-read validation fact.
     PointRead(PointReadEntry),
-    /// Large-value extent authorization/materialization fact.
-    LargeValueExtent(LargeValueExtentEntry),
 }
 
 /// Compatibility alias while current code still imports the previous name.
@@ -2528,19 +2447,6 @@ pub enum PredicateOutputSetRoleEntry {
     Base,
     /// Validation/current side.
     Now,
-}
-
-/// Large-value extent authorization/materialization fact.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
-pub struct LargeValueExtentEntry {
-    /// Owner/version/read-view context.
-    pub owner: LargeValueOwnerRef,
-    /// Column name.
-    pub column: String,
-    /// Authorized extent.
-    pub extent: Extent,
-    /// Content digest.
-    pub digest: Vec<u8>,
 }
 
 /// Namespace used for migration-lens UUIDv5 ids.

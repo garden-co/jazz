@@ -579,9 +579,6 @@ fn fact_public_fields(
                 "predicate output set facts are not prepared yet"
             }
             ProgramFactSchema::PointReads(_) => "point-read facts are not prepared yet",
-            ProgramFactSchema::LargeValueExtents(_) => {
-                "large-value extent facts are not prepared yet"
-            }
             ProgramFactSchema::AuthorizedRows(_)
             | ProgramFactSchema::ResultMembership(_)
             | ProgramFactSchema::AggregateResult(_)
@@ -2642,7 +2639,6 @@ fn current_query_output_request(
                 matches!(output, CurrentQueryProgramOutput::MaintainedView)
                     || !query.array_subqueries.is_empty(),
             ),
-            large_values: Vec::new(),
         }),
         facts,
     }
@@ -2712,7 +2708,6 @@ fn app_row_path_projections(
                 fields,
                 children: app_row_path_projections(&child, &subquery.nested_arrays, &child_path),
                 hole_policy: PathHolePolicy::KeepParentWithHoles,
-                large_values: Vec::new(),
             }
         })
         .collect()
@@ -9407,299 +9402,13 @@ where
         Ok(())
     }
 
-    fn tx_versions_for_materialization<'a>(
-        &'a mut self,
-        tx_id: TxId,
-        cache: &'a mut LocalMaintainedMaterializationCache,
-    ) -> Result<&'a [VersionRow], Error> {
-        if let std::collections::btree_map::Entry::Vacant(entry) = cache.tx_versions.entry(tx_id) {
-            let versions = self.query_versions_for_tx(tx_id)?;
-            entry.insert(versions);
-        }
-        Ok(cache
-            .tx_versions
-            .get(&tx_id)
-            .expect("tx version cache was just populated")
-            .as_slice())
-    }
-
-    fn large_value_version_for_tx_with_materialization_cache(
-        &mut self,
-        tx_id: TxId,
-        row_uuid: RowUuid,
-        table_id: PhysicalTableId,
-        column_id: PhysicalColumnId,
-        cache: &mut LocalMaintainedMaterializationCache,
-    ) -> Result<(VersionRow, TableSchema, String, SchemaVersionId), Error> {
-        let versions = self.tx_versions_for_materialization(tx_id, cache)?.to_vec();
-        for version in versions {
-            if version.row_uuid() != row_uuid || version.layer() != VersionLayer::Content {
-                continue;
-            }
-            let schema = self
-                .schema_version_for_alias(version.schema_version_alias())
-                .ok_or(Error::InvalidStoredValue(
-                    "large-value ancestor schema alias is unknown",
-                ))?;
-            let Some(table_mapping) = self
-                .catalogue
-                .physical_mappings
-                .get(&schema)
-                .and_then(|mapping| mapping.tables.get(version.table()))
-            else {
-                continue;
-            };
-            if table_mapping.table_id != table_id {
-                continue;
-            }
-            let Some(column) = table_mapping
-                .columns
-                .iter()
-                .find_map(|(name, id)| (*id == column_id).then(|| name.clone()))
-            else {
-                continue;
-            };
-            let table = self.table_in_schema(version.table(), schema)?.clone();
-            return Ok((version, table, column, schema));
-        }
-        Err(Error::MissingTransaction(tx_id))
-    }
-
     fn current_row_from_materialized_version_with_materialization_cache(
         &mut self,
         table: &TableSchema,
         version: &VersionRow,
-        cache: &mut LocalMaintainedMaterializationCache,
+        _cache: &mut LocalMaintainedMaterializationCache,
     ) -> Result<CurrentRow, Error> {
-        if !table
-            .columns
-            .iter()
-            .any(|column| column.large_value.is_some())
-        {
-            return current_row_from_version_projection(table, version);
-        }
-        let cells =
-            self.materialized_cells_for_version_with_materialization_cache(table, version, cache)?;
-        current_row_from_materialized_cells(table, version, &cells)
-    }
-
-    fn materialized_cells_for_version_with_materialization_cache(
-        &mut self,
-        table: &TableSchema,
-        version: &VersionRow,
-        cache: &mut LocalMaintainedMaterializationCache,
-    ) -> Result<BTreeMap<String, Value>, Error> {
-        let mut cells = BTreeMap::new();
-        for column in &table.columns {
-            let value = if let Some(kind) = column.large_value {
-                Some(Value::Bytes(
-                    self.large_value_handle_for_version_with_materialization_cache(
-                        table,
-                        version,
-                        &column.name,
-                        kind,
-                        cache,
-                    )?,
-                ))
-            } else {
-                version.cell(table, &column.name)?
-            };
-            if let Some(value) = value {
-                cells.insert(column.name.clone(), value);
-            }
-        }
-        Ok(cells)
-    }
-
-    fn large_value_handle_for_version_with_materialization_cache(
-        &mut self,
-        table: &TableSchema,
-        version: &VersionRow,
-        column: &str,
-        kind: LargeValueKind,
-        cache: &mut LocalMaintainedMaterializationCache,
-    ) -> Result<Vec<u8>, Error> {
-        let canonical = self.canonical_history_version_for_maintained_witness(version)?;
-        let version = &canonical;
-        let authored_schema = self
-            .schema_version_for_alias(version.schema_version_alias())
-            .ok_or(Error::InvalidStoredValue(
-                "large-value schema alias is unknown",
-            ))?;
-        let (authored_table, authored_column) =
-            self.authored_large_value_identity(authored_schema, table, column)?;
-        let authored_table_schema = self
-            .table_in_schema(&authored_table, authored_schema)?
-            .clone();
-        let len = self.large_value_column_len_with_materialization_cache(
-            &authored_table_schema,
-            version,
-            &authored_column,
-            cache,
-        )?;
-        let refs = self.large_value_extent_refs_for_version_with_materialization_cache(
-            &authored_table_schema,
-            version,
-            &authored_column,
-            kind,
-            cache,
-        )?;
-        let tx_id = self.version_tx_id(version)?;
-        encode_large_value_handle(
-            authored_schema,
-            &authored_table,
-            version.row_uuid(),
-            &authored_column,
-            tx_id,
-            kind,
-            len,
-            refs,
-        )
-    }
-
-    fn large_value_column_len_with_materialization_cache(
-        &mut self,
-        table: &TableSchema,
-        winner: &VersionRow,
-        column: &str,
-        cache: &mut LocalMaintainedMaterializationCache,
-    ) -> Result<usize, Error> {
-        let mut suffix = Vec::new();
-        let mut current = self.version_tx_id(winner)?;
-        let mut checkpoint_len = None;
-        let schema = self
-            .schema_version_for_alias(winner.schema_version_alias())
-            .ok_or(Error::InvalidStoredValue(
-                "large-value schema alias is unknown",
-            ))?;
-        let (authored_table, authored_column) =
-            self.authored_large_value_identity(schema, table, column)?;
-        let (table_id, column_id) =
-            self.large_value_lineage_ids(schema, &authored_table, &authored_column)?;
-        loop {
-            let (version, version_table, version_column, version_schema) = self
-                .large_value_version_for_tx_with_materialization_cache(
-                    current,
-                    winner.row_uuid(),
-                    table_id,
-                    column_id,
-                    cache,
-                )?;
-            if let Some(value) = self.large_value_checkpoint(
-                version_schema,
-                &version_table,
-                version.row_uuid(),
-                &version_column,
-                current,
-            )? {
-                checkpoint_len = Some(value.len());
-                break;
-            }
-            let parents = version.parents();
-            suffix.push((version, version_table, version_column));
-            match parents.as_slice() {
-                [] => break,
-                [parent] => current = *parent,
-                _ => current = self.large_value_primary_parent(&parents)?,
-            }
-        }
-        suffix.reverse();
-
-        let mut value_len = checkpoint_len.unwrap_or_default();
-        for (version, version_table, version_column) in &suffix {
-            let Some(Value::Bytes(payload)) = version.cell(version_table, version_column)? else {
-                continue;
-            };
-            match column_large_value_kind(version_table, version_column)? {
-                LargeValueKind::Text => {
-                    let op = self.decode_text_storage_op(&payload)?;
-                    let value = vec![0; value_len];
-                    value_len = op
-                        .apply(&value)
-                        .map_err(|_| Error::InvalidStoredValue("invalid text op payload"))?
-                        .len();
-                }
-                LargeValueKind::Blob => {
-                    for op in text_oplog::decode(&payload)? {
-                        match op {
-                            TextOp::Insert { content, .. } => {
-                                value_len =
-                                    value_len.checked_add(text_content_len(&content)?).ok_or(
-                                        Error::InvalidStoredValue("large value length overflow"),
-                                    )?;
-                            }
-                            TextOp::Delete { len, .. } => {
-                                value_len = value_len.checked_sub(len).ok_or(
-                                    Error::InvalidStoredValue("large value length underflow"),
-                                )?;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        Ok(value_len)
-    }
-
-    fn large_value_extent_refs_for_version_with_materialization_cache(
-        &mut self,
-        table: &TableSchema,
-        winner: &VersionRow,
-        column: &str,
-        kind: LargeValueKind,
-        cache: &mut LocalMaintainedMaterializationCache,
-    ) -> Result<Vec<content_store::Extent>, Error> {
-        let mut suffix = Vec::new();
-        let mut current = self.version_tx_id(winner)?;
-        let schema = self
-            .schema_version_for_alias(winner.schema_version_alias())
-            .ok_or(Error::InvalidStoredValue(
-                "large-value schema alias is unknown",
-            ))?;
-        let (authored_table, authored_column) =
-            self.authored_large_value_identity(schema, table, column)?;
-        let (table_id, column_id) =
-            self.large_value_lineage_ids(schema, &authored_table, &authored_column)?;
-        loop {
-            let (version, version_table, version_column, _) = self
-                .large_value_version_for_tx_with_materialization_cache(
-                    current,
-                    winner.row_uuid(),
-                    table_id,
-                    column_id,
-                    cache,
-                )?;
-            let parents = version.parents();
-            suffix.push((version, version_table, version_column));
-            match parents.as_slice() {
-                [] => break,
-                [parent] => current = *parent,
-                _ => current = self.large_value_primary_parent(&parents)?,
-            }
-        }
-        suffix.reverse();
-
-        let mut refs = Vec::new();
-        for (version, version_table, version_column) in &suffix {
-            let Some(Value::Bytes(payload)) = version.cell(version_table, version_column)? else {
-                continue;
-            };
-            match kind {
-                LargeValueKind::Text => {
-                    if let Some(extent_payload) = payload.strip_prefix(TEXT_EXTENT_OPS_MAGIC) {
-                        refs.extend(content_refs_in_text_ops(text_oplog::decode(
-                            extent_payload,
-                        )?));
-                    }
-                }
-                LargeValueKind::Blob => {
-                    refs.extend(content_refs_in_text_ops(text_oplog::decode(&payload)?));
-                }
-            }
-        }
-        refs.sort();
-        refs.dedup();
-        Ok(refs)
+        current_row_from_version_projection(table, version)
     }
 
     fn current_row_from_aggregate_result_payload(

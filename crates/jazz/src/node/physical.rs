@@ -4424,8 +4424,6 @@ pub(super) fn physical_column_epoch_is_compatible(
     };
 
     physical_value_epoch_is_compatible(&source_column.column_type, &target_column.column_type)
-        && source_column.large_value == target_column.large_value
-        && source_column.text_merge_spec == target_column.text_merge_spec
         && source_table.merge_strategy(source_column_name)
             == target_table.merge_strategy(target_column_name)
 }

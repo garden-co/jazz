@@ -11,15 +11,13 @@ use crate::tools::object::ObjectId;
 use crate::tools::public_api::policy::{CmpOp, Operation, PolicyExpr, PolicyValue};
 use crate::tools::public_api::types::{
     ColumnDescriptor, ColumnMergeStrategy, ColumnName, ColumnType, EnumCaseDescriptor,
-    LargeValueKind, RowDescriptor, Schema, SchemaHash, TableName, TablePolicies, TableSchema,
-    Value,
+    RowDescriptor, Schema, SchemaHash, TableName, TablePolicies, TableSchema, Value,
 };
 
 use crate::tools::schema_lens::{LensOp, LensTransform};
 
 /// Current encoding version.
-const SCHEMA_VERSION: u8 = 7;
-const SCHEMA_VERSION_WITHOUT_LARGE_VALUE: u8 = 6;
+const SCHEMA_VERSION: u8 = 8;
 const LENS_VERSION: u8 = 3;
 const LENS_VERSION_WITHOUT_LARGE_VALUE: u8 = 2;
 const PERMISSIONS_VERSION: u8 = 1;
@@ -104,7 +102,7 @@ pub fn decode_schema(data: &[u8]) -> Result<Schema, CatalogueEncodingError> {
         });
     }
 
-    if data[0] != SCHEMA_VERSION && data[0] != SCHEMA_VERSION_WITHOUT_LARGE_VALUE {
+    if data[0] != SCHEMA_VERSION {
         return Err(CatalogueEncodingError::UnsupportedVersion {
             found: data[0],
             expected: SCHEMA_VERSION,
@@ -242,17 +240,6 @@ fn encode_column_descriptor(buf: &mut Vec<u8>, col: &ColumnDescriptor) {
         }
         None => buf.push(0),
     }
-    match col.large_value {
-        Some(LargeValueKind::Text) => {
-            buf.push(1);
-            buf.push(1);
-        }
-        Some(LargeValueKind::Blob) => {
-            buf.push(1);
-            buf.push(2);
-        }
-        None => buf.push(0),
-    }
 }
 
 fn decode_column_descriptor(
@@ -290,26 +277,6 @@ fn decode_column_descriptor(
     } else {
         None
     };
-    let large_value = if schema_version >= SCHEMA_VERSION {
-        let has_large_value = read_u8(data, offset)? != 0;
-        if !has_large_value {
-            None
-        } else {
-            match read_u8(data, offset)? {
-                1 => Some(LargeValueKind::Text),
-                2 => Some(LargeValueKind::Blob),
-                tag => {
-                    return Err(CatalogueEncodingError::InvalidTypeTag {
-                        tag,
-                        context: "column_large_value",
-                    });
-                }
-            }
-        }
-    } else {
-        None
-    };
-
     Ok(ColumnDescriptor {
         name: ColumnName::new(name),
         column_type,
@@ -317,7 +284,6 @@ fn decode_column_descriptor(
         references,
         default,
         merge_strategy,
-        large_value,
     })
 }
 
@@ -673,12 +639,8 @@ fn decode_table_schema(
     })
 }
 
-fn schema_version_for_lens_payload(lens_version: u8) -> u8 {
-    if lens_version >= LENS_VERSION {
-        SCHEMA_VERSION
-    } else {
-        SCHEMA_VERSION_WITHOUT_LARGE_VALUE
-    }
+fn schema_version_for_lens_payload(_lens_version: u8) -> u8 {
+    SCHEMA_VERSION
 }
 
 // ============================================================================

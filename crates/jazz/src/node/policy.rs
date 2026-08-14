@@ -587,8 +587,6 @@ fn policy_tables_are_directly_compatible(source: &TableSchema, target: &TableSch
             .iter()
             .zip(target.columns.iter())
             .all(|(source, target)| {
-                source.name == target.name
-                    && source.column_type == target.column_type
-                    && source.large_value == target.large_value
+                source.name == target.name && source.column_type == target.column_type
             })
 }

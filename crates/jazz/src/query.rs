@@ -3159,14 +3159,7 @@ fn planner_column_type<'a>(
     if let Some(column_type) = executable_magic_column_type(column)? {
         return Ok(column_type);
     }
-    let column = column_schema(table, column)?;
-    if column.large_value.is_some() {
-        return Err(QueryError::LargeValueColumnInQuery {
-            table: table.name.clone(),
-            column: column.name.clone(),
-        });
-    }
-    Ok(&column.column_type)
+    Ok(&column_schema(table, column)?.column_type)
 }
 
 fn executable_magic_column_type(column: &str) -> Result<Option<&'static ColumnType>, QueryError> {

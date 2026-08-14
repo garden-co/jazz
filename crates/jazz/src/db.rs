@@ -38,25 +38,24 @@ pub use crate::node::CommitUnitTrust;
 pub use crate::node::NodeOpenReceipt as DbOpenReceipt;
 use crate::node::query_engine::QueryAuthorizationMode;
 use crate::node::{
-    CommitUnitIngestContext, CurrentRow, EdgeCacheBudget, LargeValueEditCommit, LargeValueEditOp,
-    LocalMaintainedViewSubscription, LocalMaintainedViewSubscriptionUpdate, MergeableCommit,
-    NodeState, PreparedQueryPlanHandle, QueryReadProfile, RelationEdge, RelationSnapshot,
-    RowProvenance, ViewUpdateParts,
+    CommitUnitIngestContext, CurrentRow, EdgeCacheBudget, LocalMaintainedViewSubscription,
+    LocalMaintainedViewSubscriptionUpdate, MergeableCommit, NodeState, PreparedQueryPlanHandle,
+    QueryReadProfile, RelationEdge, RelationSnapshot, RowProvenance, ViewUpdateParts,
 };
 use crate::peer::{PeerRole, PeerState};
 pub use crate::protocol::PermissionAdvice;
 #[cfg(feature = "sync-autopsy")]
 use crate::protocol::expand_version_carriers;
 use crate::protocol::{
-    AuthorizationScopeReceipt, BindingViewKey, ContentExtent, CoverageKey, CurrentWriteSchema,
-    LargeValueOwnerRef, LensOp, MigrationLens, PermissionAdviceAction, PermissionAdviceRequestId,
-    ReadViewKey, ReadViewSourceSpec, ReadViewSpec, RegisterShapeOptions, SchemaLineagePublication,
+    AuthorizationScopeReceipt, BindingViewKey, CoverageKey, CurrentWriteSchema, LensOp,
+    MigrationLens, PermissionAdviceAction, PermissionAdviceRequestId, ReadViewKey,
+    ReadViewSourceSpec, ReadViewSpec, RegisterShapeOptions, SchemaLineagePublication,
     SchemaVersion, ShapeAst, Subscribe, SubscribeRejectReason, SubscribeServerFailureCode,
     SubscriptionKey, SyncMessage, TableLens,
 };
 use crate::protocol_limits::{
-    MAX_FETCH_BRANCH_METADATA, validate_content_extents, validate_fetch_branch_metadata,
-    validate_fetch_row_versions, validate_known_state_declaration, validate_shape_ast_size,
+    MAX_FETCH_BRANCH_METADATA, validate_fetch_branch_metadata, validate_fetch_row_versions,
+    validate_known_state_declaration, validate_shape_ast_size,
 };
 use crate::query::{
     Binding, BindingId, Operand, Predicate, Query, QueryError, RelationQuery, ShapeId,
@@ -528,10 +527,7 @@ fn direct_schema_view_lens(
                 .iter()
                 .find(|column| column.name == target_column.name)
             {
-                Some(source_column)
-                    if source_column.column_type == target_column.column_type
-                        && source_column.large_value == target_column.large_value
-                        && source_column.text_merge_spec == target_column.text_merge_spec => {}
+                Some(source_column) if source_column.column_type == target_column.column_type => {}
                 Some(_) => {
                     return Err(Error::new(
                         ErrorCode::Schema,
@@ -604,10 +600,6 @@ struct MutationErrorState {
 enum PendingUpstreamCommand {
     Subscribe(PendingUpstreamSubscription),
     Unsubscribe(SubscriptionKey),
-    FetchContentExtent {
-        owner: LargeValueOwnerRef,
-        extent: crate::node::content_store::Extent,
-    },
     AuthorizationScopeIntent {
         request_id: PermissionAdviceRequestId,
         action: PermissionAdviceAction,
@@ -854,7 +846,6 @@ where
     ///         author: AuthorId::from_bytes([2; 16]),
     ///     },
     ///     id_source: Some(Box::new(SeededRowIdSource::new(1))),
-    ///     large_value_checkpoint_op_interval: 1024,
     /// }))?;
     ///
     /// let todos = db.prepare_query(&db.table("todos"))?;
@@ -867,13 +858,7 @@ where
             SchemaViewId::for_schema(&config.schema),
             config.schema.clone(),
         )])));
-        let node = NodeState::new_with_large_value_checkpoint_op_interval(
-            config.identity.node,
-            config.schema.clone(),
-            config.storage,
-            false,
-            config.large_value_checkpoint_op_interval,
-        )?;
+        let node = NodeState::new(config.identity.node, config.schema.clone(), config.storage)?;
         let node = Node::new(node);
         node.restore_pending_uploads(config.identity)?;
         Ok(Self {
@@ -907,7 +892,6 @@ where
             config.schema.clone(),
             config.storage,
             false,
-            config.large_value_checkpoint_op_interval,
         )?;
         let db = Self {
             schema: config.schema,
@@ -1472,48 +1456,6 @@ where
             .borrow_mut()
             .row_provenance(row)
             .map_err(Into::into)
-    }
-
-    /// Read the bytes behind a materialized large-value handle.
-    ///
-    /// This is explicit content access: ordinary row reads return handles and
-    /// never pull extent bytes. If the referenced extents are not hydrated
-    /// locally, this returns a protocol error whose source is the node's
-    /// `MissingContentExtent` condition.
-    pub fn hydrate_large_value_handle(&self, handle: &[u8]) -> Result<Vec<u8>, Error> {
-        let mut attempts = 0usize;
-        loop {
-            let result = {
-                self.node
-                    .node
-                    .borrow_mut()
-                    .hydrate_large_value_handle(handle)
-            };
-            match result {
-                Ok(bytes) => return Ok(bytes),
-                Err(crate::node::Error::MissingContentExtent(extent)) if attempts < 16 => {
-                    attempts += 1;
-                    self.node.queue_content_extent_fetch(extent);
-                    for _ in 0..64 {
-                        self.tick()?;
-                        let result = {
-                            self.node
-                                .node
-                                .borrow_mut()
-                                .hydrate_large_value_handle(handle)
-                        };
-                        match result {
-                            Ok(bytes) => return Ok(bytes),
-                            Err(crate::node::Error::MissingContentExtent(_)) => {
-                                std::thread::yield_now();
-                            }
-                            Err(error) => return Err(error.into()),
-                        }
-                    }
-                }
-                Err(error) => return Err(error.into()),
-            }
-        }
     }
 
     /// Read local settled history at an exact global sequence cut.
@@ -2761,33 +2703,6 @@ where
             Some(authored_columns),
             now_ms,
         )
-    }
-
-    /// Apply explicit edit operations to a text/blob column.
-    ///
-    /// Insert and delete positions are byte offsets relative to the current
-    /// local parent value for the column.
-    pub fn edit_text(
-        &self,
-        table: &str,
-        row: RowUuid,
-        column: &str,
-        edit: TextEdit,
-    ) -> Result<WriteHandle<S>, Error> {
-        self.table_schema(table)?;
-        let tx_id = self.node.node.borrow_mut().commit_large_value_edit(
-            LargeValueEditCommit::new(table, row, column, self.next_now_ms())
-                .made_by(self.identity.author)
-                .ops(edit.into_node_ops()),
-        )?;
-        let local_tier = self.finalize_local_commit(tx_id)?;
-        self.refresh_subscriptions()?;
-        Ok(WriteHandle {
-            node: Rc::downgrade(&self.node.node),
-            row_uuid: row,
-            tx_id,
-            local_tier,
-        })
     }
 
     /// Upsert a row locally.
@@ -4380,9 +4295,6 @@ where
             .local_row_for_client_identity(table, row, identity)?
             .ok_or_else(|| read_for_write_denied("partial UPDATE", table))?;
         for column in &table_schema.columns {
-            if column.large_value.is_some() {
-                continue;
-            }
             if let Some(value) = existing.cell(table_schema, &column.name) {
                 cells.insert(
                     column.name.clone(),
@@ -4425,9 +4337,6 @@ where
             .local_row_for_trusted_identity(table, row, identity)?
             .ok_or_else(|| read_for_write_denied("partial UPDATE", table))?;
         for column in &table_schema.columns {
-            if column.large_value.is_some() {
-                continue;
-            }
             if let Some(value) = existing.cell(table_schema, &column.name) {
                 cells.insert(
                     column.name.clone(),
@@ -5254,16 +5163,6 @@ where
             }
             callback(&event);
         }
-    }
-
-    fn queue_content_extent_fetch(&self, extent: crate::node::content_store::Extent) {
-        self.upstream_subscriptions
-            .borrow_mut()
-            .push(PendingUpstreamCommand::FetchContentExtent {
-                owner: LargeValueOwnerRef::current_row(extent.row),
-                extent,
-            });
-        self.schedule_tick(TickUrgency::Immediate);
     }
 
     fn request_permission_advice(&self, action: PermissionAdviceAction) -> PermissionAdviceFuture {
@@ -7502,23 +7401,6 @@ where
                                 return Err(transport_error(error));
                             }
                         }
-                        PendingUpstreamCommand::FetchContentExtent { owner, extent } => {
-                            if let Err(error) =
-                                self.transport.send(SyncMessage::FetchContentExtent {
-                                    owner: owner.clone(),
-                                    extent: extent.clone(),
-                                })
-                            {
-                                if handle_transport_backpressure(
-                                    &self.node,
-                                    &self.scheduler,
-                                    &error,
-                                ) {
-                                    return Ok(stats);
-                                }
-                                return Err(transport_error(error));
-                            }
-                        }
                         PendingUpstreamCommand::AuthorizationScopeIntent { request_id, action } => {
                             // An old or unauthenticated upstream must never receive a
                             // downgraded preflight.  Resolve conservatively instead.
@@ -9017,13 +8899,6 @@ where
                                 }
                             }
                         }
-                        SyncMessage::FetchContentExtent { owner, extent } => {
-                            let response = {
-                                let mut node = self.node.borrow_mut();
-                                peer.serve_content_extents(&mut node, owner.row, vec![extent])?
-                            };
-                            self.transport.send(response).map_err(transport_error)?;
-                        }
                         // Branch routing records select persistent partitions.
                         // Sessions may introduce their own locally-authored
                         // record only when its creator matches the authenticated
@@ -9075,13 +8950,6 @@ where
                                         })
                                         .map_err(transport_error)?;
                                 }
-                            }
-                            if let SyncMessage::ContentExtents { extents } = &other
-                                && let Err(message) = validate_content_extents(extents)
-                            {
-                                let _ = message;
-                                drop_peer_request(&self.node);
-                                continue;
                             }
                             let local_upload = match &other {
                                 SyncMessage::CommitUnit { tx, .. } => {
@@ -10272,9 +10140,6 @@ fn summarize_sync_message(message: &SyncMessage) -> String {
         SyncMessage::RowVersionPayloads { version_bundles } => {
             format!("RowVersionPayloads bundles={}", version_bundles.len())
         }
-        SyncMessage::ContentExtents { extents } => {
-            format!("ContentExtents extents={}", extents.len())
-        }
         SyncMessage::PermissionAdviceRequest { request_id, action } => {
             let (kind, table) = match action {
                 PermissionAdviceAction::Insert { table, .. } => ("insert", table),
@@ -10321,29 +10186,6 @@ where
         peer_payload_inventory.authorization_progress =
             Some(peer.authorization_progress_for_subscription(*subscription));
     }
-    let extents = match &message {
-        SyncMessage::ViewUpdate { .. } => BTreeSet::new(),
-        _ => node.borrow().content_refs_in_sync_message(&message)?,
-    };
-    let mut extents_by_row = BTreeMap::new();
-    for extent in extents {
-        extents_by_row
-            .entry(extent.row)
-            .or_insert_with(Vec::new)
-            .push(extent);
-    }
-    for (row, extents) in extents_by_row {
-        let response = {
-            let mut node = node.borrow_mut();
-            peer.serve_content_extents(&mut node, row, extents)?
-        };
-        #[cfg(feature = "sync-autopsy")]
-        sync_autopsy::record(format!(
-            "transport send {}",
-            summarize_sync_message(&response)
-        ));
-        transport.send(response).map_err(transport_error)?;
-    }
     #[cfg(feature = "sync-autopsy")]
     sync_autopsy::record(format!(
         "transport send {}",
@@ -10367,27 +10209,7 @@ fn send_with_local_content_extents<S>(
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
-    let extents = node.borrow().content_refs_in_sync_message(&message)?;
-    if !extents.is_empty() {
-        let response = {
-            let node = node.borrow();
-            let mut out = Vec::new();
-            for extent in extents {
-                out.push(ContentExtent {
-                    owner: LargeValueOwnerRef::current_row(extent.row),
-                    bytes: node.content_store().read(&extent)?,
-                    extent,
-                });
-            }
-            SyncMessage::ContentExtents { extents: out }
-        };
-        #[cfg(feature = "sync-autopsy")]
-        sync_autopsy::record(format!(
-            "transport send {}",
-            summarize_sync_message(&response)
-        ));
-        transport.send(response).map_err(transport_error)?;
-    }
+    let _ = node;
     #[cfg(feature = "sync-autopsy")]
     sync_autopsy::record(format!(
         "transport send {}",
@@ -10598,11 +10420,6 @@ pub struct DbConfig<S> {
     ///
     /// `None` selects the production source.
     pub id_source: Option<Box<dyn RowIdSource>>,
-    /// Local large-value checkpoint density in edit operations.
-    ///
-    /// Checkpoints are derived content-store state and are not synced. A zero
-    /// value is treated as one.
-    pub large_value_checkpoint_op_interval: usize,
 }
 
 impl<S> DbConfig<S> {
@@ -10613,7 +10430,6 @@ impl<S> DbConfig<S> {
             storage,
             identity,
             id_source: None,
-            large_value_checkpoint_op_interval: crate::node::LARGE_VALUE_CHECKPOINT_OP_INTERVAL,
         }
     }
 
@@ -10868,7 +10684,6 @@ pub mod doctest_support {
                 author: AuthorId::from_bytes([0xa1; 16]),
             },
             id_source: Some(Box::new(SeededRowIdSource::new(0x1111))),
-            large_value_checkpoint_op_interval: crate::node::LARGE_VALUE_CHECKPOINT_OP_INTERVAL,
         })
         .await
     }
@@ -11118,50 +10933,6 @@ fn subscriber_permission_subject(ingest: CommitUnitIngestContext) -> AuthorId {
 
 /// Row cells supplied to write methods.
 pub type RowCells = BTreeMap<String, Value>;
-
-/// Builder for explicit text/blob column edits.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct TextEdit {
-    ops: Vec<TextEditOp>,
-}
-
-impl TextEdit {
-    /// Construct an empty edit builder.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Insert bytes at `pos`.
-    pub fn insert(mut self, pos: usize, bytes: impl Into<Vec<u8>>) -> Self {
-        self.ops.push(TextEditOp::Insert {
-            pos,
-            bytes: bytes.into(),
-        });
-        self
-    }
-
-    /// Delete `len` bytes starting at `pos`.
-    pub fn delete(mut self, pos: usize, len: usize) -> Self {
-        self.ops.push(TextEditOp::Delete { pos, len });
-        self
-    }
-
-    fn into_node_ops(self) -> Vec<LargeValueEditOp> {
-        self.ops
-            .into_iter()
-            .map(|op| match op {
-                TextEditOp::Insert { pos, bytes } => LargeValueEditOp::Insert(pos, bytes),
-                TextEditOp::Delete { pos, len } => LargeValueEditOp::Delete(pos, len),
-            })
-            .collect()
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum TextEditOp {
-    Insert { pos: usize, bytes: Vec<u8> },
-    Delete { pos: usize, len: usize },
-}
 
 /// Build [`RowCells`] with bare identifier column names.
 ///

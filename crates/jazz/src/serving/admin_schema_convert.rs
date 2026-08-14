@@ -3,7 +3,7 @@ use std::fmt;
 
 use crate::groove::records::ScalarEnumSchema;
 use crate::groove::schema::ColumnType;
-use crate::schema::{ColumnSchema, JazzSchema, LargeValueKind, MergeStrategy, TableSchema};
+use crate::schema::{ColumnSchema, JazzSchema, MergeStrategy, TableSchema};
 use serde_json::Value;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -158,49 +158,21 @@ fn convert_column(
         column_type_value,
         &format!("{path}.column_type"),
     )?;
-    if let Some(kind) = object.get("large_value") {
-        let kind = kind.as_str().ok_or_else(|| {
-            err(
-                format!("{path}.large_value"),
-                "large_value must be a string",
-            )
-        })?;
-        if !matches!(column.column_type, ColumnType::Bytes) {
-            return Err(err(
-                format!("{path}.large_value"),
-                "large_value is only supported on Bytea columns",
-            ));
-        }
-        column.large_value = Some(match kind {
-            "Blob" => LargeValueKind::Blob,
-            "Text" => LargeValueKind::Text,
-            _ => {
-                return Err(err(
-                    format!("{path}.large_value"),
-                    "large_value must be Blob or Text",
-                ));
-            }
-        });
-    } else if object
+    if object.contains_key("large_value") {
+        return Err(err(
+            format!("{path}.large_value"),
+            "large values have been removed from this core version",
+        ));
+    }
+    if object
         .get("large")
         .and_then(Value::as_bool)
         .unwrap_or(false)
     {
-        match column.column_type {
-            ColumnType::String => {
-                column.column_type = ColumnType::Bytes;
-                column.large_value = Some(LargeValueKind::Text);
-            }
-            ColumnType::Bytes => {
-                column.large_value = Some(LargeValueKind::Blob);
-            }
-            _ => {
-                return Err(err(
-                    format!("{path}.large"),
-                    "large columns must be Text/String or Bytea",
-                ));
-            }
-        }
+        return Err(err(
+            format!("{path}.large"),
+            "large values have been removed from this core version",
+        ));
     }
     if object
         .get("timestamp")

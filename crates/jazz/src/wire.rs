@@ -1065,7 +1065,6 @@ mod tests {
                         user_metadata_json: None,
                         target_lineage: crate::tx::BranchLineage::Root,
                         branch_merge: None,
-                        merge_strategy: None,
                     },
                     versions: vec![
                         VersionRecord::from_cells(
@@ -1331,7 +1330,6 @@ mod tests {
                     user_metadata_json: None,
                     target_lineage: crate::tx::BranchLineage::Root,
                     branch_merge: None,
-                    merge_strategy: None,
                 },
                 versions: Vec::new(),
             },

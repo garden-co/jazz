@@ -68,7 +68,6 @@ fn open_receipt_counts_physical_recovery_scans_exactly() {
         schema,
         storage,
         false,
-        LARGE_VALUE_CHECKPOINT_OP_INTERVAL,
     )
     .unwrap();
 
@@ -96,7 +95,6 @@ fn open_receipt_attributes_catalogue_finalization_when_aliases_are_first_persist
         schema,
         storage,
         false,
-        LARGE_VALUE_CHECKPOINT_OP_INTERVAL,
     )
     .unwrap();
 
