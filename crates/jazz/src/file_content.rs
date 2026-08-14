@@ -170,11 +170,102 @@ impl FileContentAdapter {
         context: ContentReadContext,
         store: &mut dyn ImmutableContentStore,
     ) -> Result<ContentManifest, ManifestError> {
-        let bytes = self.materialize(manifest, &MaterializationRequest::Full, context, store)?;
+        let total = self.root_length(manifest.root, context, store)?;
+        let segments = planned_segments(total, &canonical_edits(&manifest.edit_tail)?)?;
+        let leaves = collect_leaves(manifest.root, context, store)?;
+        let mut next = Vec::new();
+        for segment in segments {
+            match segment {
+                Segment::Patch(bytes) => {
+                    for chunk in bytes.chunks(LEAF_BYTES) {
+                        next.push(self.put_leaf(chunk, context, store)?);
+                    }
+                }
+                Segment::Base { start, length } => {
+                    append_base_leaves(&leaves, start, length, context, store, &mut next)?
+                }
+            }
+        }
         Ok(ContentManifest {
-            root: self.store_bytes(&bytes, context, store)?,
+            root: self.store_leaf_ids(
+                next,
+                total_after_segments(&planned_segments(
+                    total,
+                    &canonical_edits(&manifest.edit_tail)?,
+                )?)?,
+                context,
+                store,
+            )?,
             edit_tail: Vec::new(),
         })
+    }
+
+    fn put_leaf(
+        &self,
+        bytes: &[u8],
+        context: ContentReadContext,
+        store: &mut dyn ImmutableContentStore,
+    ) -> Result<ContentId, ManifestError> {
+        store.put_if_absent_or_identical(
+            ContentAddress {
+                domain: context.domain,
+                adapter_kind: FILE_ADAPTER_KIND,
+                kind: ImmutableContentKind::Leaf,
+            },
+            leaf_payload(bytes),
+        )
+    }
+    fn store_leaf_ids(
+        &self,
+        mut level: Vec<ContentId>,
+        length: u64,
+        context: ContentReadContext,
+        store: &mut dyn ImmutableContentStore,
+    ) -> Result<ContentId, ManifestError> {
+        if level.is_empty() {
+            level.push(self.put_leaf(&[], context, store)?);
+        }
+        while level.len() > 1 {
+            let mut next = Vec::new();
+            for children in level.chunks(FANOUT) {
+                next.push(store.put_if_absent_or_identical(
+                    ContentAddress {
+                        domain: context.domain,
+                        adapter_kind: FILE_ADAPTER_KIND,
+                        kind: ImmutableContentKind::Node,
+                    },
+                    node_payload(children, context, store)?,
+                )?);
+            }
+            level = next;
+        }
+        let mut root = b"FRT1".to_vec();
+        root.extend_from_slice(&level[0].0);
+        root.extend_from_slice(&length.to_le_bytes());
+        store.put_if_absent_or_identical(
+            ContentAddress {
+                domain: context.domain,
+                adapter_kind: FILE_ADAPTER_KIND,
+                kind: ImmutableContentKind::Root,
+            },
+            root,
+        )
+    }
+    fn root_length(
+        &self,
+        root: ContentId,
+        context: ContentReadContext,
+        store: &dyn ImmutableContentStore,
+    ) -> Result<u64, ManifestError> {
+        let bytes = fetch(root, ImmutableContentKind::Root, context, store)?;
+        if bytes.len() != 44 || &bytes[..4] != b"FRT1" {
+            return Err(ManifestError::Malformed);
+        }
+        Ok(u64::from_le_bytes(
+            bytes[36..44]
+                .try_into()
+                .map_err(|_| ManifestError::Malformed)?,
+        ))
     }
 
     fn root_bytes(
@@ -261,6 +352,18 @@ impl ContentManifestAdapter for FileContentAdapter {
             if let MaterializationRequest::Range { offset, length } = request {
                 return self.root_range(manifest.root, *offset, *length, context, store);
             }
+        }
+        if let MaterializationRequest::Range { offset, length } = request {
+            let total = self.root_length(manifest.root, context, store)?;
+            return materialize_range(
+                manifest.root,
+                total,
+                &canonical_edits(&manifest.edit_tail)?,
+                *offset,
+                *length,
+                context,
+                store,
+            );
         }
         let mut value = self.root_bytes(manifest.root, context, store)?;
         for edit in canonical_edits(&manifest.edit_tail)? {
@@ -561,6 +664,189 @@ fn canonical_edits(raw: &[Vec<u8>]) -> Result<Vec<FileEdit>, ManifestError> {
     }
     edits.sort_by(|a, b| edit_order(b, a));
     Ok(edits)
+}
+#[derive(Clone)]
+enum Segment {
+    Base { start: u64, length: u64 },
+    Patch(Vec<u8>),
+}
+fn planned_segments(total: u64, edits: &[FileEdit]) -> Result<Vec<Segment>, ManifestError> {
+    let mut ascending = edits.to_vec();
+    ascending.sort_by(edit_order);
+    let mut cursor = 0u64;
+    let mut out = Vec::new();
+    for edit in ascending {
+        let (offset, delete, patch) = match edit {
+            FileEdit::Overwrite {
+                offset,
+                delete,
+                bytes,
+            } => (offset, delete, bytes),
+            FileEdit::Insert { offset, bytes } => (offset, 0, bytes),
+            FileEdit::Delete { offset, delete } => (offset, delete, Vec::new()),
+        };
+        let end = offset.checked_add(delete).ok_or(ManifestError::Malformed)?;
+        if offset < cursor || end > total {
+            return Err(ManifestError::Malformed);
+        }
+        if offset > cursor {
+            out.push(Segment::Base {
+                start: cursor,
+                length: offset - cursor,
+            });
+        }
+        if !patch.is_empty() {
+            out.push(Segment::Patch(patch));
+        }
+        cursor = end;
+    }
+    if cursor < total {
+        out.push(Segment::Base {
+            start: cursor,
+            length: total - cursor,
+        });
+    }
+    Ok(out)
+}
+fn total_after_segments(segments: &[Segment]) -> Result<u64, ManifestError> {
+    segments.iter().try_fold(0u64, |n, s| {
+        n.checked_add(match s {
+            Segment::Base { length, .. } => *length,
+            Segment::Patch(b) => b.len() as u64,
+        })
+        .ok_or(ManifestError::Malformed)
+    })
+}
+fn materialize_range(
+    root: ContentId,
+    total: u64,
+    edits: &[FileEdit],
+    offset: u64,
+    length: u64,
+    context: ContentReadContext,
+    store: &dyn ImmutableContentStore,
+) -> Result<Vec<u8>, ManifestError> {
+    let segments = planned_segments(total, edits)?;
+    let final_len = total_after_segments(&segments)?;
+    let end = offset.checked_add(length).ok_or(ManifestError::Malformed)?;
+    if end > final_len {
+        return Err(ManifestError::Malformed);
+    }
+    let mut cursor: u64 = 0;
+    let mut out =
+        Vec::with_capacity(usize::try_from(length).map_err(|_| ManifestError::Malformed)?);
+    for s in segments {
+        let slen = match &s {
+            Segment::Base { length, .. } => *length,
+            Segment::Patch(b) => b.len() as u64,
+        };
+        let stop = cursor.checked_add(slen).ok_or(ManifestError::Malformed)?;
+        let from = offset.max(cursor);
+        let to = end.min(stop);
+        if from < to {
+            let local = from - cursor;
+            let take = to - from;
+            match s {
+                Segment::Base { start, .. } => out.extend_from_slice(
+                    &FileContentAdapter.root_range(root, start + local, take, context, store)?,
+                ),
+                Segment::Patch(b) => {
+                    let a = usize::try_from(local).map_err(|_| ManifestError::Malformed)?;
+                    let z = usize::try_from(local + take).map_err(|_| ManifestError::Malformed)?;
+                    out.extend_from_slice(b.get(a..z).ok_or(ManifestError::Malformed)?);
+                }
+            }
+        }
+        cursor = stop;
+    }
+    Ok(out)
+}
+fn collect_leaves(
+    root: ContentId,
+    context: ContentReadContext,
+    store: &dyn ImmutableContentStore,
+) -> Result<Vec<(ContentId, u64)>, ManifestError> {
+    let root = fetch(root, ImmutableContentKind::Root, context, store)?;
+    let id = ContentId(
+        root.get(4..36)
+            .ok_or(ManifestError::Malformed)?
+            .try_into()
+            .map_err(|_| ManifestError::Malformed)?,
+    );
+    let mut out = Vec::new();
+    collect_leaf_ids(id, context, store, &mut out)?;
+    Ok(out)
+}
+fn collect_leaf_ids(
+    id: ContentId,
+    context: ContentReadContext,
+    store: &dyn ImmutableContentStore,
+    out: &mut Vec<(ContentId, u64)>,
+) -> Result<(), ManifestError> {
+    if let Ok(b) = fetch(id, ImmutableContentKind::Leaf, context, store) {
+        out.push((
+            id,
+            u64::try_from(b.len() - 4).map_err(|_| ManifestError::Malformed)?,
+        ));
+        return Ok(());
+    };
+    let b = fetch(id, ImmutableContentKind::Node, context, store)?;
+    let n = *b.get(4).ok_or(ManifestError::Malformed)? as usize;
+    if n == 0 || n > FANOUT || b.len() != 5 + n * 40 {
+        return Err(ManifestError::Malformed);
+    };
+    for i in 0..n {
+        let at = 5 + i * 40;
+        let child = ContentId(
+            b[at..at + 32]
+                .try_into()
+                .map_err(|_| ManifestError::Malformed)?,
+        );
+        let expected = u64::from_le_bytes(
+            b[at + 32..at + 40]
+                .try_into()
+                .map_err(|_| ManifestError::Malformed)?,
+        );
+        let before = out.iter().map(|(_, l)| *l).sum::<u64>();
+        collect_leaf_ids(child, context, store, out)?;
+        let after = out.iter().map(|(_, l)| *l).sum::<u64>();
+        if after.checked_sub(before) != Some(expected) {
+            return Err(ManifestError::Malformed);
+        }
+    }
+    Ok(())
+}
+fn append_base_leaves(
+    leaves: &[(ContentId, u64)],
+    start: u64,
+    length: u64,
+    context: ContentReadContext,
+    store: &mut dyn ImmutableContentStore,
+    out: &mut Vec<ContentId>,
+) -> Result<(), ManifestError> {
+    let end = start.checked_add(length).ok_or(ManifestError::Malformed)?;
+    let mut cursor: u64 = 0;
+    for (id, len) in leaves {
+        let next = cursor.checked_add(*len).ok_or(ManifestError::Malformed)?;
+        let a = start.max(cursor);
+        let z = end.min(next);
+        if a < z {
+            if a == cursor && z == next {
+                out.push(*id)
+            } else {
+                let b = fetch(*id, ImmutableContentKind::Leaf, context, store)?;
+                let x = usize::try_from(a - cursor).map_err(|_| ManifestError::Malformed)?;
+                let y = usize::try_from(z - cursor).map_err(|_| ManifestError::Malformed)?;
+                let fragment = b[4 + x..4 + y].to_vec();
+                out.push(FileContentAdapter.put_leaf(&fragment, context, store)?);
+            }
+        }
+        cursor = next;
+    }
+    if end > cursor {
+        return Err(ManifestError::Malformed);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
