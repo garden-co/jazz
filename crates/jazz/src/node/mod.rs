@@ -931,6 +931,13 @@ where
     where
         S: ReopenableStorage,
     {
+        for table in &schema.tables {
+            for column in &table.columns {
+                if let Some(manifest) = &column.content_manifest {
+                    crate::content_manifest::validate_content_manifest_schema(manifest)?;
+                }
+            }
+        }
         let current_schema_version_id = schema.version_id();
         #[cfg(feature = "testing")]
         let started = receipt.as_ref().map(|_| Instant::now());

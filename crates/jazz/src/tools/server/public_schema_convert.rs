@@ -522,20 +522,27 @@ fn convert_column(
 ) -> Result<CoreColumnSchema, SchemaConversionError> {
     if let Some(manifest) = &column.content_manifest {
         let tail_entry_type = validate_content_manifest_column(table, column)?;
+        let manifest = ContentManifestSchema::with_tail_entry_type(
+            &manifest.adapter_kind,
+            tail_entry_type,
+            manifest.max_tail_entries,
+            manifest.max_tail_bytes,
+        )
+        .map_err(|error| {
+            err(
+                format!("$.{}.{}", table.as_str(), column.name.as_str()),
+                error.to_string(),
+            )
+        })?;
+        crate::content_manifest::validate_content_manifest_schema(&manifest).map_err(|error| {
+            err(
+                format!("$.{}.{}", table.as_str(), column.name.as_str()),
+                error.to_string(),
+            )
+        })?;
         return Ok(CoreColumnSchema::content_manifest(
             column.name.as_str(),
-            ContentManifestSchema::with_tail_entry_type(
-                &manifest.adapter_kind,
-                tail_entry_type,
-                manifest.max_tail_entries,
-                manifest.max_tail_bytes,
-            )
-            .map_err(|error| {
-                err(
-                    format!("$.{}.{}", table.as_str(), column.name.as_str()),
-                    error.to_string(),
-                )
-            })?,
+            manifest,
         ));
     }
     let mut column_type = convert_column_type(table, column.name.as_str(), &column.column_type)?;

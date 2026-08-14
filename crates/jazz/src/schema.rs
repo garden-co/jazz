@@ -298,6 +298,18 @@ impl JazzSchema {
         assign_content_manifests(&mut schema, manifests, |column, manifest| {
             column.column_type == manifest.cell_type()
         })?;
+        for table in &schema.tables {
+            for column in &table.columns {
+                if let Some(manifest) = &column.content_manifest {
+                    crate::content_manifest::validate_content_manifest_schema(manifest).map_err(
+                        |_| SchemaWireError::InvalidManifestMetadata {
+                            table: table.name.clone(),
+                            column: column.name.clone(),
+                        },
+                    )?;
+                }
+            }
+        }
         Ok(schema)
     }
 }

@@ -8,6 +8,8 @@
 
 use std::collections::BTreeMap;
 
+use groove::records::{Value, ValueType};
+
 use crate::content_manifest::{
     ContentAddress, ContentDomainId, ContentId, ContentManifest, ContentManifestAdapter,
     ContentManifestSchema, ContentReadContext, ImmutableContentKind, ImmutableContentStore,
@@ -104,8 +106,9 @@ impl TextContentAdapter {
             return Err(ManifestError::InvalidSchema);
         }
         Ok(Self {
-            schema: ContentManifestSchema::new(
+            schema: ContentManifestSchema::with_tail_entry_type(
                 TEXT_ADAPTER_KIND,
+                ValueType::Bytes,
                 max_tail_entries,
                 max_tail_bytes,
             )?,
@@ -155,7 +158,7 @@ impl TextContentAdapter {
         let root = self.load_root(manifest.root, context, store)?;
         let mut logical_length = root.length();
         for operation in &manifest.edit_tail {
-            let edit = decode_edit(operation)?;
+            let edit = decode_edit(value_bytes(operation)?)?;
             validate_edit_offset(logical_length, &edit)?;
             logical_length = logical_length
                 .checked_add(scalar_len(&edit.text))
@@ -169,7 +172,7 @@ impl TextContentAdapter {
             text: text.to_owned(),
         });
         let mut tail = manifest.edit_tail.clone();
-        tail.push(encoded);
+        tail.push(Value::Bytes(encoded));
         let candidate = ContentManifest {
             root: manifest.root,
             edit_tail: tail,
@@ -179,7 +182,7 @@ impl TextContentAdapter {
         }
         let mut promoted = root;
         for operation in &candidate.edit_tail {
-            let edit = decode_edit(operation)?;
+            let edit = decode_edit(value_bytes(operation)?)?;
             promoted = self.insert_into_rope(
                 promoted,
                 edit.at_code_point,
@@ -204,8 +207,8 @@ impl TextContentAdapter {
     }
 
     /// Decodes a text operation for callers that need to inspect a tail.
-    pub fn decode_edit(operation: &[u8]) -> Result<TextEdit, ManifestError> {
-        decode_edit(operation)
+    pub fn decode_edit(operation: &Value) -> Result<TextEdit, ManifestError> {
+        decode_edit(value_bytes(operation)?)
     }
 
     fn build_root(
@@ -470,11 +473,11 @@ impl TextContentAdapter {
         })
     }
 
-    fn apply_tail(&self, root: Rope, tail: &[Vec<u8>]) -> Result<String, ManifestError> {
+    fn apply_tail(&self, root: Rope, tail: &[Value]) -> Result<String, ManifestError> {
         let mut text = String::new();
         root.text(&mut text);
         for operation in tail {
-            let edit = decode_edit(operation)?;
+            let edit = decode_edit(value_bytes(operation)?)?;
             text = insert_at_code_point(&text, edit.at_code_point, &edit.text)?;
         }
         Ok(text)
@@ -492,8 +495,18 @@ impl ContentManifestAdapter for TextContentAdapter {
         TEXT_ADAPTER_KIND
     }
 
-    fn validate_operation(&self, operation: &[u8]) -> Result<(), ManifestError> {
-        decode_edit(operation).map(|_| ())
+    fn validate_schema(&self, schema: &ContentManifestSchema) -> Result<(), ManifestError> {
+        if schema.adapter_kind != TEXT_ADAPTER_KIND
+            || schema.max_tail_entries > TEXT_MAX_TAIL_ENTRIES
+            || schema.max_tail_bytes > TEXT_MAX_TAIL_BYTES
+        {
+            return Err(ManifestError::InvalidSchema);
+        }
+        Ok(())
+    }
+
+    fn validate_operation(&self, operation: &Value) -> Result<(), ManifestError> {
+        Self::decode_edit(operation).map(|_| ())
     }
 
     fn materialize(
@@ -565,6 +578,13 @@ impl ContentManifestAdapter for TextContentAdapter {
             }
         }
         Ok(values)
+    }
+}
+
+fn value_bytes(value: &Value) -> Result<&[u8], ManifestError> {
+    match value {
+        Value::Bytes(bytes) => Ok(bytes),
+        _ => Err(ManifestError::Malformed),
     }
 }
 
@@ -922,7 +942,7 @@ mod tests {
         let base = adapter.create("safe", context(), &mut store).unwrap();
         let malformed = ContentManifest {
             root: base.root,
-            edit_tail: vec![b"not an edit".to_vec()],
+            edit_tail: vec![Value::Bytes(b"not an edit".to_vec())],
         };
         assert!(
             adapter
@@ -1229,5 +1249,39 @@ mod tests {
                 .unwrap(),
             b"root tail"
         );
+    }
+
+    #[test]
+    fn public_text_schema_rejects_bounds_above_intrinsic_format_before_cell_admission() {
+        let schema_with = |entries, bytes| {
+            JazzSchema::new([TableSchema::new(
+                "documents",
+                [ColumnSchema::content_manifest(
+                    "body",
+                    ContentManifestSchema::new(TEXT_ADAPTER_KIND, entries, bytes).unwrap(),
+                )],
+            )])
+        };
+        assert!(
+            std::panic::catch_unwind(|| schema_with(TEXT_MAX_TAIL_ENTRIES + 1, 1024)).is_err(),
+            "65 operations must be rejected during public schema construction"
+        );
+        assert!(
+            std::panic::catch_unwind(|| schema_with(8, 20_000)).is_err(),
+            "20,000 tail bytes must be rejected during public schema construction"
+        );
+
+        let schema = schema_with(TEXT_MAX_TAIL_ENTRIES, TEXT_MAX_TAIL_BYTES);
+        let column = &schema.tables[0].columns[0];
+        let manifest_schema = column.content_manifest.as_ref().unwrap();
+        let value = Value::Bytes(
+            ContentManifest {
+                root: ContentId([0; 32]),
+                edit_tail: vec![],
+            }
+            .encode(manifest_schema)
+            .unwrap(),
+        );
+        crate::node::codec::validate_cell_value(column, &value).unwrap();
     }
 }
