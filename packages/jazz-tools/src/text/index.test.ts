@@ -137,6 +137,24 @@ describe("ordinary-row text", () => {
     }
   });
 
+  it("rejects a current-version pointer transplanted from another document", async () => {
+    const { context, db, text } = setup();
+    try {
+      const first = await text.create("first");
+      const second = await text.create("second");
+      const tampered = db.update(app.jazz_text_documents, first.documentId, {
+        current_version: second.versionId,
+      });
+      await tampered.wait({ tier: "local" });
+
+      await expect(text.read(first.documentId)).rejects.toThrow(
+        "points to another document's version",
+      );
+    } finally {
+      await context.shutdown();
+    }
+  });
+
   it("enforces both frontier bounds", async () => {
     const { context, text } = setup({ maxPatches: 100, maxPatchBytes: 40 });
     try {

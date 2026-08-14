@@ -376,7 +376,11 @@ export class TextStore {
       tier: this.durability,
     });
     if (!document) throw new Error(`Text document ${documentId} was not found`);
-    return this.readVersion(document.current_version);
+    const snapshot = await this.readVersion(document.current_version);
+    if (snapshot.documentId !== documentId) {
+      throw new Error(`Text document ${documentId} points to another document's version`);
+    }
+    return snapshot;
   }
 
   async readVersion(versionId: string): Promise<TextSnapshot> {
