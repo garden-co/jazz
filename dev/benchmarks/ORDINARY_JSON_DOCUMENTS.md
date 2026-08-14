@@ -83,3 +83,61 @@ still reconstructs the old scalar value.
 Tooling friction: `dev/t` captures benchmark output, so raw receipts require a
 direct `cargo test -- --nocapture` invocation. The public row-id lowering mismatch
 also initially converted every root/part lookup into an accidental table scan.
+
+## Compressed RocksDB storage receipt
+
+The storage receipt compares three representations in separate fresh RocksDB
+directories, using the same schema, generated documents, status edits, and one
+transaction per logical edit:
+
+- a single ordinary JSON column rewritten in full;
+- mutable scalar-part rows plus a declared-path projection row;
+- the vertical slice above: immutable parts and roots plus declared projections.
+
+The active RocksDB profile compresses history append column families with Zstd,
+current/index/meta column families with LZ4, and bottommost files with Zstd. Run:
+
+```sh
+JAZZ_JSON_STORAGE_DOCS=20 JAZZ_JSON_STORAGE_EDITS=10 \
+JAZZ_JSON_STORAGE_BYTES=10240 \
+cargo test -p jazz --features test,rocksdb \
+  --test ordinary_json_storage_receipt \
+  ordinary_json_compressed_rocksdb_storage_receipt \
+  -- --ignored --exact --nocapture
+```
+
+The figures below subtract an empty database created with the identical schema.
+“Seed open” and “edited open” include the live WAL. “Edited closed” is measured
+after orderly client shutdown. The public storage API does not expose a safe
+manual flush or compaction operation, so none was forced or claimed.
+
+| Workload                  | Representation               | Seed open apparent | Edited open apparent | Edited closed apparent | Edited closed allocated |
+| ------------------------- | ---------------------------- | -----------------: | -------------------: | ---------------------: | ----------------------: |
+| 20 × 10 KiB, 10 edits/doc | whole-row rewrite            |          443,910 B |          4,912,298 B |            4,890,952 B |             4,886,528 B |
+| 20 × 10 KiB, 10 edits/doc | mutable parts + projections  |        1,008,386 B |          1,762,776 B |            1,741,430 B |             1,736,704 B |
+| 20 × 10 KiB, 10 edits/doc | immutable root + projections |        1,111,192 B |          2,434,900 B |            2,434,852 B |             2,433,024 B |
+| 10 × 100 KiB, 5 edits/doc | whole-row rewrite            |        2,065,573 B |         12,400,737 B |           12,379,391 B |            12,374,016 B |
+| 10 × 100 KiB, 5 edits/doc | mutable parts + projections  |        2,347,771 B |          2,536,330 B |            2,514,984 B |             2,510,848 B |
+| 10 × 100 KiB, 5 edits/doc | immutable root + projections |        2,399,393 B |          2,730,339 B |            2,708,993 B |             2,703,360 B |
+
+For 10 KiB documents and ten localized edits, mutable parts used 35% and the
+immutable-root model 50% of the whole-row representation's closed apparent
+growth. For 100 KiB documents and five edits, those ratios fell to 20% and 22%.
+The immutable model pays modest extra root/part metadata for independent retained
+roots, while still avoiding repeated large-value bytes for localized edits.
+
+RocksDB preallocates live files: the empty open database had 78,184,448 allocated
+bytes, larger than these populated open stores, so independently measured
+baseline-subtracted open _allocated_ values saturate at zero and are not useful.
+Closed allocated values track apparent values and are the meaningful disk receipt.
+The empty baselines were 157,501 apparent/78,184,448 allocated bytes while open
+and 179,031 apparent/204,800 allocated bytes after close.
+
+An early version closed and reopened between seeding and edits. That uncovered a
+separate persistent-client conflict (`row visible parent changed since transaction
+write was staged`) on the first post-reopen mutable update. The receipt now keeps
+one client open through both phases so it measures representation cost rather
+than that lifecycle issue. Chromium OPFS was not added: reproducing the same
+three low-level layouts through the browser facade would add a different runtime
+and persistence implementation, whereas this question is specifically answered
+by the production RocksDB compression profile.
