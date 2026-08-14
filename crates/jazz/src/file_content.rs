@@ -853,7 +853,17 @@ fn append_base_leaves(
 mod tests {
     use super::*;
     use crate::content_manifest::MemoryImmutableContentStore;
+    use crate::content_manifest::{
+        ContentManifestRuntime, ContentManifestRuntimeProvider, global_content_manifest_adapters,
+    };
+    use crate::groove::records::Value;
+    use crate::groove::schema::ColumnType;
+    use crate::groove::storage::RocksDbStorage;
+    use crate::ids::{AuthorId, NodeUuid, RowUuid};
+    use crate::node::{MergeableCommit, NodeState};
+    use crate::schema::{ColumnSchema as JazzColumnSchema, JazzSchema, TableSchema};
     use std::cell::Cell;
+    use std::sync::Arc;
     struct CountingStore {
         inner: MemoryImmutableContentStore,
         reads: Cell<usize>,
@@ -1123,5 +1133,127 @@ mod tests {
             .unwrap(),
             source[32_000..32_016]
         );
+    }
+    #[test]
+    fn registered_file_adapter_runs_through_real_node_manifest_seams() {
+        struct Provider {
+            context: ContentReadContext,
+            store: MemoryImmutableContentStore,
+        }
+        impl ContentManifestRuntimeProvider for Provider {
+            fn read_context(&self, _: NodeUuid) -> ContentReadContext {
+                self.context
+            }
+            fn immutable_store(&self) -> &dyn ImmutableContentStore {
+                &self.store
+            }
+        }
+        let context = ctx(7);
+        let adapter = FileContentAdapter;
+        let mut immutable = MemoryImmutableContentStore::default();
+        let root = adapter
+            .store_bytes(b"normal jazz row", context, &mut immutable)
+            .unwrap();
+        let manifest_schema =
+            crate::content_manifest::ContentManifestSchema::new(FILE_ADAPTER_KIND, 8, 1024)
+                .unwrap();
+        let candidate = |offset, byte| {
+            Value::Bytes(
+                ContentManifest {
+                    root,
+                    edit_tail: vec![FileContentAdapter::encode_edit(&FileEdit::Overwrite {
+                        offset,
+                        delete: 1,
+                        bytes: vec![byte],
+                    })],
+                }
+                .encode(&manifest_schema)
+                .unwrap(),
+            )
+        };
+        let runtime =
+            ContentManifestRuntime::new(global_content_manifest_adapters(), context, &immutable);
+        let merged = runtime
+            .merge_cells(&manifest_schema, &[candidate(0, b'N'), candidate(14, b'!')])
+            .unwrap();
+        assert_eq!(
+            runtime
+                .materialize_cell(&manifest_schema, &merged, &MaterializationRequest::Full)
+                .unwrap(),
+            b"Normal jazz ro!"
+        );
+        let schema = JazzSchema::new([TableSchema::new(
+            "documents",
+            [
+                JazzColumnSchema::new("owner", ColumnType::Uuid),
+                JazzColumnSchema::content_manifest("file", manifest_schema.clone()),
+            ],
+        )]);
+        let temp = tempfile::tempdir().unwrap();
+        let cfs = schema.column_families();
+        let storage = RocksDbStorage::open(
+            temp.path(),
+            &cfs.iter().map(String::as_str).collect::<Vec<_>>(),
+        )
+        .unwrap();
+        let mut node = NodeState::new_with_content_manifest_provider(
+            NodeUuid::from_bytes([9; 16]),
+            schema,
+            storage,
+            Arc::new(Provider {
+                context,
+                store: immutable,
+            }),
+            false,
+        )
+        .unwrap();
+        assert!(
+            global_content_manifest_adapters()
+                .get(FILE_ADAPTER_KIND)
+                .is_ok()
+        );
+        let cell = Value::Bytes(
+            ContentManifest {
+                root,
+                edit_tail: vec![FileContentAdapter::encode_edit(&FileEdit::Overwrite {
+                    offset: 7,
+                    delete: 4,
+                    bytes: b"Jazz".to_vec(),
+                })],
+            }
+            .encode(&manifest_schema)
+            .unwrap(),
+        );
+        node.commit_mergeable_unit(
+            MergeableCommit::new("documents", RowUuid::from_bytes([3; 16]), 1)
+                .made_by(AuthorId::from_bytes([4; 16]))
+                .cells(BTreeMap::from([
+                    ("owner".into(), Value::Uuid(uuid::Uuid::from_bytes([4; 16]))),
+                    ("file".into(), cell.clone()),
+                ])),
+        )
+        .unwrap();
+        assert_eq!(
+            node.materialize_content_manifest(
+                "documents",
+                "file",
+                &cell,
+                &MaterializationRequest::Range {
+                    offset: 7,
+                    length: 4
+                }
+            )
+            .unwrap(),
+            b"Jazz"
+        );
+        let values = node
+            .content_manifest_index_values(
+                "documents",
+                "file",
+                &cell,
+                &["byte_length".into(), "blake3".into()],
+            )
+            .unwrap();
+        assert_eq!(values["byte_length"], 15u64.to_le_bytes());
     }
 }
