@@ -3979,3 +3979,232 @@ fn reopened_pending_partial_update_upload_preserves_authored_columns() {
         ])
     );
 }
+
+/// A manifest merge only receives heads that explicitly authored `body`; a
+/// title-only head carrying an inherited stale body must be ignored. When no
+/// head authored body, the merge falls back to the shared parent exactly once.
+///
+/// ```text
+/// base(body=base) ─┬─ alice(body=left) ─┐
+///                  └─ bob(title, stale body) ─┴─► merge([left])
+/// base(body=base) ─┬─ alice(title) ─┐
+///                  └─ bob(title) ───┴─► merge([base])
+/// ```
+///
+/// Planted positive: removing the `authored_columns` filter in
+/// `merge_cells_for_heads` makes the first merge observe Bob's stale body.
+#[test]
+fn manifest_merge_uses_authored_body_candidates_and_parent_fallback() {
+    struct RecordingAdapter {
+        calls: Mutex<Vec<Vec<Vec<u8>>>>,
+    }
+    impl ContentManifestAdapter for RecordingAdapter {
+        fn adapter_kind(&self) -> &str { "node-authored-manifest-fixture-v1" }
+        fn validate_operation(&self, operation: &[u8]) -> Result<(), ManifestError> {
+            if operation.starts_with(b"+") { Ok(()) } else { Err(ManifestError::Conflict("bad fixture operation")) }
+        }
+        fn materialize(&self, _: &ContentManifest, _: &crate::content_manifest::MaterializationRequest, _: ContentReadContext, _: &dyn ImmutableContentStore) -> Result<Vec<u8>, ManifestError> { Ok(Vec::new()) }
+        fn merge(&self, manifests: &[ContentManifest], _: ContentReadContext, _: &dyn ImmutableContentStore) -> Result<ContentManifest, ManifestError> {
+            self.calls.lock().unwrap().push(manifests.iter().map(|manifest| manifest.edit_tail.concat()).collect());
+            manifests.first().cloned().ok_or(ManifestError::Conflict("no candidates"))
+        }
+        fn index_values(&self, _: &ContentManifest, _: &[String], _: ContentReadContext, _: &dyn ImmutableContentStore) -> Result<BTreeMap<String, Vec<u8>>, ManifestError> { Ok(BTreeMap::new()) }
+    }
+    struct EmptyStore;
+    impl ImmutableContentStore for EmptyStore {
+        fn get(&self, _: ContentReadContext, _: crate::content_manifest::ContentId) -> Option<&[u8]> { None }
+        fn put_if_absent_or_identical(&mut self, _: crate::content_manifest::ContentAddress<'_>, _: Vec<u8>) -> Result<crate::content_manifest::ContentId, ManifestError> { Err(ManifestError::Conflict("not used")) }
+    }
+    struct Provider(EmptyStore);
+    impl ContentManifestRuntimeProvider for Provider {
+        fn read_context(&self, node: NodeUuid) -> ContentReadContext { ContentReadContext { domain: crate::content_manifest::ContentDomainId(node.0) } }
+        fn immutable_store(&self) -> &dyn ImmutableContentStore { &self.0 }
+    }
+
+    static ADAPTER: OnceLock<Arc<RecordingAdapter>> = OnceLock::new();
+    let adapter = ADAPTER.get_or_init(|| {
+        let adapter = Arc::new(RecordingAdapter { calls: Mutex::new(Vec::new()) });
+        crate::content_manifest::global_content_manifest_adapters().register(adapter.clone()).unwrap();
+        adapter
+    }).clone();
+    adapter.calls.lock().unwrap().clear();
+    let manifest_schema = ContentManifestSchema::new("node-authored-manifest-fixture-v1", 4, 64).unwrap();
+    let schema = JazzSchema::new([TableSchema::new("documents", [
+        crate::schema::ColumnSchema::new("title", ColumnType::String),
+        crate::schema::ColumnSchema::content_manifest("body", manifest_schema.clone()),
+    ])]);
+    let temp_dir = tempfile::tempdir().unwrap();
+    let refs = schema.column_families();
+    let storage = RocksDbStorage::open(temp_dir.path(), &refs.iter().map(String::as_str).collect::<Vec<_>>()).unwrap();
+    let mut core = NodeState::new_with_content_manifest_provider(node(0xa0), schema.clone(), storage, Arc::new(Provider(EmptyStore)), false).unwrap();
+    let (_alice_dir, mut alice) = open_node_with_schema(node(0xa1), schema.clone());
+    let (_bob_dir, mut bob) = open_node_with_schema(node(0xa2), schema);
+    let row_uuid = row(0xa0);
+    let manifest = |root, tail: &[u8]| Value::Bytes(ContentManifest { root: crate::content_manifest::ContentId([root; 32]), edit_tail: vec![tail.to_vec()] }.encode(&manifest_schema).unwrap());
+
+    let (base, base_unit) = alice.commit_mergeable_unit(MergeableCommit::new("documents", row_uuid, 10).cells(BTreeMap::from([("title".into(), Value::String("base".into())), ("body".into(), manifest(1, b"+base"))]))).unwrap();
+    let [base_fate] = core.apply_sync_message(base_unit.clone()).unwrap().try_into().unwrap();
+    alice.apply_sync_message(base_fate.clone()).unwrap();
+    bob.apply_sync_message(base_unit).unwrap(); bob.apply_sync_message(base_fate).unwrap();
+    let (_, left_unit) = alice.commit_mergeable_unit(MergeableCommit::new("documents", row_uuid, 20).parents(vec![base]).cells(BTreeMap::from([("title".into(), Value::String("base".into())), ("body".into(), manifest(2, b"+left"))])).authored_columns(BTreeSet::from(["body".into()]))).unwrap();
+    core.apply_sync_message(left_unit).unwrap();
+    let (_, stale_title_unit) = bob.commit_mergeable_unit(MergeableCommit::new("documents", row_uuid, 21).parents(vec![base]).cells(BTreeMap::from([("title".into(), Value::String("title".into())), ("body".into(), manifest(1, b"+base"))])).authored_columns(BTreeSet::from(["title".into()]))).unwrap();
+    core.apply_sync_message(stale_title_unit).unwrap();
+    assert_eq!(*adapter.calls.lock().unwrap(), vec![vec![b"+left".to_vec()]]);
+
+    // Neither concurrent head authors body on this row, so the shared parent
+    // is the one manifest candidate supplied to the adapter.
+    let fallback_row = row(0xa3);
+    let (fallback_base, fallback_base_unit) = alice
+        .commit_mergeable_unit(
+            MergeableCommit::new("documents", fallback_row, 30).cells(BTreeMap::from([
+                ("title".into(), Value::String("base".into())),
+                ("body".into(), manifest(3, b"+fallback")),
+            ])),
+        )
+        .unwrap();
+    let [fallback_base_fate] = core
+        .apply_sync_message(fallback_base_unit.clone())
+        .unwrap()
+        .try_into()
+        .unwrap();
+    alice.apply_sync_message(fallback_base_fate.clone()).unwrap();
+    bob.apply_sync_message(fallback_base_unit).unwrap();
+    bob.apply_sync_message(fallback_base_fate).unwrap();
+    let (_, first_title_unit) = alice
+        .commit_mergeable_unit(
+            MergeableCommit::new("documents", fallback_row, 31)
+                .parents(vec![fallback_base])
+                .cells(BTreeMap::from([
+                    ("title".into(), Value::String("first".into())),
+                    ("body".into(), manifest(3, b"+fallback")),
+                ]))
+                .authored_columns(BTreeSet::from(["title".into()])),
+        )
+        .unwrap();
+    core.apply_sync_message(first_title_unit).unwrap();
+    let (_, second_title_unit) = bob
+        .commit_mergeable_unit(
+            MergeableCommit::new("documents", fallback_row, 32)
+                .parents(vec![fallback_base])
+                .cells(BTreeMap::from([
+                    ("title".into(), Value::String("second".into())),
+                    ("body".into(), manifest(3, b"+fallback")),
+                ]))
+                .authored_columns(BTreeSet::from(["title".into()])),
+        )
+        .unwrap();
+    core.apply_sync_message(second_title_unit).unwrap();
+    assert_eq!(
+        *adapter.calls.lock().unwrap(),
+        vec![vec![b"+left".to_vec()], vec![b"+fallback".to_vec()]]
+    );
+}
+
+/// Local Node authoring must use the same typed operation admission as a
+/// received wire record: schema-valid JCM1 bytes are insufficient when the
+/// registered adapter rejects an operation.
+#[test]
+fn local_manifest_authoring_rejects_adapter_oversize_tail_and_accepts_boundary() {
+    struct MaxTailAdapter;
+    impl ContentManifestAdapter for MaxTailAdapter {
+        fn adapter_kind(&self) -> &str {
+            "foundation-local-manifest-admission-v1"
+        }
+
+        fn validate_operation(&self, operation: &[u8]) -> Result<(), ManifestError> {
+            if operation.len() <= 256 {
+                Ok(())
+            } else {
+                Err(ManifestError::Conflict("operation exceeds 256 bytes"))
+            }
+        }
+
+        fn materialize(
+            &self,
+            _: &ContentManifest,
+            _: &crate::content_manifest::MaterializationRequest,
+            _: ContentReadContext,
+            _: &dyn ImmutableContentStore,
+        ) -> Result<Vec<u8>, ManifestError> {
+            Ok(Vec::new())
+        }
+
+        fn merge(
+            &self,
+            manifests: &[ContentManifest],
+            _: ContentReadContext,
+            _: &dyn ImmutableContentStore,
+        ) -> Result<ContentManifest, ManifestError> {
+            manifests
+                .first()
+                .cloned()
+                .ok_or(ManifestError::Conflict("no candidates"))
+        }
+
+        fn index_values(
+            &self,
+            _: &ContentManifest,
+            _: &[String],
+            _: ContentReadContext,
+            _: &dyn ImmutableContentStore,
+        ) -> Result<BTreeMap<String, Vec<u8>>, ManifestError> {
+            Ok(BTreeMap::new())
+        }
+    }
+
+    static ADAPTER: OnceLock<()> = OnceLock::new();
+    ADAPTER.get_or_init(|| {
+        crate::content_manifest::global_content_manifest_adapters()
+            .register(Arc::new(MaxTailAdapter))
+            .unwrap();
+    });
+
+    let manifest_schema =
+        ContentManifestSchema::new("foundation-local-manifest-admission-v1", 1, 512).unwrap();
+    let schema = JazzSchema::new([TableSchema::new(
+        "documents",
+        [crate::schema::ColumnSchema::content_manifest(
+            "body",
+            manifest_schema.clone(),
+        )],
+    )]);
+    let (_dir, mut node) = open_node_with_schema(node(0xa4), schema);
+    let manifest = |tail: Vec<u8>| {
+        Value::Bytes(
+            ContentManifest {
+                root: crate::content_manifest::ContentId([4; 32]),
+                edit_tail: vec![tail],
+            }
+            .encode(&manifest_schema)
+            .unwrap(),
+        )
+    };
+
+    let rejected = node
+        .commit_mergeable(
+            MergeableCommit::new("documents", row(0xa4), 10)
+                .cells(BTreeMap::from([("body".into(), manifest(vec![0; 257]))])),
+        )
+        .unwrap_err();
+    assert!(matches!(
+        rejected,
+        Error::ContentManifest(ManifestError::Conflict("operation exceeds 256 bytes"))
+    ));
+    assert!(node
+        .current_rows("documents", DurabilityTier::Local)
+        .unwrap()
+        .is_empty());
+
+    node.commit_mergeable(
+        MergeableCommit::new("documents", row(0xa4), 11)
+            .cells(BTreeMap::from([("body".into(), manifest(vec![0; 256]))])),
+    )
+    .unwrap();
+    assert_eq!(
+        node.current_rows("documents", DurabilityTier::Local)
+            .unwrap()
+            .len(),
+        1
+    );
+}

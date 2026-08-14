@@ -16,6 +16,12 @@ import {
 
 const OUTER_ROW_SESSION_PREFIX = "__jazz_outer_row";
 
+// Versioned envelope owned by Rust's `JazzSchema::decode_wire`. Schemas with
+// no manifests intentionally retain their legacy postcard representation.
+const CONTENT_MANIFEST_SCHEMA_WIRE_V1 = new TextEncoder().encode(
+  "JAZZ-CONTENT-MANIFEST-SCHEMA-V1\0",
+);
+
 type PolicyOperandValue = PolicyValue | { type: "OuterRowRef"; column: string };
 type InternalPolicyValue = PolicyValue | { type: "FrontierRowRef" };
 type LoweredPolicyExpr = PolicyExpr & { scope?: string };
@@ -81,8 +87,38 @@ type PendingPolicyReachable = Omit<
 >;
 
 export function encodeSchema(schema: WasmSchema): Uint8Array {
-  const tables = Object.entries(schema);
   const writer = new PostcardWriter();
+  writeLegacySchema(writer, schema);
+  const manifests = Object.entries(schema).flatMap(([tableName, definition]) =>
+    definition.columns.flatMap((column) =>
+      column.content_manifest == null
+        ? []
+        : [[tableName, column.name, column.content_manifest] as const],
+    ),
+  );
+  if (manifests.length === 0) return writer.finish();
+
+  // ContentManifestWireV1 = { legacy_schema, manifests }, where an entry is
+  // (table, column, { adapter_kind, max_tail_entries, max_tail_bytes }).
+  const payload = new PostcardWriter();
+  writeLegacySchema(payload, schema);
+  payload.vec((entry, index) => {
+    const [tableName, columnName, manifest] = manifests[index]!;
+    entry.string(tableName);
+    entry.string(columnName);
+    entry.string(manifest.adapter_kind);
+    entry.u64(manifest.max_tail_entries);
+    entry.u64(manifest.max_tail_bytes);
+  }, manifests.length);
+  const bytes = payload.finish();
+  const encoded = new Uint8Array(CONTENT_MANIFEST_SCHEMA_WIRE_V1.length + bytes.length);
+  encoded.set(CONTENT_MANIFEST_SCHEMA_WIRE_V1);
+  encoded.set(bytes, CONTENT_MANIFEST_SCHEMA_WIRE_V1.length);
+  return encoded;
+}
+
+function writeLegacySchema(writer: PostcardWriter, schema: WasmSchema): void {
+  const tables = Object.entries(schema);
   writer.vec((table, index) => {
     const [tableName, definition] = tables[index]!;
     table.string(tableName);
@@ -109,7 +145,6 @@ export function encodeSchema(schema: WasmSchema): Uint8Array {
   }, tables.length);
   writer.none();
   writer.none();
-  return writer.finish();
 }
 
 export function columnValueType(column: ColumnDescriptor): ValueType {

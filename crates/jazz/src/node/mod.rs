@@ -1737,6 +1737,14 @@ where
         made_at: TxTime,
         branch_merge: Option<BranchMergeProvenance>,
     ) -> Result<TxId, Error> {
+        // `VersionRow::from_parts_with_schema_version` only builds the
+        // storage-shaped record.  Validate application-owned manifest
+        // operations here, at the shared local-authoring admission point,
+        // before a pending transaction becomes visible or any authority state
+        // is finalized.  Foreign records take the corresponding wire-codec
+        // path, while local merge, branch, and open-transaction commits all
+        // converge here.
+        self.validate_local_content_manifest_cells(&commits)?;
         let tx_id = TxId::new(made_at, self.node_uuid);
         let made_by = commits[0].1.made_by;
         let permission_subject = commits[0].1.effective_permission_subject();
@@ -1879,6 +1887,45 @@ where
             self.record_child_edges(tx_id, stored.parents());
         }
         Ok(tx_id)
+    }
+
+    fn validate_local_content_manifest_cells(
+        &self,
+        commits: &[(SchemaVersionId, MergeableCommit)],
+    ) -> Result<(), Error> {
+        for (schema_version, commit) in commits {
+            self.validate_local_content_manifest_cells_for_schema(
+                *schema_version,
+                std::slice::from_ref(commit),
+            )?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn validate_local_content_manifest_cells_for_schema(
+        &self,
+        schema_version: SchemaVersionId,
+        commits: &[MergeableCommit],
+    ) -> Result<(), Error> {
+        for commit in commits {
+            let table = self.table_in_schema(&commit.table, schema_version)?;
+            for column in &table.columns {
+                let Some(manifest_schema) = &column.content_manifest else {
+                    continue;
+                };
+                let Some(value) = commit.cells.get(&column.name) else {
+                    continue;
+                };
+                // Runtime construction deliberately takes this node's
+                // provider-owned domain and immutable-store authority, even
+                // though decode/operation admission itself needs no object
+                // read. This keeps local admission on the same adapter seam
+                // as later merge, materialization, and index lowering.
+                self.content_manifest_runtime()
+                    .decode_cell(manifest_schema, value)?;
+            }
+        }
+        Ok(())
     }
 
     /// Commit a local mergeable write and return its sync commit unit.

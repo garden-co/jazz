@@ -878,6 +878,164 @@ fn branch_writes_reject_unknown_and_closed_branches() {
     );
 }
 
+/// This is intentionally a Node-level test: the property includes the
+/// branch-partition/rebuild boundary, which is not observable from an
+/// ordinary row codec alone.
+#[test]
+fn branch_manifest_admission_precedes_partition_creation_and_accepts_boundary() {
+    static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    struct MaxTailAdapter;
+    impl ContentManifestAdapter for MaxTailAdapter {
+        fn adapter_kind(&self) -> &str {
+            "foundation-branch-manifest-admission-v1"
+        }
+
+        fn validate_operation(&self, operation: &[u8]) -> Result<(), ManifestError> {
+            if operation.len() > 256 {
+                return Err(ManifestError::Conflict("operation exceeds 256 bytes"));
+            }
+            // A successful local branch write must reach the adapter exactly
+            // once. A second codec pass would fail after creating a partition.
+            if CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                Ok(())
+            } else {
+                Err(ManifestError::Conflict("operation validated twice"))
+            }
+        }
+
+        fn materialize(
+            &self,
+            _: &ContentManifest,
+            _: &crate::content_manifest::MaterializationRequest,
+            _: ContentReadContext,
+            _: &dyn ImmutableContentStore,
+        ) -> Result<Vec<u8>, ManifestError> {
+            Ok(Vec::new())
+        }
+
+        fn merge(
+            &self,
+            manifests: &[ContentManifest],
+            _: ContentReadContext,
+            _: &dyn ImmutableContentStore,
+        ) -> Result<ContentManifest, ManifestError> {
+            manifests
+                .first()
+                .cloned()
+                .ok_or(ManifestError::Conflict("no candidates"))
+        }
+
+        fn index_values(
+            &self,
+            _: &ContentManifest,
+            _: &[String],
+            _: ContentReadContext,
+            _: &dyn ImmutableContentStore,
+        ) -> Result<BTreeMap<String, Vec<u8>>, ManifestError> {
+            Ok(BTreeMap::new())
+        }
+    }
+
+    static ADAPTER: OnceLock<()> = OnceLock::new();
+    ADAPTER.get_or_init(|| {
+        crate::content_manifest::global_content_manifest_adapters()
+            .register(Arc::new(MaxTailAdapter))
+            .unwrap();
+    });
+
+    let manifest_schema =
+        ContentManifestSchema::new("foundation-branch-manifest-admission-v1", 1, 512).unwrap();
+    let schema = JazzSchema::new([TableSchema::new(
+        "documents",
+        [crate::schema::ColumnSchema::content_manifest(
+            "body",
+            manifest_schema.clone(),
+        )],
+    )]);
+    let (_dir, mut core) = open_history_complete_node_with_schema(node(0x29), schema.clone());
+    let branch_id = branch(0x29);
+    let row_uuid = row(0x29);
+    core.create_branch(branch_id).unwrap();
+    let shape = Query::from("documents").validate(&schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let manifest = |tail: Vec<u8>| {
+        Value::Bytes(
+            ContentManifest {
+                root: crate::content_manifest::ContentId([0x29; 32]),
+                edit_tail: vec![tail],
+            }
+            .encode(&manifest_schema)
+            .unwrap(),
+        )
+    };
+
+    CALLS.store(0, std::sync::atomic::Ordering::SeqCst);
+    let rejected = core
+        .commit_mergeable_on_branch(
+            branch_id,
+            MergeableCommit::new("documents", row_uuid, 10)
+                .cells(BTreeMap::from([("body".into(), manifest(vec![0; 257]))])),
+        )
+        .unwrap_err();
+    assert!(matches!(
+        rejected,
+        Error::InvalidStoredValue("invalid content manifest")
+    ));
+    assert!(
+        core.branches.branch_partitions.is_empty(),
+        "rejected authoring must not create a partition or rebuild storage topology"
+    );
+    assert!(core
+        .query_rows_on_branch(branch_id, &shape, &binding)
+        .unwrap()
+        .is_empty());
+
+    CALLS.store(0, std::sync::atomic::Ordering::SeqCst);
+    core.commit_mergeable_on_branch(
+        branch_id,
+        MergeableCommit::new("documents", row_uuid, 11)
+            .cells(BTreeMap::from([("body".into(), manifest(vec![0; 256]))])),
+    )
+    .unwrap();
+    let table_id = core
+        .physical_table_id_for_schema(core.current_write_schema().schema, "documents")
+        .unwrap();
+    assert!(core.branches.branch_partitions.contains(&(table_id, branch_id)));
+    assert_eq!(
+        core.query_rows_on_branch(branch_id, &shape, &binding)
+            .unwrap()
+            .len(),
+        1
+    );
+
+    // Exercise the calculated merge's direct branch-storage route too. Its
+    // one-shot adapter admission must happen before partition creation and
+    // must not be repeated by the persistence helper.
+    let internal_branch = branch(0x2a);
+    core.create_branch(internal_branch).unwrap();
+    CALLS.store(0, std::sync::atomic::Ordering::SeqCst);
+    let provenance = crate::tx::BranchMergeProvenance::canonical(
+        crate::tx::BranchLineage::Root,
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    )
+    .unwrap();
+    core.commit_merge_transaction(
+        crate::tx::BranchLineage::Branch(internal_branch),
+        provenance,
+        vec![
+            MergeableCommit::new("documents", row(0x2a), 12)
+                .cells(BTreeMap::from([("body".into(), manifest(vec![0; 256]))])),
+        ],
+    )
+    .unwrap();
+    assert!(core
+        .branches
+        .branch_partitions
+        .contains(&(table_id, internal_branch)));
+}
+
 #[test]
 fn discard_branch_closes_branch_for_writes_and_merge_back() {
     let (_dir, mut core) = open_history_complete_node_with_schema(node(2), schema());

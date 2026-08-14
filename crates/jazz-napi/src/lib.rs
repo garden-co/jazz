@@ -805,7 +805,7 @@ impl NapiDb {
     /// Register and return a typed view backed by this same runtime owner.
     #[napi(js_name = "registerSchema")]
     pub fn register_schema(&self, schema: Uint8Array) -> napi::Result<Self> {
-        let schema: JazzSchema = postcard::from_bytes(&schema)
+        let schema = JazzSchema::decode_wire(&schema)
             .map_err(|error| napi::Error::from_reason(format!("decode schema: {error}")))?;
         let db = self.inner.borrow();
         let db = db
@@ -2022,7 +2022,7 @@ fn decode_core_open_args(
     schema: &[u8],
     config: &[u8],
 ) -> napi::Result<(JazzSchema, CoreOpenDbConfig)> {
-    let schema: JazzSchema = postcard::from_bytes(schema)
+    let schema = JazzSchema::decode_wire(schema)
         .map_err(|error| napi::Error::from_reason(format!("decode schema: {error}")))?;
     let config: CoreOpenDbConfig = postcard::from_bytes(config)
         .map_err(|error| napi::Error::from_reason(format!("decode open config: {error}")))?;
@@ -2828,7 +2828,7 @@ impl JazzServer {
             .schema
             .take()
             .map(|schema_bytes| {
-                postcard::from_bytes::<JazzSchema>(&schema_bytes).map_err(|error| {
+                JazzSchema::decode_wire(&schema_bytes).map_err(|error| {
                     napi::Error::from_reason(format!("Invalid Jazz schema bytes: {error}"))
                 })
             })

@@ -608,6 +608,12 @@ where
                 ));
             }
         }
+        let write_schema_version = self.catalogue.current_write_schema.schema;
+        // Build the wire-shaped records before branch policy and partition
+        // creation. `VersionRecord::from_commit` is the one local codec
+        // admission (including registered manifest adapters), so a rejected
+        // operation cannot rebuild the database or leave an empty overlay.
+        let prepared_versions = self.prepare_branch_versions(write_schema_version, &commits)?;
         self.ensure_branch_open(branch_id)?;
         let permission_subject = commits[0].effective_permission_subject();
         if !self.branch_write_policy_allows(branch_id, permission_subject)? {
@@ -618,7 +624,6 @@ where
                 self.merge_tx_time(parent.time);
             }
         }
-        let write_schema_version = self.catalogue.current_write_schema.schema;
         for table in commits
             .iter()
             .map(|commit| commit.table.clone())
@@ -627,13 +632,23 @@ where
             self.persist_branch_partition(table, write_schema_version, branch_id)?;
         }
         let made_at = self.mint_tx_time(commits[0].now_ms);
-        self.commit_mergeable_many_on_branch_at(branch_id, commits, made_at, None)
+        self.commit_mergeable_many_on_branch_validated_at(
+            branch_id,
+            commits,
+            &prepared_versions,
+            made_at,
+            None,
+        )
     }
 
-    fn commit_mergeable_many_on_branch_at(
+    /// Persist a branch transaction after the caller has prepared its
+    /// codec-admitted records. Keeping that precondition explicit prevents a
+    /// direct storage path from silently bypassing typed adapter validation.
+    fn commit_mergeable_many_on_branch_validated_at(
         &mut self,
         branch_id: BranchId,
         commits: Vec<MergeableCommit>,
+        prepared_versions: &[(TableSchema, VersionRecord)],
         made_at: TxTime,
         branch_merge: Option<BranchMergeProvenance>,
     ) -> Result<TxId, Error>
@@ -648,13 +663,11 @@ where
             .cloned()
             .ok_or(Error::BranchNotFound(branch_id))?;
         let permission_subject = commits[0].effective_permission_subject();
-        for commit in &commits {
-            let table_schema = self.table_in_schema(&commit.table, write_schema_version)?;
-            let version = VersionRecord::from_commit(commit, &table_schema, write_schema_version)?;
+        for (table_schema, version) in prepared_versions {
             if !self.branch_table_write_policy_allows_version_record(
                 &branch,
-                &table_schema,
-                &version,
+                table_schema,
+                version,
                 permission_subject,
             )? {
                 return Err(Error::AuthorizationDenied);
@@ -736,6 +749,21 @@ where
         self.database.commit_batch(batch)?;
         self.cache_tx_version_tables(tx_id, transaction_tables);
         Ok(tx_id)
+    }
+
+    fn prepare_branch_versions(
+        &self,
+        schema_version: SchemaVersionId,
+        commits: &[MergeableCommit],
+    ) -> Result<Vec<(TableSchema, VersionRecord)>, Error> {
+        commits
+            .iter()
+            .map(|commit| {
+                let table_schema = self.table_in_schema(&commit.table, schema_version)?;
+                let version = VersionRecord::from_commit(commit, &table_schema, schema_version)?;
+                Ok((table_schema, version))
+            })
+            .collect()
     }
 
     /// Read a validated query in a branch view: overlay rows first, then the
@@ -1730,7 +1758,7 @@ where
         }
     }
 
-    fn commit_merge_transaction(
+    pub(super) fn commit_merge_transaction(
         &mut self,
         target: BranchLineage,
         branch_merge: BranchMergeProvenance,
@@ -1750,6 +1778,10 @@ where
             }
             BranchLineage::Branch(branch_id) => {
                 let write_schema_version = self.catalogue.current_write_schema.schema;
+                // Merge-back reaches the branch storage path directly rather
+                // than through the public branch authoring entry point.
+                let prepared_versions =
+                    self.prepare_branch_versions(write_schema_version, &commits)?;
                 for table in commits
                     .iter()
                     .map(|commit| commit.table.clone())
@@ -1758,9 +1790,10 @@ where
                     self.persist_branch_partition(table, write_schema_version, branch_id)?;
                 }
                 let made_at = self.mint_tx_time(0);
-                self.commit_mergeable_many_on_branch_at(
+                self.commit_mergeable_many_on_branch_validated_at(
                     branch_id,
                     commits,
+                    &prepared_versions,
                     made_at,
                     Some(branch_merge),
                 )

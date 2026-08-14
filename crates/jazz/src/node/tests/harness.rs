@@ -4,6 +4,10 @@
 //! model comparisons use [`crate::oracle`].
 
 use super::*;
+use crate::content_manifest::{
+    ContentManifest, ContentManifestAdapter, ContentManifestRuntimeProvider, ContentManifestSchema,
+    ContentReadContext, ImmutableContentStore, ManifestError,
+};
 use crate::oracle::{ModelRowVersion, Oracle, OracleTxState, ParallelMaterializationOracle};
 use crate::peer::{PeerEvictionPins, PeerMetrics, PeerState};
 use crate::protocol::{
@@ -25,6 +29,7 @@ use groove::storage::{
     ReopenableStorage, RocksDbStorage, ScanVisitor, Value as StorageValue, WriteOperation,
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::sync::{Arc, Mutex, OnceLock};
 
 include!("support.rs");
 include!("catalogue_lenses.rs");

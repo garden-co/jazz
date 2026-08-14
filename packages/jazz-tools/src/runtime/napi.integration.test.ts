@@ -13,6 +13,7 @@ import { loadCompiledSchema, type LoadedSchemaProject } from "../schema-loader.j
 import { deploy as deployProject } from "../dev/catalogue-project.js";
 import { deploy, startLocalJazzServer, startTestJwtIssuer } from "../testing/index.js";
 import { encodeSchema as encodeNativeSchema } from "./native-runtime/schema-codec.js";
+import { openConfig } from "./native-runtime/native-codec.js";
 import {
   createPersistentNapiNativeRuntimeAdapter,
   loadNapiModule,
@@ -384,6 +385,33 @@ async function cleanupTempRuntimeData(data: TempRuntimeData | null): Promise<voi
 }
 
 describe("NAPI integration", () => {
+  it("admits a versioned content-manifest schema through native registration", async () => {
+    const schema: WasmSchema = {
+      documents: {
+        columns: [
+          {
+            name: "body",
+            column_type: { type: "Bytea" },
+            nullable: false,
+            content_manifest: {
+              adapter_kind: "fixture-text-v1",
+              max_tail_entries: 8,
+              max_tail_bytes: 1024,
+            },
+          },
+        ],
+      },
+    };
+    const { NapiDb } = await loadNapiModule();
+    const bytes = encodeNativeSchema(schema);
+    const db = NapiDb.openMemory(bytes, openConfig(new Uint8Array(16), new Uint8Array(16)));
+    try {
+      expect(db.registerSchema(bytes)).toBeDefined();
+    } finally {
+      db.close?.();
+    }
+  });
+
   it("releases a persistent RocksDB lock after closing an upstream transport", async () => {
     const { wasmSchema } = await loadTodoServerProject();
     const runtimeData = await createTempRuntimeData("jazz-napi-transport-close-reopen-");

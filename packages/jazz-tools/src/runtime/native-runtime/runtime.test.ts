@@ -86,6 +86,36 @@ describe("NativeRuntimeAdapter server transport", () => {
     });
   });
 
+  it("uses a versioned envelope only for content-manifest schemas", () => {
+    const legacy = encodeSchema({
+      documents: {
+        columns: [{ name: "title", column_type: { type: "Text" }, nullable: false }],
+      },
+    });
+    const manifest = encodeSchema({
+      documents: {
+        columns: [
+          {
+            name: "body",
+            column_type: { type: "Bytea" },
+            nullable: false,
+            content_manifest: {
+              adapter_kind: "fixture-text-v1",
+              max_tail_entries: 8,
+              max_tail_bytes: 1024,
+            },
+          },
+        ],
+      },
+    });
+    expect(new TextDecoder().decode(legacy.slice(0, 32))).not.toContain(
+      "JAZZ-CONTENT-MANIFEST-SCHEMA-V1",
+    );
+    expect(new TextDecoder().decode(manifest.slice(0, 32))).toBe(
+      "JAZZ-CONTENT-MANIFEST-SCHEMA-V1\0",
+    );
+  });
+
   it("rejects unsupported native schema merge strategies instead of dropping them", () => {
     expect(() =>
       encodeSchema({

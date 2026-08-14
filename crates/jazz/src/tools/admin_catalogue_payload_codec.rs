@@ -1948,6 +1948,57 @@ mod tests {
     }
 
     #[test]
+    fn schema_v9_roundtrip_preserves_content_manifest_metadata_and_hash() {
+        let mut body = ColumnDescriptor::new("body", ColumnType::Bytea);
+        body.content_manifest = Some(
+            crate::content_manifest::ContentManifestSchema::new("fixture-text-v1", 8, 1024)
+                .unwrap(),
+        );
+        let schema = Schema::from([(
+            TableName::new("documents"),
+            TableSchema::new(RowDescriptor::new(vec![
+                ColumnDescriptor::new("title", ColumnType::Text),
+                body,
+            ])),
+        )]);
+
+        let encoded = encode_schema(&schema);
+        assert_eq!(encoded[0], 9);
+        let decoded = decode_schema(&encoded).unwrap();
+        assert_eq!(
+            decoded
+                .get(&TableName::new("documents"))
+                .unwrap()
+                .columns
+                .column("body")
+                .unwrap()
+                .content_manifest,
+            Some(
+                crate::content_manifest::ContentManifestSchema::new("fixture-text-v1", 8, 1024)
+                    .unwrap()
+            )
+        );
+        assert_eq!(SchemaHash::compute(&decoded), SchemaHash::compute(&schema));
+    }
+
+    #[test]
+    fn schema_v8_payload_decodes_without_content_manifest_metadata() {
+        let schema = SchemaBuilder::new()
+            .table(TableSchema::builder("documents").column("title", ColumnType::Text))
+            .build();
+        // Historical v8 fixture: one `documents.title: Text` column. Unlike
+        // v9, the column has no manifest-presence byte after its merge flag.
+        let legacy = vec![
+            8, 1, 0, 0, 0, 9, 0, 0, 0, 100, 111, 99, 117, 109, 101, 110, 116, 115, 1, 0, 0, 0, 5,
+            0, 0, 0, 116, 105, 116, 108, 101, 4, 0, 0, 0, 0, 255, 255, 255, 255,
+        ];
+
+        let decoded = decode_schema(&legacy).unwrap();
+        assert_eq!(decoded, schema);
+        assert_eq!(SchemaHash::compute(&decoded), SchemaHash::compute(&schema));
+    }
+
+    #[test]
     fn permissions_roundtrip_preserves_complex_policies() {
         let expected = PolicyExpr::And(vec![
             PolicyExpr::Contains {
