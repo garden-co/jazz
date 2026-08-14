@@ -246,6 +246,8 @@ pub struct ColumnDescriptor {
     /// Optional per-column merge strategy. Absence means MRCA-relative LWW.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merge_strategy: Option<ColumnMergeStrategy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_manifest: Option<crate::content_manifest::ContentManifestSchema>,
 }
 
 impl ColumnDescriptor {
@@ -257,6 +259,7 @@ impl ColumnDescriptor {
             references: None,
             default: None,
             merge_strategy: None,
+            content_manifest: None,
         }
     }
 

@@ -13,6 +13,7 @@ import type {
   JsonSqlType,
   JsonSchema,
   JsonValue,
+  ContentManifestSchema,
   Lens,
   LensOp,
   AddOp,
@@ -222,6 +223,7 @@ export type BytesColumn<
   HasDefault extends boolean = false,
   Value = Uint8Array,
 > = TypedColumnBuilder<"BYTEA", Optional, undefined, HasDefault, Value>;
+export type ContentManifestColumn = BytesColumn;
 export type JsonColumn<
   Output = JsonValue,
   Optional extends boolean = false,
@@ -887,6 +889,25 @@ export const col = {
   timestamp: () => new ScalarBuilder("TIMESTAMP") as unknown as TimestampColumn,
   float: () => new ScalarBuilder("REAL") as unknown as FloatColumn,
   bytes: () => new ScalarBuilder("BYTEA") as unknown as BytesColumn,
+  contentManifest: (
+    adapterKind: string,
+    options: { maxTailEntries: number; maxTailBytes: number },
+  ) => {
+    if (!adapterKind || options.maxTailEntries <= 0 || options.maxTailBytes <= 0) {
+      throw new Error("contentManifest requires a nonempty adapter kind and nonzero tail bounds.");
+    }
+    const builder = new ScalarBuilder("BYTEA");
+    const originalBuild = builder._build.bind(builder);
+    builder._build = (name: string) => ({
+      ...originalBuild(name),
+      contentManifest: {
+        adapterKind,
+        maxTailEntries: options.maxTailEntries,
+        maxTailBytes: options.maxTailBytes,
+      } satisfies ContentManifestSchema,
+    });
+    return builder as unknown as ContentManifestColumn;
+  },
   json: jsonColumn as unknown as {
     (): JsonColumn;
     <Schema extends StandardJSONSchemaV1<unknown, unknown>>(

@@ -41,6 +41,11 @@ export interface JsonSqlType<Output = JsonValue> {
    */
   __output?: Output;
 }
+export interface ContentManifestSchema {
+  adapterKind: string;
+  maxTailEntries: number;
+  maxTailBytes: number;
+}
 export type SqlType = ScalarSqlType | ArraySqlType | EnumSqlType | JsonSqlType<unknown>;
 export type ColumnMergeStrategy = "counter" | "g-set";
 export type ColumnMergeStrategyName = ColumnMergeStrategy | "lww";
@@ -104,6 +109,8 @@ export interface Column {
   default?: unknown;
   references?: string; // Target table name for foreign key
   mergeStrategy?: ColumnMergeStrategy;
+  /** Logical subtype of a BYTEA cell, lowered as one atomic manifest. */
+  contentManifest?: ContentManifestSchema;
 }
 
 export type EnumValueFromCases<Cases extends readonly EnumCaseSqlType[]> = {

@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
+use crate::content_manifest::ContentManifestSchema;
 use crate::groove::records::{
     EnumCase, EnumSchema, EnumValue, RecordDescriptor, ScalarEnumSchema, Value as GrooveValue,
 };
@@ -524,6 +525,33 @@ fn convert_column(
         column_type = column_type.nullable();
     }
     let mut converted = CoreColumnSchema::new(column.name.as_str(), column_type);
+    if let Some(manifest) = &column.content_manifest {
+        if !matches!(column.column_type, ColumnType::Bytea) {
+            return Err(err(
+                format!("$.{}.{}", table.as_str(), column.name.as_str()),
+                "content manifest must use BYTEA storage",
+            ));
+        }
+        if column.nullable || column.default.is_some() {
+            return Err(err(
+                format!("$.{}.{}", table.as_str(), column.name.as_str()),
+                "content manifests are required cells without defaults",
+            ));
+        }
+        converted.content_manifest = Some(
+            ContentManifestSchema::new(
+                &manifest.adapter_kind,
+                manifest.max_tail_entries,
+                manifest.max_tail_bytes,
+            )
+            .map_err(|error| {
+                err(
+                    format!("$.{}.{}", table.as_str(), column.name.as_str()),
+                    error.to_string(),
+                )
+            })?,
+        );
+    }
     if let Some(default) = &column.default {
         converted.default = Some(convert_column_default(table, column, default)?);
     }

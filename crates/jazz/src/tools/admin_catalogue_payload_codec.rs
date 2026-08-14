@@ -17,7 +17,7 @@ use crate::tools::public_api::types::{
 use crate::tools::schema_lens::{LensOp, LensTransform};
 
 /// Current encoding version.
-const SCHEMA_VERSION: u8 = 8;
+const SCHEMA_VERSION: u8 = 9;
 const LENS_VERSION: u8 = 3;
 const PERMISSIONS_VERSION: u8 = 1;
 const PERMISSIONS_BUNDLE_VERSION: u8 = 2;
@@ -101,7 +101,7 @@ pub fn decode_schema(data: &[u8]) -> Result<Schema, CatalogueEncodingError> {
         });
     }
 
-    if data[0] != SCHEMA_VERSION {
+    if data[0] != SCHEMA_VERSION && data[0] != 8 {
         return Err(CatalogueEncodingError::UnsupportedVersion {
             found: data[0],
             expected: SCHEMA_VERSION,
@@ -239,6 +239,15 @@ fn encode_column_descriptor(buf: &mut Vec<u8>, col: &ColumnDescriptor) {
         }
         None => buf.push(0),
     }
+    match &col.content_manifest {
+        Some(manifest) => {
+            buf.push(1);
+            write_string(buf, &manifest.adapter_kind);
+            write_u32(buf, manifest.max_tail_entries);
+            write_u32(buf, manifest.max_tail_bytes);
+        }
+        None => buf.push(0),
+    }
 }
 
 fn decode_column_descriptor(
@@ -276,6 +285,20 @@ fn decode_column_descriptor(
     } else {
         None
     };
+    let content_manifest = if schema_version >= 9 && read_u8(data, offset)? != 0 {
+        Some(
+            crate::content_manifest::ContentManifestSchema::new(
+                read_string(data, offset, "content_manifest_adapter_kind")?,
+                read_u32(data, offset)?,
+                read_u32(data, offset)?,
+            )
+            .map_err(|error| CatalogueEncodingError::DecodeError {
+                message: error.to_string(),
+            })?,
+        )
+    } else {
+        None
+    };
     Ok(ColumnDescriptor {
         name: ColumnName::new(name),
         column_type,
@@ -283,6 +306,7 @@ fn decode_column_descriptor(
         references,
         default,
         merge_strategy,
+        content_manifest,
     })
 }
 

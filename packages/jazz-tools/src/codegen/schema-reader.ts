@@ -4,7 +4,6 @@
 
 import type {
   Schema,
-  Column,
   ScalarSqlType,
   SqlType,
   TablePolicies as DslTablePolicies,
@@ -277,6 +276,13 @@ export function schemaToWasm(schema: Schema): WasmSchema {
         column_type: columnType,
         nullable: col.nullable,
       };
+      if (col.contentManifest) {
+        descriptor.content_manifest = {
+          adapter_kind: col.contentManifest.adapterKind,
+          max_tail_entries: col.contentManifest.maxTailEntries,
+          max_tail_bytes: col.contentManifest.maxTailBytes,
+        };
+      }
       if (col.default !== undefined) {
         descriptor.default = toValue(col.default, columnType);
       }

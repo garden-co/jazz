@@ -135,6 +135,7 @@ export interface ColumnDescriptor {
   default?: Value;
   references?: string;
   merge_strategy?: ColumnMergeStrategy;
+  content_manifest?: { adapter_kind: string; max_tail_entries: number; max_tail_bytes: number };
 }
 
 export type PolicyOperation = "Select" | "Insert" | "Update" | "Delete";

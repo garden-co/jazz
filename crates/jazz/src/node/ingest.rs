@@ -3139,6 +3139,47 @@ where
     ) -> Result<BTreeMap<String, Value>, Error> {
         let mut cells = BTreeMap::new();
         for column in &table_schema.columns {
+            if let Some(manifest_schema) = &column.content_manifest {
+                // The manifest is one candidate cell. The runtime decodes each
+                // complete `{root, editTail}` and delegates typed conflict
+                // resolution; it cannot pick a root and tail independently.
+                let mut values = Vec::new();
+                for version in heads {
+                    if version
+                        .authored_columns(table_schema)?
+                        .is_some_and(|columns| !columns.contains(&column.name))
+                    {
+                        continue;
+                    }
+                    if let Some(value) = version.cell(table_schema, &column.name)? {
+                        values.push(value);
+                    }
+                }
+                // Sparse title-only commits must not become body candidates.
+                // Match LWW's parent fallback when no head authored this cell.
+                if values.is_empty() {
+                    for parent in heads
+                        .iter()
+                        .flat_map(VersionRow::parents)
+                        .collect::<BTreeSet<_>>()
+                    {
+                        let Some(version) = row_versions_by_tx.get(&parent) else {
+                            continue;
+                        };
+                        if let Some(value) = version.cell(table_schema, &column.name)? {
+                            values.push(value);
+                        }
+                    }
+                }
+                if !values.is_empty() {
+                    cells.insert(
+                        column.name.clone(),
+                        self.content_manifest_runtime()
+                            .merge_cells(manifest_schema, &values)?,
+                    );
+                }
+                continue;
+            }
             match table_schema.merge_strategy(&column.name) {
                 MergeStrategy::Lww => {
                     let mut best: Option<(crate::time::TxTimeSortKey, Value)> = None;

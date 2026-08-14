@@ -10,6 +10,9 @@
 #![allow(missing_docs)]
 
 use std::collections::BTreeMap;
+use std::sync::{Arc, OnceLock, RwLock};
+
+use groove::records::Value;
 
 use thiserror::Error;
 
@@ -116,6 +119,12 @@ pub enum ManifestError {
     IdCollision(ContentId),
     #[error("content candidates cannot be merged: {0}")]
     Conflict(&'static str),
+    #[error("no content-manifest adapter is registered for kind {0:?}")]
+    UnknownAdapter(String),
+    #[error("a different content-manifest adapter is already registered for kind {0:?}")]
+    AdapterAlreadyRegistered(String),
+    #[error("content-manifest runtime received a non-bytes cell")]
+    NonBytesCell,
 }
 
 impl ContentManifest {
@@ -231,10 +240,50 @@ pub trait ImmutableContentStore {
     ) -> Result<ContentId, ManifestError>;
 }
 
+/// Production-owned source of the authorization domain and immutable object
+/// store used by a node. Core never substitutes a test memory store here:
+/// embedders install the service that owns their durable/encrypted objects.
+pub trait ContentManifestRuntimeProvider: Send + Sync + 'static {
+    fn read_context(&self, node: crate::ids::NodeUuid) -> ContentReadContext;
+    fn immutable_store(&self) -> &dyn ImmutableContentStore;
+}
+
+struct UnavailableImmutableContentStore;
+impl ImmutableContentStore for UnavailableImmutableContentStore {
+    fn get(&self, _: ContentReadContext, _: ContentId) -> Option<&[u8]> {
+        None
+    }
+    fn put_if_absent_or_identical(
+        &mut self,
+        _: ContentAddress<'_>,
+        _: Vec<u8>,
+    ) -> Result<ContentId, ManifestError> {
+        Err(ManifestError::Conflict(
+            "no immutable content store configured",
+        ))
+    }
+}
+
+/// Default service permits schema/row admission but fails any operation that
+/// needs immutable bytes. Applications with content columns install a provider
+/// through `NodeState::new_with_content_manifest_provider`.
+pub struct UnavailableContentManifestRuntimeProvider;
+impl ContentManifestRuntimeProvider for UnavailableContentManifestRuntimeProvider {
+    fn read_context(&self, node: crate::ids::NodeUuid) -> ContentReadContext {
+        ContentReadContext {
+            domain: ContentDomainId(node.0),
+        }
+    }
+    fn immutable_store(&self) -> &dyn ImmutableContentStore {
+        static STORE: UnavailableImmutableContentStore = UnavailableImmutableContentStore;
+        &STORE
+    }
+}
+
 /// Adapter seam used by merge strategies and interior query/index lowering.
 /// Both consumers receive the complete `{ root, editTail }`, never one field
 /// independently, preserving atomic conflict-unit semantics.
-pub trait ContentManifestAdapter {
+pub trait ContentManifestAdapter: Send + Sync + 'static {
     fn adapter_kind(&self) -> &str;
     fn validate_operation(&self, operation: &[u8]) -> Result<(), ManifestError>;
     fn materialize(
@@ -257,6 +306,183 @@ pub trait ContentManifestAdapter {
         context: ContentReadContext,
         store: &dyn ImmutableContentStore,
     ) -> Result<BTreeMap<String, Vec<u8>>, ManifestError>;
+}
+
+/// Process-local registry of adapter implementations.
+///
+/// Registrations are deliberately append-only.  An adapter kind is part of a
+/// replicated schema identity, so replacing its implementation while values
+/// are live could make the same manifest mean different things in different
+/// worker threads.  Register adapters during process startup, before opening
+/// nodes which can accept that schema.  The registry holds adapters behind an
+/// `Arc`, so readers never hold its lock while executing adapter code.
+#[derive(Default)]
+pub struct ContentManifestAdapterRegistry {
+    adapters: RwLock<BTreeMap<String, Arc<dyn ContentManifestAdapter>>>,
+}
+
+impl ContentManifestAdapterRegistry {
+    /// Register a new adapter. Registering the exact same `Arc` again is
+    /// idempotent; registering a different implementation for the same kind
+    /// fails closed.
+    pub fn register(&self, adapter: Arc<dyn ContentManifestAdapter>) -> Result<(), ManifestError> {
+        let kind = adapter.adapter_kind().to_owned();
+        if kind.is_empty() {
+            return Err(ManifestError::InvalidSchema);
+        }
+        // A previous adapter panic must not turn an unknown cell into an
+        // unchecked one. The map remains valid, and adapter errors are
+        // returned by the execution call itself.
+        let mut adapters = self
+            .adapters
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match adapters.get(&kind) {
+            Some(existing) if Arc::ptr_eq(existing, &adapter) => Ok(()),
+            Some(_) => Err(ManifestError::AdapterAlreadyRegistered(kind)),
+            None => {
+                adapters.insert(kind, adapter);
+                Ok(())
+            }
+        }
+    }
+
+    /// Resolve an adapter by the schema-owned stable kind.
+    pub fn get(&self, kind: &str) -> Result<Arc<dyn ContentManifestAdapter>, ManifestError> {
+        self.adapters
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(kind)
+            .cloned()
+            .ok_or_else(|| ManifestError::UnknownAdapter(kind.to_owned()))
+    }
+}
+
+/// The process-wide registry used by row codecs. It has no unregister API:
+/// adapter lifetime is the process lifetime, avoiding use-after-unregister
+/// races with node/query worker threads.
+pub fn global_content_manifest_adapters() -> &'static ContentManifestAdapterRegistry {
+    static REGISTRY: OnceLock<ContentManifestAdapterRegistry> = OnceLock::new();
+    REGISTRY.get_or_init(ContentManifestAdapterRegistry::default)
+}
+
+/// The runtime bridge from a schema-declared content-manifest cell to an
+/// adapter. All operations decode and validate the whole atomic cell before
+/// calling the adapter; neither query/index nor merge callers can accidentally
+/// observe a root while omitting its live edit tail.
+pub struct ContentManifestRuntime<'a> {
+    registry: &'a ContentManifestAdapterRegistry,
+    context: ContentReadContext,
+    store: &'a dyn ImmutableContentStore,
+}
+
+impl<'a> ContentManifestRuntime<'a> {
+    pub fn new(
+        registry: &'a ContentManifestAdapterRegistry,
+        context: ContentReadContext,
+        store: &'a dyn ImmutableContentStore,
+    ) -> Self {
+        Self {
+            registry,
+            context,
+            store,
+        }
+    }
+
+    /// Decode an actual row cell and check every typed tail operation through
+    /// its registered adapter. Unknown adapter kinds fail closed.
+    pub fn decode_cell(
+        &self,
+        schema: &ContentManifestSchema,
+        value: &Value,
+    ) -> Result<ContentManifest, ManifestError> {
+        let Value::Bytes(bytes) = value else {
+            return Err(ManifestError::NonBytesCell);
+        };
+        let manifest = ContentManifest::decode(bytes, schema)?;
+        let adapter = self.registry.get(&schema.adapter_kind)?;
+        for operation in &manifest.edit_tail {
+            adapter.validate_operation(operation)?;
+        }
+        Ok(manifest)
+    }
+
+    pub fn materialize_cell(
+        &self,
+        schema: &ContentManifestSchema,
+        value: &Value,
+        request: &MaterializationRequest,
+    ) -> Result<Vec<u8>, ManifestError> {
+        let manifest = self.decode_cell(schema, value)?;
+        self.registry.get(&schema.adapter_kind)?.materialize(
+            &manifest,
+            request,
+            self.context,
+            self.store,
+        )
+    }
+
+    /// Merge complete candidate cells using the schema's adapter and return one
+    /// canonical atomic `Bytes` cell. This is the only adapter merge entry
+    /// point; callers never receive independently mergeable root/tail fields.
+    pub fn merge_cells(
+        &self,
+        schema: &ContentManifestSchema,
+        values: &[Value],
+    ) -> Result<Value, ManifestError> {
+        let manifests = values
+            .iter()
+            .map(|value| self.decode_cell(schema, value))
+            .collect::<Result<Vec<_>, _>>()?;
+        let merged =
+            self.registry
+                .get(&schema.adapter_kind)?
+                .merge(&manifests, self.context, self.store)?;
+        merged.validate(schema)?;
+        for operation in &merged.edit_tail {
+            self.registry
+                .get(&schema.adapter_kind)?
+                .validate_operation(operation)?;
+        }
+        Ok(Value::Bytes(merged.encode(schema)?))
+    }
+
+    /// Derive interior query/index values from a full manifest. Values are
+    /// adapter-owned and intentionally not silently persisted as ordinary
+    /// columns; adapters decide which projections are safe to expose.
+    pub fn index_values_for_cell(
+        &self,
+        schema: &ContentManifestSchema,
+        value: &Value,
+        requested: &[String],
+    ) -> Result<BTreeMap<String, Vec<u8>>, ManifestError> {
+        let manifest = self.decode_cell(schema, value)?;
+        self.registry.get(&schema.adapter_kind)?.index_values(
+            &manifest,
+            requested,
+            self.context,
+            self.store,
+        )
+    }
+}
+
+/// Validate a manifest cell at the ordinary row-codec boundary. The global
+/// registry supplies the schema-defined operation validation; execution paths
+/// that need immutable reads use [`ContentManifestRuntime`] with their own
+/// store and authorization domain.
+pub fn validate_registered_cell(
+    schema: &ContentManifestSchema,
+    value: &Value,
+) -> Result<(), ManifestError> {
+    let Value::Bytes(bytes) = value else {
+        return Err(ManifestError::NonBytesCell);
+    };
+    let manifest = ContentManifest::decode(bytes, schema)?;
+    let adapter = global_content_manifest_adapters().get(&schema.adapter_kind)?;
+    for operation in &manifest.edit_tail {
+        adapter.validate_operation(operation)?;
+    }
+    Ok(())
 }
 
 /// Small in-memory fixture for adapters and tests. Production immutable stores
@@ -287,6 +513,102 @@ impl ImmutableContentStore for MemoryImmutableContentStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct FixtureAdapter {
+        materializations: AtomicUsize,
+        merges: AtomicUsize,
+        indices: AtomicUsize,
+    }
+
+    impl FixtureAdapter {
+        fn registered() -> Arc<Self> {
+            static ADAPTER: OnceLock<Arc<FixtureAdapter>> = OnceLock::new();
+            let adapter = ADAPTER
+                .get_or_init(|| {
+                    Arc::new(FixtureAdapter {
+                        materializations: AtomicUsize::new(0),
+                        merges: AtomicUsize::new(0),
+                        indices: AtomicUsize::new(0),
+                    })
+                })
+                .clone();
+            global_content_manifest_adapters()
+                .register(adapter.clone())
+                .unwrap();
+            adapter
+        }
+    }
+
+    impl ContentManifestAdapter for FixtureAdapter {
+        fn adapter_kind(&self) -> &str {
+            "manifest-runtime-fixture-v1"
+        }
+        fn validate_operation(&self, operation: &[u8]) -> Result<(), ManifestError> {
+            if operation.starts_with(b"+") {
+                Ok(())
+            } else {
+                Err(ManifestError::Conflict("fixture operation"))
+            }
+        }
+        fn materialize(
+            &self,
+            manifest: &ContentManifest,
+            request: &MaterializationRequest,
+            context: ContentReadContext,
+            store: &dyn ImmutableContentStore,
+        ) -> Result<Vec<u8>, ManifestError> {
+            self.materializations.fetch_add(1, Ordering::Relaxed);
+            let mut full = store
+                .get(context, manifest.root)
+                .ok_or(ManifestError::Conflict("fixture root missing"))?
+                .to_vec();
+            for operation in &manifest.edit_tail {
+                full.extend_from_slice(&operation[1..]);
+            }
+            match request {
+                MaterializationRequest::Full | MaterializationRequest::Projection(_) => Ok(full),
+                MaterializationRequest::Range { offset, length } => Ok(full
+                    .get(*offset as usize..offset.saturating_add(*length) as usize)
+                    .ok_or(ManifestError::Conflict("fixture range"))?
+                    .to_vec()),
+            }
+        }
+        fn merge(
+            &self,
+            manifests: &[ContentManifest],
+            _context: ContentReadContext,
+            _store: &dyn ImmutableContentStore,
+        ) -> Result<ContentManifest, ManifestError> {
+            self.merges.fetch_add(1, Ordering::Relaxed);
+            let first = manifests
+                .first()
+                .ok_or(ManifestError::Conflict("fixture empty merge"))?;
+            let mut edit_tail = Vec::new();
+            for manifest in manifests {
+                edit_tail.extend(manifest.edit_tail.clone());
+            }
+            Ok(ContentManifest {
+                root: first.root,
+                edit_tail,
+            })
+        }
+        fn index_values(
+            &self,
+            manifest: &ContentManifest,
+            requested: &[String],
+            context: ContentReadContext,
+            store: &dyn ImmutableContentStore,
+        ) -> Result<BTreeMap<String, Vec<u8>>, ManifestError> {
+            self.indices.fetch_add(1, Ordering::Relaxed);
+            let full = self.materialize(manifest, &MaterializationRequest::Full, context, store)?;
+            Ok(requested
+                .iter()
+                .cloned()
+                .map(|name| (name, full.clone()))
+                .collect())
+        }
+    }
     #[test]
     fn manifest_codec_is_atomic_and_enforces_its_boundaries() {
         // Internal because this is a wire codec boundary with no public client API yet.
@@ -356,5 +678,110 @@ mod tests {
             .put_if_absent_or_identical(address, b"different".to_vec())
             .unwrap();
         assert_ne!(different, leaf, "the store derives, never trusts, the id");
+    }
+
+    #[test]
+    fn registered_adapter_runs_for_actual_schema_column_and_all_runtime_seams() {
+        let adapter = FixtureAdapter::registered();
+        let schema = ContentManifestSchema::new("manifest-runtime-fixture-v1", 4, 64).unwrap();
+        let column = crate::schema::ColumnSchema::content_manifest("body", schema.clone());
+        let domain = ContentDomainId(uuid::Uuid::from_bytes([9; 16]));
+        let context = ContentReadContext { domain };
+        let mut store = MemoryImmutableContentStore::default();
+        let root = store
+            .put_if_absent_or_identical(
+                ContentAddress {
+                    domain,
+                    adapter_kind: &schema.adapter_kind,
+                    kind: ImmutableContentKind::Root,
+                },
+                b"root".to_vec(),
+            )
+            .unwrap();
+        let left = Value::Bytes(
+            ContentManifest {
+                root,
+                edit_tail: vec![b"+ left".to_vec()],
+            }
+            .encode(&schema)
+            .unwrap(),
+        );
+        let right = Value::Bytes(
+            ContentManifest {
+                root,
+                edit_tail: vec![b"+ right".to_vec()],
+            }
+            .encode(&schema)
+            .unwrap(),
+        );
+
+        // This is the ordinary row codec boundary, not a direct adapter call.
+        crate::node::codec::validate_cell_value(&column, &left).unwrap();
+        let runtime =
+            ContentManifestRuntime::new(global_content_manifest_adapters(), context, &store);
+        assert_eq!(
+            runtime
+                .materialize_cell(&schema, &left, &MaterializationRequest::Full)
+                .unwrap(),
+            b"root left"
+        );
+        assert_eq!(
+            runtime
+                .materialize_cell(
+                    &schema,
+                    &left,
+                    &MaterializationRequest::Range {
+                        offset: 4,
+                        length: 5
+                    }
+                )
+                .unwrap(),
+            b" left"
+        );
+        let indexed = runtime
+            .index_values_for_cell(&schema, &left, &["search".into()])
+            .unwrap();
+        assert_eq!(indexed["search"], b"root left");
+        let Value::Bytes(merged) = runtime
+            .merge_cells(&schema, &[left.clone(), right])
+            .unwrap()
+        else {
+            panic!("manifest merge must return bytes")
+        };
+        assert_eq!(
+            ContentManifest::decode(&merged, &schema).unwrap().edit_tail,
+            vec![b"+ left".to_vec(), b"+ right".to_vec()]
+        );
+        assert!(adapter.materializations.load(Ordering::Relaxed) >= 3);
+        assert_eq!(adapter.merges.load(Ordering::Relaxed), 1);
+        assert_eq!(adapter.indices.load(Ordering::Relaxed), 1);
+
+        // Planted sensitivity: a tail that the adapter rejects must be refused
+        // at the actual row codec, proving it was not merely JCM1-decoded.
+        let invalid = Value::Bytes(
+            ContentManifest {
+                root,
+                edit_tail: vec![b"not-an-operation".to_vec()],
+            }
+            .encode(&schema)
+            .unwrap(),
+        );
+        assert!(crate::node::codec::validate_cell_value(&column, &invalid).is_err());
+    }
+
+    #[test]
+    fn unknown_adapter_fails_closed_at_row_codec_boundary() {
+        let schema =
+            ContentManifestSchema::new("intentionally-unregistered-manifest-v1", 1, 8).unwrap();
+        let column = crate::schema::ColumnSchema::content_manifest("body", schema.clone());
+        let value = Value::Bytes(
+            ContentManifest {
+                root: ContentId([1; 32]),
+                edit_tail: vec![],
+            }
+            .encode(&schema)
+            .unwrap(),
+        );
+        assert!(crate::node::codec::validate_cell_value(&column, &value).is_err());
     }
 }

@@ -27,6 +27,10 @@ use groove::storage::{self, OrderedKvStorage, ReopenableStorage, StorageLayout};
 use thiserror::Error;
 
 use self::query_engine::user_column_field;
+use crate::content_manifest::{
+    ContentManifestRuntime, ContentManifestRuntimeProvider, ManifestError, MaterializationRequest,
+    UnavailableContentManifestRuntimeProvider,
+};
 use crate::ids::{
     AuthorId, BranchId, MigrationLensId, NodeAlias, NodeUuid, PhysicalColumnId, PhysicalTableId,
     RowUuid, SchemaLineagePublicationId, SchemaVersionAlias, SchemaVersionId,
@@ -359,7 +363,7 @@ fn reconcile_nested_scalar_enum_cases(
 
 mod branches;
 mod catalogue_ingest;
-mod codec;
+pub(crate) mod codec;
 mod currency;
 mod database_slot;
 mod eviction;
@@ -511,6 +515,9 @@ enum CompiledLensOp {
 pub struct NodeState<S> {
     /// Stable UUID identifying this node across storage reopen.
     node_uuid: NodeUuid,
+    /// Application-installed immutable-content backing service. Kept outside
+    /// row storage because immutable objects are domain/encryption scoped.
+    content_manifest_provider: Arc<dyn ContentManifestRuntimeProvider>,
     /// Compact alias assigned to this node for on-disk transaction keys.
     self_node_alias: Option<NodeAlias>,
     /// Schema catalogue, migration lenses, and logical-to-physical mappings.
@@ -811,7 +818,36 @@ where
     where
         S: ReopenableStorage,
     {
-        Self::new_with_history_complete(node_uuid, schema, storage, false)
+        Self::new_with_content_manifest_provider(
+            node_uuid,
+            schema,
+            storage,
+            Arc::new(UnavailableContentManifestRuntimeProvider),
+            false,
+        )
+    }
+
+    /// Open a node with the durable immutable-content service used for
+    /// manifest materialization, typed merging, and interior indices.
+    pub fn new_with_content_manifest_provider(
+        node_uuid: NodeUuid,
+        schema: JazzSchema,
+        storage: S,
+        provider: Arc<dyn ContentManifestRuntimeProvider>,
+        history_complete: bool,
+    ) -> Result<Self, Error>
+    where
+        S: ReopenableStorage,
+    {
+        Self::new_with_options_inner(
+            node_uuid,
+            schema,
+            storage,
+            history_complete,
+            provider,
+            #[cfg(feature = "testing")]
+            None,
+        )
     }
 
     /// Open or create a node that is known to hold complete settled history.
@@ -828,7 +864,13 @@ where
     where
         S: ReopenableStorage,
     {
-        Self::new_with_history_complete(node_uuid, schema, storage, true)
+        Self::new_with_content_manifest_provider(
+            node_uuid,
+            schema,
+            storage,
+            Arc::new(UnavailableContentManifestRuntimeProvider),
+            true,
+        )
     }
 
     /// Rebuild the groove layer over the same storage using the standard open path.
@@ -839,49 +881,20 @@ where
         let NodeState {
             node_uuid,
             catalogue,
+            content_manifest_provider,
             database,
             history_complete,
             ..
         } = self;
         let storage = database.into_inner().into_storage();
-        let reopened = Self::new_with_history_complete(
+        let reopened = Self::new_with_content_manifest_provider(
             node_uuid,
             catalogue.schema,
             storage,
+            content_manifest_provider,
             history_complete,
         )?;
         Ok(reopened)
-    }
-
-    fn new_with_history_complete(
-        node_uuid: NodeUuid,
-        schema: JazzSchema,
-        storage: S,
-        history_complete: bool,
-    ) -> Result<Self, Error>
-    where
-        S: ReopenableStorage,
-    {
-        Self::new_with_options(node_uuid, schema, storage, history_complete)
-    }
-
-    fn new_with_options(
-        node_uuid: NodeUuid,
-        schema: JazzSchema,
-        storage: S,
-        history_complete: bool,
-    ) -> Result<Self, Error>
-    where
-        S: ReopenableStorage,
-    {
-        Self::new_with_options_inner(
-            node_uuid,
-            schema,
-            storage,
-            history_complete,
-            #[cfg(feature = "testing")]
-            None,
-        )
     }
 
     #[cfg(feature = "testing")]
@@ -901,6 +914,7 @@ where
             schema,
             storage,
             history_complete,
+            Arc::new(UnavailableContentManifestRuntimeProvider),
             Some(&mut receipt),
         )?;
         Ok((node, receipt))
@@ -911,6 +925,7 @@ where
         schema: JazzSchema,
         storage: S,
         history_complete: bool,
+        content_manifest_provider: Arc<dyn ContentManifestRuntimeProvider>,
         #[cfg(feature = "testing")] mut receipt: Option<&mut NodeOpenReceipt>,
     ) -> Result<Self, Error>
     where
@@ -1002,6 +1017,7 @@ where
         let started = receipt.as_ref().map(|_| Instant::now());
         let mut node = Self {
             node_uuid,
+            content_manifest_provider,
             self_node_alias: None,
             catalogue: SchemaCatalogue {
                 current_schema_version_id,
@@ -4155,6 +4171,71 @@ where
             .ok_or_else(|| Error::TableNotFound(table.to_owned()))
     }
 
+    fn content_manifest_runtime(&self) -> ContentManifestRuntime<'_> {
+        ContentManifestRuntime::new(
+            crate::content_manifest::global_content_manifest_adapters(),
+            self.content_manifest_provider.read_context(self.node_uuid),
+            self.content_manifest_provider.immutable_store(),
+        )
+    }
+
+    /// Materialize a schema-declared content cell through this node's installed
+    /// immutable-content service. This is the explicit public query seam for
+    /// full values, ranges, and named projections.
+    pub fn materialize_content_manifest(
+        &self,
+        table: &str,
+        column: &str,
+        value: &Value,
+        request: &MaterializationRequest,
+    ) -> Result<Vec<u8>, Error> {
+        let column = self
+            .table(table)?
+            .columns
+            .iter()
+            .find(|candidate| candidate.name == column)
+            .ok_or(Error::InvalidStoredValue(
+                "content manifest column not found",
+            ))?;
+        let manifest = column
+            .content_manifest
+            .as_ref()
+            .ok_or(Error::InvalidStoredValue(
+                "column is not a content manifest",
+            ))?;
+        Ok(self
+            .content_manifest_runtime()
+            .materialize_cell(manifest, value, request)?)
+    }
+
+    /// Derive named interior values from one content cell. Index planners use
+    /// this same full-manifest path instead of decoding roots independently.
+    pub fn content_manifest_index_values(
+        &self,
+        table: &str,
+        column: &str,
+        value: &Value,
+        requested: &[String],
+    ) -> Result<BTreeMap<String, Vec<u8>>, Error> {
+        let column = self
+            .table(table)?
+            .columns
+            .iter()
+            .find(|candidate| candidate.name == column)
+            .ok_or(Error::InvalidStoredValue(
+                "content manifest column not found",
+            ))?;
+        let manifest = column
+            .content_manifest
+            .as_ref()
+            .ok_or(Error::InvalidStoredValue(
+                "column is not a content manifest",
+            ))?;
+        Ok(self
+            .content_manifest_runtime()
+            .index_values_for_cell(manifest, value, requested)?)
+    }
+
     pub(super) fn table_in_schema(
         &self,
         table: &str,
@@ -5408,6 +5489,9 @@ pub struct MalformedCurrentRow {
 /// Error type returned by the storage-backed node API.
 #[derive(Debug, Error)]
 pub enum Error {
+    /// A registered content-manifest adapter rejected a row, merge, or read.
+    #[error(transparent)]
+    ContentManifest(#[from] ManifestError),
     /// Error returned by groove.
     #[error(transparent)]
     Groove(#[from] GrooveDbError),

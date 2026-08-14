@@ -66,6 +66,22 @@ The materialization request may be full, range, or named projection; partial
 requests are advisory because an adapter may need to load more of its tree to
 answer safely.
 
+`ContentManifestAdapterRegistry` resolves the schema's `adapter_kind` to one
+process-local adapter. Registrations are append-only for the process lifetime:
+an adapter is registered during startup before a node can accept schemas that
+name it, and attempting to replace an already registered kind fails. This
+prevents two worker threads from interpreting a replicated manifest differently.
+The ordinary row codec resolves and validates every tail operation through that
+registry, so an unknown kind or invalid typed tail fails closed at admission.
+
+`ContentManifestRuntime` is the narrow execution bridge for materialization,
+adapter-defined merges, and interior projection/index derivation. It is given a
+domain-scoped immutable store and always decodes the complete cell before
+calling the adapter. Query/index code must use this bridge (rather than reading
+the bytes cell or root directly). A concrete content lane may opt into adapter
+merge only once it has the necessary immutable store and conflict semantics;
+until then, core keeps normal whole-cell LWW.
+
 `INV-MANIFEST-4`: Any merge strategy, interior query, or index that observes
 content MUST materialize from a coherent `{root, editTail}` pair. It MUST NOT
 read the root while ignoring a live tail.
@@ -89,5 +105,6 @@ one of those rules is forbidden.
 
 - The exact storage transaction that joins immutable `put_if_absent-or-identical`
   with publication of the owning application row is not yet a core primitive.
-- Query planner registration and a first-class adapter registry will be added
-  with the feature lanes once concrete materializers exist.
+- Physical persistence/lifecycle of immutable content objects in a production
+  node (beyond the adapter-neutral store contract) belongs to the first content
+  lane that can supply it.
