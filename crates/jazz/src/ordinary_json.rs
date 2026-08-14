@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 use crate::content_manifest::{
     ContentAddress, ContentId, ContentManifest, ContentManifestAdapter, ContentReadContext,
-    ImmutableContentKind, ImmutableContentStore, ManifestError, MaterializationRequest,
+    ImmutableContentKind, ImmutableContentStore, ManifestError, MaterializationRequest, content_id,
 };
 
 /// Schema adapter discriminator for JSON manifests.
@@ -316,8 +316,22 @@ impl OrdinaryJsonAdapter {
         context: ContentReadContext,
         store: &dyn ImmutableContentStore,
     ) -> Result<StoredObject, ManifestError> {
-        postcard::from_bytes(store.get(context, id).ok_or(ManifestError::Malformed)?)
-            .map_err(|_| ManifestError::Malformed)
+        let bytes = store.get(context, id).ok_or(ManifestError::Malformed)?;
+        let object: StoredObject =
+            postcard::from_bytes(bytes).map_err(|_| ManifestError::Malformed)?;
+        let kind = match &object {
+            StoredObject::Root { .. } => ImmutableContentKind::Root,
+            StoredObject::Node(_) | StoredObject::Order(OrderNode::Branch(_)) => {
+                ImmutableContentKind::Node
+            }
+            StoredObject::Order(OrderNode::Leaf(_)) => ImmutableContentKind::Leaf,
+        };
+        if content_id(context.domain, JSON_ADAPTER_KIND, kind, bytes) != id {
+            return Err(ManifestError::Conflict(
+                "immutable JSON object content id mismatch",
+            ));
+        }
+        Ok(object)
     }
     fn publish_node(
         &self,
@@ -445,11 +459,22 @@ impl OrdinaryJsonAdapter {
             StoredObject::Order(OrderNode::Leaf(ids)) => Ok(ids),
             StoredObject::Order(OrderNode::Branch(children)) => children
                 .into_iter()
-                .map(|(id, _)| self.load_order(id, context, store))
+                .map(|(id, expected)| {
+                    let values = self.load_order(id, context, store)?;
+                    if values.len() != expected as usize {
+                        return Err(ManifestError::Conflict(
+                            "JSON order-tree rank count mismatch",
+                        ));
+                    }
+                    Ok(values)
+                })
                 .collect::<Result<Vec<_>, _>>()
                 .map(|parts| parts.into_iter().flatten().collect()),
             _ => Err(ManifestError::Malformed),
         }
+    }
+    fn child_id(parent: Uuid, label: &[u8]) -> Uuid {
+        Uuid::new_v5(&parent, label)
     }
     fn literal_node(id: Uuid, literal: &JsonLiteral) -> Materialized {
         Materialized {
@@ -460,14 +485,22 @@ impl OrdinaryJsonAdapter {
                     values
                         .iter()
                         .map(|(key, value)| {
-                            (key.clone(), Self::literal_node(Uuid::new_v4(), value))
+                            let mut label = b"object:".to_vec();
+                            label.extend_from_slice(key.as_bytes());
+                            (
+                                key.clone(),
+                                Self::literal_node(Self::child_id(id, &label), value),
+                            )
                         })
                         .collect(),
                 ),
                 JsonLiteral::Array(values) => MaterializedValue::Array(
                     values
                         .iter()
-                        .map(|value| Self::literal_node(Uuid::new_v4(), value))
+                        .enumerate()
+                        .map(|(index, value)| {
+                            Self::literal_node(Self::child_id(id, &index.to_le_bytes()), value)
+                        })
                         .collect(),
                 ),
             },
@@ -482,14 +515,18 @@ impl OrdinaryJsonAdapter {
                     "scalar target is absent or non-scalar",
                 )),
             JsonOperation::SetMember {
-                object, key, value, ..
+                op,
+                object,
+                key,
+                value,
+                ..
             } => Self::find_mut(node, *object)
                 .and_then(|node| match &mut node.value {
                     MaterializedValue::Object(members) => Some(members),
                     _ => None,
                 })
                 .map(|members| {
-                    members.insert(key.clone(), Self::literal_node(Uuid::new_v4(), value));
+                    members.insert(key.clone(), Self::literal_node(*op, value));
                 })
                 .ok_or(ManifestError::Conflict(
                     "member target is absent or non-object",
@@ -664,8 +701,8 @@ impl ContentManifestAdapter for OrdinaryJsonAdapter {
     fn merge(
         &self,
         manifests: &[ContentManifest],
-        _: ContentReadContext,
-        _: &dyn ImmutableContentStore,
+        context: ContentReadContext,
+        store: &dyn ImmutableContentStore,
     ) -> Result<ContentManifest, ManifestError> {
         let Some(first) = manifests.first() else {
             return Err(ManifestError::Conflict("no candidates"));
@@ -673,20 +710,61 @@ impl ContentManifestAdapter for OrdinaryJsonAdapter {
         if manifests.iter().any(|manifest| manifest.root != first.root) {
             return Err(ManifestError::Conflict("unproven root descendant"));
         }
-        let mut operations = BTreeMap::new();
+        for manifest in manifests {
+            self.materialize(manifest, &MaterializationRequest::Full, context, store)?;
+        }
+        let mut operations: BTreeMap<Uuid, Vec<u8>> = BTreeMap::new();
         let mut keys = BTreeSet::new();
         for manifest in manifests {
             for bytes in &manifest.edit_tail {
                 let op = JsonOperation::decode(bytes)?;
-                if !operations.contains_key(&op.id()) && !keys.insert(op.conflict_key()) {
+                if let Some(existing) = operations.get(&op.id()) {
+                    if existing != bytes {
+                        return Err(ManifestError::Conflict(
+                            "duplicate operation id equivocation",
+                        ));
+                    }
+                    continue;
+                }
+                if !keys.insert(op.conflict_key()) {
                     return Err(ManifestError::Conflict("noncommuting typed operations"));
                 }
                 operations.insert(op.id(), bytes.clone());
             }
         }
+        for (index, left) in manifests.iter().enumerate() {
+            for right in &manifests[index + 1..] {
+                let mut left_then_right = self.load_root(first.root, context, store)?;
+                for bytes in left.edit_tail.iter().chain(&right.edit_tail) {
+                    self.apply(&mut left_then_right, &JsonOperation::decode(bytes)?)?;
+                }
+                let mut right_then_left = self.load_root(first.root, context, store)?;
+                for bytes in right.edit_tail.iter().chain(&left.edit_tail) {
+                    self.apply(&mut right_then_left, &JsonOperation::decode(bytes)?)?;
+                }
+                if Self::json(&left_then_right) != Self::json(&right_then_left) {
+                    return Err(ManifestError::Conflict(
+                        "typed operation tails do not commute",
+                    ));
+                }
+            }
+        }
+        let mut tails = manifests
+            .iter()
+            .map(|manifest| manifest.edit_tail.clone())
+            .collect::<Vec<_>>();
+        tails.sort();
+        let mut emitted = BTreeSet::new();
+        let edit_tail = tails
+            .into_iter()
+            .flatten()
+            .filter(|bytes| {
+                JsonOperation::decode(bytes).is_ok_and(|operation| emitted.insert(operation.id()))
+            })
+            .collect();
         Ok(ContentManifest {
             root: first.root,
-            edit_tail: operations.into_values().collect(),
+            edit_tail,
         })
     }
     fn index_values(
@@ -989,6 +1067,246 @@ mod tests {
                 )
                 .unwrap(),
             serde_json::to_vec(&(0..=ORDER_FANOUT).collect::<Vec<_>>()).unwrap()
+        );
+    }
+
+    #[test]
+    fn consolidation_is_deterministic_for_nested_inserted_literals() {
+        let (adapter, mut store, base, node) = seeded();
+        let object = node.id;
+        let manifest = ContentManifest {
+            root: base.root,
+            edit_tail: vec![
+                JsonOperation::SetMember {
+                    op: Uuid::from_bytes([0x71; 16]),
+                    object,
+                    key: "nested".into(),
+                    value: JsonLiteral::Object(BTreeMap::from([(
+                        "array".into(),
+                        JsonLiteral::Array(vec![JsonLiteral::Scalar(JsonScalar::Number(7))]),
+                    )])),
+                }
+                .encode()
+                .unwrap(),
+            ],
+        };
+        let first = adapter
+            .consolidate(&manifest, context(), &mut store)
+            .unwrap();
+        let second = adapter
+            .consolidate(&manifest, context(), &mut store)
+            .unwrap();
+        assert_eq!(first.root, second.root);
+    }
+
+    #[test]
+    fn merge_rejects_duplicate_operation_equivocation_and_introduced_anchor_dependency() {
+        let (adapter, store, base, node) = seeded();
+        let status = match &node.value {
+            MaterializedValue::Object(values) => values["status"].id,
+            _ => unreachable!(),
+        };
+        let op = Uuid::from_bytes([0x72; 16]);
+        let candidate = |value: &str| ContentManifest {
+            root: base.root,
+            edit_tail: vec![
+                JsonOperation::SetScalar {
+                    op,
+                    target: status,
+                    value: JsonScalar::String(value.into()),
+                }
+                .encode()
+                .unwrap(),
+            ],
+        };
+        assert_eq!(
+            adapter.merge(&[candidate("a"), candidate("b")], context(), &store),
+            Err(ManifestError::Conflict(
+                "duplicate operation id equivocation"
+            ))
+        );
+
+        let array = match &node.value {
+            MaterializedValue::Object(values) => values["items"].id,
+            _ => unreachable!(),
+        };
+        let introduced = Uuid::from_bytes([0x73; 16]);
+        let insert = JsonOperation::InsertArray {
+            op: Uuid::from_bytes([0x74; 16]),
+            array,
+            element: introduced,
+            anchor: None,
+            after: true,
+            value: JsonLiteral::Scalar(JsonScalar::Number(2)),
+        };
+        let dependent = JsonOperation::InsertArray {
+            op: Uuid::from_bytes([0x75; 16]),
+            array,
+            element: Uuid::from_bytes([0x76; 16]),
+            anchor: Some(introduced),
+            after: true,
+            value: JsonLiteral::Scalar(JsonScalar::Number(3)),
+        };
+        assert!(
+            adapter
+                .merge(
+                    &[
+                        ContentManifest {
+                            root: base.root,
+                            edit_tail: vec![insert.encode().unwrap()]
+                        },
+                        ContentManifest {
+                            root: base.root,
+                            edit_tail: vec![dependent.encode().unwrap()]
+                        },
+                    ],
+                    context(),
+                    &store,
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn fetched_ids_and_order_rank_counts_are_verified() {
+        let adapter = OrdinaryJsonAdapter;
+        let mut store = MemoryImmutableContentStore::default();
+        let child = adapter
+            .publish_node(
+                &Materialized {
+                    id: Uuid::from_bytes([0x77; 16]),
+                    value: MaterializedValue::Scalar(JsonScalar::Number(1)),
+                },
+                context(),
+                &mut store,
+            )
+            .unwrap();
+        let leaf = adapter
+            .put(
+                ImmutableContentKind::Leaf,
+                &StoredObject::Order(OrderNode::Leaf(vec![child])),
+                context(),
+                &mut store,
+            )
+            .unwrap();
+        let bad_order = adapter
+            .put(
+                ImmutableContentKind::Node,
+                &StoredObject::Order(OrderNode::Branch(vec![(leaf, 2)])),
+                context(),
+                &mut store,
+            )
+            .unwrap();
+        let document = adapter
+            .put(
+                ImmutableContentKind::Node,
+                &StoredObject::Node(StoredNode {
+                    logical_id: Uuid::from_bytes([0x78; 16]),
+                    kind: StoredKind::Array(bad_order),
+                }),
+                context(),
+                &mut store,
+            )
+            .unwrap();
+        let root = adapter
+            .put(
+                ImmutableContentKind::Root,
+                &StoredObject::Root {
+                    document,
+                    parent: None,
+                },
+                context(),
+                &mut store,
+            )
+            .unwrap();
+        assert_eq!(
+            adapter.materialize(
+                &ContentManifest {
+                    root,
+                    edit_tail: Vec::new()
+                },
+                &MaterializationRequest::Full,
+                context(),
+                &store
+            ),
+            Err(ManifestError::Conflict(
+                "JSON order-tree rank count mismatch"
+            ))
+        );
+        assert_eq!(
+            adapter.materialize(
+                &ContentManifest {
+                    root: ContentId([0x79; 32]),
+                    edit_tail: Vec::new()
+                },
+                &MaterializationRequest::Full,
+                context(),
+                &store
+            ),
+            Err(ManifestError::Malformed)
+        );
+    }
+
+    #[test]
+    fn fetched_object_bytes_must_rehash_to_the_requested_id() {
+        struct CorruptingStore {
+            inner: MemoryImmutableContentStore,
+            target: ContentId,
+            replacement: Vec<u8>,
+        }
+        impl ImmutableContentStore for CorruptingStore {
+            fn get(&self, context: ContentReadContext, id: ContentId) -> Option<&[u8]> {
+                if id == self.target {
+                    Some(&self.replacement)
+                } else {
+                    self.inner.get(context, id)
+                }
+            }
+            fn put_if_absent_or_identical(
+                &mut self,
+                address: ContentAddress<'_>,
+                bytes: Vec<u8>,
+            ) -> Result<ContentId, ManifestError> {
+                self.inner.put_if_absent_or_identical(address, bytes)
+            }
+        }
+        let adapter = OrdinaryJsonAdapter;
+        let mut store = MemoryImmutableContentStore::default();
+        let target = adapter
+            .publish_literal(
+                &JsonLiteral::Scalar(JsonScalar::Number(1)),
+                None,
+                context(),
+                &mut store,
+            )
+            .unwrap();
+        let replacement_id = adapter
+            .publish_literal(
+                &JsonLiteral::Scalar(JsonScalar::Number(2)),
+                None,
+                context(),
+                &mut store,
+            )
+            .unwrap();
+        let replacement = store.get(context(), replacement_id).unwrap().to_vec();
+        let store = CorruptingStore {
+            inner: store,
+            target,
+            replacement,
+        };
+        assert_eq!(
+            adapter.materialize(
+                &ContentManifest {
+                    root: target,
+                    edit_tail: Vec::new()
+                },
+                &MaterializationRequest::Full,
+                context(),
+                &store
+            ),
+            Err(ManifestError::Conflict(
+                "immutable JSON object content id mismatch"
+            ))
         );
     }
 }
