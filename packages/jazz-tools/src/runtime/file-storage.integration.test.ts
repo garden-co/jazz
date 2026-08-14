@@ -20,7 +20,7 @@ const app = s.defineApp({
 });
 const databases: Db[] = [],
   servers: LocalJazzServerHandle[] = [];
-async function setup(inlineBytes = 4) {
+async function setup(inlineBytes = 4, denyRootUpdate = false) {
   const appId = randomUUID(),
     adminSecret = "ordinary-file-admin";
   const server = await startLocalJazzServer({ appId, adminSecret });
@@ -36,7 +36,16 @@ async function setup(inlineBytes = 4) {
     appId,
     adminSecret,
     schema: app.wasmSchema,
-    permissions: { file_roots: allow, file_nodes: allow, file_parts: allow },
+    permissions: {
+      file_roots: denyRootUpdate
+        ? {
+            ...allow,
+            update: { using: { type: "False" as const }, with_check: { type: "False" as const } },
+          }
+        : allow,
+      file_nodes: allow,
+      file_parts: allow,
+    },
   });
   const db = await createDb({
     appId,
@@ -124,5 +133,20 @@ describe("ordinary-row files", () => {
     ]);
     const bytes = await storage.read(file.id);
     expect(bytes.length).toBe(results.filter((x) => x.status === "fulfilled").length);
+  });
+  it("rolls back a root-denied mutation without leaving child rows", async () => {
+    const { db, storage } = await setup(0, true);
+    const file = await storage.create({ tier: "edge" });
+    const before = await storage.snapshot(file.id);
+    const errors: unknown[] = [];
+    const unsubscribe = db.onMutationError((error) => errors.push(error));
+    await storage.append(file.id, Uint8Array.of(1), { waitForAuthority: false });
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    unsubscribe();
+    expect(errors).not.toHaveLength(0);
+    expect(await storage.snapshot(file.id)).toEqual(before);
+    expect(await db.all(app.file_parts.where({}), { tier: "local" })).toHaveLength(0);
+    expect(await db.all(app.file_nodes.where({}), { tier: "local" })).toHaveLength(0);
+    expect(Array.from(await storage.read(before))).toEqual([]);
   });
 });
