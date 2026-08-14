@@ -644,6 +644,9 @@ fn read_range_object(
         let start = offset.max(cursor);
         let stop = end.min(next);
         if start < stop {
+            if declared_object_length(child, context, store)? != child_len {
+                return Err(ManifestError::Malformed);
+            }
             read_range_object(child, start - cursor, stop - start, context, store, out)?;
         }
         cursor = next;
@@ -768,6 +771,9 @@ fn overwrite_object(
                     .try_into()
                     .map_err(|_| ManifestError::Malformed)?,
             );
+            if declared_object_length(child, context, store)? != len {
+                return Err(ManifestError::Malformed);
+            }
             let from = usize::try_from(a - offset).map_err(|_| ManifestError::Malformed)?;
             let to = usize::try_from(z - offset).map_err(|_| ManifestError::Malformed)?;
             let changed =
@@ -1237,6 +1243,80 @@ mod tests {
             )
             .is_err()
         );
+        let left = store
+            .put_if_absent_or_identical(
+                ContentAddress {
+                    domain: one.domain,
+                    adapter_kind: FILE_ADAPTER_KIND,
+                    kind: ImmutableContentKind::Leaf,
+                },
+                leaf_payload(b"left"),
+            )
+            .unwrap();
+        let right = store
+            .put_if_absent_or_identical(
+                ContentAddress {
+                    domain: one.domain,
+                    adapter_kind: FILE_ADAPTER_KIND,
+                    kind: ImmutableContentKind::Leaf,
+                },
+                leaf_payload(b"rght"),
+            )
+            .unwrap();
+        let mut node_bytes = b"FND1".to_vec();
+        node_bytes.push(2);
+        node_bytes.extend_from_slice(&left.0);
+        node_bytes.extend_from_slice(&3u64.to_le_bytes());
+        node_bytes.extend_from_slice(&right.0);
+        node_bytes.extend_from_slice(&5u64.to_le_bytes());
+        let forged_node = store
+            .put_if_absent_or_identical(
+                ContentAddress {
+                    domain: one.domain,
+                    adapter_kind: FILE_ADAPTER_KIND,
+                    kind: ImmutableContentKind::Node,
+                },
+                node_bytes,
+            )
+            .unwrap();
+        let mut root_bytes = b"FRT1".to_vec();
+        root_bytes.extend_from_slice(&forged_node.0);
+        root_bytes.extend_from_slice(&8u64.to_le_bytes());
+        let forged_root = store
+            .put_if_absent_or_identical(
+                ContentAddress {
+                    domain: one.domain,
+                    adapter_kind: FILE_ADAPTER_KIND,
+                    kind: ImmutableContentKind::Root,
+                },
+                root_bytes,
+            )
+            .unwrap();
+        let forged_manifest = ContentManifest {
+            root: forged_root,
+            edit_tail: vec![],
+        };
+        assert!(
+            a.materialize(
+                &forged_manifest,
+                &MaterializationRequest::Range {
+                    offset: 0,
+                    length: 1
+                },
+                one,
+                &store
+            )
+            .is_err()
+        );
+        let forged_edit = ContentManifest {
+            root: forged_root,
+            edit_tail: vec![FileContentAdapter::encode_edit(&FileEdit::Overwrite {
+                offset: 0,
+                delete: 1,
+                bytes: b"X".to_vec(),
+            })],
+        };
+        assert!(a.consolidate(&forged_edit, one, &mut store).is_err());
         assert!(
             a.materialize(
                 &ContentManifest {
@@ -1401,7 +1481,7 @@ mod tests {
         // all nine leaves (at least eleven objects), so this plant is sensitive
         // to restoring the old full-materialization implementation.
         assert!(
-            store.reads() <= 6,
+            store.reads() <= 7,
             "unexpected full-tree range hydration: {}",
             store.reads()
         );
@@ -1409,8 +1489,9 @@ mod tests {
         store.reset();
         let compact = a.consolidate(&manifest, context, &mut store).unwrap();
         assert!(
-            store.reads() <= 4,
-            "consolidation hydrated disjoint leaf payloads"
+            store.reads() <= 5,
+            "consolidation hydrated disjoint leaf payloads: {}",
+            store.reads()
         );
         let after = collect_leaves(compact.root, context, &store).unwrap();
         assert_eq!(before[0].0, after[0].0);
