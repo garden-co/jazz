@@ -44,7 +44,9 @@ async function createJazzClientInternal(config: DbConfig): Promise<JazzClient> {
 }
 
 function configKey(config: DbConfig): string {
-  return JSON.stringify(config);
+  // The React provider also uses the generic client registry. Namespace this
+  // runtime lease so its wrapper cannot collide with the underlying client.
+  return `web:${JSON.stringify(config)}`;
 }
 
 export function createJazzClient(config: DbConfig): Promise<JazzClient> {
