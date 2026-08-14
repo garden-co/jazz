@@ -134,6 +134,7 @@ pub mod result_tree;
 pub mod schema;
 /// Operational server-shell APIs formerly provided by jazz-server.
 pub mod serving;
+pub mod stream_manifest;
 /// Logical time and sequence counters.
 pub mod time;
 /// Public client, server, and CLI support APIs formerly provided by jazz-tools.
