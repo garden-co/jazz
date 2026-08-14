@@ -39,7 +39,8 @@ the tail, and advances the root atomically.
 
 - `create()` creates an empty ordinary stream row.
 - `append()` is an exclusive transaction so concurrent appenders cannot silently
-  discard one another. Authority rejection is surfaced to the caller for retry.
+  discard one another. It waits for authority acceptance by default; conflict
+  rejection is surfaced to the caller for retry.
 - `snapshot()` returns the complete root tuple.
 - `read()` and `readRange()` materialize only the addressed snapshot/tree and
   requested segment ranges.

@@ -301,6 +301,7 @@ describe("package root public API", () => {
       "RowChangeKind",
       "Transaction",
       "createDb",
+      "createConventionalStreamStorage",
       "fetchSchemaHashes",
       "fetchStoredPermissions",
       "fetchStoredWasmSchema",

@@ -52,7 +52,7 @@ export interface CreateStreamOptions {
 }
 
 export interface AppendStreamOptions {
-  /** Wait for global authority acceptance. Off by default for offline clients. */
+  /** Wait for global authority acceptance. Defaults to true. */
   waitForAuthority?: boolean;
 }
 
@@ -111,6 +111,12 @@ function concat(
   chunks: Uint8Array[],
   length = chunks.reduce((sum, chunk) => sum + chunk.length, 0),
 ) {
+  const actualLength = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+  if (actualLength !== length) {
+    throw new InvalidStreamDataError(
+      `Stream extent metadata promised ${length} bytes, but ${actualLength} bytes were readable.`,
+    );
+  }
   const output = new Uint8Array(length);
   let offset = 0;
   for (const chunk of chunks) {
@@ -234,14 +240,13 @@ export function createConventionalStreamStorage<
     async append(streamOrId, data, appendOptions = {}) {
       const streamId = typeof streamOrId === "string" ? streamOrId : streamOrId.id;
       const bytes = data.slice();
+      if (bytes.length === 0) return this.snapshot(streamId);
       const result = await db.exclusiveTransaction(async (tx) => {
         const current = await tx.one(app.streams.where({ id: streamId }), {
           tier: "local",
           propagation: "local-only",
         });
         if (!current) throw new StreamNotFoundError(streamId);
-        if (bytes.length === 0) return asSnapshot(current);
-
         const combinedTail = concat([current.inlineTail, bytes]);
         if (combinedTail.length <= inlineTailBytes) {
           tx.update(app.streams, streamId, { inlineTail: combinedTail } as Partial<
@@ -342,7 +347,7 @@ export function createConventionalStreamStorage<
           length: current.prefixBytes + combinedTail.length,
         } satisfies StreamSnapshot;
       });
-      return appendOptions.waitForAuthority ? result.wait() : result.value;
+      return appendOptions.waitForAuthority === false ? result.value : result.wait();
     },
 
     async read(streamOrSnapshot, readOptions = {}) {
