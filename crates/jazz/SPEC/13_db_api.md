@@ -220,7 +220,7 @@ implementation staging note, not a semantic exception.
 
 Writes enter the local lane first and return a `WriteHandle<S>`. The mutation
 surface consists of `insert`, `insert_with_id`, `update`, `upsert`, `delete`,
-`restore`, and `edit_text`. `insert` obtains its row id from the configured
+and `restore`. `insert` obtains its row id from the configured
 `RowIdSource`; `insert_with_id` and `upsert` accept a caller-supplied id
 (`INV-API-8`). `update`, and `upsert` when the row already exists, merge the
 patch over the row's current local cells, so omitted fields keep their value
@@ -555,9 +555,9 @@ acknowledgements, worker-thread ownership, and byte transport pumping. The
 browser harness proves worker-owned `WasmDb`/transport objects through a Web
 Worker, Record-encoded rows/cells, permission probes, write-state/wait, reads,
 subscription stream snapshots, OPFS via `WasmDb.openBrowser`, websocket byte
-batches, and a headless Chromium smoke gate. `db_read_at` and
-`db_edit_text` remains typed/API-surface-only in the TS harness until there is a
-serving-node setup for that path.
+batches, and a headless Chromium smoke gate. `db_read_at` remains
+typed/API-surface-only in the TS harness until there is a serving-node setup for
+that path.
 
 ### 13.12 Subsumed client, backend, and binding notes
 

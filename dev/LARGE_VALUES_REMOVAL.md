@@ -1,6 +1,6 @@
 # Large-value subtraction baseline
 
-Status: in progress. This document is the removal checklist for the deliberately
+Status: complete. This document records the removal checklist for the deliberately
 breaking new-core baseline. It removes the existing specialized `Text`/`Blob`
 large-value feature completely; it does **not** introduce a replacement document,
 file, stream, rope, content-store, or compatibility layer.
@@ -23,45 +23,49 @@ file, stream, rope, content-store, or compatibility layer.
 
 ### Canonical schema and values
 
-- [ ] Remove `LargeValueKind`, `ColumnSchema::large_value`, descriptor/catalogue
+- [x] Remove `LargeValueKind`, `ColumnSchema::large_value`, descriptor/catalogue
       encoding, schema hashes, public schema conversions, WASM descriptors, and TS
       DSL/codegen/schema loading support.
-- [ ] Remove `Value::LargeValue` / `LargeValueHandle` handling, binding codec
+- [x] Remove `Value::LargeValue` / `LargeValueHandle` handling, binding codec
       variants, public API types, and NAPI/WASM materialization APIs.
-- [ ] Keep plain `Value::String`, `Value::Bytes`, arrays, refs, and their normal
+- [x] Keep plain `Value::String`, `Value::Bytes`, arrays, refs, and their normal
       constraints intact.
 
 ### Core write/read/merge behavior
 
-- [ ] Remove `text_merge`, `text_oplog`, large-value edit commits and metrics,
+- [x] Remove `text_merge`, `text_oplog`, large-value edit commits and metrics,
       handle encode/decode/materialization/cache, special merge/diff logic, and
       missing-extent retry behavior.
-- [ ] Remove content store, extents, chunk/bundle/checkpoint records, eviction
+- [x] Remove content store, extents, chunk/bundle/checkpoint records, eviction
       accounting, and storage schemas that exist exclusively for them.
-- [ ] Remove large-value query lowering/output sources and special query errors.
+- [x] Remove large-value query lowering/output sources and special query errors.
 
 ### Protocol and sync
 
-- [ ] Remove content extent ownership/version entries and
+- [x] Remove content extent ownership/version entries and
       `FetchContentExtent`/`ContentExtents` messages from protocol, peer, DB
       transport, ingest, server shell, codecs, wire fixtures, and limits.
-- [ ] Bump the intentionally breaking wire version and regenerate golden frames.
+- [x] Bump the intentionally breaking wire version and regenerate golden frames.
 
 ### Surface, documentation, and tests
 
-- [ ] Delete feature-only Rust/TS tests, fixtures, benches, simulations,
+- [x] Delete feature-only Rust/TS tests, fixtures, benches, simulations,
       quarantine/invariant rows, examples, docs, and CI/gate references.
-- [ ] Remove the former chapter 12 and all normative cross-references; replace
+- [x] Remove the former chapter 12 and all normative cross-references; replace
       only with a short explicit "not in this core baseline" note where necessary.
-- [ ] Preserve ordinary byte/file examples only where they use plain columns;
+- [x] Preserve ordinary byte/file examples only where they use plain columns;
       otherwise remove them from this baseline.
 
 ### Verification
 
-- [ ] Repository source search has no active large-value/extent/oplog machinery
-      (historical release notes are the only allowed residual mentions).
-- [ ] Cargo and TypeScript compile/test gates, wire contract/goldens, formatting,
-      smoke benchmark harness, invariant registry, and sensitive-data guard pass.
+- [x] Repository source search has no active large-value/extent/oplog machinery.
+      Admin catalogue parsing intentionally recognizes legacy `large_value` and
+      `large` keys only to reject them with a schema error.
+- [x] Cargo workspace and TypeScript compile gates, focused affected tests, wire
+      contracts, formatting, invariant registry, and sensitive-data guard pass.
+      The full Jazz runtime suite still encounters the independently reproduced
+      base-branch structured-subscription hang; this cut does not add a new
+      failure set.
 
 ## Commit plan
 

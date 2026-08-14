@@ -20,10 +20,9 @@ use crate::protocol::SyncMessage;
 use crate::protocol_limits::{validate_logical_message_len, validate_wire_frame_len};
 
 /// Current Jazz wire protocol version.
-/// Version 7 carries the exact root record descriptor for terminal operations
-/// inside `SyncMessage::ViewUpdate`.  This is a semantic payload-layout change:
-/// older peers cannot safely decode maintained terminal rows, so negotiation
-/// deliberately rejects them rather than guessing a layout.
+/// Version 9 removes the specialized large-value sync messages and schema
+/// metadata. This is an intentional breaking baseline: older peers cannot
+/// safely decode the reduced payload vocabulary, so negotiation rejects them.
 pub const WIRE_PROTOCOL_VERSION: u16 = 9;
 
 /// No optional features.
