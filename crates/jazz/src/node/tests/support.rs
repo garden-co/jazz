@@ -551,48 +551,12 @@ fn open_node_with_schema(
     node_uuid: NodeUuid,
     schema: JazzSchema,
 ) -> (tempfile::TempDir, NodeState<RocksDbStorage>) {
-    open_node_with_schema_and_checkpoint_interval(
-        node_uuid,
-        schema,
-        crate::node::LARGE_VALUE_CHECKPOINT_OP_INTERVAL,
-    )
-}
-fn open_node_with_schema_and_checkpoint_interval(
-    node_uuid: NodeUuid,
-    schema: JazzSchema,
-    checkpoint_interval: usize,
-) -> (tempfile::TempDir, NodeState<RocksDbStorage>) {
     let temp_dir = tempfile::tempdir().unwrap();
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     let storage = RocksDbStorage::open(temp_dir.path(), &refs).unwrap();
-    let node = NodeState::new_with_large_value_checkpoint_op_interval(
-        node_uuid,
-        schema,
-        storage,
-        false,
-        checkpoint_interval,
-    )
-    .unwrap();
+    let node = NodeState::new(node_uuid, schema, storage).unwrap();
     (temp_dir, node)
-}
-fn reopen_node_at_with_checkpoint_interval(
-    temp_dir: &tempfile::TempDir,
-    node_uuid: NodeUuid,
-    schema: JazzSchema,
-    checkpoint_interval: usize,
-) -> NodeState<RocksDbStorage> {
-    let cfs = schema.column_families();
-    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
-    let storage = RocksDbStorage::open(temp_dir.path(), &refs).unwrap();
-    NodeState::new_with_large_value_checkpoint_op_interval(
-        node_uuid,
-        schema,
-        storage,
-        false,
-        checkpoint_interval,
-    )
-    .unwrap()
 }
 fn open_history_complete_node_with_schema(
     node_uuid: NodeUuid,
@@ -1151,7 +1115,6 @@ fn ingest_relay_version(
             predicate_read_set: None,
             user_metadata_json: None,
             branch_merge: None,
-            merge_strategy: None,
         },
         vec![version_record(
             row_uuid,

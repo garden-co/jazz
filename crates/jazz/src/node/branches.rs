@@ -435,17 +435,17 @@ where
                                     &table.name,
                                     source_authored,
                                 )? {
-                                    let column_schema = table_schema
+                                    if !table_schema
                                         .columns
                                         .iter()
-                                        .find(|candidate| candidate.name == column)
-                                        .ok_or(Error::BranchMergeCalculation(
+                                        .any(|candidate| candidate.name == column)
+                                    {
+                                        return Err(Error::BranchMergeCalculation(
                                             "authored source column is absent from current schema",
-                                        ))?;
+                                        ));
+                                    }
                                     if table_schema.merge_strategy(&column)
                                         != crate::schema::MergeStrategy::Lww
-                                        || column_schema.large_value.is_some()
-                                        || column_schema.text_merge_spec.is_some()
                                     {
                                         return Err(Error::BranchMergeCalculation(
                                             "column strategy lacks branch contribution capabilities",
@@ -683,7 +683,6 @@ where
             user_metadata_json: commits[0].user_metadata_json.clone(),
             target_lineage: BranchLineage::Branch(branch_id),
             branch_merge,
-            merge_strategy: commits[0].merge_strategy.clone(),
         };
         let tx_node_alias = self.ensure_node_alias(tx_id.node)?;
         let schema_version_alias = self.ensure_schema_version_alias(write_schema_version)?;

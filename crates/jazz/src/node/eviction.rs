@@ -2,11 +2,9 @@
 
 use std::collections::BTreeSet;
 
-use groove::records::Value;
 use groove::storage::OrderedKvStorage;
 
 use crate::peer::PeerEvictionPins;
-use crate::schema::{CONTENT_CHECKPOINTS_STORE, CONTENT_EXTENTS_STORE, CONTENT_META_STORE};
 use crate::tx::{DurabilityTier, Fate, TxId};
 
 use super::*;
@@ -26,12 +24,6 @@ pub enum EdgeCacheClass {
 /// Counts returned by [`NodeState::evict_cold`].
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct EvictColdReport {
-    /// Number of direct-store large-value extent byte entries removed.
-    pub content_extent_entries: usize,
-    /// Number of materialized large-value checkpoint byte entries removed.
-    pub content_checkpoint_entries: usize,
-    /// Number of large-value metadata entries observed and preserved.
-    pub content_meta_entries_pinned: usize,
     /// Number of stored row-version rows classified as evictable and removed.
     pub row_versions_evictable: usize,
     /// Number of stored row-version transactions classified as pinned.
@@ -120,7 +112,7 @@ where
     /// Manually drop evictable cold edge-cache state.
     ///
     /// This is intentionally not called by any automatic trigger. It preserves
-    /// large-value metadata, fate-pending rows, peer-deferred edge fates,
+    /// fate-pending rows, peer-deferred edge fates,
     /// referenced permission scopes, and all parked families.
     pub fn evict_cold(&mut self, peer_pins: &PeerEvictionPins) -> Result<EvictColdReport, Error> {
         self.evict_cold_inner(peer_pins, None)
@@ -177,16 +169,7 @@ where
         };
 
         let before_bytes = self.edge_cache_metered_bytes()?.unwrap_or(0);
-        report.content_meta_entries_pinned = self.direct_store_entry_count(CONTENT_META_STORE)?;
-
         let mut remaining_bytes = before_bytes;
-        if low_water_bytes.is_none_or(|low_water| remaining_bytes > low_water) {
-            report.content_extent_entries =
-                self.delete_direct_store_entries(CONTENT_EXTENTS_STORE)?;
-            report.content_checkpoint_entries =
-                self.delete_direct_store_entries(CONTENT_CHECKPOINTS_STORE)?;
-            remaining_bytes = self.edge_cache_metered_bytes()?.unwrap_or(remaining_bytes);
-        }
 
         let mut seen_pinned_txs = BTreeSet::new();
         let mut evictable = Vec::new();
@@ -258,33 +241,12 @@ where
     }
 
     fn edge_cache_metered_column_families(&mut self) -> Result<Vec<String>, Error> {
-        let mut families = BTreeSet::from([
-            CONTENT_EXTENTS_STORE.to_owned(),
-            CONTENT_CHECKPOINTS_STORE.to_owned(),
-        ]);
+        let mut families = BTreeSet::new();
         for table in self.catalogue.schema.tables.clone() {
             for version in self.query_table_versions(&table.name)? {
                 families.insert(self.version_storage_table_for_row(&version)?.to_string());
             }
         }
         Ok(families.into_iter().collect())
-    }
-
-    fn direct_store_entry_count(&self, store: &str) -> Result<usize, Error> {
-        Ok(self.database.direct_record_store(store)?.prefix(&[])?.len())
-    }
-
-    fn delete_direct_store_entries(&self, store: &str) -> Result<usize, Error> {
-        let direct = self.database.direct_record_store(store)?;
-        let keys = direct
-            .prefix_entries(&[])?
-            .into_iter()
-            .map(|entry| entry.key)
-            .collect::<Vec<Vec<Value>>>();
-        let count = keys.len();
-        for key in keys {
-            direct.delete(&key)?;
-        }
-        Ok(count)
     }
 }

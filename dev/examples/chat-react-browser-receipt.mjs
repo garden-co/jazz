@@ -14,7 +14,7 @@ const screenshotPath = resolve(
 );
 const messageText = `receipt message ${Date.now()}`;
 const fileName = `receipt-${Date.now()}.txt`;
-const fileText = `large-value receipt ${Date.now()} ${"x".repeat(32 * 1024)}`;
+const fileText = `binary receipt ${Date.now()} ${"x".repeat(32 * 1024)}`;
 
 await mkdir(dirname(screenshotPath), { recursive: true });
 

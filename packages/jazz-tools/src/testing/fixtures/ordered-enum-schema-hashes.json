@@ -1,12 +1,13 @@
 {
+  "schemaLayoutVersion": 9,
   "cases": [
     {
       "variants": ["draft", "active", "archived"],
-      "hash": "462dcb43747b0be89b4eb320e2d61f322fe8d9871baf87876d79b5d8611cfb75"
+      "hash": "c7f416ed5943b6e2168c3eb37aca371dc0998313576375c98004a9083101fea4"
     },
     {
       "variants": ["active", "draft", "archived"],
-      "hash": "37d743b0897361d13e0364d0933bf7d5c6380b356cfe936c6eb71ea0e60e2e04"
+      "hash": "8fbf2466b2ceff86cfc9673fff36d352268ef0719415dbe38d620608c3182446"
     }
   ]
 }

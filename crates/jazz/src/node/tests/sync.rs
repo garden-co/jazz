@@ -629,7 +629,6 @@ fn receiver_batch_coalesces_partial_bundles_for_same_tx() {
         user_metadata_json: None,
         target_lineage: crate::tx::BranchLineage::Root,
         branch_merge: None,
-        merge_strategy: None,
     };
     let first = version_record(row(1), Vec::new(), title_cells("one"), None);
     let second = version_record(row(2), Vec::new(), title_cells("two"), None);
@@ -904,7 +903,6 @@ fn sequential_partial_exclusive_bundles_index_the_complete_transaction() {
         user_metadata_json: None,
         target_lineage: crate::tx::BranchLineage::Root,
         branch_merge: None,
-        merge_strategy: None,
     };
     let updates = [
         (row(1), version_record(row(1), Vec::new(), title_cells("one"), None)),
@@ -951,7 +949,6 @@ fn completing_partial_exclusive_transaction_rejects_conflicting_metadata() {
         user_metadata_json: None,
         target_lineage: crate::tx::BranchLineage::Root,
         branch_merge: None,
-        merge_strategy: None,
     };
     reader
         .apply_view_update(partial_exclusive_view_update(
@@ -1147,7 +1144,6 @@ fn receiver_tracks_partial_mergeable_payload_coverage() {
         user_metadata_json: None,
         target_lineage: crate::tx::BranchLineage::Root,
         branch_merge: None,
-        merge_strategy: None,
     };
     let first = version_record(row(1), Vec::new(), title_cells("one"), None);
     let second = version_record(row(2), Vec::new(), title_cells("two"), None);
@@ -1468,7 +1464,6 @@ fn originating_causality_rejection_retains_child_payload() {
             user_metadata_json: None,
             target_lineage: crate::tx::BranchLineage::Root,
             branch_merge: None,
-            merge_strategy: None,
         },
         vec![version_record(row, Vec::new(), title_cells("parent"), None)],
         u64::MAX - SKEW_TOLERANCE_MS,
@@ -1777,7 +1772,6 @@ fn peer_rejects_sequenced_non_global_view_bundle_before_persisting_it() {
                     user_metadata_json: None,
                     target_lineage: crate::tx::BranchLineage::Root,
                     branch_merge: None,
-                    merge_strategy: None,
                 },
                 versions: Vec::new(),
                 fate: Fate::Accepted,
@@ -1854,50 +1848,6 @@ fn internal_sequenced_non_global_fate_trips_the_debug_assertion() {
     assert!(result.is_err());
 }
 
-#[test]
-fn content_extent_fetch_rejects_row_context_mismatch_and_invisible_content() {
-    let (_temp_dir, mut node) = open_node();
-    let author = user(0xa1);
-    let visible_row = row(7);
-    let other_row = row(8);
-    let extent = node
-        .content_store()
-        .append(
-            schema().version_id(),
-            "todos",
-            author,
-            visible_row,
-            "title",
-            b"unreferenced",
-        )
-        .unwrap();
-    let mut peer = PeerState::client_link(author);
-
-    assert!(matches!(
-        peer.handle_content_extent_fetch(
-            &mut node,
-            SyncMessage::FetchContentExtent {
-                owner: crate::protocol::LargeValueOwnerRef::current_row(other_row),
-                extent: extent.clone(),
-            },
-        ),
-        Err(Error::UnsupportedSyncMessage(
-            "content extent row context mismatch"
-        ))
-    ));
-    assert!(matches!(
-        peer.handle_content_extent_fetch(
-            &mut node,
-            SyncMessage::FetchContentExtent {
-                owner: crate::protocol::LargeValueOwnerRef::current_row(visible_row),
-                extent,
-            },
-        ),
-        Err(Error::UnsupportedSyncMessage(
-            "content extent is not visible for row"
-        ))
-    ));
-}
 
 #[test]
 fn row_version_fetch_returns_authorized_versions_and_omits_unauthorized_rows() {
@@ -2249,7 +2199,6 @@ fn seed_policy_graph_known_global(
                 user_metadata_json: None,
                 target_lineage: crate::tx::BranchLineage::Root,
                 branch_merge: None,
-                merge_strategy: None,
             },
             vec![version],
             Fate::Accepted,
@@ -3938,7 +3887,6 @@ fn duplicate_commit_units_compare_versions_without_wire_order() {
         user_metadata_json: None,
         target_lineage: crate::tx::BranchLineage::Root,
         branch_merge: None,
-        merge_strategy: None,
     };
     let versions = vec![
         version_record(row(1), Vec::new(), title_cells("a"), None),

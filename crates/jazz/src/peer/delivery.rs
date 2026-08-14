@@ -5,6 +5,7 @@
 //! protocol message details emitted from it.
 
 use super::*;
+use crate::ids::RowUuid;
 #[cfg(debug_assertions)]
 use crate::tools::OutputOccurrenceId;
 

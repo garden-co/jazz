@@ -418,11 +418,6 @@ run_scenario \
   env JAZZ_MERGE_BACK_WRITES=50 cargo bench -p jazz --bench merge_back_cost
 
 run_scenario \
-  "jazz/large_value_checkpointing" \
-  "JAZZ_LV_DEPTH=300 JAZZ_LV_INTERVALS=64 cargo bench -p jazz --bench large_value_checkpointing" \
-  env JAZZ_LV_DEPTH=300 JAZZ_LV_INTERVALS=64 cargo bench -p jazz --bench large_value_checkpointing
-
-run_scenario \
   "jazz/relation_include_delivery" \
   "JAZZ_INC_DELIVERY_SCALES=1000,2500,5000,10000,20000 JAZZ_INC_DELIVERY_SAMPLES=1 cargo bench -p jazz --no-default-features --bench relation_include_delivery" \
   env JAZZ_INC_DELIVERY_SCALES=1000,2500,5000,10000,20000 JAZZ_INC_DELIVERY_SAMPLES=1 cargo bench -p jazz --no-default-features --bench relation_include_delivery
@@ -461,11 +456,6 @@ run_scenario \
   "jazz-sim/s5_durable_stream" \
   "JAZZ_SMOKE=1 cargo bench -p jazz-sim --bench s5_durable_stream" \
   env JAZZ_SMOKE=1 cargo bench -p jazz-sim --bench s5_durable_stream
-
-run_scenario \
-  "jazz-sim/s6_text_traces" \
-  "JAZZ_SMOKE=1 cargo bench -p jazz-sim --bench s6_text_traces" \
-  env JAZZ_SMOKE=1 cargo bench -p jazz-sim --bench s6_text_traces
 
 run_scenario \
   "jazz-sim/s7_migrations" \

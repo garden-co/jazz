@@ -2694,14 +2694,6 @@ pub enum QueryError {
         /// Column name.
         column: String,
     },
-    /// Large-value columns cannot participate in query-planner predicates.
-    #[error("large-value column {table}.{column} is not allowed in query predicates")]
-    LargeValueColumnInQuery {
-        /// Table name.
-        table: String,
-        /// Column name.
-        column: String,
-    },
     /// Operand types do not match.
     #[error("operand type mismatch")]
     OperandTypeMismatch,
@@ -3159,14 +3151,7 @@ fn planner_column_type<'a>(
     if let Some(column_type) = executable_magic_column_type(column)? {
         return Ok(column_type);
     }
-    let column = column_schema(table, column)?;
-    if column.large_value.is_some() {
-        return Err(QueryError::LargeValueColumnInQuery {
-            table: table.name.clone(),
-            column: column.name.clone(),
-        });
-    }
-    Ok(&column.column_type)
+    Ok(&column_schema(table, column)?.column_type)
 }
 
 fn executable_magic_column_type(column: &str) -> Result<Option<&'static ColumnType>, QueryError> {
@@ -5128,78 +5113,6 @@ mod tests {
             .validate(&schema())
             .unwrap_err();
         assert!(matches!(err, QueryError::UnknownColumn { .. }));
-    }
-
-    #[test]
-    fn rejects_large_value_columns_in_filters_joins_and_ordering() {
-        let schema = JazzSchema::new([
-            TableSchema::new(
-                "docs",
-                [
-                    crate::schema::ColumnSchema::new("owner", ColumnType::Uuid),
-                    crate::schema::ColumnSchema::text("body"),
-                    crate::schema::ColumnSchema::blob("attachment"),
-                ],
-            )
-            .with_reference("body", "docs"),
-            TableSchema::new(
-                "doc_links",
-                [
-                    crate::schema::ColumnSchema::text("doc"),
-                    crate::schema::ColumnSchema::new("team", ColumnType::Uuid),
-                ],
-            )
-            .with_reference("doc", "docs")
-            .with_reference("team", "teams"),
-            TableSchema::new(
-                "team_edges",
-                [
-                    crate::schema::ColumnSchema::new("member", ColumnType::Uuid),
-                    crate::schema::ColumnSchema::blob("parent"),
-                ],
-            )
-            .with_reference("member", "teams")
-            .with_reference("parent", "teams"),
-            TableSchema::new("teams", [ColumnSchema::new("name", ColumnType::String)]),
-        ]);
-
-        for err in [
-            Query::from("docs")
-                .filter(eq(col("body"), lit(Value::Bytes(b"text".to_vec()))))
-                .validate(&schema)
-                .unwrap_err(),
-            Query::from("docs")
-                .filter(eq(col("attachment"), lit(Value::Bytes(vec![1, 2, 3]))))
-                .validate(&schema)
-                .unwrap_err(),
-            Query::from("docs")
-                .join_via("doc_links", "doc", [])
-                .validate(&schema)
-                .unwrap_err(),
-            Query::from("docs")
-                .join_via_column("doc_links", "team", "body", [])
-                .validate(&schema)
-                .unwrap_err(),
-            Query::from("docs")
-                .reachable_via(
-                    "doc_links",
-                    "doc",
-                    "team",
-                    claim("team"),
-                    "team_edges",
-                    "member",
-                    "parent",
-                    [],
-                )
-                .validate(&schema)
-                .unwrap_err(),
-            Query::from("docs")
-                .order_by("body", OrderDirection::Asc)
-                .validate(&schema)
-                .unwrap_err(),
-        ] {
-            assert!(matches!(err, QueryError::LargeValueColumnInQuery { .. }));
-        }
     }
 
     #[test]

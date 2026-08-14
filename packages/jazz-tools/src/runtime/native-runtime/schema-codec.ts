@@ -90,8 +90,6 @@ export function encodeSchema(schema: WasmSchema): Uint8Array {
       const columnSpec = definition.columns[columnIndex]!;
       column.string(columnSpec.name);
       writeValueType(column, columnValueType(columnSpec));
-      writeLargeValueKind(column, columnSpec);
-      column.none();
       writeColumnDefault(column, columnSpec);
     }, definition.columns.length);
     table.map(definition.columns.filter((column) => column.references).length);
@@ -117,18 +115,6 @@ export function encodeSchema(schema: WasmSchema): Uint8Array {
 export function columnValueType(column: ColumnDescriptor): ValueType {
   const valueType = columnTypeToValueType(column.column_type);
   return column.nullable ? { tag: 14, inner: valueType } : valueType;
-}
-
-function writeLargeValueKind(writer: PostcardWriter, column: ColumnDescriptor) {
-  const largeValue = column.large_value;
-  if (largeValue == null) {
-    writer.none();
-    return;
-  }
-  if (column.column_type.type !== "Bytea") {
-    throw new Error(`large_value is only supported on Bytea columns: ${column.name}`);
-  }
-  writer.some((kind) => kind.enumUnit(largeValue === "Text" ? 0 : 1));
 }
 
 function writeColumnDefault(writer: PostcardWriter, column: ColumnDescriptor): void {

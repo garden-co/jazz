@@ -48,8 +48,6 @@ Limits retained for semantic or adversarial-resource reasons:
 - `MAX_SHAPE_AST_BYTES`: executable query/shape complexity admission;
 - commit-version, repair-ref, branch-repair, known-state-ref and structured
   result depth/width limits: CPU/fan-out/state bounds independent of framing;
-- `MAX_CONTENT_EXTENT_BYTES`: content-store extent granularity and bounded
-  materialization, not logical message framing;
 - receiver in-flight/aggregate/advertised-length budgets and WebSocket frame
   limits: unauthenticated allocation and peer-fairness defenses.
 

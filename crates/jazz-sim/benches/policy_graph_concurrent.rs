@@ -1407,7 +1407,6 @@ fn open_db_at(
             author,
         },
         id_source: Some(Box::new(SeededRowIdSource::new(node_seed(node_uuid)))),
-        large_value_checkpoint_op_interval: 1024,
     };
     if history_complete {
         jazz::db::block_on(Db::open_history_complete(config)).expect("open history-complete db")

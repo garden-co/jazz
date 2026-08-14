@@ -17,8 +17,7 @@ use groove::storage::{OrderedKvStorage, ReopenableStorage};
 use web_time::Instant;
 
 use crate::authorization_scope::AuthorityScopeAggregate;
-use crate::ids::{AuthorId, RowUuid};
-use crate::node::content_store::Extent;
+use crate::ids::AuthorId;
 use crate::node::maintained_subscription_view::{
     MaintainedSubscriptionViewFootprint as MaintainedSubscriptionViewIndexFootprint,
     ResultTransitions,
@@ -29,9 +28,9 @@ use crate::protocol::KnownStateCompleteness;
 #[cfg(test)]
 use crate::protocol::ResultRowEntry;
 use crate::protocol::{
-    ContentExtent, KnownStateDeclaration, LargeValueOwnerRef, ProgramFactEntry, ReadViewSpec,
-    RegisterShapeOptions, ResultMemberEntry, RowVersionRef, ShapeAst, Subscribe, SubscriptionKey,
-    SyncMessage, VersionBundle, VersionCarrier, VersionRecord, expand_version_carriers,
+    KnownStateDeclaration, ProgramFactEntry, ReadViewSpec, RegisterShapeOptions, ResultMemberEntry,
+    RowVersionRef, ShapeAst, Subscribe, SubscriptionKey, SyncMessage, VersionBundle,
+    VersionCarrier, VersionRecord, expand_version_carriers,
 };
 use crate::protocol_limits::validate_fetch_row_versions;
 use crate::query::{Binding, ValidatedQuery};
@@ -1502,71 +1501,6 @@ impl PeerState {
             .count()
     }
 
-    #[cfg(test)]
-    pub(crate) fn retain_edge_scope_subscription_for_test(
-        &mut self,
-        subscription: SubscriptionKey,
-    ) {
-        self.retain_edge_scope_subscription(subscription);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn release_edge_scope_subscription_for_test(
-        &mut self,
-        subscription: SubscriptionKey,
-        now_ms: u64,
-    ) {
-        let Some(refcount) = self.edge_scope_subscription_refs.get_mut(&subscription) else {
-            return;
-        };
-        *refcount -= 1;
-        if *refcount == 0 {
-            self.edge_scope_subscription_refs.remove(&subscription);
-            if edge_scope_ttl_ms() != 0 {
-                self.idle_edge_scope_subscriptions
-                    .insert(subscription, now_ms);
-            }
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn defer_edge_fate_for_test(
-        &mut self,
-        tx: Transaction,
-        versions: Vec<VersionRecord>,
-        now_ms: u64,
-    ) {
-        let permission_identity = self.identity();
-        self.deferred_edge_fates.insert(
-            tx.tx_id,
-            DeferredEdgeFate {
-                tx,
-                versions,
-                now_ms,
-                permission_identity,
-                scope_subscriptions: Vec::new(),
-            },
-        );
-    }
-
-    /// Serve one bulk-lane content extent fetch for this peer.
-    pub fn handle_content_extent_fetch<S>(
-        &mut self,
-        node: &mut NodeState<S>,
-        message: SyncMessage,
-    ) -> Result<SyncMessage, Error>
-    where
-        S: OrderedKvStorage,
-    {
-        let SyncMessage::FetchContentExtent { owner, extent } = message else {
-            return Err(Error::UnsupportedSyncMessage(
-                "non-content-fetch peer request",
-            ));
-        };
-        let row = owner.row;
-        self.serve_content_extents(node, row, [extent])
-    }
-
     /// Serve exact row-version repair fetches for this peer.
     pub fn handle_row_versions_fetch<S>(
         &mut self,
@@ -1600,37 +1534,6 @@ impl PeerState {
         Ok(vec![SyncMessage::RowVersionPayloads {
             version_bundles: versions,
         }])
-    }
-
-    /// Build a bulk-lane response for extents that belong to one row.
-    pub fn serve_content_extents<S>(
-        &mut self,
-        node: &mut NodeState<S>,
-        row: RowUuid,
-        extents: impl IntoIterator<Item = Extent>,
-    ) -> Result<SyncMessage, Error>
-    where
-        S: OrderedKvStorage,
-    {
-        let mut out = Vec::new();
-        for extent in extents {
-            if extent.row != row {
-                return Err(Error::UnsupportedSyncMessage(
-                    "content extent row context mismatch",
-                ));
-            }
-            if !node.content_extent_visible_to(row, &extent, self.identity())? {
-                return Err(Error::UnsupportedSyncMessage(
-                    "content extent is not visible for row",
-                ));
-            }
-            out.push(ContentExtent {
-                owner: LargeValueOwnerRef::current_row(row),
-                bytes: node.content_store().read(&extent)?,
-                extent,
-            });
-        }
-        Ok(SyncMessage::ContentExtents { extents: out })
     }
 
     /// Return current result_set for one subscription.

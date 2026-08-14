@@ -56,14 +56,6 @@ export {
   type IntrospectionSubscriptionResponse,
 } from "./introspection-fetch.js";
 export {
-  FileNotFoundError,
-  IncompleteFileDataError,
-  type BinaryLargeValueFileApp,
-  type BinaryLargeValueFileRow,
-  type FileReadOptions,
-  type FileWriteOptions,
-} from "./file-storage.js";
-export {
   RowChangeKind,
   applySubscriptionDelta,
   type RowDelta,

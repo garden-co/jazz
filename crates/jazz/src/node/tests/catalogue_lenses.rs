@@ -3549,52 +3549,6 @@ fn transform_column_rejects_unregistered_transform_at_publish() {
     ));
 }
 
-#[test]
-fn transform_column_rejects_large_value_content_transform_at_publish() {
-    let base = JazzSchema::new([TableSchema::new(
-        "docs",
-        [crate::schema::ColumnSchema::text("body")],
-    )]);
-    let evolved = JazzSchema::new([TableSchema::new(
-        "docs",
-        [
-            crate::schema::ColumnSchema::text("body"),
-            crate::schema::ColumnSchema::new("title", ColumnType::String),
-        ],
-    )]);
-    let evolved_payload = SchemaVersion::new(evolved.clone());
-    let (_dir, mut core) = open_node_with_schema(node(0x4d), base.clone());
-    let result = publish_schema_lineage(
-        &mut core,
-        evolved_payload.clone(),
-        MigrationLens::new(
-            base.version_id(),
-            evolved_payload.id,
-            vec![TableLens {
-                source_table: "docs".to_owned(),
-                target_table: "docs".to_owned(),
-                ops: vec![
-                    LensOp::TransformColumn {
-                        column: "body".to_owned(),
-                        transform: "jazz.identity".to_owned(),
-                    },
-                    LensOp::AddColumn {
-                        column: "title".to_owned(),
-                        default: v(""),
-                    },
-                ],
-            }],
-        ),
-        Vec::<String>::new(),
-        Vec::<String>::new(),
-    );
-    assert!(matches!(
-        result,
-        Err(Error::InvalidCatalogueUpdate(
-            "large-value columns cannot be content-transformed"
-        ))
-    ));
-}
 
 #[test]
 fn lens_parallel_materialization_oracle_matches_engine_reads_seeded() {

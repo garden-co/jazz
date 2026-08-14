@@ -55,7 +55,6 @@ decisions. Guidance appendices are entirely non-normative.
 | 9   | Topology & the edge tier                                                              | client/relay/edge/core trust ladder; edge authority & cache                    |
 | 10  | Schema evolution: lenses & migrations                                                 | multi-schema coexistence                                                       |
 | 11  | Time-travel & branches                                                                | settled-history reads; snapshot-base branches                                  |
-| 12  | Large values                                                                          | `text`/`blob` columns and the op-log                                           |
 | 13  | The high-level `Db` API                                                               | the runtime-typed surface, subscriptions, sync/serve, identity/auth            |
 | 14  | Lowering to groove                                                                    | how every jazz concept maps onto groove                                        |
 | 15  | Sharding                                                                              | exploratory; mostly open questions                                             |
@@ -82,9 +81,7 @@ mechanism is specified. They are normative intent, not mechanism.
 1. **Everything queryable lowers to groove.** jazz has one query substrate.
    Schemas become groove schemas, mutations become groove batches, queries and
    sync views become groove subscriptions, and RLS policies become groove
-   prepared shapes (ch. 14). The one deliberate exception is large-value content
-   _bytes_, which live in a raw content store below the table/IVM layer (ch. 12,
-   ch. 14); their op _metadata_ still lowers normally.
+   prepared shapes (ch. 14).
 2. **One sync protocol; tiers are roles, not code.** Distribution is expressed
    through roles in a single protocol. Every hop (UI ↔ worker, worker ↔ edge,
    edge ↔ core) speaks that protocol; tiers differ only in role flags (fate

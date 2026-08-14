@@ -358,8 +358,6 @@ fn sync_message_name(message: &SyncMessage) -> &'static str {
         SyncMessage::SetCurrentWriteSchema { .. } => "SetCurrentWriteSchema",
         SyncMessage::CatalogueAck(_) => "CatalogueAck",
         SyncMessage::ViewUpdate { .. } => "ViewUpdate",
-        SyncMessage::FetchContentExtent { .. } => "FetchContentExtent",
-        SyncMessage::ContentExtents { .. } => "ContentExtents",
         SyncMessage::FetchRowVersions { .. } => "FetchRowVersions",
         SyncMessage::RowVersionPayloads { .. } => "RowVersionPayloads",
         SyncMessage::CatalogueSnapshot(_) => "CatalogueSnapshot",

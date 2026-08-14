@@ -209,6 +209,8 @@ groove::define_record! {
         10 => target_lineage: Vec<u8>,
         11 => branch_merge: Option<Vec<u8>>,
         12 => permission_subject: Option<AuthorId>,
+        // Retained as an inert physical slot so existing transaction records
+        // keep their fixed descriptor alignment. No core API writes or reads it.
         13 => merge_strategy: Option<String>,
         14 => fate: FateTag,
         15 => global_seq: Option<GlobalSeq>,
@@ -1032,11 +1034,7 @@ pub(super) fn transaction_values(
             ))
         })),
         Value::Nullable(tx.permission_subject.map(|id| Box::new(Value::Uuid(id.0)))),
-        Value::Nullable(
-            tx.merge_strategy
-                .as_ref()
-                .map(|strategy| Box::new(Value::String(encode_merge_strategy_tag(strategy)))),
-        ),
+        Value::Nullable(None),
         Value::String(fate_string(&fate)),
         Value::Nullable(global_seq.map(|seq| Box::new(Value::U64(seq.0)))),
         Value::Nullable(rejection_reason_tag(&fate).map(|reason| Box::new(Value::String(reason)))),
@@ -1048,55 +1046,6 @@ pub(super) fn transaction_values(
         ),
         Value::String(durability_string(durability).to_owned()),
     ]
-}
-
-pub(super) fn encode_merge_strategy_tag(strategy: &RecordedMergeStrategy) -> String {
-    format!(
-        "{}@{}#{}",
-        strategy.id,
-        strategy.version,
-        hex_encode(&strategy.column_spec_hash)
-    )
-}
-
-pub(super) fn decode_merge_strategy_tag(value: &str) -> Option<RecordedMergeStrategy> {
-    let (head, hash) = value.rsplit_once('#')?;
-    let (id, version) = head.rsplit_once('@')?;
-    Some(RecordedMergeStrategy {
-        id: id.to_owned(),
-        version: version.parse().ok()?,
-        column_spec_hash: hex_decode_32(hash)?,
-    })
-}
-
-fn hex_encode(bytes: &[u8; 32]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(64);
-    for byte in bytes {
-        out.push(HEX[(byte >> 4) as usize] as char);
-        out.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    out
-}
-
-fn hex_decode_32(value: &str) -> Option<[u8; 32]> {
-    if value.len() != 64 {
-        return None;
-    }
-    let mut out = [0u8; 32];
-    for (idx, chunk) in value.as_bytes().chunks_exact(2).enumerate() {
-        out[idx] = (hex_nibble(chunk[0])? << 4) | hex_nibble(chunk[1])?;
-    }
-    Some(out)
-}
-
-fn hex_nibble(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
-    }
 }
 
 pub(super) fn rejected_transaction_values(
@@ -1714,10 +1663,7 @@ pub(super) fn sort_current_rows(rows: &mut [CurrentRow]) {
 
 /// Build a current row from cells that are already app-facing values.
 ///
-/// Stored version cells for large-value columns contain operation payloads, not
-/// materialized bytes. App-facing rows built from `VersionRow` must go through
-/// `NodeState::current_row_from_materialized_version` or materialize the cells
-/// before calling this helper.
+/// Build a row from ordinary app-facing cells.
 pub(super) fn current_row_from_cells(
     table: &TableSchema,
     row_uuid: RowUuid,

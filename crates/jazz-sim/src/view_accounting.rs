@@ -25,9 +25,6 @@ pub fn view_update_bytes(update: &SyncMessage) -> u64 {
             transaction_wire_bytes(tx) + versions.iter().map(version_record_bytes).sum::<u64>()
         }
         SyncMessage::FateUpdate { .. } => tx_id_wire_bytes() + 16,
-        SyncMessage::ContentExtents { extents } => {
-            extents.iter().map(|extent| extent.bytes.len() as u64).sum()
-        }
         // An authority scope view carries an ordinary settlement-bearing view
         // update. Its row payload is part of the simulated delivery cost.
         SyncMessage::AuthorizationScopeView { view, .. } => view_update_bytes(view),
@@ -40,7 +37,6 @@ pub fn view_update_bytes(update: &SyncMessage) -> u64 {
         | SyncMessage::PublishLens { .. }
         | SyncMessage::SetCurrentWriteSchema { .. }
         | SyncMessage::CatalogueAck(_)
-        | SyncMessage::FetchContentExtent { .. }
         | SyncMessage::SessionClaims { .. }
         | SyncMessage::SubscribeRejected { .. }
         | SyncMessage::Unsubscribe { .. }
@@ -170,7 +166,6 @@ mod tests {
                     user_metadata_json: None,
                     target_lineage: BranchLineage::Root,
                     branch_merge: None,
-                    merge_strategy: None,
                 },
                 versions: vec![version],
                 fate: Fate::Accepted,

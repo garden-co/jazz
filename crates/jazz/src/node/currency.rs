@@ -559,9 +559,6 @@ where
                         .map_err(|_| Error::InvalidStoredValue("invalid branch merge provenance"))
                 })
                 .transpose()?,
-            merge_strategy: record
-                .get_nullable_string(TransactionRowRecord::FIELD_MERGE_STRATEGY_IDX)?
-                .and_then(decode_merge_strategy_tag),
         };
         let fate = fate_from_encoded_fields(record)?;
         Ok(StoredTransaction {

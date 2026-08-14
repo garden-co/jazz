@@ -17,9 +17,8 @@ use crate::protocol::{
     SubscribeServerFailureCode, TableLens,
 };
 use crate::protocol_limits::{
-    MAX_CONTENT_EXTENT_BYTES, MAX_FETCH_ROW_VERSIONS, MAX_INFLIGHT_LOGICAL_MESSAGES,
-    MAX_KNOWN_STATE_EXACT_REFS, MAX_LOGICAL_MESSAGE_BYTES, MAX_SHAPE_AST_BYTES,
-    MAX_WIRE_FRAME_BYTES,
+    MAX_FETCH_ROW_VERSIONS, MAX_INFLIGHT_LOGICAL_MESSAGES, MAX_KNOWN_STATE_EXACT_REFS,
+    MAX_LOGICAL_MESSAGE_BYTES, MAX_SHAPE_AST_BYTES, MAX_WIRE_FRAME_BYTES,
 };
 use crate::query::{
     ArraySubquery, BindingId, Include, JoinMode, OrderDirection, PolicyBranch, Predicate,
@@ -394,22 +393,6 @@ where
 {
     let prepared = prepared(db, query);
     db.one(&prepared).unwrap()
-}
-
-fn prepared_large_value_cell<S>(
-    db: &Db<S>,
-    query: &Query,
-    table: &TableSchema,
-    column: &str,
-) -> Vec<u8>
-where
-    S: OrderedKvStorage + ReopenableStorage + 'static,
-{
-    let row = prepared_one(db, query).expect("expected one row");
-    let Some(Value::Bytes(handle)) = row.cell(table, column) else {
-        panic!("expected large-value handle in {column}");
-    };
-    db.hydrate_large_value_handle(&handle).unwrap()
 }
 
 fn prepared_all<S>(db: &Db<S>, query: &Query, opts: ReadOpts) -> Vec<CurrentRow>
@@ -1208,19 +1191,6 @@ fn resource_columns_for_customer_fixture() -> [ColumnSchema; 13] {
         ColumnSchema::new("col_json", ColumnType::String.nullable()),
         ColumnSchema::new("col_tags", ColumnType::String.nullable()),
     ]
-}
-
-fn owner_blob_schema() -> JazzSchema {
-    JazzSchema::new([TableSchema::new(
-        "assets",
-        [
-            crate::schema::ColumnSchema::new("owner", ColumnType::Uuid),
-            crate::schema::ColumnSchema::new("mime_type", ColumnType::String),
-            crate::schema::ColumnSchema::blob("data"),
-        ],
-    )
-    .with_read_policy(Policy::owner_only("assets", "owner"))
-    .with_write_policy(Policy::owner_only("assets", "owner"))])
 }
 
 fn relation_schema() -> JazzSchema {
@@ -2085,36 +2055,6 @@ fn oversized_register_shape_is_rejected_at_admission() {
     assert!(matches!(
         error,
         crate::node::Error::UnsupportedSyncMessage("shape AST exceeds byte limit")
-    ));
-}
-
-#[test]
-fn oversized_content_extent_is_rejected_at_admission() {
-    let schema = schema();
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
-    let extent = crate::node::content_store::Extent {
-        schema: schema.version_id(),
-        table: "todos".to_owned(),
-        writer: AuthorId::from_bytes([0xa1; 16]),
-        row: row(0x42),
-        column: "body".to_owned(),
-        offset: 0,
-        len: (MAX_CONTENT_EXTENT_BYTES + 1) as u64,
-    };
-    let error = server
-        .node()
-        .borrow_mut()
-        .apply_sync_message(SyncMessage::ContentExtents {
-            extents: vec![crate::protocol::ContentExtent {
-                owner: LargeValueOwnerRef::current_row(row(0x42)),
-                extent,
-                bytes: vec![0_u8; MAX_CONTENT_EXTENT_BYTES + 1],
-            }],
-        })
-        .unwrap_err();
-    assert!(matches!(
-        error,
-        crate::node::Error::UnsupportedSyncMessage("content extent exceeds byte limit")
     ));
 }
 
@@ -3562,7 +3502,6 @@ fn attached_schema_mergeable_batch_is_queryable_after_owner_commit() {
             author: AuthorId::SYSTEM,
         },
         id_source: Some(Box::new(SeededRowIdSource::new(91))),
-        large_value_checkpoint_op_interval: crate::node::LARGE_VALUE_CHECKPOINT_OP_INTERVAL,
     }))
     .unwrap();
     let schema = JazzSchema::new([TableSchema::new(
@@ -5803,7 +5742,6 @@ fn db_facade_local_subscription_reports_initial_and_changed_results() {
             author: AuthorId::from_bytes([0xa1; 16]),
         },
         id_source: Some(Box::new(SeededRowIdSource::new(0x1111))),
-        large_value_checkpoint_op_interval: crate::node::LARGE_VALUE_CHECKPOINT_OP_INTERVAL,
     }))
     .unwrap();
     let query = db.table("todos");
@@ -6154,7 +6092,6 @@ fn db_facade_runs_saas_shaped_local_lane_end_to_end() {
             author: owner,
         },
         id_source: Some(Box::new(SeededRowIdSource::new(0x11))),
-        large_value_checkpoint_op_interval: crate::node::LARGE_VALUE_CHECKPOINT_OP_INTERVAL,
     }))
     .unwrap();
 
@@ -8285,7 +8222,6 @@ fn open_db(node: u8, author: AuthorId, schema: &JazzSchema) -> Db<RocksDbStorage
             author,
         },
         id_source: Some(Box::new(SeededRowIdSource::new(node as u64))),
-        large_value_checkpoint_op_interval: crate::node::LARGE_VALUE_CHECKPOINT_OP_INTERVAL,
     }))
     .unwrap()
 }
@@ -9587,7 +9523,6 @@ fn empty_branch_metadata_retries_after_unacked_reopen() {
             author: identity,
         },
         id_source: None,
-        large_value_checkpoint_op_interval: crate::node::LARGE_VALUE_CHECKPOINT_OP_INTERVAL,
     }))
     .unwrap();
     client.create_branch_with_id(branch).unwrap();
@@ -9611,7 +9546,6 @@ fn empty_branch_metadata_retries_after_unacked_reopen() {
             author: identity,
         },
         id_source: None,
-        large_value_checkpoint_op_interval: crate::node::LARGE_VALUE_CHECKPOINT_OP_INTERVAL,
     }))
     .unwrap();
     assert_eq!(
@@ -9665,7 +9599,6 @@ fn acknowledged_open_accepts_remote_discard_and_recovers_it() {
             author: identity,
         },
         id_source: None,
-        large_value_checkpoint_op_interval: crate::node::LARGE_VALUE_CHECKPOINT_OP_INTERVAL,
     }))
     .unwrap();
     let authority = open_core(0x5e, AuthorId::SYSTEM, &schema);
@@ -9717,7 +9650,6 @@ fn acknowledged_open_accepts_remote_discard_and_recovers_it() {
             author: identity,
         },
         id_source: None,
-        large_value_checkpoint_op_interval: crate::node::LARGE_VALUE_CHECKPOINT_OP_INTERVAL,
     }))
     .unwrap();
     assert_eq!(
@@ -9963,7 +9895,6 @@ fn locally_created_branch_and_commit_survive_rocks_reopen() {
             author: identity,
         },
         id_source: Some(Box::new(SeededRowIdSource::new(0xc1))),
-        large_value_checkpoint_op_interval: crate::node::LARGE_VALUE_CHECKPOINT_OP_INTERVAL,
     }))
     .unwrap();
     client.create_branch_with_id(branch).unwrap();
@@ -9989,7 +9920,6 @@ fn locally_created_branch_and_commit_survive_rocks_reopen() {
             author: identity,
         },
         id_source: Some(Box::new(SeededRowIdSource::new(0xc2))),
-        large_value_checkpoint_op_interval: crate::node::LARGE_VALUE_CHECKPOINT_OP_INTERVAL,
     }))
     .unwrap();
     assert_eq!(
@@ -11457,7 +11387,6 @@ fn malformed_authority_opening_keeps_shared_coverage_provisional() {
                 user_metadata_json: None,
                 target_lineage: crate::tx::BranchLineage::Root,
                 branch_merge: None,
-                merge_strategy: None,
             },
             versions: Vec::new(),
             fate: crate::tx::Fate::Accepted,
@@ -12405,13 +12334,13 @@ fn client_tier_routing_scans_local_overlay_but_uses_global_settled_members_at_ed
 }
 
 #[test]
-fn client_settled_file_member_materializes_bundle_for_bound_id_read() {
+fn client_settled_file_member_reads_bytes_for_bound_id_read() {
     let schema = JazzSchema::new([
         TableSchema::new(
             "files",
             [
                 crate::schema::ColumnSchema::new("mime_type", ColumnType::String),
-                crate::schema::ColumnSchema::blob("data"),
+                crate::schema::ColumnSchema::new("data", ColumnType::Bytes),
             ],
         )
         .with_read_policy(Policy::public())
@@ -12474,11 +12403,11 @@ fn client_settled_file_member_materializes_bundle_for_bound_id_read() {
         .find(|table| table.name == "files")
         .unwrap();
     let Value::Bytes(handle) = rows[0].cell(table, "data").unwrap() else {
-        panic!("file data must be a large-value handle");
+        panic!("file data must be ordinary bytes");
     };
     assert!(
         !handle.is_empty(),
-        "the received file row retains its content handle"
+        "the received file row retains its byte payload"
     );
 }
 
@@ -12609,60 +12538,6 @@ fn write_state_waiter_resolves_on_remote_fate_update() {
 }
 
 #[test]
-fn db_sync_surface_round_trips_blob_large_value_to_reader() {
-    let schema =
-        JazzSchema::new([
-            TableSchema::new("files", [crate::schema::ColumnSchema::blob("data")])
-                .with_read_policy(Policy::public())
-                .with_write_policy(Policy::public()),
-        ]);
-    let writer_author = AuthorId::from_bytes([0xc1; 16]);
-    let reader_author = AuthorId::from_bytes([0xc2; 16]);
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
-    let writer = open_db(0xc1, writer_author, &schema);
-    let reader = open_db(0xc2, reader_author, &schema);
-
-    let (writer_transport, server_writer_transport) = duplex();
-    let _writer_upstream = writer.connect_upstream(writer_transport);
-    let _writer_subscriber = server.accept_subscriber(server_writer_transport, writer_author);
-    let payload = b"synced blob bytes".to_vec();
-    writer
-        .insert(
-            "files",
-            BTreeMap::from([("data".to_owned(), Value::Bytes(payload.clone()))]),
-        )
-        .unwrap();
-    writer.tick().unwrap();
-    server.tick().unwrap();
-
-    let (reader_transport, server_reader_transport) = duplex();
-    let _reader_upstream = reader.connect_upstream(reader_transport);
-    let _reader_subscriber = server.accept_subscriber(server_reader_transport, reader_author);
-    let query = Query::from("files");
-    let mut subscription = prepared_subscribe(&reader, &query, global_subscribe_opts()).unwrap();
-    assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
-    reader.tick().unwrap();
-    server.tick().unwrap();
-    reader.tick().unwrap();
-
-    let table = &schema.tables[0];
-    let (added, updated, removed) = delta_rows(block_on(subscription.next_raw()).unwrap());
-    assert_eq!(added.len(), 1);
-    assert!(updated.is_empty());
-    assert!(removed.is_empty());
-    let handle = prepared_read(&reader, &query)[0].cell(table, "data");
-    let Some(Value::Bytes(handle)) = handle else {
-        panic!("expected large-value handle");
-    };
-    reader
-        .hydrate_large_value_handle(&handle)
-        .expect_err("large-value handle should be unhydrated before explicit fetch response");
-    server.tick().unwrap();
-    reader.tick().unwrap();
-    assert_eq!(reader.hydrate_large_value_handle(&handle).unwrap(), payload);
-}
-
-#[test]
 fn db_sync_surface_preserves_creator_provenance_across_peer_update() {
     let schema = schema();
     let alice = AuthorId::from_bytes([0xa1; 16]);
@@ -12763,110 +12638,6 @@ fn db_sync_surface_preserves_creator_provenance_across_peer_update() {
         provenance.created_at < provenance.updated_at,
         "updating a row must preserve creator provenance while advancing updater provenance"
     );
-}
-
-#[test]
-fn db_sync_surface_blob_values_follow_ordinary_row_permissions() {
-    // This is intentionally a core sync-surface test: the public jazz-tools
-    // query API does not yet expose blob values cleanly enough to assert the
-    // bytes there, but the behavior is still user-visible once that API lands.
-    let schema = owner_blob_schema();
-    let alice = AuthorId::from_bytes([0xa1; 16]);
-    let bob = AuthorId::from_bytes([0xb2; 16]);
-    let mallory = AuthorId::from_bytes([0xc3; 16]);
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
-    let alice_db = open_db(0xa1, alice, &schema);
-    let alice_observer_db = open_db(0xa2, alice, &schema);
-    let bob_db = open_db(0xb2, bob, &schema);
-    let mallory_db = open_db(0xc3, mallory, &schema);
-
-    let (alice_transport, server_alice_transport) = duplex();
-    let _alice_upstream = alice_db.connect_upstream(alice_transport);
-    let _alice_subscriber = server.accept_subscriber(server_alice_transport, alice);
-    let payload = b"file-like payload stored as an ordinary row value"
-        .repeat(64)
-        .to_vec();
-    let write = alice_db
-        .insert(
-            "assets",
-            BTreeMap::from([
-                ("owner".to_owned(), Value::Uuid(alice.0)),
-                (
-                    "mime_type".to_owned(),
-                    Value::String("application/octet-stream".to_owned()),
-                ),
-                ("data".to_owned(), Value::Bytes(payload.clone())),
-            ]),
-        )
-        .unwrap();
-    let asset = write.row_uuid();
-    alice_db.tick().unwrap();
-    server.tick().unwrap();
-    alice_db.tick().unwrap();
-    block_on(write.wait(DurabilityTier::Global)).unwrap();
-
-    let query = Query::from("assets");
-    let table = &schema.tables[0];
-    let alice_rows = prepared_read(&alice_db, &query);
-    assert_eq!(alice_rows.len(), 1);
-    assert_eq!(alice_rows[0].row_uuid(), asset);
-    let Some(Value::Bytes(handle)) = alice_rows[0].cell(table, "data") else {
-        panic!("expected large-value handle");
-    };
-    assert_eq!(
-        alice_db.hydrate_large_value_handle(&handle).unwrap(),
-        payload
-    );
-
-    let (bob_transport, server_bob_transport) = duplex();
-    let _bob_upstream = bob_db.connect_upstream(bob_transport);
-    let _bob_subscriber = server.accept_subscriber(server_bob_transport, bob);
-    let mut subscription = prepared_subscribe(&bob_db, &query, edge_subscribe_opts()).unwrap();
-    assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
-    assert!(prepared_all(&bob_db, &query, edge_subscribe_opts()).is_empty());
-
-    let (observer_transport, server_observer_transport) = duplex();
-    let _observer_upstream = alice_observer_db.connect_upstream(observer_transport);
-    let _observer_subscriber = server.accept_subscriber(server_observer_transport, alice);
-    let mut observer_subscription =
-        prepared_subscribe(&alice_observer_db, &query, edge_subscribe_opts()).unwrap();
-    assert!(opened_rows(block_on(observer_subscription.next_raw()).unwrap()).is_empty());
-    alice_observer_db.tick().unwrap();
-    server.tick().unwrap();
-    alice_observer_db.tick().unwrap();
-    let (added, updated, removed) = delta_rows(block_on(observer_subscription.next_raw()).unwrap());
-    assert_eq!(row_ids(&added), vec![asset]);
-    assert!(updated.is_empty());
-    assert!(removed.is_empty());
-
-    let (mallory_transport, server_mallory_transport) = duplex();
-    let _mallory_upstream = mallory_db.connect_upstream(mallory_transport);
-    let _mallory_subscriber = server.accept_subscriber(server_mallory_transport, mallory);
-    let spoof = mallory_db
-        .insert(
-            "assets",
-            BTreeMap::from([
-                ("owner".to_owned(), Value::Uuid(alice.0)),
-                (
-                    "mime_type".to_owned(),
-                    Value::String("application/octet-stream".to_owned()),
-                ),
-                ("data".to_owned(), Value::Bytes(b"spoofed".to_vec())),
-            ]),
-        )
-        .unwrap();
-    assert_authority_rejects_staged_write(&mallory_db, &server, &spoof);
-    assert!(
-        prepared_read(&mallory_db, &query).is_empty(),
-        "the rejected asset must not remain visible in Mallory's local view"
-    );
-    alice_observer_db.tick().unwrap();
-    let observer_rows = prepared_read(&alice_observer_db, &query);
-    assert_eq!(observer_rows.len(), 1);
-    assert_eq!(observer_rows[0].row_uuid(), asset);
-    let server_rows = server.read(&query).unwrap();
-    assert_eq!(server_rows.len(), 1);
-    assert_eq!(server_rows[0].row_uuid(), asset);
 }
 
 #[test]
@@ -13615,36 +13386,6 @@ fn local_missing_upload_body_still_kills_sync_driver() {
 }
 
 #[test]
-fn blob_commit_upload_sends_content_extents_before_commit_unit() {
-    let schema =
-        JazzSchema::new([
-            TableSchema::new("files", [crate::schema::ColumnSchema::blob("data")])
-                .with_read_policy(Policy::public())
-                .with_write_policy(Policy::public()),
-        ]);
-    let client_author = AuthorId::from_bytes([0xc1; 16]);
-    let client = open_db(0xc1, client_author, &schema);
-    let (client_transport, mut upstream_transport) = duplex();
-    let _upstream = client.connect_upstream(client_transport);
-
-    let write = client
-        .insert(
-            "files",
-            BTreeMap::from([("data".to_owned(), Value::Bytes(b"blob bytes".to_vec()))]),
-        )
-        .unwrap();
-    client.tick().unwrap();
-
-    let first = upstream_transport.try_recv().unwrap();
-    let second = upstream_transport.try_recv().unwrap();
-    assert!(matches!(first, SyncMessage::ContentExtents { .. }));
-    let SyncMessage::CommitUnit { tx, .. } = second else {
-        panic!("expected commit unit after content extents");
-    };
-    assert_eq!(tx.tx_id, write.mergeable_tx_id());
-}
-
-#[test]
 fn detach_connection_removes_connection_from_db_ticks() {
     let schema = schema();
     let client_author = AuthorId::from_bytes([0xc1; 16]);
@@ -14140,7 +13881,6 @@ fn string_grant_role_access_filter_matches_uuid_literal_in_list() {
             author: AuthorId::SYSTEM,
         },
         id_source: Some(Box::new(SeededRowIdSource::new(0x6f))),
-        large_value_checkpoint_op_interval: crate::node::LARGE_VALUE_CHECKPOINT_OP_INTERVAL,
     }))
     .unwrap();
     for (table, row_id, cells) in [
@@ -15845,7 +15585,6 @@ fn undelivered_mutation_error_is_recovered_after_reopen() {
         storage,
         identity,
         id_source: Some(Box::new(SeededRowIdSource::new(0xc3))),
-        large_value_checkpoint_op_interval: crate::node::LARGE_VALUE_CHECKPOINT_OP_INTERVAL,
     }))
     .unwrap();
     let (client_transport, mut authority_transport) = duplex();
@@ -15875,7 +15614,6 @@ fn undelivered_mutation_error_is_recovered_after_reopen() {
         storage,
         identity,
         id_source: Some(Box::new(SeededRowIdSource::new(0xc3))),
-        large_value_checkpoint_op_interval: crate::node::LARGE_VALUE_CHECKPOINT_OP_INTERVAL,
     }))
     .unwrap();
     let events = Rc::new(RefCell::new(Vec::new()));
@@ -15900,7 +15638,6 @@ fn undelivered_mutation_error_is_recovered_after_reopen() {
         storage,
         identity,
         id_source: Some(Box::new(SeededRowIdSource::new(0xc3))),
-        large_value_checkpoint_op_interval: crate::node::LARGE_VALUE_CHECKPOINT_OP_INTERVAL,
     }))
     .unwrap();
     let replayed_events = Rc::new(RefCell::new(Vec::new()));
@@ -16419,275 +16156,6 @@ fn trusted_backend_delete_uses_permission_subject_parent_for_write_policy() {
 }
 
 #[test]
-fn db_large_text_values_round_trip_across_edit_chain() {
-    let schema =
-        JazzSchema::new([
-            TableSchema::new("notes", [crate::schema::ColumnSchema::text("body")])
-                .with_read_policy(Policy::public())
-                .with_write_policy(Policy::public()),
-        ]);
-    let dir = tempfile::tempdir().unwrap();
-    let cfs = schema.column_families();
-    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
-    let storage = RocksDbStorage::open(dir.path(), &refs).unwrap();
-    let db = block_on(Db::open(DbConfig {
-        schema: schema.clone(),
-        storage,
-        identity: DbIdentity {
-            node: NodeUuid::from_bytes([0x33; 16]),
-            author: AuthorId::from_bytes([0x44; 16]),
-        },
-        id_source: Some(Box::new(SeededRowIdSource::new(0x33))),
-        large_value_checkpoint_op_interval: crate::node::LARGE_VALUE_CHECKPOINT_OP_INTERVAL,
-    }))
-    .unwrap();
-    let table = &schema.tables[0];
-
-    let write = db
-        .insert(
-            "notes",
-            BTreeMap::from([("body".to_owned(), Value::Bytes(b"hello".to_vec()))]),
-        )
-        .unwrap();
-    let note = write.row_uuid();
-    assert_eq!(
-        prepared_large_value_cell(&db, &Query::from("notes"), table, "body"),
-        b"hello".to_vec()
-    );
-
-    for value in [
-        "hello world".as_bytes().to_vec(),
-        "hello brave world".as_bytes().to_vec(),
-        "brave new world".as_bytes().to_vec(),
-        "brave new world - ecriture 日本".as_bytes().to_vec(),
-    ] {
-        db.update(
-            "notes",
-            note,
-            BTreeMap::from([("body".to_owned(), Value::Bytes(value.clone()))]),
-        )
-        .unwrap();
-        assert_eq!(
-            prepared_large_value_cell(&db, &Query::from("notes"), table, "body"),
-            value
-        );
-    }
-}
-
-#[test]
-fn db_large_blob_values_round_trip_binary_from_empty_parent() {
-    let schema =
-        JazzSchema::new([
-            TableSchema::new("files", [crate::schema::ColumnSchema::blob("data")])
-                .with_read_policy(Policy::public())
-                .with_write_policy(Policy::public()),
-        ]);
-    let dir = tempfile::tempdir().unwrap();
-    let cfs = schema.column_families();
-    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
-    let storage = RocksDbStorage::open(dir.path(), &refs).unwrap();
-    let db = block_on(Db::open(DbConfig {
-        schema: schema.clone(),
-        storage,
-        identity: DbIdentity {
-            node: NodeUuid::from_bytes([0x55; 16]),
-            author: AuthorId::from_bytes([0x66; 16]),
-        },
-        id_source: Some(Box::new(SeededRowIdSource::new(0x55))),
-        large_value_checkpoint_op_interval: crate::node::LARGE_VALUE_CHECKPOINT_OP_INTERVAL,
-    }))
-    .unwrap();
-    let table = &schema.tables[0];
-    let first = vec![0, 1, 2, 3, 255, 0, 128];
-    let second = vec![0, 1, 9, 3, 255, 64, 128, 200];
-
-    let write = db
-        .insert(
-            "files",
-            BTreeMap::from([("data".to_owned(), Value::Bytes(first.clone()))]),
-        )
-        .unwrap();
-    let file = write.row_uuid();
-    assert_eq!(
-        prepared_large_value_cell(&db, &Query::from("files"), table, "data"),
-        first
-    );
-
-    db.update(
-        "files",
-        file,
-        BTreeMap::from([("data".to_owned(), Value::Bytes(second.clone()))]),
-    )
-    .unwrap();
-    assert_eq!(
-        prepared_large_value_cell(&db, &Query::from("files"), table, "data"),
-        second
-    );
-}
-
-#[test]
-fn db_text_edit_ops_materialize_expected_value() {
-    let schema =
-        JazzSchema::new([
-            TableSchema::new("notes", [crate::schema::ColumnSchema::text("body")])
-                .with_read_policy(Policy::public())
-                .with_write_policy(Policy::public()),
-        ]);
-    let dir = tempfile::tempdir().unwrap();
-    let cfs = schema.column_families();
-    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
-    let storage = RocksDbStorage::open(dir.path(), &refs).unwrap();
-    let db = block_on(Db::open(DbConfig {
-        schema: schema.clone(),
-        storage,
-        identity: DbIdentity {
-            node: NodeUuid::from_bytes([0x77; 16]),
-            author: AuthorId::from_bytes([0x88; 16]),
-        },
-        id_source: Some(Box::new(SeededRowIdSource::new(0x77))),
-        large_value_checkpoint_op_interval: crate::node::LARGE_VALUE_CHECKPOINT_OP_INTERVAL,
-    }))
-    .unwrap();
-    let table = &schema.tables[0];
-    let write = db
-        .insert(
-            "notes",
-            BTreeMap::from([("body".to_owned(), Value::Bytes(b"hello world".to_vec()))]),
-        )
-        .unwrap();
-
-    db.edit_text(
-        "notes",
-        write.row_uuid(),
-        "body",
-        TextEdit::new().delete(5, 6).insert(5, b", ops".to_vec()),
-    )
-    .unwrap();
-
-    assert_eq!(
-        prepared_large_value_cell(&db, &Query::from("notes"), table, "body"),
-        b"hello, ops".to_vec()
-    );
-}
-
-#[test]
-fn db_text_dump_and_edit_paths_interleave() {
-    let schema =
-        JazzSchema::new([
-            TableSchema::new("notes", [crate::schema::ColumnSchema::text("body")])
-                .with_read_policy(Policy::public())
-                .with_write_policy(Policy::public()),
-        ]);
-    let dir = tempfile::tempdir().unwrap();
-    let cfs = schema.column_families();
-    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
-    let storage = RocksDbStorage::open(dir.path(), &refs).unwrap();
-    let db = block_on(Db::open(DbConfig {
-        schema: schema.clone(),
-        storage,
-        identity: DbIdentity {
-            node: NodeUuid::from_bytes([0x78; 16]),
-            author: AuthorId::from_bytes([0x89; 16]),
-        },
-        id_source: Some(Box::new(SeededRowIdSource::new(0x78))),
-        large_value_checkpoint_op_interval: crate::node::LARGE_VALUE_CHECKPOINT_OP_INTERVAL,
-    }))
-    .unwrap();
-    let table = &schema.tables[0];
-    let write = db
-        .insert(
-            "notes",
-            BTreeMap::from([("body".to_owned(), Value::Bytes(b"start".to_vec()))]),
-        )
-        .unwrap();
-    let row = write.row_uuid();
-
-    db.update(
-        "notes",
-        row,
-        BTreeMap::from([("body".to_owned(), Value::Bytes(b"start middle".to_vec()))]),
-    )
-    .unwrap();
-    db.edit_text(
-        "notes",
-        row,
-        "body",
-        TextEdit::new().insert(12, b" end".to_vec()),
-    )
-    .unwrap();
-    db.update(
-        "notes",
-        row,
-        BTreeMap::from([(
-            "body".to_owned(),
-            Value::Bytes(b"BEGIN middle end".to_vec()),
-        )]),
-    )
-    .unwrap();
-    db.edit_text("notes", row, "body", TextEdit::new().delete(5, 7))
-        .unwrap();
-
-    assert_eq!(
-        prepared_large_value_cell(&db, &Query::from("notes"), table, "body"),
-        b"BEGIN end".to_vec()
-    );
-}
-
-#[test]
-fn db_blob_edit_ops_handle_binary_and_multibyte_bytes() {
-    let schema =
-        JazzSchema::new([
-            TableSchema::new("files", [crate::schema::ColumnSchema::blob("data")])
-                .with_read_policy(Policy::public())
-                .with_write_policy(Policy::public()),
-        ]);
-    let dir = tempfile::tempdir().unwrap();
-    let cfs = schema.column_families();
-    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
-    let storage = RocksDbStorage::open(dir.path(), &refs).unwrap();
-    let db = block_on(Db::open(DbConfig {
-        schema: schema.clone(),
-        storage,
-        identity: DbIdentity {
-            node: NodeUuid::from_bytes([0x79; 16]),
-            author: AuthorId::from_bytes([0x8a; 16]),
-        },
-        id_source: Some(Box::new(SeededRowIdSource::new(0x79))),
-        large_value_checkpoint_op_interval: crate::node::LARGE_VALUE_CHECKPOINT_OP_INTERVAL,
-    }))
-    .unwrap();
-    let table = &schema.tables[0];
-    let write = db
-        .insert(
-            "files",
-            BTreeMap::from([("data".to_owned(), Value::Bytes("aé日z".as_bytes().to_vec()))]),
-        )
-        .unwrap();
-
-    db.edit_text(
-        "files",
-        write.row_uuid(),
-        "data",
-        TextEdit::new()
-            .delete(1, "é".len())
-            .insert(6, vec![0, 255])
-            .insert(7, "✓".as_bytes().to_vec()),
-    )
-    .unwrap();
-
-    let mut expected = Vec::new();
-    expected.extend_from_slice(b"a");
-    expected.extend_from_slice("日".as_bytes());
-    expected.extend_from_slice(&[0, 255]);
-    expected.extend_from_slice(b"z");
-    expected.extend_from_slice("✓".as_bytes());
-    assert_eq!(
-        prepared_large_value_cell(&db, &Query::from("files"), table, "data"),
-        expected
-    );
-}
-
-#[test]
 fn db_query_builder_expresses_s1_shaped_filters_and_include_modes() {
     let schema = issue_schema();
     let dir = tempfile::tempdir().unwrap();
@@ -16704,7 +16172,6 @@ fn db_query_builder_expresses_s1_shaped_filters_and_include_modes() {
             author: alice,
         },
         id_source: Some(Box::new(SeededRowIdSource::new(0x22))),
-        large_value_checkpoint_op_interval: crate::node::LARGE_VALUE_CHECKPOINT_OP_INTERVAL,
     }))
     .unwrap();
 

@@ -14,9 +14,6 @@ mod s4_order_processing;
 #[path = "../benches/s5_durable_stream.rs"]
 mod s5_durable_stream;
 #[allow(dead_code)]
-#[path = "../benches/s6_text_traces.rs"]
-mod s6_text_traces;
-#[allow(dead_code)]
 #[path = "../benches/s7_migrations.rs"]
 mod s7_migrations;
 #[allow(dead_code)]
@@ -55,11 +52,6 @@ fn s4_order_processing_smoke_debug_profile() {
 #[ignore = "known red; tracked in TEST_BURNDOWN.md"]
 fn s5_durable_stream_smoke() {
     s5_durable_stream::smoke();
-}
-
-#[test]
-fn s6_text_traces_smoke() {
-    s6_text_traces::smoke();
 }
 
 #[test]

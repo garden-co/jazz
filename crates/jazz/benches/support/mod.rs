@@ -8,7 +8,7 @@ use jazz::groove::db::{
 };
 use jazz::groove::ivm::{RuntimeStats, TickMetrics};
 use jazz::groove::storage::OrderedKvStorage;
-use jazz::node::{LargeValueMetrics, NodeState, QueryEngineReadMetrics, SyncMetrics};
+use jazz::node::{NodeState, QueryEngineReadMetrics, SyncMetrics};
 use jazz::tx::DurabilityTier;
 use serde_json::{Map, Value, json};
 
@@ -67,11 +67,6 @@ where
         &format!("{prefix}_query_engine_read"),
         node.query_engine_read_metrics(),
     );
-    insert_large_value_metrics(
-        fields,
-        &format!("{prefix}_large_value"),
-        node.large_value_metrics(),
-    );
 }
 
 pub fn reset_phase_counters<S>(nodes: &mut [&mut NodeState<S>])
@@ -81,7 +76,6 @@ where
     for node in nodes {
         node.reset_storage_read_metrics();
         node.reset_query_engine_read_metrics();
-        node.reset_large_value_metrics();
     }
 }
 
@@ -344,37 +338,6 @@ fn insert_query_engine_read_metrics(
     fields.insert(
         format!("{prefix}_policy_authorized_source_joins"),
         json!(metrics.policy_authorized_source_joins),
-    );
-}
-
-fn insert_large_value_metrics(
-    fields: &mut Map<String, Value>,
-    prefix: &str,
-    metrics: &LargeValueMetrics,
-) {
-    fields.insert(
-        format!("{prefix}_materializations"),
-        json!(metrics.materializations),
-    );
-    fields.insert(
-        format!("{prefix}_total_replayed_ops"),
-        json!(metrics.total_replayed_ops),
-    );
-    fields.insert(
-        format!("{prefix}_last_replayed_ops"),
-        json!(metrics.last_replayed_ops),
-    );
-    fields.insert(
-        format!("{prefix}_last_replayed_versions"),
-        json!(metrics.last_replayed_versions),
-    );
-    fields.insert(
-        format!("{prefix}_checkpoint_hits"),
-        json!(metrics.checkpoint_hits),
-    );
-    fields.insert(
-        format!("{prefix}_checkpoint_writes"),
-        json!(metrics.checkpoint_writes),
     );
 }
 

@@ -522,7 +522,6 @@ fn row_set_output(facts: BTreeSet<ProgramFactKey>) -> RowSetOutputRequest {
         app_rows: Some(AppRowOutputRequest {
             public_terminal: true,
             projection: PayloadProjection::ShapeDefault,
-            large_values: Vec::new(),
         }),
         facts,
     }
@@ -550,7 +549,6 @@ fn production_output_request(
             app_rows: Some(AppRowOutputRequest {
                 public_terminal: true,
                 projection: PayloadProjection::ShapeDefault,
-                large_values: Vec::new(),
             }),
             facts: if has_relation_paths {
                 BTreeSet::from([
@@ -794,7 +792,6 @@ fn app_path_projection(
         fields: FieldProjection::Fields(BTreeSet::from(["title".to_owned()])),
         children,
         hole_policy: PathHolePolicy::KeepParentWithHoles,
-        large_values: Vec::new(),
     }
 }
 
@@ -1377,7 +1374,6 @@ fn current_source_select_projection_and_default_ordered_slice_lower() {
                     fields: FieldProjection::Fields(BTreeSet::from(["title".to_owned()])),
                     paths: Vec::new(),
                 }),
-                large_values: Vec::new(),
             }),
             facts: BTreeSet::new(),
         },
@@ -4411,35 +4407,4 @@ fn policy_context_carries_alpha_enforcement_mode() {
     };
 
     assert_ne!(permissive, enforcing);
-}
-
-#[test]
-fn large_value_extent_schema_names_authorized_materialization_contract() {
-    let member = VersionedRowRefSchema {
-        row: RowRefSchema {
-            source_field: "source".to_owned(),
-            table_field: "table".to_owned(),
-            row_field: "row_uuid".to_owned(),
-        },
-        version: Some(ResultMembershipVersionSchema::Content(
-            ContentVersionFields {
-                tx_time_field: "tx_time".to_owned(),
-                tx_node_field: "tx_node".to_owned(),
-            },
-        )),
-    };
-    let schema = LargeValueExtentSchema {
-        owner: member,
-        column_field: "column".to_owned(),
-        range_field: "range".to_owned(),
-        digest_field: "digest".to_owned(),
-        materialization_field: "materialization".to_owned(),
-        handle_field: "handle".to_owned(),
-        tier_field: "tier".to_owned(),
-        source_coverage_field: "source_coverage".to_owned(),
-        completeness_field: "complete".to_owned(),
-    };
-
-    assert_eq!(schema.digest_field, "digest");
-    assert_eq!(schema.completeness_field, "complete");
 }

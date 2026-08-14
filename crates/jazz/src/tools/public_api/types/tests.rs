@@ -328,6 +328,8 @@ fn schema_hash_matches_ordered_enum_cross_runtime_fixture() {
     }
     #[derive(serde::Deserialize)]
     struct EnumHashFixture {
+        #[serde(rename = "schemaLayoutVersion")]
+        schema_layout_version: u16,
         cases: Vec<EnumHashCase>,
     }
 
@@ -335,6 +337,8 @@ fn schema_hash_matches_ordered_enum_cross_runtime_fixture() {
         "../../../../../../packages/jazz-tools/src/testing/fixtures/ordered-enum-schema-hashes.json"
     ))
     .expect("ordered enum hash fixture is valid JSON");
+
+    assert_eq!(fixture.schema_layout_version, 9);
 
     let hashes: Vec<_> = fixture
         .cases
@@ -412,7 +416,7 @@ fn schema_hash_ignores_policies() {
 }
 
 #[test]
-fn schema_hash_preserves_historical_default_index_behavior() {
+fn schema_hash_matches_v9_default_index_fixture() {
     let schema = SchemaBuilder::new()
         .table(
             TableSchema::builder("todos")
@@ -423,7 +427,7 @@ fn schema_hash_preserves_historical_default_index_behavior() {
 
     assert_eq!(
         SchemaHash::compute(&schema).to_string(),
-        "bfd77d25b0696da75df2ca82ab129c6289432decaaad8b86adcb31a366bdd217",
+        "ca27c6e72893cc1819ea2583bd2c450cda8dc6498b2b06dc882c06e5fcf9bc1e",
     );
 }
 

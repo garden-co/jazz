@@ -17,15 +17,14 @@ Invariant digest:
 - `INV-HIST-6`: A merge version MUST dominate all of its parent heads and become the current content winner when present and accepted.
 - `INV-HIST-7`: A merge version's transaction time MUST be strictly after the maximum made-at time of the observed heads.
 - `INV-HIST-8`: For `MergeStrategy::Lww`, a merged column MUST take the value from the highest made-at/`TxId` head that sets the column, and if no head sets it, from the highest made-at/`TxId` parent-union version that sets it.
-- `INV-HIST-9`: `MergeStrategy::Counter` MUST be declared only on non-nullable integer user columns and MUST NOT be declared on large-value columns.
+- `INV-HIST-9`: `MergeStrategy::Counter` MUST be declared only on non-nullable integer user columns.
 - `INV-HIST-10`: For `MergeStrategy::Counter`, concurrent integer deltas from their observed parent bases MUST be summed exactly.
 - `INV-HIST-11`: Content and deletion state MUST be separate layers; content writes MUST NOT change the deletion register, and a current `DeletionEvent::Deleted` MUST hide the content-current row until a current `DeletionEvent::Restored` reveals it.
 - `INV-HIST-12`: Accepted globally settled versions that become per-layer winners MUST be reflected in `jazz_{table}_global_current` or `jazz_{table}_register_global_current`.
 - `INV-HIST-13`: Re-ingesting the same commit unit with identical version rows in a different order MUST be idempotent and MUST NOT create a conflict.
 - `INV-HIST-14`: Rejected transactions MUST NOT appear as accepted row-history entries and MUST NOT participate in currentness/domination.
-- `INV-HIST-15`: Merge strategy behavior MUST be deterministic, grouping-insensitive over the parent/head set, and non-wedging at merge time: registered strategy failure degrades to the built-in text merge with that fallback recorded; write-time canonicalization remains validation and rejects loudly.
-- `INV-HIST-16`: A merge value MUST be the deterministic fold over the de-duplicated raw head set, never a fold of already-merged values. Combining divergent merge versions MUST fold the union of their raw parent-closures de-duplicated by version identity (LWW argmax; `Counter` sums per-`TxId` deltas so shared ancestors count once; large-value op-merge dedups by op identity), so divergent merges converge to the single-merger-over-the-union result.
-- `INV-LVAL-18`: An upstream large-value merge version MUST merge concurrent head op streams since their column LCA, then store a primary-parent-relative op batch that materializes to...
+- `INV-HIST-15`: Merge strategy behavior MUST be deterministic and grouping-insensitive over the parent/head set; write-time canonicalization remains validation and rejects loudly.
+- `INV-HIST-16`: A merge value MUST be the deterministic fold over the de-duplicated raw head set, never a fold of already-merged values. Combining divergent merge versions MUST fold the union of their raw parent-closures de-duplicated by version identity (LWW argmax; `Counter` sums per-`TxId` deltas so shared ancestors count once), so divergent merges converge to the single-merger-over-the-union result.
 - `INV-TX-6`: A commit unit MUST be rejected with RejectionReason::CausalityViolation if its txid.time is less than or equal to any parent transaction's txid.time, and its versions...
 
 ## Details
@@ -92,63 +91,16 @@ body:"y"}`: each column comes from the head that set it. If both had set
 
 Counter columns use delta summation instead of last-writer selection. The counter
 strategy (`MergeStrategy::Counter`) may be declared only on non-nullable integer
-columns and never on large-value columns (`INV-HIST-9`, ch. 2). It computes each
+columns (`INV-HIST-9`, ch. 2). It computes each
 concurrent writer's delta from its observed base and sums those deltas exactly
 (`INV-HIST-10`). Concurrent increments therefore converge to the exact total:
 from a base of `10`, a concurrent `+3` and `+5` merge to `18`, not to a single
 last-writer value.
 
-Large-value `text`/`blob` columns are excluded from the default LWW
-pick-one-head cell rule at upstream authorities. They merge by
-op-merge-since-LCA and store a primary-parent-relative op batch (`INV-LVAL-18`;
-covered by
-`jazz::node::tests::content_store::authority_merge_version_op_merges_concurrent_large_value_edits`
-and
-`jazz::node::ingest::large_value_merge_tests::three_head_large_value_fold_is_input_order_deterministic`).
-The N-way fold processes large-value heads in causal sort-key order and carries
-the folded accumulator's greatest causal origin, so same-position inserts
-converge independently of delivery order (`INV-HIST-15`).
-
 _Further invariants._ `INV-HIST-7` — a merge version's transaction time is
 strictly after the maximum made-at time of the observed heads. `INV-HIST-15` —
 merge-strategy output is deterministic and grouping-insensitive over the
 head/parent set, with no wall-clock or node-local state in merged values.
-
-### 4.3.1 Merge strategies and text merge
-
-A merge strategy is a deterministic function from a column's raw concurrent
-heads, their parent context, and the column's declared strategy metadata to one
-merged column value. The merge-time contract is non-wedging: a strategy failure
-must not block fate assignment. If a registered strategy cannot run, Jazz
-degrades to the built-in rung-2 behavior and records the built-in fallback id on
-the merge version. Write-time canonicalization is different: it is validation,
-and invalid authored values are rejected loudly before acceptance.
-
-Recorded merge versions carry the strategy id, strategy version, and the
-column-spec hash used for that merge. This keeps historical merge meaning
-immutable: changing a strategy affects only future merge versions, not time
-travel, replay, or existing checkpoints. Unregistered strategies are not
-interpreted during ordinary write ingestion; their authored bytes are stored as
-authored until a structurally wired authority with a registered strategy creates
-a merge version.
-
-The text strategy substrate stores plaintext retained-run operations as authored
-in the row-version payload. The only lossless compression inside that substrate
-is run-length encoding of retained runs; it must not rewrite the semantic edit
-stream. The distinguished merge site walks the event graph and orders concurrent
-same-position events by `TxId` tie-break. For rich text, the escalation ladder is:
-built-in scalar/LWW fallback, built-in plaintext retained-run merge, registered
-format-aware strategy, then future app/plugin strategies. Merge-time failure at
-any rung degrades to rung 2 with the fallback id recorded.
-
-**Implementation status.** The reference implementation covers built-in
-plaintext text merging, including recording the selected strategy, in
-`content_store::authority_merge_version_merges_concurrent_text_edits_and_records_strategy`.
-It does not yet provide equivalent coverage for format-aware rich-text merges
-with more than two heads. The current reference implementation rejects op-edits
-to format-declared columns, covered by
-`content_store::op_edits_on_format_declared_columns_are_rejected`; the external
-strategy surface needed to support them is an open design question below.
 
 **Merging merges.** Distinct upstream nodes may each mint merge versions for the
 same row. If those nodes observed different frontiers, one merge may include a
@@ -162,8 +114,7 @@ To combine two merge versions, an authority folds over the union of their raw
 parent-closures, de-duplicated by version identity. LWW takes the argmax raw head
 with the parent-union fallback; `Counter` sums each raw version's delta keyed by
 its `TxId`, so a shared ancestor is counted exactly once and never
-double-counted; large-value op-merge applies the raw ops de-duplicated by op
-identity. Consequently, duplicate merges over the _same_ frontier carry
+double-counted. Consequently, duplicate merges over the _same_ frontier carry
 identical cells, with the deterministic `(time, node)` tie-break picking one.
 Merges over divergent frontiers converge to exactly what a single merger over
 the union would have produced (`INV-HIST-16`). Reconciliation re-folds the

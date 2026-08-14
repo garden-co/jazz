@@ -1217,7 +1217,6 @@ fn topology_matrix_conformance_smoke_inventory() {
         MergeableWrite,
         RlsNarrowedRead,
         ReconnectKnownState,
-        LargeValueRefetch,
     }
 
     struct Cell {
@@ -1243,11 +1242,6 @@ fn topology_matrix_conformance_smoke_inventory() {
             coverage: "text_document_merge::offline_concurrent_text_edits_reconnect_and_converge",
         },
         Cell {
-            topology: Topology::ClientCore,
-            scenario: Scenario::LargeValueRefetch,
-            coverage: "large_blob_permissions::large_blob_values_follow_ordinary_row_permissions",
-        },
-        Cell {
             topology: Topology::ClientEdgeCore,
             scenario: Scenario::MergeableWrite,
             coverage: "edge_server_mode::edge_server_accepts_mergeable_write_while_core_down_then_promotes",
@@ -1261,11 +1255,6 @@ fn topology_matrix_conformance_smoke_inventory() {
             topology: Topology::ClientEdgeCore,
             scenario: Scenario::ReconnectKnownState,
             coverage: "text_document_merge::offline_concurrent_text_edits_reconnect_and_converge",
-        },
-        Cell {
-            topology: Topology::ClientEdgeCore,
-            scenario: Scenario::LargeValueRefetch,
-            coverage: "catalogue_sync_integration::large_blob_values_follow_ordinary_row_permissions",
         },
         Cell {
             topology: Topology::ClientRelayEdgeCore,
@@ -1282,11 +1271,6 @@ fn topology_matrix_conformance_smoke_inventory() {
             scenario: Scenario::ReconnectKnownState,
             coverage: "text_document_merge::offline_concurrent_text_edits_reconnect_and_converge + seeded m3 sync close-out soak",
         },
-        Cell {
-            topology: Topology::ClientRelayEdgeCore,
-            scenario: Scenario::LargeValueRefetch,
-            coverage: "catalogue_sync_integration::large_blob_values_follow_ordinary_row_permissions + 7a refetch-after-eviction coverage",
-        },
     ];
 
     let topologies = [
@@ -1298,7 +1282,6 @@ fn topology_matrix_conformance_smoke_inventory() {
         Scenario::MergeableWrite,
         Scenario::RlsNarrowedRead,
         Scenario::ReconnectKnownState,
-        Scenario::LargeValueRefetch,
     ];
 
     for topology in topologies {

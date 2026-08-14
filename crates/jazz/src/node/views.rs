@@ -1286,7 +1286,6 @@ where
             user_metadata_json,
             target_lineage,
             branch_merge,
-            merge_strategy,
             ..
         } = stored_tx.tx.clone();
         let tx_payload = Transaction {
@@ -1302,7 +1301,6 @@ where
             user_metadata_json,
             target_lineage,
             branch_merge,
-            merge_strategy,
         };
         let mut versions = Vec::with_capacity(tx_versions.len());
         for version in tx_versions {
@@ -1372,7 +1370,7 @@ where
         }
 
         // Some maintained rows are legitimate materialized/synthetic versions
-        // (notably large-value merge output) and therefore have no persisted
+        // (for example, synthesized merge output) and therefore have no persisted
         // history identity to reload. They may cross the boundary only when
         // their authored descriptor is complete. `authored_columns` lets us
         // distinguish such a row from a query projection whose selected-out

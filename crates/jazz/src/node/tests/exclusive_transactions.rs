@@ -358,7 +358,6 @@ fn exclusive_snapshot_global_base_uses_contiguous_global_watermark() {
                     predicate_read_set: None,
                     user_metadata_json: None,
                 branch_merge: None,
-            merge_strategy: None,
                 },
                 vec![version_record(
                     row(row_byte),
@@ -396,7 +395,6 @@ fn exclusive_snapshot_global_base_uses_contiguous_global_watermark() {
                 predicate_read_set: None,
                 user_metadata_json: None,
                 branch_merge: None,
-            merge_strategy: None,
             },
             vec![version_record(
                 row(2),

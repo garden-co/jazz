@@ -403,7 +403,6 @@ fn ingest_direct_version(
             user_metadata_json: None,
             target_lineage: crate::tx::BranchLineage::Root,
             branch_merge: None,
-            merge_strategy: None,
         },
         vec![VersionRecord::from_cells(
             table,

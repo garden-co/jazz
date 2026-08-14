@@ -1100,7 +1100,6 @@ fn open_db(node_uuid: NodeUuid, schema: JazzSchema) -> (TempDir, Db<RocksDbStora
                 .try_into()
                 .expect("node seed bytes"),
         )))),
-        large_value_checkpoint_op_interval: 1024,
     }))
     .expect("db open");
     (dir, db)

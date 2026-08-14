@@ -666,7 +666,6 @@ where
             user_metadata_json: open_tx.user_metadata_json,
             target_lineage: crate::tx::BranchLineage::Root,
             branch_merge: None,
-            merge_strategy: None,
         };
         self.ingest_transaction_and_versions(
             tx.clone(),

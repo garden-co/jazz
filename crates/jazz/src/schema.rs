@@ -19,19 +19,12 @@ use groove::schema::{
 use groove::storage::StorageLayout;
 
 use crate::ids::SchemaVersionId;
-use crate::merge_strategy::ColumnSpecHash;
 use crate::query::{Query, claim, col, eq};
 
 /// Namespace used for schema-version UUIDv5 ids.
 pub const SCHEMA_VERSION_NAMESPACE: uuid::Uuid =
     uuid::uuid!("61b9ef21-3195-50e8-87fc-2aa83a6f74e3");
 
-/// Direct groove record store used for append-only large-value byte extents.
-pub const CONTENT_EXTENTS_STORE: &str = "jazz_content_extents";
-/// Direct groove record store used for large-value stream tails.
-pub const CONTENT_META_STORE: &str = "jazz_content_meta";
-/// Direct groove record store used for local large-value checkpoints.
-pub const CONTENT_CHECKPOINTS_STORE: &str = "jazz_content_checkpoints";
 /// Direct groove record store used for persisted fast known-state facts.
 pub const KNOWN_STATE_FACTS_STORE: &str = "jazz_known_state_facts";
 /// Direct groove record store used for persisted settled result memberships.
@@ -103,12 +96,6 @@ impl JazzSchema {
                     MergeStrategy::Lww => {}
                     MergeStrategy::Counter => {
                         assert!(
-                            column.large_value.is_none(),
-                            "counter merge strategy cannot be used with a large-value column: {}.{}",
-                            table.name,
-                            column.name
-                        );
-                        assert!(
                             is_counter_column_type(&column.column_type),
                             "counter merge strategy requires a non-nullable integer column: {}.{}",
                             table.name,
@@ -123,17 +110,6 @@ impl JazzSchema {
                             column.name
                         );
                     }
-                }
-            }
-            for column in &table.columns {
-                if column.text_merge_spec.is_some() {
-                    assert_eq!(
-                        column.large_value,
-                        Some(LargeValueKind::Text),
-                        "text merge spec requires a text large-value column: {}.{}",
-                        table.name,
-                        column.name
-                    );
                 }
             }
             if let Some(policy) = &table.read_policy {
@@ -254,41 +230,6 @@ impl JazzSchema {
     fn with_jazz_direct_record_stores(&self, schema: GrooveDatabaseSchema) -> GrooveDatabaseSchema {
         schema
             .with_direct_record_store(DirectRecordStoreSchema::new(
-                CONTENT_EXTENTS_STORE,
-                RecordDescriptor::new([
-                    ("schema", ValueType::Uuid),
-                    ("table", ValueType::String),
-                    ("writer", ValueType::Uuid),
-                    ("row", ValueType::Uuid),
-                    ("column", ValueType::String),
-                    ("offset", ValueType::U64),
-                ]),
-                RecordDescriptor::new([("bytes", ValueType::Bytes)]),
-            ))
-            .with_direct_record_store(DirectRecordStoreSchema::new(
-                CONTENT_META_STORE,
-                RecordDescriptor::new([
-                    ("schema", ValueType::Uuid),
-                    ("table", ValueType::String),
-                    ("writer", ValueType::Uuid),
-                    ("row", ValueType::Uuid),
-                    ("column", ValueType::String),
-                ]),
-                RecordDescriptor::new([("offset", ValueType::U64)]),
-            ))
-            .with_direct_record_store(DirectRecordStoreSchema::new(
-                CONTENT_CHECKPOINTS_STORE,
-                RecordDescriptor::new([
-                    ("schema", ValueType::Uuid),
-                    ("table", ValueType::String),
-                    ("row", ValueType::Uuid),
-                    ("column", ValueType::String),
-                    ("version_time", ValueType::U64),
-                    ("version_node", ValueType::Uuid),
-                ]),
-                RecordDescriptor::new([("bytes", ValueType::Bytes)]),
-            ))
-            .with_direct_record_store(DirectRecordStoreSchema::new(
                 KNOWN_STATE_FACTS_STORE,
                 RecordDescriptor::new([
                     ("shape_id", ValueType::Uuid),
@@ -382,63 +323,6 @@ fn is_gset_column_type(column_type: &GrooveColumnType) -> bool {
     matches!(column_type, GrooveColumnType::Array(_))
 }
 
-/// Jazz-level large-value column kind.
-///
-/// Groove stores these as opaque [`GrooveColumnType::Bytes`]. Jazz owns the
-/// large-value semantics; this slice stores and merges the whole byte payload.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
-pub enum LargeValueKind {
-    /// Editable text stored as opaque bytes in groove for this slice.
-    Text,
-    /// Binary large object stored as opaque bytes in groove.
-    Blob,
-}
-
-/// Declared rung-3 text merge strategy spec for a text-document column.
-///
-/// The config payload is intentionally opaque to core schema lowering. Format
-/// implementations own its meaning; core only records and hashes it.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
-pub struct TextMergeSpec {
-    /// Registered strategy id.
-    pub strategy_id: String,
-    /// Strategy implementation version.
-    pub strategy_version: u32,
-    /// Opaque strategy configuration bytes from the column declaration.
-    #[serde(default)]
-    pub config: Vec<u8>,
-}
-
-impl TextMergeSpec {
-    /// Construct a text merge spec with opaque config bytes.
-    pub fn new(
-        strategy_id: impl Into<String>,
-        strategy_version: u32,
-        config: impl Into<Vec<u8>>,
-    ) -> Self {
-        Self {
-            strategy_id: strategy_id.into(),
-            strategy_version,
-            config: config.into(),
-        }
-    }
-
-    /// Deterministic hash recorded on merge versions using this spec.
-    pub fn spec_hash(&self) -> ColumnSpecHash {
-        let mut bytes = Vec::new();
-        put_str(&mut bytes, "jazz-text-merge-spec-v0");
-        put_str(&mut bytes, &self.strategy_id);
-        put_u64(&mut bytes, self.strategy_version as u64);
-        put_bytes(&mut bytes, &self.config);
-        *blake3::hash(&bytes).as_bytes()
-    }
-}
-
-/// Hash recorded when no rung-3 text merge spec is declared.
-pub fn no_text_merge_spec_hash() -> ColumnSpecHash {
-    *blake3::hash(b"jazz-no-text-merge-spec-v0").as_bytes()
-}
-
 /// Semantics declared for a built-in column transform.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ColumnTransformSemantics {
@@ -466,12 +350,6 @@ pub struct ColumnSchema {
     pub name: String,
     /// Groove storage type used for this column's cell value.
     pub column_type: GrooveColumnType,
-    /// Jazz-level large-value marker for opaque text/blob columns.
-    #[serde(default)]
-    pub large_value: Option<LargeValueKind>,
-    /// Optional rung-3 strategy spec for text-document columns.
-    #[serde(default)]
-    pub text_merge_spec: Option<TextMergeSpec>,
     /// Literal value used when an insert omits this column.
     #[serde(default)]
     pub default: Option<Value>,
@@ -483,38 +361,8 @@ impl ColumnSchema {
         Self {
             name: name.into(),
             column_type,
-            large_value: None,
-            text_merge_spec: None,
             default: None,
         }
-    }
-
-    /// Construct a Jazz text column stored in groove as opaque bytes.
-    pub fn text(name: impl Into<String>) -> Self {
-        Self {
-            name: name.into(),
-            column_type: GrooveColumnType::Bytes,
-            large_value: Some(LargeValueKind::Text),
-            text_merge_spec: None,
-            default: None,
-        }
-    }
-
-    /// Construct a Jazz blob column stored in groove as opaque bytes.
-    pub fn blob(name: impl Into<String>) -> Self {
-        Self {
-            name: name.into(),
-            column_type: GrooveColumnType::Bytes,
-            large_value: Some(LargeValueKind::Blob),
-            text_merge_spec: None,
-            default: None,
-        }
-    }
-
-    /// Attach a rung-3 text merge strategy spec to this text-document column.
-    pub fn with_text_merge_spec(mut self, spec: TextMergeSpec) -> Self {
-        self.text_merge_spec = Some(spec);
-        self
     }
 
     /// Attach a literal insert default to this column.
@@ -529,8 +377,6 @@ impl From<groove::schema::ColumnSchema> for ColumnSchema {
         Self {
             name: column.name,
             column_type: column.column_type,
-            large_value: None,
-            text_merge_spec: None,
             default: None,
         }
     }
@@ -1237,12 +1083,6 @@ fn canonical_schema_bytes(schema: &JazzSchema) -> Vec<u8> {
         for column in &table.columns {
             put_str(&mut bytes, &column.name);
             put_column_type(&mut bytes, &column.column_type);
-            if let Some(kind) = column.large_value {
-                put_large_value_kind(&mut bytes, kind);
-            }
-            if let Some(spec) = &column.text_merge_spec {
-                put_text_merge_spec(&mut bytes, spec);
-            }
             put_merge_strategy(&mut bytes, table.merge_strategy(&column.name));
         }
         put_u64(&mut bytes, table.references.len() as u64);
@@ -1260,21 +1100,6 @@ fn put_merge_strategy(bytes: &mut Vec<u8>, strategy: MergeStrategy) {
         MergeStrategy::Counter => 1,
         MergeStrategy::GSet => 2,
     });
-}
-
-fn put_large_value_kind(bytes: &mut Vec<u8>, kind: LargeValueKind) {
-    put_str(bytes, "jazz-large-value-v0");
-    bytes.push(match kind {
-        LargeValueKind::Text => 1,
-        LargeValueKind::Blob => 2,
-    });
-}
-
-fn put_text_merge_spec(bytes: &mut Vec<u8>, spec: &TextMergeSpec) {
-    put_str(bytes, "jazz-text-merge-spec-v0");
-    put_str(bytes, &spec.strategy_id);
-    put_u64(bytes, spec.strategy_version as u64);
-    put_bytes(bytes, &spec.config);
 }
 
 fn put_column_type(bytes: &mut Vec<u8>, column_type: &GrooveColumnType) {
@@ -1486,97 +1311,6 @@ mod tests {
             [ColumnSchema::new("count", ColumnType::U64.nullable())],
         )
         .with_column_merge_strategy("count", MergeStrategy::Counter)]);
-    }
-
-    #[test]
-    fn large_value_columns_lower_to_opaque_bytes() {
-        let schema = JazzSchema::new([TableSchema::new(
-            "notes",
-            [ColumnSchema::text("body"), ColumnSchema::blob("attachment")],
-        )]);
-        let history = schema.tables[0].history_storage_table();
-
-        assert_eq!(
-            history
-                .columns
-                .iter()
-                .find(|column| column.name == "user_body")
-                .unwrap()
-                .column_type,
-            ColumnType::Bytes.nullable()
-        );
-        assert_eq!(
-            history
-                .columns
-                .iter()
-                .find(|column| column.name == "user_attachment")
-                .unwrap()
-                .column_type,
-            ColumnType::Bytes.nullable()
-        );
-    }
-
-    #[test]
-    fn large_value_kind_changes_schema_identity() {
-        let plain_bytes = JazzSchema::new([TableSchema::new(
-            "notes",
-            [ColumnSchema::new("body", ColumnType::Bytes)],
-        )]);
-        let text = JazzSchema::new([TableSchema::new("notes", [ColumnSchema::text("body")])]);
-        let blob = JazzSchema::new([TableSchema::new("notes", [ColumnSchema::blob("body")])]);
-
-        assert_ne!(plain_bytes.version_id(), text.version_id());
-        assert_ne!(text.version_id(), blob.version_id());
-    }
-
-    #[test]
-    fn text_merge_spec_changes_schema_identity() {
-        let plain = JazzSchema::new([TableSchema::new("notes", [ColumnSchema::text("body")])]);
-        let with_spec = JazzSchema::new([TableSchema::new(
-            "notes",
-            [
-                ColumnSchema::text("body").with_text_merge_spec(TextMergeSpec::new(
-                    "test.strategy",
-                    1,
-                    b"config".to_vec(),
-                )),
-            ],
-        )]);
-        let with_other_spec = JazzSchema::new([TableSchema::new(
-            "notes",
-            [
-                ColumnSchema::text("body").with_text_merge_spec(TextMergeSpec::new(
-                    "test.strategy",
-                    2,
-                    b"config".to_vec(),
-                )),
-            ],
-        )]);
-
-        assert_ne!(plain.version_id(), with_spec.version_id());
-        assert_ne!(with_spec.version_id(), with_other_spec.version_id());
-    }
-
-    #[test]
-    #[should_panic(expected = "counter merge strategy cannot be used with a large-value column")]
-    fn counter_merge_strategy_rejects_large_value_columns() {
-        JazzSchema::new([TableSchema::new("notes", [ColumnSchema::text("body")])
-            .with_column_merge_strategy("body", MergeStrategy::Counter)]);
-    }
-
-    #[test]
-    #[should_panic(expected = "text merge spec requires a text large-value column")]
-    fn text_merge_spec_rejects_non_text_columns() {
-        JazzSchema::new([TableSchema::new(
-            "notes",
-            [
-                ColumnSchema::blob("body").with_text_merge_spec(TextMergeSpec::new(
-                    "test.strategy",
-                    1,
-                    Vec::new(),
-                )),
-            ],
-        )]);
     }
 
     #[test]

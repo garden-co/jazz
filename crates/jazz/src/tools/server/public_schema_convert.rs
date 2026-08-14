@@ -10,8 +10,8 @@ use crate::query::{
     PolicyBranch, Predicate, Query,
 };
 use crate::schema::{
-    ColumnSchema as CoreColumnSchema, JazzSchema, LargeValueKind as CoreLargeValueKind,
-    MergeStrategy, TableSchema as CoreTableSchema, WritePolicies,
+    ColumnSchema as CoreColumnSchema, JazzSchema, MergeStrategy, TableSchema as CoreTableSchema,
+    WritePolicies,
 };
 
 use crate::tools::public_api::policy::{CmpOp, PolicyValue};
@@ -21,8 +21,8 @@ use crate::tools::public_api::relation_ir::{
     RecursionBound as RelRecursionBound, RelExpr, RowIdRef, ValueRef as RelValueRef,
 };
 use crate::tools::public_schema::{
-    ColumnDescriptor, ColumnMergeStrategy, ColumnType, LargeValueKind, Operation, PolicyExpr,
-    Schema, TableName, TableSchema, Value,
+    ColumnDescriptor, ColumnMergeStrategy, ColumnType, Operation, PolicyExpr, Schema, TableName,
+    TableSchema, Value,
 };
 
 const DIRECT_USER_ID_CLAIM: &str = "user_id";
@@ -526,18 +526,6 @@ fn convert_column(
     let mut converted = CoreColumnSchema::new(column.name.as_str(), column_type);
     if let Some(default) = &column.default {
         converted.default = Some(convert_column_default(table, column, default)?);
-    }
-    if let Some(kind) = column.large_value {
-        if column.column_type != ColumnType::Bytea {
-            return Err(err(
-                format!("$.{}.{}", table.as_str(), column.name.as_str()),
-                "large_value is only supported on Bytea columns",
-            ));
-        }
-        converted.large_value = Some(match kind {
-            LargeValueKind::Text => CoreLargeValueKind::Text,
-            LargeValueKind::Blob => CoreLargeValueKind::Blob,
-        });
     }
     Ok(converted)
 }
@@ -2389,8 +2377,8 @@ mod tests {
     use crate::tools::public_api::types::EnumCaseDescriptor;
     use crate::tools::public_api::types::TableSchemaBuilder;
     use crate::tools::public_schema::{
-        ColumnDescriptor, ColumnType, LargeValueKind, PolicyExpr, RowDescriptor, Schema,
-        SchemaBuilder, TablePolicies, TableSchema,
+        ColumnDescriptor, ColumnType, PolicyExpr, RowDescriptor, Schema, SchemaBuilder,
+        TablePolicies, TableSchema,
     };
     use std::path::PathBuf;
     use uuid::Uuid;
@@ -2474,31 +2462,6 @@ mod tests {
                 .unwrap()
                 .column_type,
             GrooveColumnType::Bool
-        );
-    }
-
-    #[test]
-    fn converts_large_value_columns() {
-        let schema = [(
-            TableName::new("files"),
-            TableSchema::new(RowDescriptor::new(vec![
-                ColumnDescriptor::new("data", ColumnType::Bytea).large_value(LargeValueKind::Blob),
-            ])),
-        )]
-        .into_iter()
-        .collect();
-
-        let converted = convert_public_schema(&schema).unwrap();
-        let column = converted.tables[0]
-            .columns
-            .iter()
-            .find(|column| column.name == "data")
-            .unwrap();
-
-        assert_eq!(column.column_type, GrooveColumnType::Bytes);
-        assert_eq!(
-            column.large_value,
-            Some(crate::schema::LargeValueKind::Blob)
         );
     }
 

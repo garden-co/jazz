@@ -135,7 +135,6 @@ export interface ColumnDescriptor {
   default?: Value;
   references?: string;
   merge_strategy?: ColumnMergeStrategy;
-  large_value?: "Blob" | "Text";
 }
 
 export type PolicyOperation = "Select" | "Insert" | "Update" | "Delete";

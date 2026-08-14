@@ -176,8 +176,8 @@ ordinary sync receipt into acceptance authority.
 
 Authority admission ensures that a verdict is based on complete inputs and on
 the same checks for every commit unit. The fate authority first parks — and does
-not decide — any unit that is missing parent transactions, schema versions, or
-large-value content. It decides only once all prerequisites are present; a
+not decide — any unit that is missing parent transactions or schema versions.
+It decides only once all prerequisites are present; a
 duplicate parked unit parks only once (`INV-TX-5`).
 
 After prerequisites are present, the authority rejects units that violate

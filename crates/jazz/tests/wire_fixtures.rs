@@ -7,13 +7,12 @@ use jazz::binding_codec::{
     RelationSnapshotPayload, RemovedRowPayload, Row, RowBatch, SubscriptionDeltaPayload,
 };
 use jazz::ids::{AuthorId, BranchId, MigrationLensId, NodeUuid, RowUuid, SchemaVersionId};
-use jazz::node::content_store::Extent;
 use jazz::protocol::{
-    BranchMetadata, CatalogueAck, CatalogueSnapshot, ContentExtent, CurrentWriteSchema,
-    LargeValueOwnerRef, LensOp, MigrationLens, PeerPayloadInventory, RegisterShapeOptions,
-    ResultRowEntry, RowVersionRef, SchemaLineagePublication, SchemaVersion, ShapeAst, Subscribe,
-    SubscribeRejectReason, SubscribeServerFailureCode, SubscriptionKey, SyncMessage, TableLens,
-    VersionBundle, VersionCarrier, VersionRecord, build_version_bundle_runs_from_singletons,
+    BranchMetadata, CatalogueAck, CatalogueSnapshot, CurrentWriteSchema, LensOp, MigrationLens,
+    PeerPayloadInventory, RegisterShapeOptions, ResultRowEntry, RowVersionRef,
+    SchemaLineagePublication, SchemaVersion, ShapeAst, Subscribe, SubscribeRejectReason,
+    SubscribeServerFailureCode, SubscriptionKey, SyncMessage, TableLens, VersionBundle,
+    VersionCarrier, VersionRecord, build_version_bundle_runs_from_singletons,
 };
 use jazz::query::{
     ArraySubquery, ArraySubqueryRequirement, BindingId, OrderDirection, Query, ShapeId, col, eq,
@@ -133,15 +132,6 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
         binding_id,
         read_view: Default::default(),
     };
-    let content_extent = Extent {
-        schema: schema_version,
-        table: "docs".to_owned(),
-        writer: author,
-        row,
-        column: "body".to_owned(),
-        offset: 16,
-        len: 12,
-    };
     let lineage_source = SchemaVersion::new(JazzSchema::new([TableSchema::new(
         "todos",
         [ColumnSchema::new("title", ColumnType::String)],
@@ -150,7 +140,7 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
         "todos",
         [
             ColumnSchema::new("title", ColumnType::String),
-            ColumnSchema::text("body"),
+            ColumnSchema::new("body", ColumnType::String),
         ],
     )]));
     let lineage_target_id = lineage_target.id;
@@ -356,7 +346,6 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
                     user_metadata_json: Some("{\"fixture\":\"wire\"}".to_owned()),
                     target_lineage: jazz::tx::BranchLineage::Root,
                     branch_merge: None,
-                    merge_strategy: None,
                 },
                 versions: Vec::new(),
             },
@@ -380,7 +369,6 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
                         [0x42; 16],
                     )),
                     branch_merge: None,
-                    merge_strategy: None,
                 },
                 versions: Vec::new(),
             },
@@ -394,7 +382,7 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
                     "todos",
                     [
                         ColumnSchema::new("title", ColumnType::String),
-                        ColumnSchema::text("body"),
+                        ColumnSchema::new("body", ColumnType::String),
                     ],
                 )]))),
             },
@@ -455,14 +443,6 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
             }),
         ),
         (
-            "fetch_content_extent_body",
-            "FetchContentExtent",
-            SyncMessage::FetchContentExtent {
-                owner: LargeValueOwnerRef::current_row(row),
-                extent: content_extent.clone(),
-            },
-        ),
-        (
             "catalogue_snapshot_todos_lineage",
             "CatalogueSnapshot",
             SyncMessage::CatalogueSnapshot(Box::new(CatalogueSnapshot {
@@ -473,17 +453,6 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
                     schema: lineage_target_id,
                 },
             })),
-        ),
-        (
-            "content_extents_body_bytes",
-            "ContentExtents",
-            SyncMessage::ContentExtents {
-                extents: vec![ContentExtent {
-                    owner: LargeValueOwnerRef::current_row(row),
-                    extent: content_extent,
-                    bytes: b"hello world!".to_vec(),
-                }],
-            },
         ),
         (
             "fetch_row_versions_todos",
@@ -533,7 +502,6 @@ fn mixed_version_carriers(
                     user_metadata_json: None,
                     target_lineage: jazz::tx::BranchLineage::Root,
                     branch_merge: None,
-                    merge_strategy: None,
                 },
                 versions: vec![
                     VersionRecord::from_cells(
@@ -645,7 +613,9 @@ fn wire_message_frame_fixtures_decode_to_expected_messages() {
         assert_eq!(envelope.features, FEATURE_SYNC_MESSAGE_PAYLOAD);
         assert_eq!(envelope.session, None);
         assert_eq!(hex(&envelope.payload), fixture.payload_hex);
-        assert_eq!(decode_sync_message(&envelope.payload).unwrap(), expected);
+        let decoded = decode_sync_message(&envelope.payload)
+            .unwrap_or_else(|error| panic!("fixture {name} fails to decode: {error}"));
+        assert_eq!(decoded, expected);
     }
 }
 

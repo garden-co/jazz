@@ -170,7 +170,6 @@ fn db_config(schema: JazzSchema, node_uuid: NodeUuid, author: AuthorId) -> DbCon
             author,
         },
         id_source: Some(Box::new(SeededRowIdSource::new(node_seed(node_uuid)))),
-        large_value_checkpoint_op_interval: 1024,
     }
 }
 

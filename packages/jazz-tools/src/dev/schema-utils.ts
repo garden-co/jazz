@@ -118,13 +118,6 @@ function hashColumns(writer: StructuralHashWriter, columns: ColumnDescriptor[]):
     } else {
       writer.byte(0);
     }
-
-    if (column.large_value) {
-      writer.byte(1);
-      writer.byte(column.large_value === "Text" ? 1 : 2);
-    } else {
-      writer.byte(0);
-    }
   }
 }
 
@@ -259,7 +252,6 @@ function columnsEqual(left: ColumnDescriptor, right: ColumnDescriptor): boolean 
     left.nullable === right.nullable &&
     left.references === right.references &&
     left.merge_strategy === right.merge_strategy &&
-    left.large_value === right.large_value &&
     columnTypeSignature(left.column_type) === columnTypeSignature(right.column_type)
   );
 }

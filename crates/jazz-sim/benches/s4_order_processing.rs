@@ -2004,7 +2004,6 @@ fn open_db(
         id_source: Some(Box::new(SeededRowIdSource::new(u64::from(
             node_uuid.as_bytes()[0],
         )))),
-        large_value_checkpoint_op_interval: 1024,
     }))
     .unwrap();
     (dir, db)

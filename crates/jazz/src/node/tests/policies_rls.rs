@@ -180,7 +180,7 @@ fn attributed_write_checkpoint_error_cleans_up_terminal_permission_subject() {
         .unwrap();
 
     // The first six transaction reads are part of validation and acceptance;
-    // checkpoint_large_values_for_tx makes the seventh after Accepted persists.
+    // The seventh after Accepted persists.
     storage.fail_after_transaction_reads(6);
     let error = core.finalize_local_mergeable_commit(tx_id).unwrap_err();
     assert!(error.to_string().contains("injected transaction read failure"));
@@ -5207,128 +5207,6 @@ fn missing_read_or_write_policy_is_public_for_that_operation() {
     );
 }
 
-#[test]
-fn content_extent_visibility_requires_referencing_readable_version_row() {
-    let schema = JazzSchema::new([TableSchema::new(
-        "docs",
-        [
-            crate::schema::ColumnSchema::blob("body"),
-            crate::schema::ColumnSchema::new("owner", ColumnType::Uuid),
-        ],
-    )
-    .with_read_policy(Policy::owner_only("docs", "owner"))]);
-    let (_core_dir, mut core) = open_node_with_schema(node(9), schema.clone());
-    let owner = user(0xa1);
-    let other = user(0xb2);
-    let row_uuid = row(0x86);
-    let tx = core
-        .commit_mergeable(
-            MergeableCommit::new("docs", row_uuid, 10)
-                .made_by(owner)
-                .cells(BTreeMap::from([
-                    ("body".to_owned(), Value::Bytes(b"secret".to_vec())),
-                    ("owner".to_owned(), Value::Uuid(owner.0)),
-                ])),
-        )
-        .unwrap();
-    core.apply_fate_update(
-        tx,
-        Fate::Accepted,
-        Some(GlobalSeq(1)),
-        Some(DurabilityTier::Global),
-    )
-    .unwrap();
-
-    let table = core.table("docs").unwrap().clone();
-    let version = core.query_versions_for_tx(tx).unwrap().remove(0);
-    let Value::Bytes(payload) = version.cell(&table, "body").unwrap().unwrap() else {
-        panic!("body must be stored as blob oplog bytes");
-    };
-    let extent = text_oplog::decode(&payload)
-        .unwrap()
-        .into_iter()
-        .find_map(|op| match op {
-            TextOp::Insert {
-                content: TextContent::Ref(extent),
-                ..
-            } => Some(extent),
-            _ => None,
-        })
-        .expect("large-value commit must reference a content extent");
-    let mut owner_peer = PeerState::edge_client(owner);
-    core.reset_query_engine_read_metrics();
-    let delivered = owner_peer
-        .serve_content_extents(&mut core, row_uuid, [extent.clone()])
-        .unwrap();
-    let SyncMessage::ContentExtents {
-        extents: delivered_extents,
-    } = &delivered
-    else {
-        panic!("expected content extents");
-    };
-    assert_eq!(delivered_extents.len(), 1);
-    assert_eq!(delivered_extents[0].bytes, b"secret");
-    let owner_metrics = core.query_engine_read_metrics();
-    assert!(owner_metrics.policy_authorization_graphs > 0);
-    assert!(owner_metrics.policy_authorized_source_joins > 0);
-
-    let mut other_peer = PeerState::edge_client(other);
-    core.reset_query_engine_read_metrics();
-    assert!(matches!(
-        other_peer.serve_content_extents(&mut core, row_uuid, [extent.clone()]),
-        Err(Error::UnsupportedSyncMessage(
-            "content extent is not visible for row"
-        ))
-    ));
-
-    let revocation = core
-        .commit_mergeable(
-            MergeableCommit::new("docs", row_uuid, 11)
-                .made_by(other)
-                .parents(vec![tx])
-                .cells(BTreeMap::from([
-                    ("body".to_owned(), Value::Bytes(b"secret".to_vec())),
-                    ("owner".to_owned(), Value::Uuid(other.0)),
-                ])),
-        )
-        .unwrap();
-    core.apply_fate_update(
-        revocation,
-        Fate::Accepted,
-        Some(GlobalSeq(2)),
-        Some(DurabilityTier::Global),
-    )
-    .unwrap();
-    assert!(matches!(
-        owner_peer.serve_content_extents(&mut core, row_uuid, [extent.clone()]),
-        Err(Error::UnsupportedSyncMessage(
-            "content extent is not visible for row"
-        ))
-    ));
-    assert_eq!(delivered_extents[0].bytes, b"secret");
-
-    let other_metrics = core.query_engine_read_metrics();
-    assert!(other_metrics.policy_authorization_graphs > 0);
-    assert!(other_metrics.policy_authorized_source_joins > 0);
-
-    let unreferenced = core
-        .content_store()
-        .append(
-            schema.version_id(),
-            "docs",
-            owner,
-            row_uuid,
-            "body",
-            b"not referenced",
-        )
-        .unwrap();
-    assert!(matches!(
-        owner_peer.serve_content_extents(&mut core, row_uuid, [unreferenced]),
-        Err(Error::UnsupportedSyncMessage(
-            "content extent is not visible for row"
-        ))
-    ));
-}
 
 #[test]
 fn maintained_subscription_view_top_by_partitions_windows_by_policy_claim_binding() {

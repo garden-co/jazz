@@ -29,7 +29,7 @@ Invariant digest:
 - `INV-BRANCH-17`: A branch merge MUST be calculated locally from readable source and target views and emitted as one ordinary atomic mergeable transaction on the target, with no branch-specific fate or authority admission path; successful merge MUST leave the source branch open.
 - `INV-BRANCH-18`: `Discarded` MUST be the only terminal branch state; discard makes a branch read-only while retaining overlay history, and merge MUST NOT close or otherwise mutate source lifecycle state.
 - `INV-BRANCH-19`: Branch-merge provenance MUST define field-grained non-causal substitutions from each emitted target `(table,row,layer,column-or-operation)` to the exact source contribution dots the authorized merger claims it represents; a later local calculator MUST expand those substitutions rather than treating derived payload as new native contributions.
-- `INV-BRANCH-20`: A local merge calculator MUST subtract the field-grained contribution closure already represented by the target from the source contribution closure, recursively expanding structurally valid substitutions, so merging in both directions MUST NOT echo target-originated counter deltas, large-value operations, or scalar writes back to their origin.
+- `INV-BRANCH-20`: A local merge calculator MUST subtract the field-grained contribution closure already represented by the target from the source contribution closure, recursively expanding structurally valid substitutions, so merging in both directions MUST NOT echo target-originated counter deltas or scalar writes back to their origin.
 - `INV-BRANCH-21`: Incorporating another lineage into a branch MUST use the same ordinary merge-transaction calculation as merging a branch into main; branch rebase is not a separate operation.
 - `INV-BRANCH-22`: A merge-back squash's row-version parents MUST be only the target row/layer heads observed at the merge snapshot; source-branch transactions MUST NOT be causal parents of the target transaction.
 - `INV-BRANCH-23`: For each row/layer/column touched by novel source contributions, the local calculator MUST derive the equivalent ordinary target write contribution under that column's normal merge strategy, including cumulative explicit authorship and explicit writes equal to their prior value, while excluding inherited materialized cells.
@@ -225,8 +225,7 @@ user write introduces stable contribution dots:
 (origin lineage, origin TxId, table, row, layer, column-or-operation)
 ```
 
-Large-value operations retain their existing operation identities. An ordinary
-branch-merge transaction introduces no new native dots for its calculated
+An ordinary branch-merge transaction introduces no new native dots for its calculated
 payload. Instead, its typed metadata records a non-causal provenance edge:
 
 ```text
