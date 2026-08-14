@@ -1,4 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { describe, expect, it, onTestFinished } from "vitest";
 import { createJazzContext } from "../backend/create-jazz-context.js";
 import { deploy } from "../dev/catalogue.js";
 import { schema as s } from "../index.js";
@@ -34,16 +37,21 @@ const readWritePermissions = s.definePermissions(app, ({ policy }) => [
 ]);
 
 function setup(options: Parameters<typeof createTextStore>[2] = {}) {
+  const dataPath = mkdtempSync(join(tmpdir(), "jazz-ordinary-text-test-"));
   const context = createJazzContext({
     appId: `ordinary-text-${crypto.randomUUID()}`,
     app,
     permissions: {},
-    driver: { type: "in-memory" },
+    driver: { type: "persistent", dataPath },
     adminSecret: "ordinary-text-test",
     tier: "local",
   });
   const db = context.asBackend();
   const text = createTextStore(db, textTablesFromApp(app), options);
+  onTestFinished(async () => {
+    await context.shutdown();
+    rmSync(dataPath, { recursive: true, force: true });
+  });
   return { context, db, text };
 }
 
