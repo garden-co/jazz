@@ -239,21 +239,13 @@ function balance(left: RopeNode, right: RopeNode, created: Map<string, RopeNode>
 }
 
 function buildBalanced(nodes: RopeNode[], created: Map<string, RopeNode>): RopeNode {
-  let level = nodes;
-  while (level.length > 1) {
-    const next: typeof level = [];
-    for (let index = 0; index < level.length; index += 2) {
-      const left = level[index]!;
-      const right = level[index + 1];
-      if (!right) {
-        next.push(left);
-        continue;
-      }
-      next.push(makeBranch(left, right, created));
-    }
-    level = next;
-  }
-  return level[0]!;
+  if (nodes.length === 1) return nodes[0]!;
+  const middle = Math.floor(nodes.length / 2);
+  return makeBranch(
+    buildBalanced(nodes.slice(0, middle), created),
+    buildBalanced(nodes.slice(middle), created),
+    created,
+  );
 }
 
 function buildRope(value: string, leafBytes: number): { root: RopeNode; nodes: RopeNode[] } {

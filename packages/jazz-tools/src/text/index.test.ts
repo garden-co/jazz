@@ -164,4 +164,30 @@ describe("ordinary-row text", () => {
       await context.shutdown();
     }
   });
+
+  it("matches a plain-string oracle across localized and scattered consolidations", async () => {
+    const { context, text } = setup({ maxPatches: 7, maxPatchBytes: 120, leafBytes: 16 });
+    try {
+      let expected = "start🙂end";
+      let snapshot = await text.create(expected);
+      const retained = [{ versionId: snapshot.versionId, expected }];
+      for (let edit = 0; edit < 80; edit += 1) {
+        const at = (edit * 48271 + 17) % (Array.from(expected).length + 1);
+        const inserted = edit % 9 === 0 ? "é" : edit % 13 === 0 ? "🚀" : "x";
+        const points = Array.from(expected);
+        points.splice(at, 0, inserted);
+        expected = points.join("");
+        snapshot = await text.insert(snapshot, at, inserted);
+        expect(snapshot.text).toBe(expected);
+        if (edit % 10 === 0) retained.push({ versionId: snapshot.versionId, expected });
+      }
+      for (const version of retained) {
+        await expect(text.readVersion(version.versionId)).resolves.toMatchObject({
+          text: version.expected,
+        });
+      }
+    } finally {
+      await context.shutdown();
+    }
+  });
 });
