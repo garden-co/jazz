@@ -28,8 +28,8 @@ pub struct FileUploadReceipt {
     pub key_version: u32,
 }
 
-/// A byte edit encoded in the `editTail`.  Offsets are against the root, and
-/// operations are applied in vector order.  Multiple entries can target
+/// A byte edit encoded in the `editTail`. Every offset is against the immutable
+/// base root, never a preceding tail operation. Multiple entries can target
 /// independent extents; this is deliberately not a single append frontier.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FileEdit {
@@ -183,7 +183,7 @@ impl FileContentAdapter {
         context: ContentReadContext,
         store: &dyn ImmutableContentStore,
     ) -> Result<Vec<u8>, ManifestError> {
-        let root = store.get(context, root).ok_or(ManifestError::Malformed)?;
+        let root = fetch(root, ImmutableContentKind::Root, context, store)?;
         if root.len() != 44 || &root[..4] != b"FRT1" {
             return Err(ManifestError::Malformed);
         }
@@ -196,10 +196,46 @@ impl FileContentAdapter {
             root[36..44]
                 .try_into()
                 .map_err(|_| ManifestError::Malformed)?,
-        ) as usize;
+        );
+        let length = usize::try_from(length).map_err(|_| ManifestError::Malformed)?;
         let mut out = Vec::with_capacity(length);
         read_object(id, context, store, &mut out)?;
         if out.len() != length {
+            return Err(ManifestError::Malformed);
+        }
+        Ok(out)
+    }
+
+    fn root_range(
+        &self,
+        root: ContentId,
+        offset: u64,
+        length: u64,
+        context: ContentReadContext,
+        store: &dyn ImmutableContentStore,
+    ) -> Result<Vec<u8>, ManifestError> {
+        let root_bytes = fetch(root, ImmutableContentKind::Root, context, store)?;
+        if root_bytes.len() != 44 || &root_bytes[..4] != b"FRT1" {
+            return Err(ManifestError::Malformed);
+        }
+        let child = ContentId(
+            root_bytes[4..36]
+                .try_into()
+                .map_err(|_| ManifestError::Malformed)?,
+        );
+        let total = u64::from_le_bytes(
+            root_bytes[36..44]
+                .try_into()
+                .map_err(|_| ManifestError::Malformed)?,
+        );
+        let end = offset.checked_add(length).ok_or(ManifestError::Malformed)?;
+        if end > total {
+            return Err(ManifestError::Malformed);
+        }
+        let cap = usize::try_from(length).map_err(|_| ManifestError::Malformed)?;
+        let mut out = Vec::with_capacity(cap);
+        read_range_object(child, offset, length, context, store, &mut out)?;
+        if out.len() != cap {
             return Err(ManifestError::Malformed);
         }
         Ok(out)
@@ -221,9 +257,14 @@ impl ContentManifestAdapter for FileContentAdapter {
         context: ContentReadContext,
         store: &dyn ImmutableContentStore,
     ) -> Result<Vec<u8>, ManifestError> {
+        if manifest.edit_tail.is_empty() {
+            if let MaterializationRequest::Range { offset, length } = request {
+                return self.root_range(manifest.root, *offset, *length, context, store);
+            }
+        }
         let mut value = self.root_bytes(manifest.root, context, store)?;
-        for encoded in &manifest.edit_tail {
-            apply(&mut value, &Self::decode_edit(encoded)?)?;
+        for edit in canonical_edits(&manifest.edit_tail)? {
+            apply(&mut value, &edit)?;
         }
         match request {
             MaterializationRequest::Full | MaterializationRequest::Projection(_) => Ok(value),
@@ -262,20 +303,18 @@ impl ContentManifestAdapter for FileContentAdapter {
         }
         let mut decoded: Vec<_> = edits
             .into_iter()
-            .map(|raw| Ok((range(&Self::decode_edit(&raw)?).0, raw)))
+            .map(|raw| Ok((Self::decode_edit(&raw)?, raw)))
             .collect::<Result<_, ManifestError>>()?;
-        for (i, (_, raw)) in decoded.iter().enumerate() {
-            let left = Self::decode_edit(raw)?;
-            for (_, other) in &decoded[i + 1..] {
-                let right = Self::decode_edit(other)?;
-                if overlaps(&left, &right) {
+        for (i, (left, _)) in decoded.iter().enumerate() {
+            for (right, _) in &decoded[i + 1..] {
+                if overlaps(left, right) {
                     return Err(ManifestError::Conflict("overlapping file edits"));
                 }
             }
         }
         // Offsets are rooted in the immutable base. Apply right-to-left so
         // an insertion/deletion cannot shift an earlier edit's coordinate.
-        decoded.sort_by(|(left, _), (right, _)| right.cmp(left));
+        decoded.sort_by(|(left, _), (right, _)| edit_order(right, left));
         Ok(ContentManifest {
             root: first.root,
             edit_tail: decoded.into_iter().map(|(_, raw)| raw).collect(),
@@ -320,39 +359,46 @@ fn node_payload(
     out.push(children.len() as u8);
     for child in children {
         let bytes = store.get(context, *child).ok_or(ManifestError::Malformed)?;
-        let len = object_length(bytes, context, store)?;
+        let len = object_length(bytes)?;
         out.extend_from_slice(&child.0);
         out.extend_from_slice(&(len as u64).to_le_bytes());
     }
     Ok(out)
 }
-fn object_length(
-    bytes: &[u8],
-    context: ContentReadContext,
-    store: &dyn ImmutableContentStore,
-) -> Result<usize, ManifestError> {
+fn object_length(bytes: &[u8]) -> Result<usize, ManifestError> {
     if bytes.starts_with(b"FLF1") {
         Ok(bytes.len() - 4)
     } else if bytes.starts_with(b"FND1") {
-        let mut out = Vec::new();
-        let id = ContentId([0; 32]);
-        let _ = id;
         let count = *bytes.get(4).ok_or(ManifestError::Malformed)? as usize;
-        if bytes.len() != 5 + count * 40 {
+        if count == 0 || count > FANOUT || bytes.len() != 5 + count * 40 {
             return Err(ManifestError::Malformed);
         }
+        let mut sum = 0u64;
         for i in 0..count {
             let p = 5 + i * 40 + 32;
-            out.extend_from_slice(&bytes[p..p + 8]);
+            sum = sum
+                .checked_add(u64::from_le_bytes(
+                    bytes[p..p + 8]
+                        .try_into()
+                        .map_err(|_| ManifestError::Malformed)?,
+                ))
+                .ok_or(ManifestError::Malformed)?;
         }
-        Ok(out
-            .chunks_exact(8)
-            .map(|b| u64::from_le_bytes(b.try_into().unwrap()) as usize)
-            .sum())
+        usize::try_from(sum).map_err(|_| ManifestError::Malformed)
     } else {
-        let _ = (context, store);
         Err(ManifestError::Malformed)
     }
+}
+fn fetch(
+    id: ContentId,
+    kind: ImmutableContentKind,
+    context: ContentReadContext,
+    store: &dyn ImmutableContentStore,
+) -> Result<&[u8], ManifestError> {
+    let bytes = store.get(context, id).ok_or(ManifestError::Malformed)?;
+    (crate::content_manifest::content_id(context.domain, FILE_ADAPTER_KIND, kind, bytes) == id)
+        .then_some(bytes)
+        .ok_or(ManifestError::Malformed)
 }
 fn read_object(
     id: ContentId,
@@ -360,11 +406,15 @@ fn read_object(
     store: &dyn ImmutableContentStore,
     out: &mut Vec<u8>,
 ) -> Result<(), ManifestError> {
-    let bytes = store.get(context, id).ok_or(ManifestError::Malformed)?;
-    if bytes.starts_with(b"FLF1") {
+    let leaf = fetch(id, ImmutableContentKind::Leaf, context, store);
+    if let Ok(bytes) = leaf {
+        if !bytes.starts_with(b"FLF1") {
+            return Err(ManifestError::Malformed);
+        }
         out.extend_from_slice(&bytes[4..]);
         return Ok(());
     }
+    let bytes = fetch(id, ImmutableContentKind::Node, context, store)?;
     if !bytes.starts_with(b"FND1") {
         return Err(ManifestError::Malformed);
     }
@@ -379,7 +429,76 @@ fn read_object(
                 .try_into()
                 .map_err(|_| ManifestError::Malformed)?,
         );
+        let declared = u64::from_le_bytes(
+            bytes[at + 32..at + 40]
+                .try_into()
+                .map_err(|_| ManifestError::Malformed)?,
+        );
+        let before = out.len();
         read_object(child, context, store, out)?;
+        if u64::try_from(out.len() - before).map_err(|_| ManifestError::Malformed)? != declared {
+            return Err(ManifestError::Malformed);
+        }
+    }
+    Ok(())
+}
+fn read_range_object(
+    id: ContentId,
+    offset: u64,
+    length: u64,
+    context: ContentReadContext,
+    store: &dyn ImmutableContentStore,
+    out: &mut Vec<u8>,
+) -> Result<(), ManifestError> {
+    let leaf = fetch(id, ImmutableContentKind::Leaf, context, store);
+    if let Ok(bytes) = leaf {
+        if !bytes.starts_with(b"FLF1") {
+            return Err(ManifestError::Malformed);
+        }
+        let start = usize::try_from(offset).map_err(|_| ManifestError::Malformed)?;
+        let end = usize::try_from(offset.checked_add(length).ok_or(ManifestError::Malformed)?)
+            .map_err(|_| ManifestError::Malformed)?;
+        out.extend_from_slice(
+            bytes
+                .get(4 + start..4 + end)
+                .ok_or(ManifestError::Malformed)?,
+        );
+        return Ok(());
+    }
+    let bytes = fetch(id, ImmutableContentKind::Node, context, store)?;
+    if !bytes.starts_with(b"FND1") {
+        return Err(ManifestError::Malformed);
+    }
+    let count = *bytes.get(4).ok_or(ManifestError::Malformed)? as usize;
+    if count == 0 || count > FANOUT || bytes.len() != 5 + count * 40 {
+        return Err(ManifestError::Malformed);
+    }
+    let end = offset.checked_add(length).ok_or(ManifestError::Malformed)?;
+    let mut cursor = 0u64;
+    for i in 0..count {
+        let at = 5 + i * 40;
+        let child = ContentId(
+            bytes[at..at + 32]
+                .try_into()
+                .map_err(|_| ManifestError::Malformed)?,
+        );
+        let child_len = u64::from_le_bytes(
+            bytes[at + 32..at + 40]
+                .try_into()
+                .map_err(|_| ManifestError::Malformed)?,
+        );
+        let next = cursor
+            .checked_add(child_len)
+            .ok_or(ManifestError::Malformed)?;
+        let start = offset.max(cursor);
+        let stop = end.min(next);
+        if start < stop {
+            read_range_object(child, start - cursor, stop - start, context, store, out)?;
+        }
+        cursor = next;
+    }
+    if end > cursor {
+        return Err(ManifestError::Malformed);
     }
     Ok(())
 }
@@ -414,11 +533,53 @@ fn overlaps(a: &FileEdit, b: &FileEdit) -> bool {
     let (bs, be) = range(b);
     as_ < be && bs < ae || (as_ == ae && bs == be && as_ == bs)
 }
+fn edit_order(a: &FileEdit, b: &FileEdit) -> std::cmp::Ordering {
+    let ao = range(a).0;
+    let bo = range(b).0;
+    ao.cmp(&bo)
+        .then_with(|| edit_tag(a).cmp(&edit_tag(b)))
+        .then_with(|| FileContentAdapter::encode_edit(a).cmp(&FileContentAdapter::encode_edit(b)))
+}
+fn edit_tag(edit: &FileEdit) -> u8 {
+    match edit {
+        FileEdit::Delete { .. } => 0,
+        FileEdit::Overwrite { .. } => 1,
+        FileEdit::Insert { .. } => 2,
+    }
+}
+fn canonical_edits(raw: &[Vec<u8>]) -> Result<Vec<FileEdit>, ManifestError> {
+    let mut edits = raw
+        .iter()
+        .map(|r| FileContentAdapter::decode_edit(r))
+        .collect::<Result<Vec<_>, _>>()?;
+    for (i, a) in edits.iter().enumerate() {
+        for b in &edits[i + 1..] {
+            if overlaps(a, b) {
+                return Err(ManifestError::Conflict("overlapping file edits"));
+            }
+        }
+    }
+    edits.sort_by(|a, b| edit_order(b, a));
+    Ok(edits)
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::content_manifest::MemoryImmutableContentStore;
+    struct CorruptStore;
+    impl ImmutableContentStore for CorruptStore {
+        fn get(&self, _context: ContentReadContext, _id: ContentId) -> Option<&[u8]> {
+            Some(b"FRT1this-is-not-a-content-addressed-root")
+        }
+        fn put_if_absent_or_identical(
+            &mut self,
+            _address: ContentAddress<'_>,
+            _canonical_bytes: Vec<u8>,
+        ) -> Result<ContentId, ManifestError> {
+            unreachable!("corrupt fixture is read-only")
+        }
+    }
     fn ctx(n: u8) -> ContentReadContext {
         ContentReadContext {
             domain: ContentDomainId(uuid::Uuid::from_bytes([n; 16])),
@@ -500,6 +661,18 @@ mod tests {
             .is_err()
         );
         assert!(a.validate_operation(&[1, 2]).is_err());
+        assert!(
+            a.materialize(
+                &ContentManifest {
+                    root,
+                    edit_tail: vec![]
+                },
+                &MaterializationRequest::Full,
+                one,
+                &CorruptStore,
+            )
+            .is_err()
+        );
     }
     #[test]
     fn merge_materializes_complete_tail_or_conflicts() {
@@ -533,6 +706,52 @@ mod tests {
             a.index_values(&merged, &["byte_length".into()], context, &store)
                 .unwrap()
                 .contains_key("byte_length")
+        );
+    }
+    #[test]
+    fn tail_offsets_are_anchored_to_the_immutable_base() {
+        let mut store = MemoryImmutableContentStore::default();
+        let a = FileContentAdapter;
+        let context = ctx(1);
+        let root = a.store_bytes(b"abcd", context, &mut store).unwrap();
+        let insert = FileContentAdapter::encode_edit(&FileEdit::Insert {
+            offset: 0,
+            bytes: b"X".to_vec(),
+        });
+        let overwrite = FileContentAdapter::encode_edit(&FileEdit::Overwrite {
+            offset: 2,
+            delete: 1,
+            bytes: b"Y".to_vec(),
+        });
+        let manifest = ContentManifest {
+            root,
+            edit_tail: vec![insert.clone(), overwrite.clone()],
+        };
+        assert_eq!(
+            a.materialize(&manifest, &MaterializationRequest::Full, context, &store)
+                .unwrap(),
+            b"XabYd"
+        );
+        let merged = a
+            .merge(
+                &[
+                    ContentManifest {
+                        root,
+                        edit_tail: vec![insert],
+                    },
+                    ContentManifest {
+                        root,
+                        edit_tail: vec![overwrite],
+                    },
+                ],
+                context,
+                &store,
+            )
+            .unwrap();
+        assert_eq!(
+            a.materialize(&merged, &MaterializationRequest::Full, context, &store)
+                .unwrap(),
+            b"XabYd"
         );
     }
 }
