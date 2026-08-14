@@ -12,19 +12,18 @@ deployment roles are chapter 9.
 Invariant digest:
 
 - `INV-SYNC-5`: A receiver applying a fate update MUST NOT move `global_seq` backward and MUST raise observed durability only by a supplied `Some(DurabilityTier)` claim using monotone max semantics; `None` MUST leave durability unchanged.
-- `INV-SYNC-7`: A `ViewUpdate` result set MUST be member-grained for result membership and typed-fact-grained for non-row program facts; it MUST NOT model subscription membership as a transaction-grained set. Ordinary current row entries are `ResultMemberEntry::Row(RealRowMemberEntry)` values with a `(table, row_uuid, content_tx_id)` projection. Synthetic payloads, relation/path, coverage, policy, predicate, and large-value material travel as typed `ProgramFactEntry` add/remove deltas. Relation facts MUST carry the dimensions needed by lowering (kind, versions, depth, edge id, branch, role, order, hole state) rather than requiring an opaque side channel.
+- `INV-SYNC-7`: A `ViewUpdate` result set MUST be member-grained for result membership and typed-fact-grained for non-row program facts; it MUST NOT model subscription membership as a transaction-grained set. Ordinary current row entries are `ResultMemberEntry::Row(RealRowMemberEntry)` values with a `(table, row_uuid, content_tx_id)` projection. Synthetic payloads, relation/path, coverage, policy, and predicate material travel as typed `ProgramFactEntry` add/remove deltas. Relation facts MUST carry the dimensions needed by lowering (kind, versions, depth, edge id, branch, role, order, hole state) rather than requiring an opaque side channel.
 - `INV-SYNC-8`: A view server MUST use `peer_payload_inventory.complete_tx_payloads` only for tx-level complete payloads covered by the peer payload inventory; payload dedup MUST be peer-scoped, not subscription-scoped, and partial bundles MUST remain eligible for later payload emission until complete-tx payload coverage is established.
 - `INV-SYNC-9`: A receiver MUST reject a `ViewUpdate` that names a `peer_payload_inventory.complete_tx_payloads`, add, or remove transaction it lacks enough tx existence, row-version payload, complete-tx payload, or view-complete exclusive payload coverage to resolve for that subscription view.
 - `INV-SYNC-10`: A reset-result-set `ViewUpdate` MUST set `reset_result_set = true`; applying it MUST clear the receiver's settled subscription result set before applying the replacement result members and program facts.
 - `INV-SYNC-11`: Reset-result-set `ViewUpdate`s MUST preserve per-peer payload dedup when peer state survives, while resending the subscription result set as a complete replacement.
 - `INV-SYNC-12`: Downstream subscription view updates MUST contain accepted/settled state only and MUST NOT emit pending versions to non-origin peers.
-- `INV-SYNC-13`: Downstream view construction MUST apply the peer identity's read policy before emitting result-set entries, version bundles, complete tx payload refs, or content extents.
+- `INV-SYNC-13`: Downstream view construction MUST apply the peer identity's read policy before emitting result-set entries, version bundles, or complete tx payload refs.
 - `INV-SYNC-14`: A read-policy revocation MUST remove the affected row from future settled subscription result sets but MUST NOT require redaction of previously delivered local copies.
 - `INV-SYNC-15`: Exclusive transaction payloads MAY be delivered, stored, and participate partially at the transaction level; receiver-visible subscription state MUST expose them only when complete for the maintained subscription view being served, and partial fragments MUST NOT update whole-database current indexes.
 - `INV-SYNC-16`: A mergeable transaction MAY be delivered and applied partially; each visible mergeable version can contribute without waiting for `tx.n_total_writes`.
 - `INV-SYNC-17`: `ViewUpdate` emission for a result add MUST include enough deletion-register context to reconstruct visible absence/presence for that row.
 - `INV-SYNC-18`: An edge acting as mergeable fate authority MUST defer fate assignment until the relevant permission-scope subscription has settled for the writer and affected tables.
-- `INV-SYNC-19`: `FetchContentExtent` handling MUST reject an extent whose row context mismatches the requested row or whose content is not visible to the peer identity.
 - `INV-SYNC-20`: Incremental query view updates MUST be observationally equivalent to a full rehydrate for the same canonical program instance, including enter/leave churn within a single drain cycle and closure-row replacement.
 - `INV-SYNC-21`: Wire `TxId` and row-version payloads MUST use node UUIDs and schema version IDs, not node-local integer aliases.
 - `INV-SYNC-22`: An edge MUST share upstream permission-scope subscriptions whenever one settled subscription can satisfy every dependent acceptance gate.
@@ -120,7 +119,6 @@ The message variants and their payloads are:
 | `SubscribeRejected`                                                                | down           | `{ subscription: SubscriptionKey, reason: SubscribeRejectReason }`                                                                   |
 | `Unsubscribe`                                                                      | up             | `{ subscription: SubscriptionKey }`                                                                                                  |
 | `ViewUpdate`                                                                       | down           | `{ subscription, reset_result_set, version_bundles, peer_payload_inventory, result_member_adds/removes, program_fact_adds/removes }` |
-| `FetchContentExtent` / `ContentExtents`                                            | bulk lane      | `{ owner: LargeValueOwnerRef, extent }` / `{ extents: Vec<ContentExtent> }`                                                          |
 | `PublishSchemaWithLens` / `PublishLens` / `SetCurrentWriteSchema` / `CatalogueAck` | catalogue lane | ch. 10                                                                                                                               |
 
 A `VersionBundle`, carried in `ViewUpdate.version_bundles`, is `{ tx, versions,
@@ -201,7 +199,7 @@ typed result member), full transaction-payload coverage
 (`peer_payload_inventory.complete_tx_payloads` / `CompleteTxPayloadCoverage`),
 subscription-scoped exclusive completeness (`ViewCompleteExclusiveCoverage`),
 source/read-frontier coverage, policy decisions/witnesses, predicate output
-sets, and large-value extents. Subscription-scoped exclusive completeness is a
+sets. Subscription-scoped exclusive completeness is a
 visibility rule for a particular view, not a reusable tx-level reference.
 
 Receiver apply is single-mode at the semantic boundary. For each receiver apply
@@ -283,7 +281,7 @@ survives view reset and detach while peer state survives (`INV-SYNC-11`).
 
 Sync never emits view material before applying the receiving peer's read policy.
 During view construction, the peer identity's policy is checked before any result
-entry, bundle, ref, or content extent is emitted (`INV-SYNC-13`, ch. 7).
+entry, bundle, or ref is emitted (`INV-SYNC-13`, ch. 7).
 Revocation affects future delivery: it removes a row from future settled result
 sets but never redacts an already-delivered local copy (`INV-SYNC-14`).
 
@@ -328,11 +326,6 @@ Protocol size limits are enforced at the layer that can recover correctly:
   over-limit commit unit is rejected as
   `Fate::Rejected(MalformedCommit(_))`, the connection remains live, and later
   well-formed commit units may still settle.
-- A `ContentExtent` response is capped at 1 MiB of bytes per extent. This is a
-  bulk-lane semantic admission limit: it is comfortably above ch. 12's current
-  ~64 KiB blob chunk target while preventing one content response from becoming
-  an unbounded allocation. The content lane may split larger values into
-  multiple extents.
 - Structured-output v4 adds named `MAX_STRUCTURED_RESULT_DEPTH` and
   `MAX_STRUCTURED_RESULT_WIDTH` limits in `protocol_limits.rs`. A receiver MUST
   enforce both before recursively decoding/allocating an untrusted structured
@@ -386,14 +379,11 @@ reference-counted by dependent gates; this is covered by
 (`crates/jazz/tests/four_tier.rs`). Whether and how a broader scope can satisfy a
 narrower one remains an open design question below.
 
-### 8.10 Content extents and catalogue lanes
+### 8.10 Catalogue lane
 
-Large-value content uses a bulk lane rather than being forced through ordinary
-view payloads. A `FetchContentExtent` request is authorized against row context
-and read policy: an extent whose row mismatches the request or is not visible to
-the peer is refused (`INV-SYNC-19`, ch. 12). Catalogue messages
-(`PublishSchemaWithLens`, `PublishLens`, `SetCurrentWriteSchema`, `CatalogueAck`) share
-this protocol lane; their semantics are chapter 10.
+Catalogue messages (`PublishSchemaWithLens`, `PublishLens`,
+`SetCurrentWriteSchema`, `CatalogueAck`) share this protocol lane; their
+semantics are chapter 10.
 
 _Further invariants._ `INV-SYNC-21` — wire `TxId` and row-version payloads use
 node UUIDs and schema-version IDs, never node-local integer aliases (ch. 2).
