@@ -142,9 +142,9 @@ export function createConventionalFileStorage<
   // still settling, which is surprising for a mutable file API.
   const local = (queryOptions?: QueryOptions): QueryOptions => queryOptions ?? { tier: "local" };
   const load = async (file: string | F, q?: QueryOptions) => {
-    if (typeof file !== "string") return file;
-    const row = await db.one(app.files.where({ id: file }), local(q));
-    if (!row) throw new FileNotFoundError(file);
+    const id = typeof file === "string" ? file : file.id;
+    const row = await db.one(app.files.where({ id }), local(q));
+    if (!row) throw new FileNotFoundError(id);
     return row;
   };
   const validateNode = (id: string, node: N) => {
@@ -188,6 +188,10 @@ export function createConventionalFileStorage<
               : await visit(n.childIds[i]!, n.height - 1);
           if (actual !== n.childLengths[i])
             throw new InvalidFileDataError(`File node "${id}" extent metadata is corrupt.`);
+          if (n.height === 0 && actual > MAX_FILE_PART_BYTES)
+            throw new InvalidFileDataError(
+              `File part "${n.childIds[i]}" exceeds ${MAX_FILE_PART_BYTES} bytes.`,
+            );
           total += actual;
           checked(total, "File tree length");
         }

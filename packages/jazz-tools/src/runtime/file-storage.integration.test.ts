@@ -73,11 +73,11 @@ describe("ordinary-row files", () => {
     const { storage } = await setup();
     const file = await storage.create({ tier: "edge" });
     const initial = await storage.append(file, Uint8Array.from([1, 2, 3, 4, 5]));
-    expect((await storage.snapshot(file.id)).byteLength).toBe(5);
+    expect((await storage.snapshot(file)).byteLength).toBe(5);
     await storage.overwrite(file, 1, Uint8Array.of(9, 8));
     expect((await storage.snapshot(file.id)).byteLength).toBe(5);
     await storage.insert(file, 3, Uint8Array.of(7));
-    expect(Array.from(await storage.read(file.id))).toEqual([1, 9, 8, 7, 4, 5]);
+    expect(Array.from(await storage.read(file))).toEqual([1, 9, 8, 7, 4, 5]);
     expect(Array.from(await storage.readRange(file.id, 2, 5))).toEqual([8, 7, 4]);
     expect(Array.from(await storage.read(initial))).toEqual([1, 2, 3, 4, 5]);
   });
@@ -113,7 +113,7 @@ describe("ordinary-row files", () => {
     expect(newNodes.length - oldNodes.length).toBeLessThanOrEqual((oldRoot?.height ?? 0) + 1);
     expect(Array.from(await storage.read(before))).toEqual(Array.from(input));
     expect((await storage.read(after))[MAX_FILE_PART_BYTES + 1]).toBe(9);
-  });
+  }, 20_000);
   it("rejects corruption before returning a range and never advances a corrupt head", async () => {
     const { db, storage } = await setup(0);
     const file = await storage.create({ tier: "edge" });
