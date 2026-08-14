@@ -90,7 +90,6 @@ export function encodeSchema(schema: WasmSchema): Uint8Array {
       const columnSpec = definition.columns[columnIndex]!;
       column.string(columnSpec.name);
       writeValueType(column, columnValueType(columnSpec));
-      column.none();
       writeColumnDefault(column, columnSpec);
     }, definition.columns.length);
     table.map(definition.columns.filter((column) => column.references).length);
