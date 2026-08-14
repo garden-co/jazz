@@ -1047,6 +1047,7 @@ where
                 .authorization_progress_by_binding_view
                 .insert(binding_view_key, progress);
         }
+        self.persist_opening_pending(binding_view_key, opening_pending)?;
         if opening_pending {
             self.query
                 .pending_opening_binding_views

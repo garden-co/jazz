@@ -27,6 +27,9 @@ pub const SCHEMA_VERSION_NAMESPACE: uuid::Uuid =
 
 /// Direct groove record store used for persisted fast known-state facts.
 pub const KNOWN_STATE_FACTS_STORE: &str = "jazz_known_state_facts";
+/// Direct groove record store used for provisional authority openings that
+/// must continue blocking publication across process restart.
+pub const PENDING_OPENING_BINDING_VIEWS_STORE: &str = "jazz_pending_opening_binding_views";
 /// Direct groove record store used for persisted settled result memberships.
 pub const SETTLED_RESULT_MEMBERS_STORE: &str = "jazz_settled_result_members";
 /// Direct groove record store used for persisted settled program facts.
@@ -240,6 +243,15 @@ impl JazzSchema {
                     ("settled_through", ValueType::U64),
                     ("authorization_progress", ValueType::U64),
                 ]),
+            ))
+            .with_direct_record_store(DirectRecordStoreSchema::new(
+                PENDING_OPENING_BINDING_VIEWS_STORE,
+                RecordDescriptor::new([
+                    ("shape_id", ValueType::Uuid),
+                    ("binding_id", ValueType::Uuid),
+                    ("read_view_id", ValueType::Uuid),
+                ]),
+                RecordDescriptor::new([("present", ValueType::U64)]),
             ))
             .with_direct_record_store(DirectRecordStoreSchema::new(
                 SETTLED_RESULT_MEMBERS_STORE,

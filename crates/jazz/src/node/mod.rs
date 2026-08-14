@@ -39,8 +39,9 @@ use crate::protocol::{
 };
 use crate::query::{Binding, BindingId, QueryError, ShapeId, ValidatedQuery};
 use crate::schema::{
-    JazzSchema, KNOWN_STATE_FACTS_STORE, MergeStrategy, SETTLED_PROGRAM_FACTS_STORE,
-    SETTLED_RESULT_MEMBERS_STORE, TableSchema, registered_column_transform,
+    JazzSchema, KNOWN_STATE_FACTS_STORE, MergeStrategy, PENDING_OPENING_BINDING_VIEWS_STORE,
+    SETTLED_PROGRAM_FACTS_STORE, SETTLED_RESULT_MEMBERS_STORE, TableSchema,
+    registered_column_transform,
 };
 use crate::time::{GlobalSeq, TxTime};
 use crate::tools::OpenBatchId;
@@ -2674,6 +2675,23 @@ where
         Ok(())
     }
 
+    pub(crate) fn persist_opening_pending(
+        &self,
+        binding_view_key: BindingViewKey,
+        opening_pending: bool,
+    ) -> Result<(), Error> {
+        let store = self
+            .database
+            .direct_record_store(PENDING_OPENING_BINDING_VIEWS_STORE)?;
+        let key = known_state_fact_key(binding_view_key);
+        if opening_pending {
+            store.set(&key, &[Value::U64(1)])?;
+        } else {
+            store.delete(&key)?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn load_known_state_fact(
         &mut self,
         binding_view_key: BindingViewKey,
@@ -2713,8 +2731,20 @@ where
         for key in keys {
             store.delete(&key)?;
         }
+        let pending_store = self
+            .database
+            .direct_record_store(PENDING_OPENING_BINDING_VIEWS_STORE)?;
+        let pending_keys = pending_store
+            .prefix_entries(&[])?
+            .into_iter()
+            .map(|entry| entry.key)
+            .collect::<Vec<_>>();
+        for key in pending_keys {
+            pending_store.delete(&key)?;
+        }
         self.query.settled_through_by_binding_view.clear();
         self.query.authorization_progress_by_binding_view.clear();
+        self.query.pending_opening_binding_views.clear();
         self.clear_all_settled_result_state()?;
         Ok(())
     }
@@ -2896,6 +2926,7 @@ where
         self.query.settled_result_sets.clear();
         self.query.settled_result_row_index.clear();
         self.query.settled_program_facts.clear();
+        self.query.pending_opening_binding_views.clear();
         let store = self.database.direct_record_store(KNOWN_STATE_FACTS_STORE)?;
         for entry in store.prefix_entries(&[])? {
             if entry.key.len() != 3 {
@@ -2949,6 +2980,27 @@ where
                 _ => {
                     return Err(Error::InvalidStoredValue(
                         "known-state authorization progress must be u64",
+                    ));
+                }
+            }
+        }
+        let pending_store = self
+            .database
+            .direct_record_store(PENDING_OPENING_BINDING_VIEWS_STORE)?;
+        for entry in pending_store.prefix_entries(&[])? {
+            let binding_view_key = binding_view_key_from_store_key(
+                &entry.key,
+                "pending opening binding key must be valid",
+            )?;
+            match entry.value.get_idx(0)? {
+                Value::U64(1) => {
+                    self.query
+                        .pending_opening_binding_views
+                        .insert(binding_view_key);
+                }
+                _ => {
+                    return Err(Error::InvalidStoredValue(
+                        "pending opening marker must be one",
                     ));
                 }
             }

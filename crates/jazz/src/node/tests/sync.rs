@@ -1,4 +1,62 @@
 #[test]
+fn opening_pending_survives_storage_reopen() {
+    let (dir, mut reader) = open_node_with_uuid(node(3));
+    let subscription = reader.whole_table_subscription_key("todos").unwrap();
+    let binding_view = BindingViewKey::from_canonical_subscription_key(subscription);
+    reader
+        .apply_sync_message(SyncMessage::ViewUpdate {
+            subscription,
+            settled_through: GlobalSeq(7),
+            reset_result_set: true,
+            version_carriers: Vec::new(),
+            version_bundles: Vec::new(),
+            peer_payload_inventory: crate::protocol::PeerPayloadInventory {
+                opening_pending: true,
+                ..Default::default()
+            },
+            result_member_adds: Vec::new(),
+            result_member_removes: Vec::new(),
+            terminal_operations: Vec::new(),
+            program_fact_adds: Vec::new(),
+            program_fact_removes: Vec::new(),
+        })
+        .unwrap();
+    assert!(reader.opening_pending_for_binding_view(binding_view));
+    reader.close().unwrap();
+    drop(reader);
+
+    let mut reopened = reopen_node_at(&dir, node(3), schema());
+    assert!(
+        reopened.opening_pending_for_binding_view(binding_view),
+        "a provisional authority opening must not become settled merely because the client restarted"
+    );
+    reopened
+        .apply_sync_message(SyncMessage::ViewUpdate {
+            subscription,
+            settled_through: GlobalSeq(8),
+            reset_result_set: true,
+            version_carriers: Vec::new(),
+            version_bundles: Vec::new(),
+            peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
+            result_member_adds: Vec::new(),
+            result_member_removes: Vec::new(),
+            terminal_operations: Vec::new(),
+            program_fact_adds: Vec::new(),
+            program_fact_removes: Vec::new(),
+        })
+        .unwrap();
+    assert!(!reopened.opening_pending_for_binding_view(binding_view));
+    reopened.close().unwrap();
+    drop(reopened);
+
+    let settled_reopen = reopen_node_at(&dir, node(3), schema());
+    assert!(
+        !settled_reopen.opening_pending_for_binding_view(binding_view),
+        "an authoritative reset must durably clear the provisional opening marker"
+    );
+}
+
+#[test]
 fn observed_global_seq_advances_authority_allocator() {
     let (_core_dir, mut core) = open_node_with_uuid(node(9));
     let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
