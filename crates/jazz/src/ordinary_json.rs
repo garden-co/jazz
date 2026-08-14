@@ -140,7 +140,69 @@ enum MaterializedValue {
 #[derive(Default)]
 pub struct OrdinaryJsonAdapter;
 
+/// A disposable broad projection derived from one exact manifest. It is not an
+/// authoritative row value and callers must check `manifest_fingerprint` before
+/// using it for an eventual index query.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JsonEventualProjectionBundle {
+    manifest_fingerprint: [u8; 32],
+    values: BTreeMap<String, Vec<u8>>,
+}
+
 impl OrdinaryJsonAdapter {
+    /// Materialize the small, strongly consistent projections belonging to an
+    /// atomic manifest candidate. Jazz currently has no queryable atomic
+    /// subfield carrier, so these values stay inside the candidate-level hook
+    /// rather than being written as independently mergeable columns.
+    pub fn synchronous_projections(
+        &self,
+        manifest: &ContentManifest,
+        requested: &[String],
+        context: ContentReadContext,
+        store: &dyn ImmutableContentStore,
+    ) -> Result<BTreeMap<String, Vec<u8>>, ManifestError> {
+        self.index_values(manifest, requested, context, store)
+    }
+
+    /// Build a broad eventual projection bundle from an exact manifest.
+    pub fn eventual_projection_bundle(
+        &self,
+        manifest: &ContentManifest,
+        requested: &[String],
+        context: ContentReadContext,
+        store: &dyn ImmutableContentStore,
+    ) -> Result<JsonEventualProjectionBundle, ManifestError> {
+        Ok(JsonEventualProjectionBundle {
+            manifest_fingerprint: Self::manifest_fingerprint(manifest),
+            values: self.index_values(manifest, requested, context, store)?,
+        })
+    }
+
+    /// Read an eventual bundle only when it was derived from this exact root
+    /// and tail. This forbids an index result from being paired with a newer or
+    /// differently merged manifest.
+    pub fn checked_eventual_projection<'a>(
+        &self,
+        bundle: &'a JsonEventualProjectionBundle,
+        manifest: &ContentManifest,
+    ) -> Result<&'a BTreeMap<String, Vec<u8>>, ManifestError> {
+        (bundle.manifest_fingerprint == Self::manifest_fingerprint(manifest))
+            .then_some(&bundle.values)
+            .ok_or(ManifestError::Conflict(
+                "eventual projection belongs to another manifest",
+            ))
+    }
+
+    fn manifest_fingerprint(manifest: &ContentManifest) -> [u8; 32] {
+        let mut hash = blake3::Hasher::new();
+        hash.update(b"jazz-json-manifest-projection-v1\0");
+        hash.update(&manifest.root.0);
+        for operation in &manifest.edit_tail {
+            hash.update(&(operation.len() as u64).to_le_bytes());
+            hash.update(operation);
+        }
+        *hash.finalize().as_bytes()
+    }
     /// Store a content-addressed immutable JSON root. This is the publication
     /// half of consolidation; callers publish its returned id in one ordinary
     /// application-row manifest candidate.
@@ -186,6 +248,48 @@ impl OrdinaryJsonAdapter {
         Ok(ContentManifest {
             root,
             edit_tail: Vec::new(),
+        })
+    }
+
+    /// Resolve a numeric array position against the authoring manifest into a
+    /// stable before/after anchor. The resulting operation never retains the
+    /// numeric position, so a concurrent insertion cannot retarget it.
+    pub fn author_insert_at_index(
+        &self,
+        manifest: &ContentManifest,
+        array_pointer: &str,
+        index: usize,
+        op: Uuid,
+        element: Uuid,
+        value: JsonLiteral,
+        context: ContentReadContext,
+        store: &dyn ImmutableContentStore,
+    ) -> Result<JsonOperation, ManifestError> {
+        let mut root = self.load_root(manifest.root, context, store)?;
+        for bytes in &manifest.edit_tail {
+            self.apply(&mut root, &JsonOperation::decode(bytes)?)?;
+        }
+        let array = Self::pointer(&root, array_pointer)?;
+        let MaterializedValue::Array(children) = &array.value else {
+            return Err(ManifestError::Conflict(
+                "numeric position target is non-array",
+            ));
+        };
+        if index > children.len() {
+            return Err(ManifestError::Conflict("numeric position is out of bounds"));
+        }
+        let (anchor, after) = if index == 0 {
+            (children.first().map(|child| child.id), false)
+        } else {
+            (Some(children[index - 1].id), true)
+        };
+        Ok(JsonOperation::InsertArray {
+            op,
+            array: array.id,
+            element,
+            anchor,
+            after,
+            value,
         })
     }
 
@@ -454,6 +558,34 @@ impl OrdinaryJsonAdapter {
             MaterializedValue::Scalar(_) => None,
         }
     }
+    fn pointer<'a>(
+        node: &'a Materialized,
+        pointer: &str,
+    ) -> Result<&'a Materialized, ManifestError> {
+        if pointer.is_empty() {
+            return Ok(node);
+        }
+        let mut tokens = pointer
+            .strip_prefix('/')
+            .ok_or(ManifestError::Conflict(
+                "JSON pointer must start with slash",
+            ))?
+            .split('/')
+            .map(|token| token.replace("~1", "/").replace("~0", "~"));
+        tokens.try_fold(node, |node, token| match &node.value {
+            MaterializedValue::Object(members) => members
+                .get(&token)
+                .ok_or(ManifestError::Conflict("JSON pointer target is absent")),
+            MaterializedValue::Array(children) => token
+                .parse::<usize>()
+                .ok()
+                .and_then(|index| children.get(index))
+                .ok_or(ManifestError::Conflict("JSON pointer target is absent")),
+            MaterializedValue::Scalar(_) => Err(ManifestError::Conflict(
+                "JSON pointer descends through scalar",
+            )),
+        })
+    }
     fn delete(node: &mut Materialized, id: Uuid) -> bool {
         match &mut node.value {
             MaterializedValue::Object(members) => {
@@ -683,7 +815,7 @@ mod tests {
     }
 
     #[test]
-    fn stable_array_anchor_survives_another_tail_operation() {
+    fn numeric_authoring_position_becomes_a_stable_array_anchor() {
         let (adapter, store, base, node) = seeded();
         let anchor = match &node.value {
             MaterializedValue::Object(values) => match &values["items"].value {
@@ -692,24 +824,24 @@ mod tests {
             },
             _ => unreachable!(),
         };
-        let array = match &node.value {
-            MaterializedValue::Object(values) => values["items"].id,
-            _ => unreachable!(),
-        };
+        let operation = adapter
+            .author_insert_at_index(
+                &base,
+                "/items",
+                1,
+                Uuid::from_bytes([2; 16]),
+                Uuid::from_bytes([3; 16]),
+                JsonLiteral::Scalar(JsonScalar::Number(2)),
+                context(),
+                &store,
+            )
+            .unwrap();
+        assert!(
+            matches!(operation, JsonOperation::InsertArray { anchor: Some(found), after: true, .. } if found == anchor)
+        );
         let manifest = ContentManifest {
             root: base.root,
-            edit_tail: vec![
-                JsonOperation::InsertArray {
-                    op: Uuid::from_bytes([2; 16]),
-                    array,
-                    element: Uuid::from_bytes([3; 16]),
-                    anchor: Some(anchor),
-                    after: true,
-                    value: JsonLiteral::Scalar(JsonScalar::Number(2)),
-                }
-                .encode()
-                .unwrap(),
-            ],
+            edit_tail: vec![operation.encode().unwrap()],
         };
         assert_eq!(
             adapter
@@ -767,6 +899,50 @@ mod tests {
                 &store
             ),
             Err(ManifestError::Conflict("unproven root descendant"))
+        );
+    }
+
+    #[test]
+    fn synchronous_and_eventual_projections_are_bound_to_the_full_manifest() {
+        let (adapter, store, base, node) = seeded();
+        let status = match &node.value {
+            MaterializedValue::Object(values) => values["status"].id,
+            _ => unreachable!(),
+        };
+        let edited = ContentManifest {
+            root: base.root,
+            edit_tail: vec![
+                JsonOperation::SetScalar {
+                    op: Uuid::from_bytes([6; 16]),
+                    target: status,
+                    value: JsonScalar::String("closed".to_owned()),
+                }
+                .encode()
+                .unwrap(),
+            ],
+        };
+        assert_eq!(
+            adapter
+                .synchronous_projections(&edited, &["/status".to_owned()], context(), &store)
+                .unwrap()["/status"],
+            br#""closed""#
+        );
+        let bundle = adapter
+            .eventual_projection_bundle(&base, &["/status".to_owned()], context(), &store)
+            .unwrap();
+        assert_eq!(
+            adapter.checked_eventual_projection(&bundle, &base).unwrap()["/status"],
+            br#""open""#
+        );
+        assert_eq!(
+            adapter.checked_eventual_projection(&bundle, &edited),
+            Err(ManifestError::Conflict(
+                "eventual projection belongs to another manifest"
+            ))
+        );
+        assert_eq!(
+            adapter.validate_operation(b"not a JSON operation"),
+            Err(ManifestError::Malformed)
         );
     }
 }
