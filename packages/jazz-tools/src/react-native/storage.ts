@@ -1,6 +1,9 @@
 export const REACT_NATIVE_SQLITE_STORAGE_UNIMPLEMENTED_ERROR =
   "React Native SQLite storage driver is not yet implemented — see src/react-native/README.md";
 
+export const REACT_NATIVE_PERSISTENT_RUNTIME_UNAVAILABLE_ERROR =
+  'React Native persistent storage is not available in the v2 runtime — use driver: { type: "memory" } or see src/react-native/README.md';
+
 function throwUnimplemented(): never {
   throw new Error(REACT_NATIVE_SQLITE_STORAGE_UNIMPLEMENTED_ERROR);
 }

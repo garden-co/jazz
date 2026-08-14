@@ -3,9 +3,8 @@ import type { RuntimeClientContext, RuntimeTokenOptions } from "../runtime/runti
 import { RuntimeSource } from "../runtime/runtime-source.js";
 import type { JazzClient } from "../runtime/client.js";
 import type { DbConfig } from "../runtime/db.js";
-import { resolveDefaultPersistentDbName } from "../runtime/db.js";
 import type { ReactNativeSqliteStorageDriver } from "./storage.js";
-import { UnimplementedSqliteStorageDriver } from "./storage.js";
+import { REACT_NATIVE_PERSISTENT_RUNTIME_UNAVAILABLE_ERROR } from "./storage.js";
 
 export interface ReactNativeDbConfig extends DbConfig {
   /**
@@ -26,8 +25,11 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
 
   override async load(config: ReactNativeDbConfig): Promise<void> {
     if (shouldRequireSqliteDriver(config)) {
-      const driver = config.sqliteStorage ?? new UnimplementedSqliteStorageDriver();
-      await driver.open(resolveDefaultPersistentDbName(config));
+      // A ReactNativeSqliteStorageDriver cannot yet be installed into the v2
+      // Rust ordered-KV runtime. Opening one here and then delegating to WASM
+      // only preflights an unrelated database and falsely implies that Jazz
+      // rows are persisted there.
+      throw new Error(REACT_NATIVE_PERSISTENT_RUNTIME_UNAVAILABLE_ERROR);
     }
 
     await this.fallback.load(config);
