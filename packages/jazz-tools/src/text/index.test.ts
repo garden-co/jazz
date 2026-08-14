@@ -75,6 +75,9 @@ describe("ordinary-row text", () => {
         db.all(app.jazz_text_nodes, { tier: "local" }),
       ]);
 
+      await expect(text.insert(snapshot, 0, 7 as unknown as string)).rejects.toThrow(
+        "Text insertion must be a string",
+      );
       await expect(text.insert(snapshot, 0, 0 as unknown as string)).rejects.toThrow(
         "Text insertion must be a string",
       );
@@ -192,23 +195,26 @@ describe("ordinary-row text", () => {
     const draft = makeClient("draft");
     try {
       const initial = await first.text.create("shared");
-      const observed = await second.text.read(initial.documentId);
-      expect(observed.text).toBe("shared");
-      const mainEdit = await second.text.insert(observed, observed.length, "!");
+      const mainBase = await second.text.read(initial.documentId);
+      const draftBase = await draft.text.read(initial.documentId);
+      expect(mainBase.versionId).toBe(initial.versionId);
+      expect(draftBase.versionId).toBe(initial.versionId);
+
+      const mainEdit = await second.text.insert(mainBase, mainBase.length, "!");
+      const draftEdit = await draft.text.insert(draftBase, draftBase.length, "?");
       await expect(first.text.read(initial.documentId)).resolves.toMatchObject({
-        versionId: mainEdit.versionId,
+        versionId: draftEdit.versionId,
+        text: "shared?",
+      });
+      await expect(second.text.read(initial.documentId)).resolves.toMatchObject({
+        versionId: draftEdit.versionId,
+        text: "shared?",
+      });
+      await expect(first.text.readVersion(mainEdit.versionId)).resolves.toMatchObject({
         text: "shared!",
       });
-
-      const draftBase = await draft.text.read(initial.documentId);
-      const draftEdit = await draft.text.insert(draftBase, draftBase.length, "?");
-      await expect(draft.text.read(initial.documentId)).resolves.toMatchObject({
-        versionId: draftEdit.versionId,
-        text: "shared!?",
-      });
-      await expect(first.text.read(initial.documentId)).resolves.toMatchObject({
-        versionId: draftEdit.versionId,
-        text: "shared!?",
+      await expect(draft.text.readVersion(draftEdit.versionId)).resolves.toMatchObject({
+        text: "shared?",
       });
     } finally {
       await Promise.all([
