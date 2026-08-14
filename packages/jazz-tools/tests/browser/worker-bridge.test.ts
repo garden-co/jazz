@@ -2318,7 +2318,7 @@ describe("Worker Bridge with OPFS", () => {
     );
   });
 
-  it.fails("reconciles a follower write that was pending when the leader crashes", async () => {
+  it("reconciles a follower write that was pending when the leader crashes", async () => {
     const dbName = uniqueDbName("leader-crash-pending-follower-write");
     const dbA = track(
       await createDb({
@@ -2337,12 +2337,12 @@ describe("Worker Bridge with OPFS", () => {
     const marker = `pending-follower-write-${Date.now()}`;
     let pendingWrite!: Promise<unknown>;
     let pendingWriteState: "pending" | "resolved" | "rejected" = "pending";
+    await leader.all(allTodos, { tier: "local" });
     await waitForCondition(
       async () => getPrivateWorker(leader) !== null && getPrivateWorker(follower) === null,
       8000,
       "Broker should keep the follower bridged through the elected leader",
     );
-    await leader.all(allTodos, { tier: "local" });
     await waitForCondition(
       async () => {
         void getBrowserConnection(follower)?.followerReady?.catch(() => {});

@@ -40,6 +40,7 @@ export interface BrowserFollowerConnection {
   ready(): Promise<void>;
   waitForServerConnection(): Promise<void>;
   updateAuth(authJson: string, sessionClaims: Record<string, unknown>): void;
+  detachForReconnect(): void;
   shutdown(): Promise<void>;
 }
 

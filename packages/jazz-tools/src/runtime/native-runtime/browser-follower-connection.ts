@@ -87,6 +87,10 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
     this.dispose(new Error("Browser follower connection is closed"));
   }
 
+  detachForReconnect(): void {
+    this.dispose(new Error("Browser follower connection is reconnecting"));
+  }
+
   private request(request: BrowserFollowerPortRpcRequest): Promise<void> {
     if (this.failed) return Promise.reject(this.failed);
     if (this.closed) return Promise.reject(new Error("Browser follower connection is closed"));

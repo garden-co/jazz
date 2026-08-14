@@ -79,6 +79,15 @@ export class FollowerPortConnectionRole implements BrowserConnectionRole {
     this.followerPortBridge?.updateAuth(authJson, sessionClaims);
   }
 
+  detachForReconnect(): void {
+    const bridge = this.followerPortBridge;
+    this.followerPortBridge = null;
+    this.portReady = false;
+    this.followerDataPort?.close();
+    this.followerDataPort = null;
+    bridge?.detachForReconnect();
+  }
+
   async shutdown(): Promise<void> {
     const bridge = this.followerPortBridge;
     this.followerPortBridge = null;

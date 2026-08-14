@@ -616,7 +616,11 @@ export class BrowserConnectionManager extends ConnectionManager {
     if (options.preserveOutbox && !error) {
       this.markDurablePathPending();
     }
-    void roleBridge?.shutdown();
+    if (roleBridge instanceof FollowerPortConnectionRole && options.preserveOutbox) {
+      roleBridge.detachForReconnect();
+    } else {
+      void roleBridge?.shutdown();
+    }
     this.activeRoleBridge = null;
 
     if (error) {
