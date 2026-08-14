@@ -141,8 +141,6 @@ export function readSchemaSelectPolicyReachables(
     tableReader.readVec((columnReader) => {
       columnReader.string();
       skipSchemaValueType(columnReader);
-      columnReader.option(() => undefined);
-      columnReader.option(() => undefined);
       columnReader.option(skipGrooveValue);
     });
     const referenceCount = tableReader.u64();
@@ -186,8 +184,6 @@ export function readSchemaPolicyInherits(
     tableReader.readVec((columnReader) => {
       columnReader.string();
       skipSchemaValueType(columnReader);
-      columnReader.option(() => undefined);
-      columnReader.option(() => undefined);
       columnReader.option(skipGrooveValue);
     });
     const referenceCount = tableReader.u64();
