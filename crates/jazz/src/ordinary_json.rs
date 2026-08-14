@@ -18,6 +18,8 @@ use crate::content_manifest::{
 /// Schema adapter discriminator for JSON manifests.
 pub const JSON_ADAPTER_KIND: &str = "json-v1";
 const ORDER_FANOUT: usize = 32;
+const MAX_MERGE_CANDIDATES: usize = 32;
+const MAX_MERGE_OPERATIONS: usize = 256;
 
 /// A typed JSON operation carried by an un-consolidated manifest tail.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -232,8 +234,8 @@ impl OrdinaryJsonAdapter {
         store: &mut dyn ImmutableContentStore,
     ) -> Result<ContentManifest, ManifestError> {
         let mut value = self.load_root(manifest.root, context, store)?;
-        for bytes in &manifest.edit_tail {
-            self.apply(&mut value, &JsonOperation::decode(bytes)?)?;
+        for operation in Self::decoded_tail(manifest)? {
+            self.apply(&mut value, &operation)?;
         }
         let document = self.publish_node(&value, context, store)?;
         let root = self.put(
@@ -266,8 +268,8 @@ impl OrdinaryJsonAdapter {
         store: &dyn ImmutableContentStore,
     ) -> Result<JsonOperation, ManifestError> {
         let mut root = self.load_root(manifest.root, context, store)?;
-        for bytes in &manifest.edit_tail {
-            self.apply(&mut root, &JsonOperation::decode(bytes)?)?;
+        for operation in Self::decoded_tail(manifest)? {
+            self.apply(&mut root, &operation)?;
         }
         let array = Self::pointer(&root, array_pointer)?;
         let MaterializedValue::Array(children) = &array.value else {
@@ -499,7 +501,10 @@ impl OrdinaryJsonAdapter {
                         .iter()
                         .enumerate()
                         .map(|(index, value)| {
-                            Self::literal_node(Self::child_id(id, &index.to_le_bytes()), value)
+                            Self::literal_node(
+                                Self::child_id(id, &(index as u64).to_le_bytes()),
+                                value,
+                            )
                         })
                         .collect(),
                 ),
@@ -507,6 +512,13 @@ impl OrdinaryJsonAdapter {
         }
     }
     fn apply(&self, node: &mut Materialized, op: &JsonOperation) -> Result<(), ManifestError> {
+        if let JsonOperation::InsertArray { element, .. } = op {
+            if Self::find(node, *element).is_some() {
+                return Err(ManifestError::Conflict(
+                    "inserted JSON element logical id already exists",
+                ));
+            }
+        }
         match op {
             JsonOperation::SetScalar { target, value, .. } => Self::find_mut(node, *target)
                 .filter(|node| matches!(node.value, MaterializedValue::Scalar(_)))
@@ -595,6 +607,89 @@ impl OrdinaryJsonAdapter {
             MaterializedValue::Scalar(_) => None,
         }
     }
+    fn find(node: &Materialized, id: Uuid) -> Option<&Materialized> {
+        if node.id == id {
+            return Some(node);
+        }
+        match &node.value {
+            MaterializedValue::Object(members) => {
+                members.values().find_map(|child| Self::find(child, id))
+            }
+            MaterializedValue::Array(children) => {
+                children.iter().find_map(|child| Self::find(child, id))
+            }
+            MaterializedValue::Scalar(_) => None,
+        }
+    }
+    fn collect_ids(node: &Materialized, ids: &mut BTreeSet<Uuid>) {
+        ids.insert(node.id);
+        match &node.value {
+            MaterializedValue::Object(members) => {
+                for child in members.values() {
+                    Self::collect_ids(child, ids);
+                }
+            }
+            MaterializedValue::Array(children) => {
+                for child in children {
+                    Self::collect_ids(child, ids);
+                }
+            }
+            MaterializedValue::Scalar(_) => {}
+        }
+    }
+    fn decoded_tail(manifest: &ContentManifest) -> Result<Vec<JsonOperation>, ManifestError> {
+        let mut ids = BTreeSet::new();
+        manifest
+            .edit_tail
+            .iter()
+            .map(|bytes| {
+                let operation = JsonOperation::decode(bytes)?;
+                if !ids.insert(operation.id()) {
+                    return Err(ManifestError::Conflict(
+                        "duplicate operation id within one tail",
+                    ));
+                }
+                Ok(operation)
+            })
+            .collect()
+    }
+    fn footprint(
+        root: &Materialized,
+        operations: &[JsonOperation],
+    ) -> Result<(BTreeSet<Uuid>, BTreeSet<Uuid>), ManifestError> {
+        let mut requires = BTreeSet::new();
+        let mut removes = BTreeSet::new();
+        for operation in operations {
+            match operation {
+                JsonOperation::SetScalar { target, .. } => {
+                    requires.insert(*target);
+                }
+                JsonOperation::SetMember { object, key, .. }
+                | JsonOperation::RemoveMember { object, key, .. } => {
+                    requires.insert(*object);
+                    if let Some(Materialized {
+                        value: MaterializedValue::Object(members),
+                        ..
+                    }) = Self::find(root, *object)
+                    {
+                        if let Some(previous) = members.get(key) {
+                            Self::collect_ids(previous, &mut removes);
+                        }
+                    }
+                }
+                JsonOperation::InsertArray { array, anchor, .. } => {
+                    requires.insert(*array);
+                    requires.extend(anchor);
+                }
+                JsonOperation::Delete { target, .. } => {
+                    let deleted = Self::find(root, *target)
+                        .ok_or(ManifestError::Conflict("delete target is absent"))?;
+                    Self::collect_ids(deleted, &mut removes);
+                }
+            }
+        }
+        Ok((requires, removes))
+    }
     fn pointer<'a>(
         node: &'a Materialized,
         pointer: &str,
@@ -681,8 +776,8 @@ impl ContentManifestAdapter for OrdinaryJsonAdapter {
         store: &dyn ImmutableContentStore,
     ) -> Result<Vec<u8>, ManifestError> {
         let mut node = self.load_root(manifest.root, context, store)?;
-        for bytes in &manifest.edit_tail {
-            self.apply(&mut node, &JsonOperation::decode(bytes)?)?;
+        for operation in Self::decoded_tail(manifest)? {
+            self.apply(&mut node, &operation)?;
         }
         let full = Self::json(&node);
         match request {
@@ -710,8 +805,24 @@ impl ContentManifestAdapter for OrdinaryJsonAdapter {
         if manifests.iter().any(|manifest| manifest.root != first.root) {
             return Err(ManifestError::Conflict("unproven root descendant"));
         }
+        if manifests.len() > MAX_MERGE_CANDIDATES
+            || manifests
+                .iter()
+                .map(|manifest| manifest.edit_tail.len())
+                .sum::<usize>()
+                > MAX_MERGE_OPERATIONS
+        {
+            return Err(ManifestError::Conflict("JSON merge work budget exceeded"));
+        }
+        let root = self.load_root(first.root, context, store)?;
+        let mut decoded = Vec::with_capacity(manifests.len());
         for manifest in manifests {
-            self.materialize(manifest, &MaterializationRequest::Full, context, store)?;
+            let operations = Self::decoded_tail(manifest)?;
+            let mut candidate = root.clone();
+            for operation in &operations {
+                self.apply(&mut candidate, operation)?;
+            }
+            decoded.push(operations);
         }
         let mut operations: BTreeMap<Uuid, Vec<u8>> = BTreeMap::new();
         let mut keys = BTreeSet::new();
@@ -732,22 +843,19 @@ impl ContentManifestAdapter for OrdinaryJsonAdapter {
                 operations.insert(op.id(), bytes.clone());
             }
         }
-        for (index, left) in manifests.iter().enumerate() {
-            for right in &manifests[index + 1..] {
-                let mut left_then_right = self.load_root(first.root, context, store)?;
-                for bytes in left.edit_tail.iter().chain(&right.edit_tail) {
-                    self.apply(&mut left_then_right, &JsonOperation::decode(bytes)?)?;
-                }
-                let mut right_then_left = self.load_root(first.root, context, store)?;
-                for bytes in right.edit_tail.iter().chain(&left.edit_tail) {
-                    self.apply(&mut right_then_left, &JsonOperation::decode(bytes)?)?;
-                }
-                if Self::json(&left_then_right) != Self::json(&right_then_left) {
-                    return Err(ManifestError::Conflict(
-                        "typed operation tails do not commute",
-                    ));
-                }
+        let mut required_by_prior = BTreeSet::new();
+        let mut removed_by_prior = BTreeSet::new();
+        for candidate in &decoded {
+            let (required, removed) = Self::footprint(&root, candidate)?;
+            if required.iter().any(|id| removed_by_prior.contains(id))
+                || removed.iter().any(|id| required_by_prior.contains(id))
+            {
+                return Err(ManifestError::Conflict(
+                    "typed operation tails have ancestor or removal dependencies",
+                ));
             }
+            required_by_prior.extend(required);
+            removed_by_prior.extend(removed);
         }
         let mut tails = manifests
             .iter()
@@ -1164,6 +1272,88 @@ mod tests {
                     &store,
                 )
                 .is_err()
+        );
+        let duplicate = ContentManifest {
+            root: base.root,
+            edit_tail: vec![insert.encode().unwrap(), insert.encode().unwrap()],
+        };
+        assert_eq!(
+            adapter.materialize(&duplicate, &MaterializationRequest::Full, context(), &store),
+            Err(ManifestError::Conflict(
+                "duplicate operation id within one tail"
+            ))
+        );
+        let colliding = ContentManifest {
+            root: base.root,
+            edit_tail: vec![
+                JsonOperation::InsertArray {
+                    op: Uuid::from_bytes([0x7a; 16]),
+                    array,
+                    element: status,
+                    anchor: None,
+                    after: true,
+                    value: JsonLiteral::Scalar(JsonScalar::Number(4)),
+                }
+                .encode()
+                .unwrap(),
+            ],
+        };
+        assert_eq!(
+            adapter.materialize(&colliding, &MaterializationRequest::Full, context(), &store),
+            Err(ManifestError::Conflict(
+                "inserted JSON element logical id already exists"
+            ))
+        );
+    }
+
+    #[test]
+    fn distinct_keys_conflict_when_one_removes_the_others_target() {
+        let (adapter, store, base, node) = seeded();
+        let (object, status) = match &node.value {
+            MaterializedValue::Object(values) => (node.id, values["status"].id),
+            _ => unreachable!(),
+        };
+        let replace_member = ContentManifest {
+            root: base.root,
+            edit_tail: vec![
+                JsonOperation::SetMember {
+                    op: Uuid::from_bytes([0x7b; 16]),
+                    object,
+                    key: "status".into(),
+                    value: JsonLiteral::Scalar(JsonScalar::String("replacement".into())),
+                }
+                .encode()
+                .unwrap(),
+            ],
+        };
+        let edit_old_child = ContentManifest {
+            root: base.root,
+            edit_tail: vec![
+                JsonOperation::SetScalar {
+                    op: Uuid::from_bytes([0x7c; 16]),
+                    target: status,
+                    value: JsonScalar::String("edited".into()),
+                }
+                .encode()
+                .unwrap(),
+            ],
+        };
+        // Planted positive: removing the required-vs-removed footprint guard
+        // makes these distinct conflict keys merge and silently lose one edit.
+        assert_eq!(
+            adapter.merge(&[replace_member, edit_old_child], context(), &store),
+            Err(ManifestError::Conflict(
+                "typed operation tails have ancestor or removal dependencies"
+            ))
+        );
+    }
+
+    #[test]
+    fn nested_array_child_label_has_fixed_width_golden_identity() {
+        let parent = Uuid::from_bytes([0x44; 16]);
+        assert_eq!(
+            OrdinaryJsonAdapter::child_id(parent, &0u64.to_le_bytes()).to_string(),
+            "7504e01a-542a-5a18-a3ff-e671a11a74e1"
         );
     }
 
