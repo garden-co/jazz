@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useAll } from "jazz-tools/react";
 import DOMPurify from "dompurify";
 import { TrashIcon } from "lucide-react";
 import { ChatMetadata } from "@/components/chat/ChatMetadata";
