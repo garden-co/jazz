@@ -4522,12 +4522,25 @@ fn flat_subscription_updates_with_nullable_sort_payload() {
     )
     .unwrap();
     db.tick().unwrap();
-    let event = block_on(subscription.next_raw()).unwrap();
-    assert!(matches!(
-        event,
-        SubscriptionEvent::Delta { terminal_operations, .. }
-            if terminal_operations.iter().any(|operation| matches!(operation.edit, groove::ivm::TerminalEdit::Update { .. }))
-    ));
+    let SubscriptionEvent::Delta {
+        terminal_operations,
+        ..
+    } = block_on(subscription.next_raw()).unwrap()
+    else {
+        panic!("title-only update must emit a terminal delta");
+    };
+    assert!(
+        terminal_operations
+            .iter()
+            .any(|operation| matches!(operation.edit, groove::ivm::TerminalEdit::Update { .. })),
+        "title-only update must retain its root payload"
+    );
+    assert!(
+        !terminal_operations
+            .iter()
+            .any(|operation| matches!(operation.edit, groove::ivm::TerminalEdit::Move { .. })),
+        "unchanged nullable sort key must not produce a root move"
+    );
 }
 
 #[test]
