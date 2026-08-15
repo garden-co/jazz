@@ -9376,8 +9376,17 @@ where
                             .map(|raw| raw.owned_record())
                             .collect::<Vec<_>>();
                         for record in raws {
-                            let version =
-                                self.decode_history_owned_record(table, &storage_table, record)?;
+                            let requested_table = if storage_table == SHARED_DELETION_HISTORY_TABLE
+                            {
+                                ""
+                            } else {
+                                table
+                            };
+                            let version = self.decode_history_owned_record(
+                                requested_table,
+                                &storage_table,
+                                record,
+                            )?;
                             if version.tx_node_alias() != alias
                                 || !times.contains(&version.tx_time())
                             {

@@ -729,7 +729,7 @@ where
                 self.branch_version_storage_write_binding(&stored, branch_id)?;
             batch.insert_raw(
                 branch_table.as_ref(),
-                history_primary_key(&stored),
+                self.version_storage_primary_key(&stored, BranchLineage::Branch(branch_id))?,
                 branch_record,
             );
         }
@@ -1137,16 +1137,26 @@ where
             return Ok(BTreeSet::new());
         }
         let mut row_ids = BTreeSet::new();
-        for storage_table in [
-            physical_branch_history_table_name(table_id, branch_id),
-            physical_branch_register_table_name(table_id, branch_id),
-        ] {
-            for raw in self.database.primary_key_scan_raw(&storage_table, &[])? {
-                row_ids.insert(RowUuid(
-                    raw.record()
-                        .get_uuid(HistoryRowRecord::FIELD_ROW_UUID_IDX)?,
-                ));
-            }
+        for raw in self.database.primary_key_scan_raw(
+            &physical_branch_history_table_name(table_id, branch_id),
+            &[],
+        )? {
+            row_ids.insert(RowUuid(
+                raw.record()
+                    .get_uuid(HistoryRowRecord::FIELD_ROW_UUID_IDX)?,
+            ));
+        }
+        let (branch_kind, branch_lineage_id) =
+            shared_deletion_lineage_values(BranchLineage::Branch(branch_id));
+        for raw in self.database.primary_key_scan_raw(
+            SHARED_DELETION_HISTORY_TABLE,
+            &[
+                Value::U8(branch_kind),
+                Value::Uuid(branch_lineage_id),
+                Value::U64(table_id.0),
+            ],
+        )? {
+            row_ids.insert(RowUuid(raw.record().get_uuid(3)?));
         }
         Ok(row_ids)
     }
@@ -1640,6 +1650,37 @@ where
             .contains(&(table_id, branch_id))
         {
             return Ok(Vec::new());
+        }
+        if layer == VersionLayer::Deletion {
+            let (branch_kind, branch_lineage_id) =
+                shared_deletion_lineage_values(BranchLineage::Branch(branch_id));
+            let raws = self
+                .database
+                .primary_key_scan_raw(
+                    SHARED_DELETION_HISTORY_TABLE,
+                    &[
+                        Value::U8(branch_kind),
+                        Value::Uuid(branch_lineage_id),
+                        Value::U64(table_id.0),
+                        Value::Uuid(row_uuid.0),
+                    ],
+                )?
+                .into_iter()
+                .map(|raw| raw.owned_record())
+                .collect::<Vec<_>>();
+            let mut versions = Vec::with_capacity(raws.len());
+            for raw in raws {
+                let version =
+                    self.decode_history_owned_record(table, SHARED_DELETION_HISTORY_TABLE, raw)?;
+                let tx_id = self.version_tx_id(&version)?;
+                if self
+                    .transaction_record(tx_id)
+                    .is_some_and(|tx| !matches!(tx.fate, Fate::Rejected(_)))
+                {
+                    versions.push(version);
+                }
+            }
+            return Ok(versions);
         }
         let storage_table = physical_branch_version_storage_table_name(table_id, layer, branch_id);
         let raws = self

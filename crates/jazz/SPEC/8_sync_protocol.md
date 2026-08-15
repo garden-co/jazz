@@ -23,6 +23,7 @@ Invariant digest:
 - `INV-SYNC-15`: Exclusive transaction payloads MAY be delivered, stored, and participate partially at the transaction level; receiver-visible subscription state MUST expose them only when complete for the maintained subscription view being served, and partial fragments MUST NOT update whole-database current indexes.
 - `INV-SYNC-16`: A mergeable transaction MAY be delivered and applied partially; each visible mergeable version can contribute without waiting for `tx.n_total_writes`.
 - `INV-SYNC-17`: `ViewUpdate` emission for a result add MUST include enough deletion-register context to reconstruct visible absence/presence for that row.
+- `INV-SYNC-27`: Shared deletion-history storage is local representation only: sync payloads continue to identify deletion versions by logical table, row, transaction, schema and branch lineage, and receivers MUST resolve the sender's record through their own stable physical mapping.
 - `INV-SYNC-18`: An edge acting as mergeable fate authority MUST defer fate assignment until the relevant permission-scope subscription has settled for the writer and affected tables.
 - `INV-SYNC-20`: Incremental query view updates MUST be observationally equivalent to a full rehydrate for the same canonical program instance, including enter/leave churn within a single drain cycle and closure-row replacement.
 - `INV-SYNC-21`: Wire `TxId` and row-version payloads MUST use node UUIDs and schema version IDs, not node-local integer aliases.
@@ -243,6 +244,14 @@ _Further invariants._ `INV-SYNC-17` — a result add carries enough
 deletion-register witness to reconstruct the row's visible presence/absence.
 `INV-SYNC-20` — incremental view updates are observationally equivalent to a full
 reset `ViewUpdate` for the same canonical program instance (ch. 6).
+
+The universal deletion-history table is not a wire namespace. A commit still
+carries a logical table and a deletion `VersionRecord`; receiver catalogue
+admission resolves that table/schema to its receiver-local `PhysicalTableId` and
+persists the event under its local `(branch_lineage, physical_table_id, row)`
+prefix. A payload cannot choose or forge a physical id, and a shared storage
+layout never changes table-scoped sync or authorization semantics
+(`INV-SYNC-27`).
 
 ### 8.5 Subscription Attach, Reset, And Detach
 

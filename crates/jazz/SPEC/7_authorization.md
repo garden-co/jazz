@@ -41,6 +41,10 @@ Invariant digest:
 - `INV-RLS-21`: A policy subplan MUST read its dependency tables as raw policy
   evidence without recursively applying those tables' own read policies, while
   still enforcing the complete outer policy under authenticated claims.
+- `INV-RLS-22`: A deletion event's authorization and downstream read eligibility
+  MUST resolve its stable physical table lineage back to the logical
+  table/schema at the relevant frontier; shared deletion storage MUST NOT widen
+  authority across tables.
 
 ## Details
 

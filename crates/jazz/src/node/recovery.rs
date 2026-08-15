@@ -232,15 +232,15 @@ where
                     raw.record().get_u64(HistoryRowRecord::FIELD_TX_TIME_IDX)?,
                 ));
             }
-            if let Some(raw) = self.database.index_last_raw(
-                &physical_register_table_name(table_id),
-                "by_tx",
-                &[],
-            )? {
-                self.merge_tx_time(TxTime(
-                    raw.record().get_u64(RegisterRowRecord::FIELD_TX_TIME_IDX)?,
-                ));
-            }
+        }
+        if let Some(raw) =
+            self.database
+                .index_last_raw(SHARED_DELETION_HISTORY_TABLE, "by_tx", &[])?
+        {
+            self.merge_tx_time(TxTime(
+                raw.record()
+                    .get_u64(SharedDeletionHistoryRowRecord::FIELD_TX_TIME_IDX)?,
+            ));
         }
         #[cfg(feature = "testing")]
         if let (Some(receipt), Some(started)) = (&mut receipt, started) {

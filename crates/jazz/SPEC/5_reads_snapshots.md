@@ -19,11 +19,12 @@ Invariant digest:
 - `INV-READ-5`: `tx_read` MUST record a `RowRead` for a present snapshot-visible row and an `AbsentRead` for an absent snapshot-visible row.
 - `INV-READ-6`: `tx_current_rows` and `tx_query` MUST record predicate reads as `PredicateRead` values carrying `table`, `shape_id`, `shape`, `binding_id`, and `binding_values`; whole-table transaction reads are degenerate query shapes.
 - `INV-READ-7`: Local current-row reads MUST use argmax `TxId` currency per `(row_uuid, VersionLayer)` over held non-rejected versions, independent of sender arrival order.
-- `INV-READ-8`: Global current-row reads MUST use per-layer global-current tables and MUST exclude rows whose global-current deletion-register winner is `DeletionEvent::Deleted`.
-- `INV-READ-9`: Global as-of reads at `GlobalSeq` MUST choose per-layer winners from `jazz_global_changes` at or before the requested `global_base` and apply deletion anti-join before returning visible content.
-- `INV-READ-10`: Current-row visibility MUST be content-layer current rows anti-joined with the current deletion-register winner; content writes alone MUST NOT restore a deleted row, while `DeletionEvent::Restored` reveals current content.
+- `INV-READ-8`: Global current-row reads MUST use the per-lineage combined global-current source and MUST exclude rows whose stored visibility is false.
+- `INV-READ-9`: Global as-of reads at `GlobalSeq` MUST choose independent content and deletion winners from `jazz_global_changes` at or before the requested `global_base`, then derive visibility before returning content.
+- `INV-READ-10`: Current-row visibility MUST be derived from independent content and deletion-register winners; content writes alone MUST NOT restore a deleted row, while `DeletionEvent::Restored` reveals current content.
 - `INV-READ-11`: A local-tier read on the writer node MUST include the node's own pending committed transaction, while a global-tier read MUST exclude it until global fate/current state is applied.
 - `INV-READ-12`: Per-layer global-current tables MUST equal accepted argmax winners over stored versions and remain consistent after reopen.
+- `INV-READ-13`: Ordinary current query lowering MUST consume one combined current-row source per logical table and MUST NOT introduce a deletion-register anti-join; historical and fixed-snapshot views MAY resolve the two immutable histories at their requested frontier.
 
 ## Details
 
@@ -50,15 +51,18 @@ reached global durability. Chapter 9 defines the full `edge` semantics.
 ### 5.2 Current-row visibility
 
 Current-row reads return content only when the deletion register permits it. A
-visible current row is the content-layer current winner **anti-joined with the
-current deletion-register winner** (ch. 4): a current `Deleted` event hides the
-content row, a later `Restored` reveals it, and a content write alone never
-un-deletes a row (`INV-READ-10`).
+visible current row is derived from the independent content winner and deletion
+winner (ch. 4): a current `Deleted` event hides the content row, a later
+`Restored` reveals it, and a content write alone never un-deletes a row
+(`INV-READ-10`). The result is materialized into the combined current row,
+including both winner identities and the `visible` decision. An ordinary read
+reads that one source and filters `visible`; it neither reads nor joins deletion
+history/currentness separately (`INV-READ-13`).
 
 The same visibility rule applies at global durability. Global current-row reads
-perform the deletion anti-join over the global-current tables (`INV-READ-8`).
-Those tables equal the accepted argmax winners and stay consistent across reopen
-(`INV-READ-12`).
+consume the combined global-current source (`INV-READ-8`). Its embedded winner
+references must equal the accepted argmax winners and stay consistent across
+reopen (`INV-READ-12`).
 
 **Implementation status.** Current global winner maintenance is covered by
 `sync::accepted_fates_maintain_global_current_tables`; reopen consistency is
@@ -118,9 +122,9 @@ whole-table reads are degenerate query shapes.
 ### 5.5 Historical (as-of) reads
 
 A historical read asks what was visible at a past global position. For a read at
-a past `GlobalSeq`, the system chooses the per-layer winner from
-`jazz_global_changes` at or before the requested position, then applies the
-deletion anti-join before returning visible content (`INV-READ-9`). Time-travel
+a past `GlobalSeq`, the system chooses independent content and deletion winners
+from `jazz_global_changes` at or before the requested position, then derives
+visibility before returning content (`INV-READ-9`). Time-travel
 and snapshot-base branches build on this mechanism (ch. 11), and read policy is
 evaluated at the historical cut (ch. 7).
 
