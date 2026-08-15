@@ -168,7 +168,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          chromium="$(find /github/home/.cache/ms-playwright -path '*/chrome-headless-shell-linux64/chrome-headless-shell' -type f -print -quit)"
+          chromium="$(find -L /github/home/.cache/ms-playwright -path '*/chrome-headless-shell-linux64/chrome-headless-shell' -type f -print -quit)"
           test -n "${chromium}"
           "${chromium}" --headless --no-sandbox --disable-gpu \
             --screenshot="${RUNNER_TEMP}/blacksmith-browser-probe.png" about:blank
