@@ -2,6 +2,10 @@
 
 Expo example for local-first todos using `jazz-tools/react` + `jazz-rn`.
 
+> **Alpha boundary:** this is compile/build scaffolding, not a runnable persistent Jazz client.
+> React Native SQLite persistence is unavailable, and memory mode has not been validated under
+> Metro/Hermes on a device.
+
 ## Notes
 
 - This app uses native code (`jazz-rn`), so use a development build (`expo run:ios` / `expo run:android`).

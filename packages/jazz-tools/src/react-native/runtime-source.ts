@@ -3,16 +3,22 @@ import type { RuntimeClientContext, RuntimeTokenOptions } from "../runtime/runti
 import { RuntimeSource } from "../runtime/runtime-source.js";
 import type { JazzClient } from "../runtime/client.js";
 import type { DbConfig } from "../runtime/db.js";
-import { resolveDefaultPersistentDbName } from "../runtime/db.js";
 import type { ReactNativeSqliteStorageDriver } from "./storage.js";
-import { UnimplementedSqliteStorageDriver } from "./storage.js";
+import {
+  REACT_NATIVE_PERSISTENT_RUNTIME_UNAVAILABLE_ERROR,
+  REACT_NATIVE_SQLITE_STORAGE_REJECTED_ERROR,
+} from "./storage.js";
 
 export interface ReactNativeDbConfig extends DbConfig {
   /**
-   * Future SQLite storage driver hook for React Native persistence.
+   * Proposal-only SQLite storage hook for a future native v2 runtime.
    *
-   * The current scaffold typechecks only. The default driver deliberately
-   * throws a clear implementation-pending error before opening the runtime.
+   * The current runtime does not install or open this driver. Every persistent
+   * configuration is rejected before `sqliteStorage.open()` can run. Supplying
+   * it with an explicit memory driver is also rejected rather than ignored.
+   *
+   * @deprecated Ignored and rejected; do not supply this option until the
+   * native ordered-KV runtime exists.
    */
   sqliteStorage?: ReactNativeSqliteStorageDriver;
 }
@@ -25,9 +31,15 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
   private readonly fallback = new DefaultRuntimeSource();
 
   override async load(config: ReactNativeDbConfig): Promise<void> {
+    if (config.sqliteStorage !== undefined) {
+      throw new Error(REACT_NATIVE_SQLITE_STORAGE_REJECTED_ERROR);
+    }
     if (shouldRequireSqliteDriver(config)) {
-      const driver = config.sqliteStorage ?? new UnimplementedSqliteStorageDriver();
-      await driver.open(resolveDefaultPersistentDbName(config));
+      // A ReactNativeSqliteStorageDriver cannot yet be installed into the v2
+      // Rust ordered-KV runtime. Opening one here and then delegating to WASM
+      // only preflights an unrelated database and falsely implies that Jazz
+      // rows are persisted there.
+      throw new Error(REACT_NATIVE_PERSISTENT_RUNTIME_UNAVAILABLE_ERROR);
     }
 
     await this.fallback.load(config);

@@ -16,6 +16,8 @@ export {
   type UseLocalFirstAuthOptions,
 } from "./use-local-first-auth.js";
 export {
+  REACT_NATIVE_PERSISTENT_RUNTIME_UNAVAILABLE_ERROR,
+  REACT_NATIVE_SQLITE_STORAGE_REJECTED_ERROR,
   REACT_NATIVE_SQLITE_STORAGE_UNIMPLEMENTED_ERROR,
   UnimplementedSqliteStorageDriver,
   type ReactNativeSqliteConnection,

@@ -12,7 +12,9 @@ Jazz clients have two pieces of local state that are easy to confuse:
   by `BrowserAuthSecretStore` in `localStorage`; in Expo it is stored by `ExpoAuthSecretStore` in
   secure storage.
 - **Database storage**&hairsp;—&hairsp;the local relational database. Browser persistent clients store this
-  in OPFS; React Native uses native storage; memory drivers keep it only for the life of the process.
+  in OPFS. React Native/Expo persistence is not available in this alpha; its explicit memory path is
+  unverified scaffolding rather than a device-supported runtime. Supported memory drivers keep data
+  only for the life of the process.
 
 Clearing one does not automatically clear the other. That separation is intentional: a development
 storage reset should not silently destroy a user's identity, and signing out of an auth provider
