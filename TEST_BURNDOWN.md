@@ -27,7 +27,7 @@ Focused browser receipts are produced with `pnpm --filter jazz-tools test:browse
 
 A future fix must remove both the matching visible skip marker and this entry, then include a focused green receipt. Never delete or weaken the test. New known reds require both a source annotation and one row. Executable gates enforce the active annotation/entry bijection.
 
-## Active Rust quarantine (37)
+## Active Rust quarantine (36)
 
 | Test                                                                                                                     | Definition                                          | Status         | Category                     | Theory                                                                                                                                                                                                                                                                                               | Owner  |
 | ------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------- | -------------- | ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ |
