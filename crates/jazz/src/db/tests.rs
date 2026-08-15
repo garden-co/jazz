@@ -11206,6 +11206,591 @@ fn subscription_emits_when_remote_coverage_settles_without_row_changes() {
 }
 
 #[test]
+fn edge_global_settlement_requires_a_fresh_current_connection_view_receipt() {
+    let schema = schema();
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let owner = AuthorId::from_bytes([0xa1; 16]);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let client = open_db(0xc1, client_author, &schema);
+    seed(&server, "todos", cells("cached", false, owner));
+
+    let (first_client_transport, first_server_transport) = duplex();
+    let first_upstream = client.connect_upstream(first_client_transport);
+    let _first_subscriber = server.accept_subscriber(first_server_transport, client_author);
+    let query = Query::from("todos");
+    let mut subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
+    assert!(!event_settled(&block_on(subscription.next_raw()).unwrap()));
+
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+    assert!(event_settled(&block_on(subscription.next_raw()).unwrap()));
+
+    assert!(client.detach_connection(&first_upstream));
+    let disconnected = block_on(subscription.next_raw()).unwrap();
+    assert!(
+        !event_settled(&disconnected),
+        "disconnect must immediately demote cached Edge/Global rows to unsettled"
+    );
+    assert_eq!(
+        prepared_read(&client, &query).len(),
+        1,
+        "disconnect keeps the durable cached row as local data"
+    );
+
+    let (reconnected_client_transport, reconnected_server_transport) = duplex();
+    let _reconnected_upstream = client.connect_upstream(reconnected_client_transport);
+    let _reconnected_subscriber =
+        server.accept_subscriber(reconnected_server_transport, client_author);
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+    assert!(
+        event_settled(&block_on(subscription.next_raw()).unwrap()),
+        "only a fresh view from the current upstream epoch may re-settle the cache"
+    );
+}
+
+#[test]
+fn nonselected_upstream_update_demotes_selected_receipt_before_publication() {
+    let schema = schema();
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let owner = AuthorId::from_bytes([0xa1; 16]);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let client = open_db(0xc1, client_author, &schema);
+    seed(&server, "todos", cells("initial", false, owner));
+
+    let (old_client_transport, old_server_transport) = duplex();
+    let old_upstream = client.connect_upstream(old_client_transport);
+    let _old_subscriber = server.accept_subscriber(old_server_transport, client_author);
+    let query = Query::from("todos");
+    let mut subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
+    let _ = block_on(subscription.next_raw()).unwrap();
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+    assert!(event_settled(&block_on(subscription.next_raw()).unwrap()));
+
+    let (new_client_transport, new_server_transport) = duplex();
+    let new_upstream = client.connect_upstream(new_client_transport);
+    let _new_subscriber = server.accept_subscriber(new_server_transport, client_author);
+    assert!(!event_settled(&block_on(subscription.next_raw()).unwrap()));
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+    assert!(event_settled(&block_on(subscription.next_raw()).unwrap()));
+
+    seed(
+        &server,
+        "todos",
+        cells("nonselected A update", false, owner),
+    );
+    server.tick().unwrap();
+    old_upstream.borrow_mut().tick().unwrap();
+    assert!(
+        !event_settled(&block_on(subscription.next_raw()).unwrap()),
+        "A's row-changing update must retire B's receipt before publication"
+    );
+
+    new_upstream.borrow_mut().tick().unwrap();
+    assert!(
+        event_settled(&block_on(subscription.next_raw()).unwrap()),
+        "B's own queued response may re-establish the selected receipt"
+    );
+}
+
+#[test]
+fn nonselected_view_update_demotes_receipts_for_other_recomputed_views() {
+    let schema = schema();
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let client = open_db(0xc1, client_author, &schema);
+    let all_query = Query::from("todos");
+    let filtered_query = Query::from("todos").filter(eq(col("title"), lit("matching")));
+    let view_update = |subscription, settled_through| SyncMessage::ViewUpdate {
+        subscription,
+        settled_through,
+        reset_result_set: true,
+        version_carriers: Vec::new(),
+        version_bundles: Vec::new(),
+        peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
+        result_member_adds: Vec::new(),
+        result_member_removes: Vec::new(),
+        terminal_operations: Vec::new(),
+        program_fact_adds: Vec::new(),
+        program_fact_removes: Vec::new(),
+    };
+
+    let (old_client_transport, mut old_authority) = duplex();
+    let _old_upstream = client.connect_upstream(old_client_transport);
+    let mut all_subscription =
+        prepared_subscribe(&client, &all_query, global_subscribe_opts()).unwrap();
+    let mut filtered_subscription =
+        prepared_subscribe(&client, &filtered_query, global_subscribe_opts()).unwrap();
+    let _ = block_on(all_subscription.next_raw()).unwrap();
+    let _ = block_on(filtered_subscription.next_raw()).unwrap();
+    client.tick().unwrap();
+    let mut old_keys = BTreeMap::new();
+    while old_keys.len() < 2 {
+        if let SyncMessage::Subscribe(subscribe) = old_authority.try_recv().unwrap() {
+            old_keys.insert(subscribe.subscription.shape_id, subscribe.subscription);
+        }
+    }
+    for subscription in old_keys.values().copied() {
+        old_authority
+            .send(view_update(subscription, GlobalSeq(1)))
+            .unwrap();
+    }
+    client.tick().unwrap();
+    assert!(all_subscription._state.borrow().settled);
+    assert!(filtered_subscription._state.borrow().settled);
+
+    let (new_client_transport, mut new_authority) = duplex();
+    let _new_upstream = client.connect_upstream(new_client_transport);
+    assert!(!all_subscription._state.borrow().settled);
+    assert!(!filtered_subscription._state.borrow().settled);
+    client.tick().unwrap();
+    let mut new_keys = BTreeMap::new();
+    while new_keys.len() < 2 {
+        if let SyncMessage::Subscribe(subscribe) = new_authority.try_recv().unwrap() {
+            new_keys.insert(subscribe.subscription.shape_id, subscribe.subscription);
+        }
+    }
+    for subscription in new_keys.values().copied() {
+        new_authority
+            .send(view_update(subscription, GlobalSeq(2)))
+            .unwrap();
+    }
+    client.tick().unwrap();
+    assert!(all_subscription._state.borrow().settled);
+    assert!(filtered_subscription._state.borrow().settled);
+
+    let all_key = old_keys[&all_query.validate(&schema).unwrap().shape_id()];
+    old_authority
+        .send(view_update(all_key, GlobalSeq(3)))
+        .unwrap();
+    client.tick().unwrap();
+    assert!(!all_subscription._state.borrow().settled);
+    assert!(
+        !filtered_subscription._state.borrow().settled,
+        "an X update may recompute filtered Y, so no selected receipt survives"
+    );
+
+    for subscription in new_keys.values().copied() {
+        new_authority
+            .send(view_update(subscription, GlobalSeq(2)))
+            .unwrap();
+    }
+    client.tick().unwrap();
+    assert!(!all_subscription._state.borrow().settled);
+    assert!(
+        !filtered_subscription._state.borrow().settled,
+        "B@2 cannot re-receipt state after nonselected A@3 was applied"
+    );
+    for subscription in new_keys.values().copied() {
+        new_authority
+            .send(view_update(subscription, GlobalSeq(3)))
+            .unwrap();
+    }
+    client.tick().unwrap();
+    assert!(all_subscription._state.borrow().settled);
+    assert!(filtered_subscription._state.borrow().settled);
+}
+
+#[test]
+fn stale_old_upstream_epoch_cannot_settle_after_edge_switch_or_fallback() {
+    let schema = schema();
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let owner = AuthorId::from_bytes([0xa1; 16]);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let client = open_db(0xc1, client_author, &schema);
+    seed(
+        &server,
+        "todos",
+        cells("served by either edge", false, owner),
+    );
+
+    let (old_client_transport, old_server_transport) = duplex();
+    let old_upstream = client.connect_upstream(old_client_transport);
+    let _old_subscriber = server.accept_subscriber(old_server_transport, client_author);
+    let query = Query::from("todos");
+    let mut subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
+    assert!(!event_settled(&block_on(subscription.next_raw()).unwrap()));
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+    assert!(event_settled(&block_on(subscription.next_raw()).unwrap()));
+
+    // Switching links immediately retires the old receipt, even while the old
+    // transport remains alive long enough to race one more response.
+    let (new_client_transport, new_server_transport) = duplex();
+    let new_upstream = client.connect_upstream(new_client_transport);
+    let _new_subscriber = server.accept_subscriber(new_server_transport, client_author);
+    assert!(
+        !event_settled(&block_on(subscription.next_raw()).unwrap()),
+        "edge switch must immediately demote the prior edge receipt"
+    );
+
+    // Confirm B before forcing fallback, so the test proves that staging A's
+    // old traffic cannot transiently publish under B's receipt during detach.
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+    assert!(
+        event_settled(&block_on(subscription.next_raw()).unwrap()),
+        "the selected B edge must have a real receipt before the fallback test"
+    );
+
+    seed(
+        &server,
+        "todos",
+        cells("queued pre-fallback old-edge update", false, owner),
+    );
+    server.tick().unwrap();
+    // Leave A's response staged while B is selected, then select A again by
+    // detaching B. The selection barrier must consume that stale frame without
+    // treating it as a new A receipt.
+    assert!(client.detach_connection(&new_upstream));
+    client.tick().unwrap();
+    let mut drained_events = 0;
+    while let Ok(event) = subscription.receiver.try_recv() {
+        drained_events += 1;
+        assert!(
+            !event_settled(&event),
+            "a ViewUpdate queued before fallback selection must not settle the subscription"
+        );
+    }
+    assert!(
+        drained_events > 0,
+        "the row-changing staged A update must publish an explicitly unsettled event"
+    );
+
+    seed(
+        &server,
+        "todos",
+        cells("fresh fallback-edge update", false, owner),
+    );
+    server.tick().unwrap();
+    client.tick().unwrap();
+    assert!(
+        event_settled(&block_on(subscription.next_raw()).unwrap()),
+        "after the selected edge detaches, the surviving edge may settle only with its own fresh response"
+    );
+
+    drop(old_upstream);
+}
+
+#[test]
+fn fallback_staged_cut_blocks_older_selected_confirmation() {
+    let schema = schema();
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let client = open_db(0xc1, client_author, &schema);
+    let query = Query::from("todos");
+    let update = |subscription, settled_through| SyncMessage::ViewUpdate {
+        subscription,
+        settled_through,
+        reset_result_set: true,
+        version_carriers: Vec::new(),
+        version_bundles: Vec::new(),
+        peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
+        result_member_adds: Vec::new(),
+        result_member_removes: Vec::new(),
+        terminal_operations: Vec::new(),
+        program_fact_adds: Vec::new(),
+        program_fact_removes: Vec::new(),
+    };
+
+    let (old_client_transport, mut old_authority) = duplex();
+    let _old_upstream = client.connect_upstream(old_client_transport);
+    let mut subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
+    let _ = block_on(subscription.next_raw()).unwrap();
+    client.tick().unwrap();
+    let old_key = loop {
+        if let SyncMessage::Subscribe(subscribe) = old_authority.try_recv().unwrap() {
+            break subscribe.subscription;
+        }
+    };
+    old_authority.send(update(old_key, GlobalSeq(1))).unwrap();
+    client.tick().unwrap();
+    assert!(subscription._state.borrow().settled);
+
+    let (new_client_transport, mut new_authority) = duplex();
+    let new_upstream = client.connect_upstream(new_client_transport);
+    client.tick().unwrap();
+    let new_key = loop {
+        if let SyncMessage::Subscribe(subscribe) = new_authority.try_recv().unwrap() {
+            break subscribe.subscription;
+        }
+    };
+    new_authority.send(update(new_key, GlobalSeq(1))).unwrap();
+    client.tick().unwrap();
+    assert!(subscription._state.borrow().settled);
+
+    old_authority.send(update(old_key, GlobalSeq(3))).unwrap();
+    assert!(client.detach_connection(&new_upstream));
+    client.tick().unwrap();
+    assert!(!subscription._state.borrow().settled);
+
+    old_authority.send(update(old_key, GlobalSeq(2))).unwrap();
+    client.tick().unwrap();
+    assert!(
+        !subscription._state.borrow().settled,
+        "eligible A@2 cannot receipt state after fallback-staged A@3"
+    );
+    old_authority.send(update(old_key, GlobalSeq(3))).unwrap();
+    client.tick().unwrap();
+    assert!(subscription._state.borrow().settled);
+}
+
+#[test]
+fn fallback_replay_of_preselection_row_repair_cannot_settle() {
+    let schema = schema();
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let client = open_db(0xc1, client_author, &schema);
+    let query = Query::from("todos");
+
+    let (old_client_transport, mut old_authority_transport) = duplex();
+    let old_upstream = client.connect_upstream(old_client_transport);
+    let mut subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
+    let _ = block_on(subscription.next_raw()).unwrap();
+    client.tick().unwrap();
+    let old_subscription = loop {
+        match old_authority_transport.try_recv().unwrap() {
+            SyncMessage::Subscribe(subscribe) => break subscribe.subscription,
+            _ => continue,
+        }
+    };
+    let view_update = |subscription, settled_through| SyncMessage::ViewUpdate {
+        subscription,
+        settled_through,
+        reset_result_set: true,
+        version_carriers: Vec::new(),
+        version_bundles: Vec::new(),
+        peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
+        result_member_adds: Vec::new(),
+        result_member_removes: Vec::new(),
+        terminal_operations: Vec::new(),
+        program_fact_adds: Vec::new(),
+        program_fact_removes: Vec::new(),
+    };
+    old_authority_transport
+        .send(view_update(old_subscription, GlobalSeq(1)))
+        .unwrap();
+    client.tick().unwrap();
+    assert!(subscription._state.borrow().settled);
+
+    let (new_client_transport, mut new_authority_transport) = duplex();
+    let new_upstream = client.connect_upstream(new_client_transport);
+    client.tick().unwrap();
+    let new_subscription = loop {
+        match new_authority_transport.try_recv().unwrap() {
+            SyncMessage::Subscribe(subscribe) => break subscribe.subscription,
+            _ => continue,
+        }
+    };
+    new_authority_transport
+        .send(view_update(new_subscription, GlobalSeq(2)))
+        .unwrap();
+    client.tick().unwrap();
+    assert!(subscription._state.borrow().settled);
+
+    let mut old = old_upstream.borrow_mut();
+    let ConnectionLink::Upstream {
+        pending_row_version_repairs,
+        ..
+    } = &mut old.link
+    else {
+        unreachable!("expected old upstream")
+    };
+    pending_row_version_repairs.push_back(PendingRowVersionRepair {
+        requests: Vec::new(),
+        update: view_update(old_subscription, GlobalSeq(3)),
+        authority_receipt_eligible: true,
+    });
+    drop(old);
+
+    assert!(client.detach_connection(&new_upstream));
+    old_authority_transport
+        .send(SyncMessage::RowVersionPayloads {
+            version_bundles: Vec::new(),
+        })
+        .unwrap();
+    client.tick().unwrap();
+    assert!(
+        !subscription._state.borrow().settled,
+        "a repair ViewUpdate deferred before fallback must not become A's receipt"
+    );
+
+    old_authority_transport
+        .send(view_update(old_subscription, GlobalSeq(4)))
+        .unwrap();
+    client.tick().unwrap();
+    assert!(subscription._state.borrow().settled);
+}
+
+#[test]
+fn fallback_replay_of_preselection_branch_view_cannot_settle() {
+    let schema = schema();
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let client = open_db(0xc1, client_author, &schema);
+    let query = Query::from("todos");
+
+    let (old_client_transport, mut old_authority_transport) = duplex();
+    let old_upstream = client.connect_upstream(old_client_transport);
+    let mut subscription = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
+    let _ = block_on(subscription.next_raw()).unwrap();
+    client.tick().unwrap();
+    let old_subscription = loop {
+        match old_authority_transport.try_recv().unwrap() {
+            SyncMessage::Subscribe(subscribe) => break subscribe.subscription,
+            _ => continue,
+        }
+    };
+    let view_update = |subscription, settled_through| SyncMessage::ViewUpdate {
+        subscription,
+        settled_through,
+        reset_result_set: true,
+        version_carriers: Vec::new(),
+        version_bundles: Vec::new(),
+        peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
+        result_member_adds: Vec::new(),
+        result_member_removes: Vec::new(),
+        terminal_operations: Vec::new(),
+        program_fact_adds: Vec::new(),
+        program_fact_removes: Vec::new(),
+    };
+    old_authority_transport
+        .send(view_update(old_subscription, GlobalSeq(1)))
+        .unwrap();
+    client.tick().unwrap();
+
+    let (new_client_transport, mut new_authority_transport) = duplex();
+    let new_upstream = client.connect_upstream(new_client_transport);
+    client.tick().unwrap();
+    let new_subscription = loop {
+        match new_authority_transport.try_recv().unwrap() {
+            SyncMessage::Subscribe(subscribe) => break subscribe.subscription,
+            _ => continue,
+        }
+    };
+    new_authority_transport
+        .send(view_update(new_subscription, GlobalSeq(2)))
+        .unwrap();
+    client.tick().unwrap();
+    assert!(subscription._state.borrow().settled);
+
+    let branch = BranchId::from_bytes([0x42; 16]);
+    let mut old = old_upstream.borrow_mut();
+    let ConnectionLink::Upstream {
+        pending_branch_view_updates,
+        ..
+    } = &mut old.link
+    else {
+        unreachable!("expected old upstream")
+    };
+    pending_branch_view_updates
+        .entry(branch)
+        .or_default()
+        .push(PendingBranchViewUpdate {
+            message: view_update(old_subscription, GlobalSeq(3)),
+            authority_receipt_eligible: true,
+        });
+    drop(old);
+
+    assert!(client.detach_connection(&new_upstream));
+    old_authority_transport
+        .send(SyncMessage::BranchMetadata(BranchMetadata {
+            branch_id: branch,
+            created_by: client_author,
+            parent: None,
+            base: None,
+            open: true,
+        }))
+        .unwrap();
+    client.tick().unwrap();
+    assert!(
+        !subscription._state.borrow().settled,
+        "a branch ViewUpdate parked before fallback must not become A's receipt"
+    );
+
+    old_authority_transport
+        .send(view_update(old_subscription, GlobalSeq(4)))
+        .unwrap();
+    client.tick().unwrap();
+    assert!(subscription._state.borrow().settled);
+}
+
+#[test]
+fn restarted_client_reuses_durable_cursor_but_waits_for_current_authority_receipt() {
+    let schema = schema();
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let owner = AuthorId::from_bytes([0xa1; 16]);
+    let client_node = NodeUuid::from_bytes([0xc1; 16]);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    seed(&server, "todos", cells("durable cache", false, owner));
+    let dir = tempfile::tempdir().unwrap();
+    let cfs = schema.column_families();
+    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+
+    let storage = RocksDbStorage::open(dir.path(), &refs).unwrap();
+    let client = block_on(Db::open(DbConfig {
+        schema: schema.clone(),
+        storage,
+        identity: DbIdentity {
+            node: client_node,
+            author: client_author,
+        },
+        id_source: None,
+    }))
+    .unwrap();
+    let (first_client_transport, first_server_transport) = duplex();
+    let first_upstream = client.connect_upstream(first_client_transport);
+    let first_subscriber = server.accept_subscriber(first_server_transport, client_author);
+    let query = Query::from("todos");
+    let mut first_subscription =
+        prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
+    assert!(!event_settled(
+        &block_on(first_subscription.next_raw()).unwrap()
+    ));
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+    assert!(event_settled(
+        &block_on(first_subscription.next_raw()).unwrap()
+    ));
+    drop(first_subscription);
+    assert!(client.detach_connection(&first_upstream));
+    assert!(server.server.detach_connection(&first_subscriber));
+    drop(first_upstream);
+    drop(first_subscriber);
+    client.close().unwrap();
+    drop(client);
+
+    let storage = RocksDbStorage::open(dir.path(), &refs).unwrap();
+    let reopened = block_on(Db::open(DbConfig {
+        schema,
+        storage,
+        identity: DbIdentity {
+            node: client_node,
+            author: client_author,
+        },
+        id_source: None,
+    }))
+    .unwrap();
+    let mut subscription = prepared_subscribe(&reopened, &query, global_subscribe_opts()).unwrap();
+    assert!(
+        !event_settled(&block_on(subscription.next_raw()).unwrap()),
+        "an offline Edge/Global subscription must expose durable cached rows as unsettled"
+    );
+    let (reopened_client_transport, reopened_server_transport) = duplex();
+    let _reopened_upstream = reopened.connect_upstream(reopened_client_transport);
+    let _reopened_subscriber = server.accept_subscriber(reopened_server_transport, client_author);
+    reopened.tick().unwrap();
+    server.tick().unwrap();
+    reopened.tick().unwrap();
+    assert!(event_settled(&block_on(subscription.next_raw()).unwrap()));
+}
+
+#[test]
 fn one_shot_propagated_query_records_empty_remote_coverage() {
     let schema = schema();
     let client_author = AuthorId::from_bytes([0xc1; 16]);
@@ -11230,6 +11815,120 @@ fn one_shot_propagated_query_records_empty_remote_coverage() {
 
     assert!(client.query_attachment_is_covered(&attachment));
     assert!(prepared_read(&client, &query).is_empty());
+    client.detach_query(attachment);
+}
+
+#[test]
+fn one_shot_edge_global_coverage_requires_current_authority_after_reconnect() {
+    let schema = schema();
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let client = open_db(0xc1, client_author, &schema);
+
+    let (first_client_transport, first_server_transport) = duplex();
+    let first_upstream = client.connect_upstream(first_client_transport);
+    let _first_subscriber = server.accept_subscriber(first_server_transport, client_author);
+    let query = Query::from("todos");
+    let prepared = prepared(&client, &query);
+    let attachment = client
+        .attach_query_with_opts(&prepared, global_subscribe_opts())
+        .unwrap();
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+    assert!(client.query_attachment_is_covered(&attachment));
+
+    assert!(client.detach_connection(&first_upstream));
+    assert!(
+        !client.query_attachment_is_covered(&attachment),
+        "disconnect must invalidate an Edge/Global one-shot coverage witness"
+    );
+
+    let (second_client_transport, second_server_transport) = duplex();
+    let _second_upstream = client.connect_upstream(second_client_transport);
+    let _second_subscriber = server.accept_subscriber(second_server_transport, client_author);
+    assert!(
+        !client.query_attachment_is_covered(&attachment),
+        "reconnect must wait for the newly selected authority's response"
+    );
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+    let (binding_view, required_after) = attachment.required_after[0];
+    assert!(
+        client
+            .node
+            .node
+            .borrow()
+            .applied_view_update_generation(binding_view)
+            > required_after,
+        "the reconnect response must advance the attachment generation"
+    );
+    let receipt_views = client
+        .node
+        .active_authority_view_receipts
+        .borrow()
+        .as_ref()
+        .map(|receipts| receipts.binding_views.clone())
+        .unwrap_or_default();
+    assert!(
+        receipt_views.contains(&binding_view),
+        "the reconnect response must establish the selected authority receipt: expected {binding_view:?}, got {receipt_views:?}"
+    );
+    assert!(client.query_attachment_is_covered(&attachment));
+    client.detach_query(attachment);
+}
+
+#[test]
+fn one_shot_local_coverage_does_not_require_authority_continuity() {
+    let schema = schema();
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let client = open_db(0xc1, client_author, &schema);
+    client.node.set_non_durable_client();
+    let (client_transport, mut authority_transport) = duplex();
+    let upstream = client.connect_upstream(client_transport);
+    let query = Query::from("todos");
+    let prepared = prepared(&client, &query);
+    let attachment = client
+        .attach_query_with_opts(
+            &prepared,
+            ReadOpts {
+                tier: DurabilityTier::Local,
+                propagation: Propagation::LocalOnly,
+                ..ReadOpts::default()
+            },
+        )
+        .unwrap();
+    client.tick().unwrap();
+    let subscription = loop {
+        match authority_transport.try_recv().unwrap() {
+            SyncMessage::Subscribe(subscribe) => break subscribe.subscription,
+            _ => continue,
+        }
+    };
+    authority_transport
+        .send(SyncMessage::ViewUpdate {
+            subscription,
+            settled_through: GlobalSeq(1),
+            reset_result_set: true,
+            version_carriers: Vec::new(),
+            version_bundles: Vec::new(),
+            peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
+            result_member_adds: Vec::new(),
+            result_member_removes: Vec::new(),
+            terminal_operations: Vec::new(),
+            program_fact_adds: Vec::new(),
+            program_fact_removes: Vec::new(),
+        })
+        .unwrap();
+    client.tick().unwrap();
+    assert!(client.query_attachment_is_covered(&attachment));
+
+    assert!(client.detach_connection(&upstream));
+    assert!(
+        client.query_attachment_is_covered(&attachment),
+        "Local coverage remains process-local and does not depend on authority continuity"
+    );
     client.detach_query(attachment);
 }
 
@@ -11273,6 +11972,174 @@ fn one_shot_propagated_query_attaches_fresh_usage_subscription_for_covered_bindi
     assert_eq!(prepared_read(&client, &query).len(), 2);
     client.detach_query(first_attachment);
     client.detach_query(second_attachment);
+}
+
+#[test]
+fn one_shot_borrowed_stream_coverage_stays_pinned_until_query_detach() {
+    let schema = schema();
+    let owner = AuthorId::from_bytes([0xa1; 16]);
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let client = open_db(0xc1, client_author, &schema);
+    seed(&server, "todos", cells("pinned", false, owner));
+    let (client_transport, server_transport) = duplex();
+    let upstream = client.connect_upstream(client_transport);
+    let subscriber = server.accept_subscriber(server_transport, client_author);
+    let query = Query::from("todos");
+    let prepared = prepared(&client, &query);
+    let stream = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
+    let borrowed_attachment = client
+        .attach_query_with_opts(&prepared, global_subscribe_opts())
+        .unwrap();
+    let owned_attachment = client
+        .attach_query_with_opts(&prepared, global_subscribe_opts())
+        .unwrap();
+
+    client.detach_query(owned_attachment);
+    let stream_two = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
+    drop(stream_two);
+
+    drop(stream);
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+    assert!(
+        client.query_attachment_is_covered(&borrowed_attachment),
+        "dropping the stream must not strand its borrowing one-shot query"
+    );
+    assert_eq!(prepared_read(&client, &query).len(), 1);
+
+    client.detach_query(borrowed_attachment);
+    client.tick().unwrap();
+    server.tick().unwrap();
+    {
+        let subscriber_ref = subscriber.borrow();
+        let ConnectionLink::Subscriber { served, .. } = &subscriber_ref.link else {
+            panic!("expected subscriber connection");
+        };
+        assert!(served.is_empty(), "final query detach must unsubscribe");
+    }
+    assert!(client.node.upstream_coverage_refcounts.borrow().is_empty());
+    assert!(client.node.query_coverage_registrations.borrow().is_empty());
+
+    let query_first = client
+        .attach_query_with_opts(&prepared, global_subscribe_opts())
+        .unwrap();
+    let mut borrowing_stream =
+        prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
+    let _ = block_on(borrowing_stream.next_raw()).unwrap();
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+    assert!(borrowing_stream._state.borrow().settled);
+    client.detach_query(query_first);
+    assert!(client.detach_connection(&upstream));
+    assert!(server.server.detach_connection(&subscriber));
+    let (reconnected_client_transport, reconnected_server_transport) = duplex();
+    let _reconnected_upstream = client.connect_upstream(reconnected_client_transport);
+    let reconnected_subscriber =
+        server.accept_subscriber(reconnected_server_transport, client_author);
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+    assert!(
+        borrowing_stream._state.borrow().settled,
+        "detaching the owning query must not unsubscribe its live borrowing stream"
+    );
+    drop(borrowing_stream);
+    client.tick().unwrap();
+    server.tick().unwrap();
+    let subscriber_ref = reconnected_subscriber.borrow();
+    let ConnectionLink::Subscriber { served, .. } = &subscriber_ref.link else {
+        panic!("expected subscriber connection");
+    };
+    assert!(served.is_empty(), "final stream drop must unsubscribe");
+    assert!(client.node.upstream_coverage_refcounts.borrow().is_empty());
+    assert!(client.node.query_coverage_registrations.borrow().is_empty());
+}
+
+#[test]
+fn reconnect_replays_each_distinct_usage_subscription_key() {
+    let schema = schema();
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let client = open_db(0xc1, client_author, &schema);
+    let query = Query::from("todos");
+    let prepared = prepared(&client, &query);
+
+    let (first_client_transport, first_server_transport) = duplex();
+    let first_upstream = client.connect_upstream(first_client_transport);
+    let first_subscriber = server.accept_subscriber(first_server_transport, client_author);
+    let stream = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
+    let borrowed = client
+        .attach_query_with_opts(&prepared, global_subscribe_opts())
+        .unwrap();
+    let owned = client
+        .attach_query_with_opts(&prepared, global_subscribe_opts())
+        .unwrap();
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+    assert!(client.detach_connection(&first_upstream));
+    assert!(server.server.detach_connection(&first_subscriber));
+
+    let (second_client_transport, second_server_transport) = duplex();
+    let second_upstream = client.connect_upstream(second_client_transport);
+    let second_subscriber = server.accept_subscriber(second_server_transport, client_author);
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+    let served_len = match &second_subscriber.borrow().link {
+        ConnectionLink::Subscriber { served, .. } => served.len(),
+        _ => panic!("expected subscriber connection"),
+    };
+    assert_eq!(served_len, 2, "reconnect must replay S/q1 and distinct q2");
+
+    client.detach_query(owned);
+    client.tick().unwrap();
+    server.tick().unwrap();
+    let served_len = match &second_subscriber.borrow().link {
+        ConnectionLink::Subscriber { served, .. } => served.len(),
+        _ => panic!("expected subscriber connection"),
+    };
+    assert_eq!(served_len, 1);
+    drop(stream);
+    client.detach_query(borrowed);
+    client.tick().unwrap();
+    server.tick().unwrap();
+    let served_len = match &second_subscriber.borrow().link {
+        ConnectionLink::Subscriber { served, .. } => served.len(),
+        _ => panic!("expected subscriber connection"),
+    };
+    assert_eq!(served_len, 0);
+    assert!(client.detach_connection(&second_upstream));
+    assert!(server.server.detach_connection(&second_subscriber));
+
+    let first_query = client
+        .attach_query_with_opts(&prepared, global_subscribe_opts())
+        .unwrap();
+    let second_query = client
+        .attach_query_with_opts(&prepared, global_subscribe_opts())
+        .unwrap();
+    let (third_client_transport, third_server_transport) = duplex();
+    let _third_upstream = client.connect_upstream(third_client_transport);
+    let third_subscriber = server.accept_subscriber(third_server_transport, client_author);
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.detach_query(second_query);
+    client.tick().unwrap();
+    assert!(client.query_attachment_is_covered(&first_query));
+    server.tick().unwrap();
+    client.detach_query(first_query);
+    client.tick().unwrap();
+    server.tick().unwrap();
+    let served_len = match &third_subscriber.borrow().link {
+        ConnectionLink::Subscriber { served, .. } => served.len(),
+        _ => panic!("expected subscriber connection"),
+    };
+    assert_eq!(served_len, 0);
+    assert!(client.node.upstream_coverage_refcounts.borrow().is_empty());
+    assert!(client.node.query_coverage_registrations.borrow().is_empty());
 }
 
 #[test]
@@ -12101,6 +12968,16 @@ fn authoritative_reset_with_missing_payload_falls_back_to_refresh() {
     let opts = global_subscribe_opts();
     let mut subscription = block_on(client.subscribe(&prepared, opts.clone())).unwrap();
     assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+    assert!(
+        event_settled(&block_on(subscription.next_raw()).unwrap()),
+        "the injected reset test needs a real current-connection authority receipt"
+    );
+    // Keep the reset-fallback assertion focused on the resulting publication,
+    // while retaining the real connection receipt required by Edge/Global.
+    subscription._state.borrow_mut().settled = false;
 
     let missing_tx = TxId::new(
         TxTime(116_898_697_390_129_152),
@@ -12230,7 +13107,10 @@ fn authoritative_reset_skips_stale_member_without_falling_back() {
         panic!("expected subscription delta");
     };
     assert!(reset);
-    assert!(settled);
+    assert!(
+        !settled,
+        "an injected durable reset is not a fresh current-connection ViewUpdate receipt"
+    );
     assert!(updated.is_empty());
     assert!(removed.is_empty());
     assert_eq!(added.len(), 1);

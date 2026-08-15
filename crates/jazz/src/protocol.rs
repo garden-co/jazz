@@ -123,9 +123,12 @@ pub enum SyncMessage {
     ViewUpdate {
         /// Query binding result set addressed by this update.
         subscription: SubscriptionKey,
-        /// Serving node's contiguous applied global watermark when this update
-        /// was assembled. The update reflects every global change at or below
-        /// this position for the addressed view.
+        /// Core-assigned `GlobalSeq` through which the canonical binding view
+        /// was evaluated. It is durable known-state evidence, reusable after
+        /// reconnecting to an edge serving the same authoritative database
+        /// lineage for payload dedup/repair; it is not evidence that an
+        /// upstream connection is currently live and cannot alone settle a
+        /// subscription.
         settled_through: GlobalSeq,
         /// Whether receiver result_set should be reset first.
         reset_result_set: bool,
@@ -367,7 +370,9 @@ pub struct AuthorizationScopeReceipt {
     pub claims_revision: u64,
     /// Policy/schema epoch used to compile the scope.
     pub policy_epoch: u64,
-    /// Complete authoritative history cut reflected by the support view.
+    /// Complete authoritative history cut reflected by the support view. Like
+    /// other `settled_through` cursors, this is durable history evidence; the
+    /// separately scoped authority epoch supplies connection liveness.
     pub settled_through: GlobalSeq,
     /// Authority authorization generation paired with that cut.
     pub authorization_progress: u64,
@@ -1675,7 +1680,8 @@ pub enum KnownStateDeclaration {
     Fast {
         /// Completeness class this declaration claims.
         completeness: KnownStateCompleteness,
-        /// Server-stamped settled-through position being echoed.
+        /// Durable known-state cursor being echoed for payload dedup/repair;
+        /// never an active-authority settlement receipt.
         position: GlobalSeq,
     },
     /// Fast declaration qualified by the authorization state under which the
@@ -1683,7 +1689,8 @@ pub enum KnownStateDeclaration {
     FastWithAuthorizationProgress {
         /// Completeness class this declaration claims.
         completeness: KnownStateCompleteness,
-        /// Server-stamped settled-through position being echoed.
+        /// Durable known-state cursor being echoed for payload dedup/repair;
+        /// never an active-authority settlement receipt.
         position: GlobalSeq,
         /// Server-stamped authorization generation echoed by the receiver.
         authorization_progress: u64,

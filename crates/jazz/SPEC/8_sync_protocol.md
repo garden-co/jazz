@@ -34,6 +34,7 @@ Invariant digest:
 - `INV-SYNC-26`: A receiver detecting a referenced version without its body MUST be able to request exactly those `(table, row_uuid, tx_time, tx_node_id)` payloads, and the server MUST serve them subject to ordinary read policy. The repair vocabulary and server/client repair helpers are implemented and activated for declared known-state subscriptions.
 - `INV-SYNC-27`: A fast known-state declaration MUST only be made for contiguously applied, unevicted served streams; any local eviction touching stored row-version bodies invalidates persisted fast declarations before another declaration can be made.
 - `INV-SYNC-29`: A fast known-state declaration carrying authorization progress may suppress a reset for a pre-cursor membership difference only when its server-stamped authorization-progress token matches the serving peer's current token for that reader and canonical binding view. `crates/jazz/src/peer.rs::tests::fast_authorization_progress_bounds_membership_resets` enforces both bounds.
+- `INV-SYNC-30`: `settled_through` is a durable canonical-view history cursor for known-state payload dedup and repair, not a subscription or one-shot coverage receipt. Edge/Global settlement and coverage additionally require a fresh confirming `ViewUpdate` from the selected continuously active upstream connection; disconnect, restart, edge switch, or any update from a nonselected upstream invalidates all selected-authority receipts immediately unless an exact recomputation closure is proven.
 - `INV-SYNC-28`: Structured-output wire v6 MUST carry authoritative terminal resets and typed root/path edits in atomic logical view updates, fragment only at the transport boundary, and provide no partial semantic-update path.
 - `INV-TX-2`: Committing an exclusive transaction MUST store the commit locally as `Fate::Pending` with `DurabilityTier::Local` and emit exactly one `SyncMessage::CommitUnit`.
 - `INV-TX-3`: A commit unit whose Transaction.ntotalwrites does not equal the delivered version count MUST be rejected by the fate authority as RejectionReason::MalformedCommit(...)...
@@ -464,12 +465,25 @@ expressible incremental repair and resets only if that repair cannot be encoded
 as normal additions/removals. Conversely, an authorization-token mismatch with
 only post-cursor additions is reconstructible and therefore must not reset.
 
-Every `ViewUpdate` carries `settled_through`, the serving node's applied global
-watermark when the update was assembled. Its meaning is per binding view: this
-update reflects every global change at or before that position for the served
-view. A stale cursor can under-claim knowledge and cause extra bodies to ship;
+Every `ViewUpdate` carries `settled_through`, the core-assigned global cursor
+through which the canonical binding view was evaluated. Its meaning is per
+binding view: this update reflects every global change at or before that
+position for the served view. It may be persisted and reused across reconnects
+or edges serving the same authoritative database lineage for known-state payload
+dedup and repair. It is not an active-connection receipt: a subscription is
+settled, and a usage-site one-shot attachment is remotely covered, only after
+the selected continuously live upstream connection has sent a fresh confirming
+`ViewUpdate`. Disconnect, client restart, edge switch, or applying any view
+update from a nonselected upstream immediately retires all selected-authority receipts and
+makes cached rows unsettled/local until the selected authority reconfirms. A stale cursor can
+under-claim knowledge and cause extra bodies to ship;
 it cannot over-claim because rows entering the view after `p` have membership
 settle positions after `p`, and therefore do not satisfy the skip rule below.
+After a nonselected update at cut `p`, a selected link's queued confirmation at
+an earlier cut cannot restore settlement; its confirming `settled_through` must
+reach at least `p`. The same floor applies to fallback-staged or deferred
+updates marked ineligible for an authority receipt, even if their link becomes
+selected before the update is finally applied.
 
 The serving side's skip rule is one comparison (`INV-SYNC-24`): a version body
 may be omitted iff the receiver's membership in it is believed — "row in the
