@@ -26,7 +26,7 @@ pub struct StoredPage {
     pub bytes: Vec<u8>,
 }
 
-/// The complete atomic persistence unit for a dirty-page checkpoint.
+/// The complete persistence unit for a dirty-page checkpoint.
 ///
 /// IndexedDB makes these records transaction-atomic.  The experimental OPFS
 /// adapter writes and flushes the same records but does **not** claim multi-page
@@ -57,6 +57,8 @@ pub trait AsyncPageStore {
     /// exactly to `page_ids`; a missing page is an I/O/corruption error.
     async fn read_pages(&mut self, page_ids: &[u64]) -> Result<Vec<StoredPage>, BTreeError>;
 
-    /// Atomically persists an incremental dirty-page commit.
+    /// Persists an incremental dirty-page commit. IndexedDB provides
+    /// transaction atomicity; other stores need only meet the documented
+    /// awaited visibility and clean-reopen boundary.
     async fn commit(&mut self, commit: PageStoreCommit) -> Result<(), BTreeError>;
 }

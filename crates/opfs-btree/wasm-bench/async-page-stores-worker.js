@@ -7,7 +7,6 @@ const PAGE_SIZE = 4096,
   KEY_COUNT = 4096,
   CHECKPOINT_EVERY = 256;
 const RANGE_ROWS = 32,
-  WARM_WORKING_SET = 16,
   MIN_PHASE_MS = 100;
 const encoder = new TextEncoder();
 const key = (i) => encoder.encode(`k${String(i).padStart(8, "0")}`);
@@ -94,16 +93,14 @@ async function benchmark(Store, backend, size, repeat) {
   let store, tree;
   try {
     ({ store, tree } = await preparedTree(Store, `${name}-reads`, size));
-    // Populate the small working set before timing; this is the explicitly
-    // cache-warm counterpart to the clean-reopen, cache-cold scan below.
-    for (let i = 0; i < WARM_WORKING_SET; i++) {
-      const id = random[i];
-      if (!(await tree.get(key(id)))) throw new Error(`missing warmup key ${id}`);
-    }
-    rows.warm_random_get_16 = await measure(async () => {
+    // One root-to-leaf path is at most the three-page cache for this data
+    // shape. Preload exactly that path, then repeatedly read one key, so this
+    // row is genuinely cache-hot rather than a shuffled multi-leaf workload.
+    const hotKey = random[0];
+    if (!(await tree.get(key(hotKey)))) throw new Error(`missing hot key ${hotKey}`);
+    rows.warm_single_key_get = await measure(async () => {
       for (let i = 0; i < KEY_COUNT; i++) {
-        const id = random[i % WARM_WORKING_SET];
-        if (!(await tree.get(key(id)))) throw new Error(`missing warm key ${id}`);
+        if (!(await tree.get(key(hotKey)))) throw new Error(`missing hot key ${hotKey}`);
       }
       return KEY_COUNT;
     });
@@ -138,7 +135,7 @@ async function benchmark(Store, backend, size, repeat) {
         else if (!(await tree.get(key(id)))) throw new Error(`missing mixed key ${id}`);
         if ((i + 1) % CHECKPOINT_EVERY === 0) await tree.checkpoint();
       }
-      await tree.checkpoint();
+      if (KEY_COUNT % CHECKPOINT_EVERY !== 0) await tree.checkpoint();
       return KEY_COUNT;
     });
   } finally {
@@ -176,10 +173,43 @@ async function pageStoreParity() {
   }
   return output;
 }
+async function treeVisibilityParity() {
+  const names = {
+    idb: `tree-visibility-idb-${Date.now()}-${Math.random()}`,
+    opfs: `tree-visibility-opfs-${Date.now()}-${Math.random()}`,
+  };
+  const output = {};
+  for (const [backend, Store] of [
+    ["idb", IndexedDbPageStore],
+    ["opfs", OpfsPageStore],
+  ]) {
+    const store = await Store.open(names[backend], PAGE_SIZE);
+    let tree;
+    try {
+      tree = await WasmAsyncBTree.open(store, PAGE_SIZE, CACHE_PAGES);
+      const written = new Uint8Array([123, 45]);
+      await tree.put(key(7), written);
+      const immediate = await tree.get(key(7));
+      if (!immediate || immediate[0] !== 123 || immediate[1] !== 45)
+        throw new Error(`${backend} tree write was not immediately visible`);
+      await tree.checkpoint();
+      tree.free();
+      tree = await WasmAsyncBTree.open(store, PAGE_SIZE, CACHE_PAGES);
+      const reopened = await tree.get(key(7));
+      if (!reopened || reopened[0] !== 123 || reopened[1] !== 45)
+        throw new Error(`${backend} tree write did not survive reopen`);
+      output[backend] = [immediate[0], immediate[1], reopened[0], reopened[1]];
+    } finally {
+      await closeAndDestroy(Store, names[backend], tree, store);
+    }
+  }
+  return output;
+}
 self.onmessage = async () => {
   try {
     await init();
     const parity = await pageStoreParity(),
+      tree_visibility = await treeVisibilityParity(),
       bench = {};
     for (const size of [32, 256]) {
       bench[size] = { idb: [], opfs: [] };
@@ -201,6 +231,7 @@ self.onmessage = async () => {
     self.postMessage({
       out: {
         parity,
+        tree_visibility,
         bench,
         config: {
           page_size: PAGE_SIZE,
@@ -209,6 +240,8 @@ self.onmessage = async () => {
           checkpoint_every: CHECKPOINT_EVERY,
           range_rows: RANGE_ROWS,
           min_phase_ms: MIN_PHASE_MS,
+          user_agent: self.navigator.userAgent,
+          hardware_concurrency: self.navigator.hardwareConcurrency,
         },
       },
     });
