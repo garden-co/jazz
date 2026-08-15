@@ -24,10 +24,7 @@ async fn call(target: &JsValue, name: &str, arg: Option<JsValue>) -> Result<JsVa
     JsFuture::from(p).await.map_err(js_err)
 }
 fn js_err(e: JsValue) -> BTreeError {
-    BTreeError::Io(format!(
-        "page store: {}",
-        e.as_string().unwrap_or_else(|| "JS exception".into())
-    ))
+    BTreeError::Io(format!("page store: {:?}", e))
 }
 impl AsyncPageStore for JsStore {
     async fn metadata(&mut self) -> Result<Option<PageStoreMetadata>, BTreeError> {

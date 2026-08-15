@@ -112,7 +112,7 @@ export class OpfsPageStore {
   async commit({ metadata, writes, deletedPageIds: _deletedPageIds }) {
     this.pageSize = metadata.pageSize;
     for (const { pageId, bytes } of writes)
-      this.handle.write(bytes, { at: pageId * metadata.pageSize });
+      this.handle.write(new Uint8Array(bytes), { at: pageId * metadata.pageSize });
     this.handle.truncate(metadata.logicalLen);
     // The async API has the same commit visibility boundary as IndexedDB. The
     // sync handle's flush supplies a relaxed-but-complete persistence boundary.

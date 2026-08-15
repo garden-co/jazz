@@ -19,8 +19,10 @@ self.onmessage = async () => { try {
   for (let i=0;i<300;i++) await tree.put(new TextEncoder().encode("k"+String(i).padStart(4,"0")),new Uint8Array([i&255]));
   const value = await tree.get(new TextEncoder().encode("k0123")); await tree.checkpoint(); tree.free();
   const reopened = await WasmAsyncBTree.open(parityStore,pageSize,3); const reopenedValue = await reopened.get(new TextEncoder().encode("k0123")); reopened.free(); parityStore.close(); await IndexedDbPageStore.destroy(parityName);
-  out.parity=[value[0],reopenedValue[0]]; await IndexedDbPageStore.destroy(idbName); await OpfsPageStore.destroy(opfsName); self.postMessage({out});
-} catch (error) { self.postMessage({error: error.message || String(error)}); } };`;
+  out.parity=[value[0],reopenedValue[0]];
+  async function bench(Store, prefix, size) { const store=await Store.open(prefix+Date.now()+Math.random(), pageSize); const tree=await WasmAsyncBTree.open(store,pageSize,3); const enc=new TextEncoder(), val=(i)=>new Uint8Array(size).fill(i&255), key=(i)=>enc.encode("k"+String(i).padStart(4,"0")); const n=200, rows={}; let t=performance.now(); for(let i=0;i<n;i++)await tree.put(key(i),val(i)); rows.seq_put=n/(performance.now()-t)*1000; t=performance.now(); for(let i=n-1;i>=0;i--)await tree.put(key(i),val(i)); rows.rand_put=n/(performance.now()-t)*1000; t=performance.now(); for(let i=0;i<n;i++)await tree.get(key(i)); rows.seq_get=n/(performance.now()-t)*1000; t=performance.now(); for(let i=n-1;i>=0;i--)await tree.get(key(i)); rows.rand_get=n/(performance.now()-t)*1000; t=performance.now(); for(let i=0;i<n;i++){if(i%10)await tree.get(key(i));else await tree.put(key(i),val(i+1));} rows.mixed=n/(performance.now()-t)*1000; t=performance.now(); for(let i=0;i<n;i++)await tree.range(key(i),key(Math.min(n,i+32)),32); rows.range=n/(performance.now()-t)*1000; t=performance.now(); await tree.checkpoint(); tree.free(); const reopened=await WasmAsyncBTree.open(store,pageSize,3); await reopened.get(key(42)); rows.checkpoint_reopen=1/(performance.now()-t)*1000; reopened.free(); store.close(); await Store.destroy(prefix+Date.now()+Math.random()).catch(()=>{}); return rows; }
+  out.bench={}; for(const size of [32,256]) { out.bench[size]={idb:[],opfs:[]}; for(let r=0;r<3;r++){out.bench[size].idb.push(await bench(IndexedDbPageStore,"b-idb-",size));out.bench[size].opfs.push(await bench(OpfsPageStore,"b-opfs-",size));} } await IndexedDbPageStore.destroy(idbName); await OpfsPageStore.destroy(opfsName); self.postMessage({out});
+} catch (error) { self.postMessage({error: (error && (error.stack || error.message)) || String(error)}); } };`;
   const server = http.createServer((req, res) => {
     if (req.url === "/async-page-stores.js") { res.writeHead(200, { "Content-Type": "text/javascript" }); fs.createReadStream(source).pipe(res); }
     else if (req.url.startsWith("/pkg/")) { const file=path.join(__dirname,"pkg",req.url.slice(5)); res.writeHead(200,{"Content-Type":file.endsWith(".wasm")?"application/wasm":"text/javascript"}); fs.createReadStream(file).pipe(res); }
@@ -32,7 +34,7 @@ self.onmessage = async () => { try {
   try {
     const page = await context.newPage(); await page.goto(`http://127.0.0.1:${server.address().port}`);
     const result = await page.evaluate(() => new Promise((resolve, reject) => { const worker = new Worker("/store-worker.js", {type:"module"}); worker.onmessage = (e) => e.data.error ? reject(new Error(e.data.error)) : resolve(e.data.out); worker.onerror = () => reject(new Error("store worker failed")); worker.postMessage({}); }));
-    if (JSON.stringify(result) !== JSON.stringify({ idb: [{ pageSize: 4096, logicalLen: 12288 }, 2], opfs: [{ pageSize: 4096, logicalLen: 12288 }, 2], immediate: [2, 2], parity: [123,123] })) throw new Error(JSON.stringify(result));
+    if (JSON.stringify({idb:result.idb,opfs:result.opfs,immediate:result.immediate,parity:result.parity}) !== JSON.stringify({ idb: [{ pageSize: 4096, logicalLen: 12288 }, 2], opfs: [{ pageSize: 4096, logicalLen: 12288 }, 2], immediate: [2, 2], parity: [123,123] })) throw new Error(JSON.stringify(result)); console.log(JSON.stringify(result.bench));
     console.log("async page stores: atomic page commit, read-after-commit, reopen passed");
   } finally { await context.close(); await browser.close(); await new Promise((resolve) => server.close(resolve)); }
 }
