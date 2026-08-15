@@ -32,7 +32,10 @@ runs:
 
     - name: Install workspace dependencies
       shell: bash
-      run: pnpm install --frozen-lockfile
+      run: |
+        set -euo pipefail
+        git config --global --add safe.directory "${GITHUB_WORKSPACE}"
+        pnpm install --frozen-lockfile
 
     - name: Cache Rust build artifacts
       uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
