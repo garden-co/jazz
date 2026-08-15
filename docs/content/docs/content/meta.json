@@ -1,4 +1,4 @@
 {
   "title": "Content",
-  "pages": ["overview", "text", "stream", "file"]
+  "pages": ["overview", "text", "stream", "file", "structured-json"]
 }

@@ -2073,7 +2073,7 @@ mod tests {
                 "body",
                 ContentManifestSchema::with_tail_entry_type(
                     "text-v1",
-                    GrooveColumnType::String,
+                    GrooveColumnType::Bytes,
                     1,
                     64,
                 )

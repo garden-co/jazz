@@ -3,19 +3,57 @@ title: Structured JSON content
 description: Materialize, project, and merge structured JSON.
 ---
 
-`json-v1` stores a structured immutable JSON tree with a `Bytes` tail.
-`JsonOperation::encode` returns the typed tail value required by the schema.
+`json-v1` stores an immutable structured JSON tree with a `Bytes` tail. This
+complete example publishes an initial literal, applies a scalar operation, and
+reads both the document and a projection.
 
 ```rust
-let manifest = ContentManifest {
-    root,
-    edit_tail: vec![JsonOperation::SetScalar {
-        op, target: status, value: JsonScalar::String("open".into()),
-    }.encode()?],
+use groove::records::ValueType;
+use jazz::{
+    content_manifest::{
+        global_content_manifest_adapters, ContentDomainId, ContentManifest,
+        ContentManifestRuntime, ContentManifestSchema, ContentReadContext,
+        MaterializationRequest, MemoryImmutableContentStore,
+    },
+    ordinary_json::{JsonLiteral, JsonOperation, JsonScalar, OrdinaryJsonAdapter},
+    schema::ColumnSchema,
 };
-let cell = manifest.into_value(&json_schema)?;
-let document = runtime.materialize_cell(&json_schema, &cell, &MaterializationRequest::Full)?;
-let projection = runtime.index_values_for_cell(&json_schema, &cell, &["/status".into()])?;
+
+fn json_example() -> Result<(), Box<dyn std::error::Error>> {
+    let context = ContentReadContext { domain: ContentDomainId(uuid::Uuid::new_v4()) };
+    let mut store = MemoryImmutableContentStore::default();
+    let schema = ContentManifestSchema::with_tail_entry_type(
+        "json-v1", ValueType::Bytes, 8, 4096,
+    )?;
+    let column = ColumnSchema::content_manifest("body", schema.clone());
+    let adapter = OrdinaryJsonAdapter::default();
+    let root = adapter.publish_literal(
+        &JsonLiteral::Object(std::collections::BTreeMap::from([(
+            "items".into(), JsonLiteral::Array(vec![]),
+        )])),
+        None,
+        context,
+        &mut store,
+    )?;
+    let op = uuid::Uuid::new_v4();
+    let status = uuid::Uuid::new_v4();
+    let base = ContentManifest { root, edit_tail: vec![] };
+    let manifest = ContentManifest {
+        root,
+        edit_tail: vec![adapter.author_insert_at_index(
+            &base, "/items", 0, op, status,
+            JsonLiteral::Scalar(JsonScalar::String("open".into())),
+            context, &store,
+        )?.encode()?],
+    };
+    let cell = manifest.into_value(&schema)?;
+
+    let runtime = ContentManifestRuntime::new(global_content_manifest_adapters(), context, &store);
+    let document = runtime.materialize_cell(&schema, &cell, &MaterializationRequest::Full)?;
+    let projection = runtime.index_values_for_cell(&schema, &cell, &["/items".into()])?;
+    let _ = (column, document, projection);
+    Ok(())
+}
 ```
 
 Node and array identities are stable. The JSON adapter merges only coherent,
