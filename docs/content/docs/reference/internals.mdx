@@ -220,8 +220,7 @@ server over the core WebSocket protocol.
 With `driver: { type: "persistent" }`, OPFS requires worker ownership, so Jazz starts one dedicated
 module worker for that database namespace. The worker opens the real core database with
 `WasmDb.openBrowser(...)`, owns OPFS, and forwards core row/query/write/subscription calls
-over `postMessage`. This worker is an OPFS owner, not a second JavaScript engine or compatibility
-broker.
+over `postMessage`. This worker is an OPFS owner, not a second JavaScript engine.
 
 ```text
 Main thread Jazz API
@@ -243,9 +242,8 @@ checkpoint.
 
 ### React Native
 
-React Native uses a separate native runtime adapter with no web worker or OPFS path. It still uses
-the same table-first runtime model, but local persistence is provided by the native embedded backend
-rather than by browser APIs.
+React Native bindings currently typecheck, but the persistent SQLite driver is not implemented.
+React Native and Expo are not supported runtime targets in this alpha.
 
 ## Query engine
 
@@ -281,7 +279,7 @@ from full history.
 
 `db.all()` and `db.one()` are implemented as "create a temporary subscription, wait for the first
 durability-qualified snapshot, then auto-unsubscribe." They share the same reactive machinery as
-live subscriptions, which is why they participate in durability-tier gating and lens transforms.
+live subscriptions, including durability-tier gating.
 
 ### Include performance
 
@@ -330,23 +328,6 @@ Each client connection has a **role** that determines how writes are routed:
 
 Frontend clients usually authenticate as `User`. Backend services with a backend secret authenticate
 as `Admin` or `Peer`.
-
-## Schema evolution
-
-### Lenses
-
-Migrations in Jazz produce **lenses** — bidirectional transformations between schema versions. When
-`jazz-tools migrations create` diffs two schemas, it generates a lens with declarative operations
-such as adding, removing, or renaming columns and tables.
-
-At query time, Jazz can use lens paths to read older stored data through the current schema. At
-write time, updates to older rows are written back into the current schema branch via copy-on-write.
-
-### Catalogue sync
-
-Schemas and lenses travel through a separate catalogue lane, not through the normal user-row
-history path. Clients publish catalogue entries, servers discover them lazily, and query execution
-uses that catalogue state to resolve schema context on demand.
 
 ## Durability signals
 

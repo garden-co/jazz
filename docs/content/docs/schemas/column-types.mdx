@@ -56,4 +56,4 @@ Filters still use the stored column value, because arbitrary transforms cannot b
 await db.all(app.tasks.where({ priority: { gte: 8 } }));
 ```
 
-Transforms are TypeScript-client behavior. They do not change the generated SQL schema, migrations, permissions, indexes, or values stored on disk.
+Transforms are TypeScript-client behavior. They do not change the generated SQL schema, permissions, indexes, or values stored on disk.

@@ -9,7 +9,7 @@ local-first Jazz identity.
 ## What this starter gives you
 
 - A working todo app that runs on first load, no sign-in required.
-- An opt-in Better Auth sign-up / sign-in flow that upgrades the anonymous
+- An opt-in Better Auth sign-up / sign-in flow that links the local-first
   session to a named account without losing data.
 - A local Jazz dev server started automatically by the `withJazz` Next.js
   plugin in `next.config.ts`.
@@ -33,7 +33,7 @@ app. Set `BETTER_AUTH_SECRET` in `.env` before running
 app/
   layout.tsx                        ← root layout, mounts Providers
   page.tsx                          ← homepage (todo widget + auth nav)
-components/jazz-provider.tsx          ← chooses anonymous or authenticated Jazz client
+components/jazz-provider.tsx          ← chooses local-first or authenticated Jazz client
   api/auth/[...all]/route.ts        ← Better Auth catch-all handler
   signin/                           ← email/password sign-in form
   signup/                           ← email/password sign-up form
@@ -56,7 +56,7 @@ fetches a Better Auth JWT and passes it to `<JazzProvider>` as
 ### Identity continuity
 
 The key design question: what happens to the todos a user created
-anonymously when they sign up for a named account?
+with a local-first identity when they sign up for a named account?
 
 They carry over automatically. Here is how:
 
@@ -71,7 +71,7 @@ They carry over automatically. Here is how:
 4. `databaseHooks.user.create.before` pins the new Better Auth `user.id`
    to that Jazz user id instead of generating a fresh one.
 5. All subsequent JWTs carry `sub: <jazz-user-id>`, so the server sees
-   the same principal that created the anonymous todos.
+   the same principal that created the local-first todos.
 
 `components/jazz-provider.tsx` also mounts a `JwtRefresh` component inside
 the provider that re-mints the JWT via `authClient.token()` whenever
@@ -115,7 +115,7 @@ Jazz dev server and supplies its own credentials.
 
 The Jazz cloud server requires `--allow-local-first-auth` explicitly in
 production: `jazz-tools server <APP_ID> --allow-local-first-auth`.
-Without it, anonymous local-first connections will receive auth errors.
+Without it, local-first connections will receive auth errors.
 
 `.env` is gitignored and not committed. Production deployments must
 supply `BETTER_AUTH_SECRET` through your hosting provider's secret

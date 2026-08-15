@@ -38,7 +38,7 @@ This is useful when iterating on your schema during development.
 
 <Accordion id="undefined-vs-empty-array" title="Why does useAll return undefined?">
 
-`useAll` and `QuerySubscription` return `undefined` until the first response arrives from the requested tier. After that, the value is an array&hairsp;—&hairsp;empty (`[]`) if no rows match, or populated. See [The undefined loading state](/docs/reading/queries#the-undefined-loading-state) for details.
+`useAll` and `QuerySubscription` return `undefined` until the first response arrives from the requested tier. After that, the value is an array&hairsp;—&hairsp;empty (`[]`) if no rows match, or populated. See [The loading state](/docs/reading/queries#the-loading-state) for details.
 
 </Accordion>
 
@@ -54,9 +54,11 @@ Yes. When a user signs up with an external provider, their identity carries over
 
 </Accordion>
 
-<Accordion id="rust-migrations" title="Do Rust apps need separate migration files?">
+<Accordion id="schema-alpha" title="How should I change a schema during the alpha?">
 
-No. Rust services use the same TypeScript migration files. The Rust runtime consumes the compiled schema representation through the CLI. See [Migrations](/docs/schemas/migrations) for details.
+Treat the current `schema.ts` and `permissions.ts` as one tested application contract. Run
+`pnpm dlx jazz-tools@alpha validate`, then test and release the exact client/server builds that use
+that schema. See [Schema changes](/docs/schemas/migrations).
 
 </Accordion>
 
@@ -69,9 +71,8 @@ Jazz may return the following errors when a client's request is rejected by the 
   that operation on the row.
 - **`SessionRequired`**&hairsp;—&hairsp;a write was attempted without an authenticated session.
   Make sure the client is using a valid auth mode (local-first or external JWT).
-- **`CatalogueWriteDenied`**&hairsp;—&hairsp;a client attempted to write a schema or lens
-  catalogue object without the required admin secret. In production, catalogue writes require
-  `--admin-secret`.
+- **`CatalogueWriteDenied`**&hairsp;—&hairsp;a client attempted an administrative schema or policy
+  catalogue operation without the required admin secret.
 - **`QuerySubscriptionRejected`**&hairsp;—&hairsp;a query subscription was rejected by the
   server, typically because the query references a table or schema the server doesn't know about.
   This can happen if the schema hasn't synced yet or if there's a version mismatch.

@@ -1,10 +1,10 @@
 # todo-client-localfirst-ts
 
-Local-first todo app in vanilla TypeScript + Vite — no UI framework. Anonymous auth via `BrowserAuthSecretStore`, OPFS persistence.
+Local-first todo app in vanilla TypeScript + Vite — no UI framework. Local-first identity via `BrowserAuthSecretStore`, OPFS persistence.
 
 ## What it demonstrates
 
-- Anonymous identity from a locally generated secret — no login UI, no auth server.
+- Local-first identity from a locally generated secret — no login UI, no auth server.
 - The low-level Jazz client API: `createDb`, `db.subscribeAll`, `db.insert` / `db.update` / `db.delete`, `db.onAuthChanged` — consumed without React, Svelte, or Vue bindings.
 - Row-level permissions — `owner_id` enforced by `definePermissions`; mutations on rows you don't own are rejected by the runtime.
 - OPFS-backed persistence across reload, plus optional server sync when `VITE_JAZZ_SERVER_URL` is set.

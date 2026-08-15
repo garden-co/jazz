@@ -86,25 +86,26 @@ export const auth = betterAuth({
 
 ### Publishing to a sync server
 
-Because Better Auth tables are merged into your app schema, they ride on the same deploy as everything else — no separate push for `schema-better-auth/`. Publish schema, permissions, and migrations through the normal workflow:
+Because Better Auth tables are merged into your app schema, they deploy with the application schema
+and permissions:
 
 ```bash
 pnpm dlx jazz-tools@alpha deploy <appId>
 ```
 
-See [Migrations](/docs/schemas/migrations) for the full deploy flow and how schema changes produce migration edges.
+See [Schema changes](/docs/schemas/migrations) for the validation and deployment workflow.
 
-## Compatibility
+## Supported Better Auth features
 
 The adapter is currently aligned with Better Auth `1.5.5`.
 
-| Plugin/Feature        | Compatibility |
-| --------------------- | :-----------: |
-| Email & Password auth |      ✅       |
-| Social Provider auth  |      ✅       |
-| Email OTP             |      ✅       |
+| Plugin/Feature        | Status |
+| --------------------- | :----: |
+| Email & Password auth |   ✅   |
+| Social Provider auth  |   ✅   |
+| Email OTP             |   ✅   |
 
-<Callout title="Compatibility scope">
+<Callout title="Supported feature scope">
   This section reflects the adapter behavior currently covered by this repo's Better Auth
   integration and tests. If you add plugins that introduce extra tables or custom schema fields,
   regenerate `schema-better-auth/schema.ts` and re-run the Jazz schema workflow.

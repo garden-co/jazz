@@ -13,14 +13,11 @@ A Jazz project has a small set of files at the app root:
 ```text
 app-root/
 ├── schema.ts            # Structural schema — tables and columns
-├── permissions.ts       # Optional row-level policies
-└── migrations/          # Reviewed migration edges
-    └── 20260331-add-description-aaa-bbb.ts
+└── permissions.ts       # Optional row-level policies
 ```
 
 `schema.ts` is the source of truth for your data model. `permissions.ts` is optional and must be a
-separate file. The `migrations/` directory holds reviewed migration stubs — see
-[Migrations](/docs/schemas/migrations) for the full workflow.
+separate file.
 
 ## Table definitions
 
@@ -40,9 +37,8 @@ Tables are defined in `schema.ts` using the Jazz DSL. Each `s.table(...)` call r
 
 <SchemaSetup />
 
-When you change your schema on a shared app, create and push a migration. See [Migrations](/docs/schemas/migrations) for details.
-
-If you need to clear local browser data after a schema change, see [Auth Lifecycle](/docs/auth/lifecycle#storage-reset).
+Deploy the schema and permission policy that your running clients use together. During the alpha,
+make schema changes deliberately and validate the exact application build before release.
 
 ## Exporting the app
 
@@ -68,7 +64,7 @@ Extract precise TypeScript types from any table handle:
 ## Very Large Schemas
 
 For most apps, `s.defineApp(schema)` is the right export: it gives you one typed table handle for
-each table in the schema, and Jazz uses the same schema for runtime validation, migrations, query
+each table in the schema, and Jazz uses the same schema for runtime validation, query
 planning, and TypeScript inference.
 
 Very large apps can hit a different tradeoff. The runtime schema may need to contain hundreds of
@@ -151,6 +147,6 @@ commerceApp.wasmSchema === sliceableApp.wasmSchema;
 supportApp.wasmSchema === sliceableApp.wasmSchema;
 ```
 
-That means schema hashing, migrations, permissions, runtime validation, query planning, inserts,
+That means schema hashing, permissions, runtime validation, query planning, inserts,
 updates, and row transforms still see the full schema. The slice only limits the TypeScript app
 graph you ask the compiler to expand.

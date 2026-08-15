@@ -5,6 +5,7 @@ There are a number of column types available which cover most common use cases:
 | `s.string()`          | `string`             | `TEXT`          |
 | `s.boolean()`         | `boolean`            | `BOOLEAN`       |
 | `s.int()`             | `number`             | `INTEGER`       |
+| `s.bigint()`          | `bigint`             | `BIGINT`        |
 | `s.float()`           | `number`             | `REAL`          |
 | `s.timestamp()`       | `Date`               | `TIMESTAMP`     |
 | `s.bytes()`           | `Uint8Array`         | `BYTEA`         |
@@ -14,7 +15,10 @@ There are a number of column types available which cover most common use cases:
 | `s.json()`            | `JsonValue`          | `JSON`          |
 | `s.json(schema)`      | inferred from schema | `JSON`          |
 
-Any column can be made nullable with `.optional()`.
+Any column can be made nullable with `.optional()` and can have a literal insert default with
+`.default(value)`. Non-nullable integers may use `.merge("counter")`; all other columns use
+last-writer-wins merging. A non-nullable array may instead use `.merge("g-set")` for a grow-only
+set: additions merge by union, and elements cannot be removed.
 
 > **JSON columns are atomic.** The entire value is replaced on every write. Use `s.json()` for untyped JSON, or `s.json(schema)` with a [Zod](https://zod.dev)-compatible schema for typed validation. For structured data that needs per-field updates, use separate columns or a related table instead.
 

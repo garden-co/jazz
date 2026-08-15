@@ -8,6 +8,10 @@ reviewedAt: "4059cdef"
 
 All writes execute against the local database first. `insert`, `update`, and `delete` return write handles immediately. Call `.wait({ tier: ... })` on those handles when you need confirmation that the write reached a specific [durability tier](#write-durability-tiers).
 
+A write has both a **fate** and a **durability tier**. Fate is the authority's final accepted or
+rejected verdict. Durability tells you how far an accepted write has settled. A local write is
+queued for upstream delivery; local durability alone does not prove that an upstream retains it.
+
 Jazz also allows grouping writes together using [transactions](#transactions).
 Writes made through an open transaction are not individually waitable. Call `.wait()` on the returned write result instead.
 
@@ -125,7 +129,7 @@ When using `insert(...).wait({ tier })`, `update(...).wait({ tier })`, or `delet
 
 <WriteTierDiagram />
 
-Offline, only `local` resolves; `edge` and `global` waits stay pending until the device reconnects and the queued write propagates upstream. The write itself is durable locally either way, so picking a higher tier is purely about _when the promise resolves_, never about whether the data is safe.
+Offline, only `local` resolves; `edge` and `global` waits stay pending until the device reconnects and the queued write propagates upstream. A device can lose writes that have reached only local durability if its local storage is destroyed.
 
 <Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
   <Tab value="TypeScript">
@@ -176,7 +180,9 @@ db.onMutationError((error) => {
 
 ## Transactions
 
-Use an exclusive transaction when several writes should settle together after an authority validates the sealed transaction:
+Use an exclusive transaction when reads and writes must commit as one serializable unit. It reads a
+stable snapshot, sees its own staged writes, and is rejected if the authority detects a conflicting
+change:
 
 ```ts
 const result = await db.exclusiveTransaction(async (tx) => {
@@ -192,7 +198,7 @@ The changes made as part of an exclusive transaction are scoped to it, and will 
 globally visible once it's committed and accepted by the authority. Since exclusive
 transactions are settled by the global authority, `wait()` does not take a durability tier.
 
-Use a mergeable transaction when you want to group several ordinary writes and commit them together:
+Use a mergeable transaction when you want to group several convergent writes under one transaction:
 
 ```ts
 const result = db.transaction((tx) => {
@@ -213,15 +219,15 @@ This can be useful when making writes across multiple contexts. In this case how
 the transaction explicitly.
 
 ```ts
-let transaction: DbTransaction;
+let transaction: ReturnType<typeof db.beginTransaction>;
 beforeEach(() => {
   transaction = db.beginTransaction();
 });
 
-afterEach(() => {
+afterEach(async () => {
   // Writes performed in tests will be rolled back at the end,
   // preventing tests from interfering with each other
-  transaction.rollback();
+  await transaction.rollback();
 });
 
 it("tasks have a title", () => {

@@ -23,6 +23,23 @@ A one-shot query runs once against the database without subscribing to changes.
   </Tab>
 </Tabs>
 
+### Current rows and stable ordering
+
+Queries return current, visible rows. `delete(...)` removes a row from ordinary reads and relation
+payloads. To inspect a deleted row explicitly, add `includeDeleted()`:
+
+```ts
+const current = await db.all(app.todos);
+const deleted = await db.one(app.todos.includeDeleted().where({ id: todoId }));
+```
+
+Without `orderBy`, root results use ascending `RowUuid` order. That order is deterministic and is
+also the implicit tie-breaker after every explicit `orderBy`, so `limit` and `offset` are stable:
+
+```ts
+const page = await db.all(app.todos.orderBy("priority", "desc").offset(20).limit(20));
+```
+
 ## Subscriptions
 
 Subscribe to a query to receive updates whenever the underlying data changes.
@@ -65,7 +82,7 @@ Queries and subscriptions return results as soon as they are available locally b
 
 <DurabilityTiersTable />
 
-For background on how data flows between tiers, see [How Sync Works](/docs/concepts/how-sync-works#infrastructure-tiers).
+For background on how data flows between tiers, see [How Sync Works](/docs/concepts/how-sync-works).
 
 ### Choosing a tier
 
@@ -139,12 +156,12 @@ magic columns.
 
 Each framework has a reactive binding that re-renders when query results change. See [Framework Patterns](/docs/reference/framework-patterns#query-subscriptions) for side-by-side examples.
 
-| Framework  | API                            | Notes                                               |
-| ---------- | ------------------------------ | --------------------------------------------------- |
-| React/Expo | `useAll(query)`                | Returns `{ data, isLoading, error }`                |
-| Vue        | `useAll(query)`                | Returns `{ data, error, loading }` refs             |
-| Svelte     | `new QuerySubscription(query)` | Exposes reactive `.current` / `.loading` / `.error` |
-| Solid      | `useAll(() => ({ query }))`    | Returns `{ data, isLoading, error }`                |
+| Framework | API                            | Notes                                               |
+| --------- | ------------------------------ | --------------------------------------------------- |
+| React     | `useAll(query)`                | Returns `{ data, isLoading, error }`                |
+| Vue       | `useAll(query)`                | Returns `{ data, error, loading }` refs             |
+| Svelte    | `new QuerySubscription(query)` | Exposes reactive `.current` / `.loading` / `.error` |
+| Solid     | `useAll(() => ({ query }))`    | Returns `{ data, isLoading, error }`                |
 
 ### The loading state
 

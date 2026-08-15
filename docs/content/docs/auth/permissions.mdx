@@ -32,7 +32,7 @@ We can define permissions in `permissions.ts`:
 <Callout type="info">
   Write your permissions policies in `permissions.ts` next to `schema.ts`. By default Jazz looks for both files at your project root — except in SvelteKit projects, where they should live in `src/lib/` (the standard location for shared app code).
 
-Run `pnpm dlx jazz-tools@alpha validate` before publishing to surface warnings about tables with no explicit permission policy. You do not need to write a schema migration to update permissions policies. Push the updated policies by running `pnpm dlx jazz-tools@alpha deploy <appId>`.
+Run `pnpm dlx jazz-tools@alpha validate` before publishing to surface warnings about tables with no explicit permission policy. Deploy the validated policy together with the application schema using `pnpm dlx jazz-tools@alpha deploy <appId>`.
 
 </Callout>
 
@@ -188,6 +188,8 @@ When you want to reuse the same check inside a larger rule, compose `isCreator` 
 
 For more dynamic sharing or ownership models, prefer explicit tables and relations rather than
 encoding extra meaning into authorship alone.
+
+<span id="test-policy-decisions" />
 
 ## Testing permissions
 

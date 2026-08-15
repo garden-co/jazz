@@ -1,409 +1,93 @@
 ---
 title: Client
-description: Build a local-first to-do app with Jazz, step by step.
-reviewedAt: "22485728"
+description: Install a browser or TypeScript client, define a schema, and start reading and writing local data.
 ---
 
 import { Callout } from "fumadocs-ui/components/callout";
-import { Accordion, Accordions } from "fumadocs-ui/components/accordion";
-import QuickstartSchemaTypesSummary from "../../partials/schema-types-summary.mdx";
-
-## Create a project
-
-Start with a fresh app. If you already have one, skip to [Install](#install).
-
-<Tabs groupId="jazz-framework" items={["React", "Vue", "Svelte", "Solid", "Expo", "TypeScript"]} persist updateAnchor>
-  <Tab value="React">
-    ```bash title="Terminal"
-    pnpm create vite my-jazz-app --template react-ts
-    cd my-jazz-app
-    pnpm install
-    ```
-  </Tab>
-  <Tab value="Vue">
-    ```bash title="Terminal"
-    pnpm create vite my-jazz-app --template vue-ts
-    cd my-jazz-app
-    pnpm install
-    ```
-  </Tab>
-  <Tab value="Svelte">
-    ```bash title="Terminal"
-    pnpm create vite my-jazz-app --template svelte-ts
-    cd my-jazz-app
-    pnpm install
-    ```
-
-    <Callout type="info">
-      This quickstart uses Svelte 5 features (`$state`, `$props`, `$derived`, snippets). Make sure you're on Svelte 5 or later.
-    </Callout>
-
-  </Tab>
-  <Tab value="Solid">
-    ```bash title="Terminal"
-    pnpm create vite my-jazz-app --template solid-ts
-    cd my-jazz-app
-    pnpm install
-    ```
-  </Tab>
-  <Tab value="Expo">
-    ```bash title="Terminal"
-    npx create-expo-app my-jazz-app --template blank-typescript
-    cd my-jazz-app
-    ```
-  </Tab>
-  <Tab value="TypeScript">
-    ```bash title="Terminal"
-    mkdir my-jazz-app && cd my-jazz-app
-    pnpm init
-    pnpm add vite typescript
-    ```
-  </Tab>
-</Tabs>
 
 ## Install
 
-<Tabs groupId="jazz-framework" items={["React", "Vue", "Svelte", "Solid", "Expo", "TypeScript"]} persist updateAnchor>
-  <Tab value="React">
-    ```bash title="Terminal"
-    pnpm add jazz-tools@alpha
-    ```
-  </Tab>
-  <Tab value="Vue">
-    ```bash title="Terminal"
-    pnpm add jazz-tools@alpha
-    ```
-  </Tab>
-  <Tab value="Svelte">
-    ```bash title="Terminal"
-    pnpm add jazz-tools@alpha
-    ```
-  </Tab>
-  <Tab value="Solid">
-    ```bash title="Terminal"
-    pnpm add jazz-tools@alpha
-    ```
-  </Tab>
-  <Tab value="Expo">
-    ```bash title="Terminal"
-    pnpm add jazz-tools@alpha jazz-rn@alpha expo
-    pnpm add -D @babel/plugin-transform-flow-strip-types
-    ```
+Create a project, then install the TypeScript package:
 
-    `jazz-rn` is mandatory in Expo / React Native environments and must be installed alongside `jazz-tools`.
+```bash title="Terminal"
+pnpm add jazz-tools@alpha
+```
 
-    <Accordions type="single">
-    <Accordion title="Expo setup: entry point, Babel, and Metro config">
+For a Node.js runtime, install the native runtime package as well:
 
-    Create `index.js` at the project root, and set `"main": "./index.js"` in your `package.json`. Import polyfills as the very first line, before any other code:
+```bash title="Terminal"
+pnpm add jazz-tools@alpha jazz-napi@alpha
+```
 
-    ```js title="index.js"
-    import "jazz-tools/expo/polyfills";
-    import { registerRootComponent } from "expo";
-    import { App } from "./App";
-    registerRootComponent(App);
-    ```
+<Callout type="warn" title="React Native and Expo are not supported at runtime">
+  The React Native surface currently typechecks, but its persistent SQLite driver throws when
+  opened. Do not ship a React Native or Expo application on this alpha runtime.
+</Callout>
 
-    Keep this import first in the app entry point. It installs the React Native `fetch`, stream, and
-    related web API shims Jazz needs before the RN runtime is loaded.
+## Define a schema
 
-    Update `babel.config.js` to enable the `import.meta` transform and strip Flow types:
+Create `schema.ts` and export a typed app. The table handles are the inputs to queries and writes.
 
-    ```js title="babel.config.js"
-    module.exports = function (api) {
-      api.cache(true);
-      return {
-        presets: [["babel-preset-expo", { unstable_transformImportMeta: true }]],
-        plugins: [
-          ["@babel/plugin-transform-flow-strip-types", { allowDeclareFields: true }],
-        ],
-      };
-    };
-    ```
+```ts title="schema.ts"
+import { schema as s } from "jazz-tools";
 
-    Replace `metro.config.js` with `metro.config.mjs` so Metro can top-level `await` the Jazz dev server (it injects `EXPO_PUBLIC_JAZZ_*` env vars that Metro inlines into your bundle):
+const schema = {
+  todos: s.table({
+    title: s.string(),
+    done: s.boolean().default(false),
+    priority: s.int().default(0),
+  }),
+};
 
-    ```js title="metro.config.mjs"
-    import path from "node:path";
-    import { fileURLToPath } from "node:url";
-    import { createRequire } from "node:module";
-    import { withJazz } from "jazz-tools/dev/expo";
+export const app = s.defineApp(schema);
+```
 
-    const require = createRequire(import.meta.url);
-    const { getDefaultConfig } = require("expo/metro-config");
+Validate the schema and optional `permissions.ts`:
 
-    const projectRoot = path.dirname(fileURLToPath(import.meta.url));
+```bash title="Terminal"
+pnpm dlx jazz-tools@alpha validate
+```
 
-    const config = getDefaultConfig(projectRoot);
+## Open a database
 
-    // pnpm uses symlinks for hoisted packages
-    config.resolver.unstable_enableSymlinks = true;
+Use `createDb` in plain TypeScript. `appId` isolates local storage and sync state. Add `serverUrl`
+when this client should sync with an upstream server.
 
-    // Start the Jazz dev server and inject EXPO_PUBLIC_JAZZ_* env vars for Metro to inline.
-    await withJazz({}, { schemaDir: projectRoot });
+```ts title="src/main.ts"
+import { BrowserAuthSecretStore, createDb } from "jazz-tools";
+import { app } from "../schema.js";
 
-    export default config;
-    ```
+const db = await createDb({
+  appId: "your-app-id",
+  secret: await BrowserAuthSecretStore.getOrCreateSecret({ appId: "your-app-id" }),
+  // serverUrl: "https://your-sync-server.example",
+});
 
-    </Accordion>
-    </Accordions>
+const inserted = db.insert(app.todos, { title: "Ship the first screen" });
+await inserted.wait({ tier: "local" });
 
-  </Tab>
-  <Tab value="TypeScript">
-    ```bash title="Terminal"
-    pnpm add jazz-tools@alpha
-    ```
-  </Tab>
-</Tabs>
+const todos = await db.all(app.todos.orderBy("priority", "desc"));
+```
 
-## Get an app ID
+Browser clients persist in OPFS by default. Set `driver: { type: "memory" }` for an ephemeral
+standalone client. Add a `serverUrl` when that in-memory client should sync.
 
-Your app ID namespaces your data for storage and sync. Click below to generate one on [Jazz Cloud](https://v2.dashboard.jazz.tools) (sync URL: `https://v2.sync.jazz.tools/`)&hairsp;—&hairsp;you'll also get the secrets you need to deploy permissions later. Generated apps are unclaimed until you claim them in the dashboard, and unclaimed apps are automatically deleted after 14 days.
+## React, Vue, Svelte, and Solid
 
-<GenerateAppId />
+The framework packages expose a client factory, a provider, and reactive query hooks. The same
+schema and `Db` operations apply in every framework. See [Framework Patterns](/docs/reference/framework-patterns)
+for the current framework-specific imports and [Queries](/docs/reading/queries) for `useAll`.
 
-## Define your schema
+## Start sync
 
-Create `schema.ts` at the root of your project (or `src/lib/schema.ts` for SvelteKit). This is the source of truth for your data model.
-
-<include cwd lang="ts" meta='title="schema.ts"'>
-  ../examples/docs/todo-client-localfirst-react/schema.ts#schema-react
-</include>
-
-<QuickstartSchemaTypesSummary />
-
-[Learn more about schemas, optional validation, and migrations](/docs/schemas/defining-tables).
-
-## Set up your app
-
-Create the basic structure for your app with Jazz and a to-do list.
-
-<Tabs groupId="jazz-framework" items={["React", "Vue", "Svelte", "Solid", "Expo", "TypeScript"]} persist updateAnchor>
-  <Tab value="React">
-    <include cwd lang="tsx" meta='title="src/App.tsx"'>
-      ../examples/docs/todo-client-localfirst-react/src/setup-snippets.tsx#context-setup-react-minimal
-    </include>
-  </Tab>
-  <Tab value="Vue">
-    <include cwd lang="vue" meta='title="src/App.vue"'>
-      ../examples/docs/todo-client-localfirst-vue/src/App.vue
-    </include>
-  </Tab>
-  <Tab value="Svelte">
-    <include cwd lang="svelte" meta='title="src/App.svelte"'>
-      ../examples/docs/todo-client-localfirst-svelte/src/App.svelte#provider-svelte
-    </include>
-  </Tab>
-  <Tab value="Solid">
-    <include cwd lang="tsx" meta='title="src/App.tsx"'>
-      ../examples/docs/todo-client-localfirst-solid/src/App.tsx
-    </include>
-  </Tab>
-  <Tab value="Expo">
-    <include cwd lang="tsx" meta='title="App.tsx"'>
-      ../examples/docs/todo-client-localfirst-expo/src/setup-snippets.tsx#context-setup-expo-minimal
-    </include>
-  </Tab>
-  <Tab value="TypeScript">
-    <include cwd lang="html" meta='title="index.html"'>
-      ../examples/docs/todo-client-localfirst-ts/src/quickstart-setup.html
-    </include>
-
-    Create `src/main.ts` and initialise the database:
-
-    <include cwd lang="ts" meta='title="src/main.ts"'>
-      ../examples/docs/todo-client-localfirst-ts/src/quickstart.ts#setup-ts
-    </include>
-
-  </Tab>
-</Tabs>
-
-<Accordions type="single">
-  <Accordion title="Client Config">
-    `appId` identifies your app for storage and sync. Use the UUID you generated
-    above&hairsp;—&hairsp;not a human-readable name&hairsp;—&hairsp;so your local data is already
-    correctly namespaced when you add a server. For all client config options and runtime source
-    overrides, see [Client Setup](/docs/getting-started/client-setup#client-config-options).
-  </Accordion>
-</Accordions>
-
-## Add a to-do
-
-Use `db.insert` to create a new row.
-
-<Tabs
-  groupId="jazz-framework"
-  items={["React", "Vue", "Svelte", "Solid", "Expo", "TypeScript"]}
-  persist
-  updateAnchor
->
-  <Tab value="React">
-    <include cwd lang="tsx" meta='title="src/AddTodo.tsx"'>
-      ../examples/docs/todo-client-localfirst-react/src/AddTodo.tsx
-    </include>
-  </Tab>
-  <Tab value="Vue">
-    <include cwd lang="vue" meta='title="src/AddTodo.vue"'>
-      ../examples/docs/todo-client-localfirst-vue/src/AddTodo.vue
-    </include>
-  </Tab>
-  <Tab value="Svelte">
-    <include cwd lang="svelte" meta='title="src/AddTodo.svelte"'>
-      ../examples/docs/todo-client-localfirst-svelte/src/AddTodo.svelte
-    </include>
-  </Tab>
-  <Tab value="Solid">
-    <include cwd lang="tsx" meta='title="src/AddTodo.tsx"'>
-      ../examples/docs/todo-client-localfirst-solid/src/quickstart-add.tsx
-    </include>
-  </Tab>
-  <Tab value="Expo">
-    <include cwd lang="tsx" meta='title="src/AddTodo.tsx"'>
-      ../examples/docs/todo-client-localfirst-expo/src/AddTodo.tsx
-    </include>
-  </Tab>
-  <Tab value="TypeScript">
-    <include cwd lang="ts" meta='title="src/main.ts"'>
-      ../examples/docs/todo-client-localfirst-ts/src/quickstart.ts#add-ts
-    </include>
-  </Tab>
-</Tabs>
-
-## Display and edit a to-do
-
-Display a to-do with toggle and delete controls.
-
-<Tabs
-  groupId="jazz-framework"
-  items={["React", "Vue", "Svelte", "Solid", "Expo", "TypeScript"]}
-  persist
-  updateAnchor
->
-  <Tab value="React">
-    <include cwd lang="tsx" meta='title="src/TodoItem.tsx"'>
-      ../examples/docs/todo-client-localfirst-react/src/TodoItem.tsx
-    </include>
-  </Tab>
-  <Tab value="Vue">
-    <include cwd lang="vue" meta='title="src/TodoItem.vue"'>
-      ../examples/docs/todo-client-localfirst-vue/src/TodoItem.vue
-    </include>
-  </Tab>
-  <Tab value="Svelte">
-    <include cwd lang="svelte" meta='title="src/TodoItem.svelte"'>
-      ../examples/docs/todo-client-localfirst-svelte/src/TodoItem.svelte
-    </include>
-  </Tab>
-  <Tab value="Solid">
-    <include cwd lang="tsx" meta='title="src/TodoItem.tsx"'>
-      ../examples/docs/todo-client-localfirst-solid/src/quickstart-item.tsx
-    </include>
-  </Tab>
-  <Tab value="Expo">
-    <include cwd lang="tsx" meta='title="src/TodoItem.tsx"'>
-      ../examples/docs/todo-client-localfirst-expo/src/TodoItem.tsx
-    </include>
-  </Tab>
-  <Tab value="TypeScript">
-    <include cwd lang="ts" meta='title="src/TodoItem.ts"'>
-      ../examples/docs/todo-client-localfirst-ts/src/TodoItem.ts
-    </include>
-  </Tab>
-</Tabs>
-
-Full mutation API: [Writing Data](/docs/writing/writing-data).
-
-<Accordions type="single">
-  <Accordion title="Local writes">
-    Jazz persists all writes locally, so your data is saved and your UI updates
-    immediately&hairsp;—&hairsp;even while offline.
-  </Accordion>
-</Accordions>
-
-## List to-dos
-
-Subscribe to a query to get real-time updates as data changes, regardless of where the change originates.
-
-<Tabs groupId="jazz-framework" items={["React", "Vue", "Svelte", "Solid", "Expo", "TypeScript"]} persist updateAnchor>
-  <Tab value="React">
-    <include cwd lang="tsx" meta='title="src/TodoList.tsx"'>
-      ../examples/docs/todo-client-localfirst-react/src/quickstart-list.tsx
-    </include>
-  </Tab>
-  <Tab value="Vue">
-    <include cwd lang="vue" meta='title="src/TodoList.vue"'>
-      ../examples/docs/todo-client-localfirst-vue/src/quickstart-list.vue
-    </include>
-  </Tab>
-  <Tab value="Svelte">
-    <include cwd lang="svelte" meta='title="src/TodoList.svelte"'>
-      ../examples/docs/todo-client-localfirst-svelte/src/quickstart-list.svelte
-    </include>
-  </Tab>
-  <Tab value="Solid">
-    <include cwd lang="tsx" meta='title="src/TodoList.tsx"'>
-      ../examples/docs/todo-client-localfirst-solid/src/quickstart-list.tsx
-    </include>
-  </Tab>
-  <Tab value="Expo">
-    <include cwd lang="tsx" meta='title="src/TodoList.tsx"'>
-      ../examples/docs/todo-client-localfirst-expo/src/quickstart-list.tsx
-    </include>
-  </Tab>
-  <Tab value="TypeScript">
-    <include cwd lang="ts" meta='title="src/main.ts"'>
-      ../examples/docs/todo-client-localfirst-ts/src/quickstart.ts#list-ts
-    </include>
-
-    The callback receives a `{ all, delta }` object&hairsp;—&hairsp;`all` is the current full result set, and `delta` is an array of row-level changes (each with a `kind`: added, removed, or updated).
-
-  </Tab>
-</Tabs>
-
-Framework hooks return `undefined` while loading, then an array of matching rows. For filtering, sorting, and pagination, see [Queries](/docs/reading/queries).
-
-## Enable sync
-
-So far, your to-do list only works locally. To sync across devices, you need permissions published to the server.
-
-<Accordions type="single">
-  <Accordion title="Didn't generate your app ID above? Generate it now!">
-    <GenerateAppId />
-  </Accordion>
-</Accordions>
-
-### Add permissions
-
-The server rejects all reads and writes unless you define [permissions](/docs/auth/permissions). For this quickstart, allow everything:
-
-<include cwd lang="ts" meta='title="permissions.ts"'>
-  ../examples/docs/todo-client-localfirst-ts/permissions.ts#quickstart-permissions-ts
-</include>
-
-Then publish the permissions bundle using the app ID and admin secret from above:
-
-<DeployCommand />
-
-### Connect the client
-
-Update your client config to add `serverUrl` — Jazz Cloud is at `https://v2.sync.jazz.tools/`. If you generated an app ID above, these values are already filled in:
-
-<CloudConfig />
-
-Clients pick up the schema from the server when they connect. If you update `schema.ts` you need to [create and push a migration to the new schema](/docs/schemas/migrations) so that clients can understand existing data with the new schema.
-
-Permissions can be updated without a schema migration by re-running `pnpm dlx jazz-tools@alpha deploy`.
-
-For self-hosted deployments, see [Server Setup](/docs/getting-started/server-setup).
+Use a `serverUrl` that identifies a Jazz serving node. Active queries are announced upstream and
+matching current rows stream into the local replica. Writes are local immediately and are then
+submitted upstream. See [How Sync Works](/docs/concepts/how-sync-works) for role, fate, and
+durability semantics.
 
 ## Next steps
 
-- [Authentication](/docs/auth/authentication)&hairsp;—&hairsp;local-first and external JWT auth
-- [Permissions](/docs/auth/permissions)&hairsp;—&hairsp;row-level access policies
-- [Queries](/docs/reading/queries)&hairsp;—&hairsp;filtering, sorting, pagination, and relations
-- [Durability tiers](/docs/writing/writing-data#write-durability-tiers)&hairsp;—&hairsp;control when writes are confirmed
-
-## Example apps
-
-- [Todo app (React)](https://github.com/garden-co/jazz2/tree/main/examples/docs/todo-client-localfirst-react)&hairsp;—&hairsp;the app you just built, as a complete project
-- [Todo app (Solid)](https://github.com/garden-co/jazz2/tree/main/examples/docs/todo-client-localfirst-solid)&hairsp;—&hairsp;the same app built with `jazz-tools/solid`
+- [Defining Tables](/docs/schemas/defining-tables)
+- [Writing Data](/docs/writing/writing-data)
+- [Queries](/docs/reading/queries)
+- [Authentication](/docs/auth/authentication)

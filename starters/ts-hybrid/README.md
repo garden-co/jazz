@@ -65,7 +65,7 @@ Two processes run in development:
 2. **Vite** on port 5173, proxying `/api/*` to Hono.
 
 `src/main.ts` boots Jazz once BetterAuth's `useSession` atom has resolved its
-initial value. When the session flips between anonymous and signed-in, the
+initial value. When the session flips between local-first and signed-in, the
 boot loop rebuilds the `Db` against the new config (local-first secret vs
 BetterAuth-issued JWT) and re-mounts the widgets.
 

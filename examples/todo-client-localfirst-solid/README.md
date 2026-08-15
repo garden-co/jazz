@@ -1,10 +1,10 @@
 # todo-client-localfirst-solid
 
-Local-first todo app on Solid + Vite, anonymous auth via `useLocalFirstAuth`, OPFS persistence.
+Local-first todo app on Solid + Vite, local-first identity via `useLocalFirstAuth`, OPFS persistence.
 
 ## What it demonstrates
 
-- Anonymous identity from a locally generated secret — no login UI, no auth server.
+- Local-first identity from a locally generated secret — no login UI, no auth server.
 - `useAll` reactive queries with composable `where()` filters.
 - `useDb` synchronous local writes (`db.insert`, `db.update`, `db.delete`).
 - Row-level permissions — `owner_id` enforced by `definePermissions`; invalid mutations surface as toast errors via `solid-sonner`.

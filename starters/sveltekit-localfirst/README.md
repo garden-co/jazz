@@ -2,7 +2,7 @@
 
 A minimal SvelteKit starter for [Jazz](https://jazz.tools) with a pure
 local-first todo app — no accounts, no sign-in wall, data persists under a
-per-device anonymous Jazz identity. The simplest possible Jazz starter.
+per-device local-first Jazz identity. The simplest possible Jazz starter.
 
 ## What this starter gives you
 
@@ -49,7 +49,7 @@ exactly one thing: instantiate `LocalFirstAuth` (a reactive class from
 `jazz-tools/svelte` that loads or generates the secret client-side) and
 hand `auth.secret` to `createJazzClient`.
 
-Data syncs to the Jazz server under that anonymous identity. There is no
+Data syncs to the Jazz server under that local-first identity. There is no
 concept of a user account, no sign-in, no sign-out — the device _is_ the
 account.
 
@@ -92,7 +92,7 @@ provider and your app will sync against Jazz Cloud.
 For self-hosted deployments you need to run your own Jazz server. The
 server requires `--allow-local-first-auth` explicitly in production:
 `jazz-tools server <APP_ID> --allow-local-first-auth`. Without it,
-anonymous local-first connections will receive auth errors.
+local-first connections will receive auth errors.
 
 ## Known limitations
 
@@ -106,11 +106,11 @@ anonymous local-first connections will receive auth errors.
 ## Adding BetterAuth later
 
 If you later want named accounts with an upgrade path that preserves
-existing anonymous data, scaffold the `sveltekit-hybrid` starter
+existing local-first data, scaffold the `sveltekit-hybrid` starter
 in a sibling directory and copy its `src/lib/auth.ts`,
 `src/lib/auth-client.ts`, `src/hooks.server.ts`, `src/routes/signin/`, and
 `src/routes/signup/` into this project. Rework `src/routes/+layout.svelte`
-to switch between anonymous and JWT-authenticated clients based on the
+to switch between local-first and JWT-authenticated clients based on the
 Better Auth session (see the `-auth` variant for the exact pattern), add
 `better-auth` and `jazz-napi` as dependencies, and set
 `BETTER_AUTH_SECRET` in `src/lib/auth.ts` or your environment.

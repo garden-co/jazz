@@ -1,7 +1,7 @@
 # next-localfirst
 
 A minimal Next.js starter for [Jazz](https://jazz.tools) with a pure
-local-first todo app. Users' data persists under a per-device anonymous Jazz
+local-first todo app. Users' data persists under a per-device local-first Jazz
 identity.
 
 ## What this starter gives you
@@ -53,7 +53,7 @@ Jazz uses for all subsequent writes. The `JazzProvider` in
 or generates the secret client-side) and hand `secret` to the underlying
 `<JazzProvider>`.
 
-Data syncs to the Jazz server under that anonymous identity. There is no
+Data syncs to the Jazz server under that local-first identity. There is no
 concept of a user account, no sign-in, no sign-out — the device _is_ the
 account. `components/auth-backup.tsx` surfaces a recovery phrase + passkey
 UI so users can back up and restore that identity across devices.
@@ -97,7 +97,7 @@ provider and your app will sync against Jazz Cloud.
 For self-hosted deployments you need to run your own Jazz server. The
 server requires `--allow-local-first-auth` explicitly in production:
 `jazz-tools server <APP_ID> --allow-local-first-auth`. Without it,
-anonymous local-first connections will receive auth errors.
+local-first connections will receive auth errors.
 
 ## Known limitations
 

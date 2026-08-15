@@ -8,7 +8,7 @@ import DurabilityTiersTable from "../../partials/durability-tiers-table.mdx";
 
 <DurabilityTiersTable />
 
-For background on how data flows between tiers, see [How Sync Works](/docs/concepts/how-sync-works#infrastructure-tiers).
+For background on how data flows between tiers, see [How Sync Works](/docs/concepts/how-sync-works).
 
 ## Write tiers
 
@@ -31,14 +31,14 @@ These options apply to:
 - `db.all(query, options?)`
 - `db.one(query, options?)`
 - `db.subscribeAll(query, callback, options?)`
-- `useAll(query, options?)` / `useAllSuspense(query, options?)` (React/Expo)
+- `useAll(query, options?)` / `useAllSuspense(query, options?)` (React)
 - `new QuerySubscription(query, options?)` (Svelte)
 - `useAll(query, options?)` (Vue)
 - `useAll(() => ({ query, options }))` (Solid)
 
 <Tabs
   groupId="jazz-framework"
-  items={["React", "Vue", "Svelte", "Solid", "Expo", "TypeScript", "Rust"]}
+  items={["React", "Vue", "Svelte", "Solid", "TypeScript", "Rust"]}
   persist
   updateAnchor
 >
@@ -60,11 +60,6 @@ These options apply to:
   <Tab value="Solid">
     <include cwd lang="ts" meta='title="App.tsx"'>
       ../examples/docs/todo-client-localfirst-solid/src/docs-snippets.ts#reading-tier-solid
-    </include>
-  </Tab>
-  <Tab value="Expo">
-    <include cwd lang="ts" meta='title="App.tsx"'>
-      ../examples/docs/todo-client-localfirst-expo/src/docs-snippets.ts#reading-tier-expo
     </include>
   </Tab>
   <Tab value="TypeScript">

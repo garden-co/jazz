@@ -1,10 +1,10 @@
 # todo-client-localfirst-svelte
 
-Local-first todo app on Svelte 5 + Vite, anonymous auth via local-first secret, OPFS persistence.
+Local-first todo app on Svelte 5 + Vite, local-first identity via a device secret, OPFS persistence.
 
 ## What it demonstrates
 
-- Anonymous identity from a locally generated secret — no login UI, no auth server.
+- Local-first identity from a locally generated secret — no login UI, no auth server.
 - `QuerySubscription` reactive live queries with composable `where()` filters (filter by title substring, by done status).
 - `getDb` synchronous local writes (`db.insert`, `db.update`, `db.delete`).
 - Row-level permissions — `owner_id` enforced by `definePermissions`; mutations on rows you don't own surface as toast errors via `svelte-sonner`.

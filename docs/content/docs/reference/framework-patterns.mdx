@@ -1,17 +1,17 @@
 ---
 title: Framework Patterns
-description: Side-by-side reference for React/Expo, Vue, Svelte, and Solid Jazz APIs.
+description: Side-by-side reference for React, Vue, Svelte, and Solid Jazz APIs.
 reviewedAt: "3384730e1"
 ---
 
-Jazz provides framework-specific bindings for React/Expo, Vue, Svelte, and Solid. This page
+Jazz provides framework-specific bindings for React, Vue, Svelte, and Solid. This page
 is a side-by-side reference&hairsp;—&hairsp;see [Reading Data](/docs/reading/queries),
 [Writing Data](/docs/writing/writing-data), and [Sessions](/docs/auth/sessions) for
 full details.
 
 ## API equivalents
 
-| Concept            | React / Expo                     | Vue                               | Svelte                          | Solid                         |
+| Concept            | React                            | Vue                               | Svelte                          | Solid                         |
 | ------------------ | -------------------------------- | --------------------------------- | ------------------------------- | ----------------------------- |
 | Provider           | `<JazzProvider config={config}>` | `<JazzProvider :client="client">` | `<JazzSvelteProvider {client}>` | `<JazzProvider client={...}>` |
 | Query subscription | `useAll(query)`                  | `useAll(query)`                   | `new QuerySubscription(query)`  | `useAll(() => ({ query }))`   |
@@ -74,7 +74,7 @@ Subscribe to query results reactively. See [Reading Data](/docs/reading/queries)
 </Tabs>
 
 The `?? []` guard handles the `undefined` (not yet connected) case. See
-[Reading Data: The undefined loading state](/docs/reading/queries#the-undefined-loading-state) for patterns that depend on this signal.
+[Reading Data: The loading state](/docs/reading/queries#the-loading-state) for patterns that depend on this signal.
 
 In Vue, Svelte, and Solid, the binding reconciles updates into the existing reactive array in place, so only fields that actually changed trigger re-renders. See [Fine-grained updates](/docs/reading/queries#fine-grained-updates) for the full behaviour.
 

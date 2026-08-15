@@ -109,7 +109,7 @@ enough row history to converge deterministically after peers reconnect.
 ## Conflict resolution
 
 When concurrent writes touch the same field of the same row, Jazz resolves the visible result with
-[last-writer-wins (LWW)](/docs/concepts/how-sync-works#consistency-model). The later row version
+[last-writer-wins (LWW)](/docs/concepts/how-sync-works#concurrent-writes). The later row version
 wins for the conflicting field.
 
 If two peers update different fields, both changes can still be preserved in the resulting visible

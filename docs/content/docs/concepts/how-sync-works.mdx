@@ -1,127 +1,61 @@
 ---
 title: How Sync Works
-description: An overview of how Jazz syncs data between clients, covering query subscriptions, infrastructure tiers, offline behavior, and eventual consistency.
-reviewedAt: "6027cae2"
+description: Query-driven replication, transaction fate, and the local, edge, and core roles.
 ---
 
-Traditional apps send queries to a remote server, which queries a database and returns data.
+Jazz applications read and write a local database. Sync is query-driven: an active query tells an
+upstream which current rows the application needs, and the upstream sends matching row versions and
+later changes. Permissions are enforced by the serving authority before rows are emitted.
 
-This creates a few familiar problems:
+## Local-first execution
 
-- the data is immediately stale
-- both the client and the server must be online
-- your app's performance depends on the speed of each network hop
+`Db` is always a client facade. It reads the materialized local state, accepts local writes, and
+queues those writes for upstream delivery. A browser persistent client uses OPFS; a browser worker
+owns the durable database and coordinates tabs. A client with no server URL remains useful as a
+local-only database: its writes settle at `local` and never self-finalize.
 
-Techniques like websockets, client-side caching, and optimistic updates help, but they add
-complexity without changing the basic request/response shape.
+Subscriptions keep the local replica fresh. On reconnect, the client re-announces active queries
+and retries locally originated transactions by transaction identity, so repeated delivery is safe.
 
-Jazz solves these problems with **query subscriptions** backed by a local replica.
-
-## Queries drive everything
-
-When your app [subscribes to a query](/docs/reading/queries) (say, all todos where
-[`done = false`](/docs/reading/filters-and-sorting)), Jazz sends that query subscription upstream.
-The server evaluates the query against its own current relational state, finds the matching rows,
-and sends them back. The client only ever sees rows it has asked for (and
-[has permission to read](/docs/auth/permissions)).
-
-The set of active queries on a client defines the rows it can see and will keep receiving updates
-for.
-
-## The server keeps you subscribed
-
-When you register a query subscription with the server, it remembers.
-
-The server keeps a live query graph for that subscription. When local writes, remote replay, or
-schema/policy changes affect the result, it re-settles only the changed parts of the query and
-pushes the relevant row updates downstream.
-
-That means:
-
-- if a new row matches your query, it is pushed automatically
-- if a matching row changes and no longer fits, it stops appearing in the subscription result
-- clients update their local replicas from deltas instead of from full snapshots every time
-
-## What happens offline
-
-Reads always come from local storage.
-
-In the browser, Jazz uses a dedicated worker reading from data stored locally in OPFS (Origin
-Private File System). When multiple tabs are open, Jazz elects one tab as the storage leader and
-routes follower tabs through it. If the leader tab closes, a new leader is elected.
-
-Even without a network connection, your app can still read data it already has locally, whether
-that data was synced earlier or written locally on the device.
-
-[Writes](/docs/writing/writing-data) behave the same way: they are stored locally immediately so the
-UI updates without waiting on a round-trip. Jazz queues the corresponding row-version updates for
-upstream sync. When the client reconnects, queued writes are sent and active query subscriptions are
-replayed automatically.
-
-## Infrastructure tiers
-
-Jazz sync runs across three tiers:
-
-<TierSyncDiagram />
-
-**Local** is the first tier on the client itself. In browser persistent mode, a dedicated worker
-hosts that local durable copy in OPFS so it can respond immediately while updates from higher tiers
-stream in.
-
-**Edge** is the first server hop after the client. In cloud configurations it is usually a nearby
-node. Edge servers hold the data needed to serve the queries currently flowing through them.
-
-**Global** is the global reconciliation tier. Edge servers reconcile through global, which is how
-updates eventually spread to every subscribed client.
-
-### How data flows
-
-Writes flow **upward**:
+## Roles and topology
 
 ```text
-app -> local -> edge -> global
+client Db  →  edge  →  core
+     ↑           ↓
+ current rows and query deltas
 ```
 
-As a write flows through the network, each tier can confirm that it has durably received it. That
-is what durability tiers are built on.
+- **Client** — owns a partial local replica and is never a fate authority.
+- **Edge** — serves identity-scoped query data and can finally admit mergeable writes for the
+  permission scopes it terminates.
+- **Core** — the global serialization point. It finalizes exclusive transactions and assigns global
+  settlement.
 
-Reads flow **downward on demand**. When you create a query subscription, it is forwarded upward.
-Each tier registers the subscription with the next tier and asks for the rows needed to satisfy it.
-That allows the system to replicate only the data that has actually been requested.
+Edges route upstream through core. A relay forwards protocol traffic and does not decide writes.
 
-Lower tiers have lower latency, but writes have further to travel before every other client can see
-them. As a rough guide:
+## Fate and durability
 
-- waiting for the global core is only necessary if you want the strongest cross-region visibility
-- waiting for edge is useful when you want to know data has left the user's device
-- the default local tier is right for most local-first interactions
+Every committed transaction has a fate and a durability observation. Fate is `pending`, `accepted`,
+or `rejected`; it answers whether an authority admitted the transaction. Durability is `local`,
+`edge`, or `global`; it answers where the transaction is known to be stored. These are independent:
+an edge-accepted transaction is not globally durable until it reaches core.
 
-<Callout type="info" title="Sync is automatic">
-  Sync happens whenever a node is online. Writes keep propagating upward even if your promise
-  resolves at the local tier. Reads similarly propagate downward as each tier registers the query
-  with the next one up. If higher tiers have newer rows, they stream down automatically.
-</Callout>
+`WriteHandle.wait({ tier })` waits for the requested durability observation and rejects when the
+transaction's fate is rejected. Use `local` for immediate local-first UX, `edge` when the first
+server hop must observe the write, and `global` when the application needs global settlement.
 
-## Consistency model
+## Concurrent writes
 
-Every write in Jazz produces a new **row version**. That row version is stored locally, can be
-replicated upward, and contributes to the current visible state for that row.
+Each write creates an immutable row version. Current rows are derived from accepted row history.
+Concurrent writes merge deterministically: columns are last-writer-wins by default, and a declared
+non-nullable integer counter uses counter merging. Deleted rows are absent from ordinary current
+queries; `includeDeleted()` explicitly reads their retained content.
 
-Because sync is local-first, different tiers can temporarily disagree:
+## Query delivery
 
-- your local tier may already have a newer row version than edge
-- one edge may have data another edge has not fetched yet
-- another client may have its own concurrent local write
+The first result can wait for `local`, `edge`, or `global` query coverage. After that, a
+subscription receives maintained deltas as they reach the local replica. Use `propagation:
+"local-only"` when an intentionally offline view must read only the local snapshot.
 
-All of that still converges. Row versions propagate upward, are durably stored at higher tiers, and
-flow back down to every subscribed client that needs them.
-
-When clients write concurrently to the same field of the same row, Jazz uses
-**last-writer-wins (LWW)** to decide the current visible result. Even row versions that lose that
-race remain in row history, so the system keeps enough information to reconcile deterministically
-and to support richer history-aware behavior later.
-
-## See it in action
-
-The [examples reference](/docs/reference/examples) shows complete applications that exercise
-query subscriptions, real-time sync, and conflict-friendly collaboration.
+See [Queries](/docs/reading/queries) for the client API and [Writing Data](/docs/writing/writing-data)
+for mutation and transaction examples.

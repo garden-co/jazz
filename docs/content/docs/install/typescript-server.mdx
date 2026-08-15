@@ -42,7 +42,7 @@ Create `schema.ts` at the root of your project (or `src/lib/schema.ts` for Svelt
 
 <SchemaSetup />
 
-[Learn more about schemas, optional validation, and migrations](/docs/schemas/defining-tables).
+[Learn more about schemas and validation](/docs/schemas/defining-tables).
 
 ### Add permissions
 
@@ -93,7 +93,8 @@ covers those patterns in more detail.
     current Node.js setup that means SQLite-backed local persistence. `dataPath` is the directory
     where that local database lives.
 
-    There is also a `memory` driver, which does not persist data. To use it, set a `serverUrl` pointing to an upstream peer that *can* persist the data.
+    There is also a `memory` driver, which does not persist data. It works for ephemeral local
+    processes; add `serverUrl` when it should sync with an upstream peer that persists data.
 
   </Accordion>
 </Accordions>

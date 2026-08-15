@@ -1,20 +1,22 @@
 # todo-client-localfirst-expo
 
-Expo example for local-first todos using `jazz-tools/react` + `jazz-rn`.
+Expo binding scaffold for local-first todos using `jazz-tools/react` + `jazz-rn`.
 
 ## Notes
 
 - This app uses native code (`jazz-rn`), so use a development build (`expo run:ios` / `expo run:android`).
 - It does **not** run in Expo Go.
 - Keep `jazz-rn` as a **direct app dependency** so React Native codegen discovers `JazzRnSpec` during prebuild.
-- RN storage is SQLite-backed. You can optionally pass `dataPath` in `JazzProvider` config to pick a specific file path.
+- Persistent React Native storage is not implemented. Opening the persistent driver throws, so this
+  example is a binding/integration target rather than a runnable application.
 - Start a Jazz server first (for example: `jazz-tools server <APP_ID> --port 1625`).
 - Server URL defaults:
   - iOS simulator: `http://127.0.0.1:1625`
   - Android emulator: `http://10.0.2.2:1625`
   - Physical device: `http://<your-lan-ip>:1625`
 - If you set `EXPO_PUBLIC_JAZZ_SERVER_URL` to `localhost`/`127.0.0.1`, the app now rewrites it in dev when needed so devices can still reach your host machine.
-- Auth uses local-first identity via `ExpoAuthSecretStore` (backed by `expo-secure-store`).
+- The auth helper API is present for typechecking; it does not make the unavailable persistent
+  runtime deployable.
 - Todos carry `owner_id`, and mutations are authorized against `session.user_id`.
 
 ## Commands

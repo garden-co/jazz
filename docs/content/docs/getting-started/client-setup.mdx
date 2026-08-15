@@ -8,13 +8,18 @@ import { Accordion, Accordions } from "fumadocs-ui/components/accordion";
 import { Callout } from "fumadocs-ui/components/callout";
 import CreateJazzClientReference from "../../partials/create-jazz-client-reference.mdx";
 
+<Callout type="warn" title="React Native and Expo runtime support is not available">
+  The React Native API surface typechecks, but opening persistent storage throws because the SQLite
+  driver is not implemented. The browser and Node.js runtime paths are the supported alpha targets.
+</Callout>
+
 ## Zero-config client setup
 
 Every client needs an `appId` and a `secret` for [local-first auth](/docs/auth/local-first-auth). Without `secret`, the client runs in anonymous mode and every write is rejected with `AnonymousWriteDeniedError`. Add a `serverUrl` to enable sync. For the full auth matrix (anonymous, local-first, external JWT), see [Authentication](/docs/auth/authentication).
 
 <Tabs
   groupId="jazz-framework"
-  items={["React", "Vue", "Svelte", "Solid", "Expo", "TypeScript"]}
+  items={["React", "Vue", "Svelte", "Solid", "TypeScript"]}
   persist
   updateAnchor
 >
@@ -50,14 +55,6 @@ Every client needs an `appId` and a `secret` for [local-first auth](/docs/auth/l
     `useLocalFirstAuth()` from `jazz-tools/solid` loads the device secret (or generates one on first run) and exposes `login` / `signOut` for switching identity.
 
   </Tab>
-  <Tab value="Expo">
-    <include cwd lang="tsx" meta='title="App.tsx"'>
-      ../examples/docs/todo-client-localfirst-expo/src/auth-snippets.tsx#auth-localfirst-expo
-    </include>
-
-    `ExpoAuthSecretStore` persists the secret in the device's secure storage. Or use `useLocalFirstAuth()` from `jazz-tools/expo` for a hook-based API.
-
-  </Tab>
   <Tab value="TypeScript">
     <include cwd lang="ts" meta='title="app.ts"'>
       ../examples/docs/todo-client-localfirst-ts/src/auth-snippets.ts#auth-localfirst-ts
@@ -65,7 +62,8 @@ Every client needs an `appId` and a `secret` for [local-first auth](/docs/auth/l
   </Tab>
 </Tabs>
 
-The secret is generated on first load, persisted locally (`localStorage` in the browser, secure storage on Expo), and reused on every subsequent run — the same device keeps the same Jazz identity.
+The secret is generated on first load, persisted locally in the browser, and reused on every
+subsequent run — the same device keeps the same Jazz identity.
 
 <Callout type="info">
   Using Jazz completely offline? Leave out `serverUrl` and everything above still works — writes
@@ -90,13 +88,11 @@ Some bundlers and runtimes cannot automatically resolve Jazz's Wasm and worker a
 
 <CreateJazzClientReference />
 
-For React Native and Expo clients, make sure `serverUrl` points to a host your runtime can reach. For example, the Android emulator often needs `10.0.2.2` instead of `localhost`.
-
 Use `cookieSession` only when your app authenticates sync with an HttpOnly cookie instead of a JS-readable bearer token. In that setup, the cookie is the real transport credential, while `cookieSession` mirrors the current Jazz session into the client so local permission checks, `useSession()`, and `db.getAuthState()` know which user is active. You must choose between `cookieSession` and `secret`/`jwtToken`. Call `db.updateCookieSession(nextSession)` for cookie-backed session changes or recreate `JazzProvider` / `Db` on sign-in and sign-out.
 
 ### Storage driver
 
-Browser clients default to `driver: { type: "persistent" }`, which stores data locally for offline support. Set `driver: { type: "memory" }` to keep data in memory only. This option requires you to set a `serverUrl` since nothing is saved locally.
+Browser clients default to `driver: { type: "persistent" }`, which stores data locally for offline support. Set `driver: { type: "memory" }` to keep data in memory only. A memory database works without a server URL; add one when the in-memory client should sync.
 
 #### Browser storage eviction
 
@@ -126,7 +122,7 @@ Jazz ships bundler plugins that remove boilerplate in development. They start a 
 
 <Tabs
   groupId="jazz-framework"
-  items={["React (Vite)", "Vue (Vite)", "Svelte (Vite)", "Solid (Vite)", "SvelteKit", "Next.js", "Expo"]}
+  items={["React (Vite)", "Vue (Vite)", "Svelte (Vite)", "Solid (Vite)", "SvelteKit", "Next.js"]}
   persist
   updateAnchor
 >
@@ -210,25 +206,6 @@ Jazz ships bundler plugins that remove boilerplate in development. They start a 
     Injects `NEXT_PUBLIC_JAZZ_APP_ID` and `NEXT_PUBLIC_JAZZ_SERVER_URL`. Only runs in the Next.js dev phase; production builds are untouched.
 
   </Tab>
-  <Tab value="Expo">
-    ```js title="metro.config.js"
-    import { getDefaultConfig } from "expo/metro-config";
-    import { withJazz } from "jazz-tools/dev/expo";
-
-    const config = getDefaultConfig(__dirname);
-
-    await withJazz(config, { schemaDir: __dirname });
-
-    export default config;
-    ```
-
-    Injects `EXPO_PUBLIC_JAZZ_APP_ID` and `EXPO_PUBLIC_JAZZ_SERVER_URL` via `expoConfig.extra`. Skipped automatically when `NODE_ENV=production`.
-
-    Expo and React Native apps still need the runtime polyfills from the quickstart. Import
-    `jazz-tools/expo/polyfills` as the first line of your app entry point before any other Jazz
-    import.
-
-  </Tab>
 </Tabs>
 
 On first run the plugin generates an app ID, persists it to `.env`, and starts a local Jazz server under `node_modules/.cache/jazz-dev-server/`. Every subsequent run reuses both.
@@ -242,9 +219,8 @@ Each plugin writes the same two values (`appId`, `serverUrl`) under the prefix i
 | Vite      | `VITE_JAZZ_APP_ID`        | `VITE_JAZZ_SERVER_URL`        |
 | Next.js   | `NEXT_PUBLIC_JAZZ_APP_ID` | `NEXT_PUBLIC_JAZZ_SERVER_URL` |
 | SvelteKit | `PUBLIC_JAZZ_APP_ID`      | `PUBLIC_JAZZ_SERVER_URL`      |
-| Expo      | `EXPO_PUBLIC_JAZZ_APP_ID` | `EXPO_PUBLIC_JAZZ_SERVER_URL` |
 
-Jazz Cloud sync URL: `https://v2.sync.jazz.tools/`. For self-hosted deployments, point the server URL at your own host.
+For self-hosted deployments, point the server URL at your own host.
 
 ### Plugin options
 
@@ -276,7 +252,7 @@ jazzPlugin({
 On startup and on every change to `schema.ts` or `permissions.ts`, the plugin publishes the current structural schema and permissions bundle to the server. Structural schema push works without an admin secret in development, so a bare `schema.ts` edit is enough to see clients pick up the new shape. Permission pushes use the resolved server admin secret (from `server.adminSecret`, root `adminSecret`, or a generated embedded-server secret).
 
 <Callout type="warn">
-  Auto-push covers the development loop. For production — or any change that needs a schema migration — run `pnpm dlx jazz-tools@alpha deploy <appId>` to publish the migration, the new schema, and the current permissions in one step. See [Migrations](/docs/schemas/migrations).
+  Auto-push covers the development loop. For production, run `pnpm dlx jazz-tools@alpha deploy <appId>` to publish the validated schema and current permissions together. See [Schema changes](/docs/schemas/migrations).
 </Callout>
 
 ## Runtime source overrides
@@ -357,4 +333,4 @@ const db = await createDb({
 });
 ```
 
-See the [Cloudflare Wrangler example](https://github.com/garden-co/jazz2/tree/main/examples/cloudflare-worker-runtime-ts) for a complete `workerd` setup.
+See the [Cloudflare Wrangler example](https://github.com/garden-co/jazz/tree/main/examples/cloudflare-worker-runtime-ts) for a complete `workerd` setup.

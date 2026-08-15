@@ -28,10 +28,10 @@ skip the picker with `--starter <name>`:
 
 | Starter                | Framework | Auth                                      |
 | ---------------------- | --------- | ----------------------------------------- |
-| `next-localfirst`      | Next.js   | Local-first (anonymous)                   |
+| `next-localfirst`      | Next.js   | Local-first device identity               |
 | `next-hybrid`          | Next.js   | Local-first + optional BetterAuth upgrade |
 | `next-betterauth`      | Next.js   | BetterAuth (email + password)             |
-| `sveltekit-localfirst` | SvelteKit | Local-first (anonymous)                   |
+| `sveltekit-localfirst` | SvelteKit | Local-first device identity               |
 | `sveltekit-hybrid`     | SvelteKit | Local-first + optional BetterAuth upgrade |
 | `sveltekit-betterauth` | SvelteKit | BetterAuth (email + password)             |
 
@@ -47,7 +47,7 @@ zero-config local sync.
 
 Every version of `create-jazz` fetches the starter, the workspace config, and
 package versions from the `main` branch of
-[`garden-co/jazz2`](https://github.com/garden-co/jazz2) at scaffold time —
+[`garden-co/jazz`](https://github.com/garden-co/jazz) at scaffold time —
 regardless of which CLI version you install. In other words, `npm create
 jazz@0.0.1` and `npm create jazz@latest` will produce the same output on any
 given day, and that output tracks whatever is on `main` right now.

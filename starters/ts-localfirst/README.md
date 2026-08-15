@@ -58,7 +58,7 @@ result set in `delta.all`. The widget rebuilds its `<ul>` on each tick —
 simple, fast enough for the kinds of lists a starter needs, and easy to
 swap for per-row patches via `delta.delta` if you ever need them.
 
-Data syncs to the Jazz server under the device's anonymous identity. There
+Data syncs to the Jazz server under the device's local-first identity. There
 is no concept of a user account, no sign-in, no sign-out — the device _is_
 the account.
 
@@ -102,7 +102,7 @@ provider and your app will sync against Jazz Cloud.
 For self-hosted deployments you need to run your own Jazz server. The
 server requires `--allow-local-first-auth` explicitly in production:
 `jazz-tools server <APP_ID> --allow-local-first-auth`. Without it,
-anonymous local-first connections will receive auth errors.
+local-first connections will receive auth errors.
 
 ## Known limitations
 

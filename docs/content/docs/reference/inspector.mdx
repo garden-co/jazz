@@ -4,7 +4,7 @@ description: Standalone admin client for exploring Jazz sync servers, schemas, p
 reviewedAt: "3384730e1"
 ---
 
-The [Jazz Inspector](https://v2.inspector.jazz.tools/) is a standalone client for inspecting a Jazz
+The Jazz Inspector is a standalone client for inspecting a Jazz
 app through any reachable sync server. It is not tied to Jazz Cloud: if you have a server URL, app
 ID, and admin credential, you can connect to that app's sync server directly.
 
@@ -16,7 +16,7 @@ ID, and admin credential, you can connect to that app's sync server directly.
 
 ## Connecting
 
-Open [v2.inspector.jazz.tools](https://v2.inspector.jazz.tools/) and enter:
+Open the Inspector deployment configured for your Jazz environment and enter:
 
 - **Server URL**&hairsp;—&hairsp;base URL of the sync server
 - **App ID**&hairsp;—&hairsp;Jazz app namespace to inspect
@@ -53,9 +53,8 @@ Explorer.
 
 ### Schema switching
 
-If an app has multiple published schema hashes, the inspector lets you switch between them without
-reconnecting. This is useful when checking migrations, comparing stored shapes, or debugging data
-that still lives on older schema branches.
+The inspector can show the schema identity selected by the connected application. Use it to inspect
+the current stored shape, policy bundle, subscriptions, and row data.
 
 ## Development overlay
 
@@ -63,6 +62,5 @@ The Vite and SvelteKit development integrations can serve an in-app inspector ov
 embedded inspector against the running app's local runtime. The overlay is enabled by default during
 development and can be disabled with the integration's `inspector: false` option.
 
-For remote or self-hosted sync servers, the hosted client at
-[v2.inspector.jazz.tools](https://v2.inspector.jazz.tools/) is the easiest way to inspect the server
+For remote or self-hosted sync servers, use an Inspector deployment that can reach the server
 directly.

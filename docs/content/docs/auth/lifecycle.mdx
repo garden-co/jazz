@@ -9,10 +9,9 @@ import { Callout } from "fumadocs-ui/components/callout";
 Jazz clients have two pieces of local state that are easy to confuse:
 
 - **Identity secret**&hairsp;—&hairsp;the local-first auth secret. In browser apps this is usually stored
-  by `BrowserAuthSecretStore` in `localStorage`; in Expo it is stored by `ExpoAuthSecretStore` in
-  secure storage.
+  by `BrowserAuthSecretStore` in `localStorage`.
 - **Database storage**&hairsp;—&hairsp;the local relational database. Browser persistent clients store this
-  in OPFS; React Native uses native storage; memory drivers keep it only for the life of the process.
+  in OPFS; memory drivers keep it only for the life of the process.
 
 Clearing one does not automatically clear the other. That separation is intentional: a development
 storage reset should not silently destroy a user's identity, and signing out of an auth provider
@@ -32,7 +31,7 @@ const db = await createDb({
 });
 ```
 
-`useLocalFirstAuth()` wraps this storage for React and Expo apps. Its `signOut()` method clears the
+`useLocalFirstAuth()` wraps this storage for browser framework apps. Its `signOut()` method clears the
 stored secret, which means the next login without a restored secret creates a different Jazz
 identity.
 
@@ -80,7 +79,7 @@ await db.logout({ wipeData: true });
 ```
 
 `wipeData` clears the local database for this browser storage namespace. It does not clear
-local-first auth secrets from `localStorage`, Expo secure storage, or your external provider's
+local-first auth secrets from `localStorage` or your external provider's
 cookies/tokens.
 
 ## Storage reset
@@ -115,14 +114,13 @@ proof-token flow.
 
 ## Related APIs
 
-| API                               | Use it for                                                                           |
-| --------------------------------- | ------------------------------------------------------------------------------------ |
-| `BrowserAuthSecretStore`          | Browser local-first secret storage                                                   |
-| `ExpoAuthSecretStore`             | Expo secure local-first secret storage                                               |
-| `useLocalFirstAuth()`             | React/Expo hook (and Vue composable) for loading, replacing, and clearing the secret |
-| `LocalFirstAuth`                  | Svelte reactive class for loading, replacing, and clearing the secret                |
-| `db.updateAuthToken(jwt)`         | Refreshing a bearer JWT for the same principal                                       |
-| `db.updateCookieSession(session)` | Updating a mirrored cookie-backed session for the same principal                     |
-| `db.logout()`                     | Shutting down a client during logout or principal switch                             |
-| `db.logout({ wipeData: true })`   | Logout plus browser OPFS database wipe                                               |
-| `db.deleteClientStorage()`        | Development-only browser OPFS storage reset                                          |
+| API                               | Use it for                                                                      |
+| --------------------------------- | ------------------------------------------------------------------------------- |
+| `BrowserAuthSecretStore`          | Browser local-first secret storage                                              |
+| `useLocalFirstAuth()`             | React hook (and Vue composable) for loading, replacing, and clearing the secret |
+| `LocalFirstAuth`                  | Svelte reactive class for loading, replacing, and clearing the secret           |
+| `db.updateAuthToken(jwt)`         | Refreshing a bearer JWT for the same principal                                  |
+| `db.updateCookieSession(session)` | Updating a mirrored cookie-backed session for the same principal                |
+| `db.logout()`                     | Shutting down a client during logout or principal switch                        |
+| `db.logout({ wipeData: true })`   | Logout plus browser OPFS database wipe                                          |
+| `db.deleteClientStorage()`        | Development-only browser OPFS storage reset                                     |
