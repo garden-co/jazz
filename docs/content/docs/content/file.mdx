@@ -1,0 +1,48 @@
+---
+title: File content
+description: Store immutable file extents with typed edit operations.
+---
+
+`file-v1` uses a `Bytes` tail. This complete example stores immutable extents,
+authors an overwrite, publishes the one manifest cell, and materializes it.
+
+```rust
+use groove::records::ValueType;
+use jazz::{
+    content_manifest::{
+        global_content_manifest_adapters, ContentDomainId, ContentManifest,
+        ContentManifestRuntime, ContentManifestSchema, ContentReadContext,
+        MaterializationRequest, MemoryImmutableContentStore,
+    },
+    file_content::{FileContentAdapter, FileEdit},
+    schema::ColumnSchema,
+};
+
+fn file_example() -> Result<(), Box<dyn std::error::Error>> {
+    let context = ContentReadContext { domain: ContentDomainId(uuid::Uuid::new_v4()) };
+    let mut store = MemoryImmutableContentStore::default();
+    let schema = ContentManifestSchema::with_tail_entry_type(
+        "file-v1", ValueType::Bytes, 8, 1024,
+    )?;
+    let column = ColumnSchema::content_manifest("file", schema.clone());
+    let file = FileContentAdapter;
+    let root = file.store_bytes(b"draft", context, &mut store)?;
+    let manifest = ContentManifest {
+        root,
+        edit_tail: vec![FileContentAdapter::encode_edit(&FileEdit::Overwrite {
+            offset: 0, delete: 5, bytes: b"final".to_vec(),
+        })],
+    };
+    let cell = manifest.into_value(&schema)?;
+
+    let runtime = ContentManifestRuntime::new(global_content_manifest_adapters(), context, &store);
+    let bytes = runtime.materialize_cell(&schema, &cell, &MaterializationRequest::Full)?;
+    assert_eq!(bytes, b"final");
+    let _ = column;
+    Ok(())
+}
+```
+
+Use `ContentManifestRuntime` for full or range reads and adapter indices.
+Non-overlapping edits merge deterministically; `consolidate` writes a new root
+and clears the tail while retaining unaffected extents.
