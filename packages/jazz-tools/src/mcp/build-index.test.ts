@@ -16,10 +16,16 @@ import {
 const packageBinDir = resolve(dirname(fileURLToPath(import.meta.url)), "../../bin");
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../../..");
 
-function readLogicalIndex(dbPath: string) {
+function readIndexContract(dbPath: string) {
   const db = new DatabaseSync(dbPath);
   try {
     return {
+      schema: db
+        .prepare(
+          "SELECT type, name, tbl_name, sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY type, name, tbl_name, sql",
+        )
+        .all()
+        .map((row) => ({ ...row })),
       pages: db
         .prepare("SELECT title, slug, description, body FROM pages ORDER BY slug")
         .all()
@@ -30,6 +36,20 @@ function readLogicalIndex(dbPath: string) {
         )
         .all()
         .map((row) => ({ ...row })),
+      searches: ["authentication", "schema", "sync"].map((query) => ({
+        query,
+        results: db
+          .prepare(
+            `SELECT slug, section_heading,
+                    snippet(sections_fts, 3, '', '', '…', 32) AS snippet
+             FROM sections_fts
+             WHERE sections_fts MATCH ?
+             ORDER BY bm25(sections_fts), slug, section_heading
+             LIMIT 10`,
+          )
+          .all(query)
+          .map((row) => ({ ...row })),
+      })),
     };
   } finally {
     db.close();
@@ -429,8 +449,8 @@ describe("packaged docs index", () => {
         fileCwd: join(repoRoot, "docs"),
       });
 
-      expect(readLogicalIndex(join(outputDir, "docs-index.db"))).toEqual(
-        readLogicalIndex(join(packageBinDir, "docs-index.db")),
+      expect(readIndexContract(join(outputDir, "docs-index.db"))).toEqual(
+        readIndexContract(join(packageBinDir, "docs-index.db")),
       );
     } finally {
       await rm(outputDir, { recursive: true, force: true });
