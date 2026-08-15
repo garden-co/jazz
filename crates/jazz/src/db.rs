@@ -290,6 +290,7 @@ type LatestCoverageSubscriptions = Rc<RefCell<BTreeMap<CoverageKey, Subscription
 type UpstreamCoverageRefCounts = Rc<RefCell<BTreeMap<CoverageKey, usize>>>;
 type AwaitingInitialAuthorityCoverage = Rc<RefCell<BTreeSet<CoverageKey>>>;
 type CoverageRefreshGenerations = Rc<RefCell<BTreeMap<CoverageKey, u64>>>;
+type QueryCoverageRegistrations = Rc<RefCell<BTreeMap<SubscriptionKey, QueryCoverageRegistration>>>;
 /// Ephemeral evidence that the current authority connection has confirmed a
 /// canonical binding view. It is deliberately separate from durable
 /// `settled_through`: cursors retain payload possession for repair/dedup, not
@@ -309,6 +310,7 @@ const MAX_EDGE_FATE_ROUTES_PER_TX: usize = 8;
 #[derive(Default)]
 struct AuthorityViewReceipts {
     connection_epoch: u64,
+    confirmation_floor: GlobalSeq,
     binding_views: BTreeSet<BindingViewKey>,
 }
 
@@ -644,6 +646,13 @@ struct PendingUpstreamSubscription {
     identity: AuthorId,
 }
 
+struct QueryCoverageRegistration {
+    coverage: CoverageKey,
+    subscription: PendingUpstreamSubscription,
+    owns_subscription: bool,
+    ref_count: usize,
+}
+
 #[derive(Clone)]
 struct UpstreamCoverageHandle {
     coverage: CoverageKey,
@@ -771,8 +780,11 @@ impl InitialSyncFlushCadence {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct QueryAttachment {
     subscriptions: Vec<SubscriptionKey>,
-    owned_subscriptions: Vec<SubscriptionKey>,
     required_after: Vec<(BindingViewKey, u64)>,
+    /// Edge/Global coverage is live authority evidence, not merely a newer
+    /// durable view generation.
+    requires_current_authority_receipt: bool,
+    registrations: Vec<SubscriptionKey>,
     refreshes: Vec<(CoverageKey, u64)>,
 }
 
@@ -1883,6 +1895,7 @@ where
         upstream_opts: RegisterShapeOptions,
         identity: AuthorId,
     ) -> Result<QueryAttachment, Error> {
+        let requires_current_authority_receipt = upstream_opts.tier >= DurabilityTier::Edge;
         let binding_view = BindingViewKey::new(
             shape.shape_id(),
             binding.binding_id(),
@@ -1905,36 +1918,91 @@ where
                 .borrow()
                 .get(&coverage)
                 .copied()
+            && !self
+                .node
+                .query_coverage_registrations
+                .borrow()
+                .contains_key(&subscription)
         {
+            *self
+                .node
+                .upstream_coverage_refcounts
+                .borrow_mut()
+                .entry(coverage.clone())
+                .or_insert(0) += 1;
+            let pending_subscription = PendingUpstreamSubscription {
+                subscription,
+                shape: shape.clone(),
+                binding: binding.clone(),
+                opts: upstream_opts.clone(),
+                identity,
+            };
+            self.register_query_coverage(coverage.clone(), pending_subscription.clone(), false);
             let mut refreshes = self.node.coverage_refresh_generations.borrow_mut();
             if refreshes.get(&coverage).copied() != Some(required_after) {
                 refreshes.insert(coverage.clone(), required_after);
-                self.node.upstream_subscriptions.borrow_mut().push(
-                    PendingUpstreamCommand::Subscribe(PendingUpstreamSubscription {
-                        subscription,
-                        shape: shape.clone(),
-                        binding: binding.clone(),
-                        opts: upstream_opts,
-                        identity,
-                    }),
-                );
+                self.node
+                    .upstream_subscriptions
+                    .borrow_mut()
+                    .push(PendingUpstreamCommand::Subscribe(pending_subscription));
                 self.node.schedule_tick(TickUrgency::Immediate);
             }
             return Ok(QueryAttachment {
                 subscriptions: vec![subscription],
-                owned_subscriptions: Vec::new(),
                 required_after: vec![(binding_view, required_after)],
+                requires_current_authority_receipt,
+                registrations: vec![subscription],
                 refreshes: vec![(coverage, required_after)],
             });
         }
-        let subscription =
-            self.attach_query_shape_binding_with_opts(shape, binding, upstream_opts, identity)?;
+        let subscription = self.attach_query_shape_binding_with_opts(
+            shape,
+            binding,
+            upstream_opts.clone(),
+            identity,
+        )?;
+        *self
+            .node
+            .upstream_coverage_refcounts
+            .borrow_mut()
+            .entry(coverage.clone())
+            .or_insert(0) += 1;
+        self.register_query_coverage(
+            coverage.clone(),
+            PendingUpstreamSubscription {
+                subscription,
+                shape: shape.clone(),
+                binding: binding.clone(),
+                opts: upstream_opts,
+                identity,
+            },
+            true,
+        );
         Ok(QueryAttachment {
             subscriptions: vec![subscription],
-            owned_subscriptions: vec![subscription],
             required_after: vec![(binding_view, required_after)],
+            requires_current_authority_receipt,
+            registrations: vec![subscription],
             refreshes: Vec::new(),
         })
+    }
+
+    fn register_query_coverage(
+        &self,
+        coverage: CoverageKey,
+        subscription: PendingUpstreamSubscription,
+        owns_subscription: bool,
+    ) {
+        let mut registrations = self.node.query_coverage_registrations.borrow_mut();
+        registrations
+            .entry(subscription.subscription)
+            .and_modify(|registration| registration.ref_count += 1)
+            .or_insert(QueryCoverageRegistration {
+                coverage,
+                subscription,
+                owns_subscription,
+                ref_count: 1,
+            });
     }
 
     fn attach_query_shape_binding_with_opts(
@@ -1974,14 +2042,20 @@ where
     /// server receipt than the one it captured during registration.
     pub fn query_attachment_is_covered(&self, attachment: &QueryAttachment) -> bool {
         let node = self.node.node.borrow();
+        let active_receipts = self.node.active_authority_view_receipts.borrow();
         let covered = attachment
             .required_after
             .iter()
             .all(|(binding_view, required_after)| {
                 node.applied_view_update_generation(*binding_view) > *required_after
                     && !node.opening_pending_for_binding_view(*binding_view)
+                    && (!attachment.requires_current_authority_receipt
+                        || active_receipts
+                            .as_ref()
+                            .is_some_and(|receipts| receipts.binding_views.contains(binding_view)))
             });
         drop(node);
+        drop(active_receipts);
         if covered {
             let mut refreshes = self.node.coverage_refresh_generations.borrow_mut();
             for (coverage, generation) in &attachment.refreshes {
@@ -1995,12 +2069,63 @@ where
 
     /// Detach a one-shot query coverage request.
     pub fn detach_query(&self, attachment: QueryAttachment) {
-        for subscription in attachment.owned_subscriptions {
+        let mut removed_subscriptions = Vec::new();
+        let mut registrations = self.node.query_coverage_registrations.borrow_mut();
+        for subscription in attachment.registrations {
+            let Some(registration) = registrations.get_mut(&subscription) else {
+                continue;
+            };
+            let coverage = registration.coverage.clone();
+            let owns_subscription = registration.owns_subscription;
+            registration.ref_count = registration.ref_count.saturating_sub(1);
+            let last_registration = registration.ref_count == 0;
+            if last_registration {
+                registrations.remove(&subscription);
+            }
+            let mut coverage_refcounts = self.node.upstream_coverage_refcounts.borrow_mut();
+            let Some(count) = coverage_refcounts.get_mut(&coverage) else {
+                continue;
+            };
+            *count = count.saturating_sub(1);
+            let last_coverage_pin = *count == 0;
+            if last_coverage_pin {
+                coverage_refcounts.remove(&coverage);
+                self.node
+                    .awaiting_initial_authority_coverage
+                    .borrow_mut()
+                    .remove(&coverage);
+            }
+            let has_live_stream_owner = self
+                .node
+                .upstream_subscription_owners
+                .borrow()
+                .get(&subscription)
+                .is_some_and(|owners| owners.iter().any(|owner| owner.strong_count() > 0));
+            if (owns_subscription && last_registration && !has_live_stream_owner)
+                || last_coverage_pin
+            {
+                removed_subscriptions.push((subscription, coverage));
+            }
+        }
+        drop(registrations);
+        for (subscription, coverage) in removed_subscriptions {
             self.node.node.borrow_mut().apply_unsubscribe(subscription);
-            self.node
-                .latest_coverage_subscriptions
-                .borrow_mut()
-                .retain(|_, attached| *attached != subscription);
+            let replacement = self
+                .node
+                .query_coverage_registrations
+                .borrow()
+                .values()
+                .find(|registration| registration.coverage == coverage)
+                .map(|registration| registration.subscription.subscription);
+            let mut latest = self.node.latest_coverage_subscriptions.borrow_mut();
+            if latest.get(&coverage) == Some(&subscription) {
+                if let Some(replacement) = replacement {
+                    latest.insert(coverage.clone(), replacement);
+                } else {
+                    latest.remove(&coverage);
+                }
+            }
+            drop(latest);
             self.node
                 .upstream_subscriptions
                 .borrow_mut()
@@ -2320,10 +2445,12 @@ where
         }
         let subscription =
             self.attach_query_shape_binding_with_opts(shape, binding, opts, identity)?;
-        self.node
+        *self
+            .node
             .upstream_coverage_refcounts
             .borrow_mut()
-            .insert(coverage.clone(), 1);
+            .entry(coverage.clone())
+            .or_insert(0) += 1;
         let has_live_upstream =
             self.node.connections.borrow().iter().any(|connection| {
                 matches!(&connection.borrow().link, ConnectionLink::Upstream { .. })
@@ -4898,6 +5025,7 @@ where
     awaiting_initial_authority_coverage: AwaitingInitialAuthorityCoverage,
     active_authority_view_receipts: ActiveAuthorityViewReceipts,
     coverage_refresh_generations: CoverageRefreshGenerations,
+    query_coverage_registrations: QueryCoverageRegistrations,
     upstream_subscription_owners: UpstreamSubscriptionOwners,
     connections: RefCell<Vec<Rc<RefCell<PeerConnection<S>>>>>,
     scheduler: SharedTickScheduler,
@@ -4939,6 +5067,7 @@ where
             awaiting_initial_authority_coverage: Rc::new(RefCell::new(BTreeSet::new())),
             active_authority_view_receipts: Rc::new(RefCell::new(None)),
             coverage_refresh_generations: Rc::new(RefCell::new(BTreeMap::new())),
+            query_coverage_registrations: Rc::new(RefCell::new(BTreeMap::new())),
             upstream_subscription_owners: Rc::new(RefCell::new(BTreeMap::new())),
             connections: RefCell::new(Vec::new()),
             scheduler: Rc::new(RefCell::new(None)),
@@ -5305,6 +5434,7 @@ where
         // no settlement receipts until it sends a fresh ViewUpdate.
         *self.active_authority_view_receipts.borrow_mut() = Some(AuthorityViewReceipts {
             connection_epoch,
+            confirmation_floor: self.node.borrow().applied_global_watermark(),
             binding_views: BTreeSet::new(),
         });
         for state in self.subscriptions.borrow().iter().filter_map(Weak::upgrade) {
@@ -5371,22 +5501,25 @@ where
             .borrow_mut()
             .drain(..)
             .collect::<Vec<_>>();
-        let mut pending_coverage = pending
+        let mut pending_subscriptions = pending
             .iter()
             .filter_map(|command| {
                 let PendingUpstreamCommand::Subscribe(subscription) = command else {
                     return None;
                 };
-                Some(coverage_key(
-                    &subscription.shape,
-                    &subscription.binding,
-                    subscription.opts.clone(),
-                ))
+                Some(subscription.subscription)
             })
             .collect::<BTreeSet<_>>();
-        for state in self.subscriptions.borrow().iter().filter_map(Weak::upgrade) {
+        for registration in self.query_coverage_registrations.borrow().values() {
+            if pending_subscriptions.insert(registration.subscription.subscription) {
+                pending.push(PendingUpstreamCommand::Subscribe(
+                    registration.subscription.clone(),
+                ));
+            }
+        }
+        for state_rc in self.subscriptions.borrow().iter().filter_map(Weak::upgrade) {
             {
-                let state = state.borrow();
+                let state = state_rc.borrow();
                 if !state.propagates_upstream {
                     continue;
                 }
@@ -5397,22 +5530,35 @@ where
                     state.remote_propagate_upstream,
                 );
                 let coverage = coverage_key(shape, binding, opts.clone());
-                if !pending_coverage.insert(coverage.clone()) {
-                    continue;
-                }
-                let subscription = self.next_subscription_key(shape, opts.read_view_key());
+                let subscription = self
+                    .upstream_subscription_owners
+                    .borrow()
+                    .iter()
+                    .find_map(|(subscription, owners)| {
+                        owners
+                            .iter()
+                            .any(|owner| {
+                                owner
+                                    .upgrade()
+                                    .is_some_and(|owner| Rc::ptr_eq(&owner, &state_rc))
+                            })
+                            .then_some(*subscription)
+                    })
+                    .unwrap_or_else(|| self.next_subscription_key(shape, opts.read_view_key()));
                 self.latest_coverage_subscriptions
                     .borrow_mut()
                     .insert(coverage, subscription);
-                pending.push(PendingUpstreamCommand::Subscribe(
-                    PendingUpstreamSubscription {
-                        subscription,
-                        shape: shape.clone(),
-                        binding: binding.clone(),
-                        opts,
-                        identity: state.author,
-                    },
-                ));
+                if pending_subscriptions.insert(subscription) {
+                    pending.push(PendingUpstreamCommand::Subscribe(
+                        PendingUpstreamSubscription {
+                            subscription,
+                            shape: shape.clone(),
+                            binding: binding.clone(),
+                            opts,
+                            identity: state.author,
+                        },
+                    ));
+                }
             }
         }
         let connection = Rc::new(RefCell::new(PeerConnection {
@@ -5742,6 +5888,7 @@ where
             *self.active_authority_view_receipts.borrow_mut() =
                 fallback_connection.map(|connection| AuthorityViewReceipts {
                     connection_epoch: connection.borrow().connection_epoch,
+                    confirmation_floor: self.node.borrow().applied_global_watermark(),
                     binding_views: BTreeSet::new(),
                 });
             // Cached rows remain readable as stale/local state, but their
@@ -9695,8 +9842,48 @@ where
     let confirmed_subscriptions = pending
         .iter()
         .filter(|update| update.authority_receipt_eligible && !update.parts.opening_pending)
-        .map(|update| update.parts.subscription)
+        .map(|update| (update.parts.subscription, update.parts.settled_through))
         .collect::<Vec<_>>();
+    let batch_cut = pending
+        .iter()
+        .map(|update| update.parts.settled_through)
+        .max()
+        .unwrap_or_default();
+    let ineligible_cut = pending
+        .iter()
+        .filter(|update| !update.authority_receipt_eligible)
+        .map(|update| update.parts.settled_through)
+        .max();
+    let node_ref = node.borrow();
+    let confirmed_binding_views = confirmed_subscriptions
+        .into_iter()
+        .filter_map(|(subscription, settled_through)| {
+            node_ref
+                .binding_view_key_for_subscription(subscription)
+                .ok()
+                .map(|binding_view| (binding_view, settled_through))
+        })
+        .collect::<Vec<_>>();
+    drop(node_ref);
+    {
+        let mut active_receipts = active_authority_view_receipts.borrow_mut();
+        if let Some(receipts) = active_receipts.as_mut() {
+            let invalidation_cut = if receipts.connection_epoch != connection_epoch {
+                Some(batch_cut)
+            } else {
+                ineligible_cut
+            };
+            if let Some(invalidation_cut) = invalidation_cut {
+                // A nonselected upstream update may recompute binding views beyond
+                // the wire subscription it names. Fallback-staged updates are
+                // likewise ineligible even after their link becomes selected.
+                // Until that dependency closure is proven exact, no receipt
+                // remains safe and later confirmation must reach this cut.
+                receipts.binding_views.clear();
+                receipts.confirmation_floor = receipts.confirmation_floor.max(invalidation_cut);
+            }
+        }
+    }
     let mut node_ref = node.borrow_mut();
     node_ref.apply_view_updates_in_batch(
         std::mem::take(pending)
@@ -9704,19 +9891,17 @@ where
             .map(|update| update.parts)
             .collect(),
     )?;
-    let confirmed_binding_views = confirmed_subscriptions
-        .into_iter()
-        .filter_map(|subscription| {
-            node_ref
-                .binding_view_key_for_subscription(subscription)
-                .ok()
-        })
-        .collect::<Vec<_>>();
     drop(node_ref);
     if let Some(receipts) = active_authority_view_receipts.borrow_mut().as_mut()
         && receipts.connection_epoch == connection_epoch
     {
-        receipts.binding_views.extend(confirmed_binding_views);
+        receipts
+            .binding_views
+            .extend(confirmed_binding_views.into_iter().filter_map(
+                |(binding_view, settled_through)| {
+                    (settled_through >= receipts.confirmation_floor).then_some(binding_view)
+                },
+            ));
     }
     if !clears.is_empty() {
         let mut awaiting = awaiting.borrow_mut();
