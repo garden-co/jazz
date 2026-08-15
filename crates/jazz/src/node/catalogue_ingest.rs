@@ -177,16 +177,11 @@ where
         }
 
         for (catalogue_seq, publication) in lineages {
-            self.validate_schema_lineage_publication_bounds(&publication)?;
-            if publication.id != publication.content_id()
-                || publication.schema.id != publication.schema.schema.version_id()
-                || publication.lens.id != publication.lens.content_id()
-                || publication.lens.target != publication.schema.id
-            {
-                return Err(Error::InvalidCatalogueUpdate(
+            Self::validate_schema_lineage_publication(&publication).map_err(|_| {
+                Error::InvalidCatalogueUpdate(
                     "trusted catalogue snapshot contains invalid lineage identity",
-                ));
-            }
+                )
+            })?;
             if let Some(existing) = planned
                 .active_lineages_by_target
                 .get(&publication.schema.id)
@@ -209,8 +204,8 @@ where
                 .ok_or(Error::InvalidCatalogueUpdate(
                     "trusted catalogue snapshot lineage source is missing",
                 ))?;
-            self.validate_migration_lens_between(&publication.lens, source, &publication.schema)?;
-            self.validate_lineage_table_partition(
+            Self::validate_migration_lens_between(&publication.lens, source, &publication.schema)?;
+            Self::validate_lineage_table_partition(
                 &source.schema,
                 &publication.schema.schema,
                 &publication.lens,

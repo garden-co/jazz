@@ -254,6 +254,455 @@ fn settled_view_projects_authored_row_into_clients_active_schema() {
     );
 }
 
+#[test]
+fn trusted_catalogue_snapshot_reopen_retains_the_idempotent_lineage_prefix() {
+    // A trusted snapshot is a complete authoritative prefix, not a delta. Once
+    // its activation commits, reopening must retain enough canonical lineage
+    // identity to recognize that same prefix on the next upstream connection.
+    let base = schema();
+    let snapshot = catalogue_snapshot_fixture();
+    let (dir, mut receiver) = open_node_with_schema(node(0x3f), base.clone());
+
+    receiver
+        .apply_trusted_catalogue_snapshot(snapshot.clone())
+        .unwrap();
+    assert_eq!(receiver.active_catalogue_seq(), 1);
+    drop(receiver);
+
+    let mut reopened = reopen_node_at(&dir, node(0x3f), base);
+    assert_eq!(reopened.active_catalogue_seq(), 1);
+    reopened.apply_trusted_catalogue_snapshot(snapshot).unwrap();
+    assert_eq!(reopened.active_catalogue_seq(), 1);
+}
+
+fn write_catalogue_record(
+    node: &mut NodeState<RocksDbStorage>,
+    kind: &[u8],
+    id: uuid::Uuid,
+    payload: Vec<u8>,
+) {
+    let mut batch = node.database.open_batch();
+    batch.update(
+        "jazz_catalogue",
+        vec![
+            Value::Bytes(kind.to_vec()),
+            Value::Uuid(id),
+            Value::Bytes(payload),
+        ],
+    );
+    node.database.commit_batch(batch).unwrap();
+}
+
+fn delete_catalogue_record(node: &mut NodeState<RocksDbStorage>, kind: &[u8], id: uuid::Uuid) {
+    let mut batch = node.database.open_batch();
+    batch.delete(
+        "jazz_catalogue",
+        groove::db::PrimaryKeyValue::Composite(vec![
+            groove::db::PrimaryKeyValue::Bytes(kind.to_vec()),
+            groove::db::PrimaryKeyValue::Uuid(id),
+        ]),
+    );
+    node.database.commit_batch(batch).unwrap();
+}
+
+fn write_active_lineage_record(node: &mut NodeState<RocksDbStorage>, staged: &StagedSchemaLineage) {
+    write_catalogue_record(
+        node,
+        b"schema_lineage_staged",
+        staged.publication.id.0,
+        serde_json::to_vec(staged).unwrap(),
+    );
+    write_catalogue_record(
+        node,
+        b"schema_lineage_active",
+        staged.publication.id.0,
+        serde_json::to_vec(&SchemaLineageActivation {
+            id: staged.publication.id,
+            catalogue_seq: staged.catalogue_seq,
+        })
+        .unwrap(),
+    );
+}
+
+fn duplicate_target_lineage(
+    base: &JazzSchema,
+    original: &StagedSchemaLineage,
+    catalogue_seq: u64,
+) -> StagedSchemaLineage {
+    let duplicate_publication = SchemaLineagePublication::new(
+        original.publication.schema.clone(),
+        MigrationLens::new(
+            base.version_id(),
+            original.publication.schema.id,
+            vec![TableLens {
+                source_table: "todos".to_owned(),
+                target_table: "todos".to_owned(),
+                ops: vec![LensOp::AddColumn {
+                    column: "body".to_owned(),
+                    default: Value::String("different-default".to_owned()),
+                }],
+            }],
+        ),
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    );
+    assert_ne!(duplicate_publication.id, original.publication.id);
+    StagedSchemaLineage {
+        catalogue_seq,
+        publication: duplicate_publication,
+        alias: original.alias,
+        mapping: original.mapping.clone(),
+    }
+}
+
+fn assert_staged_corruption_rejected(
+    byte: u8,
+    expected: &'static str,
+    mutate: impl FnOnce(&mut StagedSchemaLineage),
+) {
+    let base = schema();
+    let snapshot = catalogue_snapshot_fixture();
+    let (dir, mut receiver) = open_node_with_schema(node(byte), base.clone());
+    receiver.apply_trusted_catalogue_snapshot(snapshot).unwrap();
+    let mut staged = receiver
+        .catalogue
+        .active_lineages_by_target
+        .values()
+        .next()
+        .unwrap()
+        .clone();
+    let original_id = staged.publication.id;
+    mutate(&mut staged);
+    delete_catalogue_record(
+        &mut receiver,
+        b"schema_lineage_active",
+        original_id.0,
+    );
+    delete_catalogue_record(
+        &mut receiver,
+        b"schema_lineage_staged",
+        original_id.0,
+    );
+    write_catalogue_record(
+        &mut receiver,
+        b"schema_lineage_staged",
+        staged.publication.id.0,
+        serde_json::to_vec(&staged).unwrap(),
+    );
+    drop(receiver);
+
+    assert_catalogue_reopen_rejected(&dir, node(byte), base, expected);
+}
+
+fn assert_catalogue_reopen_rejected(
+    dir: &tempfile::TempDir,
+    node_uuid: NodeUuid,
+    schema: JazzSchema,
+    expected: &'static str,
+) {
+    let cfs = schema.column_families();
+    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage = RocksDbStorage::open(dir.path(), &refs).unwrap();
+    assert!(matches!(
+        NodeState::new(node_uuid, schema, storage),
+        Err(Error::InvalidStoredValue(message)) if message == expected
+    ));
+}
+
+#[test]
+fn reopen_rejects_active_catalogue_marker_without_canonical_payload() {
+    let base = schema();
+    let snapshot = catalogue_snapshot_fixture();
+    let (dir, mut receiver) = open_node_with_schema(node(0x40), base.clone());
+    receiver.apply_trusted_catalogue_snapshot(snapshot).unwrap();
+    let publication_id = receiver
+        .catalogue
+        .active_lineages_by_target
+        .values()
+        .next()
+        .unwrap()
+        .publication
+        .id;
+    delete_catalogue_record(
+        &mut receiver,
+        b"schema_lineage_staged",
+        publication_id.0,
+    );
+    drop(receiver);
+
+    assert_catalogue_reopen_rejected(
+        &dir,
+        node(0x40),
+        base,
+        "active schema lineage is missing canonical payload",
+    );
+}
+
+#[test]
+fn reopen_rejects_active_catalogue_marker_with_mismatched_payload_sequence() {
+    let base = schema();
+    let snapshot = catalogue_snapshot_fixture();
+    let (dir, mut receiver) = open_node_with_schema(node(0x41), base.clone());
+    receiver.apply_trusted_catalogue_snapshot(snapshot).unwrap();
+    let mut staged = receiver
+        .catalogue
+        .active_lineages_by_target
+        .values()
+        .next()
+        .unwrap()
+        .clone();
+    staged.catalogue_seq = 2;
+    write_catalogue_record(
+        &mut receiver,
+        b"schema_lineage_staged",
+        staged.publication.id.0,
+        serde_json::to_vec(&staged).unwrap(),
+    );
+    drop(receiver);
+
+    assert_catalogue_reopen_rejected(
+        &dir,
+        node(0x41),
+        base,
+        "active schema lineage payload conflicts with marker",
+    );
+}
+
+#[test]
+fn reopen_rejects_gapped_active_catalogue_sequences() {
+    let base = schema();
+    let snapshot = catalogue_snapshot_fixture();
+    let (dir, mut receiver) = open_node_with_schema(node(0x42), base.clone());
+    receiver.apply_trusted_catalogue_snapshot(snapshot).unwrap();
+
+    let v2 = SchemaVersion::new(catalogue_evolved_schema());
+    let v3 = SchemaVersion::new(JazzSchema::new([TableSchema::new(
+        "todos",
+        [
+            ColumnSchema::new("title", ColumnType::String),
+            ColumnSchema::new("body", ColumnType::String),
+            ColumnSchema::new("archived", ColumnType::Bool),
+        ],
+    )]));
+    publish_schema_lineage(
+        &mut receiver,
+        v3.clone(),
+        MigrationLens::new(
+            v2.id,
+            v3.id,
+            vec![TableLens {
+                source_table: "todos".to_owned(),
+                target_table: "todos".to_owned(),
+                ops: vec![LensOp::AddColumn {
+                    column: "archived".to_owned(),
+                    default: Value::Bool(false),
+                }],
+            }],
+        ),
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
+    .unwrap();
+    let mut staged = receiver.catalogue.active_lineages_by_target[&v3.id].clone();
+    staged.catalogue_seq = 3;
+    write_active_lineage_record(&mut receiver, &staged);
+    drop(receiver);
+
+    assert_catalogue_reopen_rejected(
+        &dir,
+        node(0x42),
+        base,
+        "active catalogue sequences are not contiguous",
+    );
+}
+
+#[test]
+fn reopen_rejects_duplicate_active_catalogue_targets() {
+    let base = schema();
+    let snapshot = catalogue_snapshot_fixture();
+    let (dir, mut receiver) = open_node_with_schema(node(0x43), base.clone());
+    receiver.apply_trusted_catalogue_snapshot(snapshot).unwrap();
+    let original = receiver
+        .catalogue
+        .active_lineages_by_target
+        .values()
+        .next()
+        .unwrap()
+        .clone();
+    let duplicate = duplicate_target_lineage(&base, &original, 2);
+    write_active_lineage_record(&mut receiver, &duplicate);
+    drop(receiver);
+
+    assert_catalogue_reopen_rejected(
+        &dir,
+        node(0x43),
+        base,
+        "duplicate durable schema lineage target",
+    );
+}
+
+#[test]
+fn reopen_rejects_inactive_catalogue_target_already_active() {
+    let base = schema();
+    let snapshot = catalogue_snapshot_fixture();
+    let (dir, mut receiver) = open_node_with_schema(node(0x44), base.clone());
+    receiver.apply_trusted_catalogue_snapshot(snapshot).unwrap();
+    let original = receiver
+        .catalogue
+        .active_lineages_by_target
+        .values()
+        .next()
+        .unwrap()
+        .clone();
+    let duplicate = duplicate_target_lineage(&base, &original, 2);
+    write_catalogue_record(
+        &mut receiver,
+        b"schema_lineage_staged",
+        duplicate.publication.id.0,
+        serde_json::to_vec(&duplicate).unwrap(),
+    );
+    drop(receiver);
+
+    assert_catalogue_reopen_rejected(
+        &dir,
+        node(0x44),
+        base,
+        "duplicate durable schema lineage target",
+    );
+}
+
+#[test]
+fn reopen_rejects_duplicate_inactive_catalogue_targets() {
+    let base = schema();
+    let snapshot = catalogue_snapshot_fixture();
+    let (dir, mut receiver) = open_node_with_schema(node(0x45), base.clone());
+    receiver.apply_trusted_catalogue_snapshot(snapshot).unwrap();
+    let mut first = receiver
+        .catalogue
+        .active_lineages_by_target
+        .values()
+        .next()
+        .unwrap()
+        .clone();
+    first.catalogue_seq = 1;
+    let duplicate = duplicate_target_lineage(&base, &first, 2);
+    delete_catalogue_record(
+        &mut receiver,
+        b"schema_lineage_active",
+        first.publication.id.0,
+    );
+    write_catalogue_record(
+        &mut receiver,
+        b"schema_lineage_staged",
+        first.publication.id.0,
+        serde_json::to_vec(&first).unwrap(),
+    );
+    write_catalogue_record(
+        &mut receiver,
+        b"schema_lineage_staged",
+        duplicate.publication.id.0,
+        serde_json::to_vec(&duplicate).unwrap(),
+    );
+    drop(receiver);
+
+    assert_catalogue_reopen_rejected(
+        &dir,
+        node(0x45),
+        base,
+        "duplicate durable schema lineage target",
+    );
+}
+
+#[test]
+fn reopen_rejects_zero_sequence_staged_lineage() {
+    let base = schema();
+    let snapshot = catalogue_snapshot_fixture();
+    let (dir, mut receiver) = open_node_with_schema(node(0x46), base.clone());
+    receiver.apply_trusted_catalogue_snapshot(snapshot).unwrap();
+    let mut staged = receiver
+        .catalogue
+        .active_lineages_by_target
+        .values()
+        .next()
+        .unwrap()
+        .clone();
+    staged.catalogue_seq = 0;
+    write_catalogue_record(
+        &mut receiver,
+        b"schema_lineage_staged",
+        staged.publication.id.0,
+        serde_json::to_vec(&staged).unwrap(),
+    );
+    drop(receiver);
+
+    assert_catalogue_reopen_rejected(
+        &dir,
+        node(0x46),
+        base,
+        "staged schema lineage sequence must be nonzero",
+    );
+}
+
+#[test]
+fn reopen_rejects_staged_schema_payload_identity_mismatch() {
+    let base_id = schema().version_id();
+    assert_staged_corruption_rejected(
+        0x47,
+        "staged schema lineage violates trusted publication invariants",
+        |staged| {
+            staged.publication.schema.id = base_id;
+            staged.publication.id = staged.publication.content_id();
+        },
+    );
+}
+
+#[test]
+fn reopen_rejects_staged_lens_content_identity_mismatch() {
+    assert_staged_corruption_rejected(
+        0x48,
+        "staged schema lineage violates trusted publication invariants",
+        |staged| {
+            staged.publication.lens.id = MigrationLensId(uuid::Uuid::nil());
+            staged.publication.id = staged.publication.content_id();
+        },
+    );
+}
+
+#[test]
+fn reopen_rejects_staged_lens_target_mismatch() {
+    let base_id = schema().version_id();
+    assert_staged_corruption_rejected(
+        0x49,
+        "staged schema lineage violates trusted publication invariants",
+        |staged| {
+            staged.publication.lens.target = base_id;
+            staged.publication.lens.id = staged.publication.lens.content_id();
+            staged.publication.id = staged.publication.content_id();
+        },
+    );
+}
+
+#[test]
+fn reopen_rejects_staged_lens_operation_mismatch() {
+    assert_staged_corruption_rejected(0x4a, "staged schema lineage lens is invalid", |staged| {
+        staged.publication.lens.table_lenses[0].ops.clear();
+        staged.publication.lens.id = staged.publication.lens.content_id();
+        staged.publication.id = staged.publication.content_id();
+    });
+}
+
+#[test]
+fn reopen_rejects_staged_table_partition_mismatch() {
+    assert_staged_corruption_rejected(
+        0x4b,
+        "staged schema lineage table partition is invalid",
+        |staged| {
+            staged.publication.new_tables.push("todos".to_owned());
+            staged.publication.id = staged.publication.content_id();
+        },
+    );
+}
+
 fn catalogue_snapshot_fixture() -> crate::protocol::CatalogueSnapshot {
     let base = schema();
     let evolved = SchemaVersion::new(catalogue_evolved_schema());

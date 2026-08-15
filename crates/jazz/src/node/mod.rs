@@ -1375,8 +1375,7 @@ where
         let mut catalogue_lenses = BTreeMap::new();
         let mut staged_lineages_by_id = BTreeMap::new();
         let mut pending_lineages = BTreeMap::new();
-        let mut active_lineage_ids = BTreeSet::new();
-        let mut active_catalogue_seq = 0;
+        let mut active_lineages_by_id = BTreeMap::new();
         let mut pending_write_pointers = BTreeMap::new();
         let mut genesis_schema = None;
         for raw in meta_database.primary_key_scan_raw("jazz_catalogue", &[])? {
@@ -1438,13 +1437,14 @@ where
                     let active: SchemaLineageActivation = serde_json::from_slice(
                         record.get_bytes(CatalogueRowRecord::FIELD_PAYLOAD_IDX)?,
                     )?;
-                    if active.id.0 != record.get_uuid(CatalogueRowRecord::FIELD_ID_IDX)? {
+                    if active.id.0 != record.get_uuid(CatalogueRowRecord::FIELD_ID_IDX)?
+                        || active.catalogue_seq == 0
+                        || active_lineages_by_id.insert(active.id, active).is_some()
+                    {
                         return Err(Error::InvalidStoredValue(
                             "active schema lineage id mismatch",
                         ));
                     }
-                    active_catalogue_seq = active_catalogue_seq.max(active.catalogue_seq);
-                    active_lineage_ids.insert(active.id);
                 }
                 b"write_pointer_pending" => {
                     let pointer: CurrentWriteSchema = serde_json::from_slice(
@@ -1466,9 +1466,41 @@ where
         }
         let mut staged_lineages = BTreeMap::new();
         let mut active_lineages_by_target = BTreeMap::new();
+        let mut lineage_targets = BTreeSet::new();
+        let mut active_lineages_by_seq = BTreeMap::new();
+        for active in active_lineages_by_id.values() {
+            if active_lineages_by_seq
+                .insert(active.catalogue_seq, active.id)
+                .is_some()
+            {
+                return Err(Error::InvalidStoredValue(
+                    "duplicate active catalogue sequence",
+                ));
+            }
+        }
         for staged in staged_lineages_by_id.into_values() {
-            if active_lineage_ids.contains(&staged.publication.id) {
+            Self::validate_durable_staged_lineage(&staged, &catalogue_schemas)?;
+            if staged.catalogue_seq == 0 {
+                return Err(Error::InvalidStoredValue(
+                    "staged schema lineage sequence must be nonzero",
+                ));
+            }
+            if !lineage_targets.insert(staged.publication.schema.id) {
+                return Err(Error::InvalidStoredValue(
+                    "duplicate durable schema lineage target",
+                ));
+            }
+            if let Some(active) = active_lineages_by_id.remove(&staged.publication.id) {
+                if active.catalogue_seq != staged.catalogue_seq {
+                    return Err(Error::InvalidStoredValue(
+                        "active schema lineage payload conflicts with marker",
+                    ));
+                }
                 active_lineages_by_target.insert(staged.publication.schema.id, staged);
+            } else if active_lineages_by_seq.contains_key(&staged.catalogue_seq) {
+                return Err(Error::InvalidStoredValue(
+                    "staged catalogue sequence conflicts with active lineage",
+                ));
             } else if staged_lineages
                 .insert(staged.catalogue_seq, staged)
                 .is_some()
@@ -1478,6 +1510,23 @@ where
                 ));
             }
         }
+        if !active_lineages_by_id.is_empty() {
+            return Err(Error::InvalidStoredValue(
+                "active schema lineage is missing canonical payload",
+            ));
+        }
+        for (expected, actual) in (1..).zip(active_lineages_by_seq.keys().copied()) {
+            if actual != expected {
+                return Err(Error::InvalidStoredValue(
+                    "active catalogue sequences are not contiguous",
+                ));
+            }
+        }
+        let active_catalogue_seq = active_lineages_by_seq
+            .keys()
+            .next_back()
+            .copied()
+            .unwrap_or(0);
         let mut schema_version_aliases = BTreeMap::new();
         let mut physical_mappings = BTreeMap::new();
         for raw in meta_database.primary_key_scan_raw("jazz_schema_versions", &[])? {
@@ -1644,6 +1693,39 @@ where
             current_write_schema,
             branch_partitions,
         })
+    }
+
+    fn validate_durable_staged_lineage(
+        staged: &StagedSchemaLineage,
+        catalogue_schemas: &BTreeMap<SchemaVersionId, SchemaVersion>,
+    ) -> Result<(), Error> {
+        Self::validate_schema_lineage_publication(&staged.publication).map_err(|_| {
+            Error::InvalidStoredValue(
+                "staged schema lineage violates trusted publication invariants",
+            )
+        })?;
+        let source = catalogue_schemas
+            .get(&staged.publication.lens.source)
+            .ok_or(Error::InvalidStoredValue(
+                "staged schema lineage source is missing",
+            ))?;
+        Self::validate_migration_lens_between(
+            &staged.publication.lens,
+            source,
+            &staged.publication.schema,
+        )
+        .map_err(|_| Error::InvalidStoredValue("staged schema lineage lens is invalid"))?;
+        Self::validate_lineage_table_partition(
+            &source.schema,
+            &staged.publication.schema.schema,
+            &staged.publication.lens,
+            &staged.publication.new_tables,
+            &staged.publication.dropped_tables,
+        )
+        .map_err(|_| {
+            Error::InvalidStoredValue("staged schema lineage table partition is invalid")
+        })?;
+        Ok(())
     }
 
     /// Commit a local mergeable write and leave its fate pending.
@@ -3925,6 +4007,17 @@ where
     ) -> Result<(), Error> {
         let schema = &staged.publication.schema;
         let lens = &staged.publication.lens;
+        // The active marker only carries an id and sequence. Persist its
+        // canonical payload in the same durable activation batch so recovery
+        // can prove both the prefix identity and its exact sequence.
+        batch.update(
+            "jazz_catalogue",
+            vec![
+                Value::Bytes(b"schema_lineage_staged".to_vec()),
+                Value::Uuid(staged.publication.id.0),
+                Value::Bytes(serde_json::to_vec(staged)?),
+            ],
+        );
         batch.update(
             "jazz_catalogue",
             vec![
