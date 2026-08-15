@@ -40,6 +40,23 @@ pub struct BuiltServer {
     pub app: Router,
 }
 
+impl BuiltServer {
+    /// Stop this server and wait until its owned runtime and durable storage
+    /// have been closed.
+    ///
+    /// A builder owns a shell even when it is used without the test-server
+    /// listener wrapper. Callers that reopen the same persistent path must use
+    /// this lifecycle boundary rather than relying on field drop order. The
+    /// close work runs on the server's dedicated lifecycle thread, so callers
+    /// may await this method from any async executor. The operation is
+    /// idempotent: subsequent calls return the terminal shutdown phase
+    /// recorded by the state.
+    pub async fn shutdown(&self) -> crate::tools::server::ShutdownPhase {
+        self.state.shutdown.request_shutdown();
+        self.state.run_shutdown_finalization().await
+    }
+}
+
 #[cfg_attr(not(test), allow(dead_code))]
 enum ServerSchemaMode {
     Dynamic,
@@ -730,7 +747,6 @@ mod tests {
     }
 
     #[cfg(feature = "rocksdb")]
-    #[ignore = "known red; tracked in TEST_BURNDOWN.md"]
     #[tokio::test]
     async fn rocksdb_builder_starts_core_server_shell_with_catalogue_storage_after_restart() {
         let data_dir = tempfile::TempDir::new().expect("temp data dir");
@@ -743,7 +759,7 @@ mod tests {
             )
             .build();
 
-        {
+        let retained_state = {
             let built = ServerBuilder::new(app_id)
                 .with_schema(schema.clone())
                 .with_storage(StorageBackend::RocksDb {
@@ -756,10 +772,20 @@ mod tests {
             assert!(built.state.core_server_shell().is_some());
             assert!(data_dir.path().join(CATALOGUE_ROCKSDB_DIR).exists());
             assert!(data_dir.path().join(SERVER_SHELL_ROCKSDB_DIR).exists());
-        }
+            assert_eq!(
+                built.shutdown().await,
+                crate::tools::server::ShutdownPhase::StorageClosed,
+                "the public builder lifecycle must join the shell before its RocksDB path is reopened"
+            );
+            Arc::clone(&built.state)
+        };
+        assert!(
+            retained_state.core_server_shell().is_none(),
+            "shutdown must retire the shell even if request/router state outlives BuiltServer"
+        );
 
         let rebuilt = ServerBuilder::new(app_id)
-            .with_schema(schema)
+            .with_schema(schema.clone())
             .with_storage(StorageBackend::RocksDb {
                 path: data_dir.path().to_path_buf(),
             })
@@ -769,6 +795,175 @@ mod tests {
 
         assert!(rebuilt.state.core_server_shell().is_some());
         assert!(data_dir.path().join(SERVER_SHELL_ROCKSDB_DIR).exists());
+        rebuilt.shutdown().await;
+
+        // Some direct builder consumers own only `BuiltServer` and use Rust
+        // scope exit as their lifecycle. Its last-shell fallback must join as
+        // well: this reopen has no timeout or sleep to mask an owner-thread
+        // race.
+        {
+            let dropped = ServerBuilder::new(app_id)
+                .with_schema(schema.clone())
+                .with_storage(StorageBackend::RocksDb {
+                    path: data_dir.path().to_path_buf(),
+                })
+                .build()
+                .await
+                .expect("build RocksDB server for direct-drop lifecycle");
+            assert!(dropped.state.core_server_shell().is_some());
+        }
+
+        let reopened_after_drop = ServerBuilder::new(app_id)
+            .with_schema(schema)
+            .with_storage(StorageBackend::RocksDb {
+                path: data_dir.path().to_path_buf(),
+            })
+            .build()
+            .await
+            .expect("reopen RocksDB server after direct builder drop");
+        assert!(reopened_after_drop.state.core_server_shell().is_some());
+        assert_eq!(
+            reopened_after_drop.shutdown().await,
+            crate::tools::server::ShutdownPhase::StorageClosed
+        );
+        drop(retained_state);
+    }
+
+    #[cfg(feature = "rocksdb")]
+    #[tokio::test]
+    async fn rocksdb_builder_reopens_after_first_shutdown_waiter_is_aborted() {
+        let data_dir = tempfile::TempDir::new().expect("temp data dir");
+        let app_id = AppId::from_name("rocksdb-server-shell-aborted-shutdown");
+        let schema = crate::tools::public_schema::SchemaBuilder::new()
+            .table(
+                crate::tools::public_schema::TableSchema::builder("todos")
+                    .column("id", crate::tools::public_schema::ColumnType::Uuid),
+            )
+            .build();
+        let built = ServerBuilder::new(app_id)
+            .with_schema(schema.clone())
+            .with_storage(StorageBackend::RocksDb {
+                path: data_dir.path().to_path_buf(),
+            })
+            .build()
+            .await
+            .expect("build RocksDB server");
+        let state = Arc::clone(&built.state);
+        let request = state
+            .shutdown
+            .try_enter_app_request()
+            .expect("running server accepts request");
+        state.shutdown.request_shutdown();
+
+        let first_state = Arc::clone(&state);
+        let first = tokio::spawn(async move { first_state.run_shutdown_finalization().await });
+        let mut phases = state.shutdown.subscribe();
+        while *phases.borrow_and_update()
+            != crate::tools::server::ShutdownPhase::DrainingConnections
+        {
+            phases
+                .changed()
+                .await
+                .expect("detached finalizer remains alive");
+        }
+        first.abort();
+        let _ = first.await;
+        drop(request);
+        assert_eq!(
+            state.run_shutdown_finalization().await,
+            crate::tools::server::ShutdownPhase::StorageClosed
+        );
+
+        let reopened = ServerBuilder::new(app_id)
+            .with_schema(schema)
+            .with_storage(StorageBackend::RocksDb {
+                path: data_dir.path().to_path_buf(),
+            })
+            .build()
+            .await
+            .expect("reopen RocksDB after aborted shutdown waiter");
+        assert_eq!(
+            reopened.shutdown().await,
+            crate::tools::server::ShutdownPhase::StorageClosed
+        );
+    }
+
+    #[cfg(feature = "rocksdb")]
+    #[test]
+    fn rocksdb_builder_shutdown_survives_initiating_runtime_drop() {
+        let data_dir = tempfile::TempDir::new().expect("temp data dir");
+        let app_id = AppId::from_name("rocksdb-server-shell-foreign-shutdown");
+        let schema = crate::tools::public_schema::SchemaBuilder::new()
+            .table(
+                crate::tools::public_schema::TableSchema::builder("todos")
+                    .column("id", crate::tools::public_schema::ColumnType::Uuid),
+            )
+            .build();
+        let (built, state, request) = {
+            let first_runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("first shutdown runtime");
+            let built = first_runtime
+                .block_on(
+                    ServerBuilder::new(app_id)
+                        .with_schema(schema.clone())
+                        .with_storage(StorageBackend::RocksDb {
+                            path: data_dir.path().to_path_buf(),
+                        })
+                        .build(),
+                )
+                .expect("build RocksDB server");
+            let state = Arc::clone(&built.state);
+            let request = state
+                .shutdown
+                .try_enter_app_request()
+                .expect("running server accepts request");
+            state.shutdown.request_shutdown();
+            first_runtime.block_on(async {
+                let first_state = Arc::clone(&state);
+                tokio::spawn(async move { first_state.run_shutdown_finalization().await });
+                let mut phases = state.shutdown.subscribe();
+                while *phases.borrow_and_update()
+                    != crate::tools::server::ShutdownPhase::DrainingConnections
+                {
+                    phases
+                        .changed()
+                        .await
+                        .expect("dedicated finalizer remains alive");
+                }
+            });
+            // Dropping `first_runtime` cancels the initiating caller after it
+            // has begun but before the request guard lets teardown progress.
+            (built, state, request)
+        };
+        drop(request);
+
+        let second_runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("second shutdown runtime");
+        let reopened = second_runtime.block_on(async {
+            assert_eq!(
+                tokio::time::timeout(std::time::Duration::from_secs(1), built.shutdown())
+                    .await
+                    .expect("later runtime reaches durable-close barrier"),
+                crate::tools::server::ShutdownPhase::StorageClosed
+            );
+            assert!(state.core_server_shell().is_none());
+            ServerBuilder::new(app_id)
+                .with_schema(schema)
+                .with_storage(StorageBackend::RocksDb {
+                    path: data_dir.path().to_path_buf(),
+                })
+                .build()
+                .await
+                .expect("reopen RocksDB after live shutdown")
+        });
+        assert_eq!(
+            second_runtime.block_on(reopened.shutdown()),
+            crate::tools::server::ShutdownPhase::StorageClosed
+        );
     }
 
     #[tokio::test]

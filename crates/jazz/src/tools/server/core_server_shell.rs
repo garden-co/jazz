@@ -35,6 +35,19 @@ struct ServerShellInner {
     activity_tx: watch::Sender<u64>,
 }
 
+impl Drop for ServerShellInner {
+    fn drop(&mut self) {
+        // `BuiltServer::shutdown` is the public, async lifecycle boundary and
+        // drains request work before reaching this point. This fallback covers
+        // direct builder use that is simply dropped: without it, dropping the
+        // last sender merely asks the owner thread to exit and a caller can
+        // race a reopen of the same RocksDB path before that exit completes.
+        // There can be no remaining `ServerShellHandle` when this runs, so no
+        // public operation can be waiting for an owner-thread reply.
+        let _ = shutdown_blocking(self);
+    }
+}
+
 type ServerShellJob = Box<dyn FnOnce(&mut InMemoryServerShell) + Send + 'static>;
 
 enum ServerShellCommand {
@@ -364,7 +377,7 @@ impl ServerShellHandle {
     }
 }
 
-fn shutdown_blocking(inner: &Arc<ServerShellInner>) -> Result<(), String> {
+fn shutdown_blocking(inner: &ServerShellInner) -> Result<(), String> {
     let sender = inner
         .jobs
         .lock()

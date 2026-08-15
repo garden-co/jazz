@@ -1,4 +1,5 @@
 use std::sync::{Arc, RwLock as StdRwLock};
+use std::thread;
 
 use crate::serving::StorageConfig;
 use crate::tools::AppId;
@@ -103,11 +104,33 @@ impl ServerState {
         Ok(started)
     }
 
-    pub async fn run_shutdown_finalization(&self) -> ShutdownPhase {
-        if !self.shutdown.try_begin_finalization() {
-            return self.shutdown.phase();
+    /// Start (once) and await the server-wide teardown barrier.
+    ///
+    /// The first caller only launches the owned finalizer; it does not own the
+    /// finalizer future. The finalizer runs on a dedicated lifecycle thread
+    /// with its own Tokio runtime, so HTTP request cancellation, test-task
+    /// abortion, and shutdown of the initiating runtime cannot strand another
+    /// lifecycle caller in a transient phase while the same durable storage
+    /// path is reopened.
+    pub async fn run_shutdown_finalization(self: &Arc<Self>) -> ShutdownPhase {
+        if self.shutdown.try_begin_finalization() {
+            self.shutdown.set_phase(ShutdownPhase::ShuttingDown);
+            let state = Arc::clone(self);
+            if let Err(error) = thread::Builder::new()
+                .name("jazz-server-finalizer".to_owned())
+                .spawn(move || run_shutdown_finalizer(state))
+            {
+                tracing::error!(%error, "failed to start shutdown finalizer thread");
+                // The finalizer never started, so `Failed` is the only
+                // truthful terminal result. It must not be mistaken for a
+                // storage-close/reopen barrier.
+                self.shutdown.set_phase(ShutdownPhase::Failed);
+            }
         }
+        self.shutdown.wait_for_finalization().await
+    }
 
+    async fn finalize_shutdown(&self) -> ShutdownPhase {
         self.shutdown.set_phase(ShutdownPhase::DrainingConnections);
         let mut failed = false;
         let websockets_drained = self.shutdown.wait_for_websocket_drain().await;
@@ -165,6 +188,30 @@ impl ServerState {
     }
 }
 
+fn run_shutdown_finalizer(state: Arc<ServerState>) {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| format!("failed to create shutdown runtime: {error}"))?;
+        Ok::<_, String>(runtime.block_on(state.finalize_shutdown()))
+    }));
+
+    match result {
+        Ok(Ok(_terminal)) => {}
+        Ok(Err(error)) => {
+            tracing::error!(%error, "shutdown finalizer setup failed");
+            state.shutdown.set_phase(ShutdownPhase::Failed);
+        }
+        Err(_) => {
+            tracing::error!("shutdown finalizer panicked");
+            // A panic may leave resources live. Do not publish
+            // `StorageClosed`; callers must treat Failed as unsafe to reopen.
+            state.shutdown.set_phase(ShutdownPhase::Failed);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -181,6 +228,8 @@ mod tests {
     struct CloseObservingStorage {
         close_calls: Arc<AtomicUsize>,
     }
+
+    struct PanicFlushStorage;
 
     impl CatalogueStorage for CloseObservingStorage {
         fn scan_catalogue_entries(
@@ -207,6 +256,34 @@ mod tests {
 
         fn close(&self) -> CatalogueStorageResult<()> {
             self.close_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    impl CatalogueStorage for PanicFlushStorage {
+        fn scan_catalogue_entries(
+            &self,
+        ) -> CatalogueStorageResult<Vec<crate::tools::server::catalogue_entry::CatalogueEntry>>
+        {
+            Ok(Vec::new())
+        }
+
+        fn upsert_catalogue_entry(
+            &mut self,
+            _entry: &crate::tools::server::catalogue_entry::CatalogueEntry,
+        ) -> CatalogueStorageResult<()> {
+            Ok(())
+        }
+
+        fn flush(&self) -> CatalogueStorageResult<()> {
+            panic!("test finalizer panic")
+        }
+
+        fn flush_wal(&self) -> CatalogueStorageResult<()> {
+            Ok(())
+        }
+
+        fn close(&self) -> CatalogueStorageResult<()> {
             Ok(())
         }
     }
@@ -319,6 +396,149 @@ mod tests {
             close_calls.load(Ordering::SeqCst),
             1,
             "drained shutdown must explicitly close dynamic catalogue storage"
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_shutdown_finalizers_wait_for_the_same_storage_close() {
+        let state = build_test_state_with_shutdown_timeout(Duration::from_secs(1)).await;
+        let request = state
+            .shutdown
+            .try_enter_app_request()
+            .expect("running server accepts request");
+        state.shutdown.request_shutdown();
+
+        let first_state = Arc::clone(&state);
+        let first = tokio::spawn(async move { first_state.run_shutdown_finalization().await });
+
+        let mut phases = state.shutdown.subscribe();
+        while *phases.borrow_and_update() != ShutdownPhase::DrainingConnections {
+            phases
+                .changed()
+                .await
+                .expect("first finalizer remains alive");
+        }
+
+        let second_state = Arc::clone(&state);
+        let second = tokio::spawn(async move { second_state.run_shutdown_finalization().await });
+        tokio::task::yield_now().await;
+        assert!(
+            !second.is_finished(),
+            "a reentrant finalizer must wait for the durable-close barrier"
+        );
+
+        drop(request);
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), first)
+                .await
+                .expect("first finalizer completes")
+                .expect("first finalizer task"),
+            ShutdownPhase::StorageClosed
+        );
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), second)
+                .await
+                .expect("second finalizer completes")
+                .expect("second finalizer task"),
+            ShutdownPhase::StorageClosed
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_shutdown_finalizers_share_failed_result() {
+        let state = build_test_state_with_shutdown_timeout(Duration::from_millis(10)).await;
+        let _request = state
+            .shutdown
+            .try_enter_app_request()
+            .expect("running server accepts request");
+        state.shutdown.request_shutdown();
+
+        let first_state = Arc::clone(&state);
+        let first = tokio::spawn(async move { first_state.run_shutdown_finalization().await });
+        let second_state = Arc::clone(&state);
+        let second = tokio::spawn(async move { second_state.run_shutdown_finalization().await });
+
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), first)
+                .await
+                .expect("first failed finalizer completes")
+                .expect("first finalizer task"),
+            ShutdownPhase::Failed
+        );
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), second)
+                .await
+                .expect("second failed finalizer completes")
+                .expect("second finalizer task"),
+            ShutdownPhase::Failed
+        );
+    }
+
+    #[tokio::test]
+    async fn aborting_first_shutdown_waiter_does_not_strand_finalization() {
+        let state = build_test_state_with_shutdown_timeout(Duration::from_secs(1)).await;
+        let request = state
+            .shutdown
+            .try_enter_app_request()
+            .expect("running server accepts request");
+        state.shutdown.request_shutdown();
+
+        let first_state = Arc::clone(&state);
+        let first = tokio::spawn(async move { first_state.run_shutdown_finalization().await });
+        let mut phases = state.shutdown.subscribe();
+        while *phases.borrow_and_update() != ShutdownPhase::DrainingConnections {
+            phases
+                .changed()
+                .await
+                .expect("detached finalizer remains alive");
+        }
+
+        first.abort();
+        let _ = first.await;
+        drop(request);
+
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), state.run_shutdown_finalization())
+                .await
+                .expect("later shutdown caller reaches terminal result"),
+            ShutdownPhase::StorageClosed
+        );
+    }
+
+    #[tokio::test]
+    async fn panicked_shutdown_finalizer_publishes_failed_to_later_callers() {
+        let state =
+            build_test_state_with_storage(Box::new(PanicFlushStorage), Duration::from_secs(1));
+        state.shutdown.request_shutdown();
+
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), state.run_shutdown_finalization())
+                .await
+                .expect("initial waiter receives panic result"),
+            ShutdownPhase::Failed
+        );
+        assert_eq!(
+            state.run_shutdown_finalization().await,
+            ShutdownPhase::Failed,
+            "later callers share Failed rather than a transient phase"
+        );
+    }
+
+    #[tokio::test]
+    async fn foreign_executor_shutdown_uses_dedicated_lifecycle_thread() {
+        let state = build_test_state_with_shutdown_timeout(Duration::from_secs(1)).await;
+        // The caller's executor is irrelevant: the finalizer has its own
+        // current-thread Tokio runtime.
+        state.shutdown.request_shutdown();
+        let foreign_state = Arc::clone(&state);
+        assert_eq!(
+            std::thread::spawn(move || {
+                futures::executor::block_on(foreign_state.run_shutdown_finalization())
+            })
+            .join()
+            .expect("foreign executor thread"),
+            ShutdownPhase::StorageClosed,
+            "foreign executor waits for the real durable-close barrier"
         );
     }
 }
