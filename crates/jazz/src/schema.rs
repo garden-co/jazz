@@ -454,6 +454,13 @@ impl JazzSchema {
                         table.name,
                         column.name
                     );
+                    crate::content_manifest::validate_content_manifest_schema(manifest)
+                        .unwrap_or_else(|error| {
+                            panic!(
+                                "content manifest schema is incompatible with adapter for {}.{}: {error}",
+                                table.name, column.name
+                            )
+                        });
                 }
             }
             if let Some(policy) = &table.read_policy {

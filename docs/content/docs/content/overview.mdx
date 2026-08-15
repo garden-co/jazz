@@ -1,0 +1,26 @@
+---
+title: Content columns
+description: Store large or structured values in an atomic Jazz row cell.
+---
+
+A content column stores an immutable root and a bounded typed edit tail as one
+row value. Declare the content adapter and its tail type in the schema, then
+use `ContentManifestRuntime` for materialization, merge, and adapter-defined
+indices.
+
+```rust
+use groove::records::ValueType;
+use jazz::{content_manifest::ContentManifestSchema, schema::ColumnSchema};
+
+fn content_column() -> Result<ColumnSchema, Box<dyn std::error::Error>> {
+    Ok(ColumnSchema::content_manifest(
+        "body",
+        ContentManifestSchema::with_tail_entry_type(
+            "text-v1", ValueType::Bytes, 64, 16 * 1024,
+        )?,
+    ))
+}
+```
+
+The complete manifest is written with `ContentManifest::into_value`. Never
+write a root or an edit tail as separate application columns.

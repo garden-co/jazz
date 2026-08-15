@@ -322,6 +322,14 @@ impl ContentManifestRuntimeProvider for UnavailableContentManifestRuntimeProvide
 /// independently, preserving atomic conflict-unit semantics.
 pub trait ContentManifestAdapter: Send + Sync + 'static {
     fn adapter_kind(&self) -> &str;
+    /// Validate adapter-specific schema metadata at schema activation time.
+    /// The default admits third-party adapters that do not impose tighter
+    /// constraints than the generic typed-record bounds.
+    fn validate_schema(&self, schema: &ContentManifestSchema) -> Result<(), ManifestError> {
+        (schema.adapter_kind == self.adapter_kind())
+            .then_some(())
+            .ok_or(ManifestError::InvalidSchema)
+    }
     /// Validate one already type-checked tail entry.  The concrete type comes
     /// from `ContentManifestSchema::tail_entry_type`, so adapters never need
     /// a shared byte envelope or a per-row discriminant.
@@ -404,6 +412,19 @@ impl ContentManifestAdapterRegistry {
 pub fn global_content_manifest_adapters() -> &'static ContentManifestAdapterRegistry {
     static REGISTRY: OnceLock<ContentManifestAdapterRegistry> = OnceLock::new();
     REGISTRY.get_or_init(ContentManifestAdapterRegistry::default)
+}
+
+/// Validate adapter-specific schema limits when the adapter is built in or has
+/// already been registered. Unknown third-party adapters remain declarable so
+/// applications can register them before opening a node.
+pub fn validate_content_manifest_schema(
+    schema: &ContentManifestSchema,
+) -> Result<(), ManifestError> {
+    match global_content_manifest_adapters().get(&schema.adapter_kind) {
+        Ok(adapter) => adapter.validate_schema(schema),
+        Err(ManifestError::UnknownAdapter(_)) => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
 /// The runtime bridge from a schema-declared content-manifest cell to an
