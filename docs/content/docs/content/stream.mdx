@@ -1,0 +1,45 @@
+---
+title: Stream content
+description: Append and range-read a byte stream.
+---
+
+`stream-v1` has a `Bytes` tail containing one inline suffix. This standalone
+example declares the column, appends data, publishes the complete cell, and
+range-reads it.
+
+```rust
+use groove::records::ValueType;
+use jazz::{
+    content_manifest::{
+        global_content_manifest_adapters, ContentDomainId, ContentManifestRuntime,
+        ContentManifestSchema, ContentReadContext, MaterializationRequest,
+        MemoryImmutableContentStore,
+    },
+    schema::ColumnSchema,
+    stream_manifest::StreamManifestAdapter,
+};
+
+fn stream_example() -> Result<(), Box<dyn std::error::Error>> {
+    let context = ContentReadContext { domain: ContentDomainId(uuid::Uuid::new_v4()) };
+    let mut store = MemoryImmutableContentStore::default();
+    let schema = ContentManifestSchema::with_tail_entry_type(
+        "stream-v1", ValueType::Bytes, 1, 256,
+    )?;
+    let column = ColumnSchema::content_manifest("attachment", schema.clone());
+    let adapter = StreamManifestAdapter::default();
+    let manifest = adapter.empty_manifest(context, &mut store)?;
+    let manifest = adapter.append(&manifest, b"chunk", context, &mut store)?;
+    let cell = manifest.into_value(&schema)?;
+
+    let runtime = ContentManifestRuntime::new(global_content_manifest_adapters(), context, &store);
+    let bytes = runtime.materialize_cell(
+        &schema, &cell, &MaterializationRequest::Range { offset: 0, length: 5 },
+    )?;
+    assert_eq!(bytes, b"chunk");
+    let _ = column;
+    Ok(())
+}
+```
+
+Large suffixes become immutable tree objects. The adapter exposes `length` as
+an index and rejects incompatible stream candidates during merge.
