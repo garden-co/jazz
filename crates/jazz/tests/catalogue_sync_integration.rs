@@ -947,7 +947,7 @@ async fn persistent_dynamic_edge_reopens_ready_catalogue_before_first_client_imp
         .with_schema(schema.clone())
         .with_user_id(test_user_id("dynamic-edge-warmup"))
         .ready_on("users", Duration::from_secs(30))
-        .connect()
+        .connect_after_retry_later(Duration::from_secs(30))
         .await;
     warmup.shutdown().await.expect("shutdown warmup client");
     edge_before_shutdown.shutdown().await;
@@ -1016,14 +1016,14 @@ async fn core_permission_retightening_reaches_subscribed_clients_on_every_edge_i
         .with_schema(schema.clone())
         .with_user_id(test_user_id("alice-retighten-us"))
         .ready_on("users", Duration::from_secs(30))
-        .connect()
+        .connect_after_retry_later(Duration::from_secs(30))
         .await;
     let bob = TestingClient::builder()
         .with_server(&edge_eu)
         .with_schema(schema.clone())
         .with_user_id(test_user_id("bob-retighten-eu"))
         .ready_on("users", Duration::from_secs(30))
-        .connect()
+        .connect_after_retry_later(Duration::from_secs(30))
         .await;
     let carol = TestingClient::builder()
         .with_server(&core)
