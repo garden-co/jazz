@@ -11486,6 +11486,36 @@ where
         self.database.query_graph(graph).map_err(Error::Groove)
     }
 
+    /// Pick the policy-owning schema for one authorization-support operation.
+    ///
+    /// A newer read-policy revision must not shadow an older write-policy
+    /// revision (or vice versa): the terminal proof must hydrate precisely the
+    /// policy clause that admission will evaluate.
+    fn authorization_scope_policy_schema_for_action(
+        &self,
+        table: &str,
+        operation: AuthorizationScopeOperation,
+    ) -> SchemaVersionId {
+        let write_schema = self.catalogue.current_write_schema.schema;
+        let has_operation_policy = self
+            .table_in_schema(table, write_schema)
+            .is_ok_and(|table| match operation {
+                AuthorizationScopeOperation::Read => {
+                    table.read_policy.is_some() || access_edge_parent_reference(&table).is_some()
+                }
+                AuthorizationScopeOperation::Insert
+                | AuthorizationScopeOperation::Update
+                | AuthorizationScopeOperation::Delete => {
+                    !authorization_policy_queries(&table, operation).is_empty()
+                }
+            });
+        if has_operation_policy {
+            write_schema
+        } else {
+            self.catalogue.current_schema_version_id
+        }
+    }
+
     /// Compile the exact policy clauses needed for one non-mutating operation.
     /// This is intentionally separate from the legacy table-wide write scope:
     /// callers are not switched until the receipt transport is negotiated.
@@ -11496,7 +11526,25 @@ where
         action: &PermissionAdviceAction,
     ) -> Result<AuthorizationSupportScope, Error> {
         let (operation, table_name) = authorization_scope_action(action);
-        let policies = authorization_policy_queries(self.table(table_name)?, operation);
+        // `PermissionAdviceAction` is reconstructed after policy projection,
+        // so its table belongs to the policy-owning schema, not necessarily
+        // this node's base API schema. In particular, a rename lens can turn
+        // an authored `users` version into a `people` policy action while an
+        // old-schema subscriber remains live. Resolve both the policy and its
+        // support-query schema from that policy view.
+        let policy_schema_version =
+            self.authorization_scope_policy_schema_for_action(table_name, operation);
+        let policy_schema = self
+            .catalogue
+            .catalogue_schemas
+            .get(&policy_schema_version)
+            .ok_or(Error::InvalidStoredValue(
+                "authorization policy schema is unknown",
+            ))?;
+        let policies = authorization_policy_queries(
+            &self.table_in_schema(table_name, policy_schema_version)?,
+            operation,
+        );
         let claims = self.session_claims.get(&writer);
         let mut claim_values = default_permission_scope_claim_values(writer);
         if let Some(claims) = claims {
@@ -11512,7 +11560,7 @@ where
                     policy.clone(),
                     claims,
                     &claim_values,
-                    &self.catalogue.schema,
+                    &policy_schema.schema,
                 )
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -11720,6 +11768,7 @@ mod authorization_scope_compiler_tests {
     use super::*;
     use crate::ids::NodeUuid;
     use crate::node::NodeState;
+    use crate::protocol::TableLens;
     use crate::schema::WritePolicies;
     use groove::schema::ColumnType;
     use groove::storage::{Durability, RocksDbStorage};
@@ -11964,6 +12013,203 @@ mod authorization_scope_compiler_tests {
         );
         assert_ne!(insert.key, update.key);
         assert_ne!(update.key, delete.key);
+    }
+
+    /// A newer read-only policy produces support for Alice's read while Bob's
+    /// insert retains the older schema's restrictive write-policy support.
+    #[test]
+    fn authorization_scope_uses_newer_read_only_policy_schema() {
+        // A structural v2 schema gains a restrictive read policy without any
+        // write policy. Read advice must compile v2's support query rather
+        // than treating the base v1 table as public.
+        let base = JazzSchema::new([crate::schema::TableSchema::new(
+            "notes",
+            [ColumnSchema::new("owner", ColumnType::Uuid)],
+        )
+        .with_write_policies(WritePolicies {
+            insert_check: Some(JazzQuery::from("notes").filter(crate::query::eq(
+                crate::query::col("owner"),
+                crate::query::claim("sub"),
+            ))),
+            update_using: None,
+            update_check: None,
+            delete_using: None,
+        })]);
+        let evolved = JazzSchema::new([crate::schema::TableSchema::new(
+            "notes",
+            [
+                ColumnSchema::new("owner", ColumnType::Uuid),
+                ColumnSchema::new("body", ColumnType::String),
+            ],
+        )
+        .with_read_policy(JazzQuery::from("notes").filter(crate::query::eq(
+            crate::query::col("body"),
+            crate::query::lit(Value::String("private".to_owned())),
+        )))]);
+        let dir = tempfile::tempdir().unwrap();
+        let refs = base.column_families();
+        let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
+        let storage =
+            RocksDbStorage::open_with_durability(dir.path(), &refs, Durability::WalNoSync).unwrap();
+        let mut node =
+            NodeState::new(NodeUuid::from_bytes([0x31; 16]), base.clone(), storage).unwrap();
+        let evolved_id = evolved.version_id();
+        node.apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
+            author: AuthorId::SYSTEM,
+            catalogue_seq: 1,
+            publication: Box::new(SchemaLineagePublication::new(
+                SchemaVersion::new(evolved),
+                MigrationLens::new(
+                    base.version_id(),
+                    evolved_id,
+                    vec![TableLens {
+                        source_table: "notes".to_owned(),
+                        target_table: "notes".to_owned(),
+                        ops: vec![LensOp::AddColumn {
+                            column: "body".to_owned(),
+                            default: Value::String(String::new()),
+                        }],
+                    }],
+                ),
+                Vec::<String>::new(),
+                Vec::<String>::new(),
+            )),
+        })
+        .unwrap();
+        node.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+            author: AuthorId::SYSTEM,
+            pointer: CurrentWriteSchema {
+                revision: 1,
+                schema: evolved_id,
+            },
+        })
+        .unwrap();
+
+        let scope = node
+            .authorization_support_scope(
+                AuthorId::from_bytes([0x32; 16]),
+                &PermissionAdviceAction::Read {
+                    table: "notes".to_owned(),
+                    row: RowUuid::from_bytes([0x33; 16]),
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            scope.subscriptions.len(),
+            1,
+            "v2-only body policy must compile into one support subscription"
+        );
+        let insert = node
+            .authorization_support_scope(
+                AuthorId::from_bytes([0x32; 16]),
+                &PermissionAdviceAction::Insert {
+                    table: "notes".to_owned(),
+                    cells: BTreeMap::from([(
+                        "owner".to_owned(),
+                        Value::Uuid(uuid::Uuid::from_bytes([0x32; 16])),
+                    )]),
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            insert.subscriptions.len(),
+            1,
+            "insert must retain v1's write-policy support after v2 adds only a read policy"
+        );
+    }
+
+    /// Alice's v1 `users` version is projected through a rename lens to v2
+    /// `people`, where Bob's terminal insert proof compiles the v2 policy.
+    ///
+    /// alice v1 write ──rename lens──► people action ──► bob's v2 support proof
+    #[test]
+    fn projected_rename_action_uses_terminal_policy_schema_for_support() {
+        let base = JazzSchema::new([crate::schema::TableSchema::new(
+            "users",
+            [ColumnSchema::new("owner", ColumnType::Uuid)],
+        )]);
+        let evolved = JazzSchema::new([crate::schema::TableSchema::new(
+            "people",
+            [
+                ColumnSchema::new("owner", ColumnType::Uuid),
+                ColumnSchema::new("body", ColumnType::String),
+            ],
+        )
+        .with_write_policies(WritePolicies {
+            insert_check: Some(JazzQuery::from("people").filter(crate::query::eq(
+                crate::query::col("body"),
+                crate::query::lit(Value::String("migrated".to_owned())),
+            ))),
+            update_using: None,
+            update_check: None,
+            delete_using: None,
+        })]);
+        let dir = tempfile::tempdir().unwrap();
+        let refs = base.column_families();
+        let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
+        let storage =
+            RocksDbStorage::open_with_durability(dir.path(), &refs, Durability::WalNoSync).unwrap();
+        let mut node =
+            NodeState::new(NodeUuid::from_bytes([0x41; 16]), base.clone(), storage).unwrap();
+        let evolved_id = evolved.version_id();
+        node.apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
+            author: AuthorId::SYSTEM,
+            catalogue_seq: 1,
+            publication: Box::new(SchemaLineagePublication::new(
+                SchemaVersion::new(evolved),
+                MigrationLens::new(
+                    base.version_id(),
+                    evolved_id,
+                    vec![TableLens {
+                        source_table: "users".to_owned(),
+                        target_table: "people".to_owned(),
+                        ops: vec![
+                            LensOp::RenameTable {
+                                from: "users".to_owned(),
+                                to: "people".to_owned(),
+                            },
+                            LensOp::AddColumn {
+                                column: "body".to_owned(),
+                                default: Value::String("migrated".to_owned()),
+                            },
+                        ],
+                    }],
+                ),
+                Vec::<String>::new(),
+                Vec::<String>::new(),
+            )),
+        })
+        .unwrap();
+        node.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+            author: AuthorId::SYSTEM,
+            pointer: CurrentWriteSchema {
+                revision: 1,
+                schema: evolved_id,
+            },
+        })
+        .unwrap();
+
+        let commit = MergeableCommit::new("users", RowUuid::from_bytes([0x42; 16]), 1).cells(
+            BTreeMap::from([(
+                "owner".to_owned(),
+                Value::Uuid(uuid::Uuid::from_bytes([0x43; 16])),
+            )]),
+        );
+        let version =
+            VersionRecord::from_commit(&commit, &base.tables[0], base.version_id()).unwrap();
+        let actions = node.authorization_actions_for_versions(&[version]).unwrap();
+        let [PermissionAdviceAction::Insert { table, .. }] = actions.as_slice() else {
+            panic!("v1 insert must project to one v2 insert action: {actions:?}");
+        };
+        assert_eq!(table, "people");
+        let scope = node
+            .authorization_support_scope(AuthorId::from_bytes([0x44; 16]), &actions[0])
+            .unwrap();
+        assert_eq!(
+            scope.subscriptions.len(),
+            1,
+            "v2 projected insert policy needs support"
+        );
     }
 }
 
