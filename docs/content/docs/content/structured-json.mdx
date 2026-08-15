@@ -1,0 +1,22 @@
+---
+title: Structured JSON content
+description: Materialize, project, and merge structured JSON.
+---
+
+`json-v1` stores a structured immutable JSON tree with a `Bytes` tail.
+`JsonOperation::encode` returns the typed tail value required by the schema.
+
+```rust
+let manifest = ContentManifest {
+    root,
+    edit_tail: vec![JsonOperation::SetScalar {
+        op, target: status, value: JsonScalar::String("open".into()),
+    }.encode()?],
+};
+let cell = manifest.into_value(&json_schema)?;
+let document = runtime.materialize_cell(&json_schema, &cell, &MaterializationRequest::Full)?;
+let projection = runtime.index_values_for_cell(&json_schema, &cell, &["/status".into()])?;
+```
+
+Node and array identities are stable. The JSON adapter merges only coherent,
+noncommuting-safe operation tails and rejects duplicate or conflicting edits.
