@@ -59,7 +59,12 @@ describe("websocket frame carrier", () => {
 
     await carrier.ready();
     socket!.sent.length = 0;
-    const frames = [new Uint8Array(600_000), new Uint8Array(600_000), new Uint8Array(600_000)];
+    const frames = [0x11, 0x22, 0x33].map((sentinel) => {
+      const frame = new Uint8Array(600_000);
+      frame[0] = sentinel;
+      frame[frame.byteLength - 1] = sentinel ^ 0xff;
+      return frame;
+    });
     await carrier.sendBatch(frames);
 
     const batches = socket!.sent.filter(
@@ -67,7 +72,11 @@ describe("websocket frame carrier", () => {
     );
     expect(batches).toHaveLength(3);
     expect(batches.every((batch) => batch.byteLength <= 1 << 20)).toBe(true);
-    expect(batches.flatMap((batch) => decodeWebSocketFrameBatch(batch))).toEqual(frames);
+    const decoded = batches.flatMap((batch) => decodeWebSocketFrameBatch(batch));
+    expect(decoded).toHaveLength(frames.length);
+    for (const [index, frame] of frames.entries()) {
+      expect(bytesEqual(decoded[index]!, frame)).toBe(true);
+    }
   });
 
   it("uses app-scoped websocket URLs without identity query parameters", () => {
@@ -365,6 +374,16 @@ function hexToBytes(hex: string): Uint8Array {
     bytes[index] = Number.parseInt(hex.slice(index * 2, index * 2 + 2), 16);
   }
   return bytes;
+}
+
+function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
+  if (left.byteLength !== right.byteLength) return false;
+  return (
+    Buffer.compare(
+      Buffer.from(left.buffer, left.byteOffset, left.byteLength),
+      Buffer.from(right.buffer, right.byteOffset, right.byteLength),
+    ) === 0
+  );
 }
 
 function encodeWireError(code: number, retry: number, message: string): Uint8Array {
