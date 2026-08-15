@@ -9,10 +9,12 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use groove::records::{Value, ValueType};
+
 use crate::content_manifest::{
     ContentAddress, ContentDomainId, ContentId, ContentManifest, ContentManifestAdapter,
-    ContentReadContext, ImmutableContentKind, ImmutableContentStore, ManifestError,
-    MaterializationRequest,
+    ContentManifestSchema, ContentReadContext, ImmutableContentKind, ImmutableContentStore,
+    ManifestError, MaterializationRequest,
 };
 
 pub const FILE_ADAPTER_KIND: &str = "file-v1";
@@ -52,7 +54,11 @@ pub enum FileEdit {
 pub struct FileContentAdapter;
 
 impl FileContentAdapter {
-    pub fn encode_edit(edit: &FileEdit) -> Vec<u8> {
+    pub fn encode_edit(edit: &FileEdit) -> Value {
+        Value::Bytes(Self::encode_edit_bytes(edit))
+    }
+
+    fn encode_edit_bytes(edit: &FileEdit) -> Vec<u8> {
         let (tag, offset, delete, bytes) = match edit {
             FileEdit::Overwrite {
                 offset,
@@ -71,7 +77,14 @@ impl FileContentAdapter {
         out
     }
 
-    pub fn decode_edit(bytes: &[u8]) -> Result<FileEdit, ManifestError> {
+    pub fn decode_edit(value: &Value) -> Result<FileEdit, ManifestError> {
+        let Value::Bytes(bytes) = value else {
+            return Err(ManifestError::Malformed);
+        };
+        Self::decode_edit_bytes(bytes)
+    }
+
+    fn decode_edit_bytes(bytes: &[u8]) -> Result<FileEdit, ManifestError> {
         if bytes.len() < 21 {
             return Err(ManifestError::Malformed);
         }
@@ -342,7 +355,14 @@ impl ContentManifestAdapter for FileContentAdapter {
     fn adapter_kind(&self) -> &str {
         FILE_ADAPTER_KIND
     }
-    fn validate_operation(&self, operation: &[u8]) -> Result<(), ManifestError> {
+    fn validate_schema(&self, schema: &ContentManifestSchema) -> Result<(), ManifestError> {
+        if schema.adapter_kind != FILE_ADAPTER_KIND || schema.tail_entry_type != ValueType::Bytes {
+            return Err(ManifestError::InvalidSchema);
+        }
+        Ok(())
+    }
+
+    fn validate_operation(&self, operation: &Value) -> Result<(), ManifestError> {
         Self::decode_edit(operation).map(|_| ())
     }
 
@@ -406,12 +426,15 @@ impl ContentManifestAdapter for FileContentAdapter {
         for manifest in manifests {
             for raw in &manifest.edit_tail {
                 self.validate_operation(raw)?;
+                let Value::Bytes(raw) = raw else {
+                    return Err(ManifestError::Malformed);
+                };
                 edits.insert(raw.clone());
             }
         }
         let mut decoded: Vec<_> = edits
             .into_iter()
-            .map(|raw| Ok((Self::decode_edit(&raw)?, raw)))
+            .map(|raw| Ok((Self::decode_edit_bytes(&raw)?, raw)))
             .collect::<Result<_, ManifestError>>()?;
         for (i, (left, _)) in decoded.iter().enumerate() {
             for (right, _) in &decoded[i + 1..] {
@@ -425,7 +448,10 @@ impl ContentManifestAdapter for FileContentAdapter {
         decoded.sort_by(|(left, _), (right, _)| edit_order(right, left));
         Ok(ContentManifest {
             root: first.root,
-            edit_tail: decoded.into_iter().map(|(_, raw)| raw).collect(),
+            edit_tail: decoded
+                .into_iter()
+                .map(|(_, raw)| Value::Bytes(raw))
+                .collect(),
         })
     }
 
@@ -830,7 +856,9 @@ fn edit_order(a: &FileEdit, b: &FileEdit) -> std::cmp::Ordering {
     let bo = range(b).0;
     ao.cmp(&bo)
         .then_with(|| edit_tag(a).cmp(&edit_tag(b)))
-        .then_with(|| FileContentAdapter::encode_edit(a).cmp(&FileContentAdapter::encode_edit(b)))
+        .then_with(|| {
+            FileContentAdapter::encode_edit_bytes(a).cmp(&FileContentAdapter::encode_edit_bytes(b))
+        })
 }
 fn edit_tag(edit: &FileEdit) -> u8 {
     match edit {
@@ -839,10 +867,10 @@ fn edit_tag(edit: &FileEdit) -> u8 {
         FileEdit::Insert { .. } => 2,
     }
 }
-fn canonical_edits(raw: &[Vec<u8>]) -> Result<Vec<FileEdit>, ManifestError> {
+fn canonical_edits(raw: &[Value]) -> Result<Vec<FileEdit>, ManifestError> {
     let mut edits = raw
         .iter()
-        .map(|r| FileContentAdapter::decode_edit(r))
+        .map(FileContentAdapter::decode_edit)
         .collect::<Result<Vec<_>, _>>()?;
     for (i, a) in edits.iter().enumerate() {
         for b in &edits[i + 1..] {
@@ -857,7 +885,8 @@ fn canonical_edits(raw: &[Vec<u8>]) -> Result<Vec<FileEdit>, ManifestError> {
             .cmp(&range(a).0)
             .then_with(|| edit_tag(a).cmp(&edit_tag(b)))
             .then_with(|| {
-                FileContentAdapter::encode_edit(a).cmp(&FileContentAdapter::encode_edit(b))
+                FileContentAdapter::encode_edit_bytes(a)
+                    .cmp(&FileContentAdapter::encode_edit_bytes(b))
             })
     });
     Ok(edits)
@@ -1210,7 +1239,7 @@ mod tests {
             )
             .is_err()
         );
-        assert!(a.validate_operation(&[1, 2]).is_err());
+        assert!(a.validate_operation(&Value::Bytes(vec![1, 2])).is_err());
         let root_bytes = store.get(one, root).unwrap().to_vec();
         let child = ContentId(root_bytes[4..36].try_into().unwrap());
         let forged = store
@@ -1530,22 +1559,24 @@ mod tests {
         let root = adapter
             .store_bytes(b"normal jazz row", context, &mut immutable)
             .unwrap();
-        let manifest_schema =
-            crate::content_manifest::ContentManifestSchema::new(FILE_ADAPTER_KIND, 8, 1024)
-                .unwrap();
+        let manifest_schema = crate::content_manifest::ContentManifestSchema::with_tail_entry_type(
+            FILE_ADAPTER_KIND,
+            ValueType::Bytes,
+            8,
+            1024,
+        )
+        .unwrap();
         let candidate = |offset, byte| {
-            Value::Bytes(
-                ContentManifest {
-                    root,
-                    edit_tail: vec![FileContentAdapter::encode_edit(&FileEdit::Overwrite {
-                        offset,
-                        delete: 1,
-                        bytes: vec![byte],
-                    })],
-                }
-                .encode(&manifest_schema)
-                .unwrap(),
-            )
+            ContentManifest {
+                root,
+                edit_tail: vec![FileContentAdapter::encode_edit(&FileEdit::Overwrite {
+                    offset,
+                    delete: 1,
+                    bytes: vec![byte],
+                })],
+            }
+            .into_value(&manifest_schema)
+            .unwrap()
         };
         let runtime =
             ContentManifestRuntime::new(global_content_manifest_adapters(), context, &immutable);
@@ -1588,18 +1619,16 @@ mod tests {
                 .get(FILE_ADAPTER_KIND)
                 .is_ok()
         );
-        let cell = Value::Bytes(
-            ContentManifest {
-                root,
-                edit_tail: vec![FileContentAdapter::encode_edit(&FileEdit::Overwrite {
-                    offset: 7,
-                    delete: 4,
-                    bytes: b"Jazz".to_vec(),
-                })],
-            }
-            .encode(&manifest_schema)
-            .unwrap(),
-        );
+        let cell = ContentManifest {
+            root,
+            edit_tail: vec![FileContentAdapter::encode_edit(&FileEdit::Overwrite {
+                offset: 7,
+                delete: 4,
+                bytes: b"Jazz".to_vec(),
+            })],
+        }
+        .into_value(&manifest_schema)
+        .unwrap();
         node.commit_mergeable_unit(
             MergeableCommit::new("documents", RowUuid::from_bytes([3; 16]), 1)
                 .made_by(AuthorId::from_bytes([4; 16]))
