@@ -280,12 +280,7 @@ where
         S: ReopenableStorage,
     {
         self.require_catalogue_admin(author, ingest_context)?;
-        self.validate_schema_lineage_publication_bounds(&publication)?;
-        if publication.id != publication.content_id() {
-            return Err(Error::InvalidCatalogueUpdate(
-                "schema lineage publication id mismatch",
-            ));
-        }
+        Self::validate_schema_lineage_publication(&publication)?;
         if catalogue_seq == 0 {
             return Err(Error::InvalidCatalogueUpdate(
                 "schema lineage catalogue sequence must be nonzero",
@@ -293,21 +288,6 @@ where
         }
         let schema = &publication.schema;
         let lens = &publication.lens;
-        if schema.id != schema.schema.version_id() {
-            return Err(Error::InvalidCatalogueUpdate(
-                "schema id does not match schema payload",
-            ));
-        }
-        if lens.id != lens.content_id() {
-            return Err(Error::InvalidCatalogueUpdate(
-                "lens id does not match lens payload",
-            ));
-        }
-        if lens.target != schema.id {
-            return Err(Error::InvalidCatalogueUpdate(
-                "lineage lens target does not match schema",
-            ));
-        }
         if let Some(existing) = self.catalogue.active_lineages_by_target.get(&schema.id) {
             if existing.publication != publication || existing.catalogue_seq != catalogue_seq {
                 return Err(Error::InvalidCatalogueUpdate(
@@ -335,8 +315,8 @@ where
             }
         } else {
             if let Some(source) = self.catalogue.catalogue_schemas.get(&lens.source) {
-                self.validate_migration_lens_between(lens, source, schema)?;
-                self.validate_lineage_table_partition(
+                Self::validate_migration_lens_between(lens, source, schema)?;
+                Self::validate_lineage_table_partition(
                     &source.schema,
                     &schema.schema,
                     lens,
@@ -390,17 +370,20 @@ where
             else {
                 break;
             };
-            let validation = self
-                .validate_migration_lens_between(&publication.lens, &source, &publication.schema)
-                .and_then(|()| {
-                    self.validate_lineage_table_partition(
-                        &source.schema,
-                        &publication.schema.schema,
-                        &publication.lens,
-                        &publication.new_tables,
-                        &publication.dropped_tables,
-                    )
-                });
+            let validation = Self::validate_migration_lens_between(
+                &publication.lens,
+                &source,
+                &publication.schema,
+            )
+            .and_then(|()| {
+                Self::validate_lineage_table_partition(
+                    &source.schema,
+                    &publication.schema.schema,
+                    &publication.lens,
+                    &publication.new_tables,
+                    &publication.dropped_tables,
+                )
+            });
             if validation.is_err() {
                 self.remove_pending_schema_lineage(next, publication.id)?;
                 break;
@@ -720,11 +703,10 @@ where
             .catalogue_schemas
             .get(&lens.target)
             .ok_or(Error::InvalidCatalogueUpdate("lens endpoint is unknown"))?;
-        self.validate_migration_lens_between(lens, source, target)
+        Self::validate_migration_lens_between(lens, source, target)
     }
 
     pub(super) fn validate_migration_lens_between(
-        &self,
         lens: &MigrationLens,
         source: &SchemaVersion,
         target: &SchemaVersion,
@@ -860,7 +842,6 @@ where
     }
 
     pub(super) fn validate_lineage_table_partition(
-        &self,
         source: &JazzSchema,
         target: &JazzSchema,
         lens: &MigrationLens,
@@ -910,7 +891,6 @@ where
     }
 
     pub(super) fn validate_schema_lineage_publication_bounds(
-        &self,
         publication: &SchemaLineagePublication,
     ) -> Result<(), Error> {
         let declaration_count = publication
@@ -943,6 +923,33 @@ where
         {
             return Err(Error::InvalidCatalogueUpdate(
                 "schema lineage publication exceeds structural limits",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(super) fn validate_schema_lineage_publication(
+        publication: &SchemaLineagePublication,
+    ) -> Result<(), Error> {
+        Self::validate_schema_lineage_publication_bounds(publication)?;
+        if publication.id != publication.content_id() {
+            return Err(Error::InvalidCatalogueUpdate(
+                "schema lineage publication id mismatch",
+            ));
+        }
+        if publication.schema.id != publication.schema.schema.version_id() {
+            return Err(Error::InvalidCatalogueUpdate(
+                "schema id does not match schema payload",
+            ));
+        }
+        if publication.lens.id != publication.lens.content_id() {
+            return Err(Error::InvalidCatalogueUpdate(
+                "lens id does not match lens payload",
+            ));
+        }
+        if publication.lens.target != publication.schema.id {
+            return Err(Error::InvalidCatalogueUpdate(
+                "lineage lens target does not match schema",
             ));
         }
         Ok(())
