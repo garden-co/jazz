@@ -21,6 +21,7 @@ env:
 
 jobs:
   build-image:
+    if: inputs.probe_only != true
     runs-on: blacksmith-4vcpu-ubuntu-2404
     permissions:
       contents: read
@@ -145,14 +146,13 @@ jobs:
 
   browser-path-probe:
     if: inputs.probe_only == true
-    needs: build-image
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 5
     permissions:
       contents: read
       packages: read
     container:
-      image: ${{ needs.build-image.outputs.image }}
+      image: ghcr.io/garden-co/jazz-ci-toolchain@sha256:dcb4ec5e4f5507b258805617d58ee6976f7dcee2e9afe1b05ae3d41cc185ef35
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
