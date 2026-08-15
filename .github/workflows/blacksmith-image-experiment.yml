@@ -2,12 +2,11 @@ name: Blacksmith image experiment
 
 on:
   workflow_dispatch:
-  push:
-    branches: [agent/blacksmith-image-experiment]
-    paths:
-      - .github/blacksmith/**
-      - .github/actions/setup-blacksmith-experiment/**
-      - .github/workflows/blacksmith-image-experiment.yml
+    inputs:
+      probe_only:
+        description: Only verify the immutable Chromium fallback path
+        type: boolean
+        default: false
 
 concurrency:
   group: blacksmith-image-experiment-${{ github.ref }}
@@ -51,6 +50,7 @@ jobs:
         run: echo "image=ghcr.io/garden-co/jazz-ci-toolchain@${{ steps.build.outputs.digest }}" >> "${GITHUB_OUTPUT}"
 
   lint:
+    if: inputs.probe_only != true
     needs: build-image
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 10
@@ -78,6 +78,7 @@ jobs:
         run: sccache --show-stats
 
   test-rust:
+    if: inputs.probe_only != true
     needs: build-image
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 15
@@ -113,6 +114,7 @@ jobs:
         run: sccache --show-stats
 
   test-ts:
+    if: inputs.probe_only != true
     needs: build-image
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 20
@@ -140,3 +142,30 @@ jobs:
         run: dev/gates/run-ts-tests.sh
       - if: always()
         run: sccache --show-stats
+
+  browser-path-probe:
+    if: inputs.probe_only == true
+    needs: build-image
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      packages: read
+    container:
+      image: ${{ needs.build-image.outputs.image }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Expose immutable Chromium at Playwright's default path
+        run: |
+          set -euo pipefail
+          mkdir -p /github/home/.cache
+          ln -s "${PLAYWRIGHT_BROWSERS_PATH}" /github/home/.cache/ms-playwright
+          test "$(readlink -f /github/home/.cache/ms-playwright)" = "${PLAYWRIGHT_BROWSERS_PATH}"
+      - name: Launch Chromium without the image-specific environment variable
+        run: |
+          set -euo pipefail
+          env -u PLAYWRIGHT_BROWSERS_PATH \
+            pnpm dlx "playwright@1.58.2" screenshot about:blank "${RUNNER_TEMP}/blacksmith-browser-probe.png"
+          test -s "${RUNNER_TEMP}/blacksmith-browser-probe.png"

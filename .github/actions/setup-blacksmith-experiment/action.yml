@@ -21,6 +21,14 @@ runs:
         wasm-bindgen --version | grep -F "0.2.117"
         test -r /opt/jazz-ci/toolchains/v1/manifest.json
         test -d "${PLAYWRIGHT_BROWSERS_PATH}"
+        # Turbo intentionally filters undeclared environment variables. Make
+        # the same immutable browser bundle available at Playwright's default
+        # container-home path for nested workspace/example test processes.
+        mkdir -p /github/home/.cache
+        if [[ ! -e /github/home/.cache/ms-playwright ]]; then
+          ln -s "${PLAYWRIGHT_BROWSERS_PATH}" /github/home/.cache/ms-playwright
+        fi
+        test "$(readlink -f /github/home/.cache/ms-playwright)" = "${PLAYWRIGHT_BROWSERS_PATH}"
 
     - name: Restore pnpm store
       uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
