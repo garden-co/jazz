@@ -1171,9 +1171,7 @@ fn append_exists_policy_clause(
         ));
     }
 
-    let mut join_column = None;
-    let mut source_column = None;
-    let mut correlated_filters = Vec::new();
+    let mut outer_correlations = Vec::new();
     let mut filters = Vec::new();
 
     let conditions = match condition {
@@ -1188,15 +1186,10 @@ fn append_exists_policy_clause(
                 op: CmpOp::Eq,
                 value: PolicyValue::SessionRef(path_segments),
             } if path_segments.len() == 2 && path_segments[0] == "__jazz_outer_row" => {
-                if join_column.is_none() {
-                    join_column = Some(column.clone());
-                    source_column = Some(path_segments[1].clone());
-                } else {
-                    correlated_filters.push(JoinCorrelation {
-                        join_column: column.clone(),
-                        source_column: path_segments[1].clone(),
-                    });
-                }
+                outer_correlations.push(JoinCorrelation {
+                    join_column: column.clone(),
+                    source_column: path_segments[1].clone(),
+                });
             }
             other => filters.push(convert_policy_predicate(
                 &exists_table_name,
@@ -1206,16 +1199,28 @@ fn append_exists_policy_clause(
         }
     }
 
-    let join_column = join_column.ok_or_else(|| {
-        err(
+    if outer_correlations.is_empty() {
+        return Err(err(
             format!("$.{}.{}", table.as_str(), path),
             "core schema policies require EXISTS to include an equality against __jazz_outer_row",
-        )
-    })?;
-    let source_column = source_column.expect("join_column and source_column are set together");
+        ));
+    }
+    let primary_index = outer_correlations
+        .iter()
+        .position(|correlation| correlation.join_column == "id")
+        .unwrap_or(0);
+    let primary = outer_correlations.remove(primary_index);
+    let join_column = primary.join_column;
+    let source_column = primary.source_column;
+    let correlated_filters = outer_correlations;
 
     if join_column == "id" {
-        Ok(query.join_via_row_id(exists_table, source_column, filters))
+        Ok(query.join_via_row_id_with_correlations(
+            exists_table,
+            source_column,
+            correlated_filters,
+            filters,
+        ))
     } else if correlated_filters.is_empty() {
         Ok(query.join_via_column(exists_table, join_column, source_column, filters))
     } else {
@@ -3040,15 +3045,25 @@ mod tests {
             .table(
                 TableSchemaBuilder::new("chats")
                     .column("name", ColumnType::Text)
+                    .column("createdBy", ColumnType::Text)
                     .column("isPublic", ColumnType::Boolean),
             )
             .table(
                 TableSchemaBuilder::new("messages")
                     .fk_column("chatId", "chats")
+                    .column("createdBy", ColumnType::Text)
                     .column("text", ColumnType::Text)
                     .policies(TablePolicies::new().with_select(PolicyExpr::Exists {
                         table: "chats".to_owned(),
                         condition: Box::new(PolicyExpr::And(vec![
+                            PolicyExpr::Cmp {
+                                column: "createdBy".to_owned(),
+                                op: CmpOp::Eq,
+                                value: PolicyValue::SessionRef(vec![
+                                    "__jazz_outer_row".to_owned(),
+                                    "createdBy".to_owned(),
+                                ]),
+                            },
                             PolicyExpr::Cmp {
                                 column: "id".to_owned(),
                                 op: CmpOp::Eq,
@@ -3081,6 +3096,13 @@ mod tests {
         assert_eq!(join.on_column, "id");
         assert_eq!(join.target, JoinTarget::RowId);
         assert_eq!(join.source_column.as_deref(), Some("chatId"));
+        assert_eq!(
+            join.correlated_filters,
+            vec![JoinCorrelation {
+                join_column: "createdBy".to_owned(),
+                source_column: "createdBy".to_owned(),
+            }]
+        );
         assert_eq!(
             join.filters,
             vec![Predicate::Eq(

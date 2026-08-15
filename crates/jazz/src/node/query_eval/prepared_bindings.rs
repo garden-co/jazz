@@ -14,12 +14,16 @@ pub(super) fn query_binding_value_signature(binding: &Binding) -> String {
         .join(",")
 }
 
-pub(super) fn policy_plan_cache_signature(binding: &Binding, identity: AuthorId) -> String {
+pub(super) fn policy_plan_cache_signature(
+    binding: &Binding,
+    identity: AuthorId,
+    claims_revision: u64,
+) -> String {
     // Authorization lowering still embeds the permission subject in source
     // plans. Claim values are routed at bind time, but plans from different
     // subjects are not interchangeable until that subject is parameterized.
     format!(
-        "{}|subject={identity:?}",
+        "{}|subject={identity:?}|claims={claims_revision}",
         query_binding_value_signature(binding)
     )
 }

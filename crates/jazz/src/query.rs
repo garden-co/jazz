@@ -1520,6 +1520,27 @@ impl Query {
         self
     }
 
+    /// Add a row-id traversal with extra source-row equality correlations.
+    pub fn join_via_row_id_with_correlations(
+        mut self,
+        table: impl Into<String>,
+        source_column: impl Into<String>,
+        correlated_filters: impl IntoIterator<Item = JoinCorrelation>,
+        filters: impl IntoIterator<Item = Predicate>,
+    ) -> Self {
+        self.joins.push(JoinVia {
+            table: table.into(),
+            on_column: "id".to_owned(),
+            target: JoinTarget::RowId,
+            source_column: Some(source_column.into()),
+            source_lookup: None,
+            correlated_filters: correlated_filters.into_iter().collect(),
+            filters: filters.into_iter().collect(),
+            nested_joins: Vec::new(),
+        });
+        self
+    }
+
     /// Add a recursive reachability traversal through an access table and edge table.
     #[allow(clippy::too_many_arguments)]
     pub fn reachable_via(

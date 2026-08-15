@@ -17,8 +17,8 @@ export default definePermissions(app, ({ policy, session, allOf, anyOf, allowedT
       userIsChatMember(chat),
       // Users may update only non-protected fields. `createdBy` and `isPublic` cannot be updated.
       policy.chats.exists.where({
-        id: chat.id,
         createdBy: chat.createdBy,
+        id: chat.id,
         isPublic: chat.isPublic,
       }),
     ]),

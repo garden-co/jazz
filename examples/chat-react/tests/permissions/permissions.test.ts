@@ -15,20 +15,21 @@ afterEach(async () => {
 
 describe("chat permissions", () => {
   it("allows pre-authorized private chat reads via join_code claim", async () => {
-    const privateChat = testApp.seed((db) => {
-      const { value: privateChat } = db.insert(app.chats, {
+    const privateChat = await testApp.seed((db) =>
+      db.insert(app.chats, {
         name: "Private room",
         isPublic: false,
         createdBy: "alice",
         joinCode: "invite-123",
-      });
+      }),
+    );
+    await testApp.seed((db) =>
       db.insert(app.chatMembers, {
         chatId: privateChat.id,
         userId: "alice",
         joinCode: "invite-123",
-      });
-      return privateChat;
-    });
+      }),
+    );
 
     const bobWithoutClaim = testApp.as({ user_id: "bob", claims: {}, authMode: "local-first" });
     const bobWithClaim = testApp.as({
@@ -44,24 +45,27 @@ describe("chat permissions", () => {
   });
 
   it("allows chat name updates", async () => {
-    const privateChat = testApp.seed((db) => {
+    await testApp.seed((db) =>
       db.insert(app.profiles, {
         userId: "alice",
         name: "Alice",
-      });
-      const { value: privateChat } = db.insert(app.chats, {
+      }),
+    );
+    const privateChat = await testApp.seed((db) =>
+      db.insert(app.chats, {
         name: "Members only",
         isPublic: false,
         createdBy: "alice",
         joinCode: "invite-456",
-      });
+      }),
+    );
+    await testApp.seed((db) =>
       db.insert(app.chatMembers, {
         chatId: privateChat.id,
         userId: "alice",
         joinCode: "invite-456",
-      });
-      return privateChat;
-    });
+      }),
+    );
 
     const aliceDb = testApp.as({ user_id: "alice", claims: {}, authMode: "local-first" });
 
@@ -73,34 +77,37 @@ describe("chat permissions", () => {
   });
 
   it("does not allow chat creator and isPublic updates", async () => {
-    const privateChat = testApp.seed((db) => {
+    await testApp.seed((db) =>
       db.insert(app.profiles, {
         userId: "alice",
         name: "Alice",
-      });
-      const { value: privateChat } = db.insert(app.chats, {
+      }),
+    );
+    const privateChat = await testApp.seed((db) =>
+      db.insert(app.chats, {
         name: "Members only",
         isPublic: false,
         createdBy: "alice",
         joinCode: "invite-456",
-      });
+      }),
+    );
+    await testApp.seed((db) =>
       db.insert(app.chatMembers, {
         chatId: privateChat.id,
         userId: "alice",
         joinCode: "invite-456",
-      });
-      return privateChat;
-    });
+      }),
+    );
 
     const aliceDb = testApp.as({ user_id: "alice", claims: {}, authMode: "local-first" });
 
-    aliceDb.expectDenied((db) =>
+    await aliceDb.expectDenied((db) =>
       db.update(app.chats, privateChat.id, {
         createdBy: "bob",
       }),
     );
 
-    aliceDb.expectDenied((db) =>
+    await aliceDb.expectDenied((db) =>
       db.update(app.chats, privateChat.id, {
         isPublic: true,
       }),
@@ -108,28 +115,33 @@ describe("chat permissions", () => {
   });
 
   it("allows message inserts only for chat members", async () => {
-    const { aliceProfile, bobProfile, privateChat } = testApp.seed((db) => {
-      const { value: aliceProfile } = db.insert(app.profiles, {
+    const aliceProfile = await testApp.seed((db) =>
+      db.insert(app.profiles, {
         userId: "alice",
         name: "Alice",
-      });
-      const { value: bobProfile } = db.insert(app.profiles, {
+      }),
+    );
+    const bobProfile = await testApp.seed((db) =>
+      db.insert(app.profiles, {
         userId: "bob",
         name: "Bob",
-      });
-      const { value: privateChat } = db.insert(app.chats, {
+      }),
+    );
+    const privateChat = await testApp.seed((db) =>
+      db.insert(app.chats, {
         name: "Members only",
         isPublic: false,
         createdBy: "alice",
         joinCode: "invite-456",
-      });
+      }),
+    );
+    await testApp.seed((db) =>
       db.insert(app.chatMembers, {
         chatId: privateChat.id,
         userId: "alice",
         joinCode: "invite-456",
-      });
-      return { aliceProfile, bobProfile, privateChat };
-    });
+      }),
+    );
 
     const aliceDb = testApp.as({ user_id: "alice", claims: {}, authMode: "local-first" });
     const bobDb = testApp.as({ user_id: "bob", claims: {}, authMode: "local-first" });
@@ -143,7 +155,7 @@ describe("chat permissions", () => {
       }),
     );
 
-    bobDb.expectDenied((db) =>
+    await bobDb.expectDenied((db) =>
       db.insert(app.messages, {
         chatId: privateChat.id,
         text: "hello from bob",
@@ -152,13 +164,13 @@ describe("chat permissions", () => {
       }),
     );
 
-    testApp.seed((db) => {
+    await testApp.seed((db) =>
       db.insert(app.chatMembers, {
         chatId: privateChat.id,
         userId: "bob",
         joinCode: "invite-456",
-      });
-    });
+      }),
+    );
 
     bobDb.expectAllowed((db) =>
       db.insert(app.messages, {
@@ -171,40 +183,49 @@ describe("chat permissions", () => {
   });
 
   it("inherits reaction reads from the parent message/chat chain", async () => {
-    const reaction = testApp.seed((db) => {
-      const { value: aliceProfile } = db.insert(app.profiles, {
+    const aliceProfile = await testApp.seed((db) =>
+      db.insert(app.profiles, {
         userId: "alice",
         name: "Alice",
-      });
-      const { value: privateChat } = db.insert(app.chats, {
+      }),
+    );
+    const privateChat = await testApp.seed((db) =>
+      db.insert(app.chats, {
         name: "Uploads",
         isPublic: false,
         createdBy: "alice",
         joinCode: "invite-789",
-      });
+      }),
+    );
+    await testApp.seed((db) =>
       db.insert(app.chatMembers, {
         chatId: privateChat.id,
         userId: "alice",
         joinCode: "invite-789",
-      });
+      }),
+    );
+    await testApp.seed((db) =>
       db.insert(app.chatMembers, {
         chatId: privateChat.id,
         userId: "bob",
         joinCode: "invite-789",
-      });
-      const { value: message } = db.insert(app.messages, {
+      }),
+    );
+    const message = await testApp.seed((db) =>
+      db.insert(app.messages, {
         chatId: privateChat.id,
         text: "see attachment",
         senderId: aliceProfile.id,
         createdAt: new Date("2026-01-01T00:00:03.000Z"),
-      });
-      const { value: reaction } = db.insert(app.reactions, {
+      }),
+    );
+    const reaction = await testApp.seed((db) =>
+      db.insert(app.reactions, {
         messageId: message.id,
         userId: "alice",
         emoji: "fire",
-      });
-      return reaction;
-    });
+      }),
+    );
 
     const bobDb = testApp.as({ user_id: "bob", claims: {}, authMode: "local-first" });
     const carolDb = testApp.as({ user_id: "carol", claims: {}, authMode: "local-first" });

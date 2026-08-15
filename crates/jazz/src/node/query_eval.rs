@@ -9687,7 +9687,11 @@ where
                 tier,
                 format!(
                     "client-local:{}",
-                    policy_plan_cache_signature(&binding, identity)
+                    policy_plan_cache_signature(
+                        &binding,
+                        identity,
+                        self.session_claim_revision(identity),
+                    )
                 ),
             );
             if let Some(plan) = self.query.query_shape_cache.get(&key) {
@@ -10457,7 +10461,7 @@ where
         let key = (
             shape.shape_id(),
             tier,
-            policy_plan_cache_signature(binding, identity),
+            policy_plan_cache_signature(binding, identity, self.session_claim_revision(identity)),
         );
         if let Some(plan) = self.query.query_shape_cache.get(&key)
             && !matches!(plan.as_ref(), PreparedQueryPlan::PeerMaintainedMarker)
@@ -17357,6 +17361,55 @@ mod tests {
             .collect::<BTreeSet<_>>();
 
         assert_eq!(visible, BTreeSet::from([row(1)]));
+    }
+
+    #[test]
+    fn prepared_policy_plan_is_recompiled_after_same_identity_claim_revision_changes() {
+        let schema = JazzSchema::new([TableSchema::new(
+            "issues",
+            [
+                ColumnSchema::new("title", ColumnType::String),
+                ColumnSchema::new("state", ColumnType::String),
+                ColumnSchema::new("assignee", ColumnType::Uuid),
+                ColumnSchema::new("priority", ColumnType::U64),
+            ],
+        )
+        .with_read_policy(
+            Query::from("issues").filter(eq(col("assignee"), claim("selected_assignee"))),
+        )]);
+        let (_dir, mut node) =
+            open_node_with_uuid(NodeUuid::from_bytes([0x81; 16]), schema.clone());
+        let alice = author(0x82);
+        let bob = author(0x83);
+        commit_issue(&mut node, 1, "open", alice);
+        commit_issue(&mut node, 2, "open", bob);
+
+        let identity = author(0x84);
+        let shape = Query::from("issues").validate(&schema).unwrap();
+        let binding = shape.bind(BTreeMap::new()).unwrap();
+        let visible_for = |node: &mut NodeState<RocksDbStorage>| {
+            node.query_rows_for_link(&shape, &binding, DurabilityTier::Local, identity)
+                .unwrap()
+                .into_iter()
+                .map(|row| row.row_uuid())
+                .collect::<BTreeSet<_>>()
+        };
+
+        node.set_session_claims(
+            identity,
+            BTreeMap::from([("selected_assignee".to_owned(), Value::Uuid(alice.0))]),
+        );
+        assert_eq!(visible_for(&mut node), BTreeSet::from([row(1)]));
+
+        node.set_session_claims(
+            identity,
+            BTreeMap::from([("selected_assignee".to_owned(), Value::Uuid(bob.0))]),
+        );
+        assert_eq!(
+            visible_for(&mut node),
+            BTreeSet::from([row(2)]),
+            "the same prepared shape and identity must not reuse the plan compiled for prior claims",
+        );
     }
 
     #[test]
