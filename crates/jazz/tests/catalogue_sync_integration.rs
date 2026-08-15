@@ -878,6 +878,66 @@ async fn persisted_stale_edge_reconnect_replays_catalogue_before_client_work_imp
     core.shutdown().await;
 }
 
+/// A dynamic edge whose catalogue has reached Ready may be shut down and
+/// reopened after its core is unavailable. The first client after restart must
+/// use the durable catalogue immediately; it must not depend on a fresh
+/// bootstrap exchange with the unavailable upstream.
+#[tokio::test]
+async fn persistent_dynamic_edge_reopens_ready_catalogue_before_first_client() {
+    tokio::task::LocalSet::new()
+        .run_until(persistent_dynamic_edge_reopens_ready_catalogue_before_first_client_impl())
+        .await
+}
+
+async fn persistent_dynamic_edge_reopens_ready_catalogue_before_first_client_impl() {
+    let app_id = JazzServer::default_app_id();
+    let schema = schema_v1();
+    let edge_data_dir = TempDir::new().expect("create persistent edge data directory");
+    let core = JazzServer::builder().with_app_id(app_id).start().await;
+    let unavailable_core_url = core.base_url();
+    seed_schema_catalogue(&core, &schema).await;
+    publish_allow_all_permissions(&core.base_url(), app_id, core.admin_secret(), &schema).await;
+
+    let edge_before_shutdown = JazzServer::builder()
+        .with_app_id(app_id)
+        .with_upstream_url(unavailable_core_url.clone())
+        .with_data_dir(edge_data_dir.path())
+        .with_persistent_storage()
+        .start()
+        .await;
+    let warmup = TestingClient::builder()
+        .with_server(&edge_before_shutdown)
+        .with_schema(schema.clone())
+        .with_user_id(test_user_id("dynamic-edge-warmup"))
+        .ready_on("users", Duration::from_secs(30))
+        .connect()
+        .await;
+    warmup.shutdown().await.expect("shutdown warmup client");
+    edge_before_shutdown.shutdown().await;
+    core.shutdown().await;
+
+    let edge_after_restart = JazzServer::builder()
+        .with_app_id(app_id)
+        .with_upstream_url(unavailable_core_url)
+        .with_data_dir(edge_data_dir.path())
+        .with_persistent_storage()
+        .start()
+        .await;
+    let first_client = TestingClient::builder()
+        .with_server(&edge_after_restart)
+        .with_schema(schema)
+        .with_user_id(test_user_id("dynamic-edge-first-after-restart"))
+        .ready_on("users", Duration::from_secs(30))
+        .connect()
+        .await;
+
+    first_client
+        .shutdown()
+        .await
+        .expect("shutdown first client");
+    edge_after_restart.shutdown().await;
+}
+
 /// Retightening permissions at the core invalidates the existing subscriptions
 /// of clients connected through each of two independent edge servers.
 ///
@@ -890,7 +950,6 @@ async fn persisted_stale_edge_reconnect_replays_catalogue_before_client_work_imp
 /// mallory --deny select--> core --> both edges remove the existing row
 /// ```
 #[tokio::test]
-#[ignore = "known red; tracked in TEST_BURNDOWN.md"]
 async fn core_permission_retightening_reaches_subscribed_clients_on_every_edge() {
     tokio::task::LocalSet::new()
         .run_until(core_permission_retightening_reaches_subscribed_clients_on_every_edge_impl())
