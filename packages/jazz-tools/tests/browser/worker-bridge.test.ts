@@ -211,6 +211,44 @@ function attachWorkerMessageProbe(db: Db): WorkerMessageProbe {
 /** QueryBuilder that selects all todos. */
 const allTodos: QueryBuilder<Todo> = app.todos;
 
+// A small published schema family used to prove that the persistent worker
+// rehydrates catalogue state, including its migration lens, before a current
+// client issues its first query after reopening.
+const catalogueSchemaV1 = {
+  todos: s.table({
+    title: s.string(),
+    completed: s.boolean(),
+  }),
+};
+
+const catalogueSchemaV2 = {
+  todos: s.table({
+    title: s.string(),
+    completed: s.boolean(),
+    description: s.string().optional(),
+  }),
+};
+
+const catalogueAppV1 = s.defineApp(catalogueSchemaV1);
+const catalogueAppV2 = s.defineApp(catalogueSchemaV2);
+const { todos: catalogueTodos } = catalogueAppV2;
+type CatalogueTodo = s.RowOf<typeof catalogueTodos>;
+const allCatalogueTodos: QueryBuilder<CatalogueTodo> = catalogueAppV2.todos;
+
+const cataloguePermissionsV1 = s.definePermissions(catalogueAppV1, ({ policy }) => [
+  policy.todos.allowRead.always(),
+  policy.todos.allowInsert.always(),
+  policy.todos.allowUpdate.always(),
+  policy.todos.allowDelete.always(),
+]);
+
+const cataloguePermissionsV2 = s.definePermissions(catalogueAppV2, ({ policy }) => [
+  policy.todos.allowRead.always(),
+  policy.todos.allowInsert.always(),
+  policy.todos.allowUpdate.always(),
+  policy.todos.allowDelete.always(),
+]);
+
 /**
  * Structurally valid JWT with a deliberately invalid signature: parses fine on
  * the client (sub/exp claims) but the testing server rejects it at handshake.
@@ -238,6 +276,7 @@ function todosByProject(projectId: string): QueryBuilder<Todo> {
 describe("Worker Bridge with OPFS", () => {
   const ctx = new TestCleanup();
   const remoteBrowserDbIds = new Set<string>();
+  const errorListeners = new Set<(event: ErrorEvent) => void>();
 
   function trackRemoteBrowserDb(id: string): string {
     remoteBrowserDbIds.add(id);
@@ -338,6 +377,10 @@ describe("Worker Bridge with OPFS", () => {
   }
 
   afterEach(async () => {
+    for (const listener of errorListeners) {
+      globalThis.removeEventListener("error", listener);
+    }
+    errorListeners.clear();
     for (const id of remoteBrowserDbIds) {
       try {
         await closeRemoteBrowserDb(id);
@@ -841,6 +884,103 @@ describe("Worker Bridge with OPFS", () => {
     const rows = await reopened.all(allTodos, { tier: "local" });
     expect(rows).toEqual([]);
   });
+
+  // TEST_BURNDOWN_TS: Worker Bridge with OPFS > rehydrates current catalogue schema and lens state after persistent worker reopen
+  // known red; tracked in TEST_BURNDOWN.md — reopen rejects non-contiguous catalogue snapshots, then never receives an authoritative remote row.
+  it.skip("rehydrates current catalogue schema and lens state after persistent worker reopen", async () => {
+    const protocolErrors: string[] = [];
+    const recordProtocolError = (event: ErrorEvent) => {
+      const message = event.error instanceof Error ? event.error.message : event.message;
+      if (message.includes("invalid catalogue update")) {
+        protocolErrors.push(message);
+      }
+    };
+    globalThis.addEventListener("error", recordProtocolError);
+    errorListeners.add(recordProtocolError);
+
+    const dbName = uniqueDbName("catalogue-current-schema-rehydrate");
+    const testingServer = await publishCatalogueSchemaFamily("catalogue-current-schema-rehydrate");
+
+    const seeded = track(
+      await createDb({
+        appId: testingServer.appId,
+        serverUrl: testingServer.serverUrl,
+        adminSecret: testingServer.adminSecret,
+        driver: { type: "persistent", dbName },
+      }),
+    );
+
+    const marker = `catalogue-current-schema-rehydrate-${Date.now()}`;
+    await seeded
+      .insert(catalogueTodos, {
+        title: marker,
+        completed: false,
+        description: "written with the current schema",
+      })
+      .wait({ tier: "edge" });
+
+    await waitForCatalogueTodos(
+      seeded,
+      (rows) => rows.some((row) => row.title === marker && row.description?.includes("current")),
+      "initial current-schema query should read the persisted row",
+      15_000,
+      "local",
+    );
+
+    await seeded.shutdown();
+    untrack(seeded);
+
+    const reopened = track(
+      await createDb({
+        appId: testingServer.appId,
+        serverUrl: testingServer.serverUrl,
+        adminSecret: testingServer.adminSecret,
+        driver: { type: "persistent", dbName },
+      }),
+    );
+
+    const rowsAfterReopen = await waitForCatalogueTodos(
+      reopened,
+      (rows) => rows.some((row) => row.title === marker && row.description?.includes("current")),
+      "reopened persistent worker should rehydrate current schema and lenses before querying",
+      15_000,
+      "local",
+    );
+    expect(rowsAfterReopen.find((row) => row.title === marker)?.completed).toBe(false);
+
+    const remote = track(
+      await createDb({
+        appId: testingServer.appId,
+        serverUrl: testingServer.serverUrl,
+        adminSecret: testingServer.adminSecret,
+        driver: { type: "persistent", dbName: uniqueDbName("catalogue-remote-authority") },
+      }),
+    );
+    const remoteMarker = `catalogue-remote-authority-${Date.now()}`;
+    await remote
+      .insert(catalogueTodos, {
+        title: remoteMarker,
+        completed: true,
+        description: "written by an independent server-connected client",
+      })
+      .wait({ tier: "edge" });
+
+    const authoritativeRows = await waitForCatalogueTodos(
+      reopened,
+      (rows) => rows.some((row) => row.title === remoteMarker && row.completed),
+      "reopened worker should receive authoritative current-schema rows from the server",
+      15_000,
+      "edge",
+    );
+    expect(authoritativeRows.find((row) => row.title === remoteMarker)?.description).toContain(
+      "independent",
+    );
+
+    await sleep(100);
+    expect(protocolErrors).toEqual([]);
+    globalThis.removeEventListener("error", recordProtocolError);
+    errorListeners.delete(recordProtocolError);
+  }, 60_000);
 
   // -------------------------------------------------------------------------
   // 5. Durable insert resolves at local tier
@@ -2667,6 +2807,59 @@ async function waitForTodos(
   tier?: "local" | "edge",
 ): Promise<Todo[]> {
   return waitForQuery(db, allTodos, predicate, label, timeoutMs, tier);
+}
+
+async function waitForCatalogueTodos(
+  db: Db,
+  predicate: (rows: CatalogueTodo[]) => boolean,
+  label: string,
+  timeoutMs = 15_000,
+  tier?: "local" | "edge",
+): Promise<CatalogueTodo[]> {
+  return waitForQuery(db, allCatalogueTodos, predicate, label, timeoutMs, tier);
+}
+
+async function publishCatalogueSchemaFamily(scope: string): Promise<JazzServerInfo> {
+  const testingServer = await getJazzServerInfo(uniqueDbName(`worker-bridge-${scope}`));
+  const { appId, serverUrl, adminSecret } = testingServer;
+
+  const v1 = await deploy({
+    appId,
+    serverUrl,
+    adminSecret,
+    schema: catalogueAppV1.wasmSchema,
+    permissions: cataloguePermissionsV1,
+  });
+
+  const v2 = await deploy({
+    appId,
+    serverUrl,
+    adminSecret,
+    schema: catalogueAppV2.wasmSchema,
+  });
+
+  const migration = s.defineMigration({
+    fromHash: v1.schema.hash,
+    toHash: v2.schema.hash,
+    from: catalogueSchemaV1,
+    to: catalogueSchemaV2,
+    migrate: {
+      todos: {
+        description: s.add.string({ default: null }),
+      },
+    },
+  });
+
+  await deploy({
+    appId,
+    serverUrl,
+    adminSecret,
+    schema: catalogueAppV2.wasmSchema,
+    permissions: cataloguePermissionsV2,
+    migration,
+  });
+
+  return testingServer;
 }
 
 async function publishSyncServerSchemaAndPermissions(
