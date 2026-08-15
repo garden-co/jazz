@@ -435,6 +435,7 @@ mod tests;
 /// Default client-clock skew tolerance in milliseconds.
 pub const SKEW_TOLERANCE_MS: u64 = 30_000;
 const TX_VERSION_TABLE_CACHE_MAX_ENTRIES: usize = 4096;
+const PHYSICAL_CURRENT_WRITE_DESCRIPTOR_CACHE_MAX_ENTRIES: usize = 256;
 
 static NEXT_GROOVE_RUNTIME_TOKEN: AtomicU64 = AtomicU64::new(1);
 
@@ -608,8 +609,21 @@ struct SchemaCatalogue {
     lens_path_cache: BTreeMap<LensPathCacheKey, Option<Vec<MigrationLensId>>>,
     /// Table-specific, already-validated lens programs used by hot read/write paths.
     compiled_lens_cache: BTreeMap<CompiledLensCacheKey, Option<CompiledLensPath>>,
+    /// Process-local descriptors for writes into an immutable physical current
+    /// partition. The key includes the authored schema and write class; the
+    /// cache is cleared whenever a catalogue activation can widen a shared
+    /// physical table's variant descriptor.
+    physical_current_write_descriptor_cache:
+        BTreeMap<PhysicalCurrentWriteDescriptorKey, (String, records::RecordDescriptor)>,
     /// Schema version currently used for newly authored writes.
     current_write_schema: CurrentWriteSchema,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct PhysicalCurrentWriteDescriptorKey {
+    schema_version: SchemaVersionId,
+    table: String,
+    class: PhysicalCurrentClass,
 }
 
 /// Branch metadata and branch-partition layout known by the node.
@@ -1020,6 +1034,7 @@ where
                 next_physical_column_id,
                 lens_path_cache: BTreeMap::new(),
                 compiled_lens_cache: BTreeMap::new(),
+                physical_current_write_descriptor_cache: BTreeMap::new(),
                 current_write_schema,
             },
             branches: Branches {

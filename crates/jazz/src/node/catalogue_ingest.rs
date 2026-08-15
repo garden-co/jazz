@@ -99,6 +99,9 @@ where
         self.catalogue.pending_write_pointers.clear();
         self.catalogue.lens_path_cache.clear();
         self.catalogue.compiled_lens_cache.clear();
+        self.catalogue
+            .physical_current_write_descriptor_cache
+            .clear();
         self.query.version_storage_sources_cache.clear();
         self.query.query_shape_cache.clear();
         self.query.read_policy_authorization_request_cache.clear();

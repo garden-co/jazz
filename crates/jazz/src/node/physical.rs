@@ -639,7 +639,7 @@ fn physical_current_projection_target_for_enum_columns(
     format!("{base}_enum_fields_{suffix}")
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) enum PhysicalCurrentClass {
     Global,
     Ahead,

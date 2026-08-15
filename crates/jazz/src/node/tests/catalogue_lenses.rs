@@ -1073,6 +1073,64 @@ fn active_history_projection_accepts_a_new_schema_variant_without_rebuild() {
 }
 
 #[test]
+fn current_write_descriptor_cache_is_dropped_before_shared_enum_registry_widens() {
+    // This is an internal hot-path receipt: an old-schema physical write
+    // descriptor embeds the shared enum registry as it existed when cached.
+    // Activating a later case widens that same physical table. An old-schema
+    // write after activation must rebuild against the widened registry even
+    // though the authored value still uses the old ordinal space.
+    let base = enum_projection_schema(&["open"]);
+    let evolved = SchemaVersion::new(enum_projection_schema(&["open", "closed"]));
+    let (_dir, mut core) = open_node_with_schema(node(0x2f), base.clone());
+
+    accept_global(
+        &mut core,
+        MergeableCommit::new("items", row(0x46), 900).cells(BTreeMap::from([
+            ("title".to_owned(), v("before widening")),
+            ("status".to_owned(), Value::EnumTag(0)),
+        ])),
+    );
+    assert_eq!(
+        core.catalogue.physical_current_write_descriptor_cache.len(),
+        2,
+        "the local ahead write and its global fate use distinct physical partitions"
+    );
+
+    publish_schema_lineage(
+        &mut core,
+        evolved.clone(),
+        enum_identity_lens(base.version_id(), evolved.id),
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
+    .unwrap();
+    assert!(
+        core.catalogue.physical_current_write_descriptor_cache.is_empty(),
+        "enum-registry activation must evict pre-widening descriptors"
+    );
+
+    // Keep the base write pointer deliberately: this is the stale-descriptor
+    // hazard. The old authored enum stays ordinal 0 while its physical
+    // descriptor must now include both globally registered cases.
+    let after = row(0x47);
+    accept_global(
+        &mut core,
+        MergeableCommit::new("items", after, 1_000).cells(BTreeMap::from([
+            ("title".to_owned(), v("old schema after widening")),
+            ("status".to_owned(), Value::EnumTag(0)),
+        ])),
+    );
+    assert_eq!(core.catalogue.physical_current_write_descriptor_cache.len(), 2);
+    let rows = core
+        .current_rows_for_schema("items", base.version_id(), DurabilityTier::Global)
+        .unwrap();
+    assert!(rows.iter().any(|current| {
+        current.row_uuid() == after
+            && current.cell(&base.tables[0], "status") == Some(Value::EnumTag(0))
+    }));
+}
+
+#[test]
 fn table_and_column_rename_reuses_the_existing_physical_identities() {
     let base = schema();
     let renamed = SchemaVersion::new(JazzSchema::new([TableSchema::new(

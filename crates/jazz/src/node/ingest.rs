@@ -534,6 +534,9 @@ where
             .insert(staged.publication.schema.id, staged.mapping.clone());
         self.catalogue.lens_path_cache.clear();
         self.catalogue.compiled_lens_cache.clear();
+        self.catalogue
+            .physical_current_write_descriptor_cache
+            .clear();
         self.query.version_storage_sources_cache.clear();
         self.query.query_shape_cache.clear();
         self.query.read_policy_authorization_request_cache.clear();
@@ -555,6 +558,9 @@ where
             .remove(&staged.publication.schema.id);
         self.catalogue.lens_path_cache.clear();
         self.catalogue.compiled_lens_cache.clear();
+        self.catalogue
+            .physical_current_write_descriptor_cache
+            .clear();
         self.query.version_storage_sources_cache.clear();
         self.query.query_shape_cache.clear();
         self.query.read_policy_authorization_request_cache.clear();
@@ -3965,6 +3971,73 @@ where
         Ok(())
     }
 
+    /// Return the physical table and descriptor for a content current-row
+    /// write. A schema version's mapping is durable and immutable once active,
+    /// but a later catalogue activation can widen a shared physical table's
+    /// variant registry; activation clears this process-local cache before any
+    /// subsequent write observes it.
+    fn physical_current_write_descriptor(
+        &mut self,
+        schema_version: SchemaVersionId,
+        table_name: &str,
+        class: PhysicalCurrentClass,
+    ) -> Result<(String, groove::records::RecordDescriptor), Error> {
+        let key = PhysicalCurrentWriteDescriptorKey {
+            schema_version,
+            table: table_name.to_owned(),
+            class,
+        };
+        if let Some(cached) = self
+            .catalogue
+            .physical_current_write_descriptor_cache
+            .get(&key)
+        {
+            return Ok(cached.clone());
+        }
+
+        let table = self.table_in_schema(table_name, schema_version)?.clone();
+        let mapping = self
+            .catalogue
+            .physical_mappings
+            .get(&schema_version)
+            .and_then(|mapping| mapping.tables.get(table_name))
+            .cloned()
+            .ok_or(Error::InvalidStoredValue(
+                "physical current table mapping missing",
+            ))?;
+        let storage_table = match class {
+            PhysicalCurrentClass::Global => physical_global_current_table_name(mapping.table_id),
+            PhysicalCurrentClass::Ahead => physical_ahead_current_table_name(mapping.table_id),
+        };
+        let physical_table = self.database.table_schema(&storage_table)?.clone();
+        let logical = match class {
+            PhysicalCurrentClass::Global => {
+                table.global_current_storage_tables()[0].record_schema()
+            }
+            PhysicalCurrentClass::Ahead => table.ahead_current_storage_tables()[0].record_schema(),
+        };
+        let descriptor = physical_write_descriptor(
+            &logical,
+            &physical_current_field_names(&table, &mapping)?,
+            &physical_table,
+        )?;
+        let cached = (storage_table, descriptor);
+        if self.catalogue.physical_current_write_descriptor_cache.len()
+            >= PHYSICAL_CURRENT_WRITE_DESCRIPTOR_CACHE_MAX_ENTRIES
+        {
+            // Catalogue identity makes every entry independently rebuildable.
+            // A wholesale clear keeps this low-cardinality hot cache bounded
+            // without adding another ordering index to the write path.
+            self.catalogue
+                .physical_current_write_descriptor_cache
+                .clear();
+        }
+        self.catalogue
+            .physical_current_write_descriptor_cache
+            .insert(key, cached.clone());
+        Ok(cached)
+    }
+
     pub(super) fn write_global_current_update(
         &mut self,
         batch: &mut DatabaseBatch,
@@ -3977,9 +4050,7 @@ where
         match version.layer() {
             VersionLayer::Content => {
                 let table = self.table_in_schema(version.table(), schema_version)?;
-                let binding = physical_current_binding(
-                    &self.catalogue.catalogue_schemas,
-                    &self.catalogue.physical_mappings,
+                let (storage_table, descriptor) = self.physical_current_write_descriptor(
                     schema_version,
                     version.table(),
                     PhysicalCurrentClass::Global,
@@ -3998,12 +4069,7 @@ where
                     .ok_or(Error::InvalidStoredValue(
                         "physical global-current table mapping missing",
                     ))?;
-                let physical_table = self.database.table_schema(&binding.storage_table)?.clone();
-                let descriptor = physical_write_descriptor(
-                    &table.global_current_storage_tables()[0].record_schema(),
-                    &physical_current_field_names(&table, &mapping)?,
-                    &physical_table,
-                )?;
+                let physical_table = self.database.table_schema(&storage_table)?.clone();
                 let mut values = logical.to_values()?;
                 self.remap_authored_enum_cells_for_physical(
                     &mut values,
@@ -4014,7 +4080,7 @@ where
                 )?;
                 let physical = OwnedRecord::new(descriptor.create(&values)?, descriptor);
                 batch.update_raw(
-                    binding.storage_table,
+                    storage_table,
                     global_current_primary_key(version.row_uuid()),
                     groove::records::VariantRecord::new(
                         u32::try_from(version.schema_version_alias().0)
@@ -4079,9 +4145,7 @@ where
         match version.layer() {
             VersionLayer::Content => {
                 let table = self.table_in_schema(version.table(), schema_version)?;
-                let binding = physical_current_binding(
-                    &self.catalogue.catalogue_schemas,
-                    &self.catalogue.physical_mappings,
+                let (storage_table, descriptor) = self.physical_current_write_descriptor(
                     schema_version,
                     version.table(),
                     PhysicalCurrentClass::Ahead,
@@ -4100,12 +4164,7 @@ where
                     .ok_or(Error::InvalidStoredValue(
                         "physical ahead-current table mapping missing",
                     ))?;
-                let physical_table = self.database.table_schema(&binding.storage_table)?.clone();
-                let descriptor = physical_write_descriptor(
-                    &table.ahead_current_storage_tables()[0].record_schema(),
-                    &physical_current_field_names(&table, &mapping)?,
-                    &physical_table,
-                )?;
+                let physical_table = self.database.table_schema(&storage_table)?.clone();
                 let mut values = logical.to_values()?;
                 self.remap_authored_enum_cells_for_physical(
                     &mut values,
@@ -4116,7 +4175,7 @@ where
                 )?;
                 let physical = OwnedRecord::new(descriptor.create(&values)?, descriptor);
                 batch.insert_raw(
-                    binding.storage_table,
+                    storage_table,
                     history_primary_key(version),
                     groove::records::VariantRecord::new(
                         u32::try_from(version.schema_version_alias().0)
