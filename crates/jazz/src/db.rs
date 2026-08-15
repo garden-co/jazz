@@ -982,6 +982,78 @@ where
         })
     }
 
+    /// Open an edge whose durable store has no authority catalogue yet.
+    ///
+    /// This is deliberately narrower than [`Db::open`]: callers may only use
+    /// it to receive one connection-authenticated catalogue snapshot and then
+    /// select one of the snapshot's admitted schema views.  Until then the
+    /// node has no application schema and rejects ordinary data/sync work.
+    pub(crate) async fn open_catalogue_uninitialized_edge(
+        config: DbConfig<S>,
+    ) -> Result<Self, Error> {
+        let bootstrap_schema = JazzSchema::new([]);
+        let schema_version_id = bootstrap_schema.version_id();
+        let schema_views = Rc::new(RefCell::new(BTreeMap::from([(
+            SchemaViewId::for_schema(&bootstrap_schema),
+            bootstrap_schema.clone(),
+        )])));
+        let node = NodeState::new_catalogue_uninitialized(config.identity.node, config.storage)?;
+        let node = Node::new(node);
+        node.restore_pending_uploads(config.identity)?;
+        Ok(Self {
+            schema: bootstrap_schema,
+            schema_version_id,
+            schema_view_is_fixed: false,
+            schema_views,
+            identity: config.identity,
+            node: Rc::new(node),
+            row_id_source: Rc::new(RefCell::new(
+                config
+                    .id_source
+                    .unwrap_or_else(|| Box::new(ProductionRowIdSource)),
+            )),
+            next_now_ms: Rc::new(Cell::new(1)),
+        })
+    }
+
+    /// Install a complete catalogue received over the authenticated upstream
+    /// bootstrap link.  This is intentionally crate-private: ordinary wire
+    /// dispatch must never turn an arbitrary peer's snapshot into authority.
+    pub(crate) fn apply_trusted_catalogue_snapshot(
+        &self,
+        snapshot: crate::protocol::CatalogueSnapshot,
+    ) -> Result<(), Error> {
+        Ok(self
+            .node
+            .node
+            .borrow_mut()
+            .apply_trusted_catalogue_snapshot(snapshot)?)
+    }
+
+    /// Produce the authority's complete catalogue for the privileged
+    /// snapshot-only transport exchange.
+    pub(crate) fn trusted_catalogue_snapshot(
+        &self,
+    ) -> Result<crate::protocol::CatalogueSnapshot, Error> {
+        Ok(self.node.node.borrow().catalogue_snapshot()?)
+    }
+
+    /// Return the active authority-admitted schema, failing closed when this
+    /// dynamic edge still has no bootstrap receipt.
+    pub(crate) fn trusted_current_catalogue_schema(&self) -> Result<JazzSchema, Error> {
+        let node = self.node.node.borrow();
+        let pointer = node.current_write_schema()?;
+        node.catalogue_schemas()
+            .get(&pointer.schema)
+            .map(|schema| schema.schema.clone())
+            .ok_or_else(|| Error::new(ErrorCode::Schema, "active catalogue schema is missing"))
+    }
+
+    pub(crate) fn catalogue_bootstrap_is_ready(&self) -> bool {
+        self.node.node.borrow().catalogue_bootstrap_state()
+            == crate::node::CatalogueBootstrapState::Ready
+    }
+
     /// Register a typed schema view on this database owner.
     ///
     /// Registration is process-local and idempotent by the exact typed schema

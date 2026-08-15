@@ -7578,6 +7578,32 @@ fn logical_message_larger_than_frame_round_trips_reordered_and_duplicated() {
 }
 
 #[test]
+fn strict_bootstrap_receive_rejects_bad_physical_frame_before_later_valid_message() {
+    let (left, right) = byte_duplex_raw();
+    let staged = Rc::clone(&right.inbound);
+    let features =
+        FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS | FEATURE_MESSAGE_FRAGMENTATION;
+    let mut sender = WireTransportAdapter::new(left, WIRE_PROTOCOL_VERSION, features, None);
+    let mut receiver = WireTransportAdapter::new(right, WIRE_PROTOCOL_VERSION, features, None);
+    sender
+        .send(SyncMessage::SessionClaims {
+            identity: AuthorId::SYSTEM,
+            claims: BTreeMap::new(),
+        })
+        .expect("stage valid later message");
+    staged.borrow_mut().push_front(vec![0xff]);
+
+    let error = receiver
+        .try_recv_strict()
+        .expect_err("bootstrap must fail on the first malformed physical frame");
+    assert_eq!(error.code, crate::wire::WireErrorCode::MalformedFrame);
+    assert!(
+        !staged.borrow().is_empty(),
+        "later valid message must not erase the preceding bootstrap violation"
+    );
+}
+
+#[test]
 fn schema_lineage_publication_fragments_before_atomic_admission() {
     let base = schema();
     let mut evolved_schema = base.clone();

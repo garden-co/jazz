@@ -56,6 +56,147 @@ enum ServerShellCommand {
 }
 
 impl ServerShellHandle {
+    /// Reopen an already bootstrapped dynamic edge. A blank store returns
+    /// `None` so its owner can run the authenticated bootstrap exchange.
+    pub(crate) fn try_start_dynamic_edge_from_storage(
+        storage_config: StorageConfig,
+        edge_cache_budget: Option<EdgeCacheBudget>,
+    ) -> Result<Option<Self>, String> {
+        let (jobs, receiver) = mpsc::channel::<ServerShellCommand>();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (activity_tx, _) = watch::channel(0_u64);
+        let join = thread::Builder::new()
+            .name("jazz-server-shell".to_owned())
+            .spawn(move || {
+                let shell = match InMemoryServerShell::try_start_dynamic_edge_from_storage(
+                    DbIdentity {
+                        node: NodeUuid::from_bytes([0x5e; 16]),
+                        author: AuthorId::SYSTEM,
+                    },
+                    storage_config,
+                    edge_cache_budget,
+                ) {
+                    Ok(Some(shell)) => {
+                        let _ = started_tx.send(Ok(true));
+                        shell
+                    }
+                    Ok(None) => {
+                        let _ = started_tx.send(Ok(false));
+                        return;
+                    }
+                    Err(error) => {
+                        let _ = started_tx.send(Err(error.to_string()));
+                        return;
+                    }
+                };
+                let mut shell = shell;
+                while let Ok(command) = receiver.recv() {
+                    match command {
+                        ServerShellCommand::Run(job) => job(&mut shell),
+                        ServerShellCommand::Shutdown(stopped) => {
+                            drop(shell);
+                            let _ = stopped.send(());
+                            return;
+                        }
+                    }
+                }
+            })
+            .map_err(|error| format!("failed to spawn server shell thread: {error}"))?;
+        let started = started_rx
+            .recv()
+            .map_err(|_| "server shell thread exited before dynamic reopen".to_owned())??;
+        Ok(started.then_some(Self {
+            inner: Arc::new(ServerShellInner {
+                jobs: Mutex::new(Some(jobs)),
+                join: Mutex::new(Some(join)),
+                activity_tx,
+            }),
+        }))
+    }
+
+    /// Construct a ready edge shell only after an authenticated bootstrap
+    /// snapshot has been durably adopted. The owner thread is not published to
+    /// downstream routes until this returns successfully.
+    pub(crate) fn start_dynamic_edge_with_catalogue_snapshot(
+        storage_config: StorageConfig,
+        edge_cache_budget: Option<EdgeCacheBudget>,
+        snapshot: crate::protocol::CatalogueSnapshot,
+    ) -> Result<Self, String> {
+        let (jobs, receiver) = mpsc::channel::<ServerShellCommand>();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (activity_tx, _) = watch::channel(0_u64);
+
+        let join = thread::Builder::new()
+            .name("jazz-server-shell".to_owned())
+            .spawn(move || {
+                let shell = match InMemoryServerShell::start_dynamic_edge_with_catalogue_snapshot(
+                    DbIdentity {
+                        node: NodeUuid::from_bytes([0x5e; 16]),
+                        author: AuthorId::SYSTEM,
+                    },
+                    storage_config,
+                    edge_cache_budget,
+                    snapshot,
+                ) {
+                    Ok(shell) => {
+                        let _ = started_tx.send(Ok(()));
+                        shell
+                    }
+                    Err(error) => {
+                        let _ = started_tx.send(Err(error.to_string()));
+                        return;
+                    }
+                };
+                let mut shell = shell;
+                while let Ok(command) = receiver.recv() {
+                    match command {
+                        ServerShellCommand::Run(job) => job(&mut shell),
+                        ServerShellCommand::Shutdown(stopped) => {
+                            drop(shell);
+                            let _ = stopped.send(());
+                            return;
+                        }
+                    }
+                }
+            })
+            .map_err(|error| format!("failed to spawn server shell thread: {error}"))?;
+
+        started_rx
+            .recv()
+            .map_err(|_| "server shell thread exited before dynamic bootstrap".to_owned())??;
+        Ok(Self {
+            inner: Arc::new(ServerShellInner {
+                jobs: Mutex::new(Some(jobs)),
+                join: Mutex::new(Some(join)),
+                activity_tx,
+            }),
+        })
+    }
+
+    pub(crate) async fn encoded_trusted_catalogue_snapshot(
+        &self,
+        protocol_version: u16,
+        features: crate::wire::WireFeatures,
+    ) -> Result<Vec<AbiBytes>, String> {
+        self.run(move |shell| {
+            shell
+                .encoded_trusted_catalogue_snapshot(protocol_version, features)
+                .map_err(|error| error.to_string())
+        })
+        .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn trusted_catalogue_snapshot_for_test(
+        &self,
+    ) -> Result<crate::protocol::CatalogueSnapshot, String> {
+        self.run(move |shell| {
+            shell
+                .trusted_catalogue_snapshot()
+                .map_err(|error| error.to_string())
+        })
+        .await
+    }
     #[cfg(test)]
     pub(crate) async fn runtime_catalogue_contains(
         &self,

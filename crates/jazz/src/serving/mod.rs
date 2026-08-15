@@ -272,6 +272,101 @@ impl fmt::Debug for ServerSessionState {
 }
 
 impl ShellDb {
+    fn open_catalogue_uninitialized_edge(
+        identity: DbIdentity,
+        storage_config: StorageConfig,
+        row_id_seed: Option<u64>,
+    ) -> ShellResult<Self> {
+        let schema = JazzSchema::new([]);
+        match storage_config {
+            StorageConfig::InMemory => {
+                let refs = schema.column_families();
+                let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
+                let mut config = DbConfig::new(schema, MemoryStorage::new(&refs), identity);
+                if let Some(seed) = row_id_seed {
+                    config = config.with_id_source(SeededRowIdSource::new(seed));
+                }
+                Ok(Self::Memory(crate::db::block_on(
+                    Db::open_catalogue_uninitialized_edge(config),
+                )?))
+            }
+            #[cfg(feature = "rocksdb")]
+            StorageConfig::RocksDb { path } => {
+                let refs = schema.column_families();
+                let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
+                let mut config = DbConfig::new(
+                    schema,
+                    RocksDbStorage::open(path, &refs).map_err(db_storage_error)?,
+                    identity,
+                );
+                if let Some(seed) = row_id_seed {
+                    config = config.with_id_source(SeededRowIdSource::new(seed));
+                }
+                Ok(Self::Rocks(crate::db::block_on(
+                    Db::open_catalogue_uninitialized_edge(config),
+                )?))
+            }
+            #[cfg(not(feature = "rocksdb"))]
+            StorageConfig::RocksDb { .. } | StorageConfig::SQLite { .. } => {
+                Err(ShellError::UnsupportedStorage {
+                    storage: storage_config,
+                })
+            }
+            #[cfg(feature = "rocksdb")]
+            StorageConfig::SQLite { .. } => Err(ShellError::UnsupportedStorage {
+                storage: storage_config,
+            }),
+        }
+    }
+
+    fn apply_trusted_catalogue_snapshot(
+        &self,
+        snapshot: crate::protocol::CatalogueSnapshot,
+    ) -> ShellResult<()> {
+        match self {
+            Self::Memory(db) => db
+                .apply_trusted_catalogue_snapshot(snapshot)
+                .map_err(Into::into),
+            #[cfg(feature = "rocksdb")]
+            Self::Rocks(db) => db
+                .apply_trusted_catalogue_snapshot(snapshot)
+                .map_err(Into::into),
+        }
+    }
+
+    fn trusted_catalogue_snapshot(&self) -> ShellResult<crate::protocol::CatalogueSnapshot> {
+        match self {
+            Self::Memory(db) => db.trusted_catalogue_snapshot().map_err(Into::into),
+            #[cfg(feature = "rocksdb")]
+            Self::Rocks(db) => db.trusted_catalogue_snapshot().map_err(Into::into),
+        }
+    }
+
+    fn trusted_current_catalogue_schema(&self) -> ShellResult<JazzSchema> {
+        match self {
+            Self::Memory(db) => db.trusted_current_catalogue_schema().map_err(Into::into),
+            #[cfg(feature = "rocksdb")]
+            Self::Rocks(db) => db.trusted_current_catalogue_schema().map_err(Into::into),
+        }
+    }
+
+    fn catalogue_bootstrap_is_ready(&self) -> bool {
+        match self {
+            Self::Memory(db) => db.catalogue_bootstrap_is_ready(),
+            #[cfg(feature = "rocksdb")]
+            Self::Rocks(db) => db.catalogue_bootstrap_is_ready(),
+        }
+    }
+
+    fn select_schema_view(&mut self, schema: JazzSchema) -> ShellResult<()> {
+        match self {
+            Self::Memory(db) => *db = db.register_schema_view(schema)?,
+            #[cfg(feature = "rocksdb")]
+            Self::Rocks(db) => *db = db.register_schema_view(schema)?,
+        }
+        Ok(())
+    }
+
     fn seed_branch_row(
         &self,
         branch: BranchId,
@@ -592,6 +687,93 @@ impl InMemoryServerShell {
             shell.bootstrap_runtime_schema(bootstrap_schema)?;
         }
         Ok(shell)
+    }
+
+    /// Start from a blank dynamic-edge store, atomically adopt the supplied
+    /// authenticated authority snapshot, then expose the ordinary ready shell.
+    /// No application session can be admitted during this construction.
+    pub fn start_dynamic_edge_with_catalogue_snapshot(
+        identity: DbIdentity,
+        storage_config: StorageConfig,
+        edge_cache_budget: Option<EdgeCacheBudget>,
+        snapshot: crate::protocol::CatalogueSnapshot,
+    ) -> ShellResult<Self> {
+        let active_schema = snapshot.current_write_schema.schema;
+        let active_schema_payload = snapshot
+            .schemas
+            .iter()
+            .find(|schema| schema.id == active_schema)
+            .map(|schema| schema.schema.clone())
+            .ok_or(ShellError::MissingEvent("trusted snapshot active schema"))?;
+        let db = ShellDb::open_catalogue_uninitialized_edge(identity, storage_config, Some(0x5e))?;
+        db.apply_trusted_catalogue_snapshot(snapshot)?;
+        let mut db = db;
+        db.select_schema_view(active_schema_payload)?;
+        db.set_edge_cache_budget(edge_cache_budget);
+        Ok(Self {
+            db,
+            role: NodeRole::Edge,
+            sessions: Vec::new(),
+            resume_cursors: BTreeMap::new(),
+            next_resume_token: 1,
+            runtime_schema_state: RuntimeSchemaState::default(),
+            metrics: InMemoryServerShellMetrics::default(),
+            drain_state: DrainState::Running,
+        })
+    }
+
+    /// Reopen an already-adopted dynamic edge without contacting upstream.
+    /// Returns `None` for a genuinely blank store so the owner can run the
+    /// authenticated bootstrap driver; malformed durable state remains an
+    /// error and is never treated as blank.
+    pub fn try_start_dynamic_edge_from_storage(
+        identity: DbIdentity,
+        storage_config: StorageConfig,
+        edge_cache_budget: Option<EdgeCacheBudget>,
+    ) -> ShellResult<Option<Self>> {
+        let db = ShellDb::open_catalogue_uninitialized_edge(identity, storage_config, Some(0x5e))?;
+        if !db.catalogue_bootstrap_is_ready() {
+            return Ok(None);
+        }
+        let schema = db.trusted_current_catalogue_schema()?;
+        let mut db = db;
+        db.select_schema_view(schema)?;
+        db.set_edge_cache_budget(edge_cache_budget);
+        Ok(Some(Self {
+            db,
+            role: NodeRole::Edge,
+            sessions: Vec::new(),
+            resume_cursors: BTreeMap::new(),
+            next_resume_token: 1,
+            runtime_schema_state: RuntimeSchemaState::default(),
+            metrics: InMemoryServerShellMetrics::default(),
+            drain_state: DrainState::Running,
+        }))
+    }
+
+    /// Return the complete authority catalogue for the authenticated
+    /// snapshot-only websocket exchange.
+    pub(crate) fn trusted_catalogue_snapshot(
+        &self,
+    ) -> ShellResult<crate::protocol::CatalogueSnapshot> {
+        self.db.trusted_catalogue_snapshot()
+    }
+
+    /// Encode the snapshot through the ordinary negotiated wire codec so
+    /// large catalogues retain the protocol's fragmentation and feature rules.
+    pub(crate) fn encoded_trusted_catalogue_snapshot(
+        &self,
+        protocol_version: u16,
+        features: crate::wire::WireFeatures,
+    ) -> ShellResult<Vec<AbiBytes>> {
+        let transport = SharedWireTransport::default();
+        let mut wire =
+            WireTransportAdapter::new(transport.clone(), protocol_version, features, None);
+        wire.send(SyncMessage::CatalogueSnapshot(Box::new(
+            self.trusted_catalogue_snapshot()?,
+        )))
+        .map_err(|error| ShellError::Transport(format!("{error:?}")))?;
+        Ok(transport.queues.borrow_mut().outbound.drain(..).collect())
     }
 
     /// Return the shell's ABI runtime handle for diagnostics in unit tests.

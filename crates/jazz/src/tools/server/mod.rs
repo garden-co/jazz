@@ -104,6 +104,36 @@ impl ServerState {
         Ok(started)
     }
 
+    /// Atomically publish a normal edge runtime after its independent
+    /// authenticated catalogue bootstrap completed. Holding the state lock
+    /// across construction makes downstream admission observe either no shell
+    /// (retry later) or the fully adopted ready shell, never a half-ready one.
+    pub(crate) fn start_dynamic_edge_shell(
+        &self,
+        snapshot: crate::protocol::CatalogueSnapshot,
+        edge_cache_budget: Option<crate::node::EdgeCacheBudget>,
+    ) -> Result<core_server_shell::ServerShellHandle, String> {
+        if self.topology != ServerTopology::Edge {
+            return Err("dynamic catalogue bootstrap is only valid for edge topology".to_owned());
+        }
+        let storage_config = self
+            .core_server_shell_storage_config
+            .clone()
+            .ok_or_else(|| "server shell storage is not configured".to_owned())?;
+        let mut core_server_shell = self.core_server_shell.write().unwrap();
+        if let Some(existing) = core_server_shell.clone() {
+            return Ok(existing);
+        }
+        let started =
+            core_server_shell::ServerShellHandle::start_dynamic_edge_with_catalogue_snapshot(
+                storage_config,
+                edge_cache_budget,
+                snapshot,
+            )?;
+        *core_server_shell = Some(started.clone());
+        Ok(started)
+    }
+
     /// Start (once) and await the server-wide teardown barrier.
     ///
     /// The first caller only launches the owned finalizer; it does not own the
