@@ -4908,6 +4908,110 @@ it("keeps same-row union occurrences distinct through apply, removal, and reopen
   );
 });
 
+it("keeps a remove/add root replacement in place without a terminal move", () => {
+  const ids = [1, 2, 3].map((value) => {
+    const bytes = new Uint8Array(16);
+    bytes[15] = value;
+    return bytes;
+  });
+  const decode = (bytes: Uint8Array) => readNativeSubscriptionDelta(new PostcardReader(bytes));
+  const initial = applySubscriptionDeltaWithWireDelta(
+    [],
+    new Map(),
+    decode(
+      encodeSubscriptionDelta({
+        added: ids.map((rowId, index) => ({ table: "todos", rowId, title: `todo-${index}` })),
+        updated: [],
+        removed: [],
+      }),
+    ),
+    testSchema,
+  );
+  const replaced = ids[0]!;
+  const afterTitleOnlyReplacement = applySubscriptionDeltaWithWireDelta(
+    initial.rows,
+    initial.rowIndexByKey,
+    decode(
+      encodeSubscriptionDelta({
+        added: [{ table: "todos", rowId: replaced, title: "renamed" }],
+        updated: [],
+        removed: [{ table: "todos", rowId: replaced }],
+      }),
+    ),
+    testSchema,
+    false,
+    null,
+    [
+      {
+        root_key: [10, ...replaced],
+        path: [],
+        edit: { Update: { key: [10, ...replaced], value: [] } },
+      },
+    ],
+  );
+
+  expect(afterTitleOnlyReplacement.rows.map((row) => row.id)).toEqual(
+    ids.map((id) => formatUuid(id)),
+  );
+  expect(decodeNativeDelta(afterTitleOnlyReplacement.wireDelta, testSchema.todos.columns)).toEqual([
+    expect.objectContaining({ id: formatUuid(replaced), index: 0 }),
+  ]);
+
+  const afterSortReplacement = applySubscriptionDeltaWithWireDelta(
+    afterTitleOnlyReplacement.rows,
+    afterTitleOnlyReplacement.rowIndexByKey,
+    decode(
+      encodeSubscriptionDelta({
+        added: [{ table: "todos", rowId: replaced, title: "renamed and moved" }],
+        updated: [],
+        removed: [{ table: "todos", rowId: replaced }],
+      }),
+    ),
+    testSchema,
+    false,
+    null,
+    [
+      {
+        root_key: [10, ...replaced],
+        path: [],
+        edit: { Remove: { key: [10, ...replaced] } },
+      },
+      {
+        root_key: [10, ...replaced],
+        path: [],
+        edit: { Insert: { key: [10, ...replaced], index: 2, value: [] } },
+      },
+    ],
+  );
+  expect(afterSortReplacement.rows.map((row) => row.id)).toEqual([
+    formatUuid(ids[1]!),
+    formatUuid(ids[2]!),
+    formatUuid(replaced),
+  ]);
+
+  const moved = ids[2]!;
+  const afterExplicitMove = applySubscriptionDeltaWithWireDelta(
+    afterSortReplacement.rows,
+    afterSortReplacement.rowIndexByKey,
+    decode(encodeSubscriptionDelta({ added: [], updated: [], removed: [] })),
+    testSchema,
+    false,
+    null,
+    [
+      {
+        root_key: [10, ...moved],
+        path: [],
+        edit: { Move: { key: [10, ...moved], index: 0 } },
+      },
+    ],
+  );
+  expect(afterExplicitMove.rows.map((row) => row.id)).toEqual([
+    formatUuid(moved),
+    formatUuid(ids[1]!),
+    formatUuid(replaced),
+  ]);
+});
+
 function encodeUserWrappedSubscriptionDelta(row: {
   table: string;
   rowId: Uint8Array;

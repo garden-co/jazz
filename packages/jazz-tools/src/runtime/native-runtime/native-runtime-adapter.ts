@@ -1811,6 +1811,7 @@ export class NativeRuntimeAdapter implements Runtime {
             this.schema,
             chunk.reset === true,
             subscription.outputColumns,
+            chunk.terminalOperations,
           );
         } catch (error) {
           const buffered = applySubscriptionDeltaToState(
@@ -1820,6 +1821,7 @@ export class NativeRuntimeAdapter implements Runtime {
             this.schema,
             chunk.reset === true,
             subscription.outputColumns,
+            chunk.terminalOperations,
           );
           if (
             subscriptionRowsRequireBufferedPublication(
@@ -3848,6 +3850,7 @@ export function applySubscriptionDeltaWithWireDelta(
   schema: WasmSchema,
   reset = false,
   outputColumns: SubscriptionOutputColumns | null = null,
+  terminalOperations?: readonly NativeTerminalOperation[],
 ): { rows: RowState[]; rowIndexByKey: Map<string, number>; wireDelta: NativeRowDelta } {
   const { addedRows, updatedRows, removedEntries, rows, rowIndexByKey } =
     applySubscriptionDeltaToState(
@@ -3857,6 +3860,7 @@ export function applySubscriptionDeltaWithWireDelta(
       schema,
       reset,
       outputColumns,
+      terminalOperations,
     );
   return {
     rows,
@@ -3896,6 +3900,7 @@ function applySubscriptionDeltaToState(
   schema: WasmSchema,
   reset = false,
   outputColumns: SubscriptionOutputColumns | null = null,
+  terminalOperations?: readonly NativeTerminalOperation[],
 ): {
   addedRows: RowState[];
   updatedRows: RowState[];
@@ -3913,12 +3918,29 @@ function applySubscriptionDeltaToState(
     resultKeyBytes?: Uint8Array;
   }> = [];
 
+  const addedRows = rowsFromSubscriptionBatches(delta.added, schema, outputColumns, "full-record");
+  const updatedRows = rowsFromSubscriptionBatches(
+    delta.updated,
+    schema,
+    outputColumns,
+    "full-record",
+  );
+  attachOccurrenceKeys(addedRows, delta.addedOccurrenceKeys);
+  attachOccurrenceKeys(updatedRows, delta.updatedOccurrenceKeys);
+
+  // A changed row can arrive as a remove/add pair because relational record
+  // bytes include the changed value. It remains the same public occurrence,
+  // though, and must retain its slot until an explicit terminal Move says
+  // otherwise. Deleting it first makes Map insertion order spuriously turn a
+  // title-only edit into a sort reorder.
+  const replacementKeys = new Set(addedRows.concat(updatedRows).map((row) => rowStateKey(row)));
   for (const [removedIndex, removed] of delta.removed.entries()) {
     const id = formatUuid(removed.rowId);
     const resultKeyBytes = delta.removedOccurrenceKeys[removedIndex];
     const key = resultKeyBytes
       ? occurrenceStateKey(resultKeyBytes, removed.table, id)
       : rowKey(removed.table, id);
+    if (replacementKeys.has(key)) continue;
     removedEntries.push({
       table: removed.table,
       id,
@@ -3928,26 +3950,12 @@ function applySubscriptionDeltaToState(
     rowsByKey.delete(key);
   }
 
-  const nestedRowCarrier: NestedRowCarrier = "full-record";
-  const addedRows = rowsFromSubscriptionBatches(
-    delta.added,
-    schema,
-    outputColumns,
-    nestedRowCarrier,
-  );
-  const updatedRows = rowsFromSubscriptionBatches(
-    delta.updated,
-    schema,
-    outputColumns,
-    nestedRowCarrier,
-  );
-  attachOccurrenceKeys(addedRows, delta.addedOccurrenceKeys);
-  attachOccurrenceKeys(updatedRows, delta.updatedOccurrenceKeys);
   for (const row of addedRows.concat(updatedRows)) {
     rowsByKey.set(rowStateKey(row), row);
   }
 
   const rows = Array.from(rowsByKey.values());
+  applyTerminalRootOrdering(rows, terminalOperations, outputColumns?.rootTable);
   const rowIndexByKey = indexRowsByKey(rows);
   return {
     addedRows,
@@ -3956,6 +3964,40 @@ function applySubscriptionDeltaToState(
     rows,
     rowIndexByKey,
   };
+}
+
+/**
+ * Relation deltas describe row membership while terminal edits own public
+ * root positions. Root Remove edits therefore do not delete adapter state: a
+ * changed sort key is represented as Remove followed by Insert for the same
+ * occurrence, and the relation replacement already supplies its new payload.
+ * Apply only unambiguous flat-root Insert/Move positions here; composite
+ * occurrence keys intentionally remain opaque rather than guessing which
+ * duplicate physical row they address.
+ */
+function applyTerminalRootOrdering(
+  rows: RowState[],
+  operations: readonly NativeTerminalOperation[] | undefined,
+  rootTable: string | undefined,
+): void {
+  for (const operation of operations ?? []) {
+    if (operation.path.length !== 0) continue;
+    const rootEdit = operation.edit;
+    if (!("Insert" in rootEdit) && !("Move" in rootEdit)) continue;
+    const key = "Insert" in rootEdit ? rootEdit.Insert.key : rootEdit.Move.key;
+    if (key.length !== 17 || key[0] !== 10) continue;
+    const id = formatUuid(Uint8Array.from(key.slice(1)));
+    const matches = rows
+      .map((row, index) =>
+        row.id === id && (rootTable === undefined || row.table === rootTable) ? index : -1,
+      )
+      .filter((index) => index !== -1);
+    if (matches.length !== 1) continue;
+    const index = matches[0]!;
+    const target = "Insert" in rootEdit ? rootEdit.Insert.index : rootEdit.Move.index;
+    const [row] = rows.splice(index, 1);
+    rows.splice(Math.max(0, Math.min(target, rows.length)), 0, row!);
+  }
 }
 
 function rowsFromSubscriptionBatches(
