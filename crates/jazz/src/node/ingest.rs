@@ -74,6 +74,12 @@ where
     where
         S: ReopenableStorage,
     {
+        // A dynamic edge has exactly one admissible pre-ready transition: the
+        // authenticated upstream invokes `apply_trusted_catalogue_snapshot`
+        // directly.  Incremental catalogue/data/branch traffic has no
+        // authority lineage to validate against and must not leave durable
+        // pending rows that poison a later reopen.
+        self.require_catalogue_ready()?;
         if self.catalogue_activation_failed {
             return Err(Error::CatalogueActivationFailed);
         }
@@ -993,6 +999,7 @@ where
     where
         S: ReopenableStorage,
     {
+        self.require_catalogue_ready()?;
         self.ingest_commit_unit_with_context(tx, versions, now_ms, None)
     }
 
@@ -1009,6 +1016,7 @@ where
     where
         S: ReopenableStorage,
     {
+        self.require_catalogue_ready()?;
         if let Some(reason) = commit_unit_limit_violation(&versions) {
             let fate = Fate::Rejected(RejectionReason::MalformedCommit(reason));
             self.ingest_rejected_transaction(tx.clone(), fate.clone())?;
@@ -1046,6 +1054,7 @@ where
     where
         S: ReopenableStorage,
     {
+        self.require_catalogue_ready()?;
         if commit_unit_limit_violation(&versions).is_none()
             && commit_unit_write_count_matches(&tx, versions.len())
             && let Some(reason) = self.malformed_authored_version_reason(&versions)
@@ -1075,6 +1084,7 @@ where
     where
         S: ReopenableStorage,
     {
+        self.require_catalogue_ready()?;
         if commit_unit_limit_violation(&versions).is_none()
             && commit_unit_write_count_matches(&tx, versions.len())
             && let Some(reason) = self.malformed_authored_version_reason(&versions)
@@ -1111,6 +1121,7 @@ where
     /// authority validation the node already performed when it authored the
     /// commit. Idempotent: a non-pending transaction is left untouched.
     pub fn finalize_local_mergeable_commit(&mut self, tx_id: TxId) -> Result<(), Error> {
+        self.require_catalogue_ready()?;
         let stored = self
             .query_transaction(tx_id)?
             .ok_or(Error::MissingTransaction(tx_id))?;
@@ -1172,6 +1183,7 @@ where
         tx: Transaction,
         versions: Vec<VersionRecord>,
     ) -> Result<Fate, Error> {
+        self.require_catalogue_ready()?;
         let tx_id = tx.tx_id;
         if tx.kind != TxKind::Exclusive {
             return Err(Error::UnsupportedCommitUnit(
@@ -1384,6 +1396,7 @@ where
     where
         S: ReopenableStorage,
     {
+        self.require_catalogue_ready()?;
         if commit_unit_limit_violation(&versions).is_some()
             || !commit_unit_write_count_matches(&tx, versions.len())
         {
@@ -1823,6 +1836,7 @@ where
         global_seq: Option<GlobalSeq>,
         durability: DurabilityTier,
     ) -> Result<(), Error> {
+        self.require_catalogue_ready()?;
         debug_assert!(
             global_seq.is_none() || durability == DurabilityTier::Global,
             "a global sequence requires Global durability"
@@ -2140,6 +2154,7 @@ where
         global_seq: Option<GlobalSeq>,
         durability: Option<DurabilityTier>,
     ) -> Result<(), Error> {
+        self.require_catalogue_ready()?;
         debug_assert!(
             global_seq.is_none() || durability == Some(DurabilityTier::Global),
             "a global sequence requires Global durability"

@@ -572,7 +572,7 @@ fn branch_creation_persists_no_overlay_partition_until_first_write() {
     )
     .unwrap();
     let table_id = core
-        .physical_table_id_for_schema(core.current_write_schema().schema, "todos")
+        .physical_table_id_for_schema(core.current_write_schema().unwrap().schema, "todos")
         .unwrap();
     assert!(
         core.branches
@@ -607,7 +607,7 @@ fn branch_overlay_partition_creation_rebuilds_live_database_without_storage_reop
         BTreeMap::from([(row(0x22), title_cells("branch partition write"))])
     );
     let table_id = core
-        .physical_table_id_for_schema(core.current_write_schema().schema, "todos")
+        .physical_table_id_for_schema(core.current_write_schema().unwrap().schema, "todos")
         .unwrap();
     assert!(
         core.branches

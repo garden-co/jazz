@@ -312,11 +312,11 @@ impl ShellDb {
         }
     }
 
-    fn current_write_schema(&self) -> CurrentWriteSchema {
+    fn current_write_schema(&self) -> ShellResult<CurrentWriteSchema> {
         match self {
-            Self::Memory(db) => db.current_write_schema(),
+            Self::Memory(db) => db.current_write_schema().map_err(Into::into),
             #[cfg(feature = "rocksdb")]
-            Self::Rocks(db) => db.current_write_schema(),
+            Self::Rocks(db) => db.current_write_schema().map_err(Into::into),
         }
     }
 
@@ -630,7 +630,7 @@ impl InMemoryServerShell {
 
     fn bootstrap_runtime_schema(&mut self, schema: JazzSchema) -> ShellResult<()> {
         let schema_id = schema.version_id();
-        let current = self.db.current_write_schema();
+        let current = self.db.current_write_schema()?;
         if current.schema == schema_id
             && current.revision > 0
             && self.db.catalogue_schema(schema_id).is_some()
@@ -650,7 +650,7 @@ impl InMemoryServerShell {
         let schema_version = SchemaVersion::new(schema);
         let schema_id = schema_version.id;
         let expected_schema = schema_version.schema.clone();
-        let current = self.db.current_write_schema();
+        let current = self.db.current_write_schema()?;
         if current.schema == schema_id
             && current.revision > 0
             && self.db.catalogue_schema(schema_id).as_ref() == Some(&expected_schema)
@@ -673,7 +673,7 @@ impl InMemoryServerShell {
             return Err(ShellError::MissingEvent("CatalogueAck"));
         }
 
-        let current = self.db.current_write_schema();
+        let current = self.db.current_write_schema()?;
         if current.schema == schema_id && current.revision > 0 {
             self.runtime_schema_state.current_write_revision = current.revision;
             self.runtime_schema_state.last_published_schema = Some(schema_id);
@@ -689,7 +689,7 @@ impl InMemoryServerShell {
         let set_current_applied = set_current_acks.iter().any(|ack| {
             ack.applied && ack.revision == Some(revision) && ack.schema == Some(schema_id)
         });
-        let current = self.db.current_write_schema();
+        let current = self.db.current_write_schema()?;
         if !(set_current_applied || current.schema == schema_id && current.revision > 0) {
             return Err(ShellError::MissingEvent("CatalogueAck"));
         }
@@ -781,7 +781,7 @@ impl InMemoryServerShell {
             self.publish_runtime_schema_with_lens(schema, lens, Vec::new(), Vec::new())?;
         }
 
-        let current = self.db.current_write_schema();
+        let current = self.db.current_write_schema()?;
         if current.schema != schema_id {
             let revision = current.revision.saturating_add(1);
             let acks = catalogue_acks_from_messages(self.db.set_current_write_schema(
@@ -796,7 +796,7 @@ impl InMemoryServerShell {
                 return Err(ShellError::MissingEvent("CatalogueAck"));
             }
         }
-        let current = self.db.current_write_schema();
+        let current = self.db.current_write_schema()?;
         self.runtime_schema_state.current_write_revision = current.revision;
         self.runtime_schema_state.last_published_schema = Some(schema_id);
         self.db.set_permissions_ready(true)?;
@@ -1808,7 +1808,7 @@ mod tests {
             .publish_permissions_schema(second.clone(), schema_id)
             .unwrap();
         assert_eq!(shell.db.catalogue_schema(schema_id), Some(second.clone()));
-        assert_eq!(shell.db.current_write_schema().schema, schema_id);
+        assert_eq!(shell.db.current_write_schema().unwrap().schema, schema_id);
         drop(shell);
 
         let reopened = InMemoryServerShell::start_with_storage(
@@ -1819,7 +1819,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(reopened.db.catalogue_schema(schema_id), Some(second));
-        assert_eq!(reopened.db.current_write_schema().schema, schema_id);
+        assert_eq!(
+            reopened.db.current_write_schema().unwrap().schema,
+            schema_id
+        );
     }
 
     #[test]

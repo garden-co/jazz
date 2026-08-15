@@ -33,6 +33,8 @@ where
     where
         S: ReopenableStorage,
     {
+        let bootstrap_uninitialized =
+            self.catalogue_bootstrap_state == CatalogueBootstrapState::Uninitialized;
         let plan = self.plan_trusted_catalogue_snapshot(snapshot)?;
         let runtime_semantics_changed = self.catalogue.schema != plan.catalogue.schema
             || self.catalogue.catalogue_schemas != plan.catalogue.catalogue_schemas
@@ -57,6 +59,36 @@ where
         }
 
         let mut batch = self.database.open_batch();
+        if bootstrap_uninitialized || self.catalogue_bootstrap_marker {
+            // This is intentionally in the same batch as every imported
+            // schema, physical mapping, lineage activation, and write
+            // pointer.  A dynamic edge must never recover an empty local
+            // schema as a durable genesis if it crashes before the first
+            // authority snapshot completes.  Existing bootstrap markers are
+            // refreshed on every later trusted snapshot so a fresh process
+            // can verify the exact durable pointer and catalogue high-water.
+            batch.update(
+                "jazz_catalogue",
+                vec![
+                    Value::Bytes(b"genesis".to_vec()),
+                    Value::Uuid(plan.catalogue.current_schema_version_id.0),
+                    Value::Bytes(Vec::new()),
+                ],
+            );
+            let ready = CatalogueBootstrapReady {
+                genesis: plan.catalogue.current_schema_version_id,
+                current_write_schema: plan.catalogue.current_write_schema,
+                active_catalogue_seq: plan.catalogue.active_catalogue_seq,
+            };
+            batch.update(
+                "jazz_catalogue",
+                vec![
+                    Value::Bytes(b"bootstrap_ready".to_vec()),
+                    Value::Uuid(ready.genesis.0),
+                    Value::Bytes(serde_json::to_vec(&ready)?),
+                ],
+            );
+        }
         for schema in plan.catalogue.catalogue_schemas.values() {
             batch.update(
                 "jazz_catalogue",
@@ -103,6 +135,8 @@ where
         self.query.query_shape_cache.clear();
         self.query.read_policy_authorization_request_cache.clear();
         self.query.policy_authorization_graph_cache.clear();
+        self.catalogue_bootstrap_state = CatalogueBootstrapState::Ready;
+        self.catalogue_bootstrap_marker |= bootstrap_uninitialized;
         if runtime_semantics_changed {
             self.groove_runtime_token = next_groove_runtime_token();
         }
@@ -145,19 +179,87 @@ where
             .iter()
             .map(|(_, publication)| publication.schema.id)
             .collect::<BTreeSet<_>>();
-        let local_schema_storage_anchor = self
-            .catalogue
-            .schema_version_aliases
-            .get(&self.catalogue.current_schema_version_id)
+        // §10.2 has one durable genesis and every other schema enters through
+        // its lineage-defining bundle.  A snapshot is a complete authority
+        // catalogue, not an opportunity to smuggle a dormant standalone
+        // schema into a receiver's read/write surface.
+        let genesis_ids = schemas
+            .keys()
+            .filter(|schema_id| !lineage_targets.contains(schema_id))
             .copied()
-            .zip(
-                self.catalogue
-                    .physical_mappings
-                    .get(&self.catalogue.current_schema_version_id)
-                    .cloned(),
-            );
+            .collect::<Vec<_>>();
+        let [genesis_id] = genesis_ids.as_slice() else {
+            return Err(Error::InvalidCatalogueUpdate(
+                "trusted catalogue snapshot must contain exactly one genesis schema",
+            ));
+        };
+        let bootstrap_genesis =
+            if self.catalogue_bootstrap_state == CatalogueBootstrapState::Uninitialized {
+                Some(
+                    schemas
+                        .get(genesis_id)
+                        .cloned()
+                        .ok_or(Error::InvalidCatalogueUpdate(
+                            "trusted bootstrap snapshot omits genesis payload",
+                        ))?,
+                )
+            } else {
+                None
+            };
 
-        let mut planned = self.catalogue.clone();
+        let local_schema_storage_anchor = (!matches!(
+            self.catalogue_bootstrap_state,
+            CatalogueBootstrapState::Uninitialized
+        ))
+        .then(|| {
+            self.catalogue
+                .schema_version_aliases
+                .get(&self.catalogue.current_schema_version_id)
+                .copied()
+                .zip(
+                    self.catalogue
+                        .physical_mappings
+                        .get(&self.catalogue.current_schema_version_id)
+                        .cloned(),
+                )
+        })
+        .flatten();
+
+        let mut planned = match bootstrap_genesis {
+            Some(genesis) => {
+                let mut next_physical_table_id = 1;
+                let mut next_physical_column_id = 1;
+                let mapping = allocate_provisional_physical_mapping(
+                    &genesis.schema,
+                    &mut next_physical_table_id,
+                    &mut next_physical_column_id,
+                )?;
+                let genesis_id = genesis.id;
+                SchemaCatalogue {
+                    current_schema_version_id: genesis_id,
+                    current_schema_version_alias: Some(SchemaVersionAlias(1)),
+                    schema: genesis.schema.clone(),
+                    schema_version_aliases: BTreeMap::from([(genesis_id, SchemaVersionAlias(1))]),
+                    catalogue_schemas: BTreeMap::from([(genesis_id, genesis)]),
+                    catalogue_lenses: BTreeMap::new(),
+                    physical_mappings: BTreeMap::from([(genesis_id, mapping)]),
+                    staged_lineages: BTreeMap::new(),
+                    pending_lineages: BTreeMap::new(),
+                    active_lineages_by_target: BTreeMap::new(),
+                    active_catalogue_seq: 0,
+                    pending_write_pointers: BTreeMap::new(),
+                    next_physical_table_id,
+                    next_physical_column_id,
+                    lens_path_cache: BTreeMap::new(),
+                    compiled_lens_cache: BTreeMap::new(),
+                    current_write_schema: CurrentWriteSchema {
+                        revision: 0,
+                        schema: genesis_id,
+                    },
+                }
+            }
+            None => self.catalogue.clone(),
+        };
         let mut activated_lineages = Vec::new();
         for schema in schemas.values() {
             if lineage_targets.contains(&schema.id)

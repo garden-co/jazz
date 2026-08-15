@@ -1070,7 +1070,7 @@ where
             if node.catalogue_schemas().contains_key(&target_id) {
                 return Ok(());
             }
-            let current = node.current_write_schema();
+            let current = node.current_write_schema().map_err(Error::from)?;
             let source = node
                 .catalogue_schemas()
                 .get(&current.schema)
@@ -3344,8 +3344,12 @@ where
     }
 
     /// Return the current write-schema pointer known to this database.
-    pub fn current_write_schema(&self) -> CurrentWriteSchema {
-        self.node.node.borrow().current_write_schema()
+    pub fn current_write_schema(&self) -> Result<CurrentWriteSchema, Error> {
+        self.node
+            .node
+            .borrow()
+            .current_write_schema()
+            .map_err(Into::into)
     }
 
     /// Return a published schema-version payload known to this database.
@@ -4147,7 +4151,7 @@ where
             return Ok((self.schema.clone(), self.schema_version_id));
         }
         let node = self.node.node.borrow();
-        let current = node.current_write_schema();
+        let current = node.current_write_schema().map_err(Error::from)?;
         if current.schema == self.schema_version_id {
             return Ok((self.schema.clone(), self.schema_version_id));
         }
@@ -10615,7 +10619,7 @@ fn send_with_sync_context<S>(
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
-    let snapshot = node.borrow().catalogue_snapshot();
+    let snapshot = node.borrow().catalogue_snapshot()?;
     let catalogue_fingerprint = *blake3::hash(
         &serde_json::to_vec(&snapshot).expect("catalogue snapshot serialization is infallible"),
     )
