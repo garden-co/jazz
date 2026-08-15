@@ -2043,7 +2043,12 @@ where
             }
         }));
         let mut maintained_subscription = Some(subscription);
-        let terminal_rows = !local_shape.query().array_subqueries.is_empty();
+        // A projected ordered root needs terminal patches even without nested
+        // arrays: an unprojected sort-key mutation can move a visible row
+        // without changing the projected payload. Unprojected roots retain
+        // ordinary row deltas, including scope re-entry membership changes.
+        let terminal_rows = !local_shape.query().array_subqueries.is_empty()
+            || (local_shape.query().select.is_some() && !local_shape.query().order_by.is_empty());
         let mut state_shape = local_shape;
         let mut state_binding = local_binding;
         let mut remote_read_tier = None;

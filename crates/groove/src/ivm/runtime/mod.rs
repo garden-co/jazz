@@ -1143,6 +1143,15 @@ impl IvmRuntime {
                             Some(terminal)
                         } else if !public_root && !records.is_empty() {
                             Some(terminal_deltas_from_record_deltas(&records)?)
+                        } else if output.root_ordering_node.is_some() {
+                            // A root TopBy can change positions while the
+                            // structured projection has no payload delta.
+                            // Preserve the ordering channel with an empty
+                            // terminal; `apply_root_ordering` adds only the
+                            // necessary root Move edits.
+                            Some(TerminalDeltas {
+                                operations: Vec::new(),
+                            })
                         } else {
                             None
                         }
@@ -1151,12 +1160,24 @@ impl IvmRuntime {
                         // It contributes only root positions; terminal payloads
                         // must be encoded from the public sink descriptor.
                         Some(terminal_deltas_from_record_deltas(&records)?)
+                    } else if output.root_ordering_node.is_some() {
+                        // An unprojected sort-key change can reorder visible
+                        // roots without changing any rendered payload. Start
+                        // an empty terminal so root ordering can still emit
+                        // its positional Move operations.
+                        Some(TerminalDeltas {
+                            operations: Vec::new(),
+                        })
                     } else {
                         None
                     };
                     if let Some(mut terminal) = terminal {
                         if let Some(root_ordering_node) = output.root_ordering_node {
-                            evaluator.apply_root_ordering(root_ordering_node, &mut terminal)?;
+                            evaluator.apply_root_ordering(
+                                root_ordering_node,
+                                output.output,
+                                &mut terminal,
+                            )?;
                         }
                         if !terminal.is_empty() {
                             terminal_sinks.insert(sink.clone(), terminal);
@@ -6322,12 +6343,13 @@ where
     fn apply_root_ordering(
         &self,
         ordering_node: NodeId,
+        root_descriptor: RecordDescriptor,
         terminal: &mut TerminalDeltas,
     ) -> Result<(), IvmRuntimeError> {
         let Some(windows) = self.root_ordering_windows.get(&ordering_node) else {
             return Ok(());
         };
-        apply_root_ordering_operations(&windows.before, &windows.after, terminal);
+        apply_root_ordering_operations(&windows.before, &windows.after, root_descriptor, terminal);
         Ok(())
     }
 
@@ -8090,6 +8112,7 @@ fn extend_root_window_positions(
 fn apply_root_ordering_operations(
     before: &BTreeMap<Vec<u8>, usize>,
     after: &BTreeMap<Vec<u8>, usize>,
+    root_descriptor: RecordDescriptor,
     terminal: &mut TerminalDeltas,
 ) {
     let mut current = before
@@ -8135,11 +8158,7 @@ fn apply_root_ordering_operations(
             current.remove(existing);
             current.insert(after_index.min(current.len()), key.clone());
             terminal.operations.push(TerminalOperation {
-                root_descriptor: terminal
-                    .operations
-                    .first()
-                    .map(|operation| operation.root_descriptor)
-                    .expect("root ordering only operates on a terminal with payload edits"),
+                root_descriptor,
                 root_key: key.clone(),
                 path: Vec::new(),
                 edit: TerminalEdit::Move {
@@ -11893,7 +11912,7 @@ mod tests {
             ],
         };
 
-        apply_root_ordering_operations(&before, &after, &mut terminal);
+        apply_root_ordering_operations(&before, &after, RecordDescriptor::default(), &mut terminal);
 
         assert!(matches!(
             terminal.operations[1].edit,
@@ -11912,6 +11931,35 @@ mod tests {
                 })
                 .collect::<Vec<_>>(),
             vec![(key(3), 0), (key(4), 1)]
+        );
+    }
+
+    #[test]
+    fn root_ordering_emits_moves_without_payload_terminal_edits() {
+        // A policy-scope re-entry can reorder visible roots without any
+        // payload edit. The subscription output descriptor, rather than a
+        // payload operation, supplies the descriptor for the following move.
+        let key = |byte| vec![byte];
+        let before = BTreeMap::from([(key(1), 0), (key(2), 1)]);
+        let after = BTreeMap::from([(key(2), 0), (key(1), 1)]);
+        let descriptor = RecordDescriptor::new([("id", ValueType::U64)]);
+        let mut terminal = TerminalDeltas {
+            operations: Vec::new(),
+        };
+
+        apply_root_ordering_operations(&before, &after, descriptor, &mut terminal);
+
+        assert_eq!(
+            terminal.operations,
+            vec![TerminalOperation {
+                root_descriptor: descriptor,
+                root_key: key(2),
+                path: Vec::new(),
+                edit: TerminalEdit::Move {
+                    key: key(2),
+                    index: 0,
+                },
+            }]
         );
     }
 
