@@ -66,9 +66,7 @@ describe("NativeRuntimeAdapter server convergence", () => {
     globalThis.WebSocket = previousWebSocket;
   });
 
-  // TEST_BURNDOWN_TS: NativeRuntimeAdapter server convergence > syncs writes between two JazzClient connections through /apps/:app/ws
-  // known red; tracked in TEST_BURNDOWN.md — client B intermittently does not observe client A's edge-settled insert within 5s in CI.
-  it.skip("syncs writes between two JazzClient connections through /apps/:app/ws", async () => {
+  it("syncs writes between two JazzClient connections through /apps/:app/ws", async () => {
     globalThis.WebSocket ??= WebSocket as unknown as typeof globalThis.WebSocket;
 
     const appId = "00000000-0000-0000-0000-00000000c001";
