@@ -9,7 +9,7 @@ use jazz::content_manifest::{
     ContentManifestSchema, ContentReadContext, ImmutableContentStore, MaterializationRequest,
     MemoryImmutableContentStore, global_content_manifest_adapters,
 };
-use jazz::groove::records::Value;
+use jazz::groove::records::{Value, ValueType};
 use jazz::groove::schema::ColumnType;
 use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{NodeUuid, RowUuid};
@@ -92,7 +92,8 @@ fn json_manifest_runs_through_schema_admission_node_and_projection_runtime() {
         .encode()
         .unwrap();
 
-    let manifest_schema = ContentManifestSchema::new("json-v1", 8, 4096).unwrap();
+    let manifest_schema =
+        ContentManifestSchema::with_tail_entry_type("json-v1", ValueType::Bytes, 8, 4096).unwrap();
     let schema = JazzSchema::new([TableSchema::new(
         "documents",
         [
@@ -116,7 +117,7 @@ fn json_manifest_runs_through_schema_admission_node_and_projection_runtime() {
         root,
         edit_tail: vec![left_op],
     };
-    let left_cell = Value::Bytes(left.encode(&manifest_schema).unwrap());
+    let left_cell = left.into_value(&manifest_schema).unwrap();
     let row = RowUuid::from_bytes([0x67; 16]);
     node.commit_mergeable(
         MergeableCommit::new("documents", row, 1).cells(BTreeMap::from([
@@ -166,7 +167,7 @@ fn json_manifest_runs_through_schema_admission_node_and_projection_runtime() {
             &manifest_schema,
             &[
                 visible["body"].clone(),
-                Value::Bytes(right.encode(&manifest_schema).unwrap()),
+                right.into_value(&manifest_schema).unwrap(),
             ],
         )
         .unwrap();
@@ -185,10 +186,7 @@ fn json_manifest_runs_through_schema_admission_node_and_projection_runtime() {
             provider.immutable_store(),
         )
         .unwrap();
-    let merged_manifest = match merged {
-        Value::Bytes(bytes) => ContentManifest::decode(&bytes, &manifest_schema).unwrap(),
-        _ => unreachable!(),
-    };
+    let merged_manifest = ContentManifest::from_value(&merged, &manifest_schema).unwrap();
     assert!(
         adapter
             .checked_eventual_projection(&bundle, &merged_manifest)

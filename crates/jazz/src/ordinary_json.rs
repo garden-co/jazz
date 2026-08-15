@@ -7,12 +7,14 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use groove::records::{Value, ValueType};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::content_manifest::{
-    ContentAddress, ContentId, ContentManifest, ContentManifestAdapter, ContentReadContext,
-    ImmutableContentKind, ImmutableContentStore, ManifestError, MaterializationRequest, content_id,
+    ContentAddress, ContentId, ContentManifest, ContentManifestAdapter, ContentManifestSchema,
+    ContentReadContext, ImmutableContentKind, ImmutableContentStore, ManifestError,
+    MaterializationRequest, content_id,
 };
 
 /// Schema adapter discriminator for JSON manifests.
@@ -20,6 +22,13 @@ pub const JSON_ADAPTER_KIND: &str = "json-v1";
 const ORDER_FANOUT: usize = 32;
 const MAX_MERGE_CANDIDATES: usize = 32;
 const MAX_MERGE_OPERATIONS: usize = 256;
+
+fn value_bytes(value: &Value) -> Result<&[u8], ManifestError> {
+    match value {
+        Value::Bytes(bytes) => Ok(bytes),
+        _ => Err(ManifestError::Malformed),
+    }
+}
 
 /// A typed JSON operation carried by an un-consolidated manifest tail.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -55,7 +64,11 @@ pub enum JsonOperation {
 }
 
 impl JsonOperation {
-    pub fn encode(&self) -> Result<Vec<u8>, ManifestError> {
+    /// Encode this operation as the JSON manifest schema's typed tail value.
+    pub fn encode(&self) -> Result<Value, ManifestError> {
+        Ok(Value::Bytes(self.encode_bytes()?))
+    }
+    fn encode_bytes(&self) -> Result<Vec<u8>, ManifestError> {
         postcard::to_allocvec(self).map_err(|_| ManifestError::Malformed)
     }
     pub fn decode(bytes: &[u8]) -> Result<Self, ManifestError> {
@@ -200,8 +213,9 @@ impl OrdinaryJsonAdapter {
         hash.update(b"jazz-json-manifest-projection-v1\0");
         hash.update(&manifest.root.0);
         for operation in &manifest.edit_tail {
-            hash.update(&(operation.len() as u64).to_le_bytes());
-            hash.update(operation);
+            let bytes = value_bytes(operation).unwrap_or_default();
+            hash.update(&(bytes.len() as u64).to_le_bytes());
+            hash.update(bytes);
         }
         *hash.finalize().as_bytes()
     }
@@ -645,8 +659,8 @@ impl OrdinaryJsonAdapter {
         manifest
             .edit_tail
             .iter()
-            .map(|bytes| {
-                let operation = JsonOperation::decode(bytes)?;
+            .map(|value| {
+                let operation = JsonOperation::decode(value_bytes(value)?)?;
                 if !ids.insert(operation.id()) {
                     return Err(ManifestError::Conflict(
                         "duplicate operation id within one tail",
@@ -766,8 +780,15 @@ impl ContentManifestAdapter for OrdinaryJsonAdapter {
     fn adapter_kind(&self) -> &str {
         JSON_ADAPTER_KIND
     }
-    fn validate_operation(&self, bytes: &[u8]) -> Result<(), ManifestError> {
-        JsonOperation::decode(bytes).map(|_| ())
+    fn validate_schema(&self, schema: &ContentManifestSchema) -> Result<(), ManifestError> {
+        if schema.adapter_kind != JSON_ADAPTER_KIND || schema.tail_entry_type != ValueType::Bytes {
+            return Err(ManifestError::InvalidSchema);
+        }
+        Ok(())
+    }
+
+    fn validate_operation(&self, value: &Value) -> Result<(), ManifestError> {
+        JsonOperation::decode(value_bytes(value)?).map(|_| ())
     }
     fn materialize(
         &self,
@@ -838,7 +859,8 @@ impl ContentManifestAdapter for OrdinaryJsonAdapter {
         let mut operations: BTreeMap<Uuid, Vec<u8>> = BTreeMap::new();
         let mut keys: BTreeMap<String, (usize, Uuid, Vec<u8>)> = BTreeMap::new();
         for (candidate_index, manifest) in manifests.iter().enumerate() {
-            for bytes in &manifest.edit_tail {
+            for value in &manifest.edit_tail {
+                let bytes = value_bytes(value)?;
                 let op = JsonOperation::decode(bytes)?;
                 if let Some(existing) = operations.get(&op.id()) {
                     if existing != bytes {
@@ -856,9 +878,9 @@ impl ContentManifestAdapter for OrdinaryJsonAdapter {
                         return Err(ManifestError::Conflict("noncommuting typed operations"));
                     }
                 } else {
-                    keys.insert(key, (candidate_index, op.id(), bytes.clone()));
+                    keys.insert(key, (candidate_index, op.id(), bytes.to_vec()));
                 }
-                operations.insert(op.id(), bytes.clone());
+                operations.insert(op.id(), bytes.to_vec());
             }
         }
         let mut required_by_prior = BTreeSet::new();
@@ -876,8 +898,14 @@ impl ContentManifestAdapter for OrdinaryJsonAdapter {
         }
         let mut tails = manifests
             .iter()
-            .map(|manifest| manifest.edit_tail.clone())
-            .collect::<Vec<_>>();
+            .map(|manifest| {
+                manifest
+                    .edit_tail
+                    .iter()
+                    .map(|value| value_bytes(value).map(ToOwned::to_owned))
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         tails.sort();
         let mut emitted = BTreeSet::new();
         let edit_tail = tails
@@ -886,6 +914,7 @@ impl ContentManifestAdapter for OrdinaryJsonAdapter {
             .filter(|bytes| {
                 JsonOperation::decode(bytes).is_ok_and(|operation| emitted.insert(operation.id()))
             })
+            .map(Value::Bytes)
             .collect();
         let merged = ContentManifest {
             root: first.root,
@@ -1152,7 +1181,7 @@ mod tests {
             ))
         );
         assert_eq!(
-            adapter.validate_operation(b"not a JSON operation"),
+            adapter.validate_operation(&Value::Bytes(b"not a JSON operation".to_vec())),
             Err(ManifestError::Malformed)
         );
     }
