@@ -205,4 +205,113 @@ fn maintained_renamed_table_witness_reloads_the_authored_history_row() {
     assert_eq!(shipped.schema_version(), base.version_id());
     assert_eq!(shipped.table(), "todos");
     assert_eq!(shipped.cell_at(0), Some(v("old-title")));
+
+    let authored_versions = core.query_versions_for_tx(old_tx).unwrap();
+    let materialization_witness = core
+        .maintained_witness_for_result_member(
+            &authored_versions,
+            evolved_payload.id,
+            "tasks",
+            shared_row,
+        )
+        .unwrap()
+        .expect("the tasks result member recognizes its authored todos witness by physical identity");
+    assert_eq!(materialization_witness.table(), "todos");
+    assert_eq!(
+        core.physical_table_id_for_version(materialization_witness)
+            .unwrap(),
+        core.physical_table_id_for_schema(evolved_payload.id, "tasks")
+            .unwrap(),
+        "INV-LENS-21 keeps the renamed table's physical identity stable",
+    );
+}
+
+/// A projected result name may also have belonged to a different old physical
+/// table. Even when both rows share an exclusive transaction and row UUID, the
+/// maintained wire witness must fail closed rather than selecting by name/key.
+#[test]
+fn maintained_renamed_witness_rejects_reused_logical_table_collision() {
+    let base = JazzSchema::new([
+        TableSchema::new("tasks", [ColumnSchema::new("title", ColumnType::String)]),
+        TableSchema::new("todos", [ColumnSchema::new("title", ColumnType::String)]),
+    ]);
+    let evolved = JazzSchema::new([TableSchema::new(
+        "tasks",
+        [ColumnSchema::new("title", ColumnType::String)],
+    )]);
+    let evolved_payload = SchemaVersion::new(evolved.clone());
+    let (_dir, mut core) = open_node_with_schema(node(0x5f), base.clone());
+    let shared_row = row(0x60);
+
+    let open = OpenBatchId::new();
+    core.open_exclusive(open).unwrap();
+    core.tx_write(open, "tasks", shared_row, title_cells("old physical task"), None)
+        .unwrap();
+    core.tx_write(
+        open,
+        "todos",
+        shared_row,
+        title_cells("canonical renamed todo"),
+        None,
+    )
+    .unwrap();
+    let (collision_tx, _) = core.commit_exclusive(open, AuthorId::SYSTEM, 10).unwrap();
+    core.apply_fate_update(
+        collision_tx,
+        Fate::Accepted,
+        Some(core.clock.next_global_seq),
+        Some(DurabilityTier::Global),
+    )
+    .unwrap();
+
+    publish_schema_lineage(
+        &mut core,
+        evolved_payload.clone(),
+        MigrationLens::new(
+            base.version_id(),
+            evolved_payload.id,
+            vec![TableLens {
+                source_table: "todos".to_owned(),
+                target_table: "tasks".to_owned(),
+                ops: vec![LensOp::RenameTable {
+                    from: "todos".to_owned(),
+                    to: "tasks".to_owned(),
+                }],
+            }],
+        ),
+        Vec::<String>::new(),
+        ["tasks"],
+    )
+    .unwrap();
+    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+        author: AuthorId::SYSTEM,
+        pointer: CurrentWriteSchema {
+            revision: 1,
+            schema: evolved_payload.id,
+        },
+    })
+    .unwrap();
+
+    let shape = Query::from("tasks")
+        .validate_with_schema_version(&evolved, evolved_payload.id)
+        .unwrap();
+    assert_eq!(
+        core.query_rows(
+            &shape,
+            &shape.bind(BTreeMap::new()).unwrap(),
+            DurabilityTier::Global,
+        )
+        .unwrap()
+        .len(),
+        1,
+        "the evolved tasks view contains the renamed todos row, not the dropped old tasks row"
+    );
+
+    let mut peer = PeerState::new();
+    assert!(matches!(
+        peer.current_rows_update(&mut core, "tasks"),
+        Err(Error::InvalidStoredValue(
+            "maintained witness maps to zero or multiple physical tables"
+        ))
+    ));
 }

@@ -2427,7 +2427,6 @@ async fn table_rename_new_client_can_read_old_rows_impl() {
 /// v1 to `users`, and Bob's subscription receives the row through the table
 /// rename lens.
 #[tokio::test]
-#[ignore = "known red; tracked in TEST_BURNDOWN.md"]
 async fn table_rename_subscription_reacts_to_old_branch_updates() {
     tokio::task::LocalSet::new()
         .run_until(table_rename_subscription_reacts_to_old_branch_updates_impl())
@@ -2506,6 +2505,20 @@ async fn table_rename_subscription_reacts_to_old_branch_updates_impl() {
         |updates| has_added(updates, row_id),
     )
     .await;
+    let added = log
+        .iter()
+        .flat_map(|delta| &delta.added)
+        .find(|change| change.id == row_id)
+        .expect("renamed subscription delta contains Alice's exact row identity");
+    assert_eq!(
+        added.index, 0,
+        "the first row through the renamed table is inserted at the head of the ordered result"
+    );
+    assert!(
+        log.iter()
+            .all(|delta| delta.removed.is_empty() && delta.updated.is_empty()),
+        "a newly visible renamed row is an addition, not a synthetic replacement"
+    );
 
     let rows = wait_for_query(
         &bob,
