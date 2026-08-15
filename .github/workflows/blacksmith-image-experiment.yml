@@ -153,6 +153,7 @@ jobs:
         uses: vercel/setup-turborepo-remote-cache-action@135046f5efcadb17337d9b29b8d5b4035ae64b10 # v1.0.0
         with:
           team: ${{ vars.TURBO_TEAM }}
+          audience: https://vercel.com/garden-co
       - uses: ./.github/actions/setup-blacksmith-experiment
       - run: cargo check --workspace --all-targets
       - run: pnpm build:test-artifacts
