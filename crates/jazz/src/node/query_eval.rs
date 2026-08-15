@@ -9687,7 +9687,11 @@ where
                 tier,
                 format!(
                     "client-local:{}",
-                    policy_plan_cache_signature(&binding, identity)
+                    policy_plan_cache_signature(
+                        &binding,
+                        identity,
+                        self.session_claim_revision(identity),
+                    )
                 ),
             );
             if let Some(plan) = self.query.query_shape_cache.get(&key) {
@@ -10457,7 +10461,7 @@ where
         let key = (
             shape.shape_id(),
             tier,
-            policy_plan_cache_signature(binding, identity),
+            policy_plan_cache_signature(binding, identity, self.session_claim_revision(identity)),
         );
         if let Some(plan) = self.query.query_shape_cache.get(&key)
             && !matches!(plan.as_ref(), PreparedQueryPlan::PeerMaintainedMarker)
