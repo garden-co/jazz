@@ -1,0 +1,64 @@
+name: Set up Blacksmith image experiment
+description: Verify the immutable tool image and attach repository-scoped caches.
+
+runs:
+  using: composite
+  steps:
+    - name: Verify immutable toolchain
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "JAZZ_TEST_ARTIFACT_LOCK_PATH=${RUNNER_TEMP}/jazz-test-artifacts.lock" >> "${GITHUB_ENV}"
+        test "$(node --version)" = "v24.13.0"
+        test "$(pnpm --version)" = "10.14.0"
+        rustc --version | grep -F "1.93.1"
+        cargo clippy --version
+        cargo fmt --version
+        rustup target list --installed | grep -Fx "wasm32-unknown-unknown"
+        sccache --version | grep -F "0.15.0"
+        cargo-nextest --version | grep -F "0.9.143"
+        wasm-pack --version | grep -F "0.13.1"
+        wasm-bindgen --version | grep -F "0.2.117"
+        test -r /opt/jazz-ci/toolchains/v1/manifest.json
+        test -d "${PLAYWRIGHT_BROWSERS_PATH}"
+
+    - name: Restore pnpm store
+      uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+      with:
+        path: /github/home/.local/share/pnpm/store
+        key: blacksmith-image-pnpm-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+        restore-keys: |
+          blacksmith-image-pnpm-${{ runner.os }}-
+
+    - name: Install workspace dependencies
+      shell: bash
+      run: pnpm install --frozen-lockfile
+
+    - name: Cache Rust build artifacts
+      uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      with:
+        cache-on-failure: true
+        cache-bin: false
+        prefix-key: blacksmith-image-rocksdb-v1
+        key: repo-${{ env.CACHE_SCOPE_REPOSITORY_ID }}
+
+    - name: Start job-local sccache daemon with shared object storage
+      shell: bash
+      run: |
+        set -euo pipefail
+        socket="${RUNNER_TEMP}/sccache-server.sock"
+        cache_dir="${RUNNER_TEMP}/sccache-local"
+        mkdir -p "${cache_dir}"
+        echo "RUSTC_WRAPPER=sccache" >> "${GITHUB_ENV}"
+        echo "SCCACHE_BASEDIRS=${GITHUB_WORKSPACE}" >> "${GITHUB_ENV}"
+        echo "SCCACHE_MULTILEVEL_CHAIN=disk,s3" >> "${GITHUB_ENV}"
+        echo "SCCACHE_MULTILEVEL_WRITE_ERROR_POLICY=l0" >> "${GITHUB_ENV}"
+        echo "SCCACHE_DIR=${cache_dir}" >> "${GITHUB_ENV}"
+        echo "SCCACHE_SERVER_UDS=${socket}" >> "${GITHUB_ENV}"
+        echo "SCCACHE_CACHE_SIZE=5G" >> "${GITHUB_ENV}"
+        SCCACHE_BASEDIRS="${GITHUB_WORKSPACE}" \
+          SCCACHE_MULTILEVEL_CHAIN=disk,s3 \
+          SCCACHE_MULTILEVEL_WRITE_ERROR_POLICY=l0 \
+          SCCACHE_DIR="${cache_dir}" \
+          SCCACHE_SERVER_UDS="${socket}" \
+          sccache --start-server

@@ -1,0 +1,142 @@
+name: Blacksmith image experiment
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [agent/blacksmith-image-experiment]
+    paths:
+      - .github/blacksmith/**
+      - .github/actions/setup-blacksmith-experiment/**
+      - .github/workflows/blacksmith-image-experiment.yml
+
+concurrency:
+  group: blacksmith-image-experiment-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CACHE_SCOPE_REPOSITORY_ID: ${{ github.repository_id }}
+  SCCACHE_BUCKET: ${{ vars.SCCACHE_BUCKET }}
+  SCCACHE_REGION: ${{ vars.SCCACHE_REGION }}
+  SCCACHE_S3_USE_SSL: "true"
+  SCCACHE_S3_KEY_PREFIX: jazz-ci/v1/experiments/blacksmith-v1
+
+jobs:
+  build-image:
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.image.outputs.image }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: useblacksmith/setup-docker-builder@adc691ae88ab0b60a1ea3db000af973ad0f8dbfd # v1
+        with:
+          max-cache-size-mb: "20480"
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build immutable CI image
+        id: build
+        uses: useblacksmith/build-push-action@9b0579bbec7a6cad2f171596c57e7ac1e7658850 # v2
+        with:
+          context: .github/blacksmith
+          file: .github/blacksmith/Dockerfile
+          push: true
+          tags: ghcr.io/garden-co/jazz-ci-toolchain:blacksmith-experiment-v1
+      - id: image
+        run: echo "image=ghcr.io/garden-co/jazz-ci-toolchain@${{ steps.build.outputs.digest }}" >> "${GITHUB_OUTPUT}"
+
+  lint:
+    needs: build-image
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: read
+      id-token: write
+    container:
+      image: ${{ needs.build-image.outputs.image }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: aws-actions/configure-aws-credentials@cabfdba3510de1431bac9dba27511d97497fc100 # v5
+        with:
+          role-to-assume: ${{ vars.SCCACHE_EXPERIMENT_AWS_ROLE_ARN }}
+          aws-region: ${{ vars.SCCACHE_REGION }}
+      - uses: ./.github/actions/setup-blacksmith-experiment
+      - run: pnpm format:check
+      - run: pnpm lint
+      - run: pnpm test:ci-workflow
+      - run: pnpm test:turbo-cache-inputs
+      - if: always()
+        run: sccache --show-stats
+
+  test-rust:
+    needs: build-image
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: read
+      id-token: write
+    container:
+      image: ${{ needs.build-image.outputs.image }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: aws-actions/configure-aws-credentials@cabfdba3510de1431bac9dba27511d97497fc100 # v5
+        with:
+          role-to-assume: ${{ vars.SCCACHE_EXPERIMENT_AWS_ROLE_ARN }}
+          aws-region: ${{ vars.SCCACHE_REGION }}
+      - uses: ./.github/actions/setup-blacksmith-experiment
+      - name: Workspace Rust tests
+        run: node dev/gates/run-rust-tests.mjs --timeout-seconds 780 --nextest-profile jazz-ci -- --workspace --lib --bins --tests --features test
+      - run: node --test dev/gates/test/nextest-partitions.test.mjs
+      - name: Differential gates
+        run: JAZZ_SEED_COUNT=50 cargo test -p jazz m3_maintained_one_shot_differential_oracle
+      - name: Upload Rust test receipt
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: blacksmith-rust-test-receipt
+          path: target/test-receipts/*.json
+          if-no-files-found: error
+      - if: always()
+        run: sccache --show-stats
+
+  test-ts:
+    needs: build-image
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: read
+      id-token: write
+    container:
+      image: ${{ needs.build-image.outputs.image }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: aws-actions/configure-aws-credentials@cabfdba3510de1431bac9dba27511d97497fc100 # v5
+        with:
+          role-to-assume: ${{ vars.SCCACHE_EXPERIMENT_AWS_ROLE_ARN }}
+          aws-region: ${{ vars.SCCACHE_REGION }}
+      - uses: ./.github/actions/setup-blacksmith-experiment
+      - run: cargo check --workspace --all-targets
+      - run: pnpm build:test-artifacts
+      - name: Verify preinstalled Chromium
+        run: pnpm exec playwright install --dry-run chromium
+      - name: Run Node and browser test suites in parallel
+        run: dev/gates/run-ts-tests.sh
+      - if: always()
+        run: sccache --show-stats
