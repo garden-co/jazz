@@ -497,6 +497,7 @@ impl ContentManifestAdapter for TextContentAdapter {
 
     fn validate_schema(&self, schema: &ContentManifestSchema) -> Result<(), ManifestError> {
         if schema.adapter_kind != TEXT_ADAPTER_KIND
+            || schema.tail_entry_type != ValueType::Bytes
             || schema.max_tail_entries > TEXT_MAX_TAIL_ENTRIES
             || schema.max_tail_bytes > TEXT_MAX_TAIL_BYTES
         {
@@ -1199,8 +1200,8 @@ mod tests {
             .insert(&base, 4, " tail", context(), &mut store)
             .unwrap();
         let equivalent = writer.create("root tail", context(), &mut store).unwrap();
-        let tailed_value = Value::Bytes(tailed.encode(&manifest_schema).unwrap());
-        let equivalent_value = Value::Bytes(equivalent.encode(&manifest_schema).unwrap());
+        let tailed_value = tailed.into_value(&manifest_schema).unwrap();
+        let equivalent_value = equivalent.into_value(&manifest_schema).unwrap();
 
         crate::node::codec::validate_cell_value(&column, &tailed_value).unwrap();
         let refs = schema.column_families();
@@ -1253,35 +1254,46 @@ mod tests {
 
     #[test]
     fn public_text_schema_rejects_bounds_above_intrinsic_format_before_cell_admission() {
-        let schema_with = |entries, bytes| {
+        let schema_with = |tail_entry_type, entries, bytes| {
             JazzSchema::new([TableSchema::new(
                 "documents",
                 [ColumnSchema::content_manifest(
                     "body",
-                    ContentManifestSchema::new(TEXT_ADAPTER_KIND, entries, bytes).unwrap(),
+                    ContentManifestSchema::with_tail_entry_type(
+                        TEXT_ADAPTER_KIND,
+                        tail_entry_type,
+                        entries,
+                        bytes,
+                    )
+                    .unwrap(),
                 )],
             )])
         };
         assert!(
-            std::panic::catch_unwind(|| schema_with(TEXT_MAX_TAIL_ENTRIES + 1, 1024)).is_err(),
+            std::panic::catch_unwind(|| {
+                schema_with(ValueType::Bytes, TEXT_MAX_TAIL_ENTRIES + 1, 1024)
+            })
+            .is_err(),
             "65 operations must be rejected during public schema construction"
         );
         assert!(
-            std::panic::catch_unwind(|| schema_with(8, 20_000)).is_err(),
+            std::panic::catch_unwind(|| schema_with(ValueType::Bytes, 8, 20_000)).is_err(),
             "20,000 tail bytes must be rejected during public schema construction"
         );
+        assert!(
+            std::panic::catch_unwind(|| schema_with(ValueType::String, 8, 1024)).is_err(),
+            "text manifests must reject a non-byte typed tail during schema construction"
+        );
 
-        let schema = schema_with(TEXT_MAX_TAIL_ENTRIES, TEXT_MAX_TAIL_BYTES);
+        let schema = schema_with(ValueType::Bytes, TEXT_MAX_TAIL_ENTRIES, TEXT_MAX_TAIL_BYTES);
         let column = &schema.tables[0].columns[0];
         let manifest_schema = column.content_manifest.as_ref().unwrap();
-        let value = Value::Bytes(
-            ContentManifest {
-                root: ContentId([0; 32]),
-                edit_tail: vec![],
-            }
-            .encode(manifest_schema)
-            .unwrap(),
-        );
+        let value = ContentManifest {
+            root: ContentId([0; 32]),
+            edit_tail: vec![],
+        }
+        .into_value(manifest_schema)
+        .unwrap();
         crate::node::codec::validate_cell_value(column, &value).unwrap();
     }
 }

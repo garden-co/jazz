@@ -333,14 +333,6 @@ pub trait ContentManifestAdapter: Send + Sync + 'static {
     /// Validate one already type-checked tail entry.  The concrete type comes
     /// from `ContentManifestSchema::tail_entry_type`, so adapters never need
     /// a shared byte envelope or a per-row discriminant.
-    /// Verify that replicated schema bounds are within the adapter's intrinsic
-    /// format limits. The default accepts any positive foundation-valid bounds.
-    fn validate_schema(&self, schema: &ContentManifestSchema) -> Result<(), ManifestError> {
-        if schema.adapter_kind != self.adapter_kind() {
-            return Err(ManifestError::InvalidSchema);
-        }
-        Ok(())
-    }
     fn validate_operation(&self, operation: &Value) -> Result<(), ManifestError>;
     fn materialize(
         &self,

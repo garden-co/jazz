@@ -1,0 +1,23 @@
+---
+title: Text content
+description: Edit and materialize a typed text content column.
+---
+
+`text-v1` stores UTF-8 text in an immutable rope and a bounded `Bytes` tail.
+
+```rust
+use jazz::{content_manifest::{global_content_manifest_adapters, ContentDomainId, ContentManifestRuntime, ContentReadContext, MaterializationRequest, MemoryImmutableContentStore}, text_content::TextContentAdapter};
+
+fn text_example() -> Result<(), Box<dyn std::error::Error>> {
+    let context = ContentReadContext { domain: ContentDomainId(uuid::Uuid::new_v4()) };
+    let mut store = MemoryImmutableContentStore::default();
+    let adapter = TextContentAdapter::default();
+    let schema = adapter.schema().clone();
+    let base = adapter.create("Hello", context, &mut store)?;
+    let manifest = adapter.insert(&base, 5, " Jazz", context, &mut store)?;
+    let cell = manifest.into_value(&schema)?;
+    let runtime = ContentManifestRuntime::new(global_content_manifest_adapters(), context, &store);
+    assert_eq!(runtime.materialize_cell(&schema, &cell, &MaterializationRequest::Full)?, b"Hello Jazz");
+    Ok(())
+}
+```
