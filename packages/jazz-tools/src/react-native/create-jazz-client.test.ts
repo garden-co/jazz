@@ -4,6 +4,7 @@ import { createJazzClient, type JazzClient } from "./create-jazz-client.js";
 import { createDb } from "./create-db.js";
 import {
   REACT_NATIVE_PERSISTENT_RUNTIME_UNAVAILABLE_ERROR,
+  REACT_NATIVE_SQLITE_STORAGE_REJECTED_ERROR,
   type ReactNativeSqliteStorageDriver,
 } from "./storage.js";
 
@@ -44,7 +45,25 @@ describe("React Native binding scaffolding in the Node test runtime", () => {
 
     await expect(
       createDb({ appId: "react-native-persistent-boundary-test", sqliteStorage }),
-    ).rejects.toThrow(REACT_NATIVE_PERSISTENT_RUNTIME_UNAVAILABLE_ERROR);
+    ).rejects.toThrow(REACT_NATIVE_SQLITE_STORAGE_REJECTED_ERROR);
+    expect(open).not.toHaveBeenCalled();
+  });
+
+  it("rejects rather than ignores sqliteStorage combined with memory mode", async () => {
+    const open = vi.fn();
+    const sqliteStorage: ReactNativeSqliteStorageDriver = {
+      type: "react-native-sqlite",
+      open,
+      deleteDatabase: vi.fn(),
+    };
+
+    await expect(
+      createDb({
+        appId: "react-native-memory-sqlite-ambiguity-test",
+        driver: { type: "memory" },
+        sqliteStorage,
+      }),
+    ).rejects.toThrow(REACT_NATIVE_SQLITE_STORAGE_REJECTED_ERROR);
     expect(open).not.toHaveBeenCalled();
   });
 
