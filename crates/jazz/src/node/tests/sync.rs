@@ -57,6 +57,106 @@ fn opening_pending_survives_storage_reopen() {
 }
 
 #[test]
+fn opening_pending_is_written_before_later_view_state() {
+    let schema = schema();
+    let column_families = schema.column_families();
+    let refs = column_families
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let storage = FailAfterWritesMemoryStorage::new(&refs);
+    let mut reader = NodeState::new(node(3), schema.clone(), storage.clone()).unwrap();
+    let subscription = reader.whole_table_subscription_key("todos").unwrap();
+    let binding_view = BindingViewKey::from_canonical_subscription_key(subscription);
+
+    // The first write is the conservative pending marker. The injected second
+    // write failure simulates a crash while later settled-result state is
+    // advancing.
+    storage.fail_after_successful_writes(1);
+    reader
+        .apply_sync_message(SyncMessage::ViewUpdate {
+            subscription,
+            settled_through: GlobalSeq(7),
+            reset_result_set: true,
+            version_carriers: Vec::new(),
+            version_bundles: Vec::new(),
+            peer_payload_inventory: crate::protocol::PeerPayloadInventory {
+                opening_pending: true,
+                ..Default::default()
+            },
+            result_member_adds: Vec::new(),
+            result_member_removes: Vec::new(),
+            terminal_operations: Vec::new(),
+            program_fact_adds: Vec::new(),
+            program_fact_removes: Vec::new(),
+        })
+        .expect_err("later view-state persistence must hit the planted failure");
+    drop(reader);
+
+    let reopened = NodeState::new(node(3), schema, storage).unwrap();
+    assert!(
+        reopened.opening_pending_for_binding_view(binding_view),
+        "a crash after the marker but before settled state must reopen conservatively"
+    );
+}
+
+#[test]
+fn unsubscribe_and_resubscribe_retain_pending_authority_opening() {
+    let (_dir, mut reader) = open_node_with_uuid(node(3));
+    let (shape, binding) = reader.whole_table_shape_binding("todos").unwrap();
+    register_shape_binding(&mut reader, &shape, &binding);
+    let subscription = crate::protocol::SubscriptionKey {
+        shape_id: shape.shape_id(),
+        binding_id: binding.binding_id(),
+        read_view: Default::default(),
+    };
+    let binding_view = BindingViewKey::from_canonical_subscription_key(subscription);
+    reader
+        .apply_sync_message(SyncMessage::ViewUpdate {
+            subscription,
+            settled_through: GlobalSeq(7),
+            reset_result_set: true,
+            version_carriers: Vec::new(),
+            version_bundles: Vec::new(),
+            peer_payload_inventory: crate::protocol::PeerPayloadInventory {
+                opening_pending: true,
+                ..Default::default()
+            },
+            result_member_adds: Vec::new(),
+            result_member_removes: Vec::new(),
+            terminal_operations: Vec::new(),
+            program_fact_adds: Vec::new(),
+            program_fact_removes: Vec::new(),
+        })
+        .unwrap();
+
+    reader.apply_unsubscribe(subscription);
+    assert!(reader.opening_pending_for_binding_view(binding_view));
+    register_shape_binding(&mut reader, &shape, &binding);
+    assert!(
+        reader.opening_pending_for_binding_view(binding_view),
+        "resubscription must not turn a detached provisional opening into settled state"
+    );
+
+    reader
+        .apply_sync_message(SyncMessage::ViewUpdate {
+            subscription,
+            settled_through: GlobalSeq(8),
+            reset_result_set: true,
+            version_carriers: Vec::new(),
+            version_bundles: Vec::new(),
+            peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
+            result_member_adds: Vec::new(),
+            result_member_removes: Vec::new(),
+            terminal_operations: Vec::new(),
+            program_fact_adds: Vec::new(),
+            program_fact_removes: Vec::new(),
+        })
+        .unwrap();
+    assert!(!reader.opening_pending_for_binding_view(binding_view));
+}
+
+#[test]
 fn observed_global_seq_advances_authority_allocator() {
     let (_core_dir, mut core) = open_node_with_uuid(node(9));
     let (_writer_dir, mut writer) = open_node_with_uuid(node(1));

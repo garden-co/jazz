@@ -5203,9 +5203,10 @@ where
             self.query
                 .initial_hydration_binding_views
                 .remove(&binding_view_key);
-            self.query
-                .pending_opening_binding_views
-                .remove(&binding_view_key);
+            // Authority opening state is durable and conservative: detaching
+            // the last local subscriber does not prove that the authority has
+            // completed its opening snapshot. Retain it until an
+            // authoritative non-pending update clears both memory and disk.
         }
     }
 

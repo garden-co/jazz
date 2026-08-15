@@ -618,6 +618,43 @@ fn branch_overlay_partition_creation_rebuilds_live_database_without_storage_reop
 }
 
 #[test]
+fn branch_database_rebuild_recovers_pending_authority_opening() {
+    let mut core = open_history_complete_reopen_refusing_node_with_schema(node(0x23), schema());
+    let subscription = core.whole_table_subscription_key("todos").unwrap();
+    let binding_view = BindingViewKey::from_canonical_subscription_key(subscription);
+    core.apply_sync_message(SyncMessage::ViewUpdate {
+        subscription,
+        settled_through: GlobalSeq(7),
+        reset_result_set: true,
+        version_carriers: Vec::new(),
+        version_bundles: Vec::new(),
+        peer_payload_inventory: crate::protocol::PeerPayloadInventory {
+            opening_pending: true,
+            ..Default::default()
+        },
+        result_member_adds: Vec::new(),
+        result_member_removes: Vec::new(),
+        terminal_operations: Vec::new(),
+        program_fact_adds: Vec::new(),
+        program_fact_removes: Vec::new(),
+    })
+    .unwrap();
+
+    let branch_id = branch(0x23);
+    core.create_branch(branch_id).unwrap();
+    core.commit_mergeable_on_branch(
+        branch_id,
+        MergeableCommit::new("todos", row(0x23), 10).cells(title_cells("rebuild marker")),
+    )
+    .unwrap();
+
+    assert!(
+        core.opening_pending_for_binding_view(binding_view),
+        "a live database-slot rebuild must recover durable authority-opening state"
+    );
+}
+
+#[test]
 fn branch_overlay_spans_schema_renames_and_merge_back_after_restart() {
     // Physical branch partition identity is internal storage topology; the
     // branch read and merge-back assertions cover its user-visible semantics.

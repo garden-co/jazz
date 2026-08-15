@@ -1259,6 +1259,10 @@ where
         self.register_physical_current_variant_projections()?;
         self.groove_runtime_token = next_groove_runtime_token();
         self.invalidate_runtime_handles_after_database_rebuild();
+        // The rebuilt Groove registry invalidates runtime handles, not durable
+        // query facts. Rehydrate those facts (including conservative
+        // authority-opening markers) before returning to live traffic.
+        self.recover_known_state_facts()?;
         self.parking = parking;
         Ok(())
     }

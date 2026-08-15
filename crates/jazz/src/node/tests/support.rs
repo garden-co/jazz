@@ -513,6 +513,127 @@ fn open_history_complete_reopen_refusing_node_with_schema(
     NodeState::new_history_complete(node_uuid, schema, storage).unwrap()
 }
 
+#[derive(Clone)]
+struct FailAfterWritesMemoryStorage {
+    inner: MemoryStorage,
+    successful_writes_before_failure: Rc<Cell<Option<usize>>>,
+}
+
+impl FailAfterWritesMemoryStorage {
+    fn new(column_families: &[&str]) -> Self {
+        Self {
+            inner: MemoryStorage::new(column_families),
+            successful_writes_before_failure: Rc::new(Cell::new(None)),
+        }
+    }
+
+    fn fail_after_successful_writes(&self, successful_writes: usize) {
+        self.successful_writes_before_failure
+            .set(Some(successful_writes));
+    }
+
+    fn before_write(&self) -> Result<(), groove::storage::Error> {
+        let Some(remaining) = self.successful_writes_before_failure.get() else {
+            return Ok(());
+        };
+        if remaining == 0 {
+            self.successful_writes_before_failure.set(None);
+            return Err(groove::storage::Error::InvalidStorageLayout(
+                "injected write failure after pending-opening marker".to_owned(),
+            ));
+        }
+        self.successful_writes_before_failure
+            .set(Some(remaining - 1));
+        Ok(())
+    }
+}
+
+impl OrderedKvStorage for FailAfterWritesMemoryStorage {
+    fn get(
+        &self,
+        cf: &ColumnFamilyName,
+        key: &Key,
+    ) -> Result<Option<StorageValue>, groove::storage::Error> {
+        self.inner.get(cf, key)
+    }
+
+    fn set(
+        &self,
+        cf: &ColumnFamilyName,
+        key: &Key,
+        value: &[u8],
+    ) -> Result<(), groove::storage::Error> {
+        self.before_write()?;
+        self.inner.set(cf, key, value)
+    }
+
+    fn delete(&self, cf: &ColumnFamilyName, key: &Key) -> Result<(), groove::storage::Error> {
+        self.before_write()?;
+        self.inner.delete(cf, key)
+    }
+
+    fn scan_range(
+        &self,
+        cf: &ColumnFamilyName,
+        start: &Key,
+        end: &Key,
+        visit: &mut ScanVisitor<'_>,
+    ) -> Result<(), groove::storage::Error> {
+        self.inner.scan_range(cf, start, end, visit)
+    }
+
+    fn scan_prefix(
+        &self,
+        cf: &ColumnFamilyName,
+        prefix: &Key,
+        visit: &mut ScanVisitor<'_>,
+    ) -> Result<(), groove::storage::Error> {
+        self.inner.scan_prefix(cf, prefix, visit)
+    }
+
+    fn scan_prefix_reverse(
+        &self,
+        cf: &ColumnFamilyName,
+        prefix: &Key,
+        visit: &mut ScanVisitor<'_>,
+    ) -> Result<(), groove::storage::Error> {
+        self.inner.scan_prefix_reverse(cf, prefix, visit)
+    }
+
+    fn last_with_prefix(
+        &self,
+        cf: &ColumnFamilyName,
+        prefix: &Key,
+    ) -> Result<Option<groove::storage::KeyValue>, groove::storage::Error> {
+        self.inner.last_with_prefix(cf, prefix)
+    }
+
+    fn last_with_prefix_before_or_at(
+        &self,
+        cf: &ColumnFamilyName,
+        prefix: &Key,
+        upper: &Key,
+    ) -> Result<Option<groove::storage::KeyValue>, groove::storage::Error> {
+        self.inner.last_with_prefix_before_or_at(cf, prefix, upper)
+    }
+
+    fn write_many(&self, operations: &[WriteOperation<'_>]) -> Result<(), groove::storage::Error> {
+        self.before_write()?;
+        self.inner.write_many(operations)
+    }
+
+    fn column_family_names(&self) -> Option<Vec<String>> {
+        self.inner.column_family_names()
+    }
+}
+
+impl ReopenableStorage for FailAfterWritesMemoryStorage {
+    fn reopen(mut self, column_families: &[&str]) -> Result<Self, groove::storage::Error> {
+        self.inner = self.inner.reopen(column_families)?;
+        Ok(self)
+    }
+}
+
 fn open_node() -> (tempfile::TempDir, NodeState<RocksDbStorage>) {
     let schema = schema();
     let temp_dir = tempfile::tempdir().unwrap();

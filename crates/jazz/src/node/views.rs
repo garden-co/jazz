@@ -807,6 +807,17 @@ where
             }
             Err(error) => return Err(error),
         };
+        // `opening_pending` is a conservative authority-safety marker.  Make
+        // the true transition durable before any result or known-state
+        // advancement below, so a crash cannot reopen a partially applied
+        // provisional snapshot as settled.  The false transition remains the
+        // final durable mutation in this method.
+        if opening_pending {
+            self.persist_opening_pending(binding_view_key, true)?;
+            self.query
+                .pending_opening_binding_views
+                .insert(binding_view_key);
+        }
         if reset_result_set {
             self.query
                 .pending_terminal_operations_by_binding_view
@@ -1047,12 +1058,8 @@ where
                 .authorization_progress_by_binding_view
                 .insert(binding_view_key, progress);
         }
-        self.persist_opening_pending(binding_view_key, opening_pending)?;
-        if opening_pending {
-            self.query
-                .pending_opening_binding_views
-                .insert(binding_view_key);
-        } else {
+        if !opening_pending {
+            self.persist_opening_pending(binding_view_key, false)?;
             self.query
                 .pending_opening_binding_views
                 .remove(&binding_view_key);
