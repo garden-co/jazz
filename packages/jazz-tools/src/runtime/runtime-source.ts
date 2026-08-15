@@ -25,7 +25,7 @@ export interface RuntimeTelemetryContext<RuntimeConfig extends DbConfig = DbConf
 export interface BrowserWorkerConnection {
   ready(): Promise<void>;
   waitForServerConnection(): Promise<void>;
-  updateAuth(authJson: string, sessionClaims: Record<string, unknown>): void;
+  updateAuth(authJson: string, sessionClaims: Record<string, unknown>): Promise<void>;
   attachFollowerPort(followerTabId: string, leadershipId: number, port: MessagePort): Promise<void>;
   detachFollowerPort(followerTabId: string, leadershipId: number): Promise<void>;
   disconnect(): Promise<void>;
@@ -33,6 +33,7 @@ export interface BrowserWorkerConnection {
   deleteStorage(): Promise<void>;
   /** @internal Test-only crash simulation for failover reconciliation coverage. */
   simulateCrash(): Promise<void>;
+  simulatePendingAuthConfirmation(): Promise<void>;
   shutdown(): Promise<void>;
 }
 

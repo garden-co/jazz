@@ -1,5 +1,6 @@
 import type { DurabilityTier } from "../../client.js";
 import type { BrowserWorkerConnection } from "../../runtime-source.js";
+import type { AuthFailureReason } from "../../auth-state.js";
 import type { BrowserConnectionRole } from "./connection-role.js";
 import type { ConnectionManagerClientInput, DbForConnection } from "../types.js";
 
@@ -8,12 +9,18 @@ interface LeaderWorkerRoleCallbacks {
   onFollowerPortClosed(followerTabId: string, leadershipId: number): void;
   onReady(leadershipId: number): void;
   onFailure(error: unknown, role: LeaderWorkerConnectionRole, leadershipId: number): void;
+  onAuthFailure(reason: AuthFailureReason, generation: number | null): void;
 }
 
 export class LeaderWorkerConnectionRole implements BrowserConnectionRole {
   private workerBridge: BrowserWorkerConnection | null = null;
   private bridgeReady: Promise<void> | null = null;
   private shouldBeConnected = true;
+  private activeAuthRefresh: {
+    generation: number;
+    reject: (reason: AuthFailureReason) => void;
+  } | null = null;
+  private authRefreshQueue: Promise<void> = Promise.resolve();
   private readonly pendingFollowerPorts = new Map<
     string,
     { followerTabId: string; leadershipId: number; port: MessagePort }
@@ -37,8 +44,15 @@ export class LeaderWorkerConnectionRole implements BrowserConnectionRole {
       client,
       leadershipId: this.leadershipId,
       workerLockName: this.workerLockName,
-      onAuthFailure: (reason) => this.host.markUnauthenticated(reason),
-      onAuthRestored: () => this.host.clearAuthError(),
+      onAuthFailure: (reason) => {
+        const active = this.activeAuthRefresh;
+        if (active) {
+          active.reject(reason);
+        } else {
+          this.callbacks.onAuthFailure(reason, null);
+        }
+      },
+      onAuthRestored: () => undefined,
       onFailure: (error) => {
         if (this.workerBridge !== bridge) return;
         this.callbacks.onFailure(error, this, this.leadershipId);
@@ -125,9 +139,62 @@ export class LeaderWorkerConnectionRole implements BrowserConnectionRole {
     this.workerBridge?.updateAuth(authJson, sessionClaims);
   }
 
+  /** Performs one broker-authorized auth negotiation on this exact leader. */
+  async performAuthRefresh(
+    generation: number,
+    authJson: string,
+    sessionClaims: Record<string, unknown>,
+  ): Promise<"authenticated" | "deferred"> {
+    if (!this.shouldBeConnected) return "deferred";
+    const operation = this.authRefreshQueue.then(() =>
+      this.performQueuedAuthRefresh(generation, authJson, sessionClaims),
+    );
+    this.authRefreshQueue = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+    return operation;
+  }
+
+  private async performQueuedAuthRefresh(
+    generation: number,
+    authJson: string,
+    sessionClaims: Record<string, unknown>,
+  ): Promise<"authenticated" | "deferred"> {
+    if (!this.shouldBeConnected) return "deferred";
+    await this.bridgeReady;
+    const bridge = this.workerBridge;
+    if (!bridge) return "deferred";
+    let rejectRefresh!: (reason: AuthFailureReason) => void;
+    const authFailure = new Promise<never>((_, reject) => {
+      rejectRefresh = (reason) => reject(new AuthRefreshRejectedError(reason));
+    });
+    const active = { generation, reject: rejectRefresh };
+    this.activeAuthRefresh = active;
+    const negotiation = updateAndConfirmAuth(bridge, authJson, sessionClaims);
+    try {
+      await Promise.race([negotiation, authFailure]);
+      return "authenticated";
+    } catch (error) {
+      // A failure callback can beat the update RPC's rejected result. Drain
+      // that exact RPC before the serialized next generation starts, keeping
+      // all duplicate callbacks attributed to this generation.
+      await negotiation.catch(() => undefined);
+      if (!this.shouldBeConnected) return "deferred";
+      throw error;
+    } finally {
+      if (this.activeAuthRefresh === active) this.activeAuthRefresh = null;
+    }
+  }
+
   /** @internal Test-only failover hook. */
   async simulateCrash(): Promise<void> {
     await this.workerBridge?.simulateCrash();
+  }
+
+  /** @internal Test-only auth-negotiation hook. */
+  async simulatePendingAuthConfirmation(): Promise<void> {
+    await this.workerBridge?.simulatePendingAuthConfirmation();
   }
 
   async shutdown(): Promise<void> {
@@ -142,5 +209,20 @@ export class LeaderWorkerConnectionRole implements BrowserConnectionRole {
       // broker already owns recovery, so teardown must not leak that failure
       // as a second unhandled rejection.
     }
+  }
+}
+
+async function updateAndConfirmAuth(
+  bridge: BrowserWorkerConnection,
+  authJson: string,
+  sessionClaims: Record<string, unknown>,
+): Promise<void> {
+  await bridge.updateAuth(authJson, sessionClaims);
+  await bridge.waitForServerConnection();
+}
+
+export class AuthRefreshRejectedError extends Error {
+  constructor(readonly reason: AuthFailureReason) {
+    super(`Browser auth refresh rejected: ${reason}`);
   }
 }

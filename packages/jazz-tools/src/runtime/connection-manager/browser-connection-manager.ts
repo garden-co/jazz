@@ -1,6 +1,7 @@
 import type { WasmSchema } from "../../drivers/types.js";
 import type { DurabilityTier } from "../client.js";
 import { resolveClientSessionSync } from "../client-session.js";
+import { mapAuthReason } from "../auth-state.js";
 import type { Session } from "../context.js";
 import { BrowserBrokerClient, type BrowserBrokerClientSnapshot } from "../browser-broker-client.js";
 import {
@@ -10,7 +11,10 @@ import {
 } from "../browser-broker-protocol.js";
 import { acquireWebLockWithRetry, type LeaderLockLease } from "../leader-lock.js";
 import { FollowerPortConnectionRole } from "./connection-roles/follower-port-connection-role.js";
-import { LeaderWorkerConnectionRole } from "./connection-roles/leader-worker-connection-role.js";
+import {
+  AuthRefreshRejectedError,
+  LeaderWorkerConnectionRole,
+} from "./connection-roles/leader-worker-connection-role.js";
 import type { BrowserConnectionRole } from "./connection-roles/connection-role.js";
 import {
   ConnectionManager,
@@ -57,6 +61,8 @@ export class BrowserConnectionManager extends ConnectionManager {
   private tabRole: BrowserBrokerRole = "follower";
   private tabId: string | null = null;
   private currentLeadershipId = 0;
+  private latestBrokerAuthGeneration = 0;
+  private activeBrokerAuthGeneration = 0;
   private workerReconfigure: Promise<void> = Promise.resolve();
   private lifecycleHooksAttached = false;
   private readonly onVisibilityChange = (): void => {
@@ -111,6 +117,10 @@ export class BrowserConnectionManager extends ConnectionManager {
         onSchemaBlocked: (reason) => {
           this.handleBrokerSchemaBlocked(reason);
         },
+        onPerformAuthRefresh: (generation, leadershipId, authJson, sessionClaims) =>
+          this.performBrokerAuthRefresh(generation, leadershipId, authJson, sessionClaims),
+        onAuthState: (generation, state, reason) =>
+          this.handleBrokerAuthState(generation, state, reason),
         onReconnected: (client) => {
           this.handleBrokerReconnected(client);
         },
@@ -163,11 +173,14 @@ export class BrowserConnectionManager extends ConnectionManager {
       throw new Error("Db.reconnect() requires an active browser connection.");
     }
     await roleBridge.reconnect();
+    this.brokerClient?.replayAuthRefresh();
   }
 
   override updateAuth(auth: { jwtToken?: string; cookieSession?: Session }): void {
     super.updateAuth(auth);
-    this.activeRoleBridge?.updateAuth(
+    // Followers never replace the durable worker's token through their data
+    // port. The broker serializes refreshes and authorizes one leader carrier.
+    this.brokerClient?.requestAuthRefresh(
       JSON.stringify(runtimeAuth(this.host.config)),
       runtimeSessionClaims(this.host.config),
     );
@@ -334,6 +347,16 @@ export class BrowserConnectionManager extends ConnectionManager {
           },
           onFailure: (error, failedBridge, eventLeadershipId) => {
             void this.handleBrokerLeaderBridgeFailure(error, failedBridge, eventLeadershipId);
+          },
+          onAuthFailure: (reason, generation) => {
+            if (generation !== null) return;
+            // Initial/unsolicited carrier rejection has no broker generation
+            // yet. Re-submit the carrier's current credential so the broker
+            // owns and broadcasts the resulting state.
+            this.brokerClient?.requestAuthRefresh(
+              JSON.stringify(runtimeAuth(this.host.config)),
+              runtimeSessionClaims(this.host.config),
+            );
           },
         },
       );
@@ -602,6 +625,70 @@ export class BrowserConnectionManager extends ConnectionManager {
 
   private handleBrokerClosed(error: Error): void {
     this.rejectDurablePathReady(error);
+  }
+
+  private async performBrokerAuthRefresh(
+    generation: number,
+    leadershipId: number,
+    authJson: string,
+    sessionClaims: Record<string, unknown>,
+  ): Promise<void> {
+    if (generation < this.activeBrokerAuthGeneration) return;
+    this.activeBrokerAuthGeneration = generation;
+    const broker = this.brokerClient;
+    const role = this.activeRoleBridge;
+    if (
+      !broker ||
+      this.tabRole !== "leader" ||
+      this.currentLeadershipId !== leadershipId ||
+      !(role instanceof LeaderWorkerConnectionRole)
+    ) {
+      return;
+    }
+
+    try {
+      const outcome = await role.performAuthRefresh(generation, authJson, sessionClaims);
+      if (
+        this.brokerClient !== broker ||
+        this.tabRole !== "leader" ||
+        this.currentLeadershipId !== leadershipId ||
+        this.activeRoleBridge !== role ||
+        this.activeBrokerAuthGeneration !== generation
+      ) {
+        return;
+      }
+      broker.reportAuthRefreshResult(generation, leadershipId, outcome);
+    } catch (error) {
+      if (
+        this.brokerClient !== broker ||
+        this.tabRole !== "leader" ||
+        this.currentLeadershipId !== leadershipId ||
+        this.activeRoleBridge !== role ||
+        this.activeBrokerAuthGeneration !== generation
+      ) {
+        return;
+      }
+      broker.reportAuthRefreshResult(
+        generation,
+        leadershipId,
+        "invalid",
+        error instanceof AuthRefreshRejectedError ? error.reason : stringifyError(error),
+      );
+    }
+  }
+
+  private handleBrokerAuthState(
+    generation: number,
+    state: "pending" | "authenticated" | "invalid",
+    reason?: string,
+  ): void {
+    if (generation < this.latestBrokerAuthGeneration) return;
+    this.latestBrokerAuthGeneration = generation;
+    if (state === "authenticated") {
+      this.host.clearAuthError();
+    } else if (state === "invalid") {
+      this.host.markUnauthenticated(mapAuthReason(reason ?? "invalid"));
+    }
   }
 
   private recreateClientAfterBrokerReset(): void {

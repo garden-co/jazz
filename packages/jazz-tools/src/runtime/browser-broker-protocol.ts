@@ -8,7 +8,7 @@ import type { BrowserBrokerUnsupportedCode } from "./browser-broker-errors.js";
  * dropped later. Bump whenever the shape or required fields of any broker
  * message change.
  */
-export const BROKER_CONTROL_PROTOCOL_VERSION = "jazz-browser-broker-v3";
+export const BROKER_CONTROL_PROTOCOL_VERSION = "jazz-browser-broker-v4";
 export const BROWSER_STORAGE_FORMAT_VERSION = "opfs-btree-v1";
 
 // Liveness defaults shared by the broker worker and the tab client — a drift
@@ -143,6 +143,27 @@ export interface BrowserBrokerPongMessage extends BrokerInstanceMessage {
   type: "broker-pong";
 }
 
+/** A tab asks the broker to have the current durable leader refresh auth. */
+export interface BrowserBrokerAuthRefreshRequestMessage extends BrokerInstanceMessage {
+  type: "auth-refresh-request";
+  authJson: string;
+  sessionClaims: Record<string, unknown>;
+}
+
+/** A connected leader asks the broker to replay a deferred refresh. */
+export interface BrowserBrokerAuthRefreshReplayMessage extends BrokerInstanceMessage {
+  type: "auth-refresh-replay";
+}
+
+/** The leader's result for the exact generation assigned by the broker. */
+export interface BrowserBrokerAuthRefreshResultMessage extends BrokerInstanceMessage {
+  type: "auth-refresh-result";
+  generation: number;
+  leadershipId: number;
+  outcome: "authenticated" | "invalid" | "deferred";
+  reason?: string;
+}
+
 export type BrowserBrokerTabMessage =
   | BrowserBrokerHelloMessage
   | BrowserBrokerVisibilityMessage
@@ -154,7 +175,10 @@ export type BrowserBrokerTabMessage =
   | BrowserBrokerStorageResetRequestMessage
   | BrowserBrokerStorageResetReadyMessage
   | BrowserBrokerShutdownMessage
-  | BrowserBrokerPongMessage;
+  | BrowserBrokerPongMessage
+  | BrowserBrokerAuthRefreshRequestMessage
+  | BrowserBrokerAuthRefreshReplayMessage
+  | BrowserBrokerAuthRefreshResultMessage;
 
 type WithoutBrokerInstance<T> = T extends BrokerInstanceMessage ? Omit<T, "brokerInstanceId"> : T;
 
@@ -247,6 +271,22 @@ export interface BrowserBrokerSchemaBlockedMessage extends BrokerInstanceMessage
   reason: string;
 }
 
+export interface BrowserBrokerPerformAuthRefreshMessage extends BrokerInstanceMessage {
+  type: "perform-auth-refresh";
+  generation: number;
+  leadershipId: number;
+  requesterTabId: string;
+  authJson: string;
+  sessionClaims: Record<string, unknown>;
+}
+
+export interface BrowserBrokerAuthStateMessage extends BrokerInstanceMessage {
+  type: "auth-state";
+  generation: number;
+  state: "pending" | "authenticated" | "invalid";
+  reason?: string;
+}
+
 export type BrowserBrokerControlMessage =
   | BrowserBrokerHelloResponse
   | BrowserBrokerPingMessage
@@ -262,7 +302,9 @@ export type BrowserBrokerControlMessage =
   | BrowserBrokerStorageResetStartedMessage
   | BrowserBrokerStorageResetFinishedMessage
   | BrowserBrokerUnsupportedMessage
-  | BrowserBrokerSchemaBlockedMessage;
+  | BrowserBrokerSchemaBlockedMessage
+  | BrowserBrokerPerformAuthRefreshMessage
+  | BrowserBrokerAuthStateMessage;
 
 export type BrowserBrokerCapabilityGlobal = {
   SharedWorker?: unknown;

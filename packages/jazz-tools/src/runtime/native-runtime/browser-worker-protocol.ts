@@ -33,6 +33,7 @@ export type BrowserWorkerRequest =
   | { type: "detach-follower"; followerTabId: string; leadershipId: number }
   | { type: "delete-storage" }
   | { type: "simulate-crash" }
+  | { type: "simulate-pending-auth-confirmation" }
   | { type: "close" };
 
 export type BrowserWorkerMessage =

@@ -2226,7 +2226,7 @@ describe("Worker Bridge with OPFS", () => {
   });
 
   it("fans out auth loss and accepts same-principal refresh from a follower tab", async () => {
-    const { appId, serverUrl } = await getJazzServerInfo(uniqueDbName("auth-fanout"));
+    const { appId, serverUrl } = await publishSyncServerSchemaAndPermissions("auth-fanout");
     const dbName = uniqueDbName("auth-fanout");
     const userId = "00000000-0000-0000-0000-00000000fa01";
     const validJwt = await getJazzServerJwtForUser(userId, undefined, appId);

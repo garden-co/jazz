@@ -31,6 +31,9 @@ let disposeTelemetry: (() => void) | null = null;
 let workerLockLease: LeaderLockLease | null = null;
 let activeLeadershipId: number | null = null;
 let suppressOutboundFrames = false;
+let authConnectionEpoch = 0;
+let simulatePendingAuthConfirmation = false;
+const pendingAuthConfirmationCancellations = new Set<() => void>();
 
 type FollowerPeer = {
   followerTabId: string;
@@ -136,12 +139,17 @@ async function handleAfterInitialization(message: Exclude<BrowserWorkerMessage, 
     case "wait-server":
       await activeRuntime.waitForUpstreamServerConnection();
       break;
-    case "update-auth":
+    case "update-auth": {
+      const connectionEpoch = authConnectionEpoch;
       subscriber?.updateAuthenticatedClaims?.(message.sessionClaims);
       await activeRuntime.updateAuth(message.authJson);
+      await waitForAuthConfirmation(activeRuntime, connectionEpoch);
       broadcastAuthRestored();
       break;
+    }
     case "disconnect":
+      authConnectionEpoch += 1;
+      for (const cancel of pendingAuthConfirmationCancellations) cancel();
       await activeRuntime.disconnect({ rejectWaiters: false });
       break;
     case "reconnect": {
@@ -177,6 +185,9 @@ async function handleAfterInitialization(message: Exclude<BrowserWorkerMessage, 
       await new Promise((resolve) => setTimeout(resolve, 25));
       await closeRuntime();
       break;
+    case "simulate-pending-auth-confirmation":
+      simulatePendingAuthConfirmation = true;
+      break;
     case "close":
       await closeRuntime();
       break;
@@ -188,6 +199,30 @@ async function handleAfterInitialization(message: Exclude<BrowserWorkerMessage, 
     message.type === "simulate-crash"
   ) {
     queueMicrotask(() => workerScope.close());
+  }
+}
+
+async function waitForAuthConfirmation(
+  activeRuntime: NativeRuntimeAdapter,
+  connectionEpoch: number,
+): Promise<void> {
+  if (connectionEpoch !== authConnectionEpoch) {
+    throw new Error("Auth confirmation cancelled by disconnect");
+  }
+  let cancel!: () => void;
+  const cancelled = new Promise<never>((_, reject) => {
+    cancel = () => reject(new Error("Auth confirmation cancelled by disconnect"));
+  });
+  pendingAuthConfirmationCancellations.add(cancel);
+  try {
+    if (connectionEpoch !== authConnectionEpoch) cancel();
+    const serverConfirmation = simulatePendingAuthConfirmation
+      ? new Promise<never>(() => undefined)
+      : activeRuntime.waitForUpstreamServerConnection();
+    simulatePendingAuthConfirmation = false;
+    await Promise.race([serverConfirmation, cancelled]);
+  } finally {
+    pendingAuthConfirmationCancellations.delete(cancel);
   }
 }
 
