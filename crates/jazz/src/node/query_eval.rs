@@ -8936,6 +8936,34 @@ where
             ) {
                 continue;
             }
+            if let Some(occurrence_id) = public_result_member_occurrence_id(
+                &member,
+                local.result_table.as_str(),
+                local.result_query.aggregate.is_some(),
+            )? {
+                let replaced = local
+                    .result_set
+                    .iter()
+                    .filter(|candidate| **candidate != member)
+                    .filter_map(|candidate| {
+                        public_result_member_occurrence_id(
+                            candidate,
+                            local.result_table.as_str(),
+                            local.result_query.aggregate.is_some(),
+                        )
+                        .transpose()
+                        .map(|result| result.map(|candidate_id| (candidate, candidate_id)))
+                    })
+                    .collect::<Result<Vec<_>, Error>>()?
+                    .into_iter()
+                    .filter(|(_, candidate_id)| *candidate_id == occurrence_id)
+                    .map(|(candidate, _)| candidate.clone())
+                    .collect::<Vec<_>>();
+                for replaced in replaced {
+                    local.result_set.remove(&replaced);
+                    local.result_payloads.remove(&replaced);
+                }
+            }
             if local.result_set.insert(member.clone()) && materialize_update && !structured_output {
                 if let Some(row) =
                     self.materialize_local_maintained_view_result_member(local, &member)?
@@ -9054,15 +9082,6 @@ where
         })
     }
 
-    pub(crate) fn materialize_local_maintained_relation_snapshot(
-        &mut self,
-        local: &LocalMaintainedViewSubscription,
-    ) -> Result<RelationSnapshot, Error> {
-        Ok(self
-            .materialize_local_maintained_relation_snapshot_with_occurrences(local)?
-            .snapshot)
-    }
-
     pub(crate) fn relation_snapshot_has_materialized_required_cells(
         &self,
         query: &crate::query::Query,
@@ -9083,7 +9102,7 @@ where
         Ok(true)
     }
 
-    fn materialize_local_maintained_relation_snapshot_with_occurrences(
+    pub(crate) fn materialize_local_maintained_relation_snapshot_with_occurrences(
         &mut self,
         local: &LocalMaintainedViewSubscription,
     ) -> Result<LocalMaintainedRelationSnapshot, Error> {

@@ -1,7 +1,7 @@
 //! Thin Rust client facade over `crate::db`.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::ops::Deref;
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
@@ -1347,6 +1347,7 @@ impl ClientDbInner {
                         added,
                         updated,
                         removed,
+                        terminal_operations,
                         settled,
                         ..
                     } => {
@@ -1390,6 +1391,10 @@ impl ClientDbInner {
                             &effective_updated,
                             &removed,
                         );
+                        let moved = JazzClient::apply_core_subscription_terminal_moves(
+                            &mut current_rows,
+                            &terminal_operations,
+                        );
                         let rows_for_cache = current_rows
                             .iter()
                             .map(|row| row.row.clone())
@@ -1404,10 +1409,12 @@ impl ClientDbInner {
                         } else {
                             JazzClient::core_subscription_change_delta(
                                 &db,
+                                &previous_rows,
                                 &current_rows,
                                 &effective_added,
                                 &effective_updated,
                                 &removed,
+                                &moved,
                             )
                         };
                         if !reset_replaces_initial_view {
@@ -2629,12 +2636,49 @@ impl JazzClient {
         }
     }
 
+    /// Apply payload-free root moves emitted by a terminal `TopBy`.
+    ///
+    /// Root terminal keys encode the root UUID as tag `10` followed by its
+    /// 16 wire bytes.  A move must update facade order even when the public
+    /// projection did not change any payload cell.
+    fn apply_core_subscription_terminal_moves(
+        current_rows: &mut Vec<CoreSubscriptionOutputRow>,
+        operations: &[groove::ivm::TerminalOperation],
+    ) -> Vec<OutputOccurrenceId> {
+        let mut moved = Vec::new();
+        for operation in operations {
+            let groove::ivm::TerminalEdit::Move { index, .. } = &operation.edit else {
+                continue;
+            };
+            if !operation.path.is_empty() {
+                continue;
+            }
+            let Some(position) = current_rows.iter().position(|row| {
+                let identity = row.occurrence_id.canonical_bytes();
+                operation.root_key.len() == 17
+                    && operation.root_key[0] == 10
+                    && operation.root_key[1..] == identity[..16]
+            }) else {
+                continue;
+            };
+            let row = current_rows.remove(position);
+            let occurrence_id = row.occurrence_id.clone();
+            current_rows.insert((*index).min(current_rows.len()), row);
+            if !moved.contains(&occurrence_id) {
+                moved.push(occurrence_id);
+            }
+        }
+        moved
+    }
+
     fn core_subscription_change_delta(
         db: &Backend,
+        previous_rows: &[OutputOccurrenceId],
         current_rows: &[CoreSubscriptionOutputRow],
         added_rows: &[CoreSubscriptionOutputRow],
         updated_rows: &[CoreSubscriptionOutputRow],
         removed_rows: &[crate::db::RemovedRow],
+        moved_rows: &[OutputOccurrenceId],
     ) -> Result<OrderedRowDelta> {
         let index_of = |id: &OutputOccurrenceId| {
             current_rows
@@ -2658,15 +2702,47 @@ impl JazzClient {
             .iter()
             .map(|row| {
                 let public = Self::core_subscription_row_to_public(db, row)?;
-                let index = index_of(public.id.as_occurrence());
+                let new_index = index_of(public.id.as_occurrence());
+                let old_index = previous_rows
+                    .iter()
+                    .position(|id| id == public.id.as_occurrence())
+                    .unwrap_or(new_index);
                 Ok(OrderedUpdated {
                     id: public.id.clone(),
-                    old_index: index,
-                    new_index: index,
+                    old_index,
+                    new_index,
                     row: Some(public),
                 })
             })
             .collect::<Result<Vec<_>>>()?;
+        let updated_ids = updated
+            .iter()
+            .map(|update| update.id.as_occurrence().clone())
+            .collect::<BTreeSet<_>>();
+        let mut updated = updated;
+        for occurrence_id in moved_rows {
+            if updated_ids.contains(occurrence_id)
+                || added_rows
+                    .iter()
+                    .any(|row| row.occurrence_id == *occurrence_id)
+                || removed_rows
+                    .iter()
+                    .any(|row| row.occurrence_id == *occurrence_id)
+            {
+                continue;
+            }
+            let new_index = index_of(occurrence_id);
+            let old_index = previous_rows
+                .iter()
+                .position(|id| id == occurrence_id)
+                .unwrap_or(new_index);
+            updated.push(OrderedUpdated {
+                id: ResultKey::from_occurrence(occurrence_id.clone()),
+                old_index,
+                new_index,
+                row: None,
+            });
+        }
         let removed = removed_rows
             .iter()
             .enumerate()
