@@ -1332,25 +1332,10 @@ where
         &mut self,
         version: &VersionRow,
     ) -> Result<VersionRow, Error> {
-        let authored_schema = self
-            .schema_version_for_alias(version.schema_version_alias())
-            .ok_or(Error::InvalidStoredValue(
-                "maintained witness schema version alias must exist",
-            ))?;
-        let authored_table = self
-            .table_in_schema(version.table(), authored_schema)?
-            .clone();
-        let authored_descriptor = if version.layer() == VersionLayer::Deletion {
-            authored_table.register_storage_table().record_schema()
-        } else {
-            authored_table.history_storage_table().record_schema()
-        };
-        let has_authored_layout = version.record.descriptor() == &authored_descriptor;
-
         // A maintained witness is decoded from the current-query graph. Its
-        // descriptor can be identical to history storage while selected-out
-        // cells are still typed nulls, so first prefer its immutable stored
-        // history identity even when the descriptors match.
+        // logical table can therefore be the read-schema projection while its
+        // schema alias still names the authored schema. Reload the immutable
+        // history row before interpreting that projected table as authored.
         for storage_table in
             self.version_storage_sources_for_layer(version.table(), version.layer())?
         {
@@ -1368,6 +1353,23 @@ where
                 return Ok(canonical);
             }
         }
+
+        let authored_schema = self
+            .schema_version_for_alias(version.schema_version_alias())
+            .ok_or(Error::InvalidStoredValue(
+                "maintained witness schema version alias must exist",
+            ))?;
+        let Ok(authored_table) = self.table_in_schema(version.table(), authored_schema) else {
+            return Err(Error::MaintainedViewMissingBundleWitness(
+                "maintained witness is a projection without its canonical history row",
+            ));
+        };
+        let authored_descriptor = if version.layer() == VersionLayer::Deletion {
+            authored_table.register_storage_table().record_schema()
+        } else {
+            authored_table.history_storage_table().record_schema()
+        };
+        let has_authored_layout = version.record.descriptor() == &authored_descriptor;
 
         // Some maintained rows are legitimate materialized/synthetic versions
         // (for example, synthesized merge output) and therefore have no persisted

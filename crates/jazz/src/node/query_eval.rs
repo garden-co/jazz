@@ -5482,7 +5482,7 @@ where
         // Result-member ordering is for identity and deduplication, not public
         // query rank. Membership/windowing is already lowered; only restore the
         // selected roots to their advertised order before sending a reset.
-        self.apply_query_order(shape.query(), &mut rows)?;
+        self.apply_query_order_in_schema(shape.query(), shape.schema_version(), &mut rows)?;
         if shape.query().flat_join.is_none() {
             self.apply_projection_in_schema(shape.query(), shape.schema_version(), &mut rows)?;
         }
@@ -7581,7 +7581,7 @@ where
                 authorization_mode,
             )?;
             let query = shape.query();
-            self.finish_engine_query_rows(query, &mut rows)?;
+            self.finish_engine_query_rows_in_schema(query, shape.schema_version(), &mut rows)?;
             self.apply_projection_in_schema(query, shape.schema_version(), &mut rows)?;
             return Ok(rows);
         }
@@ -7740,7 +7740,7 @@ where
             normalize_public_current_rows(&table_schema, &mut rows)?;
         }
         let query = shape.query();
-        self.finish_engine_query_rows(query, &mut rows)?;
+        self.finish_engine_query_rows_in_schema(query, shape.schema_version(), &mut rows)?;
         if query.flat_join.is_none() && query.array_subqueries.is_empty() {
             self.apply_projection_in_schema(query, shape.schema_version(), &mut rows)?;
         }
@@ -7887,7 +7887,7 @@ where
 
         let query = shape.query();
         let phase_started = Instant::now();
-        self.finish_engine_query_rows(query, &mut rows)?;
+        self.finish_engine_query_rows_in_schema(query, shape.schema_version(), &mut rows)?;
         profile.finish_rows = phase_started.elapsed();
 
         let phase_started = Instant::now();
@@ -8150,7 +8150,7 @@ where
     ) -> Result<Vec<CurrentRow>, Error> {
         let mut rows = self.query_rows_at_with_query_engine(shape, binding, position, identity)?;
         let query = shape.query();
-        self.finish_engine_query_rows(query, &mut rows)?;
+        self.finish_engine_query_rows_in_schema(query, shape.schema_version(), &mut rows)?;
         Ok(rows)
     }
 
@@ -9772,7 +9772,7 @@ where
             self.materialize_inline_current_query_rows(&table, deltas)?
         };
         let query = shape.query();
-        self.finish_engine_query_rows(query, &mut rows)?;
+        self.finish_engine_query_rows_in_schema(query, shape.schema_version(), &mut rows)?;
         Ok(rows)
     }
 
@@ -10072,7 +10072,7 @@ where
         }
         // Multisink records are transport-key ordered. Restore public root rank
         // while retaining the lowered program's membership and window.
-        self.apply_query_order(shape.query(), &mut rows)?;
+        self.apply_query_order_in_schema(shape.query(), shape.schema_version(), &mut rows)?;
         Ok(rows)
     }
 
@@ -10127,18 +10127,6 @@ where
 
     pub(crate) fn uses_schema_projected_read(&self, shape: &ValidatedQuery) -> bool {
         shape.schema_version() != self.catalogue.current_schema_version_id
-    }
-
-    fn finish_engine_query_rows(
-        &self,
-        query: &crate::query::Query,
-        rows: &mut Vec<CurrentRow>,
-    ) -> Result<(), Error> {
-        self.finish_engine_query_rows_in_schema(
-            query,
-            self.catalogue.current_write_schema.schema,
-            rows,
-        )
     }
 
     fn finish_engine_query_rows_in_schema(
