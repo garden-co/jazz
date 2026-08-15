@@ -824,6 +824,27 @@ fn websocket_reconnect_resets_structured_terminal_before_live_patches() {
     reader.wire = reconnected_wire;
     reader.socket = connect_server_ws(&server.ws_url, subject);
     assert!(pump_websocket(&mut reader.socket, &reader.db, &reader.wire));
+
+    // Replacing the upstream invalidates the old authority receipt before the
+    // new link can speak. Preserve the cached structured value, but publish
+    // that it is no longer settled before accepting the reconnect reset.
+    let reconnect_demoted = block_on(subscription.next()).expect("reconnect authority demotion");
+    assert!(matches!(
+        reconnect_demoted,
+        SubscriptionEvent::Delta {
+            reset: false,
+            added,
+            updated,
+            removed,
+            terminal_operations,
+            settled: false,
+            ..
+        } if added.is_empty()
+            && updated.is_empty()
+            && removed.is_empty()
+            && terminal_operations.is_empty()
+    ));
+
     let reconnect_reset = block_on(subscription.next()).expect("authoritative reconnect reset");
     let SubscriptionEvent::Delta {
         reset,
