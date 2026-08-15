@@ -85,6 +85,21 @@ impl WasmAsyncBTree {
         )
         .map_err(|e| JsValue::from_str(&e.to_string()))
     }
+    pub async fn range(
+        &mut self,
+        start: Vec<u8>,
+        end: Vec<u8>,
+        limit: u32,
+    ) -> Result<JsValue, JsValue> {
+        serde_wasm_bindgen::to_value(
+            &self
+                .inner
+                .range(&start, &end, limit as usize)
+                .await
+                .map_err(|e| JsValue::from_str(&e.to_string()))?,
+        )
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+    }
     pub async fn checkpoint(&mut self) -> Result<(), JsValue> {
         self.inner
             .checkpoint()
