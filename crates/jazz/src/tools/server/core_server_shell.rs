@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 
 use crate::db::{CommitUnitTrust, ConnectionSessionContext, DbIdentity, RowCells, Transport};
@@ -20,14 +21,26 @@ use tokio::sync::{mpsc as tokio_mpsc, oneshot, watch};
 /// The underlying `InMemoryServerShell` is intentionally kept on one OS thread
 /// because it currently stores its DB, sessions, and transports behind
 /// `Rc<RefCell<...>>`. Axum request/websocket tasks can clone this handle, but
-/// all shell access is serialized onto that owner thread.
+/// all shell access is serialized onto that owner thread. Shutdown explicitly
+/// joins the owner before its surrounding server storage lifecycle completes.
+/// This ensures native RocksDB resources are destroyed on their owner thread.
 #[derive(Clone)]
 pub(crate) struct ServerShellHandle {
-    jobs: mpsc::Sender<ServerShellJob>,
+    inner: Arc<ServerShellInner>,
+}
+
+struct ServerShellInner {
+    jobs: Mutex<Option<mpsc::Sender<ServerShellCommand>>>,
+    join: Mutex<Option<thread::JoinHandle<()>>>,
     activity_tx: watch::Sender<u64>,
 }
 
 type ServerShellJob = Box<dyn FnOnce(&mut InMemoryServerShell) + Send + 'static>;
+
+enum ServerShellCommand {
+    Run(ServerShellJob),
+    Shutdown(mpsc::Sender<()>),
+}
 
 impl ServerShellHandle {
     #[cfg(test)]
@@ -75,11 +88,11 @@ impl ServerShellHandle {
         edge_cache_budget: Option<EdgeCacheBudget>,
         permissions_ready: bool,
     ) -> Result<Self, String> {
-        let (jobs, receiver) = mpsc::channel::<ServerShellJob>();
+        let (jobs, receiver) = mpsc::channel::<ServerShellCommand>();
         let (started_tx, started_rx) = mpsc::channel();
         let (activity_tx, _) = watch::channel(0_u64);
 
-        thread::Builder::new()
+        let join = thread::Builder::new()
             .name("jazz-server-shell".to_owned())
             .spawn(move || {
                 let config = InMemoryServerShellConfig::new(
@@ -113,8 +126,17 @@ impl ServerShellHandle {
                 };
 
                 let mut shell = shell;
-                while let Ok(job) = receiver.recv() {
-                    job(&mut shell);
+                while let Ok(command) = receiver.recv() {
+                    match command {
+                        ServerShellCommand::Run(job) => job(&mut shell),
+                        ServerShellCommand::Shutdown(stopped) => {
+                            // The shell owns the native storage, so complete
+                            // its destruction before acknowledging shutdown.
+                            drop(shell);
+                            let _ = stopped.send(());
+                            return;
+                        }
+                    }
                 }
             })
             .map_err(|error| format!("failed to spawn server shell thread: {error}"))?;
@@ -122,11 +144,17 @@ impl ServerShellHandle {
         started_rx
             .recv()
             .map_err(|_| "server shell thread exited before startup".to_owned())??;
-        Ok(Self { jobs, activity_tx })
+        Ok(Self {
+            inner: Arc::new(ServerShellInner {
+                jobs: Mutex::new(Some(jobs)),
+                join: Mutex::new(Some(join)),
+                activity_tx,
+            }),
+        })
     }
 
     pub(crate) fn subscribe_activity(&self) -> watch::Receiver<u64> {
-        self.activity_tx.subscribe()
+        self.inner.activity_tx.subscribe()
     }
 
     pub(crate) async fn open_with_session_context(
@@ -174,7 +202,7 @@ impl ServerShellHandle {
         row_id: RowUuid,
         cells: RowCells,
     ) -> Result<(), String> {
-        let activity_tx = self.activity_tx.clone();
+        let activity_tx = self.inner.activity_tx.clone();
         let result = self
             .run(move |shell| {
                 shell
@@ -193,7 +221,7 @@ impl ServerShellHandle {
         schema: JazzSchema,
         lineage_source: SchemaVersionId,
     ) -> Result<SchemaVersionId, String> {
-        let activity_tx = self.activity_tx.clone();
+        let activity_tx = self.inner.activity_tx.clone();
         let result = self
             .run(move |shell| {
                 shell
@@ -218,41 +246,39 @@ impl ServerShellHandle {
         session: ServerSession,
         frames: Vec<AbiBytes>,
     ) -> Result<tokio_mpsc::UnboundedReceiver<Result<Vec<AbiBytes>, String>>, String> {
-        let activity_tx = self.activity_tx.clone();
+        let activity_tx = self.inner.activity_tx.clone();
         let (outbound_tx, outbound_rx) = tokio_mpsc::unbounded_channel();
-        self.jobs
-            .send(Box::new(move |shell| {
-                for frame in frames {
-                    let phase = inbound_frame_phase(&frame);
-                    let result = shell
-                        .receive_frames(session, [frame])
-                        .map_err(|error| format!("server receive {phase}: {error}"))
-                        .and_then(|()| {
-                            shell
-                                .tick()
-                                .map_err(|error| format!("server tick after {phase}: {error}"))
-                        })
-                        .and_then(|()| {
-                            shell
-                                .take_frames(session)
-                                .map_err(|error| format!("server drain after {phase}: {error}"))
-                        });
-                    let keep_streaming = result.is_ok();
-                    if outbound_tx.send(result).is_err() {
-                        return;
-                    }
-                    if !keep_streaming {
-                        return;
-                    }
-                    notify_shell_activity(&activity_tx);
+        self.send(ServerShellCommand::Run(Box::new(move |shell| {
+            for frame in frames {
+                let phase = inbound_frame_phase(&frame);
+                let result = shell
+                    .receive_frames(session, [frame])
+                    .map_err(|error| format!("server receive {phase}: {error}"))
+                    .and_then(|()| {
+                        shell
+                            .tick()
+                            .map_err(|error| format!("server tick after {phase}: {error}"))
+                    })
+                    .and_then(|()| {
+                        shell
+                            .take_frames(session)
+                            .map_err(|error| format!("server drain after {phase}: {error}"))
+                    });
+                let keep_streaming = result.is_ok();
+                if outbound_tx.send(result).is_err() {
+                    return;
                 }
-            }))
-            .map_err(|_| "server shell thread is not running".to_owned())?;
+                if !keep_streaming {
+                    return;
+                }
+                notify_shell_activity(&activity_tx);
+            }
+        })))?;
         Ok(outbound_rx)
     }
 
     pub(crate) async fn tick_take(&self, session: ServerSession) -> Result<Vec<AbiBytes>, String> {
-        let activity_tx = self.activity_tx.clone();
+        let activity_tx = self.inner.activity_tx.clone();
         self.run(move |shell| {
             let result = shell
                 .tick()
@@ -278,7 +304,7 @@ impl ServerShellHandle {
         &self,
         transport: Box<dyn Transport + Send>,
     ) -> Result<(), String> {
-        let activity_tx = self.activity_tx.clone();
+        let activity_tx = self.inner.activity_tx.clone();
         self.run(move |shell| {
             let result = shell
                 .connect_upstream(transport)
@@ -292,13 +318,33 @@ impl ServerShellHandle {
     }
 
     pub(crate) fn notify_activity(&self) {
-        notify_shell_activity(&self.activity_tx);
+        notify_shell_activity(&self.inner.activity_tx);
     }
 
     pub(crate) fn close(&self, session: ServerSession) {
-        let _ = self.jobs.send(Box::new(move |shell| {
+        let _ = self.send(ServerShellCommand::Run(Box::new(move |shell| {
             let _ = shell.close_session(session);
-        }));
+        })));
+    }
+
+    /// Retire the job sender, then wait until the owner has dropped the shell
+    /// and its storage. It is safe for multiple shutdown paths to call this.
+    pub(crate) async fn shutdown(&self) -> Result<(), String> {
+        let inner = Arc::clone(&self.inner);
+        tokio::task::spawn_blocking(move || shutdown_blocking(&inner))
+            .await
+            .map_err(|error| format!("server shell shutdown task failed: {error}"))?
+    }
+
+    fn send(&self, command: ServerShellCommand) -> Result<(), String> {
+        self.inner
+            .jobs
+            .lock()
+            .map_err(|_| "server shell jobs mutex poisoned".to_owned())?
+            .as_ref()
+            .ok_or_else(|| "server shell is shut down".to_owned())?
+            .send(command)
+            .map_err(|_| "server shell thread is not running".to_owned())
     }
 
     async fn run<T>(
@@ -309,15 +355,44 @@ impl ServerShellHandle {
         T: Send + 'static,
     {
         let (reply, response) = oneshot::channel();
-        self.jobs
-            .send(Box::new(move |shell| {
-                let _ = reply.send(run_on_shell(shell));
-            }))
-            .map_err(|_| "server shell thread is not running".to_owned())?;
+        self.send(ServerShellCommand::Run(Box::new(move |shell| {
+            let _ = reply.send(run_on_shell(shell));
+        })))?;
         response
             .await
             .map_err(|_| "server shell thread dropped response".to_owned())?
     }
+}
+
+fn shutdown_blocking(inner: &Arc<ServerShellInner>) -> Result<(), String> {
+    let sender = inner
+        .jobs
+        .lock()
+        .map_err(|_| "server shell jobs mutex poisoned".to_owned())?
+        .take();
+    let Some(sender) = sender else {
+        return Ok(());
+    };
+
+    let (stopped_tx, stopped_rx) = mpsc::channel();
+    sender
+        .send(ServerShellCommand::Shutdown(stopped_tx))
+        .map_err(|_| "server shell thread is not running".to_owned())?;
+    drop(sender);
+    stopped_rx
+        .recv()
+        .map_err(|_| "server shell thread exited before storage shutdown".to_owned())?;
+
+    if let Some(join) = inner
+        .join
+        .lock()
+        .map_err(|_| "server shell join mutex poisoned".to_owned())?
+        .take()
+    {
+        join.join()
+            .map_err(|_| "server shell thread panicked during shutdown".to_owned())?;
+    }
+    Ok(())
 }
 
 fn inbound_frame_phase(frame: &[u8]) -> String {
