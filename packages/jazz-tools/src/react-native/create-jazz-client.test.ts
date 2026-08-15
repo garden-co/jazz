@@ -1,12 +1,13 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { schema as s } from "../index.js";
-import { createJazzClient, type JazzClient } from "./create-jazz-client.js";
-import { createDb } from "./create-db.js";
 import {
+  createDb,
+  createJazzClient,
   REACT_NATIVE_PERSISTENT_RUNTIME_UNAVAILABLE_ERROR,
   REACT_NATIVE_SQLITE_STORAGE_REJECTED_ERROR,
+  type JazzClient,
   type ReactNativeSqliteStorageDriver,
-} from "./storage.js";
+} from "./index.js";
 
 const app = s.defineApp({
   notes: s.table({ title: s.string() }),
@@ -20,6 +21,15 @@ describe("React Native binding scaffolding in the Node test runtime", () => {
     client = undefined;
   });
 
+  it("exports the exact installed-package persistence boundary messages", () => {
+    expect(REACT_NATIVE_PERSISTENT_RUNTIME_UNAVAILABLE_ERROR).toBe(
+      "React Native persistent storage is not available in this alpha; memory mode is unverified scaffolding, not device-supported persistence",
+    );
+    expect(REACT_NATIVE_SQLITE_STORAGE_REJECTED_ERROR).toBe(
+      "ReactNativeDbConfig.sqliteStorage is proposal-only and cannot be used by the v2 runtime; remove sqliteStorage (memory mode remains unverified scaffolding)",
+    );
+  });
+
   it("routes explicit memory configuration through the Node WASM harness", async () => {
     client = await createJazzClient({
       appId: "react-native-memory-launch-test",
@@ -30,9 +40,11 @@ describe("React Native binding scaffolding in the Node test runtime", () => {
   });
 
   it("rejects the default persistent configuration", async () => {
-    await expect(
-      createDb({ appId: "react-native-default-persistent-boundary-test" }),
-    ).rejects.toThrow(REACT_NATIVE_PERSISTENT_RUNTIME_UNAVAILABLE_ERROR);
+    const error = await createDb({ appId: "react-native-default-persistent-boundary-test" }).catch(
+      (error: unknown) => error,
+    );
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toBe(REACT_NATIVE_PERSISTENT_RUNTIME_UNAVAILABLE_ERROR);
   });
 
   it("rejects an injected SQLite driver before opening it", async () => {
@@ -43,9 +55,12 @@ describe("React Native binding scaffolding in the Node test runtime", () => {
       deleteDatabase: vi.fn(),
     };
 
-    await expect(
-      createDb({ appId: "react-native-persistent-boundary-test", sqliteStorage }),
-    ).rejects.toThrow(REACT_NATIVE_SQLITE_STORAGE_REJECTED_ERROR);
+    const error = await createDb({
+      appId: "react-native-persistent-boundary-test",
+      sqliteStorage,
+    }).catch((error: unknown) => error);
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toBe(REACT_NATIVE_SQLITE_STORAGE_REJECTED_ERROR);
     expect(open).not.toHaveBeenCalled();
   });
 
@@ -57,13 +72,13 @@ describe("React Native binding scaffolding in the Node test runtime", () => {
       deleteDatabase: vi.fn(),
     };
 
-    await expect(
-      createDb({
-        appId: "react-native-memory-sqlite-ambiguity-test",
-        driver: { type: "memory" },
-        sqliteStorage,
-      }),
-    ).rejects.toThrow(REACT_NATIVE_SQLITE_STORAGE_REJECTED_ERROR);
+    const error = await createDb({
+      appId: "react-native-memory-sqlite-ambiguity-test",
+      driver: { type: "memory" },
+      sqliteStorage,
+    }).catch((error: unknown) => error);
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toBe(REACT_NATIVE_SQLITE_STORAGE_REJECTED_ERROR);
     expect(open).not.toHaveBeenCalled();
   });
 

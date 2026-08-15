@@ -243,9 +243,11 @@ checkpoint.
 
 ### React Native
 
-React Native uses a separate native runtime adapter with no web worker or OPFS path. It still uses
-the same table-first runtime model, but local persistence is provided by the native embedded backend
-rather than by browser APIs.
+React Native has compile-level adapter scaffolding with no web worker or OPFS path. In this alpha,
+the adapter does not yet connect a native embedded storage backend to the v2 runtime: persistent
+startup fails before opening a driver, and the explicit memory path has not been validated under
+Metro/Hermes on a device. The table-first model remains the intended native architecture, not a
+claim that local database persistence is currently supported.
 
 ## Query engine
 

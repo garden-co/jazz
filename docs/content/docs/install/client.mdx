@@ -218,6 +218,13 @@ Create the basic structure for your app with Jazz and a to-do list.
   </Tab>
 </Tabs>
 
+<Callout type="warn">
+  The Expo/React Native binding is compile-level scaffolding in this alpha. Its default persistent
+  database configuration and proposal-only `sqliteStorage` option fail before opening a driver.
+  Explicit memory mode has not passed Metro/Hermes device validation and is not a supported
+  persistence alternative.
+</Callout>
+
 <Accordions type="single">
   <Accordion title="Client Config">
     `appId` identifies your app for storage and sync. Use the UUID you generated
