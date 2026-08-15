@@ -5,7 +5,7 @@ use jazz::content_manifest::{
     ContentDomainId, ContentManifest, ContentManifestRuntimeProvider, ContentManifestSchema,
     ContentReadContext, ImmutableContentStore, MaterializationRequest, MemoryImmutableContentStore,
 };
-use jazz::groove::records::Value;
+use jazz::groove::records::{Value, ValueType};
 use jazz::groove::storage::RocksDbStorage;
 use jazz::ids::{NodeUuid, RowUuid};
 use jazz::node::{MergeableCommit, NodeState};
@@ -30,7 +30,7 @@ impl ContentManifestRuntimeProvider for Provider {
 }
 
 fn cell(manifest: &ContentManifest, schema: &ContentManifestSchema) -> Value {
-    Value::Bytes(manifest.encode(schema).unwrap())
+    manifest.into_value(schema).unwrap()
 }
 
 /// Black-boxes the public schema and Node seams. Adapter codec tests remain
@@ -60,7 +60,8 @@ fn registered_stream_manifest_runs_through_a_real_node() {
 
     // The schema bound is deliberately wider than stream-v1's production
     // bound so row admission proves the registered adapter also validates it.
-    let manifest_schema = ContentManifestSchema::new("stream-v1", 1, 512).unwrap();
+    let manifest_schema =
+        ContentManifestSchema::with_tail_entry_type("stream-v1", ValueType::Bytes, 1, 512).unwrap();
     let schema = JazzSchema::new([TableSchema::new(
         "documents",
         [ColumnSchema::content_manifest(
@@ -170,7 +171,7 @@ fn registered_stream_manifest_runs_through_a_real_node() {
 
     let maximum_tail = ContentManifest {
         root: current.root,
-        edit_tail: vec![vec![0; 256]],
+        edit_tail: vec![Value::Bytes(vec![0; 256])],
     };
     let boundary = node
         .commit_mergeable(
@@ -183,7 +184,7 @@ fn registered_stream_manifest_runs_through_a_real_node() {
 
     let invalid = ContentManifest {
         root: current.root,
-        edit_tail: vec![vec![0; 257]],
+        edit_tail: vec![Value::Bytes(vec![0; 257])],
     };
     assert!(
         node.commit_mergeable(
