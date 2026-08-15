@@ -596,6 +596,14 @@ fn run_process_local_resume_canary(config: &Config) -> ResumeCanarySummary {
         .last_resume_bytes()
         .expect("fresh rehydrate bytes");
 
+    // Let the freshly served view finish its round trip before capturing its
+    // resumable peer state. A cursor captured before this acknowledgement has
+    // no acknowledged view frontier to resume from.
+    server.tick().expect("server fresh acknowledgement tick");
+    client
+        .tick()
+        .expect("client fresh acknowledgement apply tick");
+
     let cursor = subscriber
         .borrow_mut()
         .take_resume_cursor()
@@ -629,6 +637,10 @@ fn run_process_local_resume_canary(config: &Config) -> ResumeCanarySummary {
     let resumed = server.accept_subscriber_with_resume(server_transport, AuthorId::SYSTEM, cursor);
 
     client.tick().expect("client resumed subscribe tick");
+    resumed
+        .borrow_mut()
+        .serve_current_rows(STREAM_DOCS)
+        .expect("serve resumed stream rows");
     server.tick().expect("server resumed tick");
     client.tick().expect("client resumed apply tick");
 
