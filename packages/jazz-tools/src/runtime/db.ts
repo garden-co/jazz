@@ -931,6 +931,7 @@ export class Db {
         return thisDb.isShuttingDown;
       },
       markUnauthenticated: (reason) => this.markUnauthenticated(reason),
+      clearAuthError: () => this.authStateStore.clearError(),
       onMutationError: (event) => this.handleMutationError(event),
     };
   }

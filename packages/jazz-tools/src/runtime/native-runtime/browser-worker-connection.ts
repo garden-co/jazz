@@ -32,7 +32,7 @@ export class DedicatedBrowserWorkerConnection implements BrowserWorkerConnection
     options: BrowserWorkerInitOptions,
     private readonly callbacks: Pick<
       BrowserWorkerConnectionContext,
-      "onAuthFailure" | "onFailure" | "onFollowerPortClosed"
+      "onAuthFailure" | "onAuthRestored" | "onFailure" | "onFollowerPortClosed"
     >,
   ) {
     this.onFailure = callbacks.onFailure;
@@ -72,10 +72,9 @@ export class DedicatedBrowserWorkerConnection implements BrowserWorkerConnection
     await this.request({ type: "wait-server" });
   }
 
-  updateAuth(authJson: string, sessionClaims: Record<string, unknown>): void {
-    void this.ready()
-      .then(() => this.request({ type: "update-auth", authJson, sessionClaims }))
-      .catch((error: unknown) => this.fail(asError(error)));
+  async updateAuth(authJson: string, sessionClaims: Record<string, unknown>): Promise<void> {
+    await this.ready();
+    await this.request({ type: "update-auth", authJson, sessionClaims });
   }
 
   async attachFollowerPort(
@@ -111,6 +110,11 @@ export class DedicatedBrowserWorkerConnection implements BrowserWorkerConnection
   async simulateCrash(): Promise<void> {
     await this.ready();
     await this.request({ type: "simulate-crash" });
+  }
+
+  async simulatePendingAuthConfirmation(): Promise<void> {
+    await this.ready();
+    await this.request({ type: "simulate-pending-auth-confirmation" });
   }
 
   async shutdown(): Promise<void> {
@@ -155,6 +159,10 @@ export class DedicatedBrowserWorkerConnection implements BrowserWorkerConnection
       onAuthFailure(message.reason as AuthFailureReason);
       return;
     }
+    if (message.type === "auth-restored") {
+      this.callbacks.onAuthRestored();
+      return;
+    }
     if (message.type === "follower-port-closed") {
       this.callbacks.onFollowerPortClosed(message.followerTabId, message.leadershipId);
       return;
@@ -189,8 +197,4 @@ export class DedicatedBrowserWorkerConnection implements BrowserWorkerConnection
     for (const pending of this.pending.values()) pending.reject(error);
     this.pending.clear();
   }
-}
-
-function asError(error: unknown): Error {
-  return error instanceof Error ? error : new Error(String(error));
 }

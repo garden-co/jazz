@@ -4,13 +4,13 @@ import {
   DEFAULT_BROKER_PONG_TIMEOUT_MS,
   normalizePositiveTimeout,
   selectLeaderCandidate,
-  stringifyError,
   type BrowserBrokerCandidate,
   type BrowserBrokerControlMessage,
   type BrowserBrokerTabMessage,
   type BrowserBrokerVisibility,
 } from "../runtime/browser-broker-protocol.js";
 import { INCOMPATIBLE_BROWSER_BROKER_CONFIGURATION_CODE } from "../runtime/browser-broker-errors.js";
+import { BrokerAuthRefreshController, type BrokerAuthRefreshState } from "./broker-auth-refresh.js";
 import {
   monitorWebLockRelease,
   stealAndReleaseWebLock,
@@ -97,6 +97,7 @@ let leaderFailureRetryTimer: ReturnType<typeof setTimeout> | null = null;
 let resetState: ResetState | null = null;
 const completedStorageResetOutcomes = new Map<string, StorageResetOutcome>();
 const failedLeaderRetryAfterByTabId = new Map<string, number>();
+let authRefresh = new BrokerAuthRefreshController();
 
 workerGlobal.onconnect = (event) => {
   const port = event.ports[0];
@@ -183,6 +184,8 @@ function handleHello(port: MessagePort, message: BrowserBrokerTabMessage): strin
 
   startBrokerPingTimer();
   post(port, { type: "broker-hello", brokerInstanceId });
+  const currentAuth = authRefresh.snapshot();
+  if (currentAuth) postAuthState(port, currentAuth);
   // Redeliver on every hello, including mid-reset rejoins: a requester that
   // reconnects after its reset finished must not wait out the client timeout.
   redeliverFinishedStorageResets(port);
@@ -276,6 +279,7 @@ function handleTabMessage(tabId: string, message: BrowserBrokerTabMessage): void
       leader.tabLockName = message.tabLockName;
       leader.workerLockName = message.workerLockName;
       announceLeaderReady(leader);
+      dispatchPendingAuthRefresh();
       startLeaderLockMonitors(leader);
       if (resetState?.promotedLeadershipId === message.leadershipId) {
         resetState.phase = "reconnecting";
@@ -322,6 +326,16 @@ function handleTabMessage(tabId: string, message: BrowserBrokerTabMessage): void
       return;
     case "storage-reset-ready":
       handleStorageResetReady(tabId, message.requestId, message.success, message.errorMessage);
+      return;
+    case "auth-refresh-request":
+      broadcastAuthState(authRefresh.request(tabId, message.authJson, message.sessionClaims));
+      dispatchPendingAuthRefresh();
+      return;
+    case "auth-refresh-replay":
+      if (leader?.tabId === tabId) dispatchPendingAuthRefresh();
+      return;
+    case "auth-refresh-result":
+      handleAuthRefreshResult(tabId, message);
       return;
     case "shutdown":
       if (leader?.tabId === tabId) {
@@ -411,6 +425,7 @@ function electIfNeeded(): void {
     tabLockMonitor: null,
     workerLockMonitor: null,
   };
+  beginAuthLeadership(currentLeadershipId);
 
   post(tab.port, {
     type: "become-leader",
@@ -428,8 +443,73 @@ function resetIfIdle(): void {
   replacementElectionGeneration += 1;
   replacementElectionInFlight = false;
   failedLeaderRetryAfterByTabId.clear();
+  authRefresh = new BrokerAuthRefreshController();
   stopLeaderFailureRetryTimer();
   stopBrokerPingTimer();
+}
+
+function dispatchPendingAuthRefresh(): void {
+  const pending = authRefresh.snapshot();
+  if (!pending || pending.state !== "pending") return;
+  const currentLeader = leader;
+  if (!currentLeader?.ready) return;
+  const leaderTab = tabs.get(currentLeader.tabId);
+  if (!leaderTab) return;
+  if (!authRefresh.dispatch(currentLeader.leadershipId)) return;
+  post(leaderTab.port, {
+    type: "perform-auth-refresh",
+    brokerInstanceId,
+    generation: pending.generation,
+    leadershipId: currentLeader.leadershipId,
+    requesterTabId: pending.requesterTabId,
+    authJson: pending.authJson,
+    sessionClaims: pending.sessionClaims,
+  });
+}
+
+function beginAuthLeadership(leadershipId: number): void {
+  const previousState = authRefresh.snapshot()?.state;
+  const retained = authRefresh.beginLeadership(leadershipId);
+  if (retained && previousState !== "pending" && retained.state === "pending") {
+    broadcastAuthState(retained);
+  }
+}
+
+function handleAuthRefreshResult(
+  tabId: string,
+  message: Extract<BrowserBrokerTabMessage, { type: "auth-refresh-result" }>,
+): void {
+  const pending = authRefresh.snapshot();
+  if (!pending) return;
+  if (
+    !leader ||
+    !leader.ready ||
+    leader.tabId !== tabId ||
+    leader.leadershipId !== message.leadershipId
+  ) {
+    return;
+  }
+  const result = authRefresh.acceptResult(
+    message.generation,
+    message.leadershipId,
+    message.outcome,
+    message.reason,
+  );
+  if (result.stateChanged && result.state) broadcastAuthState(result.state);
+}
+
+function broadcastAuthState(state: BrokerAuthRefreshState): void {
+  for (const tab of tabs.values()) postAuthState(tab.port, state);
+}
+
+function postAuthState(port: MessagePort, state: BrokerAuthRefreshState): void {
+  post(port, {
+    type: "auth-state",
+    brokerInstanceId,
+    generation: state.generation,
+    state: state.state,
+    ...(state.reason ? { reason: state.reason } : {}),
+  });
 }
 
 function removeTab(
@@ -794,6 +874,7 @@ async function promoteResetLeader(activeReset: ResetState): Promise<void> {
     tabLockMonitor: null,
     workerLockMonitor: null,
   };
+  beginAuthLeadership(currentLeadershipId);
 
   post(tab.port, {
     type: "become-leader",

@@ -164,6 +164,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
     leadershipId,
     workerLockName,
     onAuthFailure,
+    onAuthRestored,
     onFailure,
     onFollowerPortClosed,
   }: BrowserWorkerConnectionContext<DbConfig>): BrowserWorkerConnection {
@@ -195,7 +196,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
         logLevel: config.logLevel,
         telemetryCollectorUrl: config.telemetryCollectorUrl,
       },
-      { onAuthFailure, onFailure, onFollowerPortClosed },
+      { onAuthFailure, onAuthRestored, onFailure, onFollowerPortClosed },
     );
   }
 
@@ -204,6 +205,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
     client,
     port,
     onAuthFailure,
+    onAuthRestored,
     onFailure,
   }: BrowserFollowerConnectionContext<DbConfig>): BrowserFollowerConnection {
     const runtime = client.getRuntime();
@@ -213,6 +215,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
     const sessionClaims = resolveClientSessionSync(config)?.claims ?? {};
     const connection = new MessagePortBrowserFollowerConnection(runtime, port, sessionClaims, {
       onAuthFailure,
+      onAuthRestored,
       onFailure,
     });
     connection.updateAuth(JSON.stringify(runtimeAuth(config)), sessionClaims);

@@ -46,6 +46,7 @@ export interface DbForConnection {
   readonly runtimeSource: RuntimeSource<any>;
   readonly isShuttingDown: boolean;
   markUnauthenticated(reason: AuthFailureReason): void;
+  clearAuthError(): void;
   onMutationError(event: MutationErrorEvent): void;
 }
 

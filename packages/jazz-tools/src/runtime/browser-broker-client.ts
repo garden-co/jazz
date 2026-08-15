@@ -91,6 +91,17 @@ export interface BrowserBrokerClientOptions {
   onCloseFollowerPort?: (leadershipId: number) => void;
   onStorageResetBegin?: (requestId: string, leadershipId: number) => void | Promise<void>;
   onSchemaBlocked?: (reason: string) => void;
+  onPerformAuthRefresh?: (
+    generation: number,
+    leadershipId: number,
+    authJson: string,
+    sessionClaims: Record<string, unknown>,
+  ) => void | Promise<void>;
+  onAuthState?: (
+    generation: number,
+    state: "pending" | "authenticated" | "invalid",
+    reason?: string,
+  ) => void;
   onReconnected?: (client: BrowserBrokerClient) => void;
   onClosed?: (error: Error) => void;
   storageResetTimeoutMs?: number;
@@ -237,6 +248,29 @@ export class BrowserBrokerClient {
     this.send({
       type: "schema-ready",
       schemaFingerprint,
+    });
+  }
+
+  requestAuthRefresh(authJson: string, sessionClaims: Record<string, unknown>): void {
+    this.send({ type: "auth-refresh-request", authJson, sessionClaims });
+  }
+
+  replayAuthRefresh(): void {
+    this.send({ type: "auth-refresh-replay" });
+  }
+
+  reportAuthRefreshResult(
+    generation: number,
+    leadershipId: number,
+    outcome: "authenticated" | "invalid" | "deferred",
+    reason?: string,
+  ): void {
+    this.send({
+      type: "auth-refresh-result",
+      generation,
+      leadershipId,
+      outcome,
+      ...(reason ? { reason } : {}),
     });
   }
 
@@ -515,6 +549,27 @@ export class BrowserBrokerClient {
         return;
       case "schema-blocked":
         this.options.onSchemaBlocked?.(message.reason);
+        return;
+      case "perform-auth-refresh":
+        if (message.leadershipId !== this.leadershipId || this.role !== "leader") return;
+        void Promise.resolve(
+          this.options.onPerformAuthRefresh?.(
+            message.generation,
+            message.leadershipId,
+            message.authJson,
+            message.sessionClaims,
+          ),
+        ).catch((error) => {
+          this.reportAuthRefreshResult(
+            message.generation,
+            message.leadershipId,
+            "invalid",
+            stringifyError(error),
+          );
+        });
+        return;
+      case "auth-state":
+        this.options.onAuthState?.(message.generation, message.state, message.reason);
         return;
       case "unsupported":
         this.closeWithError(createBrowserBrokerUnsupportedError(message.reason, message.code));

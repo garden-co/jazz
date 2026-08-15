@@ -34,7 +34,7 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
     sessionClaims: Record<string, unknown>,
     private readonly callbacks: Pick<
       BrowserFollowerConnectionContext,
-      "onAuthFailure" | "onFailure"
+      "onAuthFailure" | "onAuthRestored" | "onFailure"
     >,
   ) {
     port.addEventListener("message", this.onMessage);
@@ -111,6 +111,10 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
     }
     if (message.type === "auth-failure") {
       this.callbacks.onAuthFailure(message.reason as AuthFailureReason);
+      return;
+    }
+    if (message.type === "auth-restored") {
+      this.callbacks.onAuthRestored();
       return;
     }
     if (message.type === "error") {

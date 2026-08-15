@@ -33,7 +33,10 @@ export class FollowerPortConnectionRole implements BrowserConnectionRole {
       client,
       leadershipId: this.leadershipId,
       port: this.followerDataPort,
-      onAuthFailure: (reason) => this.host.markUnauthenticated(reason),
+      // Durable auth is namespace-scoped and is delivered over the broker
+      // control plane. Data-port callbacks can be stale after a refresh.
+      onAuthFailure: () => undefined,
+      onAuthRestored: () => undefined,
       onFailure: (error) => {
         if (this.followerPortBridge !== bridge) return;
         this.callbacks.onFailure(error, this, this.leadershipId);

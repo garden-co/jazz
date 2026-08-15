@@ -25,7 +25,7 @@ export interface RuntimeTelemetryContext<RuntimeConfig extends DbConfig = DbConf
 export interface BrowserWorkerConnection {
   ready(): Promise<void>;
   waitForServerConnection(): Promise<void>;
-  updateAuth(authJson: string, sessionClaims: Record<string, unknown>): void;
+  updateAuth(authJson: string, sessionClaims: Record<string, unknown>): Promise<void>;
   attachFollowerPort(followerTabId: string, leadershipId: number, port: MessagePort): Promise<void>;
   detachFollowerPort(followerTabId: string, leadershipId: number): Promise<void>;
   disconnect(): Promise<void>;
@@ -33,6 +33,7 @@ export interface BrowserWorkerConnection {
   deleteStorage(): Promise<void>;
   /** @internal Test-only crash simulation for failover reconciliation coverage. */
   simulateCrash(): Promise<void>;
+  simulatePendingAuthConfirmation(): Promise<void>;
   shutdown(): Promise<void>;
 }
 
@@ -51,6 +52,7 @@ export interface BrowserWorkerConnectionContext<RuntimeConfig extends DbConfig =
   leadershipId: number;
   workerLockName: string;
   onAuthFailure: (reason: AuthFailureReason) => void;
+  onAuthRestored: () => void;
   onFailure: (error: unknown) => void;
   onFollowerPortClosed: (followerTabId: string, leadershipId: number) => void;
 }
@@ -61,6 +63,7 @@ export interface BrowserFollowerConnectionContext<RuntimeConfig extends DbConfig
   leadershipId: number;
   port: MessagePort;
   onAuthFailure: (reason: AuthFailureReason) => void;
+  onAuthRestored: () => void;
   onFailure: (error: unknown) => void;
 }
 

@@ -232,6 +232,72 @@ describe("BrowserBrokerClient", () => {
     await client.shutdown();
   });
 
+  it("routes a broker-authorized refresh only to the current leader and reports its generation", async () => {
+    const env = createFakeWorkerEnv();
+    const perform = vi.fn();
+    const states: Array<[number, string, string | undefined]> = [];
+    const client = await BrowserBrokerClient.connect({
+      appId: "app",
+      dbName: "db",
+      tabId: "tab-a",
+      fingerprint: "fingerprint",
+      visibility: "visible",
+      globalLike: {
+        SharedWorker: env.FakeSharedWorker,
+        MessageChannel,
+        navigator: { locks: { request() {} } },
+      },
+      onPerformAuthRefresh: perform,
+      onAuthState: (generation, state, reason) => states.push([generation, state, reason]),
+    });
+
+    dispatchPortMessage(env.workers[0]!.port, {
+      type: "leader-ready",
+      brokerInstanceId: "instance-a",
+      leaderTabId: "tab-a",
+      leadershipId: 4,
+    } satisfies BrowserBrokerControlMessage);
+    dispatchPortMessage(env.workers[0]!.port, {
+      type: "perform-auth-refresh",
+      brokerInstanceId: "instance-a",
+      generation: 6,
+      leadershipId: 3,
+      requesterTabId: "former-leader",
+      authJson: "{}",
+      sessionClaims: {},
+    } satisfies BrowserBrokerControlMessage);
+    dispatchPortMessage(env.workers[0]!.port, {
+      type: "perform-auth-refresh",
+      brokerInstanceId: "instance-a",
+      generation: 7,
+      leadershipId: 4,
+      requesterTabId: "tab-b",
+      authJson: '{"jwt_token":"new"}',
+      sessionClaims: { sub: "user" },
+    } satisfies BrowserBrokerControlMessage);
+    dispatchPortMessage(env.workers[0]!.port, {
+      type: "auth-state",
+      brokerInstanceId: "instance-a",
+      generation: 7,
+      state: "invalid",
+      reason: "invalid",
+    } satisfies BrowserBrokerControlMessage);
+
+    await waitFor(() => perform.mock.calls.length === 1, 100, "leader refresh callback");
+    expect(perform).toHaveBeenCalledWith(7, 4, '{"jwt_token":"new"}', { sub: "user" });
+    expect(states).toEqual([[7, "invalid", "invalid"]]);
+    client.reportAuthRefreshResult(7, 4, "authenticated");
+    expect(env.workers[0]!.port.postedMessages).toContainEqual(
+      expect.objectContaining({
+        type: "auth-refresh-result",
+        generation: 7,
+        leadershipId: 4,
+        outcome: "authenticated",
+      }),
+    );
+    await client.shutdown();
+  });
+
   it("does not replay reconnect-time messages into a fresh broker instance", async () => {
     const env = createFakeWorkerEnv({ brokerInstanceIds: ["instance-a", "instance-b"] });
     let client: BrowserBrokerClient;
