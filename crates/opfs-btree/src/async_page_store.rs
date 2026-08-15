@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 
 /// Metadata needed to reconstruct the exact sparse page file on open.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PageStoreMetadata {
     /// Fixed byte width of every stored page.
     pub page_size: u32,
@@ -19,6 +20,7 @@ pub struct PageStoreMetadata {
 
 /// One opaque page blob addressed only by its page identity.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct StoredPage {
     pub page_id: u64,
     pub bytes: Vec<u8>,
@@ -32,6 +34,7 @@ pub struct StoredPage {
 /// durability is allowed, but a successful commit must be visible to a later
 /// open and to all program-order reads after the awaited write resolves.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PageStoreCommit {
     pub metadata: PageStoreMetadata,
     pub writes: Vec<StoredPage>,
