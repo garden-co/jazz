@@ -97,6 +97,10 @@
 /// Re-export of the underlying groove crate used for storage setup.
 pub use groove;
 
+/// Experimental pollable persistence boundary for the async persistent-runtime
+/// design spike. It is deliberately not wired into `Db` yet.
+#[doc(hidden)]
+pub mod async_persistence_spike;
 /// Shared, fail-closed state for authority-issued authorization-scope receipts.
 pub mod authorization_scope;
 /// Shared binary row payload contract for the NAPI and WASM bindings.
