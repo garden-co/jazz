@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
-use std::io::{self, BufRead, BufReader};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::path::Path;
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -90,6 +90,8 @@ fn start_jazz_tools_server(data_dir: &Path, bound_port_file: &Path) -> Child {
             bound_port_file.to_str().expect("temp path is utf-8"),
             "--shutdown-timeout-secs",
             "1",
+            "--admin-secret",
+            "sigterm-test-secret",
         ])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -109,6 +111,35 @@ fn start_jazz_tools_server(data_dir: &Path, bound_port_file: &Path) -> Child {
         thread::sleep(Duration::from_millis(20));
     }
     child
+}
+
+#[cfg(unix)]
+fn publish_empty_schema_and_wait_for_live_core(bound_port_file: &Path, data_dir: &Path) {
+    let port = std::fs::read_to_string(bound_port_file)
+        .expect("read bound port")
+        .parse::<u16>()
+        .expect("bound port is numeric");
+    let body = r#"{"schema":{}}"#;
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect admin schema API");
+    write!(
+        stream,
+        "POST /apps/00000000-0000-0000-0000-000000000001/admin/schemas HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nX-Jazz-Admin-Secret: sigterm-test-secret\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    )
+    .expect("publish schema request");
+    let mut response = String::new();
+    stream
+        .read_to_string(&mut response)
+        .expect("read schema publish response");
+    assert!(
+        response.starts_with("HTTP/1.1 201"),
+        "schema publication failed: {response}"
+    );
+    assert!(
+        data_dir.join("server-shell.rocksdb").is_dir(),
+        "published schema must start a live core backed by RocksDB"
+    );
 }
 
 fn schema_hex(schema: &JazzSchema) -> String {
@@ -643,6 +674,7 @@ fn jazz_tools_server_sigterm_exits_cleanly_and_releases_storage() {
     let data_dir = temp_dir.path().join("data");
     let first_port_file = temp_dir.path().join("first-port");
     let mut first = start_jazz_tools_server(&data_dir, &first_port_file);
+    publish_empty_schema_and_wait_for_live_core(&first_port_file, &data_dir);
 
     // SAFETY: `first.id()` names the live child process spawned above.
     let result = unsafe { libc::kill(first.id() as libc::pid_t, libc::SIGTERM) };
@@ -653,6 +685,7 @@ fn jazz_tools_server_sigterm_exits_cleanly_and_releases_storage() {
     // the process-local storage lock rather than merely stopping the listener.
     let second_port_file = temp_dir.path().join("second-port");
     let mut second = start_jazz_tools_server(&data_dir, &second_port_file);
+    assert!(data_dir.join("server-shell.rocksdb").is_dir());
     // SAFETY: `second.id()` names the live child process spawned above.
     let result = unsafe { libc::kill(second.id() as libc::pid_t, libc::SIGTERM) };
     assert_eq!(result, 0, "send SIGTERM to restarted jazz-tools server");

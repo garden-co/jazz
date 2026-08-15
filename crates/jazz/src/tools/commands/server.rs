@@ -67,11 +67,20 @@ pub async fn run(
     let shutdown = state.shutdown.clone();
     // Install the process signal handler before publishing readiness. Tests and
     // supervisors may send SIGTERM as soon as the bound-port file appears.
-    let mut sigterm_task = spawn_sigterm_shutdown_task(shutdown.clone())?;
-    if let Some(path) = bound_port_file {
-        std::fs::write(&path, bound_addr.port().to_string())
-            .map_err(|e| format!("failed to write bound port file {path}: {e}"))?;
-    }
+    let mut sigterm_task = install_signal_before_readiness(
+        || spawn_sigterm_shutdown_task(shutdown.clone()),
+        || {
+            if let Some(path) = bound_port_file {
+                std::fs::write(&path, bound_addr.port().to_string()).map_err(|error| {
+                    std::io::Error::new(
+                        error.kind(),
+                        format!("failed to write bound port file {path}: {error}"),
+                    )
+                })?;
+            }
+            Ok(())
+        },
+    )?;
 
     info!("Listening on http://{}", bound_addr);
     info!("Open the inspector: {}", inspector_link);
@@ -175,6 +184,15 @@ pub async fn run(
     Ok(())
 }
 
+fn install_signal_before_readiness<T, E>(
+    install_signal: impl FnOnce() -> Result<T, E>,
+    publish_readiness: impl FnOnce() -> Result<(), E>,
+) -> Result<T, E> {
+    let signal = install_signal()?;
+    publish_readiness()?;
+    Ok(signal)
+}
+
 #[cfg(unix)]
 fn spawn_sigterm_shutdown_task(
     shutdown: ShutdownController,
@@ -231,7 +249,46 @@ fn percent_encode_fragment_value(input: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::build_inspector_link;
+    use std::cell::RefCell;
+
+    use super::{build_inspector_link, install_signal_before_readiness};
+
+    #[test]
+    fn signal_registration_precedes_readiness_publication() {
+        let events = RefCell::new(Vec::new());
+        let installed = install_signal_before_readiness(
+            || {
+                events.borrow_mut().push("signal-installed");
+                Ok::<_, ()>(7)
+            },
+            || {
+                events.borrow_mut().push("readiness-published");
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(installed, 7);
+        assert_eq!(
+            events.into_inner(),
+            ["signal-installed", "readiness-published"]
+        );
+    }
+
+    #[test]
+    fn failed_signal_registration_never_publishes_readiness() {
+        let readiness_published = RefCell::new(false);
+        let result = install_signal_before_readiness(
+            || Err::<(), _>("signal registration failed"),
+            || {
+                *readiness_published.borrow_mut() = true;
+                Ok(())
+            },
+        );
+
+        assert_eq!(result, Err("signal registration failed"));
+        assert!(!readiness_published.into_inner());
+    }
 
     #[test]
     fn inspector_link_percent_encodes_fragment_values() {
