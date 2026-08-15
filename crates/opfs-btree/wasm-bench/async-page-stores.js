@@ -26,7 +26,7 @@ function tx(db, mode) {
 }
 
 export class IndexedDbPageStore {
-  static async open(name, pageSize) {
+  static async open(name) {
     const opening = indexedDB.open(name, 1);
     opening.onupgradeneeded = () => opening.result.createObjectStore("pages");
     return new IndexedDbPageStore(name, await request(opening));
