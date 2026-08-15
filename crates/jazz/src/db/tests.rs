@@ -6732,6 +6732,209 @@ fn edge_route_capacity_rejects_instead_of_reporting_edge_acceptance() {
     ));
 }
 
+/// An admitted Edge routes a terminal fate from its selected upstream authority
+/// to exactly the downstream client that uploaded the commit.
+///
+/// This deliberately reaches the route registry directly because the contract
+/// is below the public database API: it proves that authenticated session
+/// admission binds the parked route to one authority epoch before a websocket
+/// adapter or a server lifecycle can obscure the exact wire recipient.
+///
+/// ```text
+/// alice --CommitUnit--> edge --park(tx, core epoch)--> core
+/// alice <--FateUpdate-- edge <--FateUpdate------------ core
+/// ```
+#[test]
+fn admitted_edge_session_routes_selected_authority_fate_to_uploading_client() {
+    let schema = schema();
+    let alice = AuthorId::from_bytes([0xa1; 16]);
+    let edge_node = NodeUuid::from_bytes([0xe0; 16]);
+    let core_node = NodeUuid::from_bytes([0xc0; 16]);
+    let edge = open_core(0xe0, AuthorId::SYSTEM, &schema);
+
+    // The upstream endpoint is the authority that is allowed to discharge a
+    // downstream Edge-accepted write. The client endpoint is deliberately a
+    // different admitted session, so it cannot supply that authority context.
+    let (edge_upstream_transport, core_transport) =
+        duplex_with_admitted_session_context(AuthorId::SYSTEM, edge_node, 41, core_node, 97);
+    let edge_upstream = edge.server.connect_upstream(edge_upstream_transport);
+    let core = open_core(0xc0, AuthorId::SYSTEM, &schema);
+    let core_session = core.accept_subscriber(core_transport, AuthorId::SYSTEM);
+
+    let client = open_db(0xa1, alice, &schema);
+    let (client_transport, edge_transport) = duplex_with_admitted_session_context(
+        alice,
+        NodeUuid::from_bytes([0xa1; 16]),
+        11,
+        edge_node,
+        13,
+    );
+    let _client_upstream = client.connect_upstream(client_transport);
+    let edge_client = edge.server.accept_edge_authority_subscriber_with_claims(
+        edge_transport,
+        alice,
+        BTreeMap::new(),
+    );
+
+    let write = client
+        .insert(
+            "todos",
+            BTreeMap::from([("title".to_owned(), Value::String("routed".to_owned()))]),
+        )
+        .unwrap();
+    let tx_id = write.mergeable_tx_id();
+    client.tick().unwrap();
+    edge.tick().unwrap();
+
+    let expected_authority = AuthorityContext {
+        authority: *core_node.as_bytes(),
+        link: *AuthorId::SYSTEM.as_bytes(),
+        connection_id: 41,
+        connection_epoch: 97,
+        claims_revision: 0,
+        policy_epoch: 0,
+        authorization_progress: 0,
+        settled_through: 0,
+    };
+    let routes = edge.server.edge_fate_routes.borrow();
+    let routes_for_tx = routes.get(&tx_id).expect("edge must park the upload route");
+    assert_eq!(routes_for_tx.len(), 1);
+    assert_eq!(routes_for_tx[0].authority, expected_authority);
+    drop(routes);
+
+    // Scope receipts advance authorization metadata on the same physical
+    // connection. They must not turn that admitted link into a different fate
+    // authority: FateUpdate carries no receipt generation of its own.
+    {
+        let mut edge_upstream = edge_upstream.borrow_mut();
+        let ConnectionLink::Upstream {
+            expected_scope_authority,
+            ..
+        } = &mut edge_upstream.link
+        else {
+            panic!("edge upstream must retain its admitted authority context");
+        };
+        let authority_context = expected_scope_authority
+            .as_mut()
+            .expect("admitted authority context");
+        authority_context.claims_revision = 3;
+        authority_context.policy_epoch = 5;
+        authority_context.authorization_progress = 7;
+        authority_context.settled_through = 11;
+    }
+
+    let fate = SyncMessage::FateUpdate {
+        tx_id,
+        fate: Fate::Accepted,
+        global_seq: Some(GlobalSeq(17)),
+        durability: Some(DurabilityTier::Global),
+    };
+
+    // Receipt metadata is intentionally not a fate-route discriminator, but
+    // every physical link discriminator still is. A FateUpdate from a
+    // different epoch, local connection, authority, or admitted subject must
+    // remain unable to discharge Alice's parked route.
+    let advanced_context = {
+        let edge_upstream = edge_upstream.borrow();
+        let ConnectionLink::Upstream {
+            expected_scope_authority,
+            ..
+        } = &edge_upstream.link
+        else {
+            panic!("edge upstream must retain its admitted authority context");
+        };
+        expected_scope_authority.expect("advanced authority context")
+    };
+    for physically_different in [
+        AuthorityContext {
+            connection_id: advanced_context.connection_id.wrapping_add(1),
+            ..advanced_context
+        },
+        AuthorityContext {
+            connection_epoch: advanced_context.connection_epoch.wrapping_add(1),
+            ..advanced_context
+        },
+        AuthorityContext {
+            authority: *NodeUuid::from_bytes([0xc2; 16]).as_bytes(),
+            ..advanced_context
+        },
+        AuthorityContext {
+            link: *AuthorId::from_bytes([0xb2; 16]).as_bytes(),
+            ..advanced_context
+        },
+    ] {
+        {
+            let mut edge_upstream = edge_upstream.borrow_mut();
+            let ConnectionLink::Upstream {
+                expected_scope_authority,
+                ..
+            } = &mut edge_upstream.link
+            else {
+                unreachable!("edge upstream shape remains stable");
+            };
+            *expected_scope_authority = Some(physically_different);
+        }
+        core_session
+            .borrow_mut()
+            .transport
+            .send(SyncMessage::FateUpdate {
+                tx_id,
+                fate: Fate::Rejected(RejectionReason::MalformedCommit(
+                    "wrong physical link".to_owned(),
+                )),
+                global_seq: None,
+                durability: None,
+            })
+            .unwrap();
+        edge_upstream.borrow_mut().tick().unwrap();
+        assert!(
+            edge_client.borrow().downstream_fates.borrow().is_empty(),
+            "a physically distinct authority context must not reach Alice"
+        );
+        assert_eq!(
+            edge.node().borrow_mut().transaction_state(tx_id).unwrap().0,
+            Fate::Pending,
+            "a rejected fate from a different physical link must not alter edge state"
+        );
+    }
+    {
+        let mut edge_upstream = edge_upstream.borrow_mut();
+        let ConnectionLink::Upstream {
+            expected_scope_authority,
+            ..
+        } = &mut edge_upstream.link
+        else {
+            unreachable!("edge upstream shape remains stable");
+        };
+        *expected_scope_authority = Some(advanced_context);
+    }
+    core_session
+        .borrow_mut()
+        .transport
+        .send(fate.clone())
+        .unwrap();
+    // Step only the selected upstream connection. This makes the exact
+    // downstream fate observable before the client session consumes it.
+    edge_upstream.borrow_mut().tick().unwrap();
+    assert_eq!(
+        edge_client.borrow().downstream_fates.borrow().as_slice(),
+        [fate.clone()],
+        "the authority's terminal fate must be queued once for Alice's session"
+    );
+    assert!(
+        !edge.server.edge_fate_routes.borrow().contains_key(&tx_id),
+        "terminal delivery must retire its exact authority route"
+    );
+
+    edge_client.borrow_mut().tick().unwrap();
+    client.tick().unwrap();
+    assert_eq!(write.write_state().unwrap().fate, Fate::Accepted);
+    assert_eq!(
+        write.write_state().unwrap().durability,
+        DurabilityTier::Global
+    );
+}
+
 #[test]
 fn stale_upstream_epoch_cannot_settle_routed_local_fate_before_selected_epoch() {
     let schema = schema();
@@ -7022,6 +7225,77 @@ fn edge_parks_downstream_fate_until_a_later_authority_connects() {
         DurabilityTier::Global
     );
     assert!(edge.server.edge_fate_routes.borrow().is_empty());
+}
+
+/// The raw Edge ingestion path records no fate route when a client writes
+/// before normal upstream admission.
+///
+/// This is an internal lifecycle-boundary test: a public websocket race only
+/// exposes the symptom (a Global wait that never resolves), while the decisive
+/// contract is that Ready publication happens after this route can be bound;
+/// the dynamic-shell admission test enforces that boundary externally.
+///
+/// ```text
+/// alice --write--> edge (no upstream yet) --later attach--> core
+///                    \-- no route is available for alice yet
+/// ```
+#[test]
+fn edge_write_before_upstream_admission_has_no_fate_route() {
+    let schema = schema();
+    let alice = AuthorId::from_bytes([0xa1; 16]);
+    let edge_node = NodeUuid::from_bytes([0xe0; 16]);
+    let core_node = NodeUuid::from_bytes([0xc0; 16]);
+    let edge = open_core(0xe0, AuthorId::SYSTEM, &schema);
+    let client = open_db(0xa1, alice, &schema);
+    let (client_transport, edge_transport) = duplex_with_admitted_session_context(
+        alice,
+        NodeUuid::from_bytes([0xa1; 16]),
+        11,
+        edge_node,
+        13,
+    );
+    let _client_upstream = client.connect_upstream(client_transport);
+    let edge_client = edge.server.accept_edge_authority_subscriber_with_claims(
+        edge_transport,
+        alice,
+        BTreeMap::new(),
+    );
+
+    let write = client
+        .insert(
+            "todos",
+            BTreeMap::from([("title".to_owned(), Value::String("startup race".to_owned()))]),
+        )
+        .unwrap();
+    let tx_id = write.mergeable_tx_id();
+    client.tick().unwrap();
+    edge.tick().unwrap();
+    client.tick().unwrap();
+    assert_eq!(
+        write.write_state().unwrap().durability,
+        DurabilityTier::Edge
+    );
+    assert!(
+        !edge.server.edge_fate_routes.borrow().contains_key(&tx_id),
+        "a shell published before upstream admission currently parks no authority route"
+    );
+
+    let (edge_upstream_transport, core_transport) =
+        duplex_with_admitted_session_context(AuthorId::SYSTEM, edge_node, 41, core_node, 97);
+    let _edge_upstream = edge.server.connect_upstream(edge_upstream_transport);
+    let core = open_core(0xc0, AuthorId::SYSTEM, &schema);
+    let _core_session = core.accept_subscriber(core_transport, AuthorId::SYSTEM);
+    edge.tick().unwrap();
+    core.tick().unwrap();
+    edge.tick().unwrap();
+    edge_client.borrow_mut().tick().unwrap();
+    client.tick().unwrap();
+
+    assert_eq!(
+        write.write_state().unwrap().durability,
+        DurabilityTier::Edge,
+        "a late Core fate cannot reach a client whose write was accepted before route admission"
+    );
 }
 
 #[test]

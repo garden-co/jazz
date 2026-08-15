@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock as StdRwLock};
 use std::thread;
 
@@ -74,12 +75,93 @@ pub struct ServerState {
     /// Sendable handle to the local-owner server shell for the websocket route.
     pub(crate) core_server_shell: StdRwLock<Option<core_server_shell::ServerShellHandle>>,
     pub(crate) core_server_shell_storage_config: Option<StorageConfig>,
+    /// A dynamically bootstrapped Edge has a valid local catalogue before it
+    /// has an authenticated normal upstream session. Do not admit downstream
+    /// writes in that window: they cannot yet be bound to a fate route.
+    dynamic_edge_upstream_ready: AtomicBool,
     pub shutdown: ShutdownController,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only synchronization point immediately before the production
+    /// snapshot helper acquires the shell lock.
+    static CLIENT_SHELL_SNAPSHOT_BEFORE_LOCK_HOOK: std::cell::RefCell<Option<Box<dyn FnMut()>>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn run_client_shell_snapshot_before_lock_hook() {
+    CLIENT_SHELL_SNAPSHOT_BEFORE_LOCK_HOOK.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().as_mut() {
+            hook();
+        }
+    });
+}
+
+#[cfg(test)]
+fn with_client_shell_snapshot_before_lock_hook<T>(
+    hook: impl FnMut() + 'static,
+    callback: impl FnOnce() -> T,
+) -> T {
+    CLIENT_SHELL_SNAPSHOT_BEFORE_LOCK_HOOK.with(|slot| {
+        assert!(
+            slot.borrow().is_none(),
+            "snapshot hook is already installed"
+        );
+        *slot.borrow_mut() = Some(Box::new(hook));
+    });
+    let result = callback();
+    CLIENT_SHELL_SNAPSHOT_BEFORE_LOCK_HOOK.with(|slot| {
+        slot.borrow_mut().take();
+    });
+    result
+}
+
+/// Snapshot a shell and its dynamic-admission generation under one lock.
+///
+/// The readiness flag is atomic because the connector publishes it from an
+/// async task, but it is read while the shell lock is held. Dynamic bootstrap
+/// updates both values under that same write lock, so a client cannot pair the
+/// old generation's `true` with the newly published shell.
+fn client_shell_snapshot<T: Clone>(
+    topology: ServerTopology,
+    shell: &StdRwLock<Option<T>>,
+    dynamic_edge_upstream_ready: &AtomicBool,
+) -> Option<T> {
+    #[cfg(test)]
+    run_client_shell_snapshot_before_lock_hook();
+    let shell = shell.read().unwrap();
+    if topology == ServerTopology::Edge && !dynamic_edge_upstream_ready.load(Ordering::Acquire) {
+        return None;
+    }
+    shell.clone()
 }
 
 impl ServerState {
     pub(crate) fn core_server_shell(&self) -> Option<core_server_shell::ServerShellHandle> {
         self.core_server_shell.read().unwrap().clone()
+    }
+
+    /// Shell eligible for an ordinary downstream websocket session. Bootstrap
+    /// code may inspect the raw shell, but a dynamically bootstrapped Edge
+    /// remains RetryLater until its regular authenticated upstream is attached.
+    pub(crate) fn core_server_shell_for_client(
+        &self,
+    ) -> Option<core_server_shell::ServerShellHandle> {
+        client_shell_snapshot(
+            self.topology,
+            &self.core_server_shell,
+            &self.dynamic_edge_upstream_ready,
+        )
+    }
+
+    pub(crate) fn mark_dynamic_edge_upstream_ready(&self) {
+        // Serialize this Ready transition with dynamic shell publication and
+        // client snapshots. The connector calls this only after it has
+        // attached the normal upstream to this shell generation.
+        let _shell = self.core_server_shell.read().unwrap();
+        self.dynamic_edge_upstream_ready
+            .store(true, Ordering::Release);
     }
 
     pub(crate) fn start_core_server_shell(
@@ -130,6 +212,8 @@ impl ServerState {
                 edge_cache_budget,
                 snapshot,
             )?;
+        self.dynamic_edge_upstream_ready
+            .store(false, Ordering::Release);
         *core_server_shell = Some(started.clone());
         Ok(started)
     }
@@ -244,8 +328,10 @@ fn run_shutdown_finalizer(state: Arc<ServerState>) {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::mpsc;
+    use std::sync::{Arc, RwLock};
+    use std::thread;
     use std::time::Duration;
 
     use super::*;
@@ -363,8 +449,51 @@ mod tests {
             jwt_verifier: None,
             core_server_shell: StdRwLock::new(None),
             core_server_shell_storage_config: None,
+            dynamic_edge_upstream_ready: AtomicBool::new(true),
             shutdown: ShutdownController::new(timeout),
         })
+    }
+
+    /// Dynamic publication must not let a downstream reader pair the prior
+    /// generation's readiness with the newly published shell. The test hook
+    /// synchronizes the actual production snapshot helper at its pre-lock
+    /// boundary; it is not a hand-written model of that helper.
+    #[test]
+    fn dynamic_client_shell_snapshot_cannot_mix_ready_generation_with_new_shell() {
+        let shell = Arc::new(RwLock::new(Some("old")));
+        let ready = Arc::new(AtomicBool::new(true));
+        let mut write = shell.write().unwrap();
+        let (at_lock_boundary_tx, at_lock_boundary_rx) = mpsc::channel();
+        let (continue_tx, continue_rx) = mpsc::channel();
+        let fixed_shell = Arc::clone(&shell);
+        let fixed_ready = Arc::clone(&ready);
+        let fixed_reader = thread::spawn(move || {
+            with_client_shell_snapshot_before_lock_hook(
+                move || {
+                    at_lock_boundary_tx
+                        .send(())
+                        .expect("tell publisher reader reached production lock boundary");
+                    continue_rx
+                        .recv()
+                        .expect("publisher releases production reader");
+                },
+                || client_shell_snapshot(ServerTopology::Edge, &fixed_shell, &fixed_ready),
+            )
+        });
+        at_lock_boundary_rx
+            .recv()
+            .expect("reader reached production helper lock boundary");
+        *write = Some("new");
+        ready.store(false, Ordering::Release);
+        drop(write);
+        continue_tx
+            .send(())
+            .expect("release reader after publication");
+        assert_eq!(
+            fixed_reader.join().expect("fixed reader joins"),
+            None,
+            "the lock-first production helper observes the new generation as unready"
+        );
     }
 
     #[tokio::test]

@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use crate::db::WireTransportAdapter;
@@ -203,6 +204,7 @@ impl ServerBuilder {
             http_client,
             core_server_shell: std::sync::RwLock::new(core_server_shell),
             core_server_shell_storage_config,
+            dynamic_edge_upstream_ready: AtomicBool::new(true),
             shutdown: crate::tools::server::ShutdownController::new(self.shutdown_timeout),
         });
 
@@ -475,6 +477,7 @@ fn spawn_edge_upstream_connector(
                         .await
                         .is_ok()
                     {
+                        state.mark_dynamic_edge_upstream_ready();
                         shell.notify_activity();
                         return;
                     }
@@ -681,7 +684,7 @@ mod tests {
 
         let ready_shell = tokio::time::timeout(Duration::from_secs(3), async {
             loop {
-                if let Some(shell) = edge_state.core_server_shell() {
+                if let Some(shell) = edge_state.core_server_shell_for_client() {
                     return shell;
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
@@ -713,6 +716,72 @@ mod tests {
         assert!(
             client.is_ok(),
             "ready edge admits first normal client: {client:?}"
+        );
+
+        edge_task.abort();
+        core_task.abort();
+    }
+
+    /// A dynamically bootstrapped Edge may have adopted a catalogue before its
+    /// normal upstream session has been admitted. A downstream websocket in
+    /// that interval must receive RetryLater rather than create a write whose
+    /// final fate has no route back to its client session.
+    #[tokio::test]
+    async fn dynamic_edge_rejects_client_until_normal_upstream_session_is_attached() {
+        let app_id = AppId::from_name("dynamic-edge-client-before-upstream");
+        let auth = AuthConfig {
+            admin_secret: Some("bootstrap-secret".to_owned()),
+            ..Default::default()
+        };
+        let core = ServerBuilder::new(app_id)
+            .with_schema(dynamic_bootstrap_schema())
+            .with_auth_config(auth.clone())
+            .with_storage(StorageBackend::InMemory)
+            .build()
+            .await
+            .expect("build authority core");
+        let (_core_url, core_state, core_task) = serve_for_dynamic_bootstrap(core).await;
+        let snapshot = core_state
+            .core_server_shell()
+            .expect("core has runtime shell")
+            .trusted_catalogue_snapshot_for_test()
+            .await
+            .expect("read authority catalogue");
+
+        // The unreachable upstream keeps the ordinary connector in its retry
+        // loop. Publish only the authenticated snapshot as the narrow window
+        // that used to admit a client before that connector attached.
+        let edge = ServerBuilder::new(app_id)
+            .with_auth_config(auth.clone())
+            .with_storage(StorageBackend::InMemory)
+            .with_upstream_url("http://127.0.0.1:9")
+            .build()
+            .await
+            .expect("build blank dynamic edge");
+        edge.state
+            .start_dynamic_edge_shell(snapshot, None)
+            .expect("adopt dynamic edge catalogue");
+        assert!(edge.state.core_server_shell().is_some());
+        assert!(
+            edge.state.core_server_shell_for_client().is_none(),
+            "raw adopted shell is not externally Ready before normal upstream admission"
+        );
+        let (edge_url, _edge_state, edge_task) = serve_for_dynamic_bootstrap(edge).await;
+
+        let error = WebSocketTransport::connect(
+            &edge_url,
+            app_id,
+            AuthorId::from_bytes([0x44; 16]),
+            crate::tools::websocket_prelude_auth::AuthConfig {
+                admin_secret: Some("bootstrap-secret".to_owned()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("downstream admission waits for the normal upstream route");
+        assert!(
+            matches!(error, crate::tools::server::core_websocket_transport::WebSocketClientError::ServerRejected(ref message) if message.contains("bootstrapping") && message.contains("retry shortly")),
+            "unready dynamic edge must give retryable admission failure: {error}"
         );
 
         edge_task.abort();

@@ -462,7 +462,8 @@ fn prune_edge_fate_routes(
 ) {
     routes.retain(|_, pending| {
         pending.retain(|route| {
-            route.queue.upgrade().is_some() && admitted.is_some_and(|ctx| ctx == route.authority)
+            route.queue.upgrade().is_some()
+                && admitted.is_some_and(|ctx| ctx.same_admitted_link(route.authority))
         });
         !pending.is_empty()
     });
@@ -8437,8 +8438,11 @@ where
                                 // their normal fate transport.
                                 let routed = self.edge_fate_routes.borrow().contains_key(tx_id);
                                 if routed
-                                    && (expected_scope_authority.is_none()
-                                        || admitted != *expected_scope_authority)
+                                    && !matches!(
+                                        (admitted, *expected_scope_authority),
+                                        (Some(admitted), Some(expected))
+                                            if admitted.same_admitted_link(expected)
+                                    )
                                 {
                                     drop_peer_request(&self.node);
                                     continue;
@@ -8499,7 +8503,9 @@ where
                                 if let Some(pending) = routes.get_mut(&tx_id) {
                                     let mut remaining = Vec::new();
                                     for route in std::mem::take(pending) {
-                                        if Some(route.authority) == authority {
+                                        if authority.is_some_and(|authority| {
+                                            route.authority.same_admitted_link(authority)
+                                        }) {
                                             if let Some(queue) = route.queue.upgrade() {
                                                 queue.borrow_mut().push(fate.clone());
                                             }
@@ -9477,7 +9483,7 @@ where
                                             let pending = routes.get(&tx_id);
                                             let already_routed = pending.is_some_and(|pending| {
                                                 pending.iter().any(|route| {
-                                                    route.authority == authority
+                                                    route.authority.same_admitted_link(authority)
                                                         && route.queue.upgrade().is_some_and(
                                                             |queue| {
                                                                 Rc::ptr_eq(
