@@ -2,7 +2,7 @@ export const REACT_NATIVE_SQLITE_STORAGE_UNIMPLEMENTED_ERROR =
   "React Native SQLite storage driver is not yet implemented — see src/react-native/README.md";
 
 export const REACT_NATIVE_PERSISTENT_RUNTIME_UNAVAILABLE_ERROR =
-  'React Native persistent storage is not available in the v2 runtime — use driver: { type: "memory" } or see src/react-native/README.md';
+  "React Native persistent storage is not available in the v2 runtime — see src/react-native/README.md; memory mode is unverified scaffolding, not device-supported persistence";
 
 function throwUnimplemented(): never {
   throw new Error(REACT_NATIVE_SQLITE_STORAGE_UNIMPLEMENTED_ERROR);
@@ -20,6 +20,13 @@ export interface ReactNativeSqliteConnection extends ReactNativeSqliteTransactio
   close(): Promise<void>;
 }
 
+/**
+ * Proposal-only storage ABI. The v2 runtime cannot consume this driver and
+ * rejects persistent startup before calling it.
+ *
+ * @deprecated Do not implement or pass this interface until a native v2
+ * ordered-KV runtime is available.
+ */
 export interface ReactNativeSqliteStorageDriver {
   readonly type: "react-native-sqlite";
   open(databaseName: string): Promise<ReactNativeSqliteConnection>;

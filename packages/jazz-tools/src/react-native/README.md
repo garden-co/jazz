@@ -5,18 +5,22 @@ It is compile-level scaffolding only: the React hooks, provider, client factory,
 typed schema exports, and auth helper all typecheck, but persistent storage does
 not run yet.
 
-The current `createDb()` path installs `ReactNativeRuntimeSource`. Explicit
-`driver: { type: "memory" }` uses the v2 WASM runtime and is covered by a real
-startup/query regression. Persistent configurations fail before opening any
-SQLite driver with:
+The current `createDb()` path installs `ReactNativeRuntimeSource`. Persistent
+configurations fail before opening any SQLite driver with:
 
-`React Native persistent storage is not available in the v2 runtime — use driver: { type: "memory" } or see src/react-native/README.md`
+`React Native persistent storage is not available in the v2 runtime — see src/react-native/README.md; memory mode is unverified scaffolding, not device-supported persistence`
 
 The fail-fast boundary is intentional. A `ReactNativeSqliteStorageDriver`
 cannot yet be installed into the v2 Rust ordered-KV runtime. Merely opening a
 SQLite connection and then delegating queries to WASM would leave Jazz data in
-the WASM store and falsely claim persistence. The driver interfaces remain as
-the proposed storage ABI, but supplying one does not opt into persistence yet.
+the WASM store and falsely claim persistence. The deprecated driver interfaces
+remain as a proposed storage ABI, but supplying one is rejected before
+`open()` and does not opt into persistence.
+
+Explicit `driver: { type: "memory" }` currently reaches the v2 WASM runtime in
+the Node/forks test harness. That regression proves TypeScript wiring only. It
+has not run under Metro/Hermes on iOS or Android and must not be described as a
+supported React Native runtime mode until an actual device smoke passes.
 
 Open decisions for the RN owner:
 

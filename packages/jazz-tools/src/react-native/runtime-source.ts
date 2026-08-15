@@ -8,10 +8,13 @@ import { REACT_NATIVE_PERSISTENT_RUNTIME_UNAVAILABLE_ERROR } from "./storage.js"
 
 export interface ReactNativeDbConfig extends DbConfig {
   /**
-   * Future SQLite storage driver hook for React Native persistence.
+   * Proposal-only SQLite storage hook for a future native v2 runtime.
    *
-   * The current scaffold typechecks only. The default driver deliberately
-   * throws a clear implementation-pending error before opening the runtime.
+   * The current runtime does not install or open this driver. Every persistent
+   * configuration is rejected before `sqliteStorage.open()` can run.
+   *
+   * @deprecated Ignored and rejected; do not supply this option until the
+   * native ordered-KV runtime exists.
    */
   sqliteStorage?: ReactNativeSqliteStorageDriver;
 }

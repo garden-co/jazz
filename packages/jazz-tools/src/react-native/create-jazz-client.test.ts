@@ -11,7 +11,7 @@ const app = s.defineApp({
   notes: s.table({ title: s.string() }),
 });
 
-describe("React Native client launch", () => {
+describe("React Native binding scaffolding in the Node test runtime", () => {
   let client: JazzClient | undefined;
 
   afterEach(async () => {
@@ -19,7 +19,7 @@ describe("React Native client launch", () => {
     client = undefined;
   });
 
-  it("launches the public client with the in-memory driver and can query", async () => {
+  it("routes explicit memory configuration through the Node WASM harness", async () => {
     client = await createJazzClient({
       appId: "react-native-memory-launch-test",
       driver: { type: "memory" },
@@ -28,7 +28,13 @@ describe("React Native client launch", () => {
     await expect(client.db.all(app.notes)).resolves.toEqual([]);
   });
 
-  it("rejects persistent startup without pretending an injected SQLite driver stores Jazz data", async () => {
+  it("rejects the default persistent configuration", async () => {
+    await expect(
+      createDb({ appId: "react-native-default-persistent-boundary-test" }),
+    ).rejects.toThrow(REACT_NATIVE_PERSISTENT_RUNTIME_UNAVAILABLE_ERROR);
+  });
+
+  it("rejects an injected SQLite driver before opening it", async () => {
     const open = vi.fn();
     const sqliteStorage: ReactNativeSqliteStorageDriver = {
       type: "react-native-sqlite",
@@ -42,7 +48,7 @@ describe("React Native client launch", () => {
     expect(open).not.toHaveBeenCalled();
   });
 
-  it("can shut down and reopen the supported in-memory runtime", async () => {
+  it("can shut down and reopen the Node-only memory scaffold", async () => {
     const config = {
       appId: "react-native-memory-reopen-test",
       driver: { type: "memory" as const },
