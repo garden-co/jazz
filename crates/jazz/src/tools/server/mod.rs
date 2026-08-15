@@ -289,4 +289,26 @@ mod tests {
             "storage must not be closed while app request guards are still active"
         );
     }
+
+    #[tokio::test]
+    async fn shutdown_finalization_closes_dynamic_catalogue_storage_after_drain() {
+        let close_calls = Arc::new(AtomicUsize::new(0));
+        let state = build_test_state_with_storage(
+            Box::new(CloseObservingStorage {
+                close_calls: Arc::clone(&close_calls),
+            }),
+            Duration::from_millis(10),
+        );
+
+        state.shutdown.request_shutdown();
+        let phase = state.run_shutdown_finalization().await;
+
+        assert_eq!(phase, ShutdownPhase::StorageClosed);
+        assert_eq!(state.shutdown.phase(), ShutdownPhase::StorageClosed);
+        assert_eq!(
+            close_calls.load(Ordering::SeqCst),
+            1,
+            "drained shutdown must explicitly close dynamic catalogue storage"
+        );
+    }
 }
