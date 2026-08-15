@@ -1215,7 +1215,12 @@ fn append_exists_policy_clause(
     let source_column = source_column.expect("join_column and source_column are set together");
 
     if join_column == "id" {
-        Ok(query.join_via_row_id(exists_table, source_column, filters))
+        Ok(query.join_via_row_id_with_correlations(
+            exists_table,
+            source_column,
+            correlated_filters,
+            filters,
+        ))
     } else if correlated_filters.is_empty() {
         Ok(query.join_via_column(exists_table, join_column, source_column, filters))
     } else {
@@ -3040,11 +3045,13 @@ mod tests {
             .table(
                 TableSchemaBuilder::new("chats")
                     .column("name", ColumnType::Text)
+                    .column("createdBy", ColumnType::Text)
                     .column("isPublic", ColumnType::Boolean),
             )
             .table(
                 TableSchemaBuilder::new("messages")
                     .fk_column("chatId", "chats")
+                    .column("createdBy", ColumnType::Text)
                     .column("text", ColumnType::Text)
                     .policies(TablePolicies::new().with_select(PolicyExpr::Exists {
                         table: "chats".to_owned(),
@@ -3061,6 +3068,14 @@ mod tests {
                                 column: "isPublic".to_owned(),
                                 op: CmpOp::Eq,
                                 value: PolicyValue::Literal(Value::Boolean(true)),
+                            },
+                            PolicyExpr::Cmp {
+                                column: "createdBy".to_owned(),
+                                op: CmpOp::Eq,
+                                value: PolicyValue::SessionRef(vec![
+                                    "__jazz_outer_row".to_owned(),
+                                    "createdBy".to_owned(),
+                                ]),
                             },
                         ])),
                     })),
@@ -3081,6 +3096,13 @@ mod tests {
         assert_eq!(join.on_column, "id");
         assert_eq!(join.target, JoinTarget::RowId);
         assert_eq!(join.source_column.as_deref(), Some("chatId"));
+        assert_eq!(
+            join.correlated_filters,
+            vec![JoinCorrelation {
+                join_column: "createdBy".to_owned(),
+                source_column: "createdBy".to_owned(),
+            }]
+        );
         assert_eq!(
             join.filters,
             vec![Predicate::Eq(
