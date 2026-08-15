@@ -6,6 +6,7 @@
     "bench:wasm:opfs": "node wasm-bench/run-opfs-bench.cjs",
     "bench:wasm:opfs:mixed": "node wasm-bench/run-opfs-bench.cjs --profile mixed",
     "bench:wasm:opfs:range": "node wasm-bench/run-opfs-bench.cjs --profile range",
+    "test:wasm:async-page-stores": "node wasm-bench/async-page-stores.test.cjs",
     "bench:wasm": "pnpm run bench:wasm:build && pnpm run bench:wasm:opfs"
   },
   "devDependencies": {
