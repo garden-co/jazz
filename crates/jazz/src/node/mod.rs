@@ -2696,6 +2696,18 @@ where
         Ok(())
     }
 
+    pub(crate) fn has_persisted_opening_pending(
+        &self,
+        binding_view_key: BindingViewKey,
+    ) -> Result<bool, Error> {
+        let store = self
+            .database
+            .direct_record_store(PENDING_OPENING_BINDING_VIEWS_STORE)?;
+        Ok(store
+            .get(&known_state_fact_key(binding_view_key))?
+            .is_some())
+    }
+
     pub(crate) fn load_known_state_fact(
         &mut self,
         binding_view_key: BindingViewKey,
@@ -2726,6 +2738,11 @@ where
     }
 
     pub(crate) fn clear_all_known_state_facts(&mut self) -> Result<(), Error> {
+        // A pending marker may be removed only after every piece of state that
+        // could otherwise make this view appear settled has been durably
+        // cleared. Keep all in-memory mirrors conservative until their durable
+        // counterpart has been removed successfully.
+        self.clear_all_settled_result_state()?;
         let store = self.database.direct_record_store(KNOWN_STATE_FACTS_STORE)?;
         let keys = store
             .prefix_entries(&[])?
@@ -2735,6 +2752,8 @@ where
         for key in keys {
             store.delete(&key)?;
         }
+        self.query.settled_through_by_binding_view.clear();
+        self.query.authorization_progress_by_binding_view.clear();
         let pending_store = self
             .database
             .direct_record_store(PENDING_OPENING_BINDING_VIEWS_STORE)?;
@@ -2746,10 +2765,7 @@ where
         for key in pending_keys {
             pending_store.delete(&key)?;
         }
-        self.query.settled_through_by_binding_view.clear();
-        self.query.authorization_progress_by_binding_view.clear();
         self.query.pending_opening_binding_views.clear();
-        self.clear_all_settled_result_state()?;
         Ok(())
     }
 

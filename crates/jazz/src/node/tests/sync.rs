@@ -157,6 +157,286 @@ fn unsubscribe_and_resubscribe_retain_pending_authority_opening() {
 }
 
 #[test]
+fn detached_authoritative_false_clears_exact_pending_marker_across_reopen() {
+    let (dir, mut reader) = open_node_with_uuid(node(3));
+    let (shape, binding) = reader.whole_table_shape_binding("todos").unwrap();
+    let subscription = SubscriptionKey {
+        shape_id: shape.shape_id(),
+        binding_id: binding.binding_id(),
+        read_view: ReadViewKey {
+            id: uuid::Uuid::from_u128(0xd37ac4),
+        },
+    };
+    reader
+        .apply_sync_message(SyncMessage::RegisterShape {
+            shape_id: shape.shape_id(),
+            ast: crate::protocol::ShapeAst::from_validated(&shape),
+            opts: crate::protocol::RegisterShapeOptions::default(),
+        })
+        .unwrap();
+    reader
+        .apply_sync_message(SyncMessage::Subscribe(crate::protocol::Subscribe {
+            shape_id: shape.shape_id(),
+            subscription,
+            values: Vec::new(),
+            known_state: None,
+        }))
+        .unwrap();
+    let binding_view = BindingViewKey::from_canonical_subscription_key(subscription);
+    reader
+        .apply_sync_message(SyncMessage::ViewUpdate {
+            subscription,
+            settled_through: GlobalSeq(7),
+            reset_result_set: true,
+            version_carriers: Vec::new(),
+            version_bundles: Vec::new(),
+            peer_payload_inventory: crate::protocol::PeerPayloadInventory {
+                opening_pending: true,
+                ..Default::default()
+            },
+            result_member_adds: Vec::new(),
+            result_member_removes: Vec::new(),
+            terminal_operations: Vec::new(),
+            program_fact_adds: Vec::new(),
+            program_fact_removes: Vec::new(),
+        })
+        .unwrap();
+    reader.apply_unsubscribe(subscription);
+    reader
+        .apply_sync_message(SyncMessage::ViewUpdate {
+            subscription,
+            settled_through: GlobalSeq(8),
+            reset_result_set: true,
+            version_carriers: Vec::new(),
+            version_bundles: Vec::new(),
+            peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
+            result_member_adds: Vec::new(),
+            result_member_removes: Vec::new(),
+            terminal_operations: Vec::new(),
+            program_fact_adds: Vec::new(),
+            program_fact_removes: Vec::new(),
+        })
+        .unwrap();
+    assert_eq!(
+        reader.sync_metrics().dropped_detached_subscription_messages,
+        1
+    );
+    assert!(!reader.opening_pending_for_binding_view(binding_view));
+    reader.close().unwrap();
+    drop(reader);
+
+    let reopened = reopen_node_at(&dir, node(3), schema());
+    assert!(!reopened.opening_pending_for_binding_view(binding_view));
+}
+
+#[test]
+fn detached_false_delete_failure_keeps_pending_marker_conservative() {
+    let schema = schema();
+    let column_families = schema.column_families();
+    let refs = column_families
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let storage = FailAfterWritesMemoryStorage::new(&refs);
+    let mut reader = NodeState::new(node(3), schema.clone(), storage.clone()).unwrap();
+    let (shape, binding) = reader.whole_table_shape_binding("todos").unwrap();
+    let subscription = SubscriptionKey {
+        shape_id: shape.shape_id(),
+        binding_id: binding.binding_id(),
+        read_view: ReadViewKey {
+            id: uuid::Uuid::from_u128(0xfa11ed),
+        },
+    };
+    reader
+        .apply_sync_message(SyncMessage::RegisterShape {
+            shape_id: shape.shape_id(),
+            ast: crate::protocol::ShapeAst::from_validated(&shape),
+            opts: crate::protocol::RegisterShapeOptions::default(),
+        })
+        .unwrap();
+    reader
+        .apply_sync_message(SyncMessage::Subscribe(crate::protocol::Subscribe {
+            shape_id: shape.shape_id(),
+            subscription,
+            values: Vec::new(),
+            known_state: None,
+        }))
+        .unwrap();
+    let binding_view = BindingViewKey::from_canonical_subscription_key(subscription);
+    reader
+        .apply_sync_message(SyncMessage::ViewUpdate {
+            subscription,
+            settled_through: GlobalSeq(7),
+            reset_result_set: true,
+            version_carriers: Vec::new(),
+            version_bundles: Vec::new(),
+            peer_payload_inventory: crate::protocol::PeerPayloadInventory {
+                opening_pending: true,
+                ..Default::default()
+            },
+            result_member_adds: Vec::new(),
+            result_member_removes: Vec::new(),
+            terminal_operations: Vec::new(),
+            program_fact_adds: Vec::new(),
+            program_fact_removes: Vec::new(),
+        })
+        .unwrap();
+    reader.apply_unsubscribe(subscription);
+    storage.fail_after_successful_writes(0);
+    let error = reader
+        .apply_sync_message(SyncMessage::ViewUpdate {
+            subscription,
+            settled_through: GlobalSeq(8),
+            reset_result_set: true,
+            version_carriers: Vec::new(),
+            version_bundles: Vec::new(),
+            peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
+            result_member_adds: Vec::new(),
+            result_member_removes: Vec::new(),
+            terminal_operations: Vec::new(),
+            program_fact_adds: Vec::new(),
+            program_fact_removes: Vec::new(),
+        })
+        .expect_err("the exact pending-marker delete must hit the planted failure");
+    assert!(error.to_string().contains("injected write failure"));
+    assert_eq!(
+        reader.sync_metrics().dropped_detached_subscription_messages,
+        1
+    );
+    assert!(reader.opening_pending_for_binding_view(binding_view));
+    drop(reader);
+
+    let reopened = NodeState::new(node(3), schema, storage).unwrap();
+    assert!(reopened.opening_pending_for_binding_view(binding_view));
+}
+
+#[test]
+fn detached_false_cleanup_bounds_unique_read_view_marker_churn() {
+    let (dir, mut reader) = open_node_with_uuid(node(3));
+    let (shape, binding) = reader.whole_table_shape_binding("todos").unwrap();
+    reader
+        .apply_sync_message(SyncMessage::RegisterShape {
+            shape_id: shape.shape_id(),
+            ast: crate::protocol::ShapeAst::from_validated(&shape),
+            opts: crate::protocol::RegisterShapeOptions::default(),
+        })
+        .unwrap();
+
+    for ordinal in 1..=32u128 {
+        let subscription = SubscriptionKey {
+            shape_id: shape.shape_id(),
+            binding_id: binding.binding_id(),
+            read_view: ReadViewKey {
+                id: uuid::Uuid::from_u128(ordinal),
+            },
+        };
+        reader
+            .apply_sync_message(SyncMessage::Subscribe(crate::protocol::Subscribe {
+                shape_id: shape.shape_id(),
+                subscription,
+                values: Vec::new(),
+                known_state: None,
+            }))
+            .unwrap();
+        for opening_pending in [true, false] {
+            if !opening_pending {
+                reader.apply_unsubscribe(subscription);
+            }
+            reader
+                .apply_sync_message(SyncMessage::ViewUpdate {
+                    subscription,
+                    settled_through: GlobalSeq(ordinal as u64),
+                    reset_result_set: true,
+                    version_carriers: Vec::new(),
+                    version_bundles: Vec::new(),
+                    peer_payload_inventory: crate::protocol::PeerPayloadInventory {
+                        opening_pending,
+                        ..Default::default()
+                    },
+                    result_member_adds: Vec::new(),
+                    result_member_removes: Vec::new(),
+                    terminal_operations: Vec::new(),
+                    program_fact_adds: Vec::new(),
+                    program_fact_removes: Vec::new(),
+                })
+                .unwrap();
+        }
+    }
+    assert!(reader.query.pending_opening_binding_views.is_empty());
+    reader.close().unwrap();
+    drop(reader);
+
+    let reopened = reopen_node_at(&dir, node(3), schema());
+    assert!(reopened.query.pending_opening_binding_views.is_empty());
+}
+
+#[test]
+fn known_state_eviction_deletes_pending_marker_last() {
+    for (successful_writes, pending_after_reopen) in
+        [(0, true), (1, true), (2, true), (3, false)]
+    {
+        let schema = schema();
+        let column_families = schema.column_families();
+        let refs = column_families
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        let storage = FailAfterWritesMemoryStorage::new(&refs);
+        let mut reader = NodeState::new(node(3), schema.clone(), storage.clone()).unwrap();
+        let subscription = reader.whole_table_subscription_key("todos").unwrap();
+        let binding_view = BindingViewKey::from_canonical_subscription_key(subscription);
+        reader
+            .apply_sync_message(SyncMessage::ViewUpdate {
+                subscription,
+                settled_through: GlobalSeq(7),
+                reset_result_set: true,
+                version_carriers: Vec::new(),
+                version_bundles: Vec::new(),
+                peer_payload_inventory: crate::protocol::PeerPayloadInventory {
+                    opening_pending: true,
+                    ..Default::default()
+                },
+                result_member_adds: Vec::new(),
+                result_member_removes: Vec::new(),
+                terminal_operations: Vec::new(),
+                program_fact_adds: Vec::new(),
+                program_fact_removes: Vec::new(),
+            })
+            .unwrap();
+        reader
+            .persist_settled_result_state_delta(
+                binding_view,
+                false,
+                &[crate::protocol::ResultMemberEntry::row((
+                    groove::Intern::from("todos".to_owned()),
+                    row(9),
+                    TxId::new(TxTime(9), node(9)),
+                ))],
+                &[],
+                None,
+                &[],
+                &[],
+                None,
+            )
+            .unwrap();
+        storage.fail_after_successful_writes(successful_writes);
+        let result = reader.clear_all_known_state_facts();
+        assert_eq!(result.is_ok(), successful_writes == 3);
+        if pending_after_reopen {
+            assert!(reader.opening_pending_for_binding_view(binding_view));
+        }
+        drop(reader);
+
+        let reopened = NodeState::new(node(3), schema, storage).unwrap();
+        assert_eq!(
+            reopened.opening_pending_for_binding_view(binding_view),
+            pending_after_reopen,
+            "unexpected marker after {successful_writes} successful eviction writes"
+        );
+    }
+}
+
+#[test]
 fn observed_global_seq_advances_authority_allocator() {
     let (_core_dir, mut core) = open_node_with_uuid(node(9));
     let (_writer_dir, mut writer) = open_node_with_uuid(node(1));

@@ -803,6 +803,19 @@ where
                 // corruption. The receiver cannot distinguish late-detached
                 // from never-registered keys, so both are benign drops.
                 self.sync_metrics.dropped_detached_subscription_messages += 1;
+                if !opening_pending {
+                    let binding_view_key =
+                        BindingViewKey::from_canonical_subscription_key(subscription);
+                    // A detached authoritative `false` may clean up only the
+                    // exact durable tombstone named by the wire key. It cannot
+                    // install state or affect another canonical binding.
+                    if self.has_persisted_opening_pending(binding_view_key)? {
+                        self.persist_opening_pending(binding_view_key, false)?;
+                        self.query
+                            .pending_opening_binding_views
+                            .remove(&binding_view_key);
+                    }
+                }
                 return Ok(());
             }
             Err(error) => return Err(error),
