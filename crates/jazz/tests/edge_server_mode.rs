@@ -1102,7 +1102,6 @@ async fn dynamic_server_publishes_seeded_reachable_policy_and_serves_member_rows
 }
 
 #[tokio::test(flavor = "current_thread")]
-#[ignore = "known red; tracked in TEST_BURNDOWN.md"]
 async fn fixed_schema_data_dir_reopen_bootstraps_policy_graph_policy_serving_state() {
     tokio::task::LocalSet::new()
         .run_until(async {

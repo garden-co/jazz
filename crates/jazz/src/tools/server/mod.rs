@@ -140,6 +140,16 @@ impl ServerState {
         }
 
         self.shutdown.set_phase(ShutdownPhase::ClosingStorage);
+        // All websocket work has drained, so no route may still be using the
+        // shell. Join its dedicated owner thread before exposing this server's
+        // durable paths to a reopen or allowing process teardown to proceed.
+        let shell = self.core_server_shell.write().unwrap().take();
+        if let Some(shell) = shell
+            && let Err(error) = shell.shutdown().await
+        {
+            tracing::error!(%error, "shutdown server shell storage failed");
+            failed = true;
+        }
         if let Err(error) = self.catalogue.close(&self.catalogue_store) {
             tracing::error!(%error, "shutdown catalogue storage close failed");
             failed = true;
