@@ -39,6 +39,80 @@ pub struct AsyncOpfsBTree<S: AsyncPageStore> {
     access: FxHashMap<u64, u64>,
     tick: u64,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::async_page_store::{PageStoreMetadata, StoredPage};
+    use std::collections::BTreeMap;
+
+    #[derive(Default)]
+    struct Store {
+        meta: Option<PageStoreMetadata>,
+        pages: BTreeMap<u64, Vec<u8>>,
+    }
+    impl AsyncPageStore for Store {
+        async fn metadata(&mut self) -> Result<Option<PageStoreMetadata>, BTreeError> {
+            Ok(self.meta)
+        }
+        async fn read_pages(&mut self, ids: &[u64]) -> Result<Vec<StoredPage>, BTreeError> {
+            ids.iter()
+                .map(|id| {
+                    self.pages
+                        .get(id)
+                        .cloned()
+                        .map(|bytes| StoredPage {
+                            page_id: *id,
+                            bytes,
+                        })
+                        .ok_or_else(|| BTreeError::Io(format!("missing {id}")))
+                })
+                .collect()
+        }
+        async fn commit(&mut self, c: PageStoreCommit) -> Result<(), BTreeError> {
+            self.meta = Some(c.metadata);
+            for p in c.writes {
+                self.pages.insert(p.page_id, p.bytes);
+            }
+            for id in c.deleted_page_ids {
+                self.pages.remove(&id);
+            }
+            Ok(())
+        }
+    }
+    #[test]
+    fn async_tree_splits_ranges_and_reopens() {
+        futures::executor::block_on(async {
+            let options = AsyncBTreeOptions {
+                page_size: 4096,
+                cache_pages: 3,
+            };
+            let mut tree = AsyncOpfsBTree::open(Store::default(), options)
+                .await
+                .unwrap();
+            for i in 0..900u32 {
+                tree.put(format!("k{i:04}").as_bytes(), format!("v{i:04}").as_bytes())
+                    .await
+                    .unwrap();
+            }
+            assert_eq!(tree.get(b"k0420").await.unwrap(), Some(b"v0420".to_vec()));
+            let rows = tree.range(b"k0100", b"k0110", 20).await.unwrap();
+            assert_eq!(rows.len(), 10);
+            assert_eq!(rows[0], (b"k0100".to_vec(), b"v0100".to_vec()));
+            tree.checkpoint().await.unwrap();
+            let store = tree.into_store();
+            let mut reopened = AsyncOpfsBTree::open(store, options).await.unwrap();
+            assert_eq!(
+                reopened.get(b"k0899").await.unwrap(),
+                Some(b"v0899".to_vec())
+            );
+            assert_eq!(
+                reopened.range(b"k0890", b"k0900", 20).await.unwrap().len(),
+                10
+            );
+        });
+    }
+}
 struct Split {
     key: Vec<u8>,
     right: u64,
@@ -228,7 +302,7 @@ impl<S: AsyncPageStore> AsyncOpfsBTree<S> {
                 mut children,
             } => {
                 let at = keys.partition_point(|k| k.as_slice() <= key);
-                if let Some(split) = self.insert(children[at], key, value).await? {
+                if let Some(split) = Box::pin(self.insert(children[at], key, value)).await? {
                     keys.insert(at, split.key);
                     children.insert(at + 1, split.right);
                 }
