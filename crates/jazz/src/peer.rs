@@ -480,6 +480,7 @@ impl PeerState {
         let drain_elapsed = trace_start.elapsed();
         let drain_reads = trace_rehydrate.then(|| node.take_storage_read_metrics());
         let ResultTransitions {
+            authoritative_membership_changed: _,
             adds: result_member_adds,
             removes: mut result_member_removes,
             result_payload_adds: _,
@@ -796,6 +797,7 @@ impl PeerState {
             }
         }
         Ok(ResultTransitions {
+            authoritative_membership_changed: false,
             adds: result_member_adds,
             removes: result_member_removes,
             result_payload_adds: Vec::new(),
@@ -1248,6 +1250,7 @@ impl PeerState {
             true,
         )?;
         let ResultTransitions {
+            authoritative_membership_changed: _,
             adds: source_adds,
             removes: source_removes,
             result_payload_adds: _,

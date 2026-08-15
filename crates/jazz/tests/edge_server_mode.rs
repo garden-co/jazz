@@ -291,7 +291,9 @@ async fn public_root_default_order_and_windows_are_stable_across_reset() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-#[ignore = "known red; tracked in TEST_BURNDOWN.md"]
+/// An edge server sends every ordered-window boundary crossing to the client.
+/// Alice creates tied rows, then promotes and demotes a third row across the
+/// two-row window boundary.
 async fn maintained_window_uses_row_id_tie_breaker_and_tracks_rows_crossing_boundary() {
     tokio::task::LocalSet::new()
         .run_until(async {
@@ -390,6 +392,30 @@ async fn maintained_window_uses_row_id_tie_breaker_and_tracks_rows_crossing_boun
                 |deltas| has_added(deltas, promoted) && has_removed(deltas, tied[1]),
             )
             .await;
+            let promotion = updates
+                .iter()
+                .find(|delta| has_added(std::slice::from_ref(delta), promoted))
+                .expect("promotion delta is recorded");
+            assert_eq!(
+                promotion
+                    .added
+                    .iter()
+                    .find(|change| change.id == promoted)
+                    .expect("promoted row is added")
+                    .index,
+                0,
+                "a newly promoted row is inserted at its authoritative TopBy position"
+            );
+            assert_eq!(
+                promotion
+                    .removed
+                    .iter()
+                    .find(|change| change.id == tied[1])
+                    .expect("displaced row is removed")
+                    .index,
+                1,
+                "the displaced row retains its pre-update position"
+            );
 
             let batch = client
                 .update(
