@@ -1203,6 +1203,112 @@ async fn edge_server_accepts_mergeable_write_while_core_down_then_promotes() {
         .await;
 }
 
+/// A core-origin write reaches subscribers connected through two independent
+/// edge servers.
+///
+/// Actors: carol writes directly to `core`; alice is connected to `edge_us`
+/// and bob to `edge_eu`.
+///
+/// ```text
+///                 /--upstream--> edge_us --> alice
+/// carol --> core -|
+///                 \--upstream--> edge_eu --> bob
+/// ```
+#[tokio::test(flavor = "current_thread")]
+async fn core_write_reaches_clients_on_both_edges() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = todo_schema();
+            let app_id = AppId::random();
+            let core = JazzServer::builder()
+                .with_app_id(app_id)
+                .with_schema(schema.clone())
+                .start()
+                .await;
+            let edge_us = JazzServer::builder()
+                .with_app_id(app_id)
+                .with_schema(schema.clone())
+                .with_upstream_url(core.base_url())
+                .start()
+                .await;
+            let edge_eu = JazzServer::builder()
+                .with_app_id(app_id)
+                .with_schema(schema.clone())
+                .with_upstream_url(core.base_url())
+                .start()
+                .await;
+
+            let alice = connect_user(&edge_us, schema.clone(), "alice-edge-us").await;
+            let bob = connect_user(&edge_eu, schema.clone(), "bob-edge-eu").await;
+            let carol = connect_user(&core, schema, "carol-core").await;
+            let mut alice_stream = alice
+                .subscribe(todo_query())
+                .await
+                .expect("alice subscribes through edge_us");
+            let mut bob_stream = bob
+                .subscribe(todo_query())
+                .await
+                .expect("bob subscribes through edge_eu");
+            let mut alice_log = Vec::new();
+            let mut bob_log = Vec::new();
+
+            let (todo_id, expected, batch_id) = carol
+                .insert(
+                    "todos",
+                    row_input!("title" => "core write for both edges", "done" => false),
+                )
+                .expect("carol writes directly to core");
+            carol
+                .wait_for_batch(
+                    batch_id.expect("ordinary mutation commits immediately"),
+                    DurabilityTier::GlobalServer,
+                )
+                .await
+                .expect("core write settles globally");
+
+            wait_for_subscription_update(
+                &mut alice_stream,
+                &mut alice_log,
+                Duration::from_secs(30),
+                "alice receives the core write through edge_us",
+                |deltas| has_added(deltas, todo_id),
+            )
+            .await;
+            wait_for_subscription_update(
+                &mut bob_stream,
+                &mut bob_log,
+                Duration::from_secs(30),
+                "bob receives the core write through edge_eu",
+                |deltas| has_added(deltas, todo_id),
+            )
+            .await;
+            wait_for_row(
+                &alice,
+                DurabilityTier::EdgeServer,
+                todo_id,
+                expected.clone(),
+                "alice's edge query contains the core write",
+            )
+            .await;
+            wait_for_row(
+                &bob,
+                DurabilityTier::EdgeServer,
+                todo_id,
+                expected,
+                "bob's edge query contains the core write",
+            )
+            .await;
+
+            carol.shutdown().await.expect("shutdown carol");
+            bob.shutdown().await.expect("shutdown bob");
+            alice.shutdown().await.expect("shutdown alice");
+            edge_eu.shutdown().await;
+            edge_us.shutdown().await;
+            core.shutdown().await;
+        })
+        .await;
+}
+
 #[test]
 fn topology_matrix_conformance_smoke_inventory() {
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
