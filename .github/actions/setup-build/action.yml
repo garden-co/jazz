@@ -117,7 +117,12 @@ runs:
         components: ${{ inputs.rust-components }}
 
     - name: Cache Rust build artifacts
-      if: inputs.rust-toolchain != '' && inputs.rust-cache == 'true'
+      # The provisioned self-hosted runners already persist target artifacts
+      # and share sccache.  Swatinem/rust-cache's post-job cleanup mutates
+      # host-owned shared Cargo state on those runners, so one job can remove
+      # registry sources while another job is compiling.  Keep rust-cache
+      # confined to hosted jobs, whose mutable Rust homes are job-local.
+      if: inputs.rust-toolchain != '' && inputs.rust-cache == 'true' && steps.provisioned-tools.outputs.active != 'true'
       uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       with:
         cache-on-failure: true
