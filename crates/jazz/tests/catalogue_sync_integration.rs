@@ -690,6 +690,91 @@ async fn edge_catalogue_http_reads_and_writes_forward_to_real_core_impl() {
     core.shutdown().await;
 }
 
+/// A catalogue published through one edge reaches a client on a second edge
+/// through the real core, before that client writes any application data.
+///
+/// Actors: mallory publishes the catalogue through `edge_us`; alice connects
+/// through `edge_eu` and writes only after its edge has received that
+/// catalogue.
+///
+/// ```text
+/// mallory --catalogue--> edge_us --upstream--> core --upstream--> edge_eu
+///                                                               |
+/// alice --------------------------------------------------------+--write--> core
+/// ```
+#[tokio::test]
+#[ignore = "known red; tracked in TEST_BURNDOWN.md"]
+async fn edge_catalogue_publish_reaches_peer_edge_through_core_sync() {
+    tokio::task::LocalSet::new()
+        .run_until(edge_catalogue_publish_reaches_peer_edge_through_core_sync_impl())
+        .await
+}
+
+async fn edge_catalogue_publish_reaches_peer_edge_through_core_sync_impl() {
+    let app_id = JazzServer::default_app_id();
+    let schema = schema_v1();
+    let core = JazzServer::builder().with_app_id(app_id).start().await;
+    let edge_us = JazzServer::builder()
+        .with_app_id(app_id)
+        .with_upstream_url(core.base_url())
+        .start()
+        .await;
+    let edge_eu = JazzServer::builder()
+        .with_app_id(app_id)
+        .with_upstream_url(core.base_url())
+        .start()
+        .await;
+
+    seed_schema_catalogue(&edge_us, &schema).await;
+    publish_allow_all_permissions(&edge_us.base_url(), app_id, edge_us.admin_secret(), &schema)
+        .await;
+
+    let alice = TestingClient::builder()
+        .with_server(&edge_eu)
+        .with_schema(schema.clone())
+        .with_user_id(test_user_id("alice-peer-edge-catalogue"))
+        .ready_on("users", Duration::from_secs(30))
+        .connect()
+        .await;
+
+    let user_id = jazz::tools::ObjectId::new();
+    let (row_id, _, batch_id) = alice
+        .insert(
+            "users",
+            user_values_v1(user_id, "visible through peer edge"),
+        )
+        .expect("peer-edge client writes after receiving the catalogue");
+    alice
+        .wait_for_batch(
+            batch_id.expect("ordinary mutation commits immediately"),
+            DurabilityTier::GlobalServer,
+        )
+        .await
+        .expect("peer-edge write reaches the core");
+
+    let rows = wait_for_query(
+        &alice,
+        QueryBuilder::new("users").build(),
+        Some(DurabilityTier::EdgeServer),
+        Duration::from_secs(25),
+        "peer edge serves the row written after catalogue replication",
+        |rows| (rows.len() == 1 && rows[0].0 == row_id).then_some(rows),
+    )
+    .await;
+    assert_eq!(
+        rows[0].1,
+        vec![
+            Value::Uuid(user_id),
+            Value::Text("visible through peer edge".to_string())
+        ]
+    );
+
+    alice.shutdown().await.expect("shutdown alice");
+    edge_eu.shutdown().await;
+    edge_us.shutdown().await;
+    core.shutdown().await;
+}
+
 // Test topology:
 //
 //   admin HTTP client
