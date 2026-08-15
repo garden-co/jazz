@@ -64,6 +64,16 @@ not be silently converted into active green/red claims.
 | Catalogue reopen is a correctness root                              | `INV-LENS-8`/`INV-LENS-9` require durable staged/active lineage and idempotent reopen.                                                                                                 | Published in #1518; browser receipt pending |
 | Never retire a row on a broad count alone                           | The exit rule requires matching skip removal plus focused green evidence.                                                                                                              | Standing rule                               |
 | Timeouts/aborts are not automatically semantic failures             | Repeated CI signatures can indicate teardown or runner/resource defects, but must be reproduced before classification.                                                                 | Standing investigation rule                 |
+| Five jazz-sim rows were stale or had current-harness gaps           | The complete scenario target passes after trusted ordered catalogue publication and acknowledging/serving the retained reconnect view.                                                 | Draft #1522; independently reviewed         |
+| Browser catalogue reopen is green only with #1518                   | Fresh Chromium coverage passes after reopen; removing #1518's staged-lineage durable write reproduces the failure.                                                                     | Draft #1523; TS quarantine becomes zero     |
+| History conflict was an activation-cut race                         | `subscribe().await` is not a cross-client authority barrier; Bob provenance and value now prove post-activation delivery.                                                              | Draft #1524; independently reviewed         |
+| One RocksDB abort was a detached-owner teardown bug                 | The test reproduced 3/16 post-success aborts; explicit shell owner-thread shutdown and join produced 32/32 clean stress.                                                               | Draft #1525; one row restored               |
+| Projected-parent authorization setup was stale                      | Trusted atomic schema+lens setup plus owner acceptance and same-path non-owner `AuthorizationDenied` prove the policy boundary.                                                        | Draft #1526; independently reviewed         |
+| JSON admission must cover recursive types and schema definition     | Review expanded the boundary from explicit writes to defaults, arrays, enum payloads, and invalid declared schemas.                                                                    | Amendment active; do not publish yet        |
+| Dynamic catalogue bootstrap needs an explicit uninitialized state   | Empty `JazzSchema` fabricates a durable genesis. Correct design atomically adopts authority genesis, drives upstream while idle, and gates downstream readiness.                       | Unsafe diagnostic WIP not published         |
+| Shared-coverage timeout included a harness deadlock                 | Driving endpoints makes the test fast, but the forced-grouping hook is currently a no-op, so the row cannot honestly be retired.                                                       | Diagnostic WIP; row retained                |
+| M3 timeout is workload cost, not observed divergence                | Seed 11 remained equivalent through depth 10,000; the 100,000-operation case repeatedly rebuilds physical current descriptors.                                                         | Cache/invalidation investigation active     |
+| Ordered-window promotion is a coverage-refresh defect               | Groove/Peer TopBy and direct shell paths pass; production coverage emits removal without the promoted entrant until a one-shot forces recoverage.                                      | Root localized; fix active                  |
 
 ## Friction / follow-ups
 
@@ -74,3 +84,10 @@ predate current integration, so all overnight claims need fresh receipts. Long
 nextest and browser runs should be backgrounded and reported with exact exit
 codes. Repeated runner timeouts and RocksDB aborts deserve dedicated focused
 reproductions rather than repeated full-suite retries.
+
+Additional friction: `dev/t` may append `--exact` itself; passing another one
+fails immediately. Long Cargo/browser invocations can outlive the command
+result stream, so process ownership and exit status must be audited before
+quoting them. Artifact provenance correctly forces expensive NAPI/WASM rebuilds
+after tracked browser mutations. The Rust burndown gate recompiles unrelated
+integration inventories and emits pre-existing unused-import warnings.
