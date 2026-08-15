@@ -2703,9 +2703,15 @@ where
         let store = self
             .database
             .direct_record_store(PENDING_OPENING_BINDING_VIEWS_STORE)?;
-        Ok(store
-            .get(&known_state_fact_key(binding_view_key))?
-            .is_some())
+        let Some(record) = store.get(&known_state_fact_key(binding_view_key))? else {
+            return Ok(false);
+        };
+        match record.get_idx(0)? {
+            Value::U64(1) => Ok(true),
+            _ => Err(Error::InvalidStoredValue(
+                "pending opening marker must be one",
+            )),
+        }
     }
 
     pub(crate) fn load_known_state_fact(

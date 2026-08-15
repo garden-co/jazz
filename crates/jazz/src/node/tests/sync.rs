@@ -425,11 +425,35 @@ fn reused_binding_keeps_old_and_current_read_view_markers_isolated() {
     }
 
     // B now owns the reused shape/binding registration. A's late authoritative
-    // false must route through exact detached cleanup, never through B.
+    // true must be dropped rather than applied to B.
     reader
         .apply_sync_message(SyncMessage::ViewUpdate {
             subscription: subscription_a,
             settled_through: GlobalSeq(8),
+            reset_result_set: true,
+            version_carriers: Vec::new(),
+            version_bundles: Vec::new(),
+            peer_payload_inventory: crate::protocol::PeerPayloadInventory {
+                opening_pending: true,
+                ..Default::default()
+            },
+            result_member_adds: Vec::new(),
+            result_member_removes: Vec::new(),
+            terminal_operations: Vec::new(),
+            program_fact_adds: Vec::new(),
+            program_fact_removes: Vec::new(),
+        })
+        .unwrap();
+    let binding_view_a = BindingViewKey::from_canonical_subscription_key(subscription_a);
+    let binding_view_b = BindingViewKey::from_canonical_subscription_key(subscription_b);
+    assert!(reader.opening_pending_for_binding_view(binding_view_a));
+    assert!(reader.opening_pending_for_binding_view(binding_view_b));
+
+    // A's late authoritative false may clean up A exactly, never B.
+    reader
+        .apply_sync_message(SyncMessage::ViewUpdate {
+            subscription: subscription_a,
+            settled_through: GlobalSeq(9),
             reset_result_set: true,
             version_carriers: Vec::new(),
             version_bundles: Vec::new(),
@@ -441,13 +465,30 @@ fn reused_binding_keeps_old_and_current_read_view_markers_isolated() {
             program_fact_removes: Vec::new(),
         })
         .unwrap();
-    let binding_view_a = BindingViewKey::from_canonical_subscription_key(subscription_a);
-    let binding_view_b = BindingViewKey::from_canonical_subscription_key(subscription_b);
     assert!(!reader.opening_pending_for_binding_view(binding_view_a));
+    assert!(reader.opening_pending_for_binding_view(binding_view_b));
+
+    // Once A is gone, duplicate false remains detached and cannot fall through
+    // to B merely because the shape/binding registration was reused.
+    reader
+        .apply_sync_message(SyncMessage::ViewUpdate {
+            subscription: subscription_a,
+            settled_through: GlobalSeq(10),
+            reset_result_set: true,
+            version_carriers: Vec::new(),
+            version_bundles: Vec::new(),
+            peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
+            result_member_adds: Vec::new(),
+            result_member_removes: Vec::new(),
+            terminal_operations: Vec::new(),
+            program_fact_adds: Vec::new(),
+            program_fact_removes: Vec::new(),
+        })
+        .unwrap();
     assert!(reader.opening_pending_for_binding_view(binding_view_b));
     assert_eq!(
         reader.sync_metrics().dropped_detached_subscription_messages,
-        1
+        3
     );
     reader.close().unwrap();
     drop(reader);
@@ -455,6 +496,52 @@ fn reused_binding_keeps_old_and_current_read_view_markers_isolated() {
     let reopened = reopen_node_at(&dir, node(3), schema());
     assert!(!reopened.opening_pending_for_binding_view(binding_view_a));
     assert!(reopened.opening_pending_for_binding_view(binding_view_b));
+}
+
+#[test]
+fn stale_unsubscribe_cannot_detach_reused_read_view_binding() {
+    let (_dir, mut reader) = open_node_with_uuid(node(3));
+    let (shape, binding) = reader.whole_table_shape_binding("todos").unwrap();
+    reader
+        .apply_sync_message(SyncMessage::RegisterShape {
+            shape_id: shape.shape_id(),
+            ast: crate::protocol::ShapeAst::from_validated(&shape),
+            opts: crate::protocol::RegisterShapeOptions::default(),
+        })
+        .unwrap();
+    let subscription_for = |ordinal| SubscriptionKey {
+        shape_id: shape.shape_id(),
+        binding_id: binding.binding_id(),
+        read_view: ReadViewKey {
+            id: uuid::Uuid::from_u128(ordinal),
+        },
+    };
+    let subscription_a = subscription_for(0xa1);
+    let subscription_b = subscription_for(0xb1);
+    for subscription in [subscription_a, subscription_b] {
+        reader
+            .apply_sync_message(SyncMessage::Subscribe(crate::protocol::Subscribe {
+                shape_id: shape.shape_id(),
+                subscription,
+                values: Vec::new(),
+                known_state: None,
+            }))
+            .unwrap();
+    }
+
+    reader.apply_unsubscribe(subscription_a);
+    assert_eq!(
+        reader
+            .binding_view_key_for_subscription(subscription_b)
+            .unwrap()
+            .read_view,
+        subscription_b.read_view,
+        "stale unsubscribe A must not remove the reused current registration B"
+    );
+    reader.apply_unsubscribe(subscription_b);
+    assert!(reader
+        .binding_view_key_for_subscription(subscription_b)
+        .is_err());
 }
 
 #[test]

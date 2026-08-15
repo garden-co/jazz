@@ -5184,11 +5184,17 @@ where
     }
 
     pub(crate) fn apply_unsubscribe(&mut self, subscription: SubscriptionKey) {
-        let binding_view_key = self.binding_view_key_for_subscription(subscription).ok();
+        let binding_view_key = self
+            .binding_view_key_for_subscription(subscription)
+            .ok()
+            .filter(|binding_view_key| binding_view_key.read_view == subscription.read_view);
         if let Some(bindings) = self
             .query
             .registered_bindings
             .get_mut(&subscription.shape_id)
+            && bindings
+                .get(&subscription.binding_id)
+                .is_some_and(|binding| binding.read_view == subscription.read_view)
         {
             bindings.remove(&subscription.binding_id);
         }
@@ -14973,7 +14979,7 @@ mod tests {
         .expect("one-shot nested policy claim routes must bind against the root descriptor");
 
         let mut edge = PeerState::edge_client(identity);
-        let update = edge
+        let mut update = edge
             .rehydrate_query_with_opts(
                 &mut node,
                 &shape,
@@ -14984,6 +14990,14 @@ mod tests {
                 },
             )
             .expect("the serving maintained view must retain the invite claim route");
+        let SyncMessage::ViewUpdate { subscription, .. } = &mut update else {
+            panic!("invite rehydrate must produce a view update");
+        };
+        *subscription = SubscriptionKey {
+            shape_id: shape.shape_id(),
+            binding_id: binding.binding_id(),
+            read_view: Default::default(),
+        };
         client
             .apply_sync_message(update)
             .expect("the client must materialize the invited chat update");
@@ -15065,12 +15079,17 @@ mod tests {
             BTreeMap::from([("user_id".to_owned(), Value::String(identity.0.to_string()))]),
         );
         let mut normal_membership_peer = PeerState::edge_client(identity);
+        let mut membership_update = normal_membership_peer
+            .current_rows_update(&mut node, "chatMembers")
+            .expect("serve the accepted membership to the normal client");
+        let SyncMessage::ViewUpdate { subscription, .. } = &mut membership_update else {
+            panic!("current rows update must produce a view update");
+        };
+        *subscription = normal_client
+            .whole_table_subscription_key("chatMembers")
+            .expect("normal client has canonical chatMembers coverage");
         normal_client
-            .apply_sync_message(
-                normal_membership_peer
-                    .current_rows_update(&mut node, "chatMembers")
-                    .expect("serve the accepted membership to the normal client"),
-            )
+            .apply_sync_message(membership_update)
             .expect("normal client applies its accepted membership before querying messages");
         let simple_message_shape = Query::from("messages")
             .filter(eq(col("chatId"), param("chat_id")))
@@ -15096,20 +15115,27 @@ mod tests {
             &simple_message_binding,
         );
         let mut normal_simple_peer = PeerState::edge_client(identity);
-        normal_client
-            .apply_sync_message(
-                normal_simple_peer
-                    .rehydrate_query_with_opts(
-                        &mut node,
-                        &simple_message_shape,
-                        &simple_message_binding,
-                        RegisterShapeOptions {
-                            tier: DurabilityTier::Edge,
-                            ..RegisterShapeOptions::default()
-                        },
-                    )
-                    .expect("serve normal-member message snapshot without include"),
+        let mut simple_update = normal_simple_peer
+            .rehydrate_query_with_opts(
+                &mut node,
+                &simple_message_shape,
+                &simple_message_binding,
+                RegisterShapeOptions {
+                    tier: DurabilityTier::Edge,
+                    ..RegisterShapeOptions::default()
+                },
             )
+            .expect("serve normal-member message snapshot without include");
+        let SyncMessage::ViewUpdate { subscription, .. } = &mut simple_update else {
+            panic!("message rehydrate must produce a view update");
+        };
+        *subscription = SubscriptionKey {
+            shape_id: simple_message_shape.shape_id(),
+            binding_id: simple_message_binding.binding_id(),
+            read_view: Default::default(),
+        };
+        normal_client
+            .apply_sync_message(simple_update)
             .expect("client applies normal-member message snapshot without include");
         assert_eq!(
             normal_client
@@ -15147,9 +15173,17 @@ mod tests {
                 },
             )
             .expect("serve normal-member message include/order snapshot");
-        let normal_versions = normal_update
+        let mut normal_versions = normal_update
             .expand_version_carriers_for_receive()
             .expect("expand normal-member message include/order payloads");
+        let SyncMessage::ViewUpdate { subscription, .. } = &mut normal_versions else {
+            panic!("expanded relation snapshot must remain a view update");
+        };
+        *subscription = SubscriptionKey {
+            shape_id: message_shape.shape_id(),
+            binding_id: message_binding.binding_id(),
+            read_view: Default::default(),
+        };
         if let SyncMessage::ViewUpdate {
             version_bundles, ..
         } = &normal_versions

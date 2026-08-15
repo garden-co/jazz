@@ -795,15 +795,14 @@ where
             Ok(binding_view_key) if binding_view_key.read_view != subscription.read_view => {
                 let wire_binding_view_key =
                     BindingViewKey::from_canonical_subscription_key(subscription);
+                self.sync_metrics.dropped_detached_subscription_messages += 1;
                 if !opening_pending && self.has_persisted_opening_pending(wire_binding_view_key)? {
-                    self.sync_metrics.dropped_detached_subscription_messages += 1;
                     self.persist_opening_pending(wire_binding_view_key, false)?;
                     self.query
                         .pending_opening_binding_views
                         .remove(&wire_binding_view_key);
-                    return Ok(());
                 }
-                binding_view_key
+                return Ok(());
             }
             Ok(binding_view_key) => binding_view_key,
             Err(Error::InvalidStoredValue(
