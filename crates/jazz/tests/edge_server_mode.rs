@@ -1309,6 +1309,88 @@ async fn core_write_reaches_clients_on_both_edges() {
         .await;
 }
 
+/// A write accepted through one edge becomes globally visible through a peer
+/// edge, including its existing subscription.
+///
+/// Actors: alice writes through `edge_us`; bob is subscribed through
+/// `edge_eu`.
+///
+/// ```text
+/// alice --> edge_us --upstream--> core --upstream--> edge_eu --> bob
+/// ```
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "known red; tracked in TEST_BURNDOWN.md"]
+async fn edge_write_reaches_client_on_peer_edge() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = todo_schema();
+            let app_id = AppId::random();
+            let core = JazzServer::builder()
+                .with_app_id(app_id)
+                .with_schema(schema.clone())
+                .start()
+                .await;
+            let edge_us = JazzServer::builder()
+                .with_app_id(app_id)
+                .with_schema(schema.clone())
+                .with_upstream_url(core.base_url())
+                .start()
+                .await;
+            let edge_eu = JazzServer::builder()
+                .with_app_id(app_id)
+                .with_schema(schema.clone())
+                .with_upstream_url(core.base_url())
+                .start()
+                .await;
+
+            let alice = connect_user(&edge_us, schema.clone(), "alice-edge-us-writer").await;
+            let bob = connect_user(&edge_eu, schema, "bob-edge-eu-reader").await;
+            let mut bob_stream = bob
+                .subscribe(todo_query())
+                .await
+                .expect("bob subscribes through edge_eu");
+            let mut bob_log = Vec::new();
+
+            let (todo_id, expected, batch_id) = alice
+                .insert(
+                    "todos",
+                    row_input!("title" => "edge write for peer", "done" => true),
+                )
+                .expect("alice writes through edge_us");
+            alice
+                .wait_for_batch(
+                    batch_id.expect("ordinary mutation commits immediately"),
+                    DurabilityTier::GlobalServer,
+                )
+                .await
+                .expect("edge_us write settles globally through core");
+
+            wait_for_subscription_update(
+                &mut bob_stream,
+                &mut bob_log,
+                Duration::from_secs(30),
+                "bob receives edge_us write through edge_eu",
+                |deltas| has_added(deltas, todo_id),
+            )
+            .await;
+            wait_for_row(
+                &bob,
+                DurabilityTier::EdgeServer,
+                todo_id,
+                expected,
+                "bob's edge query contains the peer-edge write",
+            )
+            .await;
+
+            bob.shutdown().await.expect("shutdown bob");
+            alice.shutdown().await.expect("shutdown alice");
+            edge_eu.shutdown().await;
+            edge_us.shutdown().await;
+            core.shutdown().await;
+        })
+        .await;
+}
+
 #[test]
 fn topology_matrix_conformance_smoke_inventory() {
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
