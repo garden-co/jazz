@@ -202,6 +202,11 @@ test("trusted runners consume the validated immutable tool bundle", () => {
     /echo "RUSTC=\/opt\/jazz-ci\/toolchains\/v1\/rustup\/toolchains\/1\.93\.1-x86_64-unknown-linux-gnu\/bin\/rustc" >> "\$\{GITHUB_ENV\}"/,
   );
   assert.match(setupBuildAction, /Jobs are clients only/);
+  assert.match(
+    setupBuildAction,
+    /name: Cache Rust build artifacts[\s\S]*if: inputs\.rust-toolchain != '' && inputs\.rust-cache == 'true' && steps\.provisioned-tools\.outputs\.active != 'true'[\s\S]*uses: Swatinem\/rust-cache@/,
+    "rust-cache cleanup must never mutate a provisioned runner's shared Rust homes",
+  );
   assert.doesNotMatch(
     setupBuildAction.match(
       /if \[\[ '\$\{\{ steps\.provisioned-tools\.outputs\.active \}\}' == 'true' \]\]; then[\s\S]*?else/,
@@ -209,6 +214,17 @@ test("trusted runners consume the validated immutable tool bundle", () => {
     /sccache --(?:start|stop)-server/,
   );
   assert.match(fallbackBranch, /sccache --start-server/);
+  assert.throws(
+    () =>
+      assert.match(
+        setupBuildAction.replace(
+          " && steps.provisioned-tools.outputs.active != 'true'\n      uses: Swatinem/rust-cache@",
+          "\n      uses: Swatinem/rust-cache@",
+        ),
+        /name: Cache Rust build artifacts[\s\S]*if: inputs\.rust-toolchain != '' && inputs\.rust-cache == 'true' && steps\.provisioned-tools\.outputs\.active != 'true'[\s\S]*uses: Swatinem\/rust-cache@/,
+      ),
+    /rust-cache/,
+  );
 });
 
 test("Rust CI does not rerun differential integration binaries selected by the workspace test gate", () => {
