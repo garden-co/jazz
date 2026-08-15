@@ -149,6 +149,10 @@ jobs:
         with:
           role-to-assume: ${{ vars.SCCACHE_EXPERIMENT_AWS_ROLE_ARN }}
           aws-region: ${{ vars.SCCACHE_REGION }}
+      - name: Set up short-lived Turbo Remote Cache access
+        uses: vercel/setup-turborepo-remote-cache-action@135046f5efcadb17337d9b29b8d5b4035ae64b10 # v1.0.0
+        with:
+          team: ${{ vars.TURBO_TEAM }}
       - uses: ./.github/actions/setup-blacksmith-experiment
       - run: cargo check --workspace --all-targets
       - run: pnpm build:test-artifacts
