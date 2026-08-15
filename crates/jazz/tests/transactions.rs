@@ -5,6 +5,7 @@ use std::time::Duration;
 
 mod support;
 
+use jazz::protocol_limits::MAX_WIRE_FRAME_BYTES;
 use jazz::row_input;
 use jazz::tools::server::JazzServer;
 use jazz::tools::{
@@ -728,11 +729,11 @@ async fn wait_for_batch_errors_for_unattainable_durability_tier() {
 }
 }
 
-// Regression guard for websocket transport batching: a local-first import whose
-// encoded wire frames exceed the server's 1 MiB WebSocket-message cap must be
-// split before a later batch can reach global durability.
+// Regression guard for logical-message fragmentation: one incompressible import
+// is confirmed to remain larger than three physical wire frames after the same
+// zstd level used by the native transport, so a later batch must still reach
+// global durability after the WebSocket transports the fragments.
 local_tokio_test! {
-    #[ignore = "known red; tracked in TEST_BURNDOWN.md"]
 async fn global_wait_after_over_one_mib_websocket_import_settles() {
     let schema = todo_schema();
     let server = JazzServer::start_with_schema(schema.clone()).await;
@@ -745,17 +746,29 @@ async fn global_wait_after_over_one_mib_websocket_import_settles() {
         )
         .expect("insert target row");
 
-    // Keep the logical payload above 1 MiB while avoiding a throughput-shaped
-    // test with thousands of independently committed rows.
-    let import_payload = "x".repeat(1_600);
-    for index in 0..768 {
-        client
-            .insert(
-                "todos",
-                row_input!("title" => format!("imported row {index}: {import_payload}"), "completed" => false),
-            )
-            .expect("queue import row");
-    }
+    // Printable high-entropy text is legal in the public Text column and
+    // avoids relying on raw source size when zstd is negotiated.
+    let mut entropy = 1_u64;
+    let import_payload = (0..(5 * MAX_WIRE_FRAME_BYTES))
+        .map(|_| {
+            entropy = entropy
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
+            char::from(b'!' + ((entropy >> 57) as u8 % 94))
+        })
+        .collect::<String>();
+    let compressed = zstd::bulk::compress(import_payload.as_bytes(), 3)
+        .expect("compress deterministic import payload");
+    assert!(
+        compressed.len() > 3 * MAX_WIRE_FRAME_BYTES,
+        "native zstd transport payload must require more than three physical frames"
+    );
+    client
+        .insert(
+            "todos",
+            row_input!("title" => import_payload, "completed" => false),
+        )
+        .expect("queue one logical import message");
 
     let target_batch = client
         .update(target_id, vec![("completed".to_owned(), Value::Boolean(true))])
