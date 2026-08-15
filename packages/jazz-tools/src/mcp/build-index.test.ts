@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -12,8 +12,63 @@ import {
   resolveIncludes,
   splitIntoSections,
 } from "./build-index.js";
+import { createSqliteBackend } from "./backend-sqlite.js";
 
 const packageBinDir = resolve(dirname(fileURLToPath(import.meta.url)), "../../bin");
+const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../../..");
+
+function corpusSearchQueries(dbPath: string): string[] {
+  const db = new DatabaseSync(dbPath, { readOnly: true });
+  try {
+    const rows = db.prepare("SELECT title, section_heading FROM sections_fts").all() as Array<{
+      title: string;
+      section_heading: string;
+    }>;
+    const terms = [
+      ...new Set(
+        rows
+          .flatMap(
+            ({ title, section_heading }) =>
+              `${title} ${section_heading}`.toLowerCase().match(/[a-z0-9]+/g) ?? [],
+          )
+          .filter((term) => term.length >= 5),
+      ),
+    ].sort();
+    const stride = Math.max(1, Math.floor(terms.length / 24));
+    return terms.filter((_, index) => index % stride === 0).slice(0, 24);
+  } finally {
+    db.close();
+  }
+}
+
+function readIndexContract(dbPath: string) {
+  const db = new DatabaseSync(dbPath);
+  try {
+    const quickCheck = db.prepare("PRAGMA quick_check").all();
+    db.exec("INSERT INTO sections_fts(sections_fts) VALUES('integrity-check')");
+    return {
+      integrity: { quickCheck, fts5: "ok" },
+      schema: db
+        .prepare(
+          "SELECT type, name, tbl_name, sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY type, name, tbl_name, sql",
+        )
+        .all()
+        .map((row) => ({ ...row })),
+      pages: db
+        .prepare("SELECT title, slug, description, body FROM pages ORDER BY slug")
+        .all()
+        .map((row) => ({ ...row })),
+      sections: db
+        .prepare(
+          "SELECT title, slug, section_heading, body FROM sections_fts ORDER BY slug, section_heading, title, body",
+        )
+        .all()
+        .map((row) => ({ ...row })),
+    };
+  } finally {
+    db.close();
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -367,9 +422,7 @@ describe("buildIndex", () => {
     db.close();
   });
 
-  // The more content we have in the docs, the longer this test will take,
-  // and the more likely it is to fail due to timeouts.
-  it.skip("is deterministic: running twice produces identical output", async () => {
+  it("is deterministic: running twice produces identical output", async () => {
     const tmpDir = await createFixtureTree();
     const outputDir = join(tmpDir, "output");
     const opts = {
@@ -385,7 +438,12 @@ describe("buildIndex", () => {
       // Remove db, rebuild
       await rm(join(outputDir, "docs-index.db"));
 
-      await buildIndex(opts);
+      const discoveredInReverse = [
+        join(opts.contentDir, "quickstarts", "react.mdx"),
+        join(opts.contentDir, "getting-started.mdx"),
+        join(opts.contentDir, "api-reference.mdx"),
+      ];
+      await buildIndex(opts, async () => discoveredInReverse);
       const db2 = await readFile(join(outputDir, "docs-index.db"));
 
       expect(db1.equals(db2)).toBe(true);
@@ -396,6 +454,50 @@ describe("buildIndex", () => {
 });
 
 describe("packaged docs index", () => {
+  it("matches a clean rebuild of the complete production docs corpus", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "production-docs-index-"));
+    try {
+      await buildIndex({
+        contentDir: join(repoRoot, "docs", "content", "docs"),
+        outputDir,
+        fileCwd: join(repoRoot, "docs"),
+      });
+
+      const rebuiltPath = join(outputDir, "docs-index.db");
+      const packagedCopyPath = join(outputDir, "packaged-docs-index.db");
+      await copyFile(join(packageBinDir, "docs-index.db"), packagedCopyPath);
+
+      expect(readIndexContract(rebuiltPath)).toEqual(readIndexContract(packagedCopyPath));
+
+      const queries = corpusSearchQueries(rebuiltPath);
+      expect(queries).toHaveLength(24);
+      const [rebuiltBackend, packagedBackend] = await Promise.all([
+        createSqliteBackend(rebuiltPath),
+        createSqliteBackend(packagedCopyPath),
+      ]);
+      const searchContract = (backend: Awaited<ReturnType<typeof createSqliteBackend>>) => ({
+        malformed: backend.search('"', 7),
+        queries: queries.map((query) => ({
+          query,
+          zero: backend.search(query, 0),
+          one: backend.search(query, 1),
+          ranked: backend.search(query, 7),
+        })),
+      });
+      const rebuiltSearch = searchContract(rebuiltBackend);
+      const packagedSearch = searchContract(packagedBackend);
+      expect(rebuiltSearch.malformed).toEqual([]);
+      for (const result of rebuiltSearch.queries) {
+        expect(result.zero).toEqual([]);
+        expect(result.one).toEqual(result.ranked.slice(0, 1));
+        expect(result.ranked.length).toBeLessThanOrEqual(7);
+      }
+      expect(rebuiltSearch).toEqual(packagedSearch);
+    } finally {
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
   it("ships current authentication docs in docs-index.db", async () => {
     const db = new DatabaseSync(join(packageBinDir, "docs-index.db"));
     const row = db

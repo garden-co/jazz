@@ -62,14 +62,13 @@ async function findMdxFiles(dir: string): Promise<string[]> {
 // Main build function
 // ---------------------------------------------------------------------------
 
-export async function buildIndex({
-  contentDir,
-  outputDir,
-  fileCwd,
-}: BuildIndexOptions): Promise<void> {
+export async function buildIndex(
+  { contentDir, outputDir, fileCwd }: BuildIndexOptions,
+  discoverMdxFiles: (contentDir: string) => Promise<string[]> = findMdxFiles,
+): Promise<void> {
   await mkdir(outputDir, { recursive: true });
 
-  const mdxFiles = await findMdxFiles(contentDir);
+  const mdxFiles = await discoverMdxFiles(contentDir);
 
   // fileCwd: base for <include cwd> resolution.
   // Defaults to contentDir (works for tests). Production callers pass the
