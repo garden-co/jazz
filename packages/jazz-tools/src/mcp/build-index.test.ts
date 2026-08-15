@@ -14,6 +14,27 @@ import {
 } from "./build-index.js";
 
 const packageBinDir = resolve(dirname(fileURLToPath(import.meta.url)), "../../bin");
+const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../../..");
+
+function readLogicalIndex(dbPath: string) {
+  const db = new DatabaseSync(dbPath);
+  try {
+    return {
+      pages: db
+        .prepare("SELECT title, slug, description, body FROM pages ORDER BY slug")
+        .all()
+        .map((row) => ({ ...row })),
+      sections: db
+        .prepare(
+          "SELECT title, slug, section_heading, body FROM sections_fts ORDER BY slug, section_heading, title, body",
+        )
+        .all()
+        .map((row) => ({ ...row })),
+    };
+  } finally {
+    db.close();
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -367,9 +388,7 @@ describe("buildIndex", () => {
     db.close();
   });
 
-  // The more content we have in the docs, the longer this test will take,
-  // and the more likely it is to fail due to timeouts.
-  it.skip("is deterministic: running twice produces identical output", async () => {
+  it("is deterministic: running twice produces identical output", async () => {
     const tmpDir = await createFixtureTree();
     const outputDir = join(tmpDir, "output");
     const opts = {
@@ -385,7 +404,12 @@ describe("buildIndex", () => {
       // Remove db, rebuild
       await rm(join(outputDir, "docs-index.db"));
 
-      await buildIndex(opts);
+      const discoveredInReverse = [
+        join(opts.contentDir, "quickstarts", "react.mdx"),
+        join(opts.contentDir, "getting-started.mdx"),
+        join(opts.contentDir, "api-reference.mdx"),
+      ];
+      await buildIndex(opts, async () => discoveredInReverse);
       const db2 = await readFile(join(outputDir, "docs-index.db"));
 
       expect(db1.equals(db2)).toBe(true);
@@ -396,6 +420,23 @@ describe("buildIndex", () => {
 });
 
 describe("packaged docs index", () => {
+  it("matches a clean rebuild of the complete production docs corpus", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "production-docs-index-"));
+    try {
+      await buildIndex({
+        contentDir: join(repoRoot, "docs", "content", "docs"),
+        outputDir,
+        fileCwd: join(repoRoot, "docs"),
+      });
+
+      expect(readLogicalIndex(join(outputDir, "docs-index.db"))).toEqual(
+        readLogicalIndex(join(packageBinDir, "docs-index.db")),
+      );
+    } finally {
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
   it("ships current authentication docs in docs-index.db", async () => {
     const db = new DatabaseSync(join(packageBinDir, "docs-index.db"));
     const row = db
