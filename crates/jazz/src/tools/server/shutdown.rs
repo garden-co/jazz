@@ -20,6 +20,10 @@ impl ShutdownPhase {
     pub fn is_running(self) -> bool {
         matches!(self, Self::Running)
     }
+
+    pub(crate) fn is_terminal(self) -> bool {
+        matches!(self, Self::StorageClosed | Self::Failed)
+    }
 }
 
 #[derive(Clone)]
@@ -92,6 +96,26 @@ impl ShutdownController {
 
     pub(crate) fn try_begin_finalization(&self) -> bool {
         !self.inner.finalization_started.swap(true, Ordering::SeqCst)
+    }
+
+    /// Wait for the one shutdown finalizer to publish its terminal result.
+    ///
+    /// A second lifecycle caller must not treat an intermediate drain or close
+    /// phase as permission to reuse durable storage. `StorageClosed` and
+    /// `Failed` are the only externally complete outcomes.
+    pub(crate) async fn wait_for_finalization(&self) -> ShutdownPhase {
+        let mut phases = self.subscribe();
+        loop {
+            let phase = *phases.borrow_and_update();
+            if phase.is_terminal() {
+                return phase;
+            }
+            if phases.changed().await.is_err() {
+                // The controller is Arc-owned by every waiter, so this branch
+                // is defensive only. Never fabricate a successful close.
+                return ShutdownPhase::Failed;
+            }
+        }
     }
 
     pub async fn wait_requested(&self) {
