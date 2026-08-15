@@ -8,6 +8,8 @@ mod page;
 mod superblock;
 mod wal;
 #[cfg(all(target_arch = "wasm32", feature = "wasm-bench"))]
+pub mod wasm_async_btree;
+#[cfg(all(target_arch = "wasm32", feature = "wasm-bench"))]
 pub mod wasm_bench;
 
 pub use db::{BTreeOptions, CheckpointState, OpfsBTree, SyncPolicy};

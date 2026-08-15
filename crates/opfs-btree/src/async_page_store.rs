@@ -6,9 +6,10 @@
 //! defined by `page`, `superblock`, and `wal`.
 
 use crate::BTreeError;
+use serde::{Deserialize, Serialize};
 
 /// Metadata needed to reconstruct the exact sparse page file on open.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PageStoreMetadata {
     /// Fixed byte width of every stored page.
     pub page_size: u32,
@@ -17,7 +18,7 @@ pub struct PageStoreMetadata {
 }
 
 /// One opaque page blob addressed only by its page identity.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoredPage {
     pub page_id: u64,
     pub bytes: Vec<u8>,
@@ -30,7 +31,7 @@ pub struct StoredPage {
 /// OPFS uses a matching checkpoint/flush boundary.  Relaxed *physical*
 /// durability is allowed, but a successful commit must be visible to a later
 /// open and to all program-order reads after the awaited write resolves.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PageStoreCommit {
     pub metadata: PageStoreMetadata,
     pub writes: Vec<StoredPage>,
