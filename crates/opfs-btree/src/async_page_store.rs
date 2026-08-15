@@ -28,11 +28,11 @@ pub struct StoredPage {
 
 /// The complete atomic persistence unit for a dirty-page checkpoint.
 ///
-/// Implementations must make `metadata`, all page writes, and deletions visible
-/// together.  An IndexedDB implementation uses one `readwrite` transaction;
-/// OPFS uses a matching checkpoint/flush boundary.  Relaxed *physical*
-/// durability is allowed, but a successful commit must be visible to a later
-/// open and to all program-order reads after the awaited write resolves.
+/// IndexedDB makes these records transaction-atomic.  The experimental OPFS
+/// adapter writes and flushes the same records but does **not** claim multi-page
+/// crash atomicity. Relaxed physical durability is allowed. In both adapters a
+/// successful awaited commit is visible to subsequent program-order reads and
+/// to a later clean reopen; callers must not infer stronger crash guarantees.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PageStoreCommit {
