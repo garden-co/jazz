@@ -525,6 +525,42 @@ async fn seed_schema_catalogue(server: &JazzServer, schema: &jazz::tools::Schema
     assert_eq!(response.status(), StatusCode::CREATED);
 }
 
+/// Publish the explicit v1 -> v2 lineage required before the v2 schema can
+/// become an active runtime write schema. Schemas are drafts until this
+/// migration is admitted; a later permissions head must not invent a
+/// self-referential lineage for them.
+async fn publish_v1_to_v2_catalogue_migration(server: &JazzServer) {
+    let response = reqwest::Client::new()
+        .post(format!(
+            "{}/apps/{}/admin/migrations",
+            server.base_url(),
+            server.app_id()
+        ))
+        .header("X-Jazz-Admin-Secret", server.admin_secret())
+        .json(&json!({
+            "fromHash": SchemaHash::compute(&schema_v1()).to_string(),
+            "toHash": SchemaHash::compute(&schema_v2()).to_string(),
+            "forward": [{
+                "table": "users",
+                "operations": [{
+                    "type": "introduce",
+                    "column": "email",
+                    "column_type": { "type": "Text" },
+                    "value": { "type": "Null" }
+                }]
+            }]
+        }))
+        .send()
+        .await
+        .expect("publish v1 to v2 catalogue migration");
+    let status = response.status();
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "v2 must be admitted through its explicit v1-to-v2 lineage"
+    );
+}
+
 async fn assert_edge_query_does_not_include_row(
     client: &JazzClient,
     query: jazz::tools::Query,
@@ -824,6 +860,7 @@ async fn persisted_stale_edge_reconnect_replays_catalogue_before_client_work_imp
     edge_before_restart.shutdown().await;
 
     seed_schema_catalogue(&core, &v2_schema).await;
+    publish_v1_to_v2_catalogue_migration(&core).await;
     publish_allow_all_permissions(&core.base_url(), app_id, core.admin_secret(), &v2_schema).await;
 
     let edge_after_restart = JazzServer::builder()
