@@ -12,7 +12,7 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, OnceLock, RwLock};
 
-use groove::records::Value;
+use groove::records::{OwnedRecord, RecordDescriptor, Value, ValueType};
 
 use thiserror::Error;
 
@@ -73,6 +73,10 @@ pub struct ContentManifestSchema {
     /// Stable adapter name, e.g. `text-v1`; ordinary typed columns do not
     /// repeat this discriminant in every stored value.
     pub adapter_kind: String,
+    /// The schema-owned type of one edit-tail entry.  Different content
+    /// variants deliberately choose different types; it is never an opaque
+    /// byte convention shared by all adapters.
+    pub tail_entry_type: ValueType,
     /// Maximum number of encoded operations held in the un-consolidated tail.
     pub max_tail_entries: u32,
     /// Maximum aggregate tail bytes.  Adapters may impose a lower limit.
@@ -80,9 +84,26 @@ pub struct ContentManifestSchema {
 }
 
 impl ContentManifestSchema {
-    /// Construct a bounded manifest declaration.
+    /// Construct a bounded manifest whose typed tail entries are bytes. This
+    /// is shorthand for byte-oriented content variants.
     pub fn new(
         adapter_kind: impl Into<String>,
+        max_tail_entries: u32,
+        max_tail_bytes: u32,
+    ) -> Result<Self, ManifestError> {
+        Self::with_tail_entry_type(
+            adapter_kind,
+            ValueType::Bytes,
+            max_tail_entries,
+            max_tail_bytes,
+        )
+    }
+
+    /// Construct a bounded manifest declaration with the concrete content
+    /// variant's typed tail entry.
+    pub fn with_tail_entry_type(
+        adapter_kind: impl Into<String>,
+        tail_entry_type: ValueType,
         max_tail_entries: u32,
         max_tail_bytes: u32,
     ) -> Result<Self, ManifestError> {
@@ -92,24 +113,43 @@ impl ContentManifestSchema {
         }
         Ok(Self {
             adapter_kind,
+            tail_entry_type,
             max_tail_entries,
             max_tail_bytes,
         })
     }
+
+    /// The physical type of this one atomic user cell.  `root` is a checked
+    /// 32-byte content id and `editTail` is an array whose element type is
+    /// fixed by the owning content variant's schema.
+    pub fn cell_type(&self) -> ValueType {
+        ValueType::Record(Box::new(self.cell_descriptor()))
+    }
+
+    /// Descriptor used by the nested `Record` cell value.
+    pub fn cell_descriptor(&self) -> RecordDescriptor {
+        RecordDescriptor::new([
+            ("root", ValueType::Bytes),
+            (
+                "editTail",
+                ValueType::Array(Box::new(self.tail_entry_type.clone())),
+            ),
+        ])
+    }
 }
 
 /// The atomic cell stored in an application row.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ContentManifest {
     pub root: ContentId,
-    pub edit_tail: Vec<Vec<u8>>,
+    pub edit_tail: Vec<Value>,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ManifestError {
     #[error("content manifest schema must use nonempty adapter kind and nonzero bounds")]
     InvalidSchema,
-    #[error("manifest bytes are truncated or malformed")]
+    #[error("manifest cell is malformed or has the wrong record shape")]
     Malformed,
     #[error("manifest tail has {actual} entries, maximum is {maximum}")]
     TooManyTailEntries { actual: usize, maximum: u32 },
@@ -123,8 +163,8 @@ pub enum ManifestError {
     UnknownAdapter(String),
     #[error("a different content-manifest adapter is already registered for kind {0:?}")]
     AdapterAlreadyRegistered(String),
-    #[error("content-manifest runtime received a non-bytes cell")]
-    NonBytesCell,
+    #[error("content-manifest runtime received a non-record cell")]
+    NonRecordCell,
 }
 
 impl ContentManifest {
@@ -136,7 +176,11 @@ impl ContentManifest {
                 maximum: schema.max_tail_entries,
             });
         }
-        let bytes = self.edit_tail.iter().map(Vec::len).sum();
+        let bytes = self
+            .edit_tail
+            .iter()
+            .map(|entry| encoded_tail_entry_len(&schema.tail_entry_type, entry))
+            .try_fold(0usize, |total, length| length.map(|length| total + length))?;
         if bytes > schema.max_tail_bytes as usize {
             return Err(ManifestError::TailTooLarge {
                 actual: bytes,
@@ -146,64 +190,57 @@ impl ContentManifest {
         Ok(())
     }
 
-    /// Canonical record-shaped encoding for the one atomic Jazz cell.
-    pub fn encode(&self, schema: &ContentManifestSchema) -> Result<Vec<u8>, ManifestError> {
+    /// Convert this manifest into the actual typed record cell stored in the
+    /// owning application row.  The record codec checks nested descriptor
+    /// identity and canonical encoding, while `validate` enforces the
+    /// manifest-specific root and tail bounds.
+    pub fn into_value(&self, schema: &ContentManifestSchema) -> Result<Value, ManifestError> {
         self.validate(schema)?;
-        let mut out = Vec::with_capacity(40 + self.edit_tail.iter().map(Vec::len).sum::<usize>());
-        out.extend_from_slice(b"JCM1");
-        out.extend_from_slice(&self.root.0);
-        out.extend_from_slice(&(self.edit_tail.len() as u32).to_le_bytes());
-        for operation in &self.edit_tail {
-            out.extend_from_slice(&(operation.len() as u32).to_le_bytes());
-            out.extend_from_slice(operation);
-        }
-        Ok(out)
+        let descriptor = schema.cell_descriptor();
+        let raw = descriptor
+            .create(&[
+                Value::Bytes(self.root.0.to_vec()),
+                Value::Array(self.edit_tail.clone()),
+            ])
+            .map_err(|_| ManifestError::Malformed)?;
+        Ok(Value::Record(OwnedRecord::new(raw, descriptor)))
     }
 
-    /// Decode and validate a canonical manifest cell.
-    pub fn decode(bytes: &[u8], schema: &ContentManifestSchema) -> Result<Self, ManifestError> {
-        if bytes.len() < 40 || &bytes[..4] != b"JCM1" {
+    /// Decode and validate an actual typed record cell.
+    pub fn from_value(
+        value: &Value,
+        schema: &ContentManifestSchema,
+    ) -> Result<Self, ManifestError> {
+        let Value::Record(record) = value else {
+            return Err(ManifestError::NonRecordCell);
+        };
+        let descriptor = schema.cell_descriptor();
+        if record.descriptor() != &descriptor {
             return Err(ManifestError::Malformed);
         }
-        let mut root = [0; 32];
-        root.copy_from_slice(&bytes[4..36]);
-        let count = u32::from_le_bytes(
-            bytes[36..40]
-                .try_into()
-                .map_err(|_| ManifestError::Malformed)?,
-        ) as usize;
-        if count > schema.max_tail_entries as usize {
-            return Err(ManifestError::TooManyTailEntries {
-                actual: count,
-                maximum: schema.max_tail_entries,
-            });
-        }
-        let mut cursor = 40;
-        let mut edit_tail = Vec::with_capacity(count);
-        for _ in 0..count {
-            let length = bytes
-                .get(cursor..cursor + 4)
-                .ok_or(ManifestError::Malformed)?;
-            let length =
-                u32::from_le_bytes(length.try_into().map_err(|_| ManifestError::Malformed)?)
-                    as usize;
-            cursor += 4;
-            let operation = bytes
-                .get(cursor..cursor + length)
-                .ok_or(ManifestError::Malformed)?;
-            edit_tail.push(operation.to_vec());
-            cursor += length;
-        }
-        if cursor != bytes.len() {
+        let values = record.to_values().map_err(|_| ManifestError::Malformed)?;
+        let [Value::Bytes(root), Value::Array(edit_tail)] = values.as_slice() else {
             return Err(ManifestError::Malformed);
-        }
+        };
+        let root: [u8; 32] = root
+            .as_slice()
+            .try_into()
+            .map_err(|_| ManifestError::Malformed)?;
         let manifest = Self {
             root: ContentId(root),
-            edit_tail,
+            edit_tail: edit_tail.clone(),
         };
         manifest.validate(schema)?;
         Ok(manifest)
     }
+}
+
+fn encoded_tail_entry_len(value_type: &ValueType, value: &Value) -> Result<usize, ManifestError> {
+    let descriptor = RecordDescriptor::new([("entry", value_type.clone())]);
+    descriptor
+        .create(std::slice::from_ref(value))
+        .map(|raw| raw.len())
+        .map_err(|_| ManifestError::Malformed)
 }
 
 /// What an adapter is asked to materialize.  A partial request is advisory;
@@ -285,7 +322,10 @@ impl ContentManifestRuntimeProvider for UnavailableContentManifestRuntimeProvide
 /// independently, preserving atomic conflict-unit semantics.
 pub trait ContentManifestAdapter: Send + Sync + 'static {
     fn adapter_kind(&self) -> &str;
-    fn validate_operation(&self, operation: &[u8]) -> Result<(), ManifestError>;
+    /// Validate one already type-checked tail entry.  The concrete type comes
+    /// from `ContentManifestSchema::tail_entry_type`, so adapters never need
+    /// a shared byte envelope or a per-row discriminant.
+    fn validate_operation(&self, operation: &Value) -> Result<(), ManifestError>;
     fn materialize(
         &self,
         manifest: &ContentManifest,
@@ -396,10 +436,7 @@ impl<'a> ContentManifestRuntime<'a> {
         schema: &ContentManifestSchema,
         value: &Value,
     ) -> Result<ContentManifest, ManifestError> {
-        let Value::Bytes(bytes) = value else {
-            return Err(ManifestError::NonBytesCell);
-        };
-        let manifest = ContentManifest::decode(bytes, schema)?;
+        let manifest = ContentManifest::from_value(value, schema)?;
         let adapter = self.registry.get(&schema.adapter_kind)?;
         for operation in &manifest.edit_tail {
             adapter.validate_operation(operation)?;
@@ -423,7 +460,7 @@ impl<'a> ContentManifestRuntime<'a> {
     }
 
     /// Merge complete candidate cells using the schema's adapter and return one
-    /// canonical atomic `Bytes` cell. This is the only adapter merge entry
+    /// canonical atomic `Record` cell. This is the only adapter merge entry
     /// point; callers never receive independently mergeable root/tail fields.
     pub fn merge_cells(
         &self,
@@ -444,7 +481,7 @@ impl<'a> ContentManifestRuntime<'a> {
                 .get(&schema.adapter_kind)?
                 .validate_operation(operation)?;
         }
-        Ok(Value::Bytes(merged.encode(schema)?))
+        merged.into_value(schema)
     }
 
     /// Derive interior query/index values from a full manifest. Values are
@@ -474,10 +511,7 @@ pub fn validate_registered_cell(
     schema: &ContentManifestSchema,
     value: &Value,
 ) -> Result<(), ManifestError> {
-    let Value::Bytes(bytes) = value else {
-        return Err(ManifestError::NonBytesCell);
-    };
-    let manifest = ContentManifest::decode(bytes, schema)?;
+    let manifest = ContentManifest::from_value(value, schema)?;
     let adapter = global_content_manifest_adapters().get(&schema.adapter_kind)?;
     for operation in &manifest.edit_tail {
         adapter.validate_operation(operation)?;
@@ -544,8 +578,8 @@ mod tests {
         fn adapter_kind(&self) -> &str {
             "manifest-runtime-fixture-v1"
         }
-        fn validate_operation(&self, operation: &[u8]) -> Result<(), ManifestError> {
-            if operation.starts_with(b"+") {
+        fn validate_operation(&self, operation: &Value) -> Result<(), ManifestError> {
+            if matches!(operation, Value::Bytes(bytes) if bytes.starts_with(b"+")) {
                 Ok(())
             } else {
                 Err(ManifestError::Conflict("fixture operation"))
@@ -564,6 +598,9 @@ mod tests {
                 .ok_or(ManifestError::Conflict("fixture root missing"))?
                 .to_vec();
             for operation in &manifest.edit_tail {
+                let Value::Bytes(operation) = operation else {
+                    return Err(ManifestError::Conflict("fixture operation type"));
+                };
                 full.extend_from_slice(&operation[1..]);
             }
             match request {
@@ -612,23 +649,62 @@ mod tests {
     #[test]
     fn manifest_codec_is_atomic_and_enforces_its_boundaries() {
         // Internal because this is a wire codec boundary with no public client API yet.
-        let schema = ContentManifestSchema::new("fixture-v1", 2, 3).unwrap();
+        let schema =
+            ContentManifestSchema::with_tail_entry_type("fixture-v1", ValueType::Bytes, 2, 3)
+                .unwrap();
         let value = ContentManifest {
             root: ContentId([7; 32]),
-            edit_tail: vec![b"a".to_vec(), b"bc".to_vec()],
+            edit_tail: vec![Value::Bytes(b"a".to_vec()), Value::Bytes(b"bc".to_vec())],
         };
         assert_eq!(
-            ContentManifest::decode(&value.encode(&schema).unwrap(), &schema).unwrap(),
+            ContentManifest::from_value(&value.into_value(&schema).unwrap(), &schema).unwrap(),
             value
         );
         assert_eq!(
-            value.encode(&ContentManifestSchema::new("fixture-v1", 1, 3).unwrap()),
+            value.into_value(
+                &ContentManifestSchema::with_tail_entry_type("fixture-v1", ValueType::Bytes, 1, 3)
+                    .unwrap()
+            ),
             Err(ManifestError::TooManyTailEntries {
                 actual: 2,
                 maximum: 1
             })
         );
-        assert!(ContentManifest::decode(b"JCM1", &schema).is_err());
+        assert!(
+            ContentManifest::from_value(&Value::Bytes(b"not a record".to_vec()), &schema).is_err()
+        );
+    }
+
+    #[test]
+    fn schema_owned_tail_type_is_an_actual_record_field_not_a_byte_convention() {
+        let schema = ContentManifestSchema::with_tail_entry_type(
+            "typed-tail-fixture-v1",
+            ValueType::String,
+            2,
+            64,
+        )
+        .unwrap();
+        let manifest = ContentManifest {
+            root: ContentId([3; 32]),
+            edit_tail: vec![Value::String("insert: hello".into())],
+        };
+        let value = manifest.into_value(&schema).unwrap();
+        assert!(matches!(value, Value::Record(_)));
+        assert_eq!(
+            ContentManifest::from_value(&value, &schema).unwrap(),
+            manifest
+        );
+
+        // Planted negative: treating this tail as the old shared byte carrier
+        // fails in the record codec before an adapter sees it.
+        assert_eq!(
+            ContentManifest {
+                root: ContentId([3; 32]),
+                edit_tail: vec![Value::Bytes(b"insert: hello".to_vec())],
+            }
+            .into_value(&schema),
+            Err(ManifestError::Malformed)
+        );
     }
     #[test]
     fn ids_are_domain_and_kind_scoped_and_put_is_identical_only() {
@@ -650,7 +726,7 @@ mod tests {
         );
         assert_ne!(historical_left, historical_right);
         assert_eq!(
-            ContentManifestSchema::new("", 1, 1),
+            ContentManifestSchema::with_tail_entry_type("", ValueType::Bytes, 1, 1),
             Err(ManifestError::InvalidSchema)
         );
         assert_ne!(
@@ -683,7 +759,13 @@ mod tests {
     #[test]
     fn registered_adapter_runs_for_actual_schema_column_and_all_runtime_seams() {
         let adapter = FixtureAdapter::registered();
-        let schema = ContentManifestSchema::new("manifest-runtime-fixture-v1", 4, 64).unwrap();
+        let schema = ContentManifestSchema::with_tail_entry_type(
+            "manifest-runtime-fixture-v1",
+            ValueType::Bytes,
+            4,
+            64,
+        )
+        .unwrap();
         let column = crate::schema::ColumnSchema::content_manifest("body", schema.clone());
         let domain = ContentDomainId(uuid::Uuid::from_bytes([9; 16]));
         let context = ContentReadContext { domain };
@@ -698,22 +780,18 @@ mod tests {
                 b"root".to_vec(),
             )
             .unwrap();
-        let left = Value::Bytes(
-            ContentManifest {
-                root,
-                edit_tail: vec![b"+ left".to_vec()],
-            }
-            .encode(&schema)
-            .unwrap(),
-        );
-        let right = Value::Bytes(
-            ContentManifest {
-                root,
-                edit_tail: vec![b"+ right".to_vec()],
-            }
-            .encode(&schema)
-            .unwrap(),
-        );
+        let left = ContentManifest {
+            root,
+            edit_tail: vec![Value::Bytes(b"+ left".to_vec())],
+        }
+        .into_value(&schema)
+        .unwrap();
+        let right = ContentManifest {
+            root,
+            edit_tail: vec![Value::Bytes(b"+ right".to_vec())],
+        }
+        .into_value(&schema)
+        .unwrap();
 
         // This is the ordinary row codec boundary, not a direct adapter call.
         crate::node::codec::validate_cell_value(&column, &left).unwrap();
@@ -742,46 +820,49 @@ mod tests {
             .index_values_for_cell(&schema, &left, &["search".into()])
             .unwrap();
         assert_eq!(indexed["search"], b"root left");
-        let Value::Bytes(merged) = runtime
+        let merged = runtime
             .merge_cells(&schema, &[left.clone(), right])
-            .unwrap()
-        else {
-            panic!("manifest merge must return bytes")
-        };
+            .unwrap();
         assert_eq!(
-            ContentManifest::decode(&merged, &schema).unwrap().edit_tail,
-            vec![b"+ left".to_vec(), b"+ right".to_vec()]
+            ContentManifest::from_value(&merged, &schema)
+                .unwrap()
+                .edit_tail,
+            vec![
+                Value::Bytes(b"+ left".to_vec()),
+                Value::Bytes(b"+ right".to_vec())
+            ]
         );
         assert!(adapter.materializations.load(Ordering::Relaxed) >= 3);
         assert_eq!(adapter.merges.load(Ordering::Relaxed), 1);
         assert_eq!(adapter.indices.load(Ordering::Relaxed), 1);
 
         // Planted sensitivity: a tail that the adapter rejects must be refused
-        // at the actual row codec, proving it was not merely JCM1-decoded.
-        let invalid = Value::Bytes(
-            ContentManifest {
-                root,
-                edit_tail: vec![b"not-an-operation".to_vec()],
-            }
-            .encode(&schema)
-            .unwrap(),
-        );
+        // at the actual row codec, proving it was not merely shape-checked.
+        let invalid = ContentManifest {
+            root,
+            edit_tail: vec![Value::Bytes(b"not-an-operation".to_vec())],
+        }
+        .into_value(&schema)
+        .unwrap();
         assert!(crate::node::codec::validate_cell_value(&column, &invalid).is_err());
     }
 
     #[test]
     fn unknown_adapter_fails_closed_at_row_codec_boundary() {
-        let schema =
-            ContentManifestSchema::new("intentionally-unregistered-manifest-v1", 1, 8).unwrap();
+        let schema = ContentManifestSchema::with_tail_entry_type(
+            "intentionally-unregistered-manifest-v1",
+            ValueType::Bytes,
+            1,
+            8,
+        )
+        .unwrap();
         let column = crate::schema::ColumnSchema::content_manifest("body", schema.clone());
-        let value = Value::Bytes(
-            ContentManifest {
-                root: ContentId([1; 32]),
-                edit_tail: vec![],
-            }
-            .encode(&schema)
-            .unwrap(),
-        );
+        let value = ContentManifest {
+            root: ContentId([1; 32]),
+            edit_tail: vec![],
+        }
+        .into_value(&schema)
+        .unwrap();
         assert!(crate::node::codec::validate_cell_value(&column, &value).is_err());
     }
 }

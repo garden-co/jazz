@@ -4000,12 +4000,12 @@ fn manifest_merge_uses_authored_body_candidates_and_parent_fallback() {
     }
     impl ContentManifestAdapter for RecordingAdapter {
         fn adapter_kind(&self) -> &str { "node-authored-manifest-fixture-v1" }
-        fn validate_operation(&self, operation: &[u8]) -> Result<(), ManifestError> {
-            if operation.starts_with(b"+") { Ok(()) } else { Err(ManifestError::Conflict("bad fixture operation")) }
+        fn validate_operation(&self, operation: &Value) -> Result<(), ManifestError> {
+            if matches!(operation, Value::Bytes(bytes) if bytes.starts_with(b"+")) { Ok(()) } else { Err(ManifestError::Conflict("bad fixture operation")) }
         }
         fn materialize(&self, _: &ContentManifest, _: &crate::content_manifest::MaterializationRequest, _: ContentReadContext, _: &dyn ImmutableContentStore) -> Result<Vec<u8>, ManifestError> { Ok(Vec::new()) }
         fn merge(&self, manifests: &[ContentManifest], _: ContentReadContext, _: &dyn ImmutableContentStore) -> Result<ContentManifest, ManifestError> {
-            self.calls.lock().unwrap().push(manifests.iter().map(|manifest| manifest.edit_tail.concat()).collect());
+            self.calls.lock().unwrap().push(manifests.iter().map(|manifest| manifest.edit_tail.iter().flat_map(|entry| match entry { Value::Bytes(bytes) => bytes.clone(), _ => Vec::new() }).collect()).collect());
             manifests.first().cloned().ok_or(ManifestError::Conflict("no candidates"))
         }
         fn index_values(&self, _: &ContentManifest, _: &[String], _: ContentReadContext, _: &dyn ImmutableContentStore) -> Result<BTreeMap<String, Vec<u8>>, ManifestError> { Ok(BTreeMap::new()) }
@@ -4040,7 +4040,7 @@ fn manifest_merge_uses_authored_body_candidates_and_parent_fallback() {
     let (_alice_dir, mut alice) = open_node_with_schema(node(0xa1), schema.clone());
     let (_bob_dir, mut bob) = open_node_with_schema(node(0xa2), schema);
     let row_uuid = row(0xa0);
-    let manifest = |root, tail: &[u8]| Value::Bytes(ContentManifest { root: crate::content_manifest::ContentId([root; 32]), edit_tail: vec![tail.to_vec()] }.encode(&manifest_schema).unwrap());
+    let manifest = |root, tail: &[u8]| ContentManifest { root: crate::content_manifest::ContentId([root; 32]), edit_tail: vec![Value::Bytes(tail.to_vec())] }.into_value(&manifest_schema).unwrap();
 
     let (base, base_unit) = alice.commit_mergeable_unit(MergeableCommit::new("documents", row_uuid, 10).cells(BTreeMap::from([("title".into(), Value::String("base".into())), ("body".into(), manifest(1, b"+base"))]))).unwrap();
     let [base_fate] = core.apply_sync_message(base_unit.clone()).unwrap().try_into().unwrap();
@@ -4102,7 +4102,7 @@ fn manifest_merge_uses_authored_body_candidates_and_parent_fallback() {
 }
 
 /// Local Node authoring must use the same typed operation admission as a
-/// received wire record: schema-valid JCM1 bytes are insufficient when the
+/// received wire record: schema-valid typed tail entries are insufficient when the
 /// registered adapter rejects an operation.
 #[test]
 fn local_manifest_authoring_rejects_adapter_oversize_tail_and_accepts_boundary() {
@@ -4112,7 +4112,10 @@ fn local_manifest_authoring_rejects_adapter_oversize_tail_and_accepts_boundary()
             "foundation-local-manifest-admission-v1"
         }
 
-        fn validate_operation(&self, operation: &[u8]) -> Result<(), ManifestError> {
+        fn validate_operation(&self, operation: &Value) -> Result<(), ManifestError> {
+            let Value::Bytes(operation) = operation else {
+                return Err(ManifestError::Conflict("operation must be bytes"));
+            };
             if operation.len() <= 256 {
                 Ok(())
             } else {
@@ -4171,14 +4174,12 @@ fn local_manifest_authoring_rejects_adapter_oversize_tail_and_accepts_boundary()
     )]);
     let (_dir, mut node) = open_node_with_schema(node(0xa4), schema);
     let manifest = |tail: Vec<u8>| {
-        Value::Bytes(
-            ContentManifest {
+        ContentManifest {
                 root: crate::content_manifest::ContentId([4; 32]),
-                edit_tail: vec![tail],
+                edit_tail: vec![Value::Bytes(tail)],
             }
-            .encode(&manifest_schema)
-            .unwrap(),
-        )
+            .into_value(&manifest_schema)
+            .unwrap()
     };
 
     let rejected = node

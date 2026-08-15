@@ -300,6 +300,19 @@ function sqlTypeToWasmColumnType(sqlType: SqlType): WasmColumnType {
       schema: sqlType.schema,
     };
   }
+  if (sqlType.kind === "CONTENT_MANIFEST") {
+    return {
+      type: "Row",
+      columns: [
+        { name: "root", column_type: { type: "Bytea" }, nullable: false },
+        {
+          name: "editTail",
+          column_type: { type: "Array", element: sqlTypeToWasmColumnType(sqlType.tailEntry) },
+          nullable: false,
+        },
+      ],
+    };
+  }
 
   return {
     type: "Array",

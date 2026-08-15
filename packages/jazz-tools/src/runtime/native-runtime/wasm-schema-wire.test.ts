@@ -9,7 +9,17 @@ describe.skipIf(!hasJazzWasmBuild())("WasmDb schema wire format", () => {
         columns: [
           {
             name: "body",
-            column_type: { type: "Bytea" },
+            column_type: {
+              type: "Row",
+              columns: [
+                { name: "root", column_type: { type: "Bytea" }, nullable: false },
+                {
+                  name: "editTail",
+                  column_type: { type: "Array", element: { type: "Bytea" } },
+                  nullable: false,
+                },
+              ],
+            },
             nullable: false,
             content_manifest: {
               adapter_kind: "fixture-text-v1",
@@ -24,7 +34,7 @@ describe.skipIf(!hasJazzWasmBuild())("WasmDb schema wire format", () => {
     await expect(createWasmRuntime(schema)).resolves.toBeDefined();
   });
 
-  it("continues to open a legacy schema without manifests", async () => {
+  it("opens a V2 schema without content manifests", async () => {
     const schema: WasmSchema = {
       documents: {
         columns: [

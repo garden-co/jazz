@@ -86,8 +86,8 @@ describe("NativeRuntimeAdapter server transport", () => {
     });
   });
 
-  it("uses a versioned envelope only for content-manifest schemas", () => {
-    const legacy = encodeSchema({
+  it("uses the V2 envelope for every native schema", () => {
+    const ordinary = encodeSchema({
       documents: {
         columns: [{ name: "title", column_type: { type: "Text" }, nullable: false }],
       },
@@ -97,7 +97,17 @@ describe("NativeRuntimeAdapter server transport", () => {
         columns: [
           {
             name: "body",
-            column_type: { type: "Bytea" },
+            column_type: {
+              type: "Row",
+              columns: [
+                { name: "root", column_type: { type: "Bytea" }, nullable: false },
+                {
+                  name: "editTail",
+                  column_type: { type: "Array", element: { type: "Bytea" } },
+                  nullable: false,
+                },
+              ],
+            },
             nullable: false,
             content_manifest: {
               adapter_kind: "fixture-text-v1",
@@ -108,12 +118,56 @@ describe("NativeRuntimeAdapter server transport", () => {
         ],
       },
     });
-    expect(new TextDecoder().decode(legacy.slice(0, 32))).not.toContain(
-      "JAZZ-CONTENT-MANIFEST-SCHEMA-V1",
+    expect(new TextDecoder().decode(ordinary.slice(0, 32))).toBe(
+      "JAZZ-CONTENT-MANIFEST-SCHEMA-V2\0",
     );
     expect(new TextDecoder().decode(manifest.slice(0, 32))).toBe(
-      "JAZZ-CONTENT-MANIFEST-SCHEMA-V1\0",
+      "JAZZ-CONTENT-MANIFEST-SCHEMA-V2\0",
     );
+  });
+
+  it("requires the same exact ordered content-manifest record shape as the server", () => {
+    const contentManifest = {
+      adapter_kind: "fixture-text-v1",
+      max_tail_entries: 8,
+      max_tail_bytes: 1024,
+    };
+    const root = { name: "root", column_type: { type: "Bytea" as const }, nullable: false };
+    const tail = {
+      name: "editTail",
+      column_type: { type: "Array" as const, element: { type: "Text" as const } },
+      nullable: false,
+    };
+    const schemaWithFields = (
+      columns: ColumnDescriptor[],
+      overrides: Partial<ColumnDescriptor> = {},
+    ): WasmSchema => ({
+      documents: {
+        columns: [
+          {
+            name: "body",
+            column_type: { type: "Row" as const, columns },
+            nullable: false,
+            ...overrides,
+            content_manifest: contentManifest,
+          },
+        ],
+      },
+    });
+
+    expect(() => encodeSchema(schemaWithFields([tail, root]))).toThrow("Row { root");
+    expect(() => encodeSchema(schemaWithFields([root, tail, { ...root, name: "extra" }]))).toThrow(
+      "Row { root",
+    );
+    expect(() => encodeSchema(schemaWithFields([root, { ...tail, nullable: true }]))).toThrow(
+      "Row { root",
+    );
+    expect(() => encodeSchema(schemaWithFields([root, tail], { nullable: true }))).toThrow(
+      "Row { root",
+    );
+    expect(() =>
+      encodeSchema(schemaWithFields([root, tail], { default: { type: "Text", value: "invalid" } })),
+    ).toThrow("Row { root");
   });
 
   it("rejects unsupported native schema merge strategies instead of dropping them", () => {

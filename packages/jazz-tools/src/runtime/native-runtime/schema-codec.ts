@@ -16,10 +16,9 @@ import {
 
 const OUTER_ROW_SESSION_PREFIX = "__jazz_outer_row";
 
-// Versioned envelope owned by Rust's `JazzSchema::decode_wire`. Schemas with
-// no manifests intentionally retain their legacy postcard representation.
-const CONTENT_MANIFEST_SCHEMA_WIRE_V1 = new TextEncoder().encode(
-  "JAZZ-CONTENT-MANIFEST-SCHEMA-V1\0",
+// The only schema envelope accepted by Rust's `JazzSchema::decode_wire`.
+const CONTENT_MANIFEST_SCHEMA_WIRE_V2 = new TextEncoder().encode(
+  "JAZZ-CONTENT-MANIFEST-SCHEMA-V2\0",
 );
 
 type PolicyOperandValue = PolicyValue | { type: "OuterRowRef"; column: string };
@@ -87,37 +86,67 @@ type PendingPolicyReachable = Omit<
 >;
 
 export function encodeSchema(schema: WasmSchema): Uint8Array {
-  const writer = new PostcardWriter();
-  writeLegacySchema(writer, schema);
   const manifests = Object.entries(schema).flatMap(([tableName, definition]) =>
     definition.columns.flatMap((column) =>
       column.content_manifest == null
         ? []
-        : [[tableName, column.name, column.content_manifest] as const],
+        : [
+            [
+              tableName,
+              column.name,
+              column.content_manifest,
+              contentManifestTailEntryType(column),
+            ] as const,
+          ],
     ),
   );
-  if (manifests.length === 0) return writer.finish();
-
-  // ContentManifestWireV1 = { legacy_schema, manifests }, where an entry is
+  // ContentManifestWireV2 = { schema, manifests }, where an entry is
   // (table, column, { adapter_kind, max_tail_entries, max_tail_bytes }).
   const payload = new PostcardWriter();
-  writeLegacySchema(payload, schema);
+  writeSchemaPayload(payload, schema);
   payload.vec((entry, index) => {
-    const [tableName, columnName, manifest] = manifests[index]!;
+    const [tableName, columnName, manifest, tailEntry] = manifests[index]!;
     entry.string(tableName);
     entry.string(columnName);
     entry.string(manifest.adapter_kind);
+    writeValueType(entry, columnTypeToValueType(tailEntry));
     entry.u64(manifest.max_tail_entries);
     entry.u64(manifest.max_tail_bytes);
   }, manifests.length);
   const bytes = payload.finish();
-  const encoded = new Uint8Array(CONTENT_MANIFEST_SCHEMA_WIRE_V1.length + bytes.length);
-  encoded.set(CONTENT_MANIFEST_SCHEMA_WIRE_V1);
-  encoded.set(bytes, CONTENT_MANIFEST_SCHEMA_WIRE_V1.length);
+  const encoded = new Uint8Array(CONTENT_MANIFEST_SCHEMA_WIRE_V2.length + bytes.length);
+  encoded.set(CONTENT_MANIFEST_SCHEMA_WIRE_V2);
+  encoded.set(bytes, CONTENT_MANIFEST_SCHEMA_WIRE_V2.length);
   return encoded;
 }
 
-function writeLegacySchema(writer: PostcardWriter, schema: WasmSchema): void {
+function contentManifestTailEntryType(column: ColumnDescriptor | undefined): ColumnType {
+  if (
+    !column ||
+    column.nullable ||
+    column.default != null ||
+    column.column_type.type !== "Row" ||
+    column.column_type.columns.length !== 2
+  ) {
+    throw new Error("content manifests require Row { root: BYTEA, editTail: T[] } storage");
+  }
+  const [root, editTail] = column.column_type.columns;
+  if (
+    !root ||
+    root.name !== "root" ||
+    root.nullable ||
+    root.column_type.type !== "Bytea" ||
+    !editTail ||
+    editTail.name !== "editTail" ||
+    editTail.nullable ||
+    editTail.column_type.type !== "Array"
+  ) {
+    throw new Error("content manifests require Row { root: BYTEA, editTail: T[] } storage");
+  }
+  return editTail.column_type.element;
+}
+
+function writeSchemaPayload(writer: PostcardWriter, schema: WasmSchema): void {
   const tables = Object.entries(schema);
   writer.vec((table, index) => {
     const [tableName, definition] = tables[index]!;
@@ -317,7 +346,13 @@ export function columnTypeToValueType(type: ColumnType): ValueType {
     case "Array":
       return { tag: 13, inner: columnTypeToValueType(type.element) };
     case "Row":
-      throw new Error("Core runtime schema does not support nested Row columns");
+      return {
+        tag: 15,
+        record: type.columns.map((field) => ({
+          name: field.name,
+          valueType: storageColumnValueType(field),
+        })),
+      };
   }
 }
 

@@ -520,27 +520,13 @@ fn convert_column(
     table: &TableName,
     column: &ColumnDescriptor,
 ) -> Result<CoreColumnSchema, SchemaConversionError> {
-    let mut column_type = convert_column_type(table, column.name.as_str(), &column.column_type)?;
-    if column.nullable {
-        column_type = column_type.nullable();
-    }
-    let mut converted = CoreColumnSchema::new(column.name.as_str(), column_type);
     if let Some(manifest) = &column.content_manifest {
-        if !matches!(column.column_type, ColumnType::Bytea) {
-            return Err(err(
-                format!("$.{}.{}", table.as_str(), column.name.as_str()),
-                "content manifest must use BYTEA storage",
-            ));
-        }
-        if column.nullable || column.default.is_some() {
-            return Err(err(
-                format!("$.{}.{}", table.as_str(), column.name.as_str()),
-                "content manifests are required cells without defaults",
-            ));
-        }
-        converted.content_manifest = Some(
-            ContentManifestSchema::new(
+        let tail_entry_type = validate_content_manifest_column(table, column)?;
+        return Ok(CoreColumnSchema::content_manifest(
+            column.name.as_str(),
+            ContentManifestSchema::with_tail_entry_type(
                 &manifest.adapter_kind,
+                tail_entry_type,
                 manifest.max_tail_entries,
                 manifest.max_tail_bytes,
             )
@@ -550,12 +536,72 @@ fn convert_column(
                     error.to_string(),
                 )
             })?,
-        );
+        ));
     }
+    let mut column_type = convert_column_type(table, column.name.as_str(), &column.column_type)?;
+    if column.nullable {
+        column_type = column_type.nullable();
+    }
+    let mut converted = CoreColumnSchema::new(column.name.as_str(), column_type.clone());
     if let Some(default) = &column.default {
         converted.default = Some(convert_column_default(table, column, default)?);
     }
     Ok(converted)
+}
+
+pub(crate) fn validate_content_manifest_column(
+    table: &TableName,
+    column: &ColumnDescriptor,
+) -> Result<GrooveColumnType, SchemaConversionError> {
+    let manifest = column.content_manifest.as_ref().ok_or_else(|| {
+        err(
+            format!("$.{}.{}", table.as_str(), column.name.as_str()),
+            "content manifest metadata is required",
+        )
+    })?;
+    if column.nullable || column.default.is_some() {
+        return Err(err(
+            format!("$.{}.{}", table.as_str(), column.name.as_str()),
+            "content manifests are required cells without defaults",
+        ));
+    }
+    let ColumnType::Row { columns } = &column.column_type else {
+        return Err(err(
+            format!("$.{}.{}", table.as_str(), column.name.as_str()),
+            "content manifest must use Row { root: BYTEA, editTail: T[] } storage",
+        ));
+    };
+    let [root, edit_tail] = columns.columns.as_slice() else {
+        return Err(err(
+            format!("$.{}.{}", table.as_str(), column.name.as_str()),
+            "content manifest must be exactly ordered Row { root: BYTEA, editTail: T[] }",
+        ));
+    };
+    if root.name.as_str() != "root"
+        || root.nullable
+        || root.column_type != ColumnType::Bytea
+        || edit_tail.name.as_str() != "editTail"
+        || edit_tail.nullable
+    {
+        return Err(err(
+            format!("$.{}.{}", table.as_str(), column.name.as_str()),
+            "content manifest must be exactly ordered Row { root: BYTEA, editTail: T[] }",
+        ));
+    }
+    let ColumnType::Array { element } = &edit_tail.column_type else {
+        return Err(err(
+            format!("$.{}.{}", table.as_str(), column.name.as_str()),
+            "content manifest editTail must be an array",
+        ));
+    };
+    let tail_entry_type = convert_column_type(table, column.name.as_str(), element)?;
+    if manifest.tail_entry_type != tail_entry_type {
+        return Err(err(
+            format!("$.{}.{}", table.as_str(), column.name.as_str()),
+            "content manifest metadata tailEntry type must exactly match Row.editTail's element type",
+        ));
+    }
+    Ok(tail_entry_type)
 }
 
 fn convert_column_default(
@@ -2410,6 +2456,84 @@ mod tests {
     };
     use std::path::PathBuf;
     use uuid::Uuid;
+
+    fn content_manifest_column(
+        fields: Vec<ColumnDescriptor>,
+        declared_tail_type: GrooveColumnType,
+    ) -> ColumnDescriptor {
+        let mut column = ColumnDescriptor::new(
+            "body",
+            ColumnType::Row {
+                columns: Box::new(RowDescriptor::new(fields)),
+            },
+        );
+        column.content_manifest = Some(
+            ContentManifestSchema::with_tail_entry_type(
+                "fixture-text-v1",
+                declared_tail_type,
+                8,
+                1024,
+            )
+            .unwrap(),
+        );
+        column
+    }
+
+    fn manifest_root() -> ColumnDescriptor {
+        ColumnDescriptor::new("root", ColumnType::Bytea)
+    }
+
+    fn manifest_tail(nullable: bool) -> ColumnDescriptor {
+        let column = ColumnDescriptor::new(
+            "editTail",
+            ColumnType::Array {
+                element: Box::new(ColumnType::Text),
+            },
+        );
+        if nullable { column.nullable() } else { column }
+    }
+
+    #[test]
+    fn content_manifest_record_shape_is_ordered_and_matches_declared_tail_type() {
+        let table = TableName::new("documents");
+        let canonical = content_manifest_column(
+            vec![manifest_root(), manifest_tail(false)],
+            GrooveColumnType::String,
+        );
+        assert!(convert_column(&table, &canonical).is_ok());
+
+        let reversed = content_manifest_column(
+            vec![manifest_tail(false), manifest_root()],
+            GrooveColumnType::String,
+        );
+        let extra = content_manifest_column(
+            vec![
+                manifest_root(),
+                manifest_tail(false),
+                ColumnDescriptor::new("extra", ColumnType::Text),
+            ],
+            GrooveColumnType::String,
+        );
+        let nullable = content_manifest_column(
+            vec![manifest_root(), manifest_tail(true)],
+            GrooveColumnType::String,
+        );
+        for malformed in [reversed, extra, nullable] {
+            let error = convert_column(&table, &malformed).unwrap_err();
+            assert!(error.to_string().contains("exactly ordered Row"));
+        }
+
+        let mismatched_metadata = content_manifest_column(
+            vec![manifest_root(), manifest_tail(false)],
+            GrooveColumnType::Bytes,
+        );
+        let error = convert_column(&table, &mismatched_metadata).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("tailEntry type must exactly match")
+        );
+    }
 
     fn policy_graph_perf_fixture_dir() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))

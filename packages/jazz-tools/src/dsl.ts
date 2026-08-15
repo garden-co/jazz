@@ -14,6 +14,7 @@ import type {
   JsonSchema,
   JsonValue,
   ContentManifestSchema,
+  ContentManifestSqlType,
   Lens,
   LensOp,
   AddOp,
@@ -223,7 +224,13 @@ export type BytesColumn<
   HasDefault extends boolean = false,
   Value = Uint8Array,
 > = TypedColumnBuilder<"BYTEA", Optional, undefined, HasDefault, Value>;
-export type ContentManifestColumn = BytesColumn;
+export type ContentManifestColumn<TTail extends SqlType = "BYTEA"> = TypedColumnBuilder<
+  ContentManifestSqlType & { tailEntry: TTail },
+  false,
+  undefined,
+  false,
+  { root: Uint8Array; editTail: TSTypeFromSqlType<TTail>[] }
+>;
 export type JsonColumn<
   Output = JsonValue,
   Optional extends boolean = false,
@@ -370,7 +377,7 @@ class ScalarBuilder implements ColumnBuilder {
   private _mergeStrategy: ColumnMergeStrategy | undefined;
   _transform?: ColumnTransform<unknown, unknown>;
 
-  constructor(public _sqlType: ScalarSqlType) {}
+  constructor(public _sqlType: SqlType) {}
 
   optional(): this {
     if (this._mergeStrategy === "counter") {
@@ -889,24 +896,26 @@ export const col = {
   timestamp: () => new ScalarBuilder("TIMESTAMP") as unknown as TimestampColumn,
   float: () => new ScalarBuilder("REAL") as unknown as FloatColumn,
   bytes: () => new ScalarBuilder("BYTEA") as unknown as BytesColumn,
-  contentManifest: (
+  contentManifest: <TTail extends SqlType = "BYTEA">(
     adapterKind: string,
-    options: { maxTailEntries: number; maxTailBytes: number },
+    options: { maxTailEntries: number; maxTailBytes: number; tailEntry?: TTail },
   ) => {
     if (!adapterKind || options.maxTailEntries <= 0 || options.maxTailBytes <= 0) {
       throw new Error("contentManifest requires a nonempty adapter kind and nonzero tail bounds.");
     }
-    const builder = new ScalarBuilder("BYTEA");
+    const tailEntry = (options.tailEntry ?? "BYTEA") as TTail;
+    const builder = new ScalarBuilder({ kind: "CONTENT_MANIFEST", tailEntry });
     const originalBuild = builder._build.bind(builder);
     builder._build = (name: string) => ({
       ...originalBuild(name),
       contentManifest: {
         adapterKind,
+        tailEntry,
         maxTailEntries: options.maxTailEntries,
         maxTailBytes: options.maxTailBytes,
       } satisfies ContentManifestSchema,
     });
-    return builder as unknown as ContentManifestColumn;
+    return builder as unknown as ContentManifestColumn<TTail>;
   },
   json: jsonColumn as unknown as {
     (): JsonColumn;

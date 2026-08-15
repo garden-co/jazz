@@ -43,10 +43,21 @@ export interface JsonSqlType<Output = JsonValue> {
 }
 export interface ContentManifestSchema {
   adapterKind: string;
+  /** Type of one entry in the concrete variant's mutable tail. */
+  tailEntry: SqlType;
   maxTailEntries: number;
   maxTailBytes: number;
 }
-export type SqlType = ScalarSqlType | ArraySqlType | EnumSqlType | JsonSqlType<unknown>;
+export interface ContentManifestSqlType {
+  kind: "CONTENT_MANIFEST";
+  tailEntry: SqlType;
+}
+export type SqlType =
+  | ScalarSqlType
+  | ArraySqlType
+  | EnumSqlType
+  | JsonSqlType<unknown>
+  | ContentManifestSqlType;
 export type ColumnMergeStrategy = "counter" | "g-set";
 export type ColumnMergeStrategyName = ColumnMergeStrategy | "lww";
 
@@ -66,6 +77,9 @@ export function sqlTypeToString(sqlType: SqlType): string {
       return "JSON";
     }
     return `JSON('${JSON.stringify(sqlType.schema).replace(/'/g, "''")}')`;
+  }
+  if (sqlType.kind === "CONTENT_MANIFEST") {
+    return `CONTENT_MANIFEST(BYTEA, ${sqlTypeToString(sqlType.tailEntry)}[])`;
   }
   return `${sqlTypeToString(sqlType.element)}[]`;
 }
@@ -100,7 +114,9 @@ export type TSTypeFromSqlType<T extends SqlType> = T extends ScalarSqlType
           : never
       : T extends JsonSqlType<infer Output>
         ? Output
-        : never;
+        : T extends ContentManifestSqlType
+          ? { root: Uint8Array; editTail: TSTypeFromSqlType<T["tailEntry"]>[] }
+          : never;
 
 export interface Column {
   name: string;
@@ -109,7 +125,7 @@ export interface Column {
   default?: unknown;
   references?: string; // Target table name for foreign key
   mergeStrategy?: ColumnMergeStrategy;
-  /** Logical subtype of a BYTEA cell, lowered as one atomic manifest. */
+  /** Schema metadata for one atomic typed Record { root, editTail } cell. */
   contentManifest?: ContentManifestSchema;
 }
 

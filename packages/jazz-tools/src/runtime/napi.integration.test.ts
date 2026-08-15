@@ -391,7 +391,17 @@ describe("NAPI integration", () => {
         columns: [
           {
             name: "body",
-            column_type: { type: "Bytea" },
+            column_type: {
+              type: "Row",
+              columns: [
+                { name: "root", column_type: { type: "Bytea" }, nullable: false },
+                {
+                  name: "editTail",
+                  column_type: { type: "Array", element: { type: "Bytea" } },
+                  nullable: false,
+                },
+              ],
+            },
             nullable: false,
             content_manifest: {
               adapter_kind: "fixture-text-v1",

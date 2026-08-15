@@ -1,6 +1,14 @@
 import { expect } from "vitest";
 import { PostcardReader } from "./native-codec.js";
 
+const SCHEMA_WIRE_V2_PREFIX = new TextEncoder().encode("JAZZ-CONTENT-MANIFEST-SCHEMA-V2\0");
+
+function schemaWirePayload(schemaBytes: Uint8Array): Uint8Array {
+  const hasPrefix = SCHEMA_WIRE_V2_PREFIX.every((byte, index) => schemaBytes[index] === byte);
+  if (!hasPrefix) throw new Error("expected JAZZ-CONTENT-MANIFEST-SCHEMA-V2 schema bytes");
+  return schemaBytes.subarray(SCHEMA_WIRE_V2_PREFIX.length);
+}
+
 export function readSchemaSelectPolicyBranches(
   schemaBytes: Uint8Array,
   tableName: string,
@@ -23,7 +31,7 @@ export function readSchemaPolicyBranches(
   joins: TestPolicyJoin[];
   branches: TestPolicyBranch[];
 } {
-  const reader = new PostcardReader(schemaBytes);
+  const reader = new PostcardReader(schemaWirePayload(schemaBytes));
   const tables = reader.readVec((tableReader) => {
     const table = tableReader.string();
     tableReader.readVec((columnReader) => {
@@ -66,7 +74,7 @@ export function readSchemaTableMetadata(
   indexedColumns: string[];
   mergeStrategies: Array<{ column: string; strategy: "Lww" | "Counter" }>;
 } {
-  const reader = new PostcardReader(schemaBytes);
+  const reader = new PostcardReader(schemaWirePayload(schemaBytes));
   const tables = reader.readVec((tableReader) => {
     const table = tableReader.string();
     tableReader.readVec((columnReader) => {
@@ -135,7 +143,7 @@ export function readSchemaSelectPolicyReachables(
   schemaBytes: Uint8Array,
   tableName: string,
 ): TestPolicyReachable[] {
-  const reader = new PostcardReader(schemaBytes);
+  const reader = new PostcardReader(schemaWirePayload(schemaBytes));
   const tables = reader.readVec((tableReader) => {
     const table = tableReader.string();
     tableReader.readVec((columnReader) => {
@@ -178,7 +186,7 @@ export function readSchemaPolicyInherits(
   tableName: string,
   operation: "select" | "insert" | "updateUsing" | "updateCheck" | "delete",
 ): { inherits: TestPolicyInherits[]; joinCount: number } {
-  const reader = new PostcardReader(schemaBytes);
+  const reader = new PostcardReader(schemaWirePayload(schemaBytes));
   const tables = reader.readVec((tableReader) => {
     const table = tableReader.string();
     tableReader.readVec((columnReader) => {

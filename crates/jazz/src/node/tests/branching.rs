@@ -890,7 +890,10 @@ fn branch_manifest_admission_precedes_partition_creation_and_accepts_boundary() 
             "foundation-branch-manifest-admission-v1"
         }
 
-        fn validate_operation(&self, operation: &[u8]) -> Result<(), ManifestError> {
+        fn validate_operation(&self, operation: &Value) -> Result<(), ManifestError> {
+            let Value::Bytes(operation) = operation else {
+                return Err(ManifestError::Conflict("operation must be bytes"));
+            };
             if operation.len() > 256 {
                 return Err(ManifestError::Conflict("operation exceeds 256 bytes"));
             }
@@ -959,14 +962,12 @@ fn branch_manifest_admission_precedes_partition_creation_and_accepts_boundary() 
     let shape = Query::from("documents").validate(&schema).unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
     let manifest = |tail: Vec<u8>| {
-        Value::Bytes(
-            ContentManifest {
+        ContentManifest {
                 root: crate::content_manifest::ContentId([0x29; 32]),
-                edit_tail: vec![tail],
+                edit_tail: vec![Value::Bytes(tail)],
             }
-            .encode(&manifest_schema)
-            .unwrap(),
-        )
+            .into_value(&manifest_schema)
+            .unwrap()
     };
 
     CALLS.store(0, std::sync::atomic::Ordering::SeqCst);

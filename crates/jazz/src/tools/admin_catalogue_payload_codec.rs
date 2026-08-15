@@ -17,7 +17,7 @@ use crate::tools::public_api::types::{
 use crate::tools::schema_lens::{LensOp, LensTransform};
 
 /// Current encoding version.
-const SCHEMA_VERSION: u8 = 9;
+const SCHEMA_VERSION: u8 = 10;
 const LENS_VERSION: u8 = 3;
 const PERMISSIONS_VERSION: u8 = 1;
 const PERMISSIONS_BUNDLE_VERSION: u8 = 2;
@@ -101,7 +101,7 @@ pub fn decode_schema(data: &[u8]) -> Result<Schema, CatalogueEncodingError> {
         });
     }
 
-    if data[0] != SCHEMA_VERSION && data[0] != 8 {
+    if data[0] != SCHEMA_VERSION {
         return Err(CatalogueEncodingError::UnsupportedVersion {
             found: data[0],
             expected: SCHEMA_VERSION,
@@ -122,12 +122,22 @@ fn decode_table_entry(
     offset: &mut usize,
     schema_version: u8,
 ) -> Result<(TableName, TableSchema), CatalogueEncodingError> {
-    let name = read_string(data, offset, "table_name")?;
+    let name = TableName::new(read_string(data, offset, "table_name")?);
     let descriptor = decode_row_descriptor(data, offset, schema_version)?;
+    for column in &descriptor.columns {
+        if column.content_manifest.is_some() {
+            crate::tools::server::public_schema_convert::validate_content_manifest_column(
+                &name, column,
+            )
+            .map_err(|error| CatalogueEncodingError::DecodeError {
+                message: error.to_string(),
+            })?;
+        }
+    }
     let indexed_columns = decode_indexed_columns(data, offset)?;
 
     Ok((
-        TableName::new(name),
+        name,
         TableSchema {
             columns: descriptor,
             indexed_columns,
@@ -243,6 +253,10 @@ fn encode_column_descriptor(buf: &mut Vec<u8>, col: &ColumnDescriptor) {
         Some(manifest) => {
             buf.push(1);
             write_string(buf, &manifest.adapter_kind);
+            let tail_entry_type = postcard::to_allocvec(&manifest.tail_entry_type)
+                .expect("ValueType is always postcard serializable");
+            write_u32(buf, tail_entry_type.len() as u32);
+            buf.extend_from_slice(&tail_entry_type);
             write_u32(buf, manifest.max_tail_entries);
             write_u32(buf, manifest.max_tail_bytes);
         }
@@ -285,10 +299,18 @@ fn decode_column_descriptor(
     } else {
         None
     };
-    let content_manifest = if schema_version >= 9 && read_u8(data, offset)? != 0 {
+    let content_manifest = if read_u8(data, offset)? != 0 {
         Some(
-            crate::content_manifest::ContentManifestSchema::new(
+            crate::content_manifest::ContentManifestSchema::with_tail_entry_type(
                 read_string(data, offset, "content_manifest_adapter_kind")?,
+                {
+                    let length = read_u32(data, offset)? as usize;
+                    postcard::from_bytes(read_bytes(data, offset, length)?).map_err(|error| {
+                        CatalogueEncodingError::DecodeError {
+                            message: format!("invalid content manifest tail type: {error}"),
+                        }
+                    })?
+                },
                 read_u32(data, offset)?,
                 read_u32(data, offset)?,
             )
@@ -1622,6 +1644,7 @@ mod tests {
     use super::*;
     use crate::tools::public_api::policy::PolicyExpr;
     use crate::tools::public_api::types::SchemaBuilder;
+    use groove::records::ValueType as GrooveColumnType;
     use serde_json::json;
 
     #[test]
@@ -1948,11 +1971,29 @@ mod tests {
     }
 
     #[test]
-    fn schema_v9_roundtrip_preserves_content_manifest_metadata_and_hash() {
-        let mut body = ColumnDescriptor::new("body", ColumnType::Bytea);
+    fn schema_v10_roundtrip_preserves_typed_content_manifest_metadata_and_hash() {
+        let mut body = ColumnDescriptor::new(
+            "body",
+            ColumnType::Row {
+                columns: Box::new(RowDescriptor::new(vec![
+                    ColumnDescriptor::new("root", ColumnType::Bytea),
+                    ColumnDescriptor::new(
+                        "editTail",
+                        ColumnType::Array {
+                            element: Box::new(ColumnType::Text),
+                        },
+                    ),
+                ])),
+            },
+        );
         body.content_manifest = Some(
-            crate::content_manifest::ContentManifestSchema::new("fixture-text-v1", 8, 1024)
-                .unwrap(),
+            crate::content_manifest::ContentManifestSchema::with_tail_entry_type(
+                "fixture-text-v1",
+                GrooveColumnType::String,
+                8,
+                1024,
+            )
+            .unwrap(),
         );
         let schema = Schema::from([(
             TableName::new("documents"),
@@ -1963,7 +2004,7 @@ mod tests {
         )]);
 
         let encoded = encode_schema(&schema);
-        assert_eq!(encoded[0], 9);
+        assert_eq!(encoded[0], 10);
         let decoded = decode_schema(&encoded).unwrap();
         assert_eq!(
             decoded
@@ -1974,28 +2015,78 @@ mod tests {
                 .unwrap()
                 .content_manifest,
             Some(
-                crate::content_manifest::ContentManifestSchema::new("fixture-text-v1", 8, 1024)
-                    .unwrap()
+                crate::content_manifest::ContentManifestSchema::with_tail_entry_type(
+                    "fixture-text-v1",
+                    GrooveColumnType::String,
+                    8,
+                    1024,
+                )
+                .unwrap()
             )
         );
         assert_eq!(SchemaHash::compute(&decoded), SchemaHash::compute(&schema));
+
+        let mut different_bounds = schema.clone();
+        different_bounds
+            .get_mut(&TableName::new("documents"))
+            .unwrap()
+            .columns
+            .columns
+            .iter_mut()
+            .find(|column| column.name.as_str() == "body")
+            .unwrap()
+            .content_manifest = Some(
+            crate::content_manifest::ContentManifestSchema::with_tail_entry_type(
+                "fixture-text-v1",
+                GrooveColumnType::String,
+                9,
+                1024,
+            )
+            .unwrap(),
+        );
+        assert_ne!(
+            SchemaHash::compute(&different_bounds),
+            SchemaHash::compute(&schema),
+            "manifest bounds and adapter metadata are public schema identity"
+        );
     }
 
     #[test]
-    fn schema_v8_payload_decodes_without_content_manifest_metadata() {
-        let schema = SchemaBuilder::new()
-            .table(TableSchema::builder("documents").column("title", ColumnType::Text))
-            .build();
-        // Historical v8 fixture: one `documents.title: Text` column. Unlike
-        // v9, the column has no manifest-presence byte after its merge flag.
-        let legacy = vec![
-            8, 1, 0, 0, 0, 9, 0, 0, 0, 100, 111, 99, 117, 109, 101, 110, 116, 115, 1, 0, 0, 0, 5,
-            0, 0, 0, 116, 105, 116, 108, 101, 4, 0, 0, 0, 0, 255, 255, 255, 255,
-        ];
+    fn schema_v10_rejects_manifest_metadata_that_disagrees_with_record_tail_type() {
+        let mut body = ColumnDescriptor::new(
+            "body",
+            ColumnType::Row {
+                columns: Box::new(RowDescriptor::new(vec![
+                    ColumnDescriptor::new("root", ColumnType::Bytea),
+                    ColumnDescriptor::new(
+                        "editTail",
+                        ColumnType::Array {
+                            element: Box::new(ColumnType::Text),
+                        },
+                    ),
+                ])),
+            },
+        );
+        body.content_manifest = Some(
+            crate::content_manifest::ContentManifestSchema::with_tail_entry_type(
+                "fixture-text-v1",
+                GrooveColumnType::Bytes,
+                8,
+                1024,
+            )
+            .unwrap(),
+        );
+        let schema = Schema::from([(
+            TableName::new("documents"),
+            TableSchema::new(RowDescriptor::new(vec![body])),
+        )]);
 
-        let decoded = decode_schema(&legacy).unwrap();
-        assert_eq!(decoded, schema);
-        assert_eq!(SchemaHash::compute(&decoded), SchemaHash::compute(&schema));
+        let error = decode_schema(&encode_schema(&schema)).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("tailEntry type must exactly match")
+        );
     }
 
     #[test]
@@ -2354,12 +2445,12 @@ mod tests {
 
     #[test]
     fn decode_invalid_version() {
-        let data = vec![99, 0, 0, 0, 0]; // Unknown version 99
-        let result = decode_schema(&data);
-        assert!(matches!(
-            result,
-            Err(CatalogueEncodingError::UnsupportedVersion { .. })
-        ));
+        for data in [vec![9], vec![8], vec![99]] {
+            assert!(matches!(
+                decode_schema(&data),
+                Err(CatalogueEncodingError::UnsupportedVersion { .. })
+            ));
+        }
     }
 
     #[test]

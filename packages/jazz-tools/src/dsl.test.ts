@@ -437,3 +437,43 @@ describe("reserved magic-column namespace", () => {
     });
   });
 });
+
+describe("content manifest DSL", () => {
+  it("lowers one schema-owned typed tail into an atomic record cell", () => {
+    resetCollectedState();
+    table("documents", {
+      body: col.contentManifest("text-v1", {
+        tailEntry: "TEXT",
+        maxTailEntries: 8,
+        maxTailBytes: 1024,
+      }),
+    });
+
+    expect(schemaToWasm(getCollectedSchema())).toEqual({
+      documents: {
+        columns: [
+          {
+            name: "body",
+            column_type: {
+              type: "Row",
+              columns: [
+                { name: "root", column_type: { type: "Bytea" }, nullable: false },
+                {
+                  name: "editTail",
+                  column_type: { type: "Array", element: { type: "Text" } },
+                  nullable: false,
+                },
+              ],
+            },
+            nullable: false,
+            content_manifest: {
+              adapter_kind: "text-v1",
+              max_tail_entries: 8,
+              max_tail_bytes: 1024,
+            },
+          },
+        ],
+      },
+    });
+  });
+});

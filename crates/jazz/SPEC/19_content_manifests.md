@@ -3,8 +3,8 @@
 ## Overview
 
 This chapter specifies the common substrate for large, structured content
-stored by a normal Jazz application row. It deliberately has no `snapshot_heads`
-table. A content column is one atomic record-shaped value:
+stored by a normal Jazz application row. A content column is one atomic typed
+record value:
 
 ```text
 { root: ContentId, editTail: TypedBoundedTail }
@@ -16,25 +16,34 @@ retains a snapshot; referring to the owner row follows future row versions.
 
 Invariant digest:
 
-- `INV-MANIFEST-1`: root and tail are one atomic replicated cell.
-- `INV-MANIFEST-2`: immutable ids are canonical, domain-scoped addresses.
-- `INV-MANIFEST-3`: immutable insertion is absent-or-identical only.
-- `INV-MANIFEST-4`: merge and interior-index consumers receive the complete manifest.
+- `INV-CONTENT-1`: root and tail are one atomic replicated cell.
+- `INV-CONTENT-2`: immutable ids are canonical, domain-scoped addresses.
+- `INV-CONTENT-3`: immutable insertion is absent-or-identical only.
+- `INV-CONTENT-4`: merge and interior-index consumers receive the complete manifest.
 
 ## Details
 
 ### 19.1 Schema and codec
 
 `ColumnSchema::content_manifest(name, ContentManifestSchema)` lowers to one
-non-null `Bytes` user column. Its schema metadata declares an adapter kind and
-non-zero entry/byte bounds for the tail. The stored `JCM1` codec contains the
-32-byte root followed by a length-delimited operation vector. It is canonical:
-trailing bytes, truncated fields, and bounds violations are rejected.
+non-null `Record` user column with exactly these ordered fields: `root: Bytes`
+then `editTail: Array<T>`. `T` is declared by the content variant in the schema;
+for example, text may use a typed edit record while a stream may use an append
+operation record. The ordinary Groove record codec validates the nested layout
+and canonical encoding, and the content boundary additionally requires a
+32-byte root plus non-zero entry/byte bounds for the tail. The byte bound is
+the sum of each typed tail entry's canonical encoded size.
 
 The adapter kind belongs to the schema, not every row. A dynamically typed
 union column is a different feature and must carry its own discriminant.
 
-`INV-MANIFEST-1`: A manifest MUST be authored, retained, transported, and
+Every schema uses the explicit `JAZZ-CONTENT-MANIFEST-SCHEMA-V2` envelope. It
+carries the tail entry type and verifies exact equality with the inline
+`editTail` element type. V1 and bare legacy schema bytes are rejected. There
+is no released content-cell persistence format to migrate, so V2 is the only
+supported wire and authoring format for this alpha.
+
+`INV-CONTENT-1`: A manifest MUST be authored, retained, transported, and
 merged as one ordinary user cell. An implementation MUST NOT independently
 choose a root from one concurrent candidate and a tail from another. Today this
 is achieved by the existing whole-column LWW behavior; adapters may later
@@ -47,12 +56,12 @@ passed full manifests.
 immutable kind (`leaf`, `node`, or `root`), authorization/encryption domain,
 adapter kind, and canonical payload length and bytes.
 
-`INV-MANIFEST-2`: Every semantically relevant immutable field, including
+`INV-CONTENT-2`: Every semantically relevant immutable field, including
 adapter/version and domain, MUST be in the canonical payload or fixed preimage.
 The authorization/encryption domain MUST be included, so equality does not
 leak across domains.
 
-`INV-MANIFEST-3`: Immutable storage MUST implement
+`INV-CONTENT-3`: Immutable storage MUST implement
 `put_if_absent_or_identical`: an existing id with identical canonical bytes is
 success; an existing id with different bytes is a hard integrity error. The
 foundation exposes this as `ImmutableContentStore`; storage-backed adapters
@@ -78,11 +87,11 @@ registry, so an unknown kind or invalid typed tail fails closed at admission.
 adapter-defined merges, and interior projection/index derivation. It is given a
 domain-scoped immutable store and always decodes the complete cell before
 calling the adapter. Query/index code must use this bridge (rather than reading
-the bytes cell or root directly). A concrete content lane may opt into adapter
+the record fields or root directly). A concrete content lane may opt into adapter
 merge only once it has the necessary immutable store and conflict semantics;
 until then, core keeps normal whole-cell LWW.
 
-`INV-MANIFEST-4`: Any merge strategy, interior query, or index that observes
+`INV-CONTENT-4`: Any merge strategy, interior query, or index that observes
 content MUST materialize from a coherent `{root, editTail}` pair. It MUST NOT
 read the root while ignoring a live tail.
 

@@ -68,6 +68,19 @@ function sqlTypeToWasm(sqlType: SqlType): ColumnType {
         schema: sqlType.schema,
       };
     }
+    if (sqlType.kind === "CONTENT_MANIFEST") {
+      return {
+        type: "Row",
+        columns: [
+          { name: "root", column_type: { type: "Bytea" }, nullable: false },
+          {
+            name: "editTail",
+            column_type: { type: "Array", element: sqlTypeToWasm(sqlType.tailEntry) },
+            nullable: false,
+          },
+        ],
+      };
+    }
     return { type: "Array", element: sqlTypeToWasm(sqlType.element) };
   }
   return map[sqlType];

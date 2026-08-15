@@ -181,6 +181,22 @@ fn hash_column_descriptor(hasher: &mut blake3::Hasher, col: &ColumnDescriptor) {
         hasher.update(&[0]);
     }
 
+    // Content adapter identity and the tail entry type are semantic schema
+    // inputs even though the physical record already exposes root/editTail.
+    // Hash them explicitly so two variants cannot share a public catalogue
+    // identity merely because their record layouts happen to coincide.
+    if let Some(manifest) = &col.content_manifest {
+        hasher.update(&[1]);
+        hasher.update(manifest.adapter_kind.as_bytes());
+        hasher.update(&[0]);
+        let tail = postcard::to_allocvec(&manifest.tail_entry_type)
+            .expect("ValueType is always postcard serializable");
+        hasher.update(&(tail.len() as u64).to_le_bytes());
+        hasher.update(&tail);
+        hasher.update(&manifest.max_tail_entries.to_le_bytes());
+        hasher.update(&manifest.max_tail_bytes.to_le_bytes());
+    }
+
     hasher.update(&[0]); // delimiter
 }
 
