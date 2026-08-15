@@ -254,10 +254,13 @@ at-least-once by `TxId`; the authority's idempotent commit-unit handling makes
 that safe, while each individual connection still sends a `TxId` at most once.
 
 Field-level semantics are the same regardless of the write method. An explicit
-null clears a nullable column. A JSON column is replaced atomically. A write to a
-soft-deleted row fails locally, and an offline racing write is rejected at the
-authority. Unawaited write failures surface through an `on_write_error` hook
-rather than being lost.
+null clears a nullable column. A JSON column accepts only syntactically valid
+JSON source text and, when it declares a JSON Schema, only instances accepted by
+that schema; it preserves the accepted source text verbatim and is replaced
+atomically. A rejected JSON write therefore leaves no new row or partial update.
+A write to a soft-deleted row fails locally, and an offline racing write is
+rejected at the authority. Unawaited write failures surface through an
+`on_write_error` hook rather than being lost.
 
 Trusted backends can perform core-only attributed writes: the backend sets
 `Transaction.made_by` to a user while write policy is evaluated under the

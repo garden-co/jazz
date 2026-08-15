@@ -30,10 +30,10 @@ use crate::tools::public_api::query::{
 use crate::tools::public_api::types::{
     OrderedAdded, OrderedRemoved, OrderedUpdated, QueryResultField,
 };
-use crate::tools::public_schema::Schema;
 use crate::tools::public_schema::TableName;
 use crate::tools::public_schema::{ColumnType, Query, Session, TableSchema, Value, WriteContext};
 use crate::tools::public_schema::{OrderedRowDelta, QueryResult, Row};
+use crate::tools::public_schema::{Schema, validate_json_value};
 use crate::tools::server::core_websocket_transport::WebSocketTransport;
 use crate::tools::server::public_schema_convert::convert_public_schema;
 #[cfg(feature = "test-utils")]
@@ -1831,6 +1831,8 @@ fn public_to_core_value_for_column(
     value: Value,
     column: &crate::tools::public_schema::ColumnDescriptor,
 ) -> Result<CoreValue> {
+    validate_json_value(&value, &column.column_type, column.name_str())
+        .map_err(JazzError::Write)?;
     let value = public_to_core_value_for_column_type(value, &column.column_type)?;
     if column.nullable && !matches!(value, CoreValue::Nullable(_)) {
         Ok(CoreValue::Nullable(Some(Box::new(value))))
