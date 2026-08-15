@@ -130,3 +130,79 @@ fn maintained_projected_current_picks_winner_before_lens_projection() {
     assert_eq!(shipped.cell_at(0), Some(v("new-name")));
     assert_eq!(shipped.cell_at(1), Some(v("new-body")));
 }
+
+/// A maintained `tasks` view may read an old `todos` row through a table-rename
+/// lens, but its wire witness remains the complete `todos` history version.
+#[test]
+fn maintained_renamed_table_witness_reloads_the_authored_history_row() {
+    let base = schema();
+    let evolved = JazzSchema::new([TableSchema::new(
+        "tasks",
+        [ColumnSchema::new("title", ColumnType::String)],
+    )]);
+    let evolved_payload = SchemaVersion::new(evolved.clone());
+    let (_dir, mut core) = open_node_with_schema(node(0x5d), base.clone());
+    let shared_row = row(0x5e);
+
+    let old_tx = core
+        .commit_mergeable(MergeableCommit::new("todos", shared_row, 10).cells(BTreeMap::from([
+            ("title".to_owned(), v("old-title")),
+        ])))
+        .unwrap();
+    core.apply_fate_update(
+        old_tx,
+        Fate::Accepted,
+        Some(core.clock.next_global_seq),
+        Some(DurabilityTier::Global),
+    )
+    .unwrap();
+    publish_schema_lineage(
+        &mut core,
+        evolved_payload.clone(),
+        MigrationLens::new(
+            base.version_id(),
+            evolved_payload.id,
+            vec![TableLens {
+                source_table: "todos".to_owned(),
+                target_table: "tasks".to_owned(),
+                ops: vec![LensOp::RenameTable {
+                    from: "todos".to_owned(),
+                    to: "tasks".to_owned(),
+                }],
+            }],
+        ),
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
+    .unwrap();
+    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+        author: AuthorId::SYSTEM,
+        pointer: CurrentWriteSchema {
+            revision: 1,
+            schema: evolved_payload.id,
+        },
+    })
+    .unwrap();
+
+    let shape = Query::from("tasks")
+        .validate_with_schema_version(&evolved, evolved_payload.id)
+        .unwrap();
+    let rows = core
+        .query_rows(
+            &shape,
+            &shape.bind(BTreeMap::new()).unwrap(),
+            DurabilityTier::Global,
+        )
+        .unwrap();
+    assert_eq!(rows.len(), 1, "the renamed view sees the old row");
+
+    let mut peer = PeerState::new();
+    let update = peer.current_rows_update(&mut core, "tasks").unwrap();
+    let bundles = version_bundles_for_update(&update);
+    assert_eq!(bundles.len(), 1);
+    assert_eq!(bundles[0].versions.len(), 1);
+    let shipped = &bundles[0].versions[0];
+    assert_eq!(shipped.schema_version(), base.version_id());
+    assert_eq!(shipped.table(), "todos");
+    assert_eq!(shipped.cell_at(0), Some(v("old-title")));
+}
