@@ -118,6 +118,9 @@ struct ReplacementKey {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct ResultTransitions {
+    /// Membership was reconciled from a newly advanced remote authority view,
+    /// rather than emitted by this local Groove subscription.
+    pub(crate) authoritative_membership_changed: bool,
     pub(crate) adds: Vec<ResultMemberEntry>,
     pub(crate) removes: Vec<ResultMemberEntry>,
     pub(crate) result_payload_adds: Vec<(ResultMemberEntry, ResultMemberPayloadEntry)>,

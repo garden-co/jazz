@@ -6368,6 +6368,8 @@ where
                                 let snapshot = node
                                     .borrow_mut()
                                     .materialize_local_maintained_relation_snapshot(maintained)?;
+                                let current_root_occurrences =
+                                    maintained.root_occurrence_ids().to_vec();
                                 let settled = subscription_is_settled(
                                     &node.borrow(),
                                     &shape,
@@ -6377,15 +6379,24 @@ where
                                     remote_propagate_upstream,
                                 );
                                 let state_ref = &mut *state_ref;
+                                let previous_root_occurrences = snapshot_root_occurrences(
+                                    &state_ref.snapshot,
+                                    &state_ref.snapshot_index,
+                                )?;
                                 let event = subscription_terminal_delta_event(
                                     snapshot_tier,
                                     settled,
                                     &state_ref.snapshot,
+                                    &previous_root_occurrences,
                                     &snapshot,
-                                );
+                                    &current_root_occurrences,
+                                )?;
                                 state_ref.snapshot = relation_snapshot_with_delta_slack(&snapshot);
                                 state_ref.snapshot_index =
-                                    RelationSnapshotIndex::from_snapshot(&state_ref.snapshot);
+                                    relation_snapshot_index_with_root_occurrences(
+                                        &state_ref.snapshot,
+                                        &current_root_occurrences,
+                                    )?;
                                 state_ref.snapshot_source =
                                     SubscriptionSnapshotSource::LocalMaintained;
                                 state_ref.settled = settled;
@@ -6396,6 +6407,10 @@ where
                                 continue;
                             } else {
                                 let state_ref = &mut *state_ref;
+                                let previous_snapshot = state_ref.snapshot.clone();
+                                let previous_snapshot_index = state_ref.snapshot_index.clone();
+                                let authoritative_membership_changed =
+                                    update.authoritative_membership_changed;
                                 let mut event = apply_maintained_update_to_snapshot(
                                     &mut state_ref.snapshot,
                                     &mut state_ref.snapshot_index,
@@ -6404,6 +6419,32 @@ where
                                     previous_settled,
                                     terminal_rows,
                                 );
+                                if authoritative_membership_changed {
+                                    order_maintained_snapshot_roots(
+                                        &node.borrow(),
+                                        &shape.query(),
+                                        &mut state_ref.snapshot,
+                                        &mut state_ref.snapshot_index,
+                                    )?;
+                                    // Authority reconciliation carries row
+                                    // additions/removals without positions.
+                                    // Re-publish the first changed ordered
+                                    // suffix so consumers apply TopBy order.
+                                    event = subscription_terminal_delta_event(
+                                        snapshot_tier,
+                                        previous_settled,
+                                        &previous_snapshot,
+                                        &snapshot_root_occurrences(
+                                            &previous_snapshot,
+                                            &previous_snapshot_index,
+                                        )?,
+                                        &state_ref.snapshot,
+                                        &snapshot_root_occurrences(
+                                            &state_ref.snapshot,
+                                            &state_ref.snapshot_index,
+                                        )?,
+                                    )?;
+                                }
                                 state_ref.snapshot_source =
                                     SubscriptionSnapshotSource::LocalMaintained;
                                 let settled = subscription_is_settled(
@@ -6413,7 +6454,12 @@ where
                                     settled_tier,
                                     read_view,
                                     remote_propagate_upstream,
-                                );
+                                ) && node
+                                    .borrow()
+                                    .relation_snapshot_has_materialized_required_cells(
+                                        shape.query(),
+                                        &state_ref.snapshot,
+                                    )?;
                                 state_ref.settled = settled;
                                 retained.push(Rc::downgrade(&state));
                                 if let SubscriptionEvent::Delta {
@@ -11952,39 +11998,56 @@ fn subscription_terminal_delta_event(
     tier: DurabilityTier,
     settled: bool,
     previous: &RelationSnapshot,
+    previous_occurrences: &[OutputOccurrenceId],
     current: &RelationSnapshot,
-) -> SubscriptionEvent {
+    current_occurrences: &[OutputOccurrenceId],
+) -> Result<SubscriptionEvent, Error> {
     let previous_roots = &previous.rows[..previous.root_count];
     let current_roots = &current.rows[..current.root_count];
+    if previous_roots.len() != previous_occurrences.len()
+        || current_roots.len() != current_occurrences.len()
+    {
+        return Err(Error::new(
+            ErrorCode::Protocol,
+            "maintained terminal occurrence sidecar length does not match root rows",
+        ));
+    }
     let common_prefix = previous_roots
         .iter()
-        .zip(current_roots)
-        .take_while(|(previous, current)| {
-            subscription_row_occurrence_id(previous) == subscription_row_occurrence_id(current)
-        })
+        .zip(previous_occurrences)
+        .zip(current_roots.iter().zip(current_occurrences))
+        .take_while(|((_, previous), (_, current))| previous == current)
         .count();
 
     let updated = previous_roots[..common_prefix]
         .iter()
         .zip(&current_roots[..common_prefix])
-        .filter(|(previous, current)| previous != current)
-        .map(|(_, current)| subscription_output_row(current.clone()))
+        .zip(&current_occurrences[..common_prefix])
+        .filter(|((previous, current), _)| previous != current)
+        .map(|((_, current), occurrence_id)| SubscriptionOutputRow {
+            occurrence_id: occurrence_id.clone(),
+            row: current.clone(),
+        })
         .collect();
     let removed = previous_roots[common_prefix..]
         .iter()
-        .map(|row| RemovedRow {
+        .zip(&previous_occurrences[common_prefix..])
+        .map(|(row, occurrence_id)| RemovedRow {
             table: row.table().to_owned(),
             row_uuid: row.row_uuid(),
-            occurrence_id: subscription_row_occurrence_id(row),
+            occurrence_id: occurrence_id.clone(),
         })
         .collect();
     let added = current_roots[common_prefix..]
         .iter()
-        .cloned()
-        .map(subscription_output_row)
+        .zip(&current_occurrences[common_prefix..])
+        .map(|(row, occurrence_id)| SubscriptionOutputRow {
+            occurrence_id: occurrence_id.clone(),
+            row: row.clone(),
+        })
         .collect();
 
-    SubscriptionEvent::Delta {
+    Ok(SubscriptionEvent::Delta {
         reset: false,
         publishable: true,
         added,
@@ -11994,7 +12057,7 @@ fn subscription_terminal_delta_event(
         terminal_layout: None,
         settled,
         tier,
-    }
+    })
 }
 
 fn subscription_delta_event_with_reset(
@@ -12082,6 +12145,7 @@ fn apply_maintained_update_to_snapshot(
     _terminal_rows: bool,
 ) -> SubscriptionEvent {
     let LocalMaintainedViewSubscriptionUpdate {
+        authoritative_membership_changed: _,
         added: update_added,
         removed: update_removed,
         added_edges: update_added_edges,
@@ -12303,6 +12367,84 @@ fn apply_maintained_update_to_snapshot(
         settled,
         tier,
     }
+}
+
+/// Restore the query's observable root order after applying a maintained
+/// membership transition. Groove owns membership/windowing, while this helper
+/// only orders the selected roots before their row-only delta is bridged to an
+/// application subscription.
+fn order_maintained_snapshot_roots<S>(
+    node: &NodeState<S>,
+    query: &crate::query::Query,
+    snapshot: &mut RelationSnapshot,
+    snapshot_index: &mut RelationSnapshotIndex,
+) -> Result<(), Error>
+where
+    S: OrderedKvStorage,
+{
+    let mut roots = snapshot.rows[..snapshot.root_count].to_vec();
+    let mut occurrences = snapshot_root_occurrences(snapshot, snapshot_index)?;
+    node.apply_query_order_with_occurrences(query, &mut roots, &mut occurrences)?;
+    snapshot.rows[..snapshot.root_count].clone_from_slice(&roots);
+    snapshot_index.roots = root_occurrence_positions(&occurrences);
+    Ok(())
+}
+
+fn snapshot_root_occurrences(
+    snapshot: &RelationSnapshot,
+    snapshot_index: &RelationSnapshotIndex,
+) -> Result<Vec<OutputOccurrenceId>, Error> {
+    let mut occurrences = vec![None; snapshot.root_count];
+    for (occurrence, position) in &snapshot_index.roots {
+        let slot = occurrences.get_mut(*position).ok_or_else(|| {
+            Error::new(
+                ErrorCode::Protocol,
+                "maintained root occurrence index exceeds snapshot roots",
+            )
+        })?;
+        *slot = Some(occurrence.clone());
+    }
+    occurrences
+        .into_iter()
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| {
+            Error::new(
+                ErrorCode::Protocol,
+                "maintained snapshot root is missing an occurrence identity",
+            )
+        })
+}
+
+fn root_occurrence_positions(
+    occurrences: &[OutputOccurrenceId],
+) -> BTreeMap<OutputOccurrenceId, usize> {
+    occurrences
+        .iter()
+        .cloned()
+        .enumerate()
+        .map(|(position, occurrence)| (occurrence, position))
+        .collect()
+}
+
+fn relation_snapshot_index_with_root_occurrences(
+    snapshot: &RelationSnapshot,
+    occurrences: &[OutputOccurrenceId],
+) -> Result<RelationSnapshotIndex, Error> {
+    if snapshot.root_count != occurrences.len() {
+        return Err(Error::new(
+            ErrorCode::Protocol,
+            "maintained terminal occurrence sidecar length does not match root rows",
+        ));
+    }
+    let mut index = RelationSnapshotIndex::from_snapshot(snapshot);
+    index.roots = root_occurrence_positions(occurrences);
+    if index.roots.len() != occurrences.len() {
+        return Err(Error::new(
+            ErrorCode::Protocol,
+            "maintained terminal occurrence sidecar contains duplicate identity",
+        ));
+    }
+    Ok(index)
 }
 
 fn relation_snapshot_with_delta_slack(snapshot: &RelationSnapshot) -> RelationSnapshot {

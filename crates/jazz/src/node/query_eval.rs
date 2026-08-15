@@ -711,6 +711,7 @@ fn version_identity_fields(schema: &VersionIdentityFields) -> Vec<String> {
 }
 
 pub(crate) struct LocalMaintainedViewSubscriptionUpdate {
+    pub(crate) authoritative_membership_changed: bool,
     pub(crate) added: Vec<(OutputOccurrenceId, CurrentRow)>,
     pub(crate) removed: Vec<OutputOccurrenceId>,
     pub(crate) added_edges: Vec<(RelationEdge, Option<CurrentRow>)>,
@@ -5417,6 +5418,7 @@ where
             .collect();
         Ok(Some(
             super::maintained_subscription_view::ResultTransitions {
+                authoritative_membership_changed: false,
                 adds: current.difference(&previous).cloned().collect(),
                 removes: previous.difference(&current).cloned().collect(),
                 result_payload_adds,
@@ -8659,6 +8661,7 @@ where
         let mut fact_states = BTreeMap::<ProgramFactEntry, (bool, bool)>::new();
         let mut structured_app_row_changes = BTreeSet::new();
         let mut terminal_operations = Vec::new();
+        let mut authoritative_membership_changed = false;
         if let Some(binding_view) = authoritative_binding_view {
             let authoritative_generation = self.applied_view_update_generation(binding_view);
             // Local optimistic changes can advance the maintained graph
@@ -8671,20 +8674,77 @@ where
                     .get(&binding_view)
                     .cloned()
                     .unwrap_or_default();
-                let remote_occurrences = remote_members
-                    .iter()
-                    .filter_map(ResultMemberEntry::output_occurrence_id)
-                    .collect::<BTreeSet<_>>();
+                let remote_payloads = self
+                    .query
+                    .settled_program_facts
+                    .get(&binding_view)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|fact| match fact {
+                        ProgramFactEntry::ResultPayload(payload) => {
+                            Some((payload.member.clone(), payload.clone()))
+                        }
+                        _ => None,
+                    })
+                    .collect::<BTreeMap<_, _>>();
+                // The local maintained graph may intentionally be behind the
+                // authority frontier (for example, an Edge-tier window over a
+                // client-local database).  An authoritative ViewUpdate is not
+                // merely a revocation signal: it is the current membership
+                // decision for that frontier.  Import members newly admitted
+                // there so a row promoted across a TopBy boundary is delivered
+                // even though none of its locally-visible source facts changed.
+                for entry in remote_members.difference(&local.authoritative_result_set) {
+                    if !local.result_set.contains(entry) {
+                        let materializable = if remote_payloads.contains_key(entry) {
+                            true
+                        } else if let Some(row) =
+                            self.materialize_local_maintained_view_result_member(local, entry)?
+                        {
+                            let table = self.table(row.table())?;
+                            current_row_has_required_subscription_cells(
+                                &row,
+                                table,
+                                local.result_select.as_deref(),
+                            )
+                        } else {
+                            false
+                        };
+                        // Authority membership can arrive before the admitted
+                        // row's readable content bundle. Do not publish a
+                        // synthetic placeholder root: the ordinary maintained
+                        // source transition will add it once that content is
+                        // locally materializable.
+                        if !materializable {
+                            continue;
+                        }
+                        authoritative_membership_changed = true;
+                        states.insert(entry.clone(), (false, true));
+                        if let Some(payload) = remote_payloads.get(entry) {
+                            payload_states.insert(
+                                entry.clone(),
+                                (
+                                    local.result_payloads.get(entry).cloned(),
+                                    Some(payload.clone()),
+                                ),
+                            );
+                        }
+                    }
+                }
                 for entry in local.authoritative_result_set.difference(&remote_members) {
-                    // A content-version replacement is still the same
-                    // authorized output occurrence. Membership reconciliation
-                    // must not retract the locally maintained row while its
-                    // newer payload is being applied.
-                    let remains_authoritative = entry
-                        .output_occurrence_id()
-                        .is_some_and(|occurrence| remote_occurrences.contains(&occurrence));
-                    if !remains_authoritative && local.result_set.contains(entry) {
+                    // Replace the exact prior member even when its output
+                    // occurrence remains visible through a new content
+                    // version. The snapshot reducer coalesces the matching
+                    // occurrence add/remove into one replacement.
+                    if local.result_set.contains(entry) {
+                        authoritative_membership_changed = true;
                         states.insert(entry.clone(), (true, false));
+                        if local.result_payloads.contains_key(entry) {
+                            payload_states.insert(
+                                entry.clone(),
+                                (local.result_payloads.get(entry).cloned(), None),
+                            );
+                        }
                     }
                 }
                 local.authoritative_result_set = remote_members;
@@ -8760,6 +8820,7 @@ where
             return Ok(None);
         }
         let mut transitions = super::maintained_subscription_view::ResultTransitions {
+            authoritative_membership_changed,
             structured_app_row_changes,
             terminal_operations,
             ..Default::default()
@@ -8831,6 +8892,7 @@ where
         materialize_update: bool,
     ) -> Result<LocalMaintainedViewSubscriptionUpdate, Error> {
         let structured_output = !local.result_query.array_subqueries.is_empty();
+        let authoritative_membership_changed = transitions.authoritative_membership_changed;
         let structured_app_row_changes = transitions.structured_app_row_changes.clone();
         let terminal_operations = transitions.terminal_operations.clone();
         let terminal_layout = (!terminal_operations.is_empty())
@@ -8980,6 +9042,7 @@ where
             }
         }
         Ok(LocalMaintainedViewSubscriptionUpdate {
+            authoritative_membership_changed,
             added,
             removed,
             added_edges,
@@ -8996,6 +9059,26 @@ where
         Ok(self
             .materialize_local_maintained_relation_snapshot_with_occurrences(local)?
             .snapshot)
+    }
+
+    pub(crate) fn relation_snapshot_has_materialized_required_cells(
+        &self,
+        query: &crate::query::Query,
+        snapshot: &RelationSnapshot,
+    ) -> Result<bool, Error> {
+        if query.aggregate.is_some() || query.flat_join.is_some() {
+            return Ok(true);
+        }
+        for (index, row) in snapshot.rows.iter().enumerate() {
+            let table = self.table(row.table())?;
+            let projection = (index < snapshot.root_count && row.table() == query.table)
+                .then_some(query.select.as_deref())
+                .flatten();
+            if !current_row_has_required_subscription_cells(row, table, projection) {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     fn materialize_local_maintained_relation_snapshot_with_occurrences(
@@ -9223,17 +9306,30 @@ where
             version.clone()
         } else {
             let (content_winner, _) = local.maintained.replacement_for(entry.0.as_str(), entry.1);
-            let Some(content_winner) = content_winner else {
-                return Ok(None);
-            };
-            if self.version_tx_id(&content_winner)? != entry.2 {
-                return Ok(None);
+            if let Some(content_winner) = content_winner {
+                if self.version_tx_id(&content_winner)? != entry.2 {
+                    return Ok(None);
+                }
+                tx_versions.push(content_winner);
+                tx_versions
+                    .last()
+                    .ok_or(Error::MissingTransaction(entry.2))?
+                    .clone()
+            } else {
+                // A client-local maintained graph can lag its remote
+                // authority's source. The authority ViewUpdate has already
+                // authenticated both this exact result member and its content
+                // bundle; use that member's exact `(table, row, tx)` witness
+                // to materialize the newly admitted row. This is payload
+                // lookup, not a facade-side query or recompute.
+                let tx_versions = self.query_versions_for_tx(entry.2)?;
+                let Some(version) =
+                    local_maintained_view_content_witness(&tx_versions, entry.0.as_str(), entry.1)
+                else {
+                    return Ok(None);
+                };
+                version.clone()
             }
-            tx_versions.push(content_winner);
-            tx_versions
-                .last()
-                .ok_or(Error::MissingTransaction(entry.2))?
-                .clone()
         };
         let mut row = self.current_row_from_materialized_version(&table, &version)?;
         if let Some(columns) = &local.result_select {
@@ -10079,7 +10175,7 @@ where
         self.apply_query_order_in_schema(query, self.catalogue.current_write_schema.schema, rows)
     }
 
-    fn apply_query_order_with_occurrences(
+    pub(crate) fn apply_query_order_with_occurrences(
         &self,
         query: &crate::query::Query,
         rows: &mut Vec<CurrentRow>,
@@ -13023,6 +13119,18 @@ fn local_maintained_view_content_witness<'a>(
     })
 }
 
+fn current_row_has_required_subscription_cells(
+    row: &CurrentRow,
+    table: &TableSchema,
+    projection: Option<&[String]>,
+) -> bool {
+    table.columns.iter().all(|column| {
+        projection.is_some_and(|columns| !columns.contains(&column.name))
+            || matches!(column.column_type, ValueType::Nullable(_))
+            || row.cell(table, &column.name).is_some()
+    })
+}
+
 fn contiguous_tx_time_spans(times: &BTreeSet<TxTime>) -> Vec<(TxTime, Option<TxTime>)> {
     let mut spans = Vec::new();
     let mut iter = times.iter().copied();
@@ -13919,6 +14027,53 @@ mod tests {
     use crate::schema::{JazzSchema, Policy, TableSchema};
 
     use super::*;
+
+    #[test]
+    fn required_cell_guard_resolves_a_later_projected_column_by_name() {
+        let table = TableSchema::new(
+            "items",
+            [
+                ColumnSchema::new("first", ColumnType::String),
+                ColumnSchema::new("second", ColumnType::String),
+                ColumnSchema::new("third", ColumnType::String),
+            ],
+        );
+        let row_id = RowUuid(uuid::Uuid::from_u128(1));
+        let complete = current_row_from_cells(
+            &table,
+            row_id,
+            &BTreeMap::from([
+                ("first".to_owned(), Value::String("one".to_owned())),
+                ("second".to_owned(), Value::String("two".to_owned())),
+                ("third".to_owned(), Value::String("three".to_owned())),
+            ]),
+        )
+        .expect("build complete row")
+        .project(&table, &["third".to_owned()])
+        .expect("project later column");
+        assert!(current_row_has_required_subscription_cells(
+            &complete,
+            &table,
+            Some(&["third".to_owned()]),
+        ));
+
+        let missing = current_row_from_cells(
+            &table,
+            row_id,
+            &BTreeMap::from([
+                ("first".to_owned(), Value::String("one".to_owned())),
+                ("second".to_owned(), Value::String("two".to_owned())),
+            ]),
+        )
+        .expect("build row missing projected required cell")
+        .project(&table, &["third".to_owned()])
+        .expect("project missing later column");
+        assert!(!current_row_has_required_subscription_cells(
+            &missing,
+            &table,
+            Some(&["third".to_owned()]),
+        ));
+    }
 
     #[test]
     fn prepared_integer_bindings_coerce_only_when_representable() {

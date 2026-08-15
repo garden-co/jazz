@@ -173,6 +173,78 @@ fn snapshot_from_event(event: SubscriptionEvent) -> RelationSnapshot {
     snapshot
 }
 
+/// A maintained union emits a suffix removal addressed to its typed union arm.
+/// Alice's one source row appears through `left` and `right` union arms; only
+/// the left occurrence leaves the ordered result.
+#[test]
+fn ordered_suffix_delta_preserves_typed_union_occurrence_ids_for_duplicate_rows() {
+    let schema = schema();
+    let db = open_db(0xd1, AuthorId::SYSTEM, &schema);
+    let root = row(0xd2);
+    db.insert_with_id(
+        "todos",
+        root,
+        BTreeMap::from([
+            ("title".to_owned(), Value::String("same source".to_owned())),
+            ("done".to_owned(), Value::Bool(false)),
+            ("owner".to_owned(), Value::Uuid(row(0xd3).0)),
+        ]),
+    )
+    .unwrap();
+    let source_row = prepared_one(&db, &Query::from("todos")).expect("inserted source row");
+    let left = OutputOccurrenceId::with_union_arms(
+        ObjectId::from_uuid(root.0),
+        [ObjectId::from_uuid(row(0xd4).0)],
+        [(0, "left".to_owned())],
+    )
+    .expect("typed union occurrence");
+    let right = OutputOccurrenceId::with_union_arms(
+        ObjectId::from_uuid(root.0),
+        [ObjectId::from_uuid(row(0xd4).0)],
+        [(0, "right".to_owned())],
+    )
+    .expect("distinct typed union occurrence");
+    let previous = RelationSnapshot {
+        root_count: 2,
+        rows: vec![source_row.clone(), source_row.clone()],
+        edges: Vec::new(),
+    };
+    let current = RelationSnapshot {
+        root_count: 1,
+        rows: vec![source_row],
+        edges: Vec::new(),
+    };
+
+    let event = subscription_terminal_delta_event(
+        DurabilityTier::Edge,
+        true,
+        &previous,
+        &[left.clone(), right.clone()],
+        &current,
+        &[right.clone()],
+    )
+    .expect("sidecar-preserving ordered suffix delta");
+    let SubscriptionEvent::Delta { removed, added, .. } = event else {
+        panic!("expected delta");
+    };
+    assert_eq!(
+        removed
+            .into_iter()
+            .map(|row| row.occurrence_id)
+            .collect::<Vec<_>>(),
+        vec![left, right.clone()],
+        "the ordered suffix carries the exact typed occurrences it retracts"
+    );
+    assert_eq!(
+        added
+            .into_iter()
+            .map(|row| row.occurrence_id)
+            .collect::<Vec<_>>(),
+        vec![right],
+        "the surviving arm is re-added with its original typed identity"
+    );
+}
+
 fn terminal_nested_text_values(
     snapshot: &RelationSnapshot,
     root: RowUuid,
