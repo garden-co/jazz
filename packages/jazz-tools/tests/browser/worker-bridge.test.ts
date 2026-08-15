@@ -885,9 +885,7 @@ describe("Worker Bridge with OPFS", () => {
     expect(rows).toEqual([]);
   });
 
-  // TEST_BURNDOWN_TS: Worker Bridge with OPFS > rehydrates current catalogue schema and lens state after persistent worker reopen
-  // known red; tracked in TEST_BURNDOWN.md — reopen rejects non-contiguous catalogue snapshots, then never receives an authoritative remote row.
-  it.skip("rehydrates current catalogue schema and lens state after persistent worker reopen", async () => {
+  it("rehydrates current catalogue schema and lens state after persistent worker reopen", async () => {
     const protocolErrors: string[] = [];
     const recordProtocolError = (event: ErrorEvent) => {
       const message = event.error instanceof Error ? event.error.message : event.message;

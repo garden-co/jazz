@@ -82,10 +82,9 @@ A future fix must remove both the matching visible skip marker and this entry, t
 | `groove::db::tests::indexed_batch_commit_timing_receipt_20k_and_single_row`                      | `crates/groove/src/db/tests.rs`               | timing receipt             |
 | `jazz::node::tests::harness::policy_graph_perf_dropdown_entry_reset_ingest_timing_receipt`       | `crates/jazz/src/node/tests/sync.rs`          | timing receipt             |
 
-## Active TypeScript/browser quarantine (1)
+## Active TypeScript/browser quarantine (0)
 
-The original measured TypeScript/browser failure set has been burned down. One browser catalogue-rehydration failure remains tracked below.
-
-| Test                                                                                                          | Definition                                                | Status | Category                      | Failure signature / theory                                                                                                                                    | Owner  |
-| ------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------- | ------ | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ |
-| `Worker Bridge with OPFS > rehydrates current catalogue schema and lens state after persistent worker reopen` | `packages/jazz-tools/tests/browser/worker-bridge.test.ts` | FAIL   | Browser catalogue rehydration | Reopened worker rejects catalogue snapshots as non-contiguous and never receives a current-schema row written through an independent server-connected client. | Anselm |
+The original measured TypeScript/browser failure set is burned down. The former
+catalogue-rehydration case is now an active browser receipt in
+`worker-bridge.test.ts`, with a fresh release-NAPI/fast-WASM run on the trusted
+catalogue-lineage persistence fix.
