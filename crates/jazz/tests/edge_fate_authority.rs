@@ -198,13 +198,6 @@ fn edge_shell_does_not_report_global_or_serve_global_before_core_ack() {
     let _ = core;
 }
 
-/// Alice subscribes to the core's Global view before uploading a row. Once the
-/// core assigns Global fate, that identity-scoped view receives the row and
-/// Alice can read it through the same public read route.
-///
-/// ```text
-/// alice ──subscribe/upload──► core ──Global fate + view update──► alice
-/// ```
 #[test]
 fn core_shell_client_upload_still_reports_global_immediately() {
     let schema = schema();
@@ -215,11 +208,18 @@ fn core_shell_client_upload_still_reports_global_immediately() {
     .unwrap();
 
     let alice = open_db(0xa1, author(0xa1), &schema);
+    let bob = open_db(0xb1, author(0xb1), &schema);
     let alice_wire = QueuedWireTransport::default();
+    let bob_wire = QueuedWireTransport::default();
     let alice_session = connect_client_to_edge(&mut core, &alice, &alice_wire, author(0xa1));
-    let query = Query::from("todos");
-    let prepared = alice.prepare_query(&query).unwrap();
-    let mut global_subscription = block_on(alice.subscribe(
+    let bob_session = connect_client_to_edge(&mut core, &bob, &bob_wire, author(0xb1));
+
+    // Bob's Global read consumes the identity-scoped settled view emitted by
+    // the authority, rather than Alice's locally uploaded payload. Establish
+    // that authoritative Global view before Alice writes so the test covers
+    // the core's FateUpdate and its downstream maintained-view publication.
+    let prepared = bob.prepare_query(&Query::from("todos")).unwrap();
+    let mut bob_global_subscription = block_on(bob.subscribe(
         &prepared,
         ReadOpts {
             tier: DurabilityTier::Global,
@@ -229,11 +229,23 @@ fn core_shell_client_upload_still_reports_global_immediately() {
         },
     ))
     .unwrap();
-    // Edge/Global client reads consume an upstream-owned settled binding view;
-    // they intentionally do not treat the local transaction overlay as a
-    // remote fetch. Register and settle that public view before asserting it.
-    pump_client_edge(&alice, &alice_wire, &mut core, alice_session);
-    while global_subscription.try_next_event().is_some() {}
+    pump_client_edge(&bob, &bob_wire, &mut core, bob_session);
+    let Some(jazz::db::SubscriptionEvent::Delta {
+        reset: true,
+        publishable: true,
+        settled: true,
+        tier: DurabilityTier::Global,
+        added,
+        updated,
+        removed,
+        ..
+    }) = bob_global_subscription.try_next_event()
+    else {
+        panic!("Bob must receive an authoritative settled Global hydration before upload");
+    };
+    assert!(added.is_empty());
+    assert!(updated.is_empty());
+    assert!(removed.is_empty());
 
     let write = alice
         .insert(
@@ -242,33 +254,32 @@ fn core_shell_client_upload_still_reports_global_immediately() {
         )
         .unwrap();
     pump_client_edge(&alice, &alice_wire, &mut core, alice_session);
+    pump_client_edge(&bob, &bob_wire, &mut core, bob_session);
 
     assert!(block_on(write.wait(DurabilityTier::Global)).is_ok());
     let Some(jazz::db::SubscriptionEvent::Delta {
-        publishable,
-        settled,
-        tier,
+        reset: false,
+        publishable: true,
+        settled: true,
+        tier: DurabilityTier::Global,
         added,
         updated,
         removed,
         ..
-    }) = global_subscription.try_next_event()
+    }) = bob_global_subscription.try_next_event()
     else {
-        panic!("core Global upload must publish a subscription delta");
+        panic!("Alice's globally settled write must publish one Global delta to Bob");
     };
-    assert!(publishable, "core delivery is authority-backed");
-    assert!(settled, "core delivery is settled at Global");
-    assert_eq!(tier, DurabilityTier::Global);
     assert!(updated.is_empty());
     assert!(removed.is_empty());
     assert_eq!(added.len(), 1);
     assert_eq!(added[0].row_uuid(), write.row_uuid());
-    assert_eq!(
+    assert!(matches!(
         added[0].cell(&schema.tables[0], "title"),
-        Some(Value::String("core global".to_owned()))
-    );
+        Some(Value::String(title)) if title == "core global"
+    ));
     assert_eq!(
-        visible_titles(&alice, DurabilityTier::Global),
+        visible_titles(&bob, DurabilityTier::Global),
         ["core global"]
     );
 }
