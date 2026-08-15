@@ -63,7 +63,11 @@ pub async fn run(
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let bound_addr = listener.local_addr()?;
     let inspector_link = build_inspector_link(bound_addr.port(), &app_id_string);
-
+    let state = built.state.clone();
+    let shutdown = state.shutdown.clone();
+    // Install the process signal handler before publishing readiness. Tests and
+    // supervisors may send SIGTERM as soon as the bound-port file appears.
+    let mut sigterm_task = spawn_sigterm_shutdown_task(shutdown.clone())?;
     if let Some(path) = bound_port_file {
         std::fs::write(&path, bound_addr.port().to_string())
             .map_err(|e| format!("failed to write bound port file {path}: {e}"))?;
@@ -75,8 +79,6 @@ pub async fn run(
         info!("Enter your admin secret in the inspector to publish schemas and policies.");
     }
 
-    let state = built.state.clone();
-    let shutdown = state.shutdown.clone();
     // Report the current inbound WebSocket count as an OTel gauge. Held for the
     // server's lifetime; dropped when `run` returns. Only active when otel is
     // compiled in and an OTLP endpoint is configured.
@@ -93,7 +95,6 @@ pub async fn run(
     let shutdown_budget = shutdown_timeout
         .saturating_mul(2)
         .saturating_add(Duration::from_secs(5));
-    let mut sigterm_task = spawn_sigterm_shutdown_task(shutdown.clone())?;
     let (serve_shutdown_tx, serve_shutdown_rx) = tokio::sync::oneshot::channel();
     let mut shutdown_task = tokio::spawn(async move {
         state.shutdown.wait_requested().await;

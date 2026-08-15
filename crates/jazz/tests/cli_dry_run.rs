@@ -7,7 +7,7 @@ use std::path::Path;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::rc::Rc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures_util::{FutureExt, StreamExt};
 use jazz::db::{
@@ -45,6 +45,70 @@ fn jazz_server_command() -> Command {
         .env_remove("JAZZ_UPSTREAM_URL")
         .env_remove("JAZZ_SERVER_ANONYMOUS_SUBJECT");
     command
+}
+
+fn jazz_tools_command() -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_jazz-tools"));
+    command
+        .env_remove("JAZZ_SERVER_PORT")
+        .env_remove("JAZZ_SERVER_DATA_DIR")
+        .env_remove("JAZZ_SERVER_IN_MEMORY")
+        .env_remove("JAZZ_ADMIN_SECRET")
+        .env_remove("JAZZ_UPSTREAM_URL")
+        .env_remove("JAZZ_BOUND_PORT_FILE");
+    command
+}
+
+#[cfg(unix)]
+fn wait_for_successful_exit(child: &mut Child, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(status) = child.try_wait().expect("poll jazz-tools server") {
+            assert!(status.success(), "jazz-tools server exited with {status}");
+            return;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("jazz-tools server did not exit within {timeout:?}");
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[cfg(unix)]
+fn start_jazz_tools_server(data_dir: &Path, bound_port_file: &Path) -> Child {
+    let mut child = jazz_tools_command()
+        .args([
+            "server",
+            "00000000-0000-0000-0000-000000000001",
+            "--port",
+            "0",
+            "--data-dir",
+            data_dir.to_str().expect("temp path is utf-8"),
+            "--bound-port-file",
+            bound_port_file.to_str().expect("temp path is utf-8"),
+            "--shutdown-timeout-secs",
+            "1",
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn jazz-tools server");
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !bound_port_file.exists() {
+        if let Some(status) = child.try_wait().expect("poll jazz-tools startup") {
+            panic!("jazz-tools server exited before binding: {status}");
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("jazz-tools server did not bind within 10s");
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    child
 }
 
 fn schema_hex(schema: &JazzSchema) -> String {
@@ -570,6 +634,29 @@ fn server_command_reports_wired_loopback_shape() {
             .any(|line| line == "ws_url=ws://127.0.0.1:0/apps/app-a/ws"
                 || line.starts_with("ws_url=ws://127.0.0.1:") && line.ends_with("/apps/app-a/ws"))
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn jazz_tools_server_sigterm_exits_cleanly_and_releases_storage() {
+    let temp_dir = tempfile::tempdir().expect("create server temp dir");
+    let data_dir = temp_dir.path().join("data");
+    let first_port_file = temp_dir.path().join("first-port");
+    let mut first = start_jazz_tools_server(&data_dir, &first_port_file);
+
+    // SAFETY: `first.id()` names the live child process spawned above.
+    let result = unsafe { libc::kill(first.id() as libc::pid_t, libc::SIGTERM) };
+    assert_eq!(result, 0, "send SIGTERM to jazz-tools server");
+    wait_for_successful_exit(&mut first, Duration::from_secs(10));
+
+    // Reopening the same RocksDB directory proves controlled shutdown released
+    // the process-local storage lock rather than merely stopping the listener.
+    let second_port_file = temp_dir.path().join("second-port");
+    let mut second = start_jazz_tools_server(&data_dir, &second_port_file);
+    // SAFETY: `second.id()` names the live child process spawned above.
+    let result = unsafe { libc::kill(second.id() as libc::pid_t, libc::SIGTERM) };
+    assert_eq!(result, 0, "send SIGTERM to restarted jazz-tools server");
+    wait_for_successful_exit(&mut second, Duration::from_secs(10));
 }
 
 #[test]
