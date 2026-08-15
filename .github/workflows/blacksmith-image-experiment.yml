@@ -7,6 +7,10 @@ on:
         description: Only verify the immutable Chromium fallback path
         type: boolean
         default: false
+      ts_only:
+        description: Run only the TypeScript/browser workload after building the image
+        type: boolean
+        default: false
 
 concurrency:
   group: blacksmith-image-experiment-${{ github.ref }}
@@ -51,7 +55,7 @@ jobs:
         run: echo "image=ghcr.io/garden-co/jazz-ci-toolchain@${{ steps.build.outputs.digest }}" >> "${GITHUB_OUTPUT}"
 
   lint:
-    if: inputs.probe_only != true
+    if: inputs.probe_only != true && inputs.ts_only != true
     needs: build-image
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 10
@@ -79,7 +83,7 @@ jobs:
         run: sccache --show-stats
 
   test-rust:
-    if: inputs.probe_only != true
+    if: inputs.probe_only != true && inputs.ts_only != true
     needs: build-image
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 15
@@ -117,7 +121,7 @@ jobs:
   test-ts:
     if: inputs.probe_only != true
     needs: build-image
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: blacksmith-16vcpu-ubuntu-2404
     timeout-minutes: 20
     permissions:
       contents: read
@@ -130,6 +134,17 @@ jobs:
         password: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - name: Record runner process capacity
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "logical_cpus=$(nproc)"
+          ulimit -a
+          for path in /sys/fs/cgroup/pids.max /sys/fs/cgroup/pids.current; do
+            if [[ -r "${path}" ]]; then
+              echo "${path}=$(<"${path}")"
+            fi
+          done
       - uses: aws-actions/configure-aws-credentials@cabfdba3510de1431bac9dba27511d97497fc100 # v5
         with:
           role-to-assume: ${{ vars.SCCACHE_EXPERIMENT_AWS_ROLE_ARN }}
