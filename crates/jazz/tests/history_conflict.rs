@@ -6,12 +6,14 @@ use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
+use uuid::Uuid;
+
 use jazz::tools::server::JazzServer;
 use jazz::tools::{
     AppContext, ColumnType, DurabilityTier, JazzClient, ObjectId, Query, QueryBuilder,
     SchemaBuilder, TableSchema, Value,
 };
-use support::{TestingClient, has_updated, wait_for_query, wait_for_subscription_update};
+use support::{TestingClient, has_added, wait_for_query, wait_for_subscription_update};
 
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
 const QUERY_TIMEOUT: Duration = Duration::from_secs(25);
@@ -544,12 +546,11 @@ async fn fresh_client_sees_lww_winner_after_conflict_impl() {
 /// Alice subscribes, Bob updates — Alice's subscription fires with the change.
 ///
 /// ```text
-/// alice subscribes to todos
+/// alice subscribes to todos ──initial materialization──► alice
 /// bob updates a todo alice created
 /// alice's subscription stream → sees update delta with bob's change
 /// ```
 #[tokio::test]
-#[ignore = "known red; tracked in TEST_BURNDOWN.md"]
 async fn subscription_reflects_concurrent_update() {
     tokio::task::LocalSet::new()
         .run_until(subscription_reflects_concurrent_update_impl())
@@ -576,6 +577,7 @@ async fn subscription_reflects_concurrent_update_impl() {
         .ready_on("todos", READY_TIMEOUT)
         .connect()
         .await;
+    let bob_author = Uuid::new_v5(&Uuid::NAMESPACE_URL, b"bob-sub").to_string();
 
     // Alice creates a todo
     let (todo_id, _, _) = alice.insert("todos", todo_values("task")).expect("create");
@@ -592,9 +594,21 @@ async fn subscription_reflects_concurrent_update_impl() {
     )
     .await;
 
-    // Alice subscribes
-    let mut stream = alice.subscribe(query).await.expect("subscribe");
+    // `subscribe` opens the local stream and queues upstream coverage, but it
+    // is not a cross-client activation barrier. Establish Alice's authoritative
+    // initial materialization before allowing Bob's concurrent write, so the assertion
+    // below tests a post-activation delivery delta rather than racing that
+    // write into the initial snapshot.
+    let mut stream = alice.subscribe(query.clone()).await.expect("subscribe");
     let mut log = Vec::new();
+    wait_for_subscription_update(
+        &mut stream,
+        &mut log,
+        QUERY_TIMEOUT,
+        "alice subscription receives initial todo before concurrent update",
+        |log| has_added(log, todo_id),
+    )
+    .await;
 
     // Bob updates
     bob.update(
@@ -608,8 +622,36 @@ async fn subscription_reflects_concurrent_update_impl() {
         &mut stream,
         &mut log,
         QUERY_TIMEOUT,
-        "alice sees bob's update via subscription",
-        |log| has_updated(log, todo_id),
+        "alice sees Bob's exact update via subscription",
+        |log| {
+            log.iter().any(|delta| {
+                delta.updated.iter().any(|change| {
+                    change.id == todo_id
+                        && change
+                            .row
+                            .as_ref()
+                            .is_some_and(|row| row.provenance.updated_by == bob_author)
+                })
+            })
+        },
+    )
+    .await;
+
+    // Public stream rows intentionally expose opaque encoded payloads. Assert
+    // the received update's public provenance, then use the public query API
+    // to assert its decoded title.
+    wait_for_query(
+        &alice,
+        query,
+        Some(DurabilityTier::EdgeServer),
+        QUERY_TIMEOUT,
+        "alice reads Bob's delivered title",
+        |rows| {
+            (rows.len() == 1
+                && rows[0].0 == todo_id
+                && matches!(&rows[0].1[0], Value::Text(title) if title == "bob-updated"))
+            .then_some(())
+        },
     )
     .await;
 
