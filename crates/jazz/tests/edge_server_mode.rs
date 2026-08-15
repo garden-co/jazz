@@ -196,7 +196,6 @@ async fn maintained_unordered_limit_and_offset_windows_open_offline() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-#[ignore = "known red; tracked in TEST_BURNDOWN.md"]
 async fn public_root_default_order_and_windows_are_stable_across_reset() {
     tokio::task::LocalSet::new()
         .run_until(async {
