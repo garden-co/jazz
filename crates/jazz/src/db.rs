@@ -290,6 +290,11 @@ type LatestCoverageSubscriptions = Rc<RefCell<BTreeMap<CoverageKey, Subscription
 type UpstreamCoverageRefCounts = Rc<RefCell<BTreeMap<CoverageKey, usize>>>;
 type AwaitingInitialAuthorityCoverage = Rc<RefCell<BTreeSet<CoverageKey>>>;
 type CoverageRefreshGenerations = Rc<RefCell<BTreeMap<CoverageKey, u64>>>;
+/// Ephemeral evidence that the current authority connection has confirmed a
+/// canonical binding view. It is deliberately separate from durable
+/// `settled_through`: cursors retain payload possession for repair/dedup, not
+/// authority settlement.
+type ActiveAuthorityViewReceipts = Rc<RefCell<Option<AuthorityViewReceipts>>>;
 type UpstreamSubscriptionOwners =
     Rc<RefCell<BTreeMap<SubscriptionKey, Vec<Weak<RefCell<SubscriptionState>>>>>>;
 type SharedTickScheduler = Rc<RefCell<Option<Rc<dyn TickScheduler>>>>;
@@ -300,6 +305,30 @@ type PendingDownstreamFates = Rc<RefCell<Vec<SyncMessage>>>;
 type AdmittedUpstreamAuthorities = Rc<RefCell<Vec<AuthorityContext>>>;
 const MAX_EDGE_FATE_ROUTES: usize = 1024;
 const MAX_EDGE_FATE_ROUTES_PER_TX: usize = 8;
+
+#[derive(Default)]
+struct AuthorityViewReceipts {
+    connection_epoch: u64,
+    binding_views: BTreeSet<BindingViewKey>,
+}
+
+/// An inbound message held across authority selection. It preserves ordinary
+/// sync delivery while ensuring traffic staged before selection cannot become
+/// the selected connection's fresh view receipt.
+struct StagedInboundMessage {
+    message: SyncMessage,
+    authority_receipt_eligible: bool,
+}
+
+struct PendingAuthorityViewUpdate {
+    parts: ViewUpdateParts,
+    authority_receipt_eligible: bool,
+}
+
+struct PendingBranchViewUpdate {
+    message: SyncMessage,
+    authority_receipt_eligible: bool,
+}
 
 struct EdgeFateRoute {
     authority: AuthorityContext,
@@ -2047,6 +2076,7 @@ where
         let mut state_shape = local_shape;
         let mut state_binding = local_binding;
         let mut remote_read_tier = None;
+        let mut requires_authority_receipt = false;
         let mut upstream_subscription_handles = Vec::new();
         let mut suppress_provisional_opening = false;
         let remote_propagate_upstream = opts.propagation == Propagation::Full;
@@ -2079,6 +2109,10 @@ where
             state_shape = shape.clone();
             state_binding = binding.clone();
             remote_read_tier = Some(upstream_opts.tier);
+            // Edge/Global cache possession is never a settlement receipt,
+            // even when this subscription opens before an upstream exists.
+            // The eventual connection must send its own ViewUpdate.
+            requires_authority_receipt = upstream_opts.tier >= DurabilityTier::Edge;
             let opened = self.open_subscription_upstream_coverage(
                 &shape,
                 &binding,
@@ -2120,11 +2154,13 @@ where
         }
         let settled = subscription_is_settled(
             &self.node.node.borrow(),
+            &self.node.active_authority_view_receipts,
             &state_shape,
             &state_binding,
             settled_tier,
             opts.read_view.clone(),
             remote_propagate_upstream,
+            requires_authority_receipt,
         );
         let (sender, receiver) = unbounded();
         let initial_outputs =
@@ -2151,6 +2187,7 @@ where
             authorization_mode,
             read_tier,
             remote_read_tier,
+            requires_authority_receipt,
             remote_propagate_upstream,
             read_view: opts.read_view.clone(),
             snapshot: state_snapshot,
@@ -4859,6 +4896,7 @@ where
     latest_coverage_subscriptions: LatestCoverageSubscriptions,
     upstream_coverage_refcounts: UpstreamCoverageRefCounts,
     awaiting_initial_authority_coverage: AwaitingInitialAuthorityCoverage,
+    active_authority_view_receipts: ActiveAuthorityViewReceipts,
     coverage_refresh_generations: CoverageRefreshGenerations,
     upstream_subscription_owners: UpstreamSubscriptionOwners,
     connections: RefCell<Vec<Rc<RefCell<PeerConnection<S>>>>>,
@@ -4899,6 +4937,7 @@ where
             latest_coverage_subscriptions: Rc::new(RefCell::new(BTreeMap::new())),
             upstream_coverage_refcounts: Rc::new(RefCell::new(BTreeMap::new())),
             awaiting_initial_authority_coverage: Rc::new(RefCell::new(BTreeSet::new())),
+            active_authority_view_receipts: Rc::new(RefCell::new(None)),
             coverage_refresh_generations: Rc::new(RefCell::new(BTreeMap::new())),
             upstream_subscription_owners: Rc::new(RefCell::new(BTreeMap::new())),
             connections: RefCell::new(Vec::new()),
@@ -5244,7 +5283,11 @@ where
     }
 
     fn refresh_subscriptions(&self) -> Result<usize, Error> {
-        refresh_subscriptions_in(&self.node, &self.subscriptions)
+        refresh_subscriptions_in(
+            &self.node,
+            &self.subscriptions,
+            &self.active_authority_view_receipts,
+        )
     }
 
     /// Attach this node to an upstream peer over a binding-supplied transport.
@@ -5257,6 +5300,23 @@ where
         let connection_epoch = session_context
             .map(|context| context.local.epoch)
             .unwrap_or_else(|| uuid::Uuid::new_v4().as_u128() as u64);
+        // Durable settled-view state remains available for known-state
+        // payload repair, but a new upstream (including an edge switch) owns
+        // no settlement receipts until it sends a fresh ViewUpdate.
+        *self.active_authority_view_receipts.borrow_mut() = Some(AuthorityViewReceipts {
+            connection_epoch,
+            binding_views: BTreeSet::new(),
+        });
+        for state in self.subscriptions.borrow().iter().filter_map(Weak::upgrade) {
+            let mut state = state.borrow_mut();
+            if state.propagates_upstream {
+                state.requires_authority_receipt = true;
+            }
+        }
+        // A replacement link invalidates the prior link's receipt before the
+        // new transport can deliver anything. Publish that demotion now rather
+        // than letting cached rows remain settled until the next tick.
+        let _ = self.refresh_subscriptions();
         let expected_scope_authority = session_context
             .filter(|context| {
                 context.negotiated_features & crate::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS != 0
@@ -5357,6 +5417,7 @@ where
         }
         let connection = Rc::new(RefCell::new(PeerConnection {
             transport,
+            staged_inbound: VecDeque::new(),
             node: Rc::clone(&self.node),
             subscriptions: Rc::clone(&self.subscriptions),
             upstream_subscription_owners: Rc::clone(&self.upstream_subscription_owners),
@@ -5364,6 +5425,7 @@ where
             awaiting_initial_authority_coverage: Rc::clone(
                 &self.awaiting_initial_authority_coverage,
             ),
+            active_authority_view_receipts: Rc::clone(&self.active_authority_view_receipts),
             scheduler: Rc::clone(&self.scheduler),
             write_state_waiters: Rc::clone(&self.write_state_waiters),
             permission_advice_waiters: Rc::clone(&self.permission_advice_waiters),
@@ -5575,6 +5637,7 @@ where
             .and_then(Result::err);
         let connection = Rc::new(RefCell::new(PeerConnection {
             transport,
+            staged_inbound: VecDeque::new(),
             node: Rc::clone(&self.node),
             subscriptions: Rc::clone(&self.subscriptions),
             upstream_subscription_owners: Rc::clone(&self.upstream_subscription_owners),
@@ -5582,6 +5645,7 @@ where
             awaiting_initial_authority_coverage: Rc::clone(
                 &self.awaiting_initial_authority_coverage,
             ),
+            active_authority_view_receipts: Rc::clone(&self.active_authority_view_receipts),
             scheduler: Rc::clone(&self.scheduler),
             write_state_waiters: Rc::clone(&self.write_state_waiters),
             permission_advice_waiters: Rc::clone(&self.permission_advice_waiters),
@@ -5627,18 +5691,63 @@ where
 
     /// Detach a previously attached peer connection from this node.
     pub fn detach_connection(&self, connection: &Rc<RefCell<PeerConnection<S>>>) -> bool {
-        let authority = match &connection.borrow().link {
+        let connection_ref = connection.borrow();
+        let (authority, upstream_epoch) = match &connection_ref.link {
             ConnectionLink::Upstream {
                 expected_scope_authority,
                 ..
-            } => *expected_scope_authority,
-            ConnectionLink::Subscriber { .. } => None,
+            } => (
+                *expected_scope_authority,
+                Some(connection_ref.connection_epoch),
+            ),
+            ConnectionLink::Subscriber { .. } => (None, None),
         };
+        drop(connection_ref);
         let mut connections = self.connections.borrow_mut();
         let before = connections.len();
         connections.retain(|candidate| !Rc::ptr_eq(candidate, connection));
         let detached = connections.len() != before;
         drop(connections);
+        if detached
+            && let Some(epoch) = upstream_epoch
+            && self
+                .active_authority_view_receipts
+                .borrow()
+                .as_ref()
+                .is_some_and(|receipts| receipts.connection_epoch == epoch)
+        {
+            // A parallel upstream that survived the selected link is a new
+            // active authority epoch for settlement purposes. Its older
+            // receipt was retired by the switch, so it must confirm the view
+            // again before cached rows can become settled.
+            // Retire B before staging A's queued frames: otherwise applying a
+            // row-changing A update during the handoff could briefly publish
+            // it under B's now-dead receipt.
+            *self.active_authority_view_receipts.borrow_mut() = None;
+            let fallback_connection =
+                self.connections
+                    .borrow()
+                    .iter()
+                    .rev()
+                    .find_map(|connection| {
+                        let connection_ref = connection.borrow();
+                        matches!(&connection_ref.link, ConnectionLink::Upstream { .. })
+                            .then(|| Rc::clone(connection))
+                    });
+            if let Some(connection) = &fallback_connection {
+                connection
+                    .borrow_mut()
+                    .stage_inbound_without_authority_receipt();
+            }
+            *self.active_authority_view_receipts.borrow_mut() =
+                fallback_connection.map(|connection| AuthorityViewReceipts {
+                    connection_epoch: connection.borrow().connection_epoch,
+                    binding_views: BTreeSet::new(),
+                });
+            // Cached rows remain readable as stale/local state, but their
+            // settled receipt died with this authority connection.
+            let _ = self.refresh_subscriptions();
+        }
         if detached && let Some(authority) = authority {
             let mut eligible = self.admitted_upstream_authorities.borrow_mut();
             eligible.retain(|candidate| *candidate != authority);
@@ -5762,6 +5871,7 @@ where
 fn refresh_subscriptions_in<S>(
     node: &Rc<RefCell<NodeState<S>>>,
     subscriptions: &SubscriptionList,
+    active_authority_view_receipts: &ActiveAuthorityViewReceipts,
 ) -> Result<usize, Error>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
@@ -5780,6 +5890,7 @@ where
         let (
             read_tier,
             remote_read_tier,
+            requires_authority_receipt,
             remote_propagate_upstream,
             read_view,
             previous_source,
@@ -5792,6 +5903,7 @@ where
             (
                 state.read_tier,
                 state.remote_read_tier,
+                state.requires_authority_receipt,
                 state.remote_propagate_upstream,
                 state.read_view.clone(),
                 state.snapshot_source,
@@ -5959,11 +6071,13 @@ where
                 subscription_outputs_with_occurrence_sidecar(&snapshot, &root_occurrence_ids)?;
             let settled = subscription_is_settled(
                 &node.borrow(),
+                active_authority_view_receipts,
                 &shape,
                 &binding,
                 settled_tier,
                 read_view.clone(),
                 remote_propagate_upstream,
+                requires_authority_receipt,
             );
             let mut state_ref = state.borrow_mut();
             let removed = reset_removed_roots(
@@ -6127,11 +6241,13 @@ where
                         *maintained = replacement;
                         let settled = subscription_is_settled(
                             &node.borrow(),
+                            active_authority_view_receipts,
                             &shape,
                             &binding,
                             settled_tier,
                             read_view,
                             remote_propagate_upstream,
+                            requires_authority_receipt,
                         );
                         (
                             snapshot,
@@ -6240,11 +6356,13 @@ where
                         }
                         let settled = subscription_is_settled(
                             &node.borrow(),
+                            active_authority_view_receipts,
                             &shape,
                             &binding,
                             settled_tier,
                             read_view,
                             remote_propagate_upstream,
+                            requires_authority_receipt,
                         );
                         (
                             snapshot,
@@ -6270,11 +6388,13 @@ where
                             }
                             let settled = subscription_is_settled(
                                 &node.borrow(),
+                                active_authority_view_receipts,
                                 &shape,
                                 &binding,
                                 settled_tier,
                                 read_view.clone(),
                                 remote_propagate_upstream,
+                                requires_authority_receipt,
                             );
                             let state_ref = &mut *state_ref;
                             let event = SubscriptionEvent::Delta {
@@ -6334,11 +6454,13 @@ where
                                 if !update.terminal_operations.is_empty() {
                                     let settled = subscription_is_settled(
                                         &node.borrow(),
+                                        active_authority_view_receipts,
                                         &shape,
                                         &binding,
                                         settled_tier,
                                         read_view,
                                         remote_propagate_upstream,
+                                        requires_authority_receipt,
                                     );
                                     let state_ref = &mut *state_ref;
                                     let event = SubscriptionEvent::Delta {
@@ -6372,11 +6494,13 @@ where
                                     maintained.root_occurrence_ids().to_vec();
                                 let settled = subscription_is_settled(
                                     &node.borrow(),
+                                    active_authority_view_receipts,
                                     &shape,
                                     &binding,
                                     settled_tier,
                                     read_view,
                                     remote_propagate_upstream,
+                                    requires_authority_receipt,
                                 );
                                 let state_ref = &mut *state_ref;
                                 let previous_root_occurrences = snapshot_root_occurrences(
@@ -6449,11 +6573,13 @@ where
                                     SubscriptionSnapshotSource::LocalMaintained;
                                 let settled = subscription_is_settled(
                                     &node.borrow(),
+                                    active_authority_view_receipts,
                                     &shape,
                                     &binding,
                                     settled_tier,
                                     read_view,
                                     remote_propagate_upstream,
+                                    requires_authority_receipt,
                                 ) && node
                                     .borrow()
                                     .relation_snapshot_has_materialized_required_cells(
@@ -6589,11 +6715,13 @@ where
                         };
                         let settled = subscription_is_settled(
                             &node.borrow(),
+                            active_authority_view_receipts,
                             &shape,
                             &binding,
                             settled_tier,
                             read_view,
                             remote_propagate_upstream,
+                            requires_authority_receipt,
                         );
                         (snapshot, snapshot_source, settled, snapshot_tier, false)
                     }
@@ -6766,11 +6894,13 @@ where
     S: OrderedKvStorage,
 {
     transport: Box<dyn Transport>,
+    staged_inbound: VecDeque<StagedInboundMessage>,
     node: Rc<RefCell<NodeState<S>>>,
     subscriptions: SubscriptionList,
     upstream_subscription_owners: UpstreamSubscriptionOwners,
     latest_coverage_subscriptions: LatestCoverageSubscriptions,
     awaiting_initial_authority_coverage: AwaitingInitialAuthorityCoverage,
+    active_authority_view_receipts: ActiveAuthorityViewReceipts,
     scheduler: SharedTickScheduler,
     write_state_waiters: WriteStateWaiters,
     permission_advice_waiters: PermissionAdviceWaiters,
@@ -6816,7 +6946,7 @@ enum ConnectionLink {
         /// Branch selected by each upstream usage-site subscription.
         branch_views: BTreeMap<SubscriptionKey, crate::ids::BranchId>,
         /// View updates held until their branch routing record arrives.
-        pending_branch_view_updates: BTreeMap<crate::ids::BranchId, Vec<SyncMessage>>,
+        pending_branch_view_updates: BTreeMap<crate::ids::BranchId, Vec<PendingBranchViewUpdate>>,
         /// Deduplicated outstanding metadata repairs on this link.
         pending_branch_metadata_repairs: BTreeMap<crate::ids::BranchId, ()>,
         /// Round-robin cursor so a saturated repair set cannot starve later ids.
@@ -6894,6 +7024,7 @@ enum ConnectionLink {
 struct PendingRowVersionRepair {
     requests: Vec<crate::protocol::RowVersionRef>,
     update: SyncMessage,
+    authority_receipt_eligible: bool,
 }
 
 /// Return one fair bounded repair page, advancing the cursor after the page.
@@ -7285,6 +7416,34 @@ where
         Ok(())
     }
 
+    /// Preserve every frame currently staged on this link across an authority
+    /// handoff, but make its ViewUpdates ineligible as the new authority's
+    /// receipt. The next transport arrival is therefore the first receipt
+    /// candidate after selection.
+    fn stage_inbound_without_authority_receipt(&mut self) {
+        if let ConnectionLink::Upstream {
+            pending_row_version_repairs,
+            pending_branch_view_updates,
+            ..
+        } = &mut self.link
+        {
+            for repair in pending_row_version_repairs {
+                repair.authority_receipt_eligible = false;
+            }
+            for updates in pending_branch_view_updates.values_mut() {
+                for update in updates {
+                    update.authority_receipt_eligible = false;
+                }
+            }
+        }
+        while let Some(message) = self.transport.try_recv() {
+            self.staged_inbound.push_back(StagedInboundMessage {
+                message,
+                authority_receipt_eligible: false,
+            });
+        }
+    }
+
     /// Service this connection once: drain inbound, apply, wake subscriptions, and
     /// flush pending outbound. Non-blocking; the binding calls it in its loop.
     pub fn tick(&mut self) -> Result<DbTickStats, Error> {
@@ -7534,9 +7693,19 @@ where
                     uploaded.insert(tx_id);
                 }
                 let mut applied = false;
-                let mut pending_view_updates = Vec::<ViewUpdateParts>::new();
+                let mut pending_view_updates = Vec::<PendingAuthorityViewUpdate>::new();
                 let mut pending_initial_coverage_clears = BTreeSet::<CoverageKey>::new();
-                while let Some(message) = self.transport.try_recv() {
+                while let Some(StagedInboundMessage {
+                    message,
+                    authority_receipt_eligible,
+                }) = self.staged_inbound.pop_front().or_else(|| {
+                    self.transport
+                        .try_recv()
+                        .map(|message| StagedInboundMessage {
+                            message,
+                            authority_receipt_eligible: true,
+                        })
+                }) {
                     let write_state_tx_id = write_state_update_tx_id(&message);
                     #[cfg(feature = "sync-autopsy")]
                     sync_autopsy::record(format!(
@@ -7551,6 +7720,8 @@ where
                                     &mut pending_view_updates,
                                     &self.awaiting_initial_authority_coverage,
                                     &mut pending_initial_coverage_clears,
+                                    &self.active_authority_view_receipts,
+                                    self.connection_epoch,
                                 )?;
                             }
                             self.node
@@ -7564,6 +7735,8 @@ where
                                     &mut pending_view_updates,
                                     &self.awaiting_initial_authority_coverage,
                                     &mut pending_initial_coverage_clears,
+                                    &self.active_authority_view_receipts,
+                                    self.connection_epoch,
                                 )?;
                             }
                             let Some(repair) = pending_row_version_repairs.pop_front() else {
@@ -7593,6 +7766,7 @@ where
                             push_view_update_message_for_receiver(
                                 &mut pending_view_updates,
                                 repair.update,
+                                repair.authority_receipt_eligible,
                             )?;
                             scope_view_cuts.insert(subscription, settled_through);
                         }
@@ -7605,10 +7779,12 @@ where
                             if let Some(branch) = branch_views.get(&subscription).copied()
                                 && self.node.borrow().branch_record(branch).is_none()
                             {
-                                pending_branch_view_updates
-                                    .entry(branch)
-                                    .or_default()
-                                    .push(message);
+                                pending_branch_view_updates.entry(branch).or_default().push(
+                                    PendingBranchViewUpdate {
+                                        message,
+                                        authority_receipt_eligible,
+                                    },
+                                );
                                 if let std::collections::btree_map::Entry::Vacant(entry) =
                                     pending_branch_metadata_repairs.entry(branch)
                                 {
@@ -7636,6 +7812,7 @@ where
                                 push_view_update_message_for_receiver(
                                     &mut pending_view_updates,
                                     message,
+                                    authority_receipt_eligible,
                                 )?;
                                 scope_view_cuts.insert(subscription, settled_through);
                                 #[cfg(feature = "sync-autopsy")]
@@ -7658,6 +7835,7 @@ where
                                 pending_row_version_repairs.push_back(PendingRowVersionRepair {
                                     requests: missing,
                                     update: message,
+                                    authority_receipt_eligible,
                                 });
                             }
                         }
@@ -7771,6 +7949,7 @@ where
                             push_view_update_message_for_receiver(
                                 &mut pending_view_updates,
                                 *view,
+                                authority_receipt_eligible,
                             )?;
                             scope_view_cuts.insert(subscription, settled_through);
                             request.applied_clauses.insert(
@@ -7791,6 +7970,8 @@ where
                                     &mut pending_view_updates,
                                     &self.awaiting_initial_authority_coverage,
                                     &mut pending_initial_coverage_clears,
+                                    &self.active_authority_view_receipts,
+                                    self.connection_epoch,
                                 )?;
                             }
                             let Some(expected) = expected_scope_authority.as_mut() else {
@@ -7997,7 +8178,7 @@ where
                             pending_branch_metadata_repairs.remove(&branch);
                             if let Some(updates) = pending_branch_view_updates.remove(&branch) {
                                 for update in updates {
-                                    let (subscription, settled_through) = match &update {
+                                    let (subscription, settled_through) = match &update.message {
                                         SyncMessage::ViewUpdate {
                                             subscription,
                                             settled_through,
@@ -8008,13 +8189,14 @@ where
                                         }
                                     };
                                     stage_initial_coverage_clear_for_update(
-                                        &update,
+                                        &update.message,
                                         &self.latest_coverage_subscriptions,
                                         &mut pending_initial_coverage_clears,
                                     );
                                     push_view_update_message_for_receiver(
                                         &mut pending_view_updates,
-                                        update,
+                                        update.message,
+                                        update.authority_receipt_eligible,
                                     )?;
                                     scope_view_cuts.insert(subscription, settled_through);
                                 }
@@ -8066,6 +8248,8 @@ where
                                     &mut pending_view_updates,
                                     &self.awaiting_initial_authority_coverage,
                                     &mut pending_initial_coverage_clears,
+                                    &self.active_authority_view_receipts,
+                                    self.connection_epoch,
                                 )?;
                             }
                             if *local_receiver {
@@ -8129,11 +8313,16 @@ where
                         &mut pending_view_updates,
                         &self.awaiting_initial_authority_coverage,
                         &mut pending_initial_coverage_clears,
+                        &self.active_authority_view_receipts,
+                        self.connection_epoch,
                     )?;
                 }
                 if applied {
-                    stats.subscription_events +=
-                        refresh_subscriptions_in(&self.node, &self.subscriptions)?;
+                    stats.subscription_events += refresh_subscriptions_in(
+                        &self.node,
+                        &self.subscriptions,
+                        &self.active_authority_view_receipts,
+                    )?;
                     stats.remote_sync_applied += 1;
                     let next = self.subscriber_dirty_epoch.get().wrapping_add(1);
                     self.subscriber_dirty_epoch.set(next);
@@ -9456,10 +9645,14 @@ fn view_update_parts_from_message(message: SyncMessage) -> ViewUpdateParts {
 }
 
 fn push_view_update_message_for_receiver(
-    ready: &mut Vec<ViewUpdateParts>,
+    ready: &mut Vec<PendingAuthorityViewUpdate>,
     message: SyncMessage,
+    authority_receipt_eligible: bool,
 ) -> Result<(), Error> {
-    ready.push(view_update_parts_from_message(message));
+    ready.push(PendingAuthorityViewUpdate {
+        parts: view_update_parts_from_message(message),
+        authority_receipt_eligible,
+    });
     Ok(())
 }
 
@@ -9490,15 +9683,41 @@ fn stage_initial_coverage_clear_for_update(
 
 fn apply_pending_authority_view_updates<S>(
     node: &Rc<RefCell<NodeState<S>>>,
-    pending: &mut Vec<ViewUpdateParts>,
+    pending: &mut Vec<PendingAuthorityViewUpdate>,
     awaiting: &AwaitingInitialAuthorityCoverage,
     clears: &mut BTreeSet<CoverageKey>,
+    active_authority_view_receipts: &ActiveAuthorityViewReceipts,
+    connection_epoch: u64,
 ) -> Result<(), Error>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
-    node.borrow_mut()
-        .apply_view_updates_in_batch(std::mem::take(pending))?;
+    let confirmed_subscriptions = pending
+        .iter()
+        .filter(|update| update.authority_receipt_eligible && !update.parts.opening_pending)
+        .map(|update| update.parts.subscription)
+        .collect::<Vec<_>>();
+    let mut node_ref = node.borrow_mut();
+    node_ref.apply_view_updates_in_batch(
+        std::mem::take(pending)
+            .into_iter()
+            .map(|update| update.parts)
+            .collect(),
+    )?;
+    let confirmed_binding_views = confirmed_subscriptions
+        .into_iter()
+        .filter_map(|subscription| {
+            node_ref
+                .binding_view_key_for_subscription(subscription)
+                .ok()
+        })
+        .collect::<Vec<_>>();
+    drop(node_ref);
+    if let Some(receipts) = active_authority_view_receipts.borrow_mut().as_mut()
+        && receipts.connection_epoch == connection_epoch
+    {
+        receipts.binding_views.extend(confirmed_binding_views);
+    }
     if !clears.is_empty() {
         let mut awaiting = awaiting.borrow_mut();
         for coverage in std::mem::take(clears) {
@@ -11647,6 +11866,9 @@ struct SubscriptionState {
     authorization_mode: QueryAuthorizationMode,
     read_tier: DurabilityTier,
     remote_read_tier: Option<DurabilityTier>,
+    /// Once this stream has an upstream, cached durable state needs a receipt
+    /// from each replacement connection before it can be settled again.
+    requires_authority_receipt: bool,
     /// Routing intent sent with this subscription's remote registration.
     remote_propagate_upstream: bool,
     read_view: ReadViewSpec,
@@ -12464,11 +12686,13 @@ fn reserve_relation_snapshot_delta_slack(snapshot: &mut RelationSnapshot) {
 
 fn subscription_is_settled<S>(
     node: &NodeState<S>,
+    active_authority_view_receipts: &ActiveAuthorityViewReceipts,
     shape: &ValidatedQuery,
     binding: &Binding,
     tier: DurabilityTier,
     read_view: ReadViewSpec,
     propagate_upstream: bool,
+    requires_authority_receipt: bool,
 ) -> bool
 where
     S: OrderedKvStorage,
@@ -12488,6 +12712,11 @@ where
     };
     node.has_settled_result_set(binding_view_key)
         && !node.opening_pending_for_binding_view(binding_view_key)
+        && (!requires_authority_receipt
+            || active_authority_view_receipts
+                .borrow()
+                .as_ref()
+                .is_some_and(|receipts| receipts.binding_views.contains(&binding_view_key)))
 }
 
 pub(crate) fn subscription_row_occurrence_id(row: &CurrentRow) -> OutputOccurrenceId {
