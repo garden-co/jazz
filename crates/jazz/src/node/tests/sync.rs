@@ -371,6 +371,136 @@ fn detached_false_cleanup_bounds_unique_read_view_marker_churn() {
 }
 
 #[test]
+fn reused_binding_keeps_old_and_current_read_view_markers_isolated() {
+    let (dir, mut reader) = open_node_with_uuid(node(3));
+    let (shape, binding) = reader.whole_table_shape_binding("todos").unwrap();
+    reader
+        .apply_sync_message(SyncMessage::RegisterShape {
+            shape_id: shape.shape_id(),
+            ast: crate::protocol::ShapeAst::from_validated(&shape),
+            opts: crate::protocol::RegisterShapeOptions::default(),
+        })
+        .unwrap();
+    let subscription_for = |read_view| SubscriptionKey {
+        shape_id: shape.shape_id(),
+        binding_id: binding.binding_id(),
+        read_view,
+    };
+    let read_view_a = ReadViewKey {
+        id: uuid::Uuid::from_u128(0xa),
+    };
+    let read_view_b = ReadViewKey {
+        id: uuid::Uuid::from_u128(0xb),
+    };
+    let subscription_a = subscription_for(read_view_a);
+    let subscription_b = subscription_for(read_view_b);
+
+    for subscription in [subscription_a, subscription_b] {
+        reader
+            .apply_sync_message(SyncMessage::Subscribe(crate::protocol::Subscribe {
+                shape_id: shape.shape_id(),
+                subscription,
+                values: Vec::new(),
+                known_state: None,
+            }))
+            .unwrap();
+        reader
+            .apply_sync_message(SyncMessage::ViewUpdate {
+                subscription,
+                settled_through: GlobalSeq(7),
+                reset_result_set: true,
+                version_carriers: Vec::new(),
+                version_bundles: Vec::new(),
+                peer_payload_inventory: crate::protocol::PeerPayloadInventory {
+                    opening_pending: true,
+                    ..Default::default()
+                },
+                result_member_adds: Vec::new(),
+                result_member_removes: Vec::new(),
+                terminal_operations: Vec::new(),
+                program_fact_adds: Vec::new(),
+                program_fact_removes: Vec::new(),
+            })
+            .unwrap();
+    }
+
+    // B now owns the reused shape/binding registration. A's late authoritative
+    // false must route through exact detached cleanup, never through B.
+    reader
+        .apply_sync_message(SyncMessage::ViewUpdate {
+            subscription: subscription_a,
+            settled_through: GlobalSeq(8),
+            reset_result_set: true,
+            version_carriers: Vec::new(),
+            version_bundles: Vec::new(),
+            peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
+            result_member_adds: Vec::new(),
+            result_member_removes: Vec::new(),
+            terminal_operations: Vec::new(),
+            program_fact_adds: Vec::new(),
+            program_fact_removes: Vec::new(),
+        })
+        .unwrap();
+    let binding_view_a = BindingViewKey::from_canonical_subscription_key(subscription_a);
+    let binding_view_b = BindingViewKey::from_canonical_subscription_key(subscription_b);
+    assert!(!reader.opening_pending_for_binding_view(binding_view_a));
+    assert!(reader.opening_pending_for_binding_view(binding_view_b));
+    assert_eq!(
+        reader.sync_metrics().dropped_detached_subscription_messages,
+        1
+    );
+    reader.close().unwrap();
+    drop(reader);
+
+    let reopened = reopen_node_at(&dir, node(3), schema());
+    assert!(!reopened.opening_pending_for_binding_view(binding_view_a));
+    assert!(reopened.opening_pending_for_binding_view(binding_view_b));
+}
+
+#[test]
+fn repeated_pending_true_does_not_rewrite_the_same_marker() {
+    let schema = schema();
+    let column_families = schema.column_families();
+    let refs = column_families
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let storage = FailAfterWritesMemoryStorage::new(&refs);
+    let mut reader = NodeState::new(node(3), schema, storage.clone()).unwrap();
+    let subscription = reader.whole_table_subscription_key("todos").unwrap();
+    let writes_before_updates = storage.total_writes();
+    let mut writes_after_updates = Vec::new();
+
+    for settled_through in [GlobalSeq(7), GlobalSeq(8)] {
+        reader
+            .apply_sync_message(SyncMessage::ViewUpdate {
+                subscription,
+                settled_through,
+                reset_result_set: true,
+                version_carriers: Vec::new(),
+                version_bundles: Vec::new(),
+                peer_payload_inventory: crate::protocol::PeerPayloadInventory {
+                    opening_pending: true,
+                    ..Default::default()
+                },
+                result_member_adds: Vec::new(),
+                result_member_removes: Vec::new(),
+                terminal_operations: Vec::new(),
+                program_fact_adds: Vec::new(),
+                program_fact_removes: Vec::new(),
+            })
+            .unwrap();
+        writes_after_updates.push(storage.total_writes());
+    }
+
+    assert_eq!(
+        writes_after_updates[0] - writes_before_updates,
+        writes_after_updates[1] - writes_after_updates[0] + 1,
+        "the first update must perform exactly one marker write that the repeated true skips"
+    );
+}
+
+#[test]
 fn known_state_eviction_deletes_pending_marker_last() {
     for (successful_writes, pending_after_reopen) in
         [(0, true), (1, true), (2, true), (3, false)]

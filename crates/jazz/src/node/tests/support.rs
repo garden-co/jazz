@@ -517,6 +517,7 @@ fn open_history_complete_reopen_refusing_node_with_schema(
 struct FailAfterWritesMemoryStorage {
     inner: MemoryStorage,
     successful_writes_before_failure: Rc<Cell<Option<usize>>>,
+    total_writes: Rc<Cell<usize>>,
 }
 
 impl FailAfterWritesMemoryStorage {
@@ -524,6 +525,7 @@ impl FailAfterWritesMemoryStorage {
         Self {
             inner: MemoryStorage::new(column_families),
             successful_writes_before_failure: Rc::new(Cell::new(None)),
+            total_writes: Rc::new(Cell::new(0)),
         }
     }
 
@@ -546,6 +548,10 @@ impl FailAfterWritesMemoryStorage {
             .set(Some(remaining - 1));
         Ok(())
     }
+
+    fn total_writes(&self) -> usize {
+        self.total_writes.get()
+    }
 }
 
 impl OrderedKvStorage for FailAfterWritesMemoryStorage {
@@ -564,11 +570,13 @@ impl OrderedKvStorage for FailAfterWritesMemoryStorage {
         value: &[u8],
     ) -> Result<(), groove::storage::Error> {
         self.before_write()?;
+        self.total_writes.set(self.total_writes.get() + 1);
         self.inner.set(cf, key, value)
     }
 
     fn delete(&self, cf: &ColumnFamilyName, key: &Key) -> Result<(), groove::storage::Error> {
         self.before_write()?;
+        self.total_writes.set(self.total_writes.get() + 1);
         self.inner.delete(cf, key)
     }
 
@@ -619,6 +627,7 @@ impl OrderedKvStorage for FailAfterWritesMemoryStorage {
 
     fn write_many(&self, operations: &[WriteOperation<'_>]) -> Result<(), groove::storage::Error> {
         self.before_write()?;
+        self.total_writes.set(self.total_writes.get() + 1);
         self.inner.write_many(operations)
     }
 

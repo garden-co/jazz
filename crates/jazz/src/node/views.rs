@@ -792,6 +792,19 @@ where
         let version_bundle_refs =
             version_bundle_refs_for_carriers(&version_bundles, &version_carriers)?;
         let binding_view_key = match self.binding_view_key_for_subscription(subscription) {
+            Ok(binding_view_key) if binding_view_key.read_view != subscription.read_view => {
+                let wire_binding_view_key =
+                    BindingViewKey::from_canonical_subscription_key(subscription);
+                if !opening_pending && self.has_persisted_opening_pending(wire_binding_view_key)? {
+                    self.sync_metrics.dropped_detached_subscription_messages += 1;
+                    self.persist_opening_pending(wire_binding_view_key, false)?;
+                    self.query
+                        .pending_opening_binding_views
+                        .remove(&wire_binding_view_key);
+                    return Ok(());
+                }
+                binding_view_key
+            }
             Ok(binding_view_key) => binding_view_key,
             Err(Error::InvalidStoredValue(
                 "subscription referenced unregistered shape"
@@ -826,7 +839,9 @@ where
         // provisional snapshot as settled.  The false transition remains the
         // final durable mutation in this method.
         if opening_pending {
-            self.persist_opening_pending(binding_view_key, true)?;
+            if !self.has_persisted_opening_pending(binding_view_key)? {
+                self.persist_opening_pending(binding_view_key, true)?;
+            }
             self.query
                 .pending_opening_binding_views
                 .insert(binding_view_key);
