@@ -1,3 +1,4 @@
+pub mod async_db;
 pub mod async_page_store;
 mod checksum;
 mod db;
