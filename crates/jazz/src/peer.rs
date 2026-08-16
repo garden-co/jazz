@@ -928,6 +928,15 @@ impl PeerState {
             .difference(&current_member_result_set)
             .cloned()
             .collect::<Vec<_>>();
+        // A live reconciliation is still a delta to the receiver's existing
+        // result set.  Rehydration used for an explicit reset is different:
+        // the receiver discards that set and needs the complete replacement.
+        // In particular, a deletion witness may force reconciliation alongside
+        // an ordinary result delta; do not resend retained window members as
+        // additions in that case.
+        if !reset_result_set {
+            result_member_adds.retain(|member| !previous_member_result_set.contains(member));
+        }
         // The downstream cursor tracks data progress, not authorization. A
         // removed prior member or newly visible pre-cursor member cannot be
         // reconstructed from that cursor, so it cannot safely suppress the
