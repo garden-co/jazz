@@ -1713,13 +1713,24 @@ where
             });
         }
         let history_fields = maintained_view_history_storage_field_names(table);
+        let required_fields = self.current_projection_required_fields(request, table);
+        let projection_target = self
+            .node
+            .ensure_physical_branch_history_projection_for_enum_columns(
+                self.read_view.read_schema,
+                &request.source.table,
+                branch_id,
+                &required_fields,
+            )
+            .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
         let overlay_content = GraphBuilder::arg_max_by(
             tier_visible_branch_history_graph(
                 self.node
-                    .physical_branch_history_source_graph(
+                    .physical_branch_history_source_graph_with_projection_target(
                         self.read_view.read_schema,
                         &request.source.table,
                         branch_id,
+                        projection_target,
                     )
                     .map_err(|_| source_resolution_error(request, SourceGap::BranchOverlay))?,
                 history_fields,

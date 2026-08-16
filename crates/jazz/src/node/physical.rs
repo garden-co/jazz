@@ -639,6 +639,24 @@ fn physical_current_projection_target_for_enum_columns(
     format!("{base}_enum_fields_{suffix}")
 }
 
+/// A query-local branch-history target.  Like its current-row counterpart,
+/// this is an authored-descriptor compatibility boundary: branch overlays are
+/// unioned with an already-projected frozen base, so their enum registries
+/// must agree before the union is compiled.
+fn physical_history_projection_target_for_enum_columns(
+    schema_alias: SchemaVersionAlias,
+    logical_table: &str,
+    enum_columns: &BTreeSet<PhysicalColumnId>,
+) -> String {
+    let base = physical_history_projection_target(schema_alias, logical_table);
+    let suffix = enum_columns
+        .iter()
+        .map(|column| column.0.to_string())
+        .collect::<Vec<_>>()
+        .join("_");
+    format!("{base}_enum_fields_{suffix}")
+}
+
 #[derive(Clone, Copy)]
 pub(super) enum PhysicalCurrentClass {
     Global,
@@ -649,6 +667,35 @@ pub(super) enum PhysicalCurrentClass {
 enum ContentProjectionShape {
     History,
     Current,
+}
+
+/// The history storage schema owns physical enum registry identities so it
+/// can store every compatible authored version. A query-local history source
+/// instead crosses into the reader's authored descriptor, matching current
+/// row sources and inline frozen branch bases.
+fn authored_history_projection_descriptor(table: &TableSchema) -> records::RecordDescriptor {
+    records::RecordDescriptor::new(
+        table
+            .history_storage_table()
+            .record_schema()
+            .fields()
+            .iter()
+            .map(|field| {
+                let name = field
+                    .name
+                    .clone()
+                    .expect("Jazz history storage fields are named");
+                let value_type = table
+                    .columns
+                    .iter()
+                    .find(|column| user_column_field(&column.name) == name)
+                    .map(|column| {
+                        records::ValueType::Nullable(Box::new(column.column_type.clone()))
+                    })
+                    .unwrap_or_else(|| field.value_type.clone());
+                (name, value_type)
+            }),
+    )
 }
 
 pub(super) fn allocate_provisional_physical_mapping(
@@ -1575,30 +1622,15 @@ where
         ))
     }
 
-    /// The branch-overlay counterpart of [`Self::physical_history_source_graph`].
-    ///
-    /// Branch content history has the same variant layouts as root history;
-    /// only the physical partition differs.  Keeping that distinction here is
-    /// important: query lowering can keep an IVM source subscribed to the
-    /// durable overlay table instead of snapshotting branch rows into an inline
-    /// graph at subscription-open time.
-    pub(super) fn physical_branch_history_source_graph(
+    pub(super) fn physical_branch_history_source_graph_with_projection_target(
         &self,
         schema_version: SchemaVersionId,
         logical_table: &str,
         branch_id: BranchId,
+        projection_target: impl Into<String>,
     ) -> Result<GraphBuilder, Error> {
-        let alias = self
-            .catalogue
-            .schema_version_aliases
-            .get(&schema_version)
-            .copied()
-            .ok_or(Error::InvalidStoredValue(
-                "physical branch history source schema alias missing",
-            ))?;
-        // Validate that the logical table has the same physical history
-        // binding as a root history source before selecting its branch
-        // partition.
+        // Keep the same schema/table validation as the ordinary branch
+        // history source; only the query-local projection target differs.
         let _ = physical_history_binding(
             &self.catalogue.catalogue_schemas,
             &self.catalogue.schema_version_aliases,
@@ -1609,7 +1641,7 @@ where
         let table_id = self.physical_table_id_for_schema(schema_version, logical_table)?;
         Ok(GraphBuilder::variant_source(
             physical_branch_history_table_name(table_id, branch_id),
-            physical_history_projection_target(alias, logical_table),
+            projection_target,
         ))
     }
 
@@ -1960,6 +1992,132 @@ where
                             tag,
                         )?;
                     }
+                }
+            }
+        }
+        Ok(projection_target)
+    }
+
+    /// Register a branch-history counterpart to the query-local current
+    /// compatibility target.  A branch overlay is joined with a frozen base
+    /// already materialized in the reader schema, so this boundary belongs
+    /// before the overlay/base union rather than after it.
+    pub(super) fn ensure_physical_branch_history_projection_for_enum_columns(
+        &mut self,
+        target_schema: SchemaVersionId,
+        target_table_name: &str,
+        branch_id: BranchId,
+        required_fields: &BTreeSet<String>,
+    ) -> Result<String, Error> {
+        let target_alias = self
+            .catalogue
+            .schema_version_aliases
+            .get(&target_schema)
+            .copied()
+            .ok_or(Error::InvalidStoredValue(
+                "physical branch history projection target schema alias missing",
+            ))?;
+        let target_table = self.table_in_schema(target_table_name, target_schema)?;
+        let target_mapping = self
+            .catalogue
+            .physical_mappings
+            .get(&target_schema)
+            .and_then(|mapping| mapping.tables.get(target_table_name))
+            .cloned()
+            .ok_or(Error::InvalidStoredValue(
+                "target branch-history enum physical mapping missing",
+            ))?;
+        let required_enum_columns = target_table
+            .columns
+            .iter()
+            .filter(|column| required_fields.contains(&column.name))
+            .filter_map(|column| {
+                let column_id = target_mapping.columns.get(&column.name).copied()?;
+                let has_enum_boundary = target_mapping.scalar_enum_cases.contains_key(&column_id)
+                    || target_mapping.payload_enum_cases.contains_key(&column_id)
+                    || target_mapping
+                        .nested_scalar_enum_cases
+                        .contains_key(&column_id)
+                    || target_mapping
+                        .nested_payload_enum_cases
+                        .contains_key(&column_id)
+                    || matches!(
+                        column.column_type,
+                        records::ValueType::EnumTag(_) | records::ValueType::Enum(_)
+                    );
+                has_enum_boundary.then_some(column_id)
+            })
+            .collect::<BTreeSet<_>>();
+        let projection_target = physical_history_projection_target_for_enum_columns(
+            target_alias,
+            target_table_name,
+            &required_enum_columns,
+        );
+        let storage_table = physical_branch_history_table_name(target_mapping.table_id, branch_id);
+        // This target is the semantic reader boundary.  It must use the
+        // authored descriptor, not the widened durable history descriptor,
+        // otherwise its enum registry cannot union with the frozen base.
+        self.database.define_variant_projection(
+            &storage_table,
+            &projection_target,
+            authored_history_projection_descriptor(&target_table),
+        )?;
+        let sources = self
+            .catalogue
+            .physical_mappings
+            .iter()
+            .flat_map(|(schema_version, mapping)| {
+                mapping
+                    .tables
+                    .iter()
+                    .filter(|(_, table)| table.table_id == target_mapping.table_id)
+                    .map(|(logical_table, table)| {
+                        (*schema_version, logical_table.clone(), table.clone())
+                    })
+            })
+            .collect::<Vec<_>>();
+        for (source_schema, source_table_name, source_mapping) in sources {
+            let source_alias = self
+                .catalogue
+                .schema_version_aliases
+                .get(&source_schema)
+                .copied()
+                .ok_or(Error::InvalidStoredValue(
+                    "physical branch-history projection source schema alias missing",
+                ))?;
+            let cases = if source_mapping.variant_cases.is_empty() {
+                vec![(groove_variant_tag(source_alias)?, None)]
+            } else {
+                source_mapping
+                    .variant_cases
+                    .iter()
+                    .map(|case| (case.tag, Some(&case.fields)))
+                    .collect()
+            };
+            for (tag, present) in cases {
+                let fields = self.physical_history_projection_case_for_enum_columns(
+                    source_schema,
+                    &source_table_name,
+                    &source_mapping,
+                    target_schema,
+                    target_table_name,
+                    present,
+                    Some(&required_enum_columns),
+                )?;
+                if let Some(fields) = fields {
+                    self.database
+                        .register_variant_projection_case_omitting_unrepresentable_enums(
+                            &storage_table,
+                            &projection_target,
+                            tag,
+                            fields,
+                        )?;
+                } else {
+                    self.database.register_variant_ignore_case(
+                        &storage_table,
+                        &projection_target,
+                        tag,
+                    )?;
                 }
             }
         }
@@ -2412,6 +2570,28 @@ where
         )
     }
 
+    fn physical_history_projection_case_for_enum_columns(
+        &mut self,
+        source_schema: SchemaVersionId,
+        source_table_name: &str,
+        source_mapping: &TablePhysicalMapping,
+        target_schema: SchemaVersionId,
+        target_table_name: &str,
+        present: Option<&BTreeSet<String>>,
+        required_enum_columns: Option<&BTreeSet<PhysicalColumnId>>,
+    ) -> Result<Option<Vec<ProjectField>>, Error> {
+        self.physical_content_projection_case(
+            source_schema,
+            source_table_name,
+            source_mapping,
+            target_schema,
+            target_table_name,
+            ContentProjectionShape::History,
+            present,
+            required_enum_columns,
+        )
+    }
+
     fn physical_current_projection_case(
         &mut self,
         source_schema: SchemaVersionId,
@@ -2565,7 +2745,12 @@ where
             // Query-local enum targets are authored-descriptor boundaries;
             // their recursive remap must validate/encode against the old
             // schema rather than the physical registry descriptor.
-            target_storage.record_schema()
+            match shape {
+                ContentProjectionShape::History => {
+                    authored_history_projection_descriptor(&target_table)
+                }
+                ContentProjectionShape::Current => target_storage.record_schema(),
+            }
         } else {
             widened_projection_descriptor(
                 &target_storage.record_schema(),
