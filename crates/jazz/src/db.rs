@@ -6113,13 +6113,20 @@ where
         self.deliver_pending_mutation_errors();
         let mut stats = DbTickStats::default();
         let mut remote_sync_applied = false;
+        // A later subscriber can mutate Core state after an earlier peer link
+        // has already had its turn in this pass.  Remember that generation so
+        // the post-receive serve pass below reaches that earlier link too;
+        // websocket hosts are event-driven and need not provide unrelated
+        // follow-up traffic just to flush a freshly accepted row.
+        let subscriber_dirty_epoch_before = self.subscriber_dirty_epoch.get();
         for connection in self.connections.borrow().iter() {
             let next = connection.borrow_mut().tick()?;
             stats.subscription_events += next.subscription_events;
             stats.remote_sync_applied += next.remote_sync_applied;
             remote_sync_applied |= next.remote_sync_applied > 0;
         }
-        if remote_sync_applied {
+        if remote_sync_applied || self.subscriber_dirty_epoch.get() != subscriber_dirty_epoch_before
+        {
             for connection in self.connections.borrow().iter() {
                 if connection.borrow_mut().mark_subscriber_dirty() {
                     let next = connection.borrow_mut().tick()?;
