@@ -7156,7 +7156,7 @@ fn correlated_relation_edge_fields(
 ) -> CapabilityResult<Vec<ProjectField>> {
     let source_version = version_witness_fields(&source.row_shape)?;
     let target_version = version_witness_fields(&target.row_shape)?;
-    Ok(vec![
+    let mut fields = vec![
         ProjectField::literal(
             "source_source",
             Value::String(source.row_shape.source.table.clone()),
@@ -7188,7 +7188,20 @@ fn correlated_relation_edge_fields(
             right_field(&target_version.tx_node_field),
             "target_tx_node_id",
         ),
-    ])
+    ];
+    if let Some(field) = source_version.branch_or_prefix_field {
+        fields.push(ProjectField::renamed(
+            left_field(&field),
+            "source_branch_or_prefix",
+        ));
+    }
+    if let Some(field) = target_version.branch_or_prefix_field {
+        fields.push(ProjectField::renamed(
+            right_field(&field),
+            "target_branch_or_prefix",
+        ));
+    }
+    Ok(fields)
 }
 
 fn correlated_relation_name(path: &CorrelatedPathPlan) -> String {
@@ -7793,13 +7806,15 @@ fn versioned_row_ref_schema(source: &ResolvedSource) -> CapabilityResult<Version
             row_field: source.row_shape.row_uuid_field.clone(),
         },
         version: Some(content_version_schema(&version)),
+        branch_or_prefix_field: version.branch_or_prefix_field,
     })
 }
 
 fn prefixed_versioned_row_ref_schema(
-    _source: &ResolvedSource,
+    source: &ResolvedSource,
     prefix: &str,
 ) -> CapabilityResult<VersionedRowRefSchema> {
+    let version = version_witness_fields(&source.row_shape)?;
     Ok(VersionedRowRefSchema {
         row: RowRefSchema {
             source_field: format!("{prefix}_source"),
@@ -7812,6 +7827,9 @@ fn prefixed_versioned_row_ref_schema(
                 tx_node_field: format!("{prefix}_tx_node_id"),
             },
         )),
+        branch_or_prefix_field: version
+            .branch_or_prefix_field
+            .map(|_| format!("{prefix}_branch_or_prefix")),
     })
 }
 

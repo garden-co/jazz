@@ -50,8 +50,8 @@ use crate::protocol::{
     AuthorizationOperationKey, AuthorizationScopeOperation, AuthorizationSupportScopeKey,
     BindingViewKey, KnownStateCompleteness, KnownStateDeclaration, PermissionAdviceAction,
     ProgramFactEntry, ReadViewKey, ReadViewSourceSpec, ReadViewSpec, RegisterShapeOptions,
-    ResultMemberEntry, ResultMemberPayloadEntry, RowVersionRef, ShapeAst, ShapeBody, Subscribe,
-    SubscriptionKey, SyntheticReplacementToken,
+    RelationEdgeEntry, ResultMemberEntry, ResultMemberPayloadEntry, ResultRowLayer, RowVersionRef,
+    RowVersionRefEntry, ShapeAst, ShapeBody, Subscribe, SubscriptionKey, SyntheticReplacementToken,
 };
 use crate::protocol_limits::MAX_KNOWN_STATE_EXACT_REFS;
 use crate::query::{
@@ -706,6 +706,7 @@ fn row_ref_fields(schema: &QueryEngineRowRefSchema) -> Vec<String> {
 
 fn versioned_row_ref_fields(schema: &VersionedRowRefSchema) -> Vec<String> {
     let mut fields = row_ref_fields(&schema.row);
+    fields.extend(schema.branch_or_prefix_field.clone());
     if let Some(version) = &schema.version {
         fields.extend(result_membership_version_fields(version));
     }
@@ -1086,6 +1087,50 @@ where
                     self.read_view.read_schema,
                 )
                 .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
+            let rows = rows
+                .into_iter()
+                .map(|row| {
+                    let tx_id = if let Some((time, alias)) = row.projected_tx_alias() {
+                        let node = self
+                            .node
+                            .node_aliases
+                            .iter()
+                            .find_map(|(node, candidate)| (*candidate == alias).then_some(*node))
+                            .ok_or_else(|| source_resolution_error(request, SourceGap::Coverage))?;
+                        TxId::new(time, node)
+                    } else {
+                        let base = branch
+                            .base
+                            .as_ref()
+                            .ok_or_else(|| source_resolution_error(request, SourceGap::Coverage))?;
+                        self.node
+                            .historical_content_witness_at(
+                                &request.source.table,
+                                self.read_view.read_schema,
+                                row.row_uuid(),
+                                base.global_base,
+                            )
+                            .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?
+                            .ok_or_else(|| source_resolution_error(request, SourceGap::Coverage))?
+                    };
+                    let tx = self
+                        .node
+                        .query_transaction(tx_id)
+                        .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?
+                        .ok_or_else(|| source_resolution_error(request, SourceGap::Coverage))?;
+                    let lineage = match tx.tx.target_lineage {
+                        BranchLineage::Root => None,
+                        BranchLineage::Branch(branch) => Some(branch),
+                    };
+                    let alias = self
+                        .node
+                        .node_aliases
+                        .get(&tx_id.node)
+                        .copied()
+                        .ok_or_else(|| source_resolution_error(request, SourceGap::Coverage))?;
+                    Ok((row, tx_id.time, alias, lineage))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
             let schema_version_alias = self
                 .node
                 .ensure_schema_version_alias(self.read_view.read_schema)
@@ -1094,7 +1139,6 @@ where
                 &table,
                 rows,
                 schema_version_alias,
-                branch_id,
                 &request.requirements,
             )
             .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
@@ -2567,7 +2611,10 @@ fn current_row_descriptor_with_hidden_source_fields(
             ..
         }) = metadata.get(&SourceMetadataRequirement::VersionWitnesses)
         {
-            fields.push((field.clone(), ValueType::Uuid));
+            fields.push((
+                field.clone(),
+                ValueType::Nullable(Box::new(ValueType::Uuid)),
+            ));
         }
     }
     if metadata.contains_key(&SourceMetadataRequirement::Coverage) {
@@ -5531,24 +5578,25 @@ where
             let ProgramFactEntry::RelationEdge(edge) = fact else {
                 continue;
             };
-            edges.push(RelationEdge {
-                source_table: edge.source_table.to_string(),
-                source_row: edge.source_row,
-                relation: edge.path.clone(),
-                target_table: edge.target_table.to_string(),
-                target_row: edge.target_row,
-            });
-            if row_keys.insert((edge.target_table.to_string(), edge.target_row))
+            // Program facts retain canonical authored identity.  The public
+            // relation snapshot, including its removal index, is keyed in the
+            // subscription read schema; project the edge identity alongside
+            // the row it references rather than mixing canonical `users`
+            // with a materialized `people` row.
+            let read_edge =
+                self.project_relation_edge_through_read_schema(&edge, shape.schema_version())?;
+            if row_keys.insert((read_edge.target_table.clone(), read_edge.target_row))
                 && let Some(version) = &edge.target_version
                 && let Some(row) = self.materialize_authoritative_reset_relation_edge_target(
                     shape.schema_version(),
                     edge.target_table.as_str(),
                     edge.target_row,
-                    version.tx,
+                    version,
                 )?
             {
                 rows.push(row);
             }
+            edges.push(read_edge);
         }
         Ok(Some(RelationSnapshot {
             root_count,
@@ -5683,28 +5731,197 @@ where
         read_schema: SchemaVersionId,
         target_table_name: &str,
         target_row: RowUuid,
-        tx_id: TxId,
+        version_ref: &RowVersionRefEntry,
     ) -> Result<Option<CurrentRow>, Error> {
-        let target_table = self
-            .table_in_schema(target_table_name, read_schema)?
+        let version =
+            self.resolve_relation_edge_version(target_table_name, target_row, version_ref)?;
+        // Relation-edge facts retain the canonical authored table name.  A
+        // read schema can have renamed that table, so resolving the edge name
+        // directly against the read descriptor would reject an otherwise
+        // complete canonical witness before the lens gets a chance to map it.
+        // Resolve and project the immutable version first, then select the
+        // projected table from the read schema.
+        let authored_schema = self
+            .schema_version_for_alias(version.schema_version_alias())
+            .ok_or(Error::InvalidStoredValue(
+                "relation edge witness schema version alias must exist",
+            ))?;
+        let authored_table = self
+            .table_in_schema(version.table(), authored_schema)?
             .clone();
-        let Some(tx_node_alias) = self.node_aliases.get(&tx_id.node).copied() else {
-            return Err(Error::MissingTransaction(tx_id));
-        };
-        let Some(version) = self.query_version_by_alias(
-            target_table_name,
-            target_row,
-            VersionLayer::Content,
-            tx_id.time,
-            tx_node_alias,
-        )?
+        let mut cells = self.materialized_cells_for_version(&authored_table, &version)?;
+        let Some(projected_table_name) =
+            self.translate_cells(authored_schema, read_schema, version.table(), &mut cells)?
         else {
-            if self.query_transaction(tx_id)?.is_some() {
-                return Ok(None);
-            }
-            return Err(Error::MissingTransaction(tx_id));
+            return Ok(None);
         };
-        self.projected_current_row_from_materialized_version(&target_table, read_schema, &version)
+        let projected_table = self
+            .table_in_schema(&projected_table_name, read_schema)?
+            .clone();
+        current_row_from_materialized_cells(&projected_table, &version, &cells).map(Some)
+    }
+
+    /// Project a canonical maintained relation fact into the public read
+    /// schema. The fact itself remains canonical in `program_facts`; this
+    /// derived identity is only for the materialized snapshot and its local
+    /// add/remove indexes.
+    fn project_relation_edge_through_read_schema(
+        &mut self,
+        edge: &RelationEdgeEntry,
+        read_schema: SchemaVersionId,
+    ) -> Result<RelationEdge, Error> {
+        Ok(RelationEdge {
+            source_table: self.project_relation_edge_table_through_read_schema(
+                edge.source_table.as_str(),
+                edge.source_row,
+                edge.source_version.as_ref(),
+                read_schema,
+            )?,
+            source_row: edge.source_row,
+            relation: edge.path.clone(),
+            target_table: self.project_relation_edge_table_through_read_schema(
+                edge.target_table.as_str(),
+                edge.target_row,
+                edge.target_version.as_ref(),
+                read_schema,
+            )?,
+            target_row: edge.target_row,
+        })
+    }
+
+    fn project_relation_edge_table_through_read_schema(
+        &mut self,
+        canonical_table: &str,
+        row_uuid: RowUuid,
+        version_ref: Option<&RowVersionRefEntry>,
+        read_schema: SchemaVersionId,
+    ) -> Result<String, Error> {
+        let Some(version_ref) = version_ref else {
+            // A fact without a concrete version is already required to name
+            // the read view. Never relabel it optimistically.
+            self.table_in_schema(canonical_table, read_schema)?;
+            return Ok(canonical_table.to_owned());
+        };
+        let version = self.resolve_relation_edge_version(canonical_table, row_uuid, version_ref)?;
+        let authored_schema = self
+            .schema_version_for_alias(version.schema_version_alias())
+            .ok_or(Error::InvalidStoredValue(
+                "relation edge witness schema version alias must exist",
+            ))?;
+        let mut cells = BTreeMap::new();
+        self.translate_cells(authored_schema, read_schema, version.table(), &mut cells)?
+            .ok_or(Error::InvalidStoredValue(
+                "relation edge witness does not project into the read schema",
+            ))
+    }
+
+    /// Resolve the immutable version named by a relation-edge witness. Branch
+    /// current-row scans are deliberately insufficient here: a later branch
+    /// winner must never replace the exact version named by an authority reset.
+    fn resolve_relation_edge_version(
+        &mut self,
+        canonical_table: &str,
+        row_uuid: RowUuid,
+        version_ref: &RowVersionRefEntry,
+    ) -> Result<VersionRow, Error> {
+        let version = if let Some(branch_id) = Self::relation_edge_branch_id(version_ref)? {
+            let stored_tx = self
+                .query_transaction(version_ref.tx)?
+                .ok_or(Error::MissingTransaction(version_ref.tx))?;
+            if stored_tx.tx.target_lineage != BranchLineage::Branch(branch_id) {
+                return Err(Error::InvalidStoredValue(
+                    "relation edge branch discriminator does not match its transaction",
+                ));
+            }
+            self.query_versions_for_tx(version_ref.tx)?
+                .into_iter()
+                .find(|version| {
+                    version.table() == canonical_table
+                        && version.row_uuid() == row_uuid
+                        && version.layer() == VersionLayer::Content
+                })
+                .ok_or(Error::MissingTransaction(version_ref.tx))?
+        } else {
+            let tx_node_alias = self
+                .node_aliases
+                .get(&version_ref.tx.node)
+                .copied()
+                .ok_or(Error::MissingTransaction(version_ref.tx))?;
+            self.query_version_by_alias(
+                canonical_table,
+                row_uuid,
+                VersionLayer::Content,
+                version_ref.tx.time,
+                tx_node_alias,
+            )?
+            .ok_or(Error::MissingTransaction(version_ref.tx))?
+        };
+        Ok(version)
+    }
+
+    /// Resolve a terminal relation witness whose table literal is already in
+    /// the read schema. The immutable stored version may still use an older
+    /// authored table name, so identify candidates by exact tx/row/layer and
+    /// use lens projection only to disambiguate the emitted table.
+    fn resolve_relation_terminal_version(
+        &mut self,
+        emitted_table: &str,
+        row_uuid: RowUuid,
+        version_ref: &RowVersionRefEntry,
+        read_schema: SchemaVersionId,
+    ) -> Result<VersionRow, Error> {
+        if let Some(branch_id) = Self::relation_edge_branch_id(version_ref)? {
+            let stored_tx = self
+                .query_transaction(version_ref.tx)?
+                .ok_or(Error::MissingTransaction(version_ref.tx))?;
+            if stored_tx.tx.target_lineage != BranchLineage::Branch(branch_id) {
+                return Err(Error::InvalidStoredValue(
+                    "relation edge branch discriminator does not match its transaction",
+                ));
+            }
+        }
+        let candidates = self
+            .query_versions_for_tx(version_ref.tx)?
+            .into_iter()
+            .filter(|version| {
+                version.row_uuid() == row_uuid && version.layer() == VersionLayer::Content
+            })
+            .collect::<Vec<_>>();
+        let mut matching = Vec::new();
+        for version in candidates {
+            let authored_schema = self
+                .schema_version_for_alias(version.schema_version_alias())
+                .ok_or(Error::InvalidStoredValue(
+                    "relation edge witness schema version alias must exist",
+                ))?;
+            let mut cells = BTreeMap::new();
+            if self.translate_cells(authored_schema, read_schema, version.table(), &mut cells)?
+                == Some(emitted_table.to_owned())
+            {
+                matching.push(version);
+            }
+        }
+        match matching.as_slice() {
+            [version] => Ok(version.clone()),
+            [] => Err(Error::InvalidStoredValue(
+                "relation edge terminal witness does not project to its emitted table",
+            )),
+            _ => Err(Error::InvalidStoredValue(
+                "relation edge terminal witness is ambiguous after projection",
+            )),
+        }
+    }
+
+    fn relation_edge_branch_id(
+        version_ref: &RowVersionRefEntry,
+    ) -> Result<Option<BranchId>, Error> {
+        let Some(bytes) = &version_ref.branch_or_prefix else {
+            return Ok(None);
+        };
+        let branch: [u8; 16] = bytes.as_slice().try_into().map_err(|_| {
+            Error::InvalidStoredValue("relation edge branch discriminator must be a UUID")
+        })?;
+        Ok(Some(BranchId::from_bytes(branch)))
     }
 
     pub(crate) fn settled_through_for_binding_view(
@@ -8140,60 +8357,48 @@ where
         let mut row_entries = row_result_set
             .iter()
             .filter_map(ResultMemberEntry::as_row)
-            .filter(|(entry_table, _, _)| entry_table.as_str() == table)
-            .map(|(_, row_uuid, tx_id)| (row_uuid, tx_id))
-            .collect::<BTreeSet<_>>();
+            .map(|(entry_table, row_uuid, tx_id)| {
+                ((entry_table.to_string(), row_uuid, tx_id), None)
+            })
+            .collect::<BTreeMap<_, Option<RowVersionRefEntry>>>();
         if let Some(program_facts) = self.query.settled_program_facts.get(&binding_view) {
             row_entries.extend(program_facts.iter().filter_map(|fact| {
                 let ProgramFactEntry::RelationEdge(edge) = fact else {
                     return None;
                 };
-                (edge.target_table.as_str() == table)
-                    .then(|| {
-                        edge.target_version
-                            .as_ref()
-                            .map(|version| (edge.target_row, version.tx))
-                    })
-                    .flatten()
+                edge.target_version.as_ref().map(|version| {
+                    (
+                        (edge.target_table.to_string(), edge.target_row, version.tx),
+                        Some(version.clone()),
+                    )
+                })
             }));
         }
-        let read_table = self.table_in_schema(table, read_schema)?.clone();
         let mut rows = Vec::with_capacity(row_entries.len());
-        for (row_uuid, tx_id) in row_entries {
-            let tx_node_alias = self
-                .node_aliases
-                .get(&tx_id.node)
-                .copied()
-                .ok_or(Error::MissingTransaction(tx_id))?;
-            let version = self
-                .query_version_by_alias(
-                    table,
+        for ((canonical_table, row_uuid, tx_id), relation_version) in row_entries {
+            let version = if let Some(version_ref) = relation_version {
+                self.resolve_relation_edge_version(&canonical_table, row_uuid, &version_ref)?
+            } else {
+                let tx_node_alias = self
+                    .node_aliases
+                    .get(&tx_id.node)
+                    .copied()
+                    .ok_or(Error::MissingTransaction(tx_id))?;
+                self.query_version_by_alias(
+                    &canonical_table,
                     row_uuid,
                     VersionLayer::Content,
                     tx_id.time,
                     tx_node_alias,
                 )?
-                .ok_or(Error::MissingTransaction(tx_id))?;
-            let authored_schema = self
-                .schema_version_for_alias(version.schema_version_alias())
-                .ok_or(Error::InvalidStoredValue(
-                    "settled view row schema version alias missing",
-                ))?;
-            let authored_table = self
-                .table_in_schema(version.table(), authored_schema)?
-                .clone();
-            let mut cells = self.materialized_cells_for_version(&authored_table, &version)?;
-            let Some(projected_table) =
-                self.translate_cells(authored_schema, read_schema, version.table(), &mut cells)?
-            else {
-                continue;
+                .ok_or(Error::MissingTransaction(tx_id))?
             };
-            if projected_table == table {
-                rows.push(current_row_from_materialized_cells(
-                    &read_table,
-                    &version,
-                    &cells,
-                )?);
+            if let Some(row) = self.projected_current_row_from_materialized_version_in_read_schema(
+                read_schema,
+                &version,
+            )? && row.table() == table
+            {
+                rows.push(row);
             }
         }
         Ok(rows)
@@ -8459,6 +8664,69 @@ where
         }
         sort_current_rows(&mut rows);
         Ok(rows)
+    }
+
+    fn historical_content_witness_at(
+        &mut self,
+        table: &str,
+        read_schema: SchemaVersionId,
+        row_uuid: RowUuid,
+        position: GlobalSeq,
+    ) -> Result<Option<TxId>, Error> {
+        let mut content = None::<(TxTime, NodeAlias)>;
+        let mut latest_event = None::<(TxTime, NodeAlias, Option<DeletionEvent>)>;
+        let table_id = self.physical_table_id_for_schema(read_schema, table)?;
+        let raw_records = if position.0 == u64::MAX {
+            self.database.index_scan_raw(
+                "jazz_global_changes",
+                "by_table_global_seq",
+                &[Value::U64(table_id.0)],
+            )?
+        } else {
+            self.database.index_scan_range_raw(
+                "jazz_global_changes",
+                "by_table_global_seq",
+                &[Value::U64(table_id.0), Value::U64(0)],
+                &[Value::U64(table_id.0), Value::U64(position.0 + 1)],
+            )?
+        };
+        for raw in raw_records {
+            let record = raw.record();
+            if RowUuid(record.get_uuid(GlobalChangeRowRecord::FIELD_ROW_UUID_IDX)?) != row_uuid {
+                continue;
+            }
+            let time = TxTime(record.get_u64(GlobalChangeRowRecord::FIELD_TX_TIME_IDX)?);
+            let alias = NodeAlias(record.get_u64(GlobalChangeRowRecord::FIELD_TX_NODE_ID_IDX)?);
+            if record.get_bytes(GlobalChangeRowRecord::FIELD_LAYER_IDX)?
+                == version_layer_string(VersionLayer::Content).as_bytes()
+                && content.is_none_or(|current| (time, alias) > current)
+            {
+                content = Some((time, alias));
+            }
+            let deletion = record
+                .get_nullable_enum(GlobalChangeRowRecord::FIELD__DELETION_IDX)?
+                .map(|value| deletion_event_from_value(Value::EnumTag(value)))
+                .transpose()?;
+            if latest_event.is_none_or(|(current_time, current_alias, _)| {
+                (time, alias) > (current_time, current_alias)
+            }) {
+                latest_event = Some((time, alias, deletion));
+            }
+        }
+        if latest_event.is_some_and(|(_, _, deletion)| deletion == Some(DeletionEvent::Deleted)) {
+            return Ok(None);
+        }
+        let Some((time, alias)) = content else {
+            return Ok(None);
+        };
+        let node = self
+            .node_aliases
+            .iter()
+            .find_map(|(node, candidate)| (*candidate == alias).then_some(*node))
+            .ok_or(Error::InvalidStoredValue(
+                "historical content witness node alias is missing",
+            ))?;
+        Ok(Some(TxId::new(time, node)))
     }
 
     pub(crate) fn open_maintained_view_subscription_in_authorization_mode(
@@ -9081,13 +9349,10 @@ where
                     && !structured_output
                     && let ProgramFactEntry::RelationEdge(edge) = fact
                 {
-                    removed_edges.push(RelationEdge {
-                        source_table: edge.source_table.to_string(),
-                        source_row: edge.source_row,
-                        relation: edge.path,
-                        target_table: edge.target_table.to_string(),
-                        target_row: edge.target_row,
-                    });
+                    removed_edges.push(self.project_relation_edge_through_read_schema(
+                        &edge,
+                        local.result_schema_version,
+                    )?);
                 }
             }
         }
@@ -9101,13 +9366,10 @@ where
             if local.program_facts.insert(fact)
                 && let Some(edge) = edge
             {
-                let relation_edge = RelationEdge {
-                    source_table: edge.source_table.to_string(),
-                    source_row: edge.source_row,
-                    relation: edge.path.clone(),
-                    target_table: edge.target_table.to_string(),
-                    target_row: edge.target_row,
-                };
+                let relation_edge = self.project_relation_edge_through_read_schema(
+                    &edge,
+                    local.result_schema_version,
+                )?;
                 let row = if let Some(version) = &edge.target_version {
                     self.materialize_local_maintained_view_relation_edge_row(
                         local,
@@ -9233,14 +9495,9 @@ where
             let ProgramFactEntry::RelationEdge(edge) = fact else {
                 continue;
             };
-            edges.push(RelationEdge {
-                source_table: edge.source_table.to_string(),
-                source_row: edge.source_row,
-                relation: edge.path.clone(),
-                target_table: edge.target_table.to_string(),
-                target_row: edge.target_row,
-            });
-            if row_keys.insert((edge.target_table.to_string(), edge.target_row))
+            let read_edge =
+                self.project_relation_edge_through_read_schema(edge, local.result_schema_version)?;
+            if row_keys.insert((read_edge.target_table.clone(), read_edge.target_row))
                 && let Some(version) = &edge.target_version
                 && let Some(row) = self
                     .materialize_local_maintained_view_relation_edge_row_with_cache(
@@ -9253,6 +9510,7 @@ where
             {
                 rows.push(row);
             }
+            edges.push(read_edge);
         }
         Ok(LocalMaintainedRelationSnapshot {
             snapshot: RelationSnapshot {
@@ -9304,17 +9562,13 @@ where
         row_uuid: RowUuid,
         tx_id: TxId,
     ) -> Result<Option<CurrentRow>, Error> {
-        let table = self
-            .table_in_schema(table_name, local.result_schema_version)?
-            .clone();
         let tx_versions = local.maintained.versions_by_tx(tx_id);
         let Some(version) =
             local_maintained_view_content_witness(&tx_versions, table_name, row_uuid)
         else {
             return Ok(None);
         };
-        self.projected_current_row_from_materialized_version(
-            &table,
+        self.projected_current_row_from_materialized_version_in_read_schema(
             local.result_schema_version,
             version,
         )
@@ -9328,9 +9582,6 @@ where
         tx_id: TxId,
         cache: &mut LocalMaintainedMaterializationCache,
     ) -> Result<Option<CurrentRow>, Error> {
-        let table = self
-            .table_in_schema(table_name, local.result_schema_version)?
-            .clone();
         let tx_versions = self.local_maintained_tx_versions(local, tx_id, cache);
         let Some(version) =
             local_maintained_view_content_witness(tx_versions, table_name, row_uuid)
@@ -9338,8 +9589,7 @@ where
             return Ok(None);
         };
         let version = version.clone();
-        self.projected_current_row_from_materialized_version(
-            &table,
+        self.projected_current_row_from_materialized_version_in_read_schema(
             local.result_schema_version,
             &version,
         )
@@ -9648,9 +9898,11 @@ where
     /// after that version.  The source graph has already established both
     /// source-read authorization and the exact witness; this is solely the
     /// read-view projection boundary for that selected witness.
-    fn projected_current_row_from_materialized_version(
+    /// Resolve the destination table only after applying the complete lens
+    /// path. Canonical witnesses may name a table that no longer exists in the
+    /// subscription's read schema.
+    fn projected_current_row_from_materialized_version_in_read_schema(
         &mut self,
-        read_table: &TableSchema,
         read_schema: SchemaVersionId,
         version: &VersionRow,
     ) -> Result<Option<CurrentRow>, Error> {
@@ -9668,10 +9920,8 @@ where
         else {
             return Ok(None);
         };
-        if projected_table != read_table.name {
-            return Ok(None);
-        }
-        current_row_from_materialized_cells(read_table, version, &cells).map(Some)
+        let read_table = self.table_in_schema(&projected_table, read_schema)?.clone();
+        current_row_from_materialized_cells(&read_table, version, &cells).map(Some)
     }
 
     fn current_row_from_aggregate_result_payload(
@@ -10048,6 +10298,7 @@ where
         #[derive(Clone)]
         struct RelationEdgeCandidate {
             edge: RelationEdge,
+            canonical_target_table: String,
             target_tx_time: TxTime,
             target_tx_node: NodeAlias,
         }
@@ -10056,11 +10307,21 @@ where
         let descriptor = &edges.descriptor;
         let source_table_idx = required_field_idx(descriptor, "source_table")?;
         let source_row_idx = required_field_idx(descriptor, "source_row")?;
+        let source_tx_time_idx = required_field_idx(descriptor, "source_tx_time")?;
+        let source_tx_node_idx = required_field_idx(descriptor, "source_tx_node_id")?;
+        let source_branch_idx = descriptor
+            .fields()
+            .iter()
+            .position(|field| field.name.as_deref() == Some("source_branch_or_prefix"));
         let relation_idx = required_field_idx(descriptor, "path")?;
         let target_table_idx = required_field_idx(descriptor, "target_table")?;
         let target_row_idx = required_field_idx(descriptor, "target_row")?;
         let target_tx_time_idx = required_field_idx(descriptor, "target_tx_time")?;
         let target_tx_node_idx = required_field_idx(descriptor, "target_tx_node_id")?;
+        let target_branch_idx = descriptor
+            .fields()
+            .iter()
+            .position(|field| field.name.as_deref() == Some("target_branch_or_prefix"));
         let mut candidates = Vec::new();
         for (record, weight) in edges.iter() {
             if weight <= 0 {
@@ -10068,19 +10329,94 @@ where
             }
             let source_table = record.get_str(source_table_idx)?.to_owned();
             let source_row = RowUuid(record.get_uuid(source_row_idx)?);
+            let source_tx_time = TxTime(record.get_u64(source_tx_time_idx)?);
+            let source_tx_node = NodeAlias(record.get_u64(source_tx_node_idx)?);
             let relation = record.get_str(relation_idx)?.to_owned();
             let target_table_name = record.get_str(target_table_idx)?.to_owned();
             let target_row = RowUuid(record.get_uuid(target_row_idx)?);
             let target_tx_time = TxTime(record.get_u64(target_tx_time_idx)?);
             let target_tx_node = NodeAlias(record.get_u64(target_tx_node_idx)?);
+            let branch_discriminator = |idx| -> Result<Option<Vec<u8>>, Error> {
+                let Some(idx) = idx else {
+                    return Ok(None);
+                };
+                match record.get_idx(idx)? {
+                    Value::Uuid(value) => Ok(Some(value.as_bytes().to_vec())),
+                    Value::Bytes(value) => Ok(Some(value)),
+                    Value::Nullable(Some(value)) => match *value {
+                        Value::Uuid(value) => Ok(Some(value.as_bytes().to_vec())),
+                        Value::Bytes(value) => Ok(Some(value)),
+                        _ => Err(Error::InvalidStoredValue(
+                            "relation edge branch discriminator must be UUID or bytes",
+                        )),
+                    },
+                    Value::Nullable(None) => Ok(None),
+                    _ => Err(Error::InvalidStoredValue(
+                        "relation edge branch discriminator must be UUID or bytes",
+                    )),
+                }
+            };
+            let version_ref =
+                |time, alias, branch_or_prefix| -> Result<RowVersionRefEntry, Error> {
+                    let node = self
+                        .node_aliases
+                        .iter()
+                        .find_map(|(node, candidate)| (*candidate == alias).then_some(*node))
+                        .ok_or(Error::InvalidStoredValue(
+                            "relation edge node alias is missing",
+                        ))?;
+                    Ok(RowVersionRefEntry {
+                        tx: TxId::new(time, node),
+                        schema_version: None,
+                        layer: ResultRowLayer::Content,
+                        batch: None,
+                        branch_or_prefix,
+                        row_digest: None,
+                    })
+                };
+            let source_version = version_ref(
+                source_tx_time,
+                source_tx_node,
+                branch_discriminator(source_branch_idx)?,
+            )?;
+            let target_version = version_ref(
+                target_tx_time,
+                target_tx_node,
+                branch_discriminator(target_branch_idx)?,
+            )?;
+            let canonical_source_version = self.resolve_relation_terminal_version(
+                &source_table,
+                source_row,
+                &source_version,
+                shape.schema_version(),
+            )?;
+            let canonical_target_version = self.resolve_relation_terminal_version(
+                &target_table_name,
+                target_row,
+                &target_version,
+                shape.schema_version(),
+            )?;
+            let projected_source_table = self.project_relation_edge_table_through_read_schema(
+                canonical_source_version.table(),
+                source_row,
+                Some(&source_version),
+                shape.schema_version(),
+            )?;
+            let projected_target_table = self.project_relation_edge_table_through_read_schema(
+                canonical_target_version.table(),
+                target_row,
+                Some(&target_version),
+                shape.schema_version(),
+            )?;
             candidates.push(RelationEdgeCandidate {
                 edge: RelationEdge {
-                    source_table,
+                    source_table: projected_source_table,
                     source_row,
                     relation,
-                    target_table: target_table_name,
+                    target_table: projected_target_table,
                     target_row,
                 },
+                canonical_target_table: canonical_target_version.table().to_owned(),
                 target_tx_time,
                 target_tx_node,
             });
@@ -10100,7 +10436,6 @@ where
                 ))
         });
         let mut counts = BTreeMap::<(String, RowUuid, String), usize>::new();
-        let mut target_tables = BTreeMap::<String, TableSchema>::new();
         for candidate in candidates {
             let group = (
                 candidate.edge.source_table.clone(),
@@ -10124,20 +10459,10 @@ where
                 candidate.edge.target_table.clone(),
                 candidate.edge.target_row,
             )) {
-                if !target_tables.contains_key(&candidate.edge.target_table) {
-                    let target_table = self
-                        .table_in_schema(&candidate.edge.target_table, shape.schema_version())?
-                        .clone();
-                    target_tables.insert(candidate.edge.target_table.clone(), target_table);
-                }
-                let target_table = target_tables
-                    .get(&candidate.edge.target_table)
-                    .expect("target table was inserted");
                 let row = self.materialize_relation_edge_target_row(
                     read_view,
                     shape.schema_version(),
-                    target_table,
-                    &candidate.edge.target_table,
+                    &candidate.canonical_target_table,
                     candidate.edge.target_row,
                     candidate.target_tx_time,
                     candidate.target_tx_node,
@@ -10153,7 +10478,6 @@ where
         &mut self,
         read_view: &ReadViewSpec,
         read_schema: SchemaVersionId,
-        target_table: &TableSchema,
         target_table_name: &str,
         target_row: RowUuid,
         target_tx_time: TxTime,
@@ -10167,8 +10491,7 @@ where
             target_tx_node,
         )? {
             return self
-                .projected_current_row_from_materialized_version(
-                    target_table,
+                .projected_current_row_from_materialized_version_in_read_schema(
                     read_schema,
                     &version,
                 )?
@@ -10181,19 +10504,36 @@ where
                 "relation edge target version is missing",
             ));
         };
-        let branch = self
-            .branches
-            .branches
-            .get(&BranchId(branch))
-            .cloned()
+        let target_node = self
+            .node_aliases
+            .iter()
+            .find_map(|(node, alias)| (*alias == target_tx_node).then_some(*node))
             .ok_or(Error::InvalidStoredValue(
-                "relation edge target branch is missing",
+                "relation edge target node alias is missing",
             ))?;
-        self.branch_current_rows_for_schema(target_table_name, &branch, read_schema)?
+        let tx_id = TxId::new(target_tx_time, target_node);
+        let stored_tx = self
+            .query_transaction(tx_id)?
+            .ok_or(Error::MissingTransaction(tx_id))?;
+        if stored_tx.tx.target_lineage != BranchLineage::Branch(BranchId(branch)) {
+            return Err(Error::InvalidStoredValue(
+                "relation edge target branch does not match its transaction",
+            ));
+        }
+        let version = self
+            .query_versions_for_tx(tx_id)?
             .into_iter()
-            .find(|row| row.row_uuid() == target_row)
+            .find(|version| {
+                version.table() == target_table_name
+                    && version.row_uuid() == target_row
+                    && version.layer() == VersionLayer::Content
+            })
             .ok_or(Error::InvalidStoredValue(
-                "relation edge target branch row is missing",
+                "relation edge target branch version is missing",
+            ))?;
+        self.projected_current_row_from_materialized_version_in_read_schema(read_schema, &version)?
+            .ok_or(Error::InvalidStoredValue(
+                "relation edge target version does not project into the read schema",
             ))
     }
 
@@ -13973,9 +14313,8 @@ fn inline_include_deleted_current_graph(
 
 fn inline_branch_current_graph(
     table: &TableSchema,
-    rows: Vec<CurrentRow>,
+    rows: Vec<(CurrentRow, TxTime, NodeAlias, Option<BranchId>)>,
     schema_version_alias: SchemaVersionAlias,
-    branch_id: BranchId,
     requirements: &SourceRequirements,
 ) -> Result<
     (
@@ -14035,8 +14374,15 @@ fn inline_branch_current_graph(
     let descriptor = current_row_descriptor_with_hidden_source_fields(table, &metadata);
     let records = rows
         .iter()
-        .map(|row| {
-            inline_branch_current_record(table, &descriptor, row, schema_version_alias, branch_id)
+        .map(|(row, tx_time, tx_node, branch)| {
+            inline_branch_current_record(
+                table,
+                &descriptor,
+                row,
+                schema_version_alias,
+                (*tx_time, *tx_node),
+                *branch,
+            )
         })
         .collect::<Result<Vec<_>, _>>()?;
     Ok((
@@ -14051,7 +14397,8 @@ fn inline_branch_current_record(
     descriptor: &RecordDescriptor,
     row: &CurrentRow,
     schema_version_alias: SchemaVersionAlias,
-    branch_id: BranchId,
+    witness: (TxTime, NodeAlias),
+    branch_id: Option<BranchId>,
 ) -> Result<Vec<u8>, Error> {
     let mut values = Vec::new();
     values.push(Value::Uuid(row.row_uuid().0));
@@ -14070,9 +14417,7 @@ fn inline_branch_current_record(
         Value::Uuid(provenance.updated_by.0),
         Value::U64(provenance.updated_at.0),
     ]);
-    let (tx_time, tx_node_alias) = row
-        .projected_tx_alias()
-        .unwrap_or((TxTime(0), NodeAlias(0)));
+    let (tx_time, tx_node_alias) = witness;
     values.extend([Value::U64(tx_time.0), Value::U64(tx_node_alias.0)]);
     if descriptor.field_index("table").is_some() {
         values.extend([
@@ -14087,7 +14432,9 @@ fn inline_branch_current_record(
             Value::Nullable(None),
         ]);
         if descriptor.field_index("branch_id").is_some() {
-            values.push(Value::Uuid(branch_id.0));
+            values.push(Value::Nullable(
+                branch_id.map(|branch| Box::new(Value::Uuid(branch.0))),
+            ));
         }
     }
     if descriptor.field_index("coverage").is_some() {
@@ -14424,7 +14771,8 @@ mod tests {
     use crate::peer::PeerState;
     use crate::protocol::{
         CurrentWriteSchema, MigrationLens, ReadViewSourceSpec, ReadViewSpec, RegisterShapeOptions,
-        SchemaVersion, ShapeAst, Subscribe, SyncMessage, TableLens,
+        RelationEdgeEntry, ResultRowLayer, RowVersionRefEntry, SchemaVersion, ShapeAst, Subscribe,
+        SyncMessage, TableLens,
     };
     use crate::query::{
         Aggregate, ArraySubquery, JoinSourceLookup, OrderDirection, PolicyBranch, Query, claim,
@@ -14433,6 +14781,102 @@ mod tests {
     use crate::schema::{JazzSchema, Policy, TableSchema};
 
     use super::*;
+
+    #[test]
+    fn prepared_relation_terminal_keeps_branch_discriminator_in_public_payload() {
+        // Prepared subscriptions wrap each production terminal in a routed
+        // projection. `versioned_row_ref_fields` is the public payload list
+        // supplied to that projection; omitting this field makes lowering look
+        // correct while the decoder receives no branch witness.
+        let versioned_ref = |prefix: &str| {
+            let branch_field = format!("{prefix}_branch_or_prefix");
+            VersionedRowRefSchema {
+                row: super::super::query_engine::RowRefSchema {
+                    source_field: format!("{prefix}_source"),
+                    table_field: format!("{prefix}_table"),
+                    row_field: format!("{prefix}_row"),
+                },
+                version: Some(ResultMembershipVersionSchema::Content(
+                    super::super::query_engine::ContentVersionFields {
+                        tx_time_field: format!("{prefix}_tx_time"),
+                        tx_node_field: format!("{prefix}_tx_node"),
+                    },
+                )),
+                branch_or_prefix_field: Some(branch_field),
+            }
+        };
+        let schema = super::super::query_engine::ProgramFactSchema::RelationEdges(
+            super::super::query_engine::RelationEdgeSchema {
+                source: versioned_ref("source"),
+                path_field: "path".to_owned(),
+                target: versioned_ref("target"),
+                kind_field: "kind".to_owned(),
+                depth_field: None,
+                edge_id_field: None,
+                branch_field: None,
+                role_field: None,
+                order_field: None,
+                hole_state_field: None,
+            },
+        );
+        let public_payload = fact_public_fields(&schema).expect("relation facts are routable");
+        for prefix in ["source", "target"] {
+            let branch_field = format!("{prefix}_branch_or_prefix");
+            assert!(
+                public_payload.contains(&branch_field),
+                "prepared routed {prefix} payload must retain its branch discriminator"
+            );
+        }
+    }
+
+    #[test]
+    fn branch_source_witness_discriminator_tracks_each_row_lineage() {
+        let table = TableSchema::new("users", [ColumnSchema::new("name", ColumnType::String)]);
+        let row = current_row_from_cells(
+            &table,
+            row(0xf3),
+            &BTreeMap::from([("name".to_owned(), Value::String("alice".to_owned()))]),
+        )
+        .expect("build projected row");
+        let metadata = BTreeMap::from([(
+            SourceMetadataRequirement::VersionWitnesses,
+            SourceMetadataFields::VersionWitnesses {
+                schema_version_field: "schema_version".to_owned(),
+                tx_time_field: "tx_time".to_owned(),
+                tx_node_field: "tx_node_id".to_owned(),
+                branch_or_prefix_field: Some("branch_id".to_owned()),
+            },
+        )]);
+        let descriptor = current_row_descriptor_with_hidden_source_fields(&table, &metadata);
+        let branch = BranchId::from_bytes([0xf4; 16]);
+        let root_record = inline_branch_current_record(
+            &table,
+            &descriptor,
+            &row,
+            SchemaVersionAlias(1),
+            (TxTime(1), NodeAlias(1)),
+            None,
+        )
+        .expect("encode root/base row in branch view");
+        let overlay_record = inline_branch_current_record(
+            &table,
+            &descriptor,
+            &row,
+            SchemaVersionAlias(1),
+            (TxTime(2), NodeAlias(1)),
+            Some(branch),
+        )
+        .expect("encode branch overlay row");
+        let branch_idx = descriptor.field_index("branch_id").expect("branch field");
+        assert!(matches!(
+            BorrowedRecord::new(&root_record, &descriptor).get_idx(branch_idx),
+            Ok(Value::Nullable(None))
+        ));
+        assert!(matches!(
+            BorrowedRecord::new(&overlay_record, &descriptor).get_idx(branch_idx),
+            Ok(Value::Nullable(Some(value))) if matches!(*value, Value::Uuid(id) if id == branch.0)
+        ));
+    }
 
     /// A coalesced authority re-entry for Alice's document must replace only
     /// that exact member; Bob's ordinary content update in the same batch must
@@ -16470,7 +16914,6 @@ mod tests {
             .materialize_relation_edge_target_row(
                 &ReadViewSpec::default(),
                 node.catalogue.current_schema_version_id,
-                &table,
                 "todos",
                 todo,
                 tx_id.time,
@@ -16559,7 +17002,6 @@ mod tests {
             .materialize_relation_edge_target_row(
                 &ReadViewSpec::default(),
                 evolved.id,
-                &evolved_table,
                 "todos",
                 todo,
                 tx_id.time,
@@ -16640,8 +17082,23 @@ mod tests {
         })
         .expect("publish people lens");
 
+        let target_version = RowVersionRefEntry {
+            tx: tx_id,
+            schema_version: None,
+            layer: ResultRowLayer::Content,
+            batch: None,
+            branch_or_prefix: None,
+            row_digest: None,
+        };
         let row = node
-            .materialize_authoritative_reset_relation_edge_target(evolved.id, "people", user, tx_id)
+            // The wire fact names the canonical authored table.  The receiver
+            // must lens it to the v2 read table before materializing it.
+            .materialize_authoritative_reset_relation_edge_target(
+                evolved.id,
+                "users",
+                user,
+                &target_version,
+            )
             .expect("render authority relation target")
             .expect("authority has stored target witness");
         assert_eq!(row.table(), "people");
@@ -16653,6 +17110,481 @@ mod tests {
             row.cell(&people, "label"),
             Some(Value::String("migrated".to_owned()))
         );
+
+        let canonical_edge = RelationEdgeEntry {
+            path: "author".to_owned(),
+            // The root is already expressed in Bob's result schema; only the
+            // related witness needs the lineage translation here.
+            source_table: groove::Intern::new("people".to_owned()),
+            source_row: user,
+            target_table: groove::Intern::new("users".to_owned()),
+            target_row: user,
+            kind: None,
+            source_version: None,
+            target_version: Some(target_version),
+            depth: None,
+            edge_id: None,
+            branch: None,
+            role: None,
+            order: None,
+            hole_state: None,
+        };
+        let read_edge = node
+            .project_relation_edge_through_read_schema(&canonical_edge, evolved.id)
+            .expect("project canonical edge identity for reset index");
+        assert_eq!(canonical_edge.target_table.as_str(), "users");
+        assert_eq!(read_edge.target_table, "people");
+        assert_eq!(read_edge.target_row, user);
+    }
+
+    #[test]
+    fn authoritative_reset_relation_target_projects_two_hop_canonical_witness() {
+        let v1 = JazzSchema::new([TableSchema::new(
+            "users",
+            [ColumnSchema::new("name", ColumnType::String)],
+        )]);
+        let (_dir, mut node) = open_node_with_uuid(NodeUuid::from_bytes([0xf0; 16]), v1.clone());
+        let user = row(0xf1);
+        let tx_id = node
+            .commit_mergeable(
+                MergeableCommit::new("users", user, 0xf2).cells(BTreeMap::from([(
+                    "name".to_owned(),
+                    Value::String("alice".to_owned()),
+                )])),
+            )
+            .expect("commit v1 user");
+
+        let v2 = SchemaVersion::new(JazzSchema::new([TableSchema::new(
+            "people",
+            [ColumnSchema::new("name", ColumnType::String)],
+        )]));
+        node.apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
+            author: AuthorId::SYSTEM,
+            catalogue_seq: 1,
+            publication: Box::new(SchemaLineagePublication::new(
+                v2.clone(),
+                MigrationLens::new(
+                    v1.version_id(),
+                    v2.id,
+                    vec![TableLens {
+                        source_table: "users".to_owned(),
+                        target_table: "people".to_owned(),
+                        ops: vec![LensOp::RenameTable {
+                            from: "users".to_owned(),
+                            to: "people".to_owned(),
+                        }],
+                    }],
+                ),
+                Vec::<String>::new(),
+                Vec::<String>::new(),
+            )),
+        })
+        .expect("publish v2 rename");
+
+        let members = TableSchema::new(
+            "members",
+            [
+                ColumnSchema::new("display_name", ColumnType::String),
+                ColumnSchema::new("origin", ColumnType::String),
+            ],
+        );
+        let v3 = SchemaVersion::new(JazzSchema::new([members.clone()]));
+        node.apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
+            author: AuthorId::SYSTEM,
+            catalogue_seq: 2,
+            publication: Box::new(SchemaLineagePublication::new(
+                v3.clone(),
+                MigrationLens::new(
+                    v2.id,
+                    v3.id,
+                    vec![TableLens {
+                        source_table: "people".to_owned(),
+                        target_table: "members".to_owned(),
+                        ops: vec![
+                            LensOp::RenameTable {
+                                from: "people".to_owned(),
+                                to: "members".to_owned(),
+                            },
+                            LensOp::RenameColumn {
+                                from: "name".to_owned(),
+                                to: "display_name".to_owned(),
+                            },
+                            LensOp::AddColumn {
+                                column: "origin".to_owned(),
+                                default: Value::String("v1".to_owned()),
+                            },
+                        ],
+                    }],
+                ),
+                Vec::<String>::new(),
+                Vec::<String>::new(),
+            )),
+        })
+        .expect("publish v3 rename");
+
+        let target_version = RowVersionRefEntry {
+            tx: tx_id,
+            schema_version: Some(v1.version_id()),
+            layer: ResultRowLayer::Content,
+            batch: None,
+            branch_or_prefix: None,
+            row_digest: None,
+        };
+        let edge = RelationEdgeEntry {
+            path: "author".to_owned(),
+            source_table: groove::Intern::new("members".to_owned()),
+            source_row: user,
+            target_table: groove::Intern::new("users".to_owned()),
+            target_row: user,
+            kind: None,
+            source_version: None,
+            target_version: Some(target_version.clone()),
+            depth: None,
+            edge_id: None,
+            branch: None,
+            role: None,
+            order: None,
+            hole_state: None,
+        };
+        let projected_edge = node
+            .project_relation_edge_through_read_schema(&edge, v3.id)
+            .expect("project canonical edge through both lenses");
+        assert_eq!(projected_edge.target_table, "members");
+
+        let query = Query::from("members")
+            .validate(&v3.schema)
+            .expect("validate v3 members query");
+        let binding = query.bind(BTreeMap::new()).expect("bind members query");
+        let binding_view = BindingViewKey {
+            shape_id: query.shape_id(),
+            binding_id: binding.binding_id(),
+            read_view: Default::default(),
+        };
+        node.query
+            .settled_result_sets
+            .insert(binding_view, BTreeSet::new());
+        node.query.settled_program_facts.insert(
+            binding_view,
+            BTreeSet::from([ProgramFactEntry::RelationEdge(edge.clone())]),
+        );
+        let settled_rows = node
+            .settled_binding_view_source_rows("members", v3.id, binding_view)
+            .expect("project canonical settled relation source through both lenses");
+        assert_eq!(settled_rows.len(), 1);
+        assert_eq!(settled_rows[0].table(), "members");
+
+        let row = node
+            .materialize_authoritative_reset_relation_edge_target(
+                v3.id,
+                "users",
+                user,
+                &target_version,
+            )
+            .expect("render canonical relation witness through v3")
+            .expect("stored target witness");
+        assert_eq!(row.table(), "members");
+        assert_eq!(
+            row.cell(&members, "display_name"),
+            Some(Value::String("alice".to_owned()))
+        );
+        assert_eq!(
+            row.cell(&members, "origin"),
+            Some(Value::String("v1".to_owned()))
+        );
+    }
+
+    /// A canonical relation witness can name a branch-only v1 row. Projection
+    /// and reset materialization must honor its branch discriminator, lens the
+    /// old `users` table to `people`, and never substitute root history.
+    #[test]
+    fn branch_relation_target_projects_old_renamed_witness() {
+        let base = JazzSchema::new([TableSchema::new(
+            "users",
+            [ColumnSchema::new("name", ColumnType::String)],
+        )]);
+        let (_dir, mut node) = open_node_with_uuid(NodeUuid::from_bytes([0xea; 16]), base.clone());
+        let branch = BranchId::from_bytes([0xeb; 16]);
+        node.create_branch(branch).expect("create branch");
+        let user = row(0xec);
+        let tx_id = node
+            .commit_mergeable_on_branch(
+                branch,
+                MergeableCommit::new("users", user, 0xed).cells(BTreeMap::from([(
+                    "name".to_owned(),
+                    Value::String("branch-alice".to_owned()),
+                )])),
+            )
+            .expect("commit branch-only v1 user");
+
+        let people = TableSchema::new("people", [ColumnSchema::new("name", ColumnType::String)]);
+        let evolved = SchemaVersion::new(JazzSchema::new([people.clone()]));
+        node.apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
+            author: AuthorId::SYSTEM,
+            catalogue_seq: 1,
+            publication: Box::new(SchemaLineagePublication::new(
+                evolved.clone(),
+                MigrationLens::new(
+                    base.version_id(),
+                    evolved.id,
+                    vec![TableLens {
+                        source_table: "users".to_owned(),
+                        target_table: "people".to_owned(),
+                        ops: vec![LensOp::RenameTable {
+                            from: "users".to_owned(),
+                            to: "people".to_owned(),
+                        }],
+                    }],
+                ),
+                Vec::<String>::new(),
+                Vec::<String>::new(),
+            )),
+        })
+        .expect("publish people lens");
+        node.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+            author: AuthorId::SYSTEM,
+            pointer: CurrentWriteSchema {
+                revision: 1,
+                schema: evolved.id,
+            },
+        })
+        .expect("activate people schema");
+
+        let alias = *node.node_aliases.get(&tx_id.node).expect("node alias");
+        assert!(
+            node.query_version_by_alias("users", user, VersionLayer::Content, tx_id.time, alias,)
+                .expect("query root history")
+                .is_none(),
+            "branch-only relation witness must not be found through root history"
+        );
+        let branch_version = RowVersionRefEntry {
+            tx: tx_id,
+            schema_version: Some(base.version_id()),
+            layer: ResultRowLayer::Content,
+            batch: None,
+            branch_or_prefix: Some(branch.to_bytes()),
+            row_digest: None,
+        };
+        let canonical_edge = RelationEdgeEntry {
+            path: "author".to_owned(),
+            source_table: groove::Intern::new("people".to_owned()),
+            source_row: user,
+            target_table: groove::Intern::new("users".to_owned()),
+            target_row: user,
+            kind: None,
+            source_version: None,
+            target_version: Some(branch_version.clone()),
+            depth: None,
+            edge_id: None,
+            branch: None,
+            role: None,
+            order: None,
+            hole_state: None,
+        };
+        let projected = node
+            .project_relation_edge_through_read_schema(&canonical_edge, evolved.id)
+            .expect("project branch edge identity");
+        assert_eq!(projected.target_table, "people");
+
+        node.commit_mergeable_on_branch(
+            branch,
+            MergeableCommit::new("people", user, 0xee)
+                .parents(vec![tx_id])
+                .cells(BTreeMap::from([(
+                    "name".to_owned(),
+                    Value::String("branch-bob".to_owned()),
+                )])),
+        )
+        .expect("commit a later branch winner");
+
+        let row = node
+            .materialize_authoritative_reset_relation_edge_target(
+                evolved.id,
+                "users",
+                user,
+                &branch_version,
+            )
+            .expect("materialize branch relation target")
+            .expect("branch target row exists");
+        assert_eq!(row.table(), "people");
+        assert_eq!(
+            row.cell(&people, "name"),
+            Some(Value::String("branch-alice".to_owned())),
+            "the authority reset must render its exact v1 witness, not the later branch winner"
+        );
+    }
+
+    #[test]
+    fn renamed_branch_terminal_resolves_root_target_from_emitted_read_table() {
+        let issue = row(0xf8);
+        let v1 = JazzSchema::new([
+            TableSchema::new(
+                "issues",
+                [
+                    ColumnSchema::new("assignee", ColumnType::Uuid),
+                    ColumnSchema::new("key", ColumnType::Uuid),
+                ],
+            ),
+            TableSchema::new(
+                "users",
+                [
+                    ColumnSchema::new("name", ColumnType::String),
+                    ColumnSchema::new("issue", ColumnType::Uuid),
+                ],
+            ),
+        ]);
+        let (_dir, mut node) = open_node_with_uuid(NodeUuid::from_bytes([0xf5; 16]), v1.clone());
+        let user = row(0xf6);
+        let user_tx = node
+            .commit_mergeable(
+                MergeableCommit::new("users", user, 1).cells(BTreeMap::from([
+                    ("name".to_owned(), Value::String("root-alice".to_owned())),
+                    ("issue".to_owned(), Value::Uuid(issue.0)),
+                ])),
+            )
+            .expect("commit root user");
+        node.apply_fate_update(
+            user_tx,
+            Fate::Accepted,
+            Some(GlobalSeq(1)),
+            Some(DurabilityTier::Global),
+        )
+        .expect("settle root user before branch snapshot");
+
+        let issues = TableSchema::new(
+            "issues",
+            [
+                ColumnSchema::new("assignee", ColumnType::Uuid),
+                ColumnSchema::new("key", ColumnType::Uuid),
+            ],
+        );
+        let people = TableSchema::new(
+            "people",
+            [
+                ColumnSchema::new("name", ColumnType::String),
+                ColumnSchema::new("issue", ColumnType::Uuid),
+            ],
+        );
+        let v2 = SchemaVersion::new(JazzSchema::new([issues, people]));
+        node.apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
+            author: AuthorId::SYSTEM,
+            catalogue_seq: 1,
+            publication: Box::new(SchemaLineagePublication::new(
+                v2.clone(),
+                MigrationLens::new(
+                    v1.version_id(),
+                    v2.id,
+                    vec![
+                        TableLens {
+                            source_table: "issues".to_owned(),
+                            target_table: "issues".to_owned(),
+                            ops: Vec::new(),
+                        },
+                        TableLens {
+                            source_table: "users".to_owned(),
+                            target_table: "people".to_owned(),
+                            ops: vec![LensOp::RenameTable {
+                                from: "users".to_owned(),
+                                to: "people".to_owned(),
+                            }],
+                        },
+                    ],
+                ),
+                Vec::<String>::new(),
+                Vec::<String>::new(),
+            )),
+        })
+        .expect("publish users to people lens");
+        node.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+            author: AuthorId::SYSTEM,
+            pointer: CurrentWriteSchema {
+                revision: 1,
+                schema: v2.id,
+            },
+        })
+        .expect("activate v2");
+
+        let branch = BranchId::from_bytes([0xf7; 16]);
+        node.create_branch(branch).expect("create branch");
+        node.commit_mergeable_on_branch(
+            branch,
+            MergeableCommit::new("issues", issue, 2).cells(BTreeMap::from([
+                ("assignee".to_owned(), Value::Uuid(user.0)),
+                ("key".to_owned(), Value::Uuid(issue.0)),
+            ])),
+        )
+        .expect("commit branch issue referencing root user");
+        let branch_state = node
+            .branches
+            .branches
+            .get(&branch)
+            .cloned()
+            .expect("branch");
+        let branch_people = node
+            .branch_current_rows_for_schema("people", &branch_state, v2.id)
+            .expect("project root users into branch people view");
+        assert_eq!(branch_people.len(), 1);
+        assert_eq!(
+            node.historical_content_witness_at(
+                "people",
+                v2.id,
+                user,
+                branch_state.base.as_ref().expect("branch base").global_base,
+            )
+            .expect("recover frozen root witness"),
+            Some(user_tx)
+        );
+
+        let people_shape = Query::from("people")
+            .validate(&v2.schema)
+            .expect("validate branch people query");
+        let people_binding = people_shape
+            .bind(BTreeMap::new())
+            .expect("bind branch people query");
+        assert_eq!(
+            node.query_rows_on_branch_query_engine(
+                branch,
+                &people_shape,
+                &people_binding,
+                AuthorId::SYSTEM,
+            )
+            .expect("query frozen root people through branch engine")
+            .len(),
+            1
+        );
+        let issue_shape = Query::from("issues")
+            .validate(&v2.schema)
+            .expect("validate branch issues query");
+        let issue_binding = issue_shape
+            .bind(BTreeMap::new())
+            .expect("bind branch issues query");
+        let issue_rows = node
+            .query_rows_on_branch_query_engine(
+                branch,
+                &issue_shape,
+                &issue_binding,
+                AuthorId::SYSTEM,
+            )
+            .expect("query branch issues");
+        assert_eq!(issue_rows.len(), 1);
+        assert_eq!(
+            issue_rows[0].cell(
+                &node.table_in_schema("issues", v2.id).expect("issues table"),
+                "assignee",
+            ),
+            Some(Value::Uuid(user.0))
+        );
+        let root_terminal_ref = RowVersionRefEntry {
+            tx: user_tx,
+            schema_version: None,
+            layer: ResultRowLayer::Content,
+            batch: None,
+            branch_or_prefix: None,
+            row_digest: None,
+        };
+        let canonical = node
+            .resolve_relation_terminal_version("people", user, &root_terminal_ref, v2.id)
+            .expect("resolve emitted people literal to exact authored root witness");
+        assert_eq!(canonical.table(), "users");
     }
 
     fn recursive_schema() -> JazzSchema {
