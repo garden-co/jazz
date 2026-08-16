@@ -1993,7 +1993,6 @@ async fn cannot_read_from_old_schema_until_lens_is_added_impl() {
 ///                        Charlie(email=value, role=value)
 /// ```
 #[tokio::test]
-#[ignore = "known red; tracked in TEST_BURNDOWN.md"]
 async fn multi_hop_column_additions_new_client_can_read_old_rows() {
     tokio::task::LocalSet::new()
         .run_until(multi_hop_column_additions_new_client_can_read_old_rows_impl())
@@ -2162,7 +2161,6 @@ async fn multi_hop_column_additions_new_client_can_read_old_rows_impl() {
 /// bob (v3) query ──► user row with contact_email value
 /// ```
 #[tokio::test]
-#[ignore = "known red; tracked in TEST_BURNDOWN.md"]
 async fn multi_hop_column_renames_new_client_can_read_old_rows() {
     tokio::task::LocalSet::new()
         .run_until(multi_hop_column_renames_new_client_can_read_old_rows_impl())
