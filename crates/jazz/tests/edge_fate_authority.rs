@@ -198,8 +198,14 @@ fn edge_shell_does_not_report_global_or_serve_global_before_core_ack() {
     let _ = core;
 }
 
+/// Alice subscribes to the core's Global view before uploading a row. Once the
+/// core assigns Global fate, that identity-scoped view receives the row and
+/// Alice can read it through the same public read route.
+///
+/// ```text
+/// alice ──subscribe/upload──► core ──Global fate + view update──► alice
+/// ```
 #[test]
-#[ignore = "known red; tracked in TEST_BURNDOWN.md"]
 fn core_shell_client_upload_still_reports_global_immediately() {
     let schema = schema();
     let mut core = InMemoryServerShell::start(
@@ -211,6 +217,23 @@ fn core_shell_client_upload_still_reports_global_immediately() {
     let alice = open_db(0xa1, author(0xa1), &schema);
     let alice_wire = QueuedWireTransport::default();
     let alice_session = connect_client_to_edge(&mut core, &alice, &alice_wire, author(0xa1));
+    let query = Query::from("todos");
+    let prepared = alice.prepare_query(&query).unwrap();
+    let mut global_subscription = block_on(alice.subscribe(
+        &prepared,
+        ReadOpts {
+            tier: DurabilityTier::Global,
+            local_updates: LocalUpdates::Deferred,
+            propagation: Propagation::Full,
+            ..ReadOpts::default()
+        },
+    ))
+    .unwrap();
+    // Edge/Global client reads consume an upstream-owned settled binding view;
+    // they intentionally do not treat the local transaction overlay as a
+    // remote fetch. Register and settle that public view before asserting it.
+    pump_client_edge(&alice, &alice_wire, &mut core, alice_session);
+    while global_subscription.try_next_event().is_some() {}
 
     let write = alice
         .insert(
@@ -221,6 +244,29 @@ fn core_shell_client_upload_still_reports_global_immediately() {
     pump_client_edge(&alice, &alice_wire, &mut core, alice_session);
 
     assert!(block_on(write.wait(DurabilityTier::Global)).is_ok());
+    let Some(jazz::db::SubscriptionEvent::Delta {
+        publishable,
+        settled,
+        tier,
+        added,
+        updated,
+        removed,
+        ..
+    }) = global_subscription.try_next_event()
+    else {
+        panic!("core Global upload must publish a subscription delta");
+    };
+    assert!(publishable, "core delivery is authority-backed");
+    assert!(settled, "core delivery is settled at Global");
+    assert_eq!(tier, DurabilityTier::Global);
+    assert!(updated.is_empty());
+    assert!(removed.is_empty());
+    assert_eq!(added.len(), 1);
+    assert_eq!(added[0].row_uuid(), write.row_uuid());
+    assert_eq!(
+        added[0].cell(&schema.tables[0], "title"),
+        Some(Value::String("core global".to_owned()))
+    );
     assert_eq!(
         visible_titles(&alice, DurabilityTier::Global),
         ["core global"]
