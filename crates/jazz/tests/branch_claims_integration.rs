@@ -886,6 +886,28 @@ async fn explicit_branch_subscription_should_match_claims_select_query() {
             let branch_row = RowUuid(uuid::Uuid::from_bytes([0x43; 16]));
             let sibling = BranchId(uuid::Uuid::from_bytes([0x44; 16]));
             let sibling_row = RowUuid(uuid::Uuid::from_bytes([0x45; 16]));
+            let empty_branch = BranchId(uuid::Uuid::from_bytes([0x46; 16]));
+            let empty_row = RowUuid(uuid::Uuid::from_bytes([0x47; 16]));
+            server.create_branch_for_test(empty_branch).await;
+            let empty_query = QueryBuilder::new("rooms")
+                .branch(empty_branch.0.to_string())
+                .build();
+            let partition_probe = TestingClient::builder()
+                .with_server(&server)
+                .with_schema(schema.clone())
+                .with_user_id("aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaa44")
+                .with_claims(json!({"join_code": "wrong"}))
+                .ready_on("rooms", READY_TIMEOUT)
+                .connect()
+                .await;
+            let absent_partition_rows = partition_probe
+                .query(empty_query.clone(), Some(DurabilityTier::EdgeServer))
+                .await
+                .expect("denied probe queries empty branch");
+            assert!(
+                absent_partition_rows.is_empty(),
+                "a denied query must not observe an absent sparse partition: {absent_partition_rows:?}"
+            );
             server
                 .seed_branch_row_for_test(
                     branch,
@@ -903,6 +925,31 @@ async fn explicit_branch_subscription_should_match_claims_select_query() {
                     ]),
                 )
                 .await;
+            server
+                .seed_branch_row_for_test(
+                    empty_branch,
+                    "rooms",
+                    empty_row,
+                    BTreeMap::from([
+                        (
+                            "name".to_owned(),
+                            CoreValue::String("lazy partition room".to_owned()),
+                        ),
+                        (
+                            "join_code".to_owned(),
+                            CoreValue::String("branch-secret".to_owned()),
+                        ),
+                    ]),
+                )
+                .await;
+            let populated_partition_rows = partition_probe
+                .query(empty_query.clone(), Some(DurabilityTier::EdgeServer))
+                .await
+                .expect("denied probe queries lazily populated branch");
+            assert!(
+                populated_partition_rows.is_empty(),
+                "a denied query must not distinguish a lazily created partition: {populated_partition_rows:?}"
+            );
             server
                 .seed_branch_row_for_test(
                     sibling,
@@ -1029,9 +1076,30 @@ async fn explicit_branch_subscription_should_match_claims_select_query() {
                 !has_added(&denied_log, jazz::tools::ObjectId::from_uuid(branch_row.0)),
                 "branch subscription must retain ordinary select policy: {denied_log:?}"
             );
+            let mut lazy_denied_stream = partition_probe
+                .subscribe(empty_query)
+                .await
+                .expect("denied probe subscribes after lazy partition creation");
+            let mut lazy_denied_log = Vec::new();
+            wait_for_subscription_update(
+                &mut lazy_denied_stream,
+                &mut lazy_denied_log,
+                QUERY_TIMEOUT,
+                "denied probe receives its empty lazy-partition snapshot",
+                |updates| !updates.is_empty(),
+            )
+            .await;
+            assert!(
+                !has_added(&lazy_denied_log, jazz::tools::ObjectId::from_uuid(empty_row.0)),
+                "a denied subscription must not reveal lazily partitioned branch rows: {lazy_denied_log:?}"
+            );
 
             matching.shutdown().await.expect("shutdown matching client");
             denied.shutdown().await.expect("shutdown denied client");
+            partition_probe
+                .shutdown()
+                .await
+                .expect("shutdown partition probe");
             server.shutdown().await;
         })
         .await;

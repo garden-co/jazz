@@ -1203,11 +1203,12 @@ where
                     .to_owned(),
             ));
         }
-        let base = branch.base.as_ref().ok_or_else(|| {
-            Error::QueryCapability(
-                "branch-current subscriptions require a frozen snapshot base".to_owned(),
-            )
-        })?;
+        let Some(base) = branch.base.as_ref() else {
+            // A root branch is defined without a frozen parent snapshot. Its
+            // immutable contribution is therefore the empty relation; the
+            // maintained overlay source supplies all branch-current rows.
+            return Ok(Vec::new());
+        };
         if read_schema_version == self.catalogue.current_schema_version_id {
             self.current_rows_at(table, base.global_base)
         } else {
@@ -2075,6 +2076,22 @@ where
             .branch_partitions
             .remove(&(table_id, branch_id));
         result
+    }
+
+    #[cfg(test)]
+    pub(crate) fn branch_subscription_source_exists_for_test(
+        &self,
+        table: &str,
+        schema_version: SchemaVersionId,
+        branch_id: BranchId,
+    ) -> bool {
+        self.physical_table_id_for_schema(schema_version, table)
+            .ok()
+            .is_some_and(|table_id| {
+                self.database
+                    .table_schema(&physical_branch_history_table_name(table_id, branch_id))
+                    .is_ok()
+            })
     }
 
     pub(super) fn ensure_branch_target_partitions(

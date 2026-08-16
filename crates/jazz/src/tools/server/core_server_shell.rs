@@ -404,6 +404,22 @@ impl ServerShellHandle {
         result
     }
 
+    #[allow(dead_code)] // exercised only by the integration-test server feature
+    pub(crate) async fn create_branch_for_test(&self, branch: BranchId) -> Result<(), String> {
+        let activity_tx = self.inner.activity_tx.clone();
+        let result = self
+            .run(move |shell| {
+                shell
+                    .create_branch_for_test(branch)
+                    .map_err(|error| error.to_string())
+            })
+            .await;
+        if result.is_ok() {
+            notify_shell_activity(&activity_tx);
+        }
+        result
+    }
+
     pub(crate) async fn publish_permissions_schema(
         &self,
         schema: JazzSchema,

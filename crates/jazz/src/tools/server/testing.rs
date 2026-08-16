@@ -425,6 +425,17 @@ impl JazzServer {
             .expect("seed branch row through server shell");
     }
 
+    pub async fn create_branch_for_test(&self, branch: crate::ids::BranchId) {
+        let shell = self
+            .state
+            .core_server_shell()
+            .expect("test server starts a core server shell");
+        shell
+            .create_branch_for_test(branch)
+            .await
+            .expect("create empty branch through server shell");
+    }
+
     fn require_built_in_jwt_helpers(&self) {
         if self.embedded_jwks_server.is_none() {
             panic!(
