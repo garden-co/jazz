@@ -63,7 +63,7 @@ jobs:
         if: always()
         run: sccache --show-stats
 
-  test-rust:
+  test-rust-workspace:
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 15
     permissions:
@@ -106,16 +106,97 @@ jobs:
       - name: Report sccache statistics
         if: always()
         run: sccache --show-stats
-      # The correctness story of the engine-swap PR, first-class in CI
-      # (Anselm-approved 2026-07-19): mechanism canaries, differential
-      # harnesses, and the maintained-vs-one-shot oracle at a CI-sized seed
-      # count. Builds reuse the workspace test build above.
-      - name: Differential gates
+
+  # This runs a bounded real M3 oracle smoke separately from the workspace
+  # suite. The Rust test remains #[ignore] because canonical seeds 47 and
+  # 4372288 are tracked red debt; CI deliberately invokes the proven-green
+  # canonical seed 11. Do not persist this randomized test job's target
+  # directory in the Rust artifact cache.
+  test-rust-differential:
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+      packages: read
+    container:
+      image: ghcr.io/garden-co/jazz-ci-toolchain@sha256:dcb4ec5e4f5507b258805617d58ee6976f7dcee2e9afe1b05ae3d41cc185ef35
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - name: Authenticate read-only PR sccache
+        if: github.event_name == 'pull_request' && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != ''
+        uses: aws-actions/configure-aws-credentials@cabfdba3510de1431bac9dba27511d97497fc100 # v5
+        with:
+          role-to-assume: ${{ vars.SCCACHE_PR_READER_AWS_ROLE_ARN }}
+          aws-region: ${{ vars.SCCACHE_REGION }}
+      - name: Authenticate trusted sccache writer
+        if: github.event_name != 'pull_request' && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != ''
+        uses: aws-actions/configure-aws-credentials@cabfdba3510de1431bac9dba27511d97497fc100 # v5
+        with:
+          role-to-assume: ${{ vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN }}
+          aws-region: ${{ vars.SCCACHE_REGION }}
+      - uses: ./.github/actions/setup-blacksmith
+        with:
+          sccache-s3: ${{ (github.event_name == 'pull_request' && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != '') || (github.event_name != 'pull_request' && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != '') }}
+          rust-cache: "false"
+      # Compile only the library test binary first. The semantic oracle timeout
+      # below must not charge a cold compile or unrelated integration binaries.
+      - name: Compile M3 differential oracle libtest
+        shell: bash
         run: |
-          # The three integration-test binaries above are already selected by
-          # the workspace runner's `--tests` argument. Keep the M3 oracle
-          # separate: its CI seed count is wider than the default test run.
-          JAZZ_SEED_COUNT=50 cargo test -p jazz m3_maintained_one_shot_differential_oracle
+          set -euo pipefail
+          test_binary="$(cargo test -p jazz --lib --no-run --message-format=json | node -e '
+            const readline = require("node:readline");
+            let executable;
+            const lines = readline.createInterface({ input: process.stdin });
+            lines.on("line", (line) => {
+              try {
+                const message = JSON.parse(line);
+                if (message.reason === "compiler-artifact" && message.target.name === "jazz" && message.executable)
+                  executable = message.executable;
+              } catch {}
+            });
+            lines.on("close", () => {
+              if (!executable) process.exitCode = 1;
+              else console.log(executable);
+            });
+          ')"
+          test -x "${test_binary}"
+          echo "M3_ORACLE_TEST_BINARY=${test_binary}" >> "${GITHUB_ENV}"
+      # The smallest stable real oracle smoke: fixed seed 11, the two smallest
+      # aggregate churn depths, and the normal three differential steps.
+      - name: Run maintained-vs-one-shot differential oracle smoke
+        shell: bash
+        run: |
+          timeout 60s env \
+            JAZZ_SEED=11 \
+            JAZZ_DIFFERENTIAL_CHURN_DEPTHS=10,1000 \
+            JAZZ_DIFFERENTIAL_STEP_COUNT=3 \
+            "${M3_ORACLE_TEST_BINARY}" node::tests::harness::m3_maintained_one_shot_differential_oracle --exact --ignored
+      - name: Report sccache statistics
+        if: always()
+        run: sccache --show-stats
+
+  # Branch protection requires this stable check name. It aggregates both Rust
+  # correctness jobs and stays red whenever either dependency fails or is cancelled.
+  test-rust:
+    if: always()
+    needs: [test-rust-workspace, test-rust-differential]
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 2
+    permissions:
+      contents: read
+    steps:
+      - name: Require all Rust partitions
+        env:
+          WORKSPACE_RESULT: ${{ needs.test-rust-workspace.result }}
+          DIFFERENTIAL_RESULT: ${{ needs.test-rust-differential.result }}
+        run: |
+          test "${WORKSPACE_RESULT}" = success
+          test "${DIFFERENTIAL_RESULT}" = success
 
   test-ts:
     runs-on: blacksmith-16vcpu-ubuntu-2404

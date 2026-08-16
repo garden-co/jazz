@@ -32,6 +32,10 @@ const toolBundleValidator = fs.readFileSync(
   path.join(root, "dev/ci/validate-tool-bundle.mjs"),
   "utf8",
 );
+const m3Differential = fs.readFileSync(
+  path.join(root, "crates/jazz/src/node/tests/m3_differential.rs"),
+  "utf8",
+);
 const jobs = (() => {
   const jobsStart = workflow.indexOf("\njobs:\n");
   assert.notEqual(jobsStart, -1, "missing jobs section");
@@ -81,17 +85,20 @@ const assertIntegrationCheckIsGating = (typescriptJob) => {
 
 test("Rust CI uses pinned prebuilt tools without charging Rust-only jobs for wasm-pack", () => {
   const lint = job("lint");
-  const rust = job("test-rust");
+  const workspaceRust = job("test-rust-workspace");
+  const differentialRust = job("test-rust-differential");
   const typescript = job("test-ts");
 
   assert.doesNotMatch(workflow, /cargo install cargo-nextest/);
   assert.match(setupBlacksmithAction, /cargo-nextest --version \| grep -F "0\.9\.143"/);
   assert.match(setupBlacksmithAction, /wasm-pack --version \| grep -F "0\.13\.1"/);
-  assert.doesNotMatch(rust, /install-rust-tool|ensure:rust-toolchain|wasm-pack/);
-  assert.doesNotMatch(rust, /rust-components:/);
+  for (const rust of [workspaceRust, differentialRust]) {
+    assert.doesNotMatch(rust, /install-rust-tool|ensure:rust-toolchain|wasm-pack/);
+    assert.doesNotMatch(rust, /rust-components:/);
+  }
   assert.doesNotMatch(lint, /install-rust-tool|ensure:rust-toolchain|wasm-pack/);
   assert.doesNotMatch(typescript, /install-rust-tool/);
-  for (const source of [lint, rust, typescript])
+  for (const source of [lint, workspaceRust, differentialRust, typescript])
     assert.match(source, /uses: \.\/\.github\/actions\/setup-blacksmith/);
 });
 
@@ -223,11 +230,42 @@ test("trusted runners consume the validated immutable tool bundle", () => {
   );
 });
 
-test("Rust CI does not rerun differential integration binaries selected by the workspace test gate", () => {
-  const rust = job("test-rust", "test-ts");
+test("Rust CI splits a bounded real differential-oracle smoke behind a stable aggregate", () => {
+  const workspace = job("test-rust-workspace");
+  const differential = job("test-rust-differential");
+  const aggregate = job("test-rust");
+  const compileStepName = "name: Compile M3 differential oracle libtest";
+  const runStepName = "name: Run maintained-vs-one-shot differential oracle smoke";
+  const assertM3CompileThenRun = (source) => {
+    const compileStart = source.indexOf(compileStepName);
+    const runStart = source.indexOf(runStepName);
+    assert.ok(compileStart !== -1, "missing M3 libtest compile step");
+    assert.ok(runStart !== -1, "missing M3 semantic execution step");
+    assert.ok(compileStart < runStart, "compile the M3 libtest before its semantic execution");
+    assert.match(
+      source.slice(compileStart, runStart),
+      /shell: bash/,
+      "the M3 compile step must not inherit the container's sh default",
+    );
+    assert.doesNotMatch(
+      source.slice(compileStart, runStart),
+      /\btimeout\b/,
+      "cold compilation must not consume the semantic-execution timeout",
+    );
+    assert.match(
+      source.slice(runStart),
+      /timeout 60s env/,
+      "the direct libtest execution must remain bounded",
+    );
+    assert.match(
+      source.slice(runStart),
+      /shell: bash/,
+      "the M3 semantic execution step must not inherit the container's sh default",
+    );
+  };
 
   assert.match(
-    rust,
+    workspace,
     /run-rust-tests\.mjs --timeout-seconds 780 --nextest-profile jazz-ci -- --workspace --lib --bins --tests --features test/,
   );
   for (const testTarget of [
@@ -235,11 +273,109 @@ test("Rust CI does not rerun differential integration binaries selected by the w
     "shared_coverage_differential",
     "warm_reopen_differential",
   ]) {
-    assert.doesNotMatch(rust, new RegExp(`cargo test -p jazz --test ${testTarget}`));
+    assert.doesNotMatch(workspace, new RegExp(`cargo test -p jazz --test ${testTarget}`));
   }
+  assert.match(differential, /cargo test -p jazz --lib --no-run --message-format=json/);
+  assert.match(differential, /message\.target\.name === "jazz"/);
   assert.match(
-    rust,
-    /JAZZ_SEED_COUNT=50 cargo test -p jazz m3_maintained_one_shot_differential_oracle/,
+    differential,
+    /echo "M3_ORACLE_TEST_BINARY=\$\{test_binary\}" >> "\$\{GITHUB_ENV\}"/,
+  );
+  assert.match(
+    differential,
+    /timeout 60s env[\s\\]+JAZZ_SEED=11[\s\\]+JAZZ_DIFFERENTIAL_CHURN_DEPTHS=10,1000[\s\\]+JAZZ_DIFFERENTIAL_STEP_COUNT=3[\s\\]+"\$\{M3_ORACLE_TEST_BINARY\}" node::tests::harness::m3_maintained_one_shot_differential_oracle --exact --ignored/,
+  );
+  assertM3CompileThenRun(differential);
+  assert.match(
+    m3Differential,
+    /#\[ignore = "known red; tracked in TEST_BURNDOWN\.md"\]\n(?:pub )?fn m3_maintained_one_shot_differential_oracle/,
+  );
+  assert.doesNotMatch(workspace, /m3_maintained_one_shot_differential_oracle/);
+  assert.match(aggregate, /if: always\(\)/);
+  assert.match(aggregate, /needs: \[test-rust-workspace, test-rust-differential\]/);
+  assert.match(aggregate, /WORKSPACE_RESULT: \$\{\{ needs\.test-rust-workspace\.result \}\}/);
+  assert.match(aggregate, /DIFFERENTIAL_RESULT: \$\{\{ needs\.test-rust-differential\.result \}\}/);
+  assert.match(aggregate, /test "\$\{WORKSPACE_RESULT\}" = success/);
+  assert.match(aggregate, /test "\$\{DIFFERENTIAL_RESULT\}" = success/);
+  assert.match(differential, /rust-cache: "false"/);
+  assert.throws(
+    () =>
+      assert.match(
+        differential.replace('rust-cache: "false"', 'rust-cache: "true"'),
+        /rust-cache: "false"/,
+      ),
+    /rust-cache/,
+  );
+  assert.throws(
+    () =>
+      assert.match(
+        differential.replace(
+          "cargo test -p jazz --lib --no-run --message-format=json",
+          "cargo test -p jazz --no-run --message-format=json",
+        ),
+        /cargo test -p jazz --lib --no-run --message-format=json/,
+      ),
+    /--lib/,
+  );
+  assert.throws(
+    () => assert.match(differential.replace("--exact --ignored", "--ignored"), /--exact --ignored/),
+    /exact/,
+  );
+  assert.throws(
+    () =>
+      assertM3CompileThenRun(
+        differential.replace(
+          `${compileStepName}\n        shell: bash\n        run:`,
+          `${compileStepName}\n        run:`,
+        ),
+      ),
+    /compile step must not inherit the container's sh default/,
+  );
+  assert.throws(
+    () =>
+      assertM3CompileThenRun(
+        differential.replace(
+          `${runStepName}\n        shell: bash\n        run:`,
+          `${runStepName}\n        run:`,
+        ),
+      ),
+    /semantic execution step must not inherit the container's sh default/,
+  );
+  assert.throws(
+    () =>
+      assertM3CompileThenRun(
+        differential.replace(
+          "cargo test -p jazz --lib --no-run --message-format=json",
+          "timeout 60s cargo test -p jazz --lib --no-run --message-format=json",
+        ),
+      ),
+    /cold compilation must not consume the semantic-execution timeout/,
+  );
+  assert.throws(
+    () =>
+      assertM3CompileThenRun(
+        differential
+          .replace(compileStepName, "__M3_STEP_SWAP__")
+          .replace(runStepName, compileStepName)
+          .replace("__M3_STEP_SWAP__", runStepName),
+      ),
+    /compile the M3 libtest before its semantic execution/,
+  );
+});
+
+test("Blacksmith setup can exclude nondeterministic jobs from the Rust artifact cache", () => {
+  assert.match(setupBlacksmithAction, /inputs:[\s\S]*rust-cache:[\s\S]*default: "true"/);
+  assert.match(
+    setupBlacksmithAction,
+    /name: Cache Rust build artifacts\n      if: inputs\.rust-cache == 'true'/,
+  );
+  assert.throws(
+    () =>
+      assert.match(
+        setupBlacksmithAction.replace("if: inputs.rust-cache == 'true'\n", ""),
+        /if: inputs\.rust-cache == 'true'/,
+      ),
+    /rust-cache/,
   );
 });
 
@@ -313,7 +449,7 @@ test("Turbo cache uses pinned OIDC policy, signing, and excludes fork PRs", () =
 });
 
 test("shared Rust cache separates read-only PRs from trusted writers", () => {
-  for (const name of ["lint", "test-rust", "test-ts"]) {
+  for (const name of ["lint", "test-rust-workspace", "test-rust-differential", "test-ts"]) {
     const source = job(name);
     assert.match(source, /role-to-assume: \$\{\{ vars\.SCCACHE_PR_READER_AWS_ROLE_ARN \}\}/);
     assert.match(source, /role-to-assume: \$\{\{ vars\.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN \}\}/);
