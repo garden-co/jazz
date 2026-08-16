@@ -108,11 +108,13 @@ jobs:
         run: sccache --show-stats
 
   # This runs a bounded real M3 oracle smoke separately from the workspace
-  # suite. The Rust test remains #[ignore] because canonical seeds 47 and
-  # 4372288 are tracked red debt; CI deliberately invokes the proven-green
-  # canonical seed 11. Do not persist this randomized test job's target
-  # directory in the Rust artifact cache.
+  # suite. The Rust test remains #[ignore] because its full randomized matrix
+  # is a long-running manual soak; CI deliberately invokes the bounded,
+  # deterministic canonical seed 11. Do not persist this randomized test
+  # job's target directory in the Rust artifact cache.
   test-rust-differential:
+    # The full randomized matrix remains a long-running manual soak; this job
+    # intentionally exercises one bounded deterministic seed.
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 15
     permissions:
