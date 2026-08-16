@@ -12,7 +12,8 @@ use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::node::{MergeableCommit, NodeState};
 use jazz::protocol::{
-    CurrentWriteSchema, LensOp, MigrationLens, SchemaVersion, SyncMessage, TableLens,
+    CurrentWriteSchema, LensOp, MigrationLens, SchemaLineagePublication, SchemaVersion,
+    SyncMessage, TableLens,
 };
 use jazz::query::{claim, col, eq};
 use jazz::row_input;
@@ -21,7 +22,7 @@ use jazz::tools::public_schema::SchemaHash;
 use jazz::tools::schema_lens::{Lens, LensTransform};
 use jazz::tools::server::JazzServer;
 use jazz::tools::{JazzClient, SchemaBuilder};
-use jazz::tx::{DurabilityTier, Fate};
+use jazz::tx::{DurabilityTier, Fate, RejectionReason};
 use support::{publish_allow_all_permissions, push_catalogue_in_memory, wait_for_edge_query_ready};
 
 fn author(byte: u8) -> AuthorId {
@@ -163,7 +164,6 @@ fn client_rename_lens() -> Lens {
 /// writer(v2) --people update--> authority(v2) --policy over projected v1 parent--> accepted
 /// ```
 #[test]
-#[ignore = "known red; tracked in TEST_BURNDOWN.md"]
 fn renamed_table_update_policy_uses_projected_parent_version() {
     let alice = author(0xa1);
     let v1 = SchemaVersion::new(v1_schema());
@@ -203,20 +203,23 @@ fn renamed_table_update_policy_uses_projected_parent_version() {
         )
     }));
 
+    // Catalogue evolution is a trusted administrative lane, distinct from
+    // the untrusted writer whose policy-scoped update we exercise below.
+    let catalogue_seq = authority.active_catalogue_seq().saturating_add(1);
     authority
-        .apply_sync_message(SyncMessage::PublishSchema {
+        .apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
             author: AuthorId::SYSTEM,
-            schema: Box::new(v2.clone()),
+            catalogue_seq,
+            publication: Box::new(SchemaLineagePublication::new(
+                v2.clone(),
+                lens.clone(),
+                Vec::<String>::new(),
+                Vec::<String>::new(),
+            )),
         })
-        .expect("publish v2 schema");
+        .expect("publish v2 rename lineage");
     authority
-        .apply_sync_message(SyncMessage::PublishLens {
-            author: AuthorId::SYSTEM,
-            lens: lens.clone(),
-        })
-        .expect("publish rename lens");
-    authority
-        .apply_sync_message(SyncMessage::SetCurrentWriteSchema {
+        .apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
             author: AuthorId::SYSTEM,
             pointer: CurrentWriteSchema {
                 revision: 1,
@@ -224,6 +227,38 @@ fn renamed_table_update_policy_uses_projected_parent_version() {
             },
         })
         .expect("select v2 write schema");
+
+    let mallory = author(0xa2);
+    let mut non_owner_writer_v2 = open_node(node(0x11), v2.schema.clone());
+    let (_rejected_tx, rejected_unit) = non_owner_writer_v2
+        .commit_mergeable_unit(
+            MergeableCommit::new("people", user_row, 2_000)
+                .made_by(mallory)
+                .parents(vec![insert_tx])
+                .cells(cells(user_row, "mallory+renamed@example.com", alice)),
+        )
+        .expect("non-owner stages v2 update");
+    let SyncMessage::CommitUnit {
+        tx: rejected_tx_record,
+        versions: rejected_versions,
+    } = rejected_unit
+    else {
+        panic!("expected rejected update commit unit");
+    };
+    let rejected_tx = rejected_tx_record.tx_id;
+    let rejected_updates = authority
+        .ingest_commit_unit(rejected_tx_record, rejected_versions, 2_000)
+        .expect("authority rejects non-owner v2 update");
+    assert!(rejected_updates.iter().any(|message| {
+        matches!(
+            message,
+            SyncMessage::FateUpdate {
+                tx_id,
+                fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
+                ..
+            } if *tx_id == rejected_tx
+        )
+    }));
 
     let mut writer_v2 = open_node(node(0x10), v2.schema.clone());
     let (_update_tx, update_unit) = writer_v2
