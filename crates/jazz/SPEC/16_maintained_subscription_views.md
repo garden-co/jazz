@@ -65,9 +65,23 @@ semantics.
 The maintained view is a consumer preset over the shared lowered query program.
 It requests result-membership facts, path/correlation facts,
 payload/replacement/version witnesses, policy witnesses, and settled-frontier
-facts as needed, then maps those terminal rows to subscription or sync events.
-App-row projection and internal fact emission are separate outputs of the same
-program; projection must not become a second diffing path.
+facts as needed. For peer sync, those inputs are the two manifest-bound families
+from ch. 8 §8.4.1: canonical authored history and authority-maintained
+correlation/admission/settlement facts. The receiving node installs only that
+closure and runs the identified authorized residual program locally. Only the
+local terminal maps to an application subscription event. App-row projection
+and internal fact emission are separate outputs of the same program; projected
+terminal rows must not become a second diffing path or peer-replicated truth.
+
+The authority's maintained view remains essential even though the receiver also
+runs IVM: it decides which canonical input facts are safe for this peer, emits
+opaque admission facts where policy evidence is hidden, and certifies a complete
+settled closure manifest. That manifest binds the authorized residual program:
+the receiver does not independently rerun authorization, infer hidden joins,
+supplement it from unrelated local history, or accept a server-projected
+terminal cache as a substitute for either fact family. Thus simple roots, join
+results, and nested array relations all share one rule: manifest-admitted inputs
+enter the local graph; terminal rows leave it.
 
 ### 16.1.1 Application subscription delta contract
 

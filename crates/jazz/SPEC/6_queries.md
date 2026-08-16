@@ -284,9 +284,12 @@ inner collection or carry an already-rendered form.
 
 **Implementation status (2026-08-09).** Groove `CollectBy` is the authoritative
 structured terminal. One-shot reads materialize its recursive roots directly;
-maintained subscriptions and sync links carry typed root/path edits. Jazz,
-N-API, WASM, and TypeScript transport or apply those edits but do not reconstruct
-structured output from relation facts.
+local application subscriptions carry typed root/path edits. The current sync
+transport's terminal edits are migration scaffolding only: the intended peer
+contract carries the canonical witness closure, and the receiver's local IVM
+recreates these edits (ch. 8 §8.4.1). Jazz, N-API, WASM, and TypeScript transport
+or apply local terminal edits but do not reconstruct structured output from
+relation facts.
 
 Nesting and flat expansion are constructed only by Groove's output-terminal
 `CollectBy` (`groove/SPEC/3_queries_operators.md` §3.6.1). A collector MUST NOT

@@ -43,8 +43,11 @@ TypeScript subscription result
   not compiler or transport data structures.
 - **Peer wire protocol:** `WireFrame` in `wire.rs`, containing the
   postcard-encoded `SyncMessage` defined in `protocol.rs`. This is the only
-  portable transport-byte contract. Bindings move these bytes but do not treat
-  `SyncMessage` as their application API.
+  portable transport-byte contract. Its target subscription representation is
+  canonical authored facts, ordered catalogue/lens lineage, and
+  authority-filtered witness/admission facts — never projected app rows or a
+  terminal cache as truth (ch. 8 §8.4.1). Bindings move these bytes but do not
+  treat `SyncMessage` as their application API.
 - **Binding ABI:** descriptors and packed `Record` row bytes, plus
   `TerminalRootLayout` and terminal operations. It is deliberately separate
   from peer wire protocol and may use native host objects for non-hot-path core
@@ -76,6 +79,12 @@ TypeScript subscription result
    ordinary and structured include/relation results. They must remain internal
    unless a public API explicitly exposes a corresponding result; app output
    must not reimplement their diffing logic.
+5. **No projection carrier crosses peer sync.** A `ProjectedAppRow`, packed
+   terminal record, or relabeled raw source bytes is not a protocol escape hatch.
+   The receiver decodes a canonical version in its authored schema, projects it
+   through the ordered lineage, and uses local IVM to produce its terminal.
+   That preserves source/witness identity and lets recovery discard every local
+   terminal cache without losing replicated truth.
 
 ## Pointers for changes
 
