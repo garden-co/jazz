@@ -57,6 +57,7 @@ where
         branch_id: BranchId,
         created_by: AuthorId,
     ) -> Result<BranchRecord, Error> {
+        self.require_catalogue_ready()?;
         if let Some(existing) = self.branches.branches.get(&branch_id) {
             if existing.created_by == created_by
                 && existing.parent.is_none()
@@ -89,6 +90,7 @@ where
 
     /// Declare a root branch with no parent fallback.
     pub fn create_root_branch(&mut self, branch_id: BranchId) -> Result<BranchRecord, Error> {
+        self.require_catalogue_ready()?;
         let record = BranchRecord {
             branch_id,
             created_by: AuthorId(uuid::Uuid::nil()),
@@ -124,6 +126,7 @@ where
         &mut self,
         metadata: &crate::protocol::BranchMetadata,
     ) -> Result<(), Error> {
+        self.require_catalogue_ready()?;
         if !self
             .branches
             .pending_metadata_uploads
@@ -152,6 +155,7 @@ where
         &mut self,
         metadata: crate::protocol::BranchMetadata,
     ) -> Result<(), Error> {
+        self.require_catalogue_ready()?;
         self.admit_branch_metadata_with_upstream_relay(metadata, false)
     }
 
@@ -201,6 +205,7 @@ where
         metadata: crate::protocol::BranchMetadata,
         identity: AuthorId,
     ) -> Result<bool, Error> {
+        self.require_catalogue_ready()?;
         if metadata.created_by != identity {
             return Err(Error::InvalidStoredValue(
                 "branch metadata creator does not match authenticated session",
@@ -242,6 +247,7 @@ where
 
     /// Discard an open branch without deleting its overlay history.
     pub fn discard_branch(&mut self, branch_id: BranchId) -> Result<(), Error> {
+        self.require_catalogue_ready()?;
         let mut record = self
             .branches
             .branches
@@ -305,6 +311,7 @@ where
     where
         S: ReopenableStorage,
     {
+        self.require_catalogue_ready()?;
         if source == target {
             return Err(Error::BranchMergeCalculation(
                 "source and target lineage must differ",
@@ -569,6 +576,7 @@ where
 
     /// Branch-scoped exclusives are intentionally not implemented in v1.
     pub fn open_exclusive_on_branch(&mut self, _branch_id: BranchId) -> Result<OpenBatchId, Error> {
+        self.require_catalogue_ready()?;
         Err(Error::UnsupportedBranchExclusive)
     }
 
@@ -595,6 +603,7 @@ where
     where
         S: ReopenableStorage,
     {
+        self.require_catalogue_ready()?;
         if commits.is_empty() {
             return Err(Error::InvalidMergeableCommit(
                 "mergeable transaction requires at least one write",
@@ -761,6 +770,7 @@ where
         binding: &Binding,
         identity: AuthorId,
     ) -> Result<Vec<CurrentRow>, Error> {
+        self.require_catalogue_ready()?;
         let Some(branch) = self.branches.branches.get(&branch_id).cloned() else {
             // Remote/session branch reads deliberately conflate an unknown
             // lineage with a lineage the caller is not allowed to enumerate.
@@ -787,6 +797,7 @@ where
         binding: &Binding,
         identity: AuthorId,
     ) -> Result<Vec<CurrentRow>, Error> {
+        self.require_catalogue_ready()?;
         if !self.branches.branches.contains_key(&branch_id) {
             return Ok(Vec::new());
         }

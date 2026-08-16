@@ -47,6 +47,7 @@ where
         kind: OpenTransactionKind,
         provisional_author: AuthorId,
     ) -> Result<(), Error> {
+        self.require_catalogue_ready()?;
         if self.open_tx.open_transactions.contains_key(&id)
             || self.open_tx.closed_batches.contains(&id)
         {

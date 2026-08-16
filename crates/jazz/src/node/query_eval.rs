@@ -7450,6 +7450,7 @@ where
         binding: &Binding,
         tier: DurabilityTier,
     ) -> Result<Vec<CurrentRow>, Error> {
+        self.require_catalogue_ready()?;
         self.query_rows_with_prepared_plan(shape, binding, tier, None)
     }
 
@@ -8138,6 +8139,7 @@ where
         binding: &Binding,
         position: GlobalSeq,
     ) -> Result<Vec<CurrentRow>, Error> {
+        self.require_catalogue_ready()?;
         self.query_rows_at_for_identity(shape, binding, position, AuthorId::SYSTEM)
     }
 

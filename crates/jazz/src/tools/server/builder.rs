@@ -19,6 +19,7 @@ use crate::tools::public_schema::Schema;
 #[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
 use crate::tools::server::CatalogueRocksDbStorage;
 use crate::tools::server::core_websocket_transport::WebSocketTransport;
+use crate::tools::server::core_websocket_transport::validate_catalogue_bootstrap_upstream_url;
 use crate::tools::server::routes;
 use crate::tools::server::{
     CatalogueMemoryStorage, DynCatalogueStorage, ServerState, ServerTopology, StoredCatalogue,
@@ -167,6 +168,14 @@ impl ServerBuilder {
             None => None,
         };
         validate_server_config(&auth_config, topology)?;
+        if topology == ServerTopology::Edge {
+            validate_catalogue_bootstrap_upstream_url(
+                self.upstream_url
+                    .as_deref()
+                    .expect("edge topology has an upstream URL"),
+                self.app_id,
+            )?;
+        }
         let jwt_verifier = build_jwt_verifier(&auth_config).await?;
         log_auth_config(&auth_config, topology);
 
@@ -181,7 +190,6 @@ impl ServerBuilder {
             core_server_shell_storage_config.clone(),
             topology,
         )?;
-        let edge_upstream_shell = core_server_shell.clone();
         let core_server_shell_storage_config = core_server_shell_storage_config.ok();
 
         let state = Arc::new(ServerState {
@@ -198,18 +206,17 @@ impl ServerBuilder {
             shutdown: crate::tools::server::ShutdownController::new(self.shutdown_timeout),
         });
 
-        if let (ServerTopology::Edge, Some(upstream_url), Some(shell), Some(admin_secret)) = (
+        if let (ServerTopology::Edge, Some(upstream_url), Some(admin_secret)) = (
             topology,
             self.upstream_url.clone(),
-            edge_upstream_shell,
             state.auth_config.admin_secret.clone(),
         ) {
             spawn_edge_upstream_connector(
                 state.clone(),
-                shell,
                 upstream_url,
                 self.app_id,
                 admin_secret,
+                self.edge_cache_budget,
             );
         }
 
@@ -275,6 +282,12 @@ impl ServerBuilder {
             ServerSchemaMode::Dynamic => latest_catalogue_schema,
         };
         let Some(schema) = schema else {
+            if topology == ServerTopology::Edge {
+                return crate::tools::server::core_server_shell::ServerShellHandle::try_start_dynamic_edge_from_storage(
+                    storage_config?,
+                    self.edge_cache_budget,
+                );
+            }
             return Ok(None);
         };
         let storage_config = storage_config?;
@@ -395,10 +408,10 @@ fn test_schema_branches(schema: Option<&Schema>) -> Vec<String> {
 
 fn spawn_edge_upstream_connector(
     state: Arc<ServerState>,
-    shell: crate::tools::server::core_server_shell::ServerShellHandle,
     upstream_url: String,
     app_id: AppId,
     admin_secret: String,
+    edge_cache_budget: Option<EdgeCacheBudget>,
 ) {
     tokio::spawn(async move {
         let retry_delay = Duration::from_millis(100);
@@ -406,12 +419,39 @@ fn spawn_edge_upstream_connector(
             if state.shutdown.is_shutting_down() {
                 return;
             }
-            let wake_shell = shell.clone();
-            let wake = Arc::new(move || wake_shell.notify_activity());
             let auth = crate::tools::websocket_prelude_auth::AuthConfig {
                 admin_secret: Some(admin_secret.clone()),
                 ..Default::default()
             };
+            let shell = match state.core_server_shell() {
+                Some(shell) => shell,
+                None => match WebSocketTransport::connect_catalogue_bootstrap(
+                    &upstream_url,
+                    app_id,
+                    AuthorId::SYSTEM,
+                    auth.clone(),
+                )
+                .await
+                {
+                    Ok(snapshot) => {
+                        match state.start_dynamic_edge_shell(snapshot, edge_cache_budget) {
+                            Ok(shell) => shell,
+                            Err(error) => {
+                                info!("edge catalogue bootstrap pending: {}", error);
+                                tokio::time::sleep(retry_delay).await;
+                                continue;
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        info!("edge catalogue bootstrap pending: {}", error);
+                        tokio::time::sleep(retry_delay).await;
+                        continue;
+                    }
+                },
+            };
+            let wake_shell = shell.clone();
+            let wake = Arc::new(move || wake_shell.notify_activity());
             match WebSocketTransport::connect_with_wake(
                 &upstream_url,
                 app_id,
@@ -579,6 +619,307 @@ mod tests {
     use crate::tools::AppId;
     use crate::tools::server::catalogue::CatalogueStore;
 
+    async fn serve_for_dynamic_bootstrap(
+        built: BuiltServer,
+    ) -> (String, Arc<ServerState>, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let address = listener.local_addr().expect("test listener address");
+        let state = built.state.clone();
+        let task = tokio::spawn(async move {
+            axum::serve(listener, built.app)
+                .await
+                .expect("serve test server");
+        });
+        (format!("ws://{address}"), state, task)
+    }
+
+    fn dynamic_bootstrap_schema() -> crate::tools::public_schema::Schema {
+        crate::tools::public_schema::SchemaBuilder::new()
+            .table(
+                crate::tools::public_schema::TableSchema::builder("notes")
+                    .column("id", crate::tools::public_schema::ColumnType::Uuid)
+                    .column("body", crate::tools::public_schema::ColumnType::Text),
+            )
+            .build()
+    }
+
+    #[tokio::test]
+    async fn dynamic_edge_bootstraps_authenticated_catalogue_before_first_client() {
+        let app_id = AppId::from_name("dynamic-edge-bootstrap-first-client");
+        let auth = AuthConfig {
+            admin_secret: Some("bootstrap-secret".to_owned()),
+            ..Default::default()
+        };
+        let core = ServerBuilder::new(app_id)
+            .with_schema(dynamic_bootstrap_schema())
+            .with_auth_config(auth.clone())
+            .with_storage(StorageBackend::InMemory)
+            .build()
+            .await
+            .expect("build authority core");
+        let (core_url, core_state, core_task) = serve_for_dynamic_bootstrap(core).await;
+        let expected = core_state
+            .core_server_shell()
+            .expect("core has runtime shell")
+            .trusted_catalogue_snapshot_for_test()
+            .await
+            .expect("read authority catalogue");
+
+        // This uses the separate snapshot-only wire exchange: no downstream
+        // edge session or application schema exists before it succeeds.
+        let edge = ServerBuilder::new(app_id)
+            .with_auth_config(auth.clone())
+            .with_storage(StorageBackend::InMemory)
+            .with_upstream_url(core_url.clone())
+            .build()
+            .await
+            .expect("build blank dynamic edge");
+        assert!(edge.state.core_server_shell().is_none());
+        let (edge_url, edge_state, edge_task) = serve_for_dynamic_bootstrap(edge).await;
+
+        let ready_shell = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if let Some(shell) = edge_state.core_server_shell() {
+                    return shell;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("edge becomes ready from idle bootstrap");
+        assert_eq!(
+            ready_shell
+                .trusted_catalogue_snapshot_for_test()
+                .await
+                .expect("read adopted edge catalogue"),
+            expected,
+            "edge must adopt the authority genesis, lineage, and policy-bearing schema exactly"
+        );
+
+        // The first normal downstream connection is admitted only after Ready;
+        // it is deliberately a separate connection from bootstrap.
+        let client = WebSocketTransport::connect(
+            &edge_url,
+            app_id,
+            AuthorId::from_bytes([0x44; 16]),
+            crate::tools::websocket_prelude_auth::AuthConfig {
+                admin_secret: Some("bootstrap-secret".to_owned()),
+                ..Default::default()
+            },
+        )
+        .await;
+        assert!(
+            client.is_ok(),
+            "ready edge admits first normal client: {client:?}"
+        );
+
+        edge_task.abort();
+        core_task.abort();
+    }
+
+    #[tokio::test]
+    async fn dynamic_catalogue_bootstrap_rejects_wrong_authority_credential() {
+        let app_id = AppId::from_name("dynamic-edge-bootstrap-auth-denial");
+        let core = ServerBuilder::new(app_id)
+            .with_schema(dynamic_bootstrap_schema())
+            .with_auth_config(AuthConfig {
+                admin_secret: Some("right-secret".to_owned()),
+                ..Default::default()
+            })
+            .with_storage(StorageBackend::InMemory)
+            .build()
+            .await
+            .expect("build authority core");
+        let (core_url, _core_state, core_task) = serve_for_dynamic_bootstrap(core).await;
+        let error = WebSocketTransport::connect_catalogue_bootstrap(
+            core_url,
+            app_id,
+            AuthorId::SYSTEM,
+            crate::tools::websocket_prelude_auth::AuthConfig {
+                admin_secret: Some("wrong-secret".to_owned()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("wrong bootstrap credential must not obtain a catalogue");
+        assert!(
+            matches!(error, crate::tools::server::core_websocket_transport::WebSocketClientError::ServerRejected(ref message) if message.contains("AuthFailed")),
+            "unexpected bootstrap auth result: {error}"
+        );
+        core_task.abort();
+    }
+
+    #[tokio::test]
+    async fn dynamic_catalogue_bootstrap_requires_the_reserved_edge_identity() {
+        let app_id = AppId::from_name("dynamic-edge-bootstrap-identity-denial");
+        let core = ServerBuilder::new(app_id)
+            .with_schema(dynamic_bootstrap_schema())
+            .with_auth_config(AuthConfig {
+                admin_secret: Some("bootstrap-secret".to_owned()),
+                ..Default::default()
+            })
+            .with_storage(StorageBackend::InMemory)
+            .build()
+            .await
+            .expect("build authority core");
+        let (core_url, _core_state, core_task) = serve_for_dynamic_bootstrap(core).await;
+        let error = WebSocketTransport::connect_catalogue_bootstrap(
+            core_url,
+            app_id,
+            AuthorId::from_bytes([0x46; 16]),
+            crate::tools::websocket_prelude_auth::AuthConfig {
+                admin_secret: Some("bootstrap-secret".to_owned()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("normal privileged client identity must not request bootstrap");
+        assert!(
+            matches!(error, crate::tools::server::core_websocket_transport::WebSocketClientError::ServerRejected(ref message) if message.contains("AuthFailed")),
+            "bootstrap identity boundary returned {error}"
+        );
+        core_task.abort();
+    }
+
+    #[tokio::test]
+    async fn dynamic_catalogue_bootstrap_rejects_generic_backend_credential() {
+        let app_id = AppId::from_name("dynamic-edge-bootstrap-backend-denial");
+        let core = ServerBuilder::new(app_id)
+            .with_schema(dynamic_bootstrap_schema())
+            .with_auth_config(AuthConfig {
+                admin_secret: Some("bootstrap-admin-secret".to_owned()),
+                backend_secret: Some("ordinary-backend-secret".to_owned()),
+                ..Default::default()
+            })
+            .with_storage(StorageBackend::InMemory)
+            .build()
+            .await
+            .expect("build authority core");
+        let (core_url, _core_state, core_task) = serve_for_dynamic_bootstrap(core).await;
+        let error = WebSocketTransport::connect_catalogue_bootstrap(
+            core_url,
+            app_id,
+            AuthorId::SYSTEM,
+            crate::tools::websocket_prelude_auth::AuthConfig {
+                backend_secret: Some("ordinary-backend-secret".to_owned()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("backend credential must not read an authority catalogue");
+        assert!(
+            matches!(error, crate::tools::server::core_websocket_transport::WebSocketClientError::ServerRejected(ref message) if message.contains("AuthFailed")),
+            "generic backend credential crossed bootstrap boundary: {error}"
+        );
+        core_task.abort();
+    }
+
+    #[tokio::test]
+    async fn dynamic_edge_keeps_unready_after_malformed_snapshot_then_accepts_retry() {
+        let app_id = AppId::from_name("dynamic-edge-bootstrap-malformed-retry");
+        let auth = AuthConfig {
+            admin_secret: Some("bootstrap-secret".to_owned()),
+            ..Default::default()
+        };
+        let core = ServerBuilder::new(app_id)
+            .with_schema(dynamic_bootstrap_schema())
+            .with_auth_config(auth.clone())
+            .with_storage(StorageBackend::InMemory)
+            .build()
+            .await
+            .expect("build authority core");
+        let snapshot = core
+            .state
+            .core_server_shell()
+            .expect("core has shell")
+            .trusted_catalogue_snapshot_for_test()
+            .await
+            .expect("read authority snapshot");
+        let edge = ServerBuilder::new(app_id)
+            .with_auth_config(auth)
+            .with_storage(StorageBackend::InMemory)
+            .with_upstream_url("ws://127.0.0.1:9")
+            .build()
+            .await
+            .expect("build blank edge");
+        let mut malformed = snapshot.clone();
+        malformed.schemas.push(
+            malformed
+                .schemas
+                .first()
+                .expect("authority has genesis")
+                .clone(),
+        );
+        assert!(
+            edge.state
+                .start_dynamic_edge_shell(malformed, None)
+                .is_err()
+        );
+        assert!(
+            edge.state.core_server_shell().is_none(),
+            "failed adoption must not publish a shell to downstream clients"
+        );
+        assert!(
+            edge.state
+                .start_dynamic_edge_shell(snapshot.clone(), None)
+                .is_ok()
+        );
+        let first_shell = edge
+            .state
+            .core_server_shell()
+            .expect("retry publishes ready shell");
+        let second_shell = edge
+            .state
+            .start_dynamic_edge_shell(snapshot, None)
+            .expect("duplicate driver wake is idempotent");
+        assert_eq!(
+            first_shell
+                .trusted_catalogue_snapshot_for_test()
+                .await
+                .expect("read first ready shell"),
+            second_shell
+                .trusted_catalogue_snapshot_for_test()
+                .await
+                .expect("read duplicate-ready shell"),
+            "a duplicate bootstrap wake reuses the already-published shell"
+        );
+    }
+
+    #[tokio::test]
+    async fn blank_dynamic_edge_rejects_downstream_with_retry_later_until_ready() {
+        let app_id = AppId::from_name("dynamic-edge-unready-downstream");
+        let edge = ServerBuilder::new(app_id)
+            .with_auth_config(AuthConfig {
+                admin_secret: Some("edge-secret".to_owned()),
+                ..Default::default()
+            })
+            .with_storage(StorageBackend::InMemory)
+            .with_upstream_url("ws://127.0.0.1:9")
+            .build()
+            .await
+            .expect("build blank edge");
+        assert!(edge.state.core_server_shell().is_none());
+        let (edge_url, _edge_state, edge_task) = serve_for_dynamic_bootstrap(edge).await;
+        let error = WebSocketTransport::connect(
+            edge_url,
+            app_id,
+            AuthorId::from_bytes([0x45; 16]),
+            crate::tools::websocket_prelude_auth::AuthConfig {
+                admin_secret: Some("edge-secret".to_owned()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("unready edge must not admit a downstream session");
+        assert!(
+            matches!(error, crate::tools::server::core_websocket_transport::WebSocketClientError::ServerRejected(ref message) if message.contains("bootstrapping") && message.contains("retry shortly")),
+            "unready edge must return an explicit retry-later diagnosis: {error}"
+        );
+        edge_task.abort();
+    }
+
     #[tokio::test]
     async fn edge_upstream_mode_builds_with_admin_secret() {
         let app_id =
@@ -596,6 +937,27 @@ mod tests {
             .await;
 
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn edge_builder_rejects_remote_plaintext_bootstrap_upstream() {
+        let result = ServerBuilder::new(AppId::from_name("edge-plaintext-bootstrap-rejected"))
+            .with_storage(StorageBackend::InMemory)
+            .with_auth_config(AuthConfig {
+                admin_secret: Some("admin-secret".to_owned()),
+                ..Default::default()
+            })
+            .with_upstream_url("http://core.example.test")
+            .build()
+            .await;
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("remote plaintext bootstrap must fail configuration"),
+        };
+        assert!(
+            error.contains("plaintext ws:// bootstrap"),
+            "error: {error}"
+        );
     }
 
     #[test]

@@ -13,6 +13,15 @@ use crate::protocol::{KnownStateDeclaration, RowVersionRef, ShapeAst, VersionRec
 /// envelope overhead while forcing large batches to split by bytes.
 pub const MAX_WIRE_FRAME_BYTES: usize = 2 * 1024 * 1024;
 
+/// Maximum raw wire frames carried by one postcard WebSocket batch.
+///
+/// Carrier encoders split above this count. It is deliberately the same as
+/// the maximum atomic commit-unit cardinality; meanwhile the 512 KiB
+/// fragmentation extent means even a maximum legal 256 MiB logical message
+/// needs only 512 physical frames. This keeps a tiny-frame flood from being
+/// retained or staged beyond a bounded cardinality at the WebSocket boundary.
+pub const MAX_WIRE_BATCH_FRAMES: usize = MAX_COMMIT_UNIT_VERSIONS;
+
 /// Resource ceiling for one decoded logical message, independent of framing.
 ///
 /// This prevents allocation bombs while allowing normal database payloads to

@@ -238,7 +238,7 @@ fn tx_read_parent_cache_is_invalidated_by_same_row_write_without_changing_read_s
             .unwrap()
             .base_snapshot_rows
             .contains_key(&(
-                node.current_write_schema().schema,
+                node.current_write_schema().unwrap().schema,
                 "todos".to_owned(),
                 row
             ))
@@ -252,7 +252,7 @@ fn tx_read_parent_cache_is_invalidated_by_same_row_write_without_changing_read_s
             .unwrap()
             .base_snapshot_rows
             .contains_key(&(
-                node.current_write_schema().schema,
+                node.current_write_schema().unwrap().schema,
                 "todos".to_owned(),
                 row
             ))

@@ -369,6 +369,74 @@ where
             })?;
         Ok(message)
     }
+
+    /// Strict receive mode for bootstrap-only exchanges. Unlike a live peer,
+    /// bootstrap cannot safely skip a malformed physical frame and continue to
+    /// a later catalogue snapshot: that would make the authority boundary
+    /// depend on first-valid-message behavior.
+    pub(crate) fn try_recv_strict(&mut self) -> Result<Option<SyncMessage>, WireError> {
+        let _ = self.flush_pending_outbound();
+        while let Some(bytes) = self.inner.try_recv_frame() {
+            validate_wire_frame_len(bytes.len()).map_err(|message| {
+                WireError::new(WireErrorCode::MalformedFrame, WireRetry::Never, message)
+            })?;
+            let frame = decode_frame(&bytes).map_err(|error| {
+                WireError::new(
+                    WireErrorCode::MalformedFrame,
+                    WireRetry::Never,
+                    format!("failed to decode wire frame: {error}"),
+                )
+            })?;
+            match frame {
+                WireFrame::Message(envelope) => {
+                    return self.decode_inbound_envelope(envelope).map(Some);
+                }
+                WireFrame::MessageFragment(fragment) => {
+                    let fragment_message_id = fragment.message_id;
+                    let metadata = WireEnvelope {
+                        protocol_version: fragment.protocol_version,
+                        features: fragment.features,
+                        session: fragment.session.clone(),
+                        payload: Vec::new(),
+                    };
+                    self.validate_inbound_metadata(&metadata)?;
+                    self.validate_inbound_session(&metadata)?;
+                    if self.features & FEATURE_MESSAGE_FRAGMENTATION == 0
+                        || fragment.features & FEATURE_MESSAGE_FRAGMENTATION == 0
+                    {
+                        return Err(WireError::new(
+                            WireErrorCode::UnsupportedFeature,
+                            WireRetry::Never,
+                            "fragment does not declare logical-message fragmentation",
+                        ));
+                    }
+                    match self.reassembler.push(fragment) {
+                        Ok(Some(envelope)) => {
+                            return self.decode_inbound_envelope(envelope).map(Some);
+                        }
+                        Ok(None) => {}
+                        Err(message) => {
+                            self.reassembler.discard(fragment_message_id);
+                            return Err(WireError::new(
+                                WireErrorCode::MalformedFrame,
+                                WireRetry::AfterResume,
+                                message,
+                            ));
+                        }
+                    }
+                }
+                WireFrame::Hello(_) => {
+                    return Err(WireError::new(
+                        WireErrorCode::UnsupportedFeature,
+                        WireRetry::AfterResume,
+                        "hello frames must be handled before constructing a peer connection",
+                    ));
+                }
+                WireFrame::Error(error) => return Err(error),
+            }
+        }
+        Ok(None)
+    }
 }
 
 impl<T> Transport for WireTransportAdapter<T>
