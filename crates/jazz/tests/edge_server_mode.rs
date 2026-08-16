@@ -1386,7 +1386,7 @@ async fn core_write_reaches_clients_on_both_edges() {
 /// alice --> edge_us --upstream--> core --upstream--> edge_eu --> bob
 /// ```
 #[tokio::test(flavor = "current_thread")]
-#[ignore = "known red; tracked in TEST_BURNDOWN.md"]
+#[ignore = "manual peer-edge delivery topology canary; deterministic no-retry regression covers the scheduling defect"]
 async fn edge_write_reaches_client_on_peer_edge() {
     tokio::task::LocalSet::new()
         .run_until(async {
