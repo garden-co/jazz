@@ -17,6 +17,11 @@ import type { WasmRow } from "../drivers/types.js";
 import { createOpenBatchId, type BatchId, type OpenBatchId, type WriteReceipt } from "./client.js";
 
 const require = createRequire(import.meta.url);
+// These direct-memory subscription fixtures exercise only the local NAPI
+// delivery boundary.  An unqualified subscription propagates upstream by
+// default, so an initially empty full-propagation view is deliberately
+// withheld until its authority has settled it.
+const LOCAL_ONLY_SUBSCRIPTION_OPTIONS = JSON.stringify({ propagation: "local-only" });
 const debugSubscriptionEventFixture = hasJazzNapiBuild()
   ? (
       require("jazz-napi") as typeof import("jazz-napi") & {
@@ -498,7 +503,12 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
 
     const manager = new SubscriptionManager<WasmRow>();
     const updates: ReturnType<SubscriptionManager<WasmRow>["handleDelta"]>[] = [];
-    const handle = runtime.createSubscription(JSON.stringify({ table: "todos" }), null, "local");
+    const handle = runtime.createSubscription(
+      JSON.stringify({ table: "todos" }),
+      null,
+      "local",
+      LOCAL_ONLY_SUBSCRIPTION_OPTIONS,
+    );
     runtime.executeSubscription(handle, (delta: unknown) => {
       updates.push(
         manager.handleDelta(
@@ -553,6 +563,41 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     ]);
 
     runtime.unsubscribe(handle);
+  });
+
+  it("withholds a default full-propagation empty opening but publishes a local-only one", async () => {
+    const { NapiDb } = await loadNapiModule();
+    const runtime = new NativeRuntimeAdapter(
+      { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
+      TEST_SCHEMA,
+      deterministicBytes("jazz-napi-native-runtime-provisional-empty:node"),
+      deterministicBytes("jazz-napi-native-runtime-provisional-empty:author"),
+      25,
+      true,
+    );
+    runtimes.push(runtime);
+
+    const defaultFullUpdates: unknown[] = [];
+    const defaultFull = runtime.createSubscription(
+      JSON.stringify({ table: "todos" }),
+      null,
+      "local",
+    );
+    runtime.executeSubscription(defaultFull, (delta: unknown) => defaultFullUpdates.push(delta));
+    expect(defaultFullUpdates).toEqual([]);
+
+    const localOnlyUpdates: unknown[] = [];
+    const localOnly = runtime.createSubscription(
+      JSON.stringify({ table: "todos" }),
+      null,
+      "local",
+      LOCAL_ONLY_SUBSCRIPTION_OPTIONS,
+    );
+    runtime.executeSubscription(localOnly, (delta: unknown) => localOnlyUpdates.push(delta));
+    expect(localOnlyUpdates).toHaveLength(1);
+
+    runtime.unsubscribe(defaultFull);
+    runtime.unsubscribe(localOnly);
   });
 
   it("returns raw NAPI subscription payloads as Uint8Array with registered terminal layouts", async () => {
@@ -622,7 +667,12 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
 
     const manager = new SubscriptionManager<WasmRow>();
     const updates: ReturnType<SubscriptionManager<WasmRow>["handleDelta"]>[] = [];
-    const handle = runtime.createSubscription(JSON.stringify({ table: "blobs" }), null, "local");
+    const handle = runtime.createSubscription(
+      JSON.stringify({ table: "blobs" }),
+      null,
+      "local",
+      LOCAL_ONLY_SUBSCRIPTION_OPTIONS,
+    );
     runtime.executeSubscription(handle, (delta: unknown) => {
       updates.push(
         manager.handleDelta(
@@ -774,6 +824,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
           JSON.stringify({ table: "todos" }),
           null,
           "local",
+          LOCAL_ONLY_SUBSCRIPTION_OPTIONS,
         );
         runtime.executeSubscription(handle, (...args: unknown[]) => notifications.push(args));
         expect(notifications).toHaveLength(1);
@@ -846,7 +897,12 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
 
     const manager = new SubscriptionManager<WasmRow>();
     const updates: ReturnType<SubscriptionManager<WasmRow>["handleDelta"]>[] = [];
-    const handle = runtime.createSubscription(JSON.stringify({ table: "todos" }), null, "local");
+    const handle = runtime.createSubscription(
+      JSON.stringify({ table: "todos" }),
+      null,
+      "local",
+      LOCAL_ONLY_SUBSCRIPTION_OPTIONS,
+    );
     runtime.executeSubscription(handle, (delta: unknown) => {
       updates.push(
         manager.handleDelta(
@@ -1014,7 +1070,12 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       );
     const aliceDecodedUpdates: ReturnType<SubscriptionManager<WasmRow>["handleDelta"]>[] = [];
 
-    const aliceHandle = runtime.createSubscription(query, aliceSession, "local");
+    const aliceHandle = runtime.createSubscription(
+      query,
+      aliceSession,
+      "local",
+      LOCAL_ONLY_SUBSCRIPTION_OPTIONS,
+    );
     runtime.executeSubscription(aliceHandle, (delta: unknown) => {
       aliceUpdates.push(delta);
       aliceDecodedUpdates.push(decodeAliceDelta(delta));
