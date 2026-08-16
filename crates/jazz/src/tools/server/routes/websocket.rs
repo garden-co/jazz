@@ -647,7 +647,7 @@ async fn handle_ws_connection(
         return;
     }
 
-    let Some(core_server_shell) = state.core_server_shell() else {
+    let Some(core_server_shell) = state.core_server_shell_for_client() else {
         send_ws_error(
             &mut socket,
             WireError::new(

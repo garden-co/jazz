@@ -525,6 +525,42 @@ async fn seed_schema_catalogue(server: &JazzServer, schema: &jazz::tools::Schema
     assert_eq!(response.status(), StatusCode::CREATED);
 }
 
+/// Publish the explicit v1 -> v2 lineage required before the v2 schema can
+/// become an active runtime write schema. Schemas are drafts until this
+/// migration is admitted; a later permissions head must not invent a
+/// self-referential lineage for them.
+async fn publish_v1_to_v2_catalogue_migration(server: &JazzServer) {
+    let response = reqwest::Client::new()
+        .post(format!(
+            "{}/apps/{}/admin/migrations",
+            server.base_url(),
+            server.app_id()
+        ))
+        .header("X-Jazz-Admin-Secret", server.admin_secret())
+        .json(&json!({
+            "fromHash": SchemaHash::compute(&schema_v1()).to_string(),
+            "toHash": SchemaHash::compute(&schema_v2()).to_string(),
+            "forward": [{
+                "table": "users",
+                "operations": [{
+                    "type": "introduce",
+                    "column": "email",
+                    "column_type": { "type": "Text" },
+                    "value": { "type": "Null" }
+                }]
+            }]
+        }))
+        .send()
+        .await
+        .expect("publish v1 to v2 catalogue migration");
+    let status = response.status();
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "v2 must be admitted through its explicit v1-to-v2 lineage"
+    );
+}
+
 async fn assert_edge_query_does_not_include_row(
     client: &JazzClient,
     query: jazz::tools::Query,
@@ -824,6 +860,7 @@ async fn persisted_stale_edge_reconnect_replays_catalogue_before_client_work_imp
     edge_before_restart.shutdown().await;
 
     seed_schema_catalogue(&core, &v2_schema).await;
+    publish_v1_to_v2_catalogue_migration(&core).await;
     publish_allow_all_permissions(&core.base_url(), app_id, core.admin_secret(), &v2_schema).await;
 
     let edge_after_restart = JazzServer::builder()
@@ -878,6 +915,66 @@ async fn persisted_stale_edge_reconnect_replays_catalogue_before_client_work_imp
     core.shutdown().await;
 }
 
+/// A dynamic edge whose catalogue has reached Ready may be shut down and
+/// reopened after its core is unavailable. The first client after restart must
+/// use the durable catalogue immediately; it must not depend on a fresh
+/// bootstrap exchange with the unavailable upstream.
+#[tokio::test]
+async fn persistent_dynamic_edge_reopens_ready_catalogue_before_first_client() {
+    tokio::task::LocalSet::new()
+        .run_until(persistent_dynamic_edge_reopens_ready_catalogue_before_first_client_impl())
+        .await
+}
+
+async fn persistent_dynamic_edge_reopens_ready_catalogue_before_first_client_impl() {
+    let app_id = JazzServer::default_app_id();
+    let schema = schema_v1();
+    let edge_data_dir = TempDir::new().expect("create persistent edge data directory");
+    let core = JazzServer::builder().with_app_id(app_id).start().await;
+    let unavailable_core_url = core.base_url();
+    seed_schema_catalogue(&core, &schema).await;
+    publish_allow_all_permissions(&core.base_url(), app_id, core.admin_secret(), &schema).await;
+
+    let edge_before_shutdown = JazzServer::builder()
+        .with_app_id(app_id)
+        .with_upstream_url(unavailable_core_url.clone())
+        .with_data_dir(edge_data_dir.path())
+        .with_persistent_storage()
+        .start()
+        .await;
+    let warmup = TestingClient::builder()
+        .with_server(&edge_before_shutdown)
+        .with_schema(schema.clone())
+        .with_user_id(test_user_id("dynamic-edge-warmup"))
+        .ready_on("users", Duration::from_secs(30))
+        .connect_after_retry_later(Duration::from_secs(30))
+        .await;
+    warmup.shutdown().await.expect("shutdown warmup client");
+    edge_before_shutdown.shutdown().await;
+    core.shutdown().await;
+
+    let edge_after_restart = JazzServer::builder()
+        .with_app_id(app_id)
+        .with_upstream_url(unavailable_core_url)
+        .with_data_dir(edge_data_dir.path())
+        .with_persistent_storage()
+        .start()
+        .await;
+    let first_client = TestingClient::builder()
+        .with_server(&edge_after_restart)
+        .with_schema(schema)
+        .with_user_id(test_user_id("dynamic-edge-first-after-restart"))
+        .ready_on("users", Duration::from_secs(30))
+        .connect()
+        .await;
+
+    first_client
+        .shutdown()
+        .await
+        .expect("shutdown first client");
+    edge_after_restart.shutdown().await;
+}
+
 /// Retightening permissions at the core invalidates the existing subscriptions
 /// of clients connected through each of two independent edge servers.
 ///
@@ -890,7 +987,6 @@ async fn persisted_stale_edge_reconnect_replays_catalogue_before_client_work_imp
 /// mallory --deny select--> core --> both edges remove the existing row
 /// ```
 #[tokio::test]
-#[ignore = "known red; tracked in TEST_BURNDOWN.md"]
 async fn core_permission_retightening_reaches_subscribed_clients_on_every_edge() {
     tokio::task::LocalSet::new()
         .run_until(core_permission_retightening_reaches_subscribed_clients_on_every_edge_impl())
@@ -920,14 +1016,14 @@ async fn core_permission_retightening_reaches_subscribed_clients_on_every_edge_i
         .with_schema(schema.clone())
         .with_user_id(test_user_id("alice-retighten-us"))
         .ready_on("users", Duration::from_secs(30))
-        .connect()
+        .connect_after_retry_later(Duration::from_secs(30))
         .await;
     let bob = TestingClient::builder()
         .with_server(&edge_eu)
         .with_schema(schema.clone())
         .with_user_id(test_user_id("bob-retighten-eu"))
         .ready_on("users", Duration::from_secs(30))
-        .connect()
+        .connect_after_retry_later(Duration::from_secs(30))
         .await;
     let carol = TestingClient::builder()
         .with_server(&core)

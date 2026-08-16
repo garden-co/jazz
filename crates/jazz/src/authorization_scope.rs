@@ -114,6 +114,19 @@ pub struct AuthorityContext {
     pub settled_through: u64,
 }
 
+impl AuthorityContext {
+    /// Whether two snapshots describe the same authenticated physical
+    /// connection. Scope receipts legitimately advance the remaining fields
+    /// while that connection stays live; those receipt bounds must not make an
+    /// already parked edge-fate route look as if it belonged to a stale link.
+    pub(crate) fn same_admitted_link(self, other: Self) -> bool {
+        self.authority == other.authority
+            && self.link == other.link
+            && self.connection_id == other.connection_id
+            && self.connection_epoch == other.connection_epoch
+    }
+}
+
 /// Capability to send exactly one hydration request for a lease generation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct AuthorizationScopeOwnerToken(u64);
