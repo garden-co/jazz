@@ -162,7 +162,7 @@ fn catalogue_snapshot_preserves_active_schema_storage_identity() {
 }
 
 #[test]
-fn settled_view_projects_authored_row_into_clients_active_schema() {
+fn settled_view_projects_old_authored_row_into_clients_active_schema() {
     // Internal because settled result-set installation is a sync receiver
     // boundary; schema projection itself is asserted through the query API.
     let base = schema();
@@ -197,20 +197,27 @@ fn settled_view_projects_authored_row_into_clients_active_schema() {
         })
         .unwrap();
 
-    let (_writer_dir, mut writer) = open_node_with_schema(node(0x64), base);
-    let (tx_id, unit) = writer
-        .commit_mergeable_unit(
+    let snapshot = authority.catalogue_snapshot().unwrap();
+    let (_writer_dir, mut writer) = open_node_with_schema(node(0x64), base.clone());
+    writer
+        .apply_trusted_catalogue_snapshot(snapshot.clone())
+        .unwrap();
+    let tx_id = writer
+        .commit_mergeable_in_schema(
+            base.version_id(),
             MergeableCommit::new("todos", row(0x65), 10).cells(title_cells("authored-base")),
         )
         .unwrap();
+    let unit = writer.commit_unit_for(tx_id).unwrap();
     let SyncMessage::CommitUnit { tx, versions } = unit else {
         panic!("commit unit expected");
     };
+    assert_eq!(versions[0].schema_version(), base.version_id());
 
     let (_receiver_dir, mut receiver) =
         open_node_with_schema(node(0x66), evolved.schema.clone());
     receiver
-        .apply_trusted_catalogue_snapshot(authority.catalogue_snapshot().unwrap())
+        .apply_trusted_catalogue_snapshot(snapshot)
         .unwrap();
     receiver
         .ingest_known_transaction(
@@ -252,6 +259,41 @@ fn settled_view_projects_authored_row_into_clients_active_schema() {
             ]),
         )])
     );
+}
+
+#[test]
+fn mergeable_commit_rejects_unadmitted_authored_schema() {
+    // Internal because this verifies the node admission boundary underlying a
+    // public client's fixed-schema write contract.
+    let (_dir, mut writer) = open_node_with_schema(node(0x67), schema());
+    let unknown = SchemaVersionId(uuid::Uuid::from_bytes([0x67; 16]));
+    assert!(matches!(
+        writer.commit_mergeable_in_schema(
+            unknown,
+            MergeableCommit::new("todos", row(0x68), 10).cells(title_cells("forged")),
+        ),
+        Err(Error::InvalidMergeableCommit("authored schema version is not admitted"))
+    ));
+    assert!(writer.query_all_versions().unwrap().is_empty());
+}
+
+#[test]
+fn branch_commit_rejects_unadmitted_authored_schema_without_persistence() {
+    let (_dir, mut writer) = open_node_with_schema(node(0x69), schema());
+    let branch_id = branch(0x69);
+    writer.create_root_branch(branch_id).unwrap();
+    let unknown = SchemaVersionId(uuid::Uuid::from_bytes([0x69; 16]));
+    assert!(matches!(
+        writer.commit_mergeable_on_branch_in_schema(
+            branch_id,
+            unknown,
+            MergeableCommit::new("todos", row(0x6a), 10).cells(title_cells("forged")),
+        ),
+        Err(Error::InvalidMergeableCommit(
+            "authored schema version is not admitted"
+        ))
+    ));
+    assert!(writer.query_all_versions().unwrap().is_empty());
 }
 
 #[test]
