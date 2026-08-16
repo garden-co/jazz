@@ -7062,7 +7062,7 @@ where
                 }
             }
         };
-        let (previous, previous_source, has_maintained_subscription) = {
+        let (previous, previous_source, has_maintained_flat_tuple_subscription) = {
             let state = state.borrow();
             (
                 state.snapshot.clone(),
@@ -7070,9 +7070,10 @@ where
                 matches!(
                     &state.kind,
                     SubscriptionKind::Prepared {
+                        shape,
                         maintained_subscription: Some(_),
                         ..
-                    }
+                    } if shape.query().flat_join.is_some()
                 ),
             )
         };
@@ -7081,7 +7082,7 @@ where
         // stream, replace it from the terminal rather than installing an
         // unaddressable facade snapshot.
         if !force_reset_event
-            && has_maintained_subscription
+            && has_maintained_flat_tuple_subscription
             && previous_source == SubscriptionSnapshotSource::LocalMaintained
             && snapshot_source == SubscriptionSnapshotSource::LinkSnapshot
         {
@@ -13210,12 +13211,16 @@ where
     S: OrderedKvStorage,
 {
     let SubscriptionKind::Prepared {
+        shape,
         maintained_subscription: Some(maintained),
         ..
     } = kind
     else {
         return Ok(RelationSnapshotIndex::from_snapshot(snapshot));
     };
+    if shape.query().flat_join.is_none() {
+        return Ok(RelationSnapshotIndex::from_snapshot(snapshot));
+    }
     let materialized =
         node.materialize_local_maintained_relation_snapshot_with_occurrences(maintained)?;
     if materialized.snapshot.root_count == snapshot.root_count {

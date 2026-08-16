@@ -27,3 +27,18 @@ The design must specify:
 
 This item records an open API-design task. It does not reopen the runtime
 invariant: runtime activation remains atomic across schema and lens.
+
+## Nightly failure-to-fix pipeline
+
+Run expensive and exploratory verification outside the pull-request critical
+path: non-CI end-to-end and manual receipts, incremental/differential oracles,
+fuzzing, randomized seed sweeps, and stress tests.
+
+Every failure should automatically preserve enough evidence to make the next
+step useful rather than merely noisy: the exact seed or replay input, commit and
+artifact provenance, environment, logs, minimized trace when available, and the
+failing invariant. Surface that evidence as a draft issue or pull-request
+scaffold that can be picked up each day. The expected engineering workflow is
+to first turn the nightly failure into a fast deterministic regression, then
+implement and verify the fix; nightly-only retries or timing changes are not a
+substitute for that regression.
