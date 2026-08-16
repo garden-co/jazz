@@ -84,7 +84,6 @@ pub struct WebSocketTransport {
     inbound_error: Arc<Mutex<Option<String>>>,
     inbound_notify: Arc<Notify>,
     outbound: mpsc::UnboundedSender<Vec<u8>>,
-    wake: Arc<dyn Fn() + Send + Sync>,
     task: tokio::task::JoinHandle<()>,
     protocol_version: u16,
     features: u64,
@@ -292,7 +291,6 @@ impl WebSocketTransport {
             inbound_error,
             inbound_notify,
             outbound,
-            wake,
             task,
             protocol_version: negotiated.protocol_version,
             features: negotiated.features,
@@ -324,7 +322,12 @@ impl WireTransport for WebSocketTransport {
         self.outbound
             .send(frame)
             .map_err(|_| TransportError::Failed("websocket pump is closed".to_owned()))?;
-        (self.wake)();
+        // The shell is already actively servicing this connection when it
+        // emits an outbound frame. Waking it again turns `tick_take` into a
+        // feedback loop: the drained frame schedules another empty shell tick,
+        // whose outbound drain can schedule the next. Only the pump's inbound
+        // branch wakes the synchronous owner because only new peer work needs
+        // another tick.
         Ok(())
     }
 
