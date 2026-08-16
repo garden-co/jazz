@@ -254,13 +254,6 @@ const JAZZ_SIM_FAST_SCENARIOS = [
     log_path: "logs/s5_durable_stream.log",
   },
   {
-    id: "s6_text_traces",
-    label: "Jazz-sim S6 text traces",
-    bench: "s6_text_traces",
-    output_path: "s6_text_traces.jsonl",
-    log_path: "logs/s6_text_traces.log",
-  },
-  {
     id: "s7_migrations",
     label: "Jazz-sim S7 migrations",
     bench: "s7_migrations",
