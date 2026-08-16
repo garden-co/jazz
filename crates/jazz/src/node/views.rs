@@ -741,6 +741,29 @@ where
         Ok(())
     }
 
+    /// Materialize sparse branch storage before a trusted receiver batch can
+    /// stage its branch-target versions. The branch metadata gate runs before
+    /// this path, so a receiver only provisions a partition for content it is
+    /// already allowed to name. Keeping this before the batch is essential:
+    /// the physical history table must be durable before a ViewUpdate can make
+    /// its version witness public to a maintained subscription.
+    pub(crate) fn prepare_view_update_branch_partitions(
+        &mut self,
+        updates: &[ViewUpdateParts],
+    ) -> Result<(), Error>
+    where
+        S: ReopenableStorage,
+    {
+        for update in updates {
+            for bundle in
+                version_bundle_refs_for_carriers(&update.version_bundles, &update.version_carriers)?
+            {
+                self.prepare_branch_target_partitions_if_ready(&bundle.tx, bundle.versions)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Validate all row bundles carried by a receiver frame without changing
     /// storage or in-memory receiver state.
     fn validate_view_update_payloads(&self, updates: &[ViewUpdateParts]) -> Result<(), Error> {

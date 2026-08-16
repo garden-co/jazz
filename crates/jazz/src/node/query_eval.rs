@@ -1079,69 +1079,16 @@ where
                 .get(&branch_id)
                 .cloned()
                 .ok_or_else(|| source_resolution_error(request, SourceGap::Coverage))?;
-            let rows = self
-                .node
-                .branch_current_rows_for_schema(
-                    &request.source.table,
-                    &branch,
-                    self.read_view.read_schema,
-                )
-                .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
-            let rows = rows
-                .into_iter()
-                .map(|row| {
-                    let tx_id = if let Some((time, alias)) = row.projected_tx_alias() {
-                        let node = self
-                            .node
-                            .node_aliases
-                            .iter()
-                            .find_map(|(node, candidate)| (*candidate == alias).then_some(*node))
-                            .ok_or_else(|| source_resolution_error(request, SourceGap::Coverage))?;
-                        TxId::new(time, node)
-                    } else {
-                        let base = branch
-                            .base
-                            .as_ref()
-                            .ok_or_else(|| source_resolution_error(request, SourceGap::Coverage))?;
-                        self.node
-                            .historical_content_witness_at(
-                                &request.source.table,
-                                self.read_view.read_schema,
-                                row.row_uuid(),
-                                base.global_base,
-                            )
-                            .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?
-                            .ok_or_else(|| source_resolution_error(request, SourceGap::Coverage))?
-                    };
-                    let tx = self
-                        .node
-                        .query_transaction(tx_id)
-                        .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?
-                        .ok_or_else(|| source_resolution_error(request, SourceGap::Coverage))?;
-                    let lineage = match tx.tx.target_lineage {
-                        BranchLineage::Root => None,
-                        BranchLineage::Branch(branch) => Some(branch),
-                    };
-                    let alias = self
-                        .node
-                        .node_aliases
-                        .get(&tx_id.node)
-                        .copied()
-                        .ok_or_else(|| source_resolution_error(request, SourceGap::Coverage))?;
-                    Ok((row, tx_id.time, alias, lineage))
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            let schema_version_alias = self
-                .node
-                .ensure_schema_version_alias(self.read_view.read_schema)
-                .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
-            let (base, descriptor, metadata) = inline_branch_current_graph(
+            let source = self.branch_current_source_graph(
+                request,
                 &table,
-                rows,
-                schema_version_alias,
-                &request.requirements,
-            )
-            .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
+                &branch,
+                branch_id,
+                graph_tier.expect("branch-current source has a tier"),
+            )?;
+            let base = source.graph;
+            let descriptor = source.descriptor;
+            let metadata = source.metadata;
             let graph = match &authorization {
                 SourceAuthorizationRequest::System => base,
                 SourceAuthorizationRequest::PolicyFiltered {
@@ -1554,8 +1501,12 @@ where
         {
             return Err(source_resolution_error(request, SourceGap::Coverage));
         }
-        if branch_data.is_some() {
-            return Err(source_resolution_error(request, SourceGap::BranchOverlay));
+        if let Some(branch_id) = branch_data {
+            return Ok(Some(DeletionRegisterSource {
+                graph: self
+                    .branch_overlay_deletion_current_graph(request, table, branch_id, tier)?,
+                row_uuid_field: "row_uuid".to_owned(),
+            }));
         }
         if self.needs_projected_current_source(&request.source.table) {
             return Ok(Some(DeletionRegisterSource {
@@ -1603,7 +1554,12 @@ where
             return Err(source_resolution_error(request, SourceGap::Coverage));
         }
         if branch_data.is_some() {
-            return Err(source_resolution_error(request, SourceGap::BranchOverlay));
+            // The branch-current membership graph already carries the exact
+            // selected content witness (including its branch discriminator).
+            // Let the generic witness lowering consume that graph directly:
+            // a separate root-current sidecar would be both stale at the
+            // frozen base and capable of crossing branch identities.
+            return Ok(None);
         }
         if self.needs_projected_current_source(&request.source.table) {
             return Ok(Some(ContentVersionSource {
@@ -1646,6 +1602,242 @@ where
             .map_err(|_| source_resolution_error(request, SourceGap::HistoricalStorageCut))?;
         inline_current_graph(table, rows)
             .map_err(|_| source_resolution_error(request, SourceGap::HistoricalStorageCut))
+    }
+
+    /// Build the maintained input for one v1 branch-current source.
+    ///
+    /// The frozen root base is intentionally inline: no later root write may
+    /// move a branch's base.  The branch overlay, in contrast, stays wired to
+    /// its durable history and sparse deletion register so add/replace/delete/
+    /// restore events flow through the existing IVM subscription.  An overlay
+    /// content winner or a currently-deleted overlay row masks the frozen base;
+    /// a restored deletion without overlay content exposes that base again.
+    fn branch_current_source_graph(
+        &mut self,
+        request: &SourceRequest,
+        table: &TableSchema,
+        branch: &BranchRecord,
+        branch_id: BranchId,
+        tier: DurabilityTier,
+    ) -> Result<CurrentSourceGraph, SourceResolutionError> {
+        let base_rows = self
+            .node
+            .branch_base_rows_for_schema(&request.source.table, branch, self.read_view.read_schema)
+            .map_err(|_| source_resolution_error(request, SourceGap::BranchOverlay))?;
+        let base_rows = base_rows
+            .into_iter()
+            .map(|row| {
+                let tx_id = if let Some((time, alias)) = row.projected_tx_alias() {
+                    let node = self
+                        .node
+                        .node_aliases
+                        .iter()
+                        .find_map(|(node, candidate)| (*candidate == alias).then_some(*node))
+                        .ok_or_else(|| source_resolution_error(request, SourceGap::Coverage))?;
+                    TxId::new(time, node)
+                } else {
+                    let base = branch
+                        .base
+                        .as_ref()
+                        .ok_or_else(|| source_resolution_error(request, SourceGap::Coverage))?;
+                    self.node
+                        .historical_content_witness_at(
+                            &request.source.table,
+                            self.read_view.read_schema,
+                            row.row_uuid(),
+                            base.global_base,
+                        )
+                        .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?
+                        .ok_or_else(|| source_resolution_error(request, SourceGap::Coverage))?
+                };
+                let alias = self
+                    .node
+                    .node_aliases
+                    .get(&tx_id.node)
+                    .copied()
+                    .ok_or_else(|| source_resolution_error(request, SourceGap::Coverage))?;
+                Ok((row, tx_id.time, alias, None))
+            })
+            .collect::<Result<Vec<_>, SourceResolutionError>>()?;
+        let schema_version_alias = self
+            .node
+            .ensure_schema_version_alias(self.read_view.read_schema)
+            .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
+        let (frozen_base, descriptor, metadata) = inline_branch_current_graph(
+            table,
+            base_rows,
+            schema_version_alias,
+            &request.requirements,
+        )
+        .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
+
+        let table_id = self
+            .node
+            .physical_table_id_for_schema(self.read_view.read_schema, &request.source.table)
+            .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
+        // The graph can name a sparse branch source before it has rows. The
+        // receiving ViewUpdate path provisions that physical partition before
+        // staging its first witness. A metadata-only receiver, however, has
+        // no such table and must expose its frozen base without creating a
+        // branch-content existence oracle; the rebuild on first witness
+        // reopens its maintained view against the live source.
+        if !self
+            .node
+            .branches
+            .branch_partitions
+            .contains(&(table_id, branch_id))
+        {
+            return Ok(CurrentSourceGraph {
+                graph: frozen_base,
+                descriptor,
+                metadata,
+            });
+        }
+        let history_fields = maintained_view_history_storage_field_names(table);
+        let overlay_content = GraphBuilder::arg_max_by(
+            tier_visible_branch_history_graph(
+                self.node
+                    .physical_branch_history_source_graph(
+                        self.read_view.read_schema,
+                        &request.source.table,
+                        branch_id,
+                    )
+                    .map_err(|_| source_resolution_error(request, SourceGap::BranchOverlay))?,
+                history_fields,
+                tier,
+            ),
+            ["row_uuid"],
+            ["tx_time", "tx_node_id"],
+        );
+        let overlay_deletion_winner =
+            self.branch_overlay_deletion_current_graph_for_table(table_id, branch_id, tier);
+        let deleted_overlay_rows = overlay_deletion_winner
+            .clone()
+            .filter(PredicateExpr::eq("_deletion", Value::EnumTag(0)))
+            .project(["row_uuid"]);
+        let overlay_visible = GraphBuilder::anti_join(
+            overlay_content.clone(),
+            deleted_overlay_rows.clone(),
+            ["row_uuid"],
+            ["row_uuid"],
+        );
+        let overlay_masks_base = GraphBuilder::union([
+            overlay_content.clone().project(["row_uuid"]),
+            deleted_overlay_rows,
+        ]);
+        let frozen_base =
+            GraphBuilder::anti_join(frozen_base, overlay_masks_base, ["row_uuid"], ["row_uuid"]);
+
+        // The durable content carrier uses storage names; normalize it to the
+        // same descriptor as the frozen-base records before their union.
+        let mut normalized = vec![ProjectField::named("row_uuid")];
+        normalized.extend(
+            table
+                .columns
+                .iter()
+                .map(|column| ProjectField::named(user_column_field(&column.name))),
+        );
+        normalized.extend([
+            ProjectField::renamed("created_by", "$createdBy"),
+            ProjectField::renamed("created_at", "$createdAt"),
+            ProjectField::renamed("updated_by", "$updatedBy"),
+            ProjectField::renamed("updated_at", "$updatedAt"),
+            ProjectField::named("tx_time"),
+            ProjectField::named("tx_node_id"),
+        ]);
+        if metadata.contains_key(&SourceMetadataRequirement::VersionWitnesses) {
+            normalized.extend([
+                ProjectField::literal("table", Value::String(table.name.clone())),
+                ProjectField::literal("layer", Value::String("content".to_owned())),
+                ProjectField::named("schema_version"),
+                ProjectField::named("parents"),
+                ProjectField::renamed("created_by", "created_by"),
+                ProjectField::renamed("created_at", "created_at"),
+                ProjectField::renamed("updated_by", "updated_by"),
+                ProjectField::renamed("updated_at", "updated_at"),
+                ProjectField::named("authored_columns"),
+                ProjectField::literal(
+                    "branch_id",
+                    Value::Nullable(Some(Box::new(Value::Uuid(branch_id.0)))),
+                ),
+            ]);
+        }
+        if metadata.contains_key(&SourceMetadataRequirement::Coverage) {
+            normalized.push(ProjectField::literal(
+                "coverage",
+                Value::String("branch-current".to_owned()),
+            ));
+        }
+        if metadata.contains_key(&SourceMetadataRequirement::SettlePosition) {
+            normalized.push(ProjectField::null_typed(
+                "settle_position",
+                ValueType::Nullable(Box::new(ValueType::U64)),
+            ));
+        }
+        // Keep this assertion close to the union: a metadata expansion must
+        // update both branches together instead of silently stripping a
+        // witness from live overlay rows.
+        debug_assert_eq!(
+            descriptor
+                .fields()
+                .iter()
+                .map(|field| field.name.as_deref())
+                .collect::<Vec<_>>(),
+            normalized
+                .iter()
+                .map(|field| Some(field.output_name.as_str()))
+                .collect::<Vec<_>>(),
+        );
+        let overlay_visible = overlay_visible.project_fields(normalized);
+        Ok(CurrentSourceGraph {
+            graph: GraphBuilder::union([frozen_base, overlay_visible]),
+            descriptor,
+            metadata,
+        })
+    }
+
+    fn branch_overlay_deletion_current_graph(
+        &mut self,
+        request: &SourceRequest,
+        table: &TableSchema,
+        branch_id: BranchId,
+        tier: DurabilityTier,
+    ) -> Result<GraphBuilder, SourceResolutionError> {
+        let table_id = self
+            .node
+            .physical_table_id_for_schema(self.read_view.read_schema, &request.source.table)
+            .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
+        let _ = table;
+        Ok(self.branch_overlay_deletion_current_graph_for_table(table_id, branch_id, tier))
+    }
+
+    fn branch_overlay_deletion_current_graph_for_table(
+        &self,
+        table_id: PhysicalTableId,
+        branch_id: BranchId,
+        tier: DurabilityTier,
+    ) -> GraphBuilder {
+        GraphBuilder::arg_max_by(
+            tier_visible_branch_history_graph(
+                GraphBuilder::table(SHARED_DELETION_HISTORY_TABLE).filter(
+                    PredicateExpr::And(vec![
+                        PredicateExpr::eq("branch_kind", Value::U8(1)),
+                        PredicateExpr::eq("branch_id", Value::Uuid(branch_id.0)),
+                        PredicateExpr::eq("physical_table_id", Value::U64(table_id.0)),
+                    ])
+                    .canonicalize(),
+                ),
+                register_storage_field_names(),
+                tier,
+            ),
+            ["row_uuid"],
+            ["tx_time", "tx_node_id"],
+        )
+        .project_fields(
+            register_storage_fields_for_query_engine("")
+                .into_iter()
+                .chain([ProjectField::literal("branch_id", Value::Uuid(branch_id.0))]),
+        )
     }
 
     fn projected_maintained_visible_current_source_graph(
@@ -1961,6 +2153,52 @@ fn edge_visible_ahead_current_source_graph(
                 ])
                 .canonicalize(),
             )
+            .project(["time", "node_id"]),
+        ["tx_time", "tx_node_id"],
+        ["time", "node_id"],
+    )
+    .project_fields(
+        fields
+            .into_iter()
+            .map(|field| ProjectField::renamed(left_field(&field), field)),
+    )
+}
+
+/// Select branch overlay history by the same fate/durability contract as a
+/// root current read before choosing the row winner. Branch partitions retain
+/// raw history after rejection, so winner selection over the unfiltered table
+/// would expose pending rows at Edge/Global and let a rejected latest version
+/// continue masking an earlier accepted winner.
+fn tier_visible_branch_history_graph(
+    source: GraphBuilder,
+    fields: Vec<String>,
+    tier: DurabilityTier,
+) -> GraphBuilder {
+    let eligible = match tier {
+        DurabilityTier::None | DurabilityTier::Local => PredicateExpr::Or(vec![
+            PredicateExpr::eq("fate", Value::EnumTag(FateTag::Pending as u8)),
+            PredicateExpr::eq("fate", Value::EnumTag(FateTag::Accepted as u8)),
+        ])
+        .canonicalize(),
+        DurabilityTier::Edge => PredicateExpr::And(vec![
+            PredicateExpr::eq("fate", Value::EnumTag(FateTag::Accepted as u8)),
+            PredicateExpr::Or(vec![
+                PredicateExpr::eq("durability", Value::EnumTag(2)),
+                PredicateExpr::eq("durability", Value::EnumTag(3)),
+            ])
+            .canonicalize(),
+        ])
+        .canonicalize(),
+        DurabilityTier::Global => PredicateExpr::And(vec![
+            PredicateExpr::eq("fate", Value::EnumTag(FateTag::Accepted as u8)),
+            PredicateExpr::eq("durability", Value::EnumTag(3)),
+        ])
+        .canonicalize(),
+    };
+    GraphBuilder::join(
+        source.project(fields.clone()),
+        GraphBuilder::table("jazz_transactions")
+            .filter(eligible)
             .project(["time", "node_id"]),
         ["tx_time", "tx_node_id"],
         ["time", "node_id"],
@@ -7808,6 +8046,30 @@ where
         )
     }
 
+    pub(crate) fn query_rows_for_client_read_view(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        tier: DurabilityTier,
+        read_view: &ReadViewSpec,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        let Some(binding_view) =
+            self.client_settled_binding_view_key_for_query(shape, binding, tier, read_view)
+        else {
+            return Ok(Vec::new());
+        };
+        let Some(snapshot) =
+            self.authoritative_reset_snapshot_for_binding_view(shape, binding_view)?
+        else {
+            return Ok(Vec::new());
+        };
+        Ok(snapshot
+            .rows
+            .into_iter()
+            .take(snapshot.root_count)
+            .collect())
+    }
+
     pub(crate) fn query_rows_local_preview(
         &mut self,
         shape: &ValidatedQuery,
@@ -10237,6 +10499,60 @@ where
             read_view,
             QueryAuthorizationMode::ClientLocal,
         )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn query_relation_branch_discriminators_for_test(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        tier: DurabilityTier,
+        identity: AuthorId,
+        read_view: &ReadViewSpec,
+    ) -> Result<Vec<(Option<uuid::Uuid>, Option<uuid::Uuid>)>, Error> {
+        let program = self.compile_current_query_program_for_read_view_in_authorization_mode(
+            shape,
+            binding,
+            tier,
+            identity,
+            CurrentQueryProgramOutput::RelationSnapshot,
+            read_view,
+            QueryAuthorizationMode::ClientLocal,
+        )?;
+        let snapshots = self
+            .database
+            .query_graphs(lowered_program_sinks(&program))
+            .map_err(Error::Groove)?;
+        let Some(edges) = snapshots.get("maintained.relation_edges") else {
+            return Ok(Vec::new());
+        };
+        let decode =
+            |record: &BorrowedRecord<'_>, field: &str| -> Result<Option<uuid::Uuid>, Error> {
+                let index = required_field_idx(&edges.descriptor, field)?;
+                match record.get_idx(index)? {
+                    Value::Uuid(value) => Ok(Some(value)),
+                    Value::Nullable(Some(value)) => match *value {
+                        Value::Uuid(value) => Ok(Some(value)),
+                        _ => Err(Error::InvalidStoredValue(
+                            "branch discriminator must be UUID",
+                        )),
+                    },
+                    Value::Nullable(None) => Ok(None),
+                    _ => Err(Error::InvalidStoredValue(
+                        "branch discriminator must be UUID",
+                    )),
+                }
+            };
+        edges
+            .iter()
+            .filter(|(_, weight)| *weight > 0)
+            .map(|(record, _)| {
+                Ok((
+                    decode(&record, "source_branch_or_prefix")?,
+                    decode(&record, "target_branch_or_prefix")?,
+                ))
+            })
+            .collect()
     }
 
     fn query_relation_snapshot_in_authorization_mode(

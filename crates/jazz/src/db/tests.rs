@@ -2202,6 +2202,34 @@ fn branch_read_view_relation_snapshot_uses_query_engine_relation_edges() {
     let schema = relation_schema();
     let db = open_db(0xc1, AuthorId::from_bytes([0xc1; 16]), &schema);
     let branch = BranchId(uuid::Uuid::from_bytes([0x42; 16]));
+    let root_versions = [
+        MergeableCommit::new("users", row(0xa1), 10).cells(BTreeMap::from([(
+            "name".to_owned(),
+            Value::String("alice".to_owned()),
+        )])),
+        MergeableCommit::new("todos", row(0x11), 11).cells(BTreeMap::from([
+            ("title".to_owned(), Value::String("root todo".to_owned())),
+            ("owner_id".to_owned(), Value::Uuid(row(0xa1).0)),
+        ])),
+    ];
+    for (sequence, commit) in root_versions.into_iter().enumerate() {
+        let tx = db
+            .node
+            .node
+            .borrow_mut()
+            .commit_mergeable(commit)
+            .expect("commit root relation row");
+        db.node
+            .node
+            .borrow_mut()
+            .apply_fate_update(
+                tx,
+                Fate::Accepted,
+                Some(GlobalSeq(sequence as u64 + 1)),
+                Some(DurabilityTier::Global),
+            )
+            .expect("globally accept root relation row");
+    }
     db.node
         .node
         .borrow_mut()
@@ -2214,21 +2242,10 @@ fn branch_read_view_relation_snapshot_uses_query_engine_relation_edges() {
             branch,
             MergeableCommit::new("users", row(0xa1), 10).cells(BTreeMap::from([(
                 "name".to_owned(),
-                Value::String("alice".to_owned()),
+                Value::String("branch alice".to_owned()),
             )])),
         )
-        .expect("commit branch user");
-    db.node
-        .node
-        .borrow_mut()
-        .commit_mergeable_on_branch(
-            branch,
-            MergeableCommit::new("todos", row(0x11), 11).cells(BTreeMap::from([
-                ("title".to_owned(), Value::String("branch todo".to_owned())),
-                ("owner_id".to_owned(), Value::Uuid(row(0xa1).0)),
-            ])),
-        )
-        .expect("commit branch todo");
+        .expect("replace only the source row in the branch overlay");
 
     let query = Query::from("users").array_subquery(ArraySubquery::new(
         "todosViaOwner",
@@ -2245,7 +2262,28 @@ fn branch_read_view_relation_snapshot_uses_query_engine_relation_edges() {
     assert!(snapshot.edges.is_empty());
     assert_eq!(
         terminal_nested_text_values(&snapshot, row(0xa1), "todosViaOwner", "title"),
-        vec!["branch todo".to_owned()]
+        vec!["root todo".to_owned()]
+    );
+    let binding = prepared_query
+        .shape()
+        .bind(BTreeMap::new())
+        .expect("bind relation snapshot shape");
+    let discriminators = db
+        .node
+        .node
+        .borrow_mut()
+        .query_relation_branch_discriminators_for_test(
+            prepared_query.shape(),
+            &binding,
+            DurabilityTier::Local,
+            db.identity.author,
+            &branch_read_opts().read_view,
+        )
+        .expect("inspect production relation-edge witnesses");
+    assert_eq!(
+        discriminators,
+        vec![(Some(branch.0), None)],
+        "the overlay source keeps its branch witness while the frozen target retains root lineage"
     );
 }
 

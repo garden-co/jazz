@@ -7286,6 +7286,9 @@ fn result_membership_fields(
         ProjectField::renamed(version.tx_time_field, "content_tx_time"),
         ProjectField::renamed(version.tx_node_field, "content_tx_node_id"),
     ];
+    if let Some(branch_or_prefix) = version.branch_or_prefix_field {
+        fields.push(ProjectField::named(branch_or_prefix));
+    }
     fields.extend(
         occurrence_id_fields
             .iter()
@@ -7593,6 +7596,14 @@ fn prefixed_version_witness_fields_for_tagged_rows(
             table_user_column_field(&source.table_schema.name, &column.name),
         )
     }));
+    if let Some(branch_or_prefix) =
+        version_witness_fields(&source.row_shape)?.branch_or_prefix_field
+    {
+        fields.push(ProjectField::renamed(
+            format!("{prefix}{branch_or_prefix}"),
+            branch_or_prefix,
+        ));
+    }
     Ok(fields)
 }
 
@@ -7627,6 +7638,9 @@ fn inline_version_witness_fields_for_tagged_rows(
             table_user_column_field(&source.table_schema.name, &column.name),
         )
     }));
+    if let Some(branch_or_prefix) = version.branch_or_prefix_field {
+        fields.push(ProjectField::named(branch_or_prefix));
+    }
     Ok(fields)
 }
 
@@ -7663,6 +7677,11 @@ fn deletion_witness_fields_for_tagged_rows(
             ValueType::Nullable(Box::new(column.column_type.clone())),
         )
     }));
+    if let Some(branch_or_prefix) =
+        version_witness_fields(&source.row_shape)?.branch_or_prefix_field
+    {
+        fields.push(ProjectField::named(branch_or_prefix));
+    }
     Ok(fields)
 }
 

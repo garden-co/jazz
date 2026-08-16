@@ -1575,6 +1575,44 @@ where
         ))
     }
 
+    /// The branch-overlay counterpart of [`Self::physical_history_source_graph`].
+    ///
+    /// Branch content history has the same variant layouts as root history;
+    /// only the physical partition differs.  Keeping that distinction here is
+    /// important: query lowering can keep an IVM source subscribed to the
+    /// durable overlay table instead of snapshotting branch rows into an inline
+    /// graph at subscription-open time.
+    pub(super) fn physical_branch_history_source_graph(
+        &self,
+        schema_version: SchemaVersionId,
+        logical_table: &str,
+        branch_id: BranchId,
+    ) -> Result<GraphBuilder, Error> {
+        let alias = self
+            .catalogue
+            .schema_version_aliases
+            .get(&schema_version)
+            .copied()
+            .ok_or(Error::InvalidStoredValue(
+                "physical branch history source schema alias missing",
+            ))?;
+        // Validate that the logical table has the same physical history
+        // binding as a root history source before selecting its branch
+        // partition.
+        let _ = physical_history_binding(
+            &self.catalogue.catalogue_schemas,
+            &self.catalogue.schema_version_aliases,
+            &self.catalogue.physical_mappings,
+            schema_version,
+            logical_table,
+        )?;
+        let table_id = self.physical_table_id_for_schema(schema_version, logical_table)?;
+        Ok(GraphBuilder::variant_source(
+            physical_branch_history_table_name(table_id, branch_id),
+            physical_history_projection_target(alias, logical_table),
+        ))
+    }
+
     pub(super) fn register_physical_history_variant_projections(&mut self) -> Result<(), Error> {
         let targets = self
             .catalogue
@@ -1596,19 +1634,10 @@ where
                     "physical projection target schema alias missing",
                 ))?;
             let target_table = self.table_in_schema(&target_table_name, target_schema)?;
-            let storage_table = physical_history_table_name(target_mapping.table_id);
             let projection_target =
                 physical_history_projection_target(target_alias, &target_table_name);
             let logical_output = target_table.history_storage_table().record_schema();
             let physical_names = physical_history_field_names(&target_table, &target_mapping)?;
-            let output = widened_projection_descriptor(
-                &logical_output,
-                &physical_names,
-                self.database.table_schema(&storage_table)?,
-            )?;
-            self.database
-                .define_variant_projection(&storage_table, &projection_target, output)?;
-
             let sources = self
                 .catalogue
                 .physical_mappings
@@ -1623,47 +1652,74 @@ where
                         })
                 })
                 .collect::<Vec<_>>();
-            for (source_schema, source_table_name, source_mapping) in sources {
-                let source_alias = self
-                    .catalogue
-                    .schema_version_aliases
-                    .get(&source_schema)
-                    .copied()
-                    .ok_or(Error::InvalidStoredValue(
-                        "physical projection source schema alias missing",
-                    ))?;
-                let cases = if source_mapping.variant_cases.is_empty() {
-                    vec![(groove_variant_tag(source_alias)?, None)]
-                } else {
-                    source_mapping
-                        .variant_cases
-                        .iter()
-                        .map(|case| (case.tag, Some(&case.fields)))
-                        .collect()
-                };
-                for (tag, present) in cases {
-                    let Some(fields) = self.physical_history_projection_case(
-                        source_schema,
-                        &source_table_name,
-                        &source_mapping,
-                        target_schema,
-                        &target_table_name,
-                        present,
-                    )?
-                    else {
-                        self.database.register_variant_ignore_case(
+            let storage_tables =
+                std::iter::once(physical_history_table_name(target_mapping.table_id))
+                    .chain(
+                        self.branches
+                            .branch_partitions
+                            .iter()
+                            .filter(|(table_id, _)| *table_id == target_mapping.table_id)
+                            .map(|(_, branch_id)| {
+                                physical_branch_history_table_name(
+                                    target_mapping.table_id,
+                                    *branch_id,
+                                )
+                            }),
+                    )
+                    .collect::<Vec<_>>();
+            for storage_table in storage_tables {
+                let output = widened_projection_descriptor(
+                    &logical_output,
+                    &physical_names,
+                    self.database.table_schema(&storage_table)?,
+                )?;
+                self.database.define_variant_projection(
+                    &storage_table,
+                    &projection_target,
+                    output,
+                )?;
+                for (source_schema, source_table_name, source_mapping) in &sources {
+                    let source_alias = self
+                        .catalogue
+                        .schema_version_aliases
+                        .get(source_schema)
+                        .copied()
+                        .ok_or(Error::InvalidStoredValue(
+                            "physical projection source schema alias missing",
+                        ))?;
+                    let cases = if source_mapping.variant_cases.is_empty() {
+                        vec![(groove_variant_tag(source_alias)?, None)]
+                    } else {
+                        source_mapping
+                            .variant_cases
+                            .iter()
+                            .map(|case| (case.tag, Some(&case.fields)))
+                            .collect()
+                    };
+                    for (tag, present) in cases {
+                        let Some(fields) = self.physical_history_projection_case(
+                            *source_schema,
+                            source_table_name,
+                            source_mapping,
+                            target_schema,
+                            &target_table_name,
+                            present,
+                        )?
+                        else {
+                            self.database.register_variant_ignore_case(
+                                &storage_table,
+                                &projection_target,
+                                tag,
+                            )?;
+                            continue;
+                        };
+                        self.database.register_variant_case(
                             &storage_table,
                             &projection_target,
                             tag,
+                            fields,
                         )?;
-                        continue;
-                    };
-                    self.database.register_variant_case(
-                        &storage_table,
-                        &projection_target,
-                        tag,
-                        fields,
-                    )?;
+                    }
                 }
             }
         }

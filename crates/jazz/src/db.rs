@@ -1331,6 +1331,7 @@ where
                 .made_by(made_by)
                 .cells(cells),
         )?;
+        node.finalize_local_mergeable_commit(tx_id)?;
         drop(node);
         self.refresh_subscriptions()?;
         self.node.mark_subscriber_connections_dirty();
@@ -1697,12 +1698,26 @@ where
                             author,
                         )
                         .map_err(Into::into),
-                    QueryAuthorizationMode::ClientLocal => node
+                    QueryAuthorizationMode::ClientLocal if tier < DurabilityTier::Edge => node
                         .query_rows_on_branch_for_client(
                             crate::ids::BranchId(*branch),
                             &prepared.shape,
                             &prepared.binding,
                             author,
+                        )
+                        .map_err(Into::into),
+                    QueryAuthorizationMode::ClientLocal => node
+                        .query_rows_for_client_read_view(
+                            &prepared.shape,
+                            &prepared.binding,
+                            self.node
+                                .upstream_register_shape_options(
+                                    tier,
+                                    opts.read_view.clone(),
+                                    opts.propagation == Propagation::Full,
+                                )
+                                .tier,
+                            &opts.read_view,
                         )
                         .map_err(Into::into),
                 };
@@ -8866,7 +8881,17 @@ where
                                 }
                             };
                             if let Some(shape) = &shape {
-                                if shape.params().is_empty() {
+                                // Branch compilation may install an empty
+                                // process-local sparse source. Defer that
+                                // side-effecting preflight until Subscribe,
+                                // where the authenticated branch gate is
+                                // available.
+                                if shape.params().is_empty()
+                                    && !matches!(
+                                        opts.read_view.source,
+                                        ReadViewSourceSpec::Branch { .. }
+                                    )
+                                {
                                     let binding = shape.bind(BTreeMap::new()).map_err(Error::from);
                                     let binding = match binding {
                                         Ok(binding) => binding,
@@ -9107,6 +9132,34 @@ where
                                 && existing != purpose
                             {
                                 drop_peer_request(&self.node);
+                                continue;
+                            }
+                            if let ReadViewSourceSpec::Branch { branch } = &opts.read_view.source
+                                && !self.node.borrow_mut().branch_metadata_visible_to(
+                                    crate::ids::BranchId(*branch),
+                                    peer.link_identity(),
+                                )?
+                            {
+                                let update = SyncMessage::ViewUpdate {
+                                    subscription,
+                                    settled_through: self.node.borrow().applied_global_watermark(),
+                                    reset_result_set: true,
+                                    version_carriers: Vec::new(),
+                                    version_bundles: Vec::new(),
+                                    peer_payload_inventory:
+                                        crate::protocol::PeerPayloadInventory::default(),
+                                    result_member_adds: Vec::new(),
+                                    result_member_removes: Vec::new(),
+                                    terminal_operations: Vec::new(),
+                                    program_fact_adds: Vec::new(),
+                                    program_fact_removes: Vec::new(),
+                                };
+                                send_with_sync_context(
+                                    &self.node,
+                                    peer,
+                                    self.transport.as_mut(),
+                                    update,
+                                )?;
                                 continue;
                             }
                             let supported = self
@@ -10115,13 +10168,16 @@ where
             }
         }
     }
+    let updates = std::mem::take(pending)
+        .into_iter()
+        .map(|update| update.parts)
+        .collect::<Vec<_>>();
     let mut node_ref = node.borrow_mut();
-    node_ref.apply_view_updates_in_batch(
-        std::mem::take(pending)
-            .into_iter()
-            .map(|update| update.parts)
-            .collect(),
-    )?;
+    // Branch view payloads carry branch-target version witnesses. Provision
+    // their sparse physical partitions before staging the receiver batch, so
+    // a durable table exists before the selected result becomes observable.
+    node_ref.prepare_view_update_branch_partitions(&updates)?;
+    node_ref.apply_view_updates_in_batch(updates)?;
     drop(node_ref);
     if let Some(receipts) = active_authority_view_receipts.borrow_mut().as_mut()
         && receipts.connection_epoch == connection_epoch

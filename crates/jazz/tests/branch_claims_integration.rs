@@ -959,7 +959,7 @@ async fn explicit_branch_subscription_should_match_claims_select_query() {
                 .connect()
                 .await;
             let denied_rows = denied
-                .query(branch_query, Some(DurabilityTier::EdgeServer))
+                .query(branch_query.clone(), Some(DurabilityTier::EdgeServer))
                 .await
                 .expect("nonmatching claim queries branch");
             assert!(
@@ -967,6 +967,23 @@ async fn explicit_branch_subscription_should_match_claims_select_query() {
                     .iter()
                     .all(|(id, _)| *id != jazz::tools::ObjectId::from_uuid(branch_row.0)),
                 "branch query must retain ordinary select policy: {denied_rows:?}"
+            );
+            let mut denied_stream = denied
+                .subscribe(branch_query)
+                .await
+                .expect("nonmatching claim subscribes to branch");
+            let mut denied_log = Vec::new();
+            wait_for_subscription_update(
+                &mut denied_stream,
+                &mut denied_log,
+                QUERY_TIMEOUT,
+                "nonmatching branch subscription receives its empty snapshot",
+                |updates| !updates.is_empty(),
+            )
+            .await;
+            assert!(
+                !has_added(&denied_log, jazz::tools::ObjectId::from_uuid(branch_row.0)),
+                "branch subscription must retain ordinary select policy: {denied_log:?}"
             );
 
             matching.shutdown().await.expect("shutdown matching client");
