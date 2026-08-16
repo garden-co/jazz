@@ -6,6 +6,10 @@ inputs:
     description: Enable the already-authenticated shared S3 cache tier.
     required: false
     default: "false"
+  rust-cache:
+    description: Restore and save deterministic Rust build artifacts.
+    required: false
+    default: "true"
 
 runs:
   using: composite
@@ -47,6 +51,7 @@ runs:
       run: pnpm install --frozen-lockfile
 
     - name: Cache Rust build artifacts
+      if: inputs.rust-cache == 'true'
       uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       with:
         cache-on-failure: true
