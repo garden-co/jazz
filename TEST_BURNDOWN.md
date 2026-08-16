@@ -58,3 +58,14 @@ The original measured TypeScript/browser failure set is burned down. The former
 catalogue-rehydration case is now an active browser receipt in
 `worker-bridge.test.ts`, with a fresh release-NAPI/fast-WASM run on the trusted
 catalogue-lineage persistence fix.
+
+## Manual starter E2E stabilization (not quarantine)
+
+- **Fresh-artifact starter matrix:** run the four local-first production-build
+  starters (`next-localfirst`, `sveltekit-localfirst`, `react-localfirst`, and
+  `ts-localfirst`) through `create-jazz-e2e` after `pnpm build:test-artifacts`.
+  The canary waits for each starter's accessible **Saved locally** acknowledgement
+  before reload, so it checks persistence after the documented Local-durability
+  boundary rather than an optimistic-render timing race. This manual/release
+  tracking item is explicitly excluded from the strict Rust and TypeScript
+  ignored-test accounting above: it adds no skip marker and no quarantined test.

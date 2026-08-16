@@ -13,6 +13,7 @@ async function addTodo(page: Page, title: string) {
   await page.getByLabel(TODO_INPUT_LABEL).fill(title);
   await page.getByRole("button", { name: "Add" }).click();
   await expect(page.getByText(title)).toBeVisible({ timeout: TIMEOUT });
+  await expect(page.getByRole("status")).toHaveText("Saved locally", { timeout: TIMEOUT });
 }
 
 test("recovery phrase round-trips the local-first identity", async ({ page }) => {

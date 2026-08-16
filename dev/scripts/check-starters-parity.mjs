@@ -250,6 +250,43 @@ function checkSharedReadmeBlocks() {
   }
 }
 
+function checkSaveLifecycleContracts() {
+  for (const [framework, dirs] of Object.entries(STARTERS)) {
+    const widgetPath = {
+      next: "components/todo-widget.tsx",
+      sveltekit: "src/lib/TodoWidget.svelte",
+      react: "src/todo-widget.tsx",
+      ts: "src/todo-widget.ts",
+    }[framework];
+    for (const dir of dirs) {
+      const path = `${dir}/${widgetPath}`;
+      const content = read(path);
+      if (content === null) continue;
+      for (const [description, pattern] of [
+        ["a save generation guard", /latestSaveGeneration/],
+        ["a pending local-save counter", /pending(?:Local)?SaveCount/],
+        ["a local failure acknowledgement", /Save failed locally/],
+        ["a lifecycle-state renderer", /renderLocalSaveState/],
+      ]) {
+        if (!pattern.test(content)) {
+          errors.push(`${path}: missing ${description}`);
+        }
+      }
+      if (framework === "ts") {
+        for (const [description, pattern] of [
+          ["an edge durability wait after local acknowledgement", /wait\(\{ tier: "edge" \}\)/],
+          ["an edge failure acknowledgement", /Saved locally; sync failed/],
+          ["a generation-guarded reset", /generation === latestSaveGeneration\) form\.reset/],
+        ]) {
+          if (!pattern.test(content)) {
+            errors.push(`${path}: missing ${description}`);
+          }
+        }
+      }
+    }
+  }
+}
+
 function checkAllStartersParity() {
   const allDirs = Object.values(STARTERS).flat();
   for (const rel of ALL_STARTERS_FILES) {
@@ -279,6 +316,7 @@ checkAllStartersParity();
 checkHonoServerPairs();
 checkReadmeStructure();
 checkSharedReadmeBlocks();
+checkSaveLifecycleContracts();
 
 if (errors.length > 0) {
   console.error("Starters parity check FAILED:\n");

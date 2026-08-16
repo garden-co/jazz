@@ -7,14 +7,17 @@
     "dev": "vite",
     "build": "tsc -p tsconfig.json && vite build",
     "preview": "vite preview",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "test:unit": "vitest run"
   },
   "dependencies": {
     "jazz-tools": "workspace:*"
   },
   "devDependencies": {
     "@playwright/test": "^1.58.2",
+    "jsdom": "^26.0.0",
     "typescript": "catalog:default",
-    "vite": "catalog:default"
+    "vite": "catalog:default",
+    "vitest": "catalog:default"
   }
 }
