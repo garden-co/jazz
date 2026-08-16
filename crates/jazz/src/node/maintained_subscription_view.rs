@@ -141,6 +141,11 @@ pub(crate) struct ResultTransitions {
     pub(crate) terminal_operations: Vec<TerminalOperation>,
     pub(crate) allow_storage_witness_fallback: bool,
     pub(crate) observed_result_delta_batches: usize,
+    /// A deletion-register witness changed while its anti-joined result
+    /// terminal may be silent. The caller must replace this tick with an
+    /// authoritative membership reconciliation, even if other terminals
+    /// produced deltas concurrently.
+    pub(crate) requires_authoritative_membership_reconcile: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -233,6 +238,12 @@ impl MaintainedSubscriptionView {
             return Ok(ResultTransitions::default());
         }
         let observed_result_delta_batch = !deltas.is_empty() && kind.is_result_terminal();
+        // Deletion witnesses are part of the membership proof: a current-row
+        // anti-join can become empty solely because its deletion-register
+        // input changed. Groove reports that change through the witness
+        // terminal even when the result-current terminal is silent.
+        let requires_authoritative_membership_reconcile =
+            !deltas.is_empty() && kind.requires_authoritative_membership_reconcile();
         let mut decode_plan_cache = VersionDecodePlanCache::new();
         let decoded = deltas
             .iter()
@@ -251,6 +262,8 @@ impl MaintainedSubscriptionView {
         if observed_result_delta_batch {
             transitions.observed_result_delta_batches += 1;
         }
+        transitions.requires_authoritative_membership_reconcile =
+            requires_authoritative_membership_reconcile;
         Ok(transitions)
     }
 
@@ -293,6 +306,8 @@ impl MaintainedSubscriptionView {
                 .extend(delta_transitions.structured_app_row_changes);
             transitions.observed_result_delta_batches +=
                 delta_transitions.observed_result_delta_batches;
+            transitions.requires_authoritative_membership_reconcile |=
+                delta_transitions.requires_authoritative_membership_reconcile;
         }
         Ok(transitions)
     }
@@ -1020,6 +1035,14 @@ impl MaintainedTerminalKind {
         matches!(
             self,
             MaintainedTerminalKind::ResultCurrent(_) | MaintainedTerminalKind::AggregateResult(_)
+        )
+    }
+
+    fn requires_authoritative_membership_reconcile(&self) -> bool {
+        matches!(
+            self,
+            MaintainedTerminalKind::VersionDeletion(_)
+                | MaintainedTerminalKind::ReplacementDeletion(_)
         )
     }
 }
@@ -2167,6 +2190,47 @@ mod tests {
                 "structured terminal operation descriptor disagrees with prepared root layout"
             ))
         ));
+    }
+
+    fn witness_schema() -> VersionWitnessSchema {
+        VersionWitnessSchema {
+            descriptor: RecordDescriptor::new(std::iter::empty::<(String, ValueType)>()),
+            identity: crate::node::query_engine::VersionIdentityFields {
+                table_field: "table".to_owned(),
+                row_field: "row_uuid".to_owned(),
+                tx_time_field: "tx_time".to_owned(),
+                tx_node_field: "tx_node_id".to_owned(),
+                batch_id_field: None,
+                branch_or_prefix_field: None,
+                row_digest_field: None,
+                schema_field: "schema_version".to_owned(),
+                layer_field: "layer".to_owned(),
+            },
+            created_by_field: "created_by".to_owned(),
+            created_at_field: "created_at".to_owned(),
+            updated_by_field: "updated_by".to_owned(),
+            updated_at_field: "updated_at".to_owned(),
+            parents_field: "parents".to_owned(),
+            authored_columns_field: "authored_columns".to_owned(),
+            deletion_field: "_deletion".to_owned(),
+            user_fields: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn deletion_witnesses_force_authoritative_membership_reconciliation() {
+        assert!(
+            MaintainedTerminalKind::VersionDeletion(witness_schema())
+                .requires_authoritative_membership_reconcile()
+        );
+        assert!(
+            MaintainedTerminalKind::ReplacementDeletion(witness_schema())
+                .requires_authoritative_membership_reconcile()
+        );
+        assert!(
+            !MaintainedTerminalKind::VersionContent(witness_schema())
+                .requires_authoritative_membership_reconcile()
+        );
     }
 
     fn table() -> TableSchema {
