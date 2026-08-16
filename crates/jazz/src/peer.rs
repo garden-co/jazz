@@ -581,6 +581,11 @@ impl PeerState {
             .subscriptions
             .get(&subscription)
             .and_then(|state| state.known_state.clone());
+        let previous_program_facts = self
+            .subscriptions
+            .get(&subscription)
+            .map(PeerSubscriptionState::program_fact_set)
+            .unwrap_or_default();
         let bundle_start = Instant::now();
         if trace_rehydrate {
             node.reset_storage_read_metrics();
@@ -601,6 +606,7 @@ impl PeerState {
                     known_state,
                     complete_exclusive_payloads: self.ship_complete_exclusive_payloads,
                     previous_result_set: previous_result_tx_ids,
+                    previous_program_facts,
                     result_member_adds,
                     result_member_removes,
                     program_fact_adds,
@@ -1010,6 +1016,7 @@ impl PeerState {
                 known_state: bundle_known_state,
                 complete_exclusive_payloads: self.ship_complete_exclusive_payloads,
                 previous_result_set: BTreeSet::new(),
+                previous_program_facts: BTreeSet::new(),
                 result_member_adds,
                 result_member_removes,
                 program_fact_adds,
@@ -1357,6 +1364,7 @@ impl PeerState {
                     known_state,
                     complete_exclusive_payloads: self.ship_complete_exclusive_payloads,
                     previous_result_set: BTreeSet::new(),
+                    previous_program_facts: BTreeSet::new(),
                     result_member_adds,
                     result_member_removes: Vec::new(),
                     program_fact_adds: Vec::new(),

@@ -8678,6 +8678,34 @@ where
                     )
                 })
             }));
+            row_entries.extend(program_facts.iter().filter_map(|fact| {
+                let ProgramFactEntry::ContributingMembers(contribution) = fact else {
+                    return None;
+                };
+                if contribution.role.as_deref() != Some("flat_tuple_source")
+                    || !row_result_set.contains(&contribution.result)
+                {
+                    return None;
+                }
+                contribution
+                    .contributor
+                    .as_real_row()
+                    .and_then(|contributor| {
+                        contributor.row_projection().map(|(table, row, tx)| {
+                            (
+                                (table.to_string(), row, tx),
+                                Some(RowVersionRefEntry {
+                                    tx,
+                                    schema_version: contributor.schema_version,
+                                    layer: contributor.layer,
+                                    batch: contributor.batch,
+                                    branch_or_prefix: contributor.branch_or_prefix.clone(),
+                                    row_digest: contributor.row_digest.clone(),
+                                }),
+                            )
+                        })
+                    })
+            }));
         }
         let mut rows = Vec::with_capacity(row_entries.len());
         for ((canonical_table, row_uuid, tx_id), relation_version) in row_entries {

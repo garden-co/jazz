@@ -132,6 +132,11 @@ impl OutputOccurrenceId {
         }
     }
 
+    /// Source rows contributed after the root, in declared join order.
+    pub(crate) fn joined_sources(&self) -> &[ObjectId] {
+        &self.joined
+    }
+
     /// Canonical positional bytes for terminal-state keys and consolidation.
     ///
     /// Each component is a fixed-width UUID, so concatenating root followed by

@@ -404,6 +404,38 @@ impl MaintainedSubscriptionView {
         self.versions.versions_by_tx(tx_id)
     }
 
+    /// Source records whose row identities occur in visible flat tuples.
+    /// The caller resolves each maintained record back to its authored history
+    /// version before publishing the result-to-contributor admission fact.
+    pub(crate) fn tuple_source_versions_for_members(
+        &self,
+        members: &[ResultMemberEntry],
+    ) -> Vec<(ResultMemberEntry, VersionRow)> {
+        let mut tuples = Vec::new();
+        for member in members {
+            let Some(occurrence) = member.output_occurrence_id() else {
+                continue;
+            };
+            let joined_rows = occurrence
+                .joined_sources()
+                .iter()
+                .map(|id| RowUuid(*id.uuid()))
+                .collect::<BTreeSet<_>>();
+            if joined_rows.is_empty() {
+                continue;
+            }
+            for weighted in self.versions.by_identity.values() {
+                if weighted.weight > 0
+                    && weighted.row.deletion().is_none()
+                    && joined_rows.contains(&weighted.row.row_uuid())
+                {
+                    tuples.push((member.clone(), weighted.row.clone()));
+                }
+            }
+        }
+        tuples
+    }
+
     pub(crate) fn replacement_for(
         &self,
         table: &str,

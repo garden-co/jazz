@@ -12,9 +12,9 @@ use super::*;
 use crate::ids::SchemaVersionId;
 use crate::node::maintained_subscription_view::MaintainedSubscriptionView;
 use crate::protocol::{
-    KnownStateDeclaration, PeerPayloadInventory, ProgramFactEntry, ResultMemberEntry,
-    RowVersionRef, VersionBundle, VersionBundleRef, VersionCarrier, VersionRecord,
-    build_version_carriers_from_singletons,
+    ContributingMembersEntry, KnownStateDeclaration, PeerPayloadInventory, ProgramFactEntry,
+    RealRowMemberEntry, ResultMemberEntry, ResultRowSource, RowVersionRef, VersionBundle,
+    VersionBundleRef, VersionCarrier, VersionRecord, build_version_carriers_from_singletons,
 };
 
 fn maintained_view_tx_versions_contain_winner(
@@ -145,6 +145,25 @@ fn relation_edge_version_rows_for_bundle(
         .collect()
 }
 
+fn contributing_member_version_rows_for_bundle(
+    facts: &[ProgramFactEntry],
+) -> BTreeSet<(String, RowUuid, TxId)> {
+    facts
+        .iter()
+        .filter_map(|fact| match fact {
+            ProgramFactEntry::ContributingMembers(contribution)
+                if contribution.role.as_deref() == Some("flat_tuple_source") =>
+            {
+                contribution
+                    .contributor
+                    .as_row()
+                    .map(|(table, row, tx)| (table.to_string(), row, tx))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 pub(crate) struct MaintainedViewBundleInputs<'a> {
     pub(crate) subscription: SubscriptionKey,
     /// Peer inventory of transactions whose full row-version payload has
@@ -157,6 +176,10 @@ pub(crate) struct MaintainedViewBundleInputs<'a> {
     /// use refreshed rows as a write base for later exclusive transactions.
     pub(crate) complete_exclusive_payloads: bool,
     pub(crate) previous_result_set: BTreeSet<TxId>,
+    /// Facts previously admitted on this subscription. Result-to-contributor
+    /// admissions are retired with their result member, rather than becoming
+    /// a durable general-history grant.
+    pub(crate) previous_program_facts: BTreeSet<ProgramFactEntry>,
     pub(crate) result_member_adds: Vec<ResultMemberEntry>,
     pub(crate) result_member_removes: Vec<ResultMemberEntry>,
     pub(crate) program_fact_adds: Vec<ProgramFactEntry>,
@@ -332,6 +355,7 @@ where
             known_state: None,
             complete_exclusive_payloads: false,
             previous_result_set,
+            previous_program_facts: BTreeSet::new(),
             identity,
             tier,
             maintained_facts: &maintained,
@@ -354,13 +378,55 @@ where
             result_member_adds,
             result_member_removes,
             mut program_fact_adds,
-            program_fact_removes,
+            mut program_fact_removes,
+            previous_program_facts,
             identity: _identity,
             tier: _tier,
             maintained_facts,
             allow_storage_witness_fallback,
         } = inputs;
         program_fact_adds.extend(maintained_facts.payload_facts_for_members(&result_member_adds));
+        for (result, maintained_version) in
+            maintained_facts.tuple_source_versions_for_members(&result_member_adds)
+        {
+            let canonical =
+                self.canonical_history_version_for_maintained_witness(&maintained_version)?;
+            let tx = self.version_tx_id(&canonical)?;
+            let schema_version = self
+                .schema_version_for_alias(canonical.schema_version_alias())
+                .ok_or(Error::InvalidStoredValue(
+                    "flat tuple source witness schema version alias must exist",
+                ))?;
+            let stored_tx = self
+                .query_transaction(tx)?
+                .ok_or(Error::MissingTransaction(tx))?;
+            let mut contributor = RealRowMemberEntry::current_content((
+                canonical.table.clone(),
+                canonical.row_uuid(),
+                tx,
+            ));
+            contributor.schema_version = Some(schema_version);
+            if let BranchLineage::Branch(branch) = stored_tx.tx.target_lineage {
+                contributor.branch_or_prefix = Some(branch.to_bytes());
+                contributor.source = ResultRowSource::Branch { branch: branch.0 };
+            }
+            program_fact_adds.push(ProgramFactEntry::ContributingMembers(
+                ContributingMembersEntry {
+                    result,
+                    contributor: contributor.into(),
+                    batch: Some(tx),
+                    role: Some("flat_tuple_source".to_owned()),
+                },
+            ));
+        }
+        program_fact_removes.extend(previous_program_facts.into_iter().filter(|fact| {
+            matches!(
+                fact,
+                ProgramFactEntry::ContributingMembers(contribution)
+                    if contribution.role.as_deref() == Some("flat_tuple_source")
+                        && result_member_removes.iter().any(|member| member == &contribution.result)
+            )
+        }));
         let program_fact_adds = program_fact_adds
             .into_iter()
             .collect::<BTreeSet<_>>()
@@ -417,12 +483,28 @@ where
                 }
                 None
             })
+            .chain(program_fact_adds.iter().filter_map(|fact| {
+                let ProgramFactEntry::ContributingMembers(contribution) = fact else {
+                    return None;
+                };
+                if contribution.role.as_deref() != Some("flat_tuple_source") {
+                    return None;
+                }
+                let contributor = contribution.contributor.as_real_row()?;
+                let (table, row, tx) = contributor.row_projection()?;
+                let version_ref = RowVersionRef::new(table.to_string(), row, tx);
+                known_state_exact_refs
+                    .contains(&version_ref)
+                    .then_some((table.to_string(), row))
+            }))
             .collect::<BTreeSet<_>>();
         let relation_edge_add_rows = relation_edge_version_rows_for_bundle(&program_fact_adds);
+        let contributing_add_rows = contributing_member_version_rows_for_bundle(&program_fact_adds);
         let wanted_add_rows_by_tx = row_result_adds
             .iter()
             .map(|(table, row_uuid, tx_id)| (table.to_string(), *row_uuid, *tx_id))
             .chain(relation_edge_add_rows)
+            .chain(contributing_add_rows)
             .fold(
                 BTreeMap::<TxId, BTreeSet<(String, RowUuid)>>::new(),
                 |mut by_tx, (table, row_uuid, tx_id)| {
