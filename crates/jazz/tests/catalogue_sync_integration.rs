@@ -2926,8 +2926,15 @@ async fn table_rename_join_query_translates_join_target_on_old_branch_impl() {
     server.shutdown().await;
 }
 
+/// A v2 reader reconstructs an array relation from canonical v1 rows after
+/// the root table was renamed from `users` to `people`.
+///
+/// alice ──v1 user + post──► edge ──canonical versions──► bob(v2)
+///
+/// `id` is the public spelling of Jazz's row UUID in correlations, so Alice
+/// supplies the same UUID for the row and the foreign-key value. The separate
+/// physical row identity must not be confused with an arbitrary user cell.
 #[tokio::test]
-#[ignore = "known red; tracked in TEST_BURNDOWN.md"]
 async fn table_rename_fk_array_lookup_finds_related_rows_on_old_branch() {
     tokio::task::LocalSet::new()
         .run_until(table_rename_fk_array_lookup_finds_related_rows_on_old_branch_impl())
@@ -2967,7 +2974,11 @@ async fn table_rename_fk_array_lookup_finds_related_rows_on_old_branch_impl() {
 
     let author_id = jazz::tools::ObjectId::new();
     let (author_row_id, _, batch_id) = alice
-        .insert("users", table_rename_join_user_values(author_id, "Alice"))
+        .insert_with_id(
+            "users",
+            *author_id.uuid(),
+            table_rename_join_user_values(author_id, "Alice"),
+        )
         .expect("alice creates v1 user");
     alice
         .wait_for_batch(

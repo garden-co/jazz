@@ -8325,7 +8325,13 @@ where
         // public CurrentRow boundary: subscriptions use the public terminal
         // shape, and native/WASM consumers must see the same layout from both
         // read paths.
-        if shape.query().flat_join.is_none() {
+        // Tree collectors own relation fields such as `posts` in their public
+        // app-row descriptor.  Those fields are not columns of the root
+        // table, so normalizing a structured result against that table would
+        // silently discard the recursive payload before the client can read
+        // it.  Flat rows still need this boundary to remove materializer-only
+        // physical fields.
+        if shape.query().flat_join.is_none() && shape.query().array_subqueries.is_empty() {
             normalize_public_current_rows(&table_schema, &mut rows)?;
         }
         let query = shape.query();
