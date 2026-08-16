@@ -1888,8 +1888,16 @@ async fn column_addition_new_client_can_read_old_rows_impl() {
     server.shutdown().await;
 }
 
+/// Alice writes under schema v1, Bob opens a v2 draft, and only the public
+/// migration publication makes Bob's schema readable. The draft must not expose
+/// Alice's v1 row before the lineage lens atomically activates it.
+///
+/// ```text
+/// admin ──publish v1──► server ◄── Alice writes v1 row
+/// admin ──publish v2 draft──► server ◄── Bob cannot read the row
+/// admin ──publish v1→v2 migration──► server ──► Bob reads projected row
+/// ```
 #[tokio::test]
-#[ignore = "known red; tracked in TEST_BURNDOWN.md"]
 async fn cannot_read_from_old_schema_until_lens_is_added() {
     tokio::task::LocalSet::new()
         .run_until(cannot_read_from_old_schema_until_lens_is_added_impl())
@@ -1901,16 +1909,7 @@ async fn cannot_read_from_old_schema_until_lens_is_added_impl() {
     let v1_schema = schema_v1();
     let v2_schema = schema_v2();
 
-    push_catalogue_in_memory(
-        server.server_state(),
-        server.app_id(),
-        "dev",
-        "main",
-        std::slice::from_ref(&v1_schema),
-        &[],
-    )
-    .await
-    .expect("push initial v1 catalogue");
+    seed_schema_catalogue(&server, &v1_schema).await;
     publish_allow_all_permissions(
         &server.base_url(),
         server.app_id(),
@@ -1940,23 +1939,7 @@ async fn cannot_read_from_old_schema_until_lens_is_added_impl() {
         .await
         .expect("alice user reaches edge");
 
-    push_catalogue_in_memory(
-        server.server_state(),
-        server.app_id(),
-        "dev",
-        "main",
-        &[v1_schema.clone(), v2_schema.clone()],
-        &[],
-    )
-    .await
-    .expect("push v2 schema without lens");
-    publish_allow_all_permissions(
-        &server.base_url(),
-        server.app_id(),
-        server.admin_secret(),
-        &v2_schema,
-    )
-    .await;
+    seed_schema_catalogue(&server, &v2_schema).await;
 
     let bob =
         JazzClient::connect(server.make_client_context_for_user(
@@ -1964,27 +1947,28 @@ async fn cannot_read_from_old_schema_until_lens_is_added_impl() {
             test_user_id("bob-schema-before-lens"),
         ))
         .await
-        .expect("connect bob");
+        .expect("connect bob with unpublished draft schema");
     let query = QueryBuilder::new("users").build();
-    assert_edge_query_does_not_include_row(
-        &bob,
-        query.clone(),
-        row_id,
-        Duration::from_secs(2),
-        "bob should not see v1 row before the lens arrives",
-    )
-    .await;
+    let pre_lens_deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let mut pre_lens_attempts = 0;
+    while tokio::time::Instant::now() < pre_lens_deadline {
+        pre_lens_attempts += 1;
+        let attempt = tokio::time::timeout(
+            Duration::from_millis(250),
+            bob.query(query.clone(), Some(DurabilityTier::EdgeServer)),
+        )
+        .await;
+        assert!(
+            matches!(attempt, Err(_)),
+            "v2 draft must remain unready and expose no query result before its lineage lens: {attempt:?}"
+        );
+    }
+    assert!(
+        pre_lens_attempts >= 4,
+        "must repeatedly exercise Bob's v2 query while the draft is unpublished"
+    );
 
-    push_catalogue_in_memory(
-        server.server_state(),
-        server.app_id(),
-        "dev",
-        "main",
-        &[v1_schema, v2_schema],
-        &[v1_to_v2_lens()],
-    )
-    .await
-    .expect("push v1 to v2 lens");
+    publish_v1_to_v2_catalogue_migration(&server).await;
     wait_for_edge_query_ready(&bob, "users", Duration::from_secs(30)).await;
 
     let rows = wait_for_query(
@@ -1992,7 +1976,7 @@ async fn cannot_read_from_old_schema_until_lens_is_added_impl() {
         query,
         Some(DurabilityTier::EdgeServer),
         Duration::from_secs(25),
-        "bob sees alice row after lens arrives",
+        "bob sees Alice's row after atomic v1-to-v2 migration publication",
         |rows| (rows.len() == 1 && rows[0].0 == row_id).then_some(rows),
     )
     .await;
