@@ -2365,6 +2365,17 @@ where
             remote_propagate_upstream,
             requires_authority_receipt,
         );
+        // An empty local opening carries no observable result information at
+        // an Edge/Global request.  Until the authority replies, publishing it
+        // would let a public subscription report a provisional empty view as
+        // its first delivery.  `awaits_initial_authority_response` is only
+        // known while opening a fresh upstream handle, but an already-open
+        // link has the same receipt requirement.
+        suppress_provisional_opening |= authorization_mode == QueryAuthorizationMode::ClientLocal
+            && remote_read_tier.is_some()
+            && !settled
+            && snapshot.root_count == 0
+            && snapshot.edges.is_empty();
         let (sender, receiver) = unbounded();
         let initial_outputs =
             subscription_outputs_with_occurrence_sidecar(&snapshot, &root_occurrence_ids)?;
@@ -6316,7 +6327,12 @@ where
             );
             let event = SubscriptionEvent::Delta {
                 reset: true,
-                publishable: true,
+                // Rebuilding a local maintained terminal during an Edge/Global
+                // opening must not leak a second provisional empty reset. The
+                // initial opener already suppressed it; runtime replacement
+                // follows the same authority boundary. Non-empty optimistic
+                // results and retractions remain observable as before.
+                publishable: settled || !reset_outputs.is_empty() || !removed.is_empty(),
                 added: reset_outputs,
                 updated: Vec::new(),
                 removed,
