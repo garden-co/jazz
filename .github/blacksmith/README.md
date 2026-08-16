@@ -17,11 +17,13 @@ Cross-VM reuse is explicit:
   role for trusted pushes.
   Remote write failures are observable in sccache statistics but do not fail a
   correct build when the job-local cache remains healthy.
-- Turbo remote caching is deliberately disabled until the experiment has a
-  dedicated least-privilege Vercel Remote Cache token. The broader deployment
-  token used by benchmark workflows must not be exposed to build subprocesses.
-  Turbo stores content-addressed outputs and logs declared by `turbo.json`; it
-  does not share mutable working directories.
+- Turbo remote caching uses a short-lived cache-only token obtained from Vercel
+  through GitHub Actions OIDC. The Vercel policy is restricted to this
+  repository, workflow, and experiment branch, and the workflow names that
+  policy and its `https://github.com/garden-co` audience explicitly. No Vercel
+  deployment token is exposed to build subprocesses. Turbo stores
+  content-addressed outputs and logs declared by `turbo.json`; it does not share
+  mutable working directories.
 - pnpm and Rust download/build caches use concurrency-safe GitHub Actions cache
   entries, transparently accelerated by Blacksmith.
 
