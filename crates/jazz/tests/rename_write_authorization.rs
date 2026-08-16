@@ -269,7 +269,6 @@ fn renamed_table_update_policy_uses_projected_parent_version() {
 /// bob   --insert people-------> server --write policy on v2 table--> accepted
 /// ```
 #[tokio::test(flavor = "current_thread")]
-#[ignore = "known red; tracked in TEST_BURNDOWN.md"]
 async fn renamed_table_insert_after_schema_evolution_reaches_edge() {
     tokio::task::LocalSet::new()
         .run_until(async {
