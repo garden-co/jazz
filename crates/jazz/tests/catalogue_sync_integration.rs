@@ -3048,7 +3048,6 @@ async fn table_rename_fk_array_lookup_finds_related_rows_on_old_branch_impl() {
 }
 
 #[tokio::test]
-#[ignore = "known red; tracked in TEST_BURNDOWN.md"]
 async fn local_join_query_uses_current_permissions_for_joined_provenance_after_lens_transform() {
     tokio::task::LocalSet::new().run_until(local_join_query_uses_current_permissions_for_joined_provenance_after_lens_transform_impl()).await
 }
