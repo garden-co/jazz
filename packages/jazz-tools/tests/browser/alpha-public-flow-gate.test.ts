@@ -122,7 +122,6 @@ describe("alpha public package flow", () => {
       list: "launch",
     });
     await expectTodoSummaries(db, ["Adopt alpha public flow:done", "Prove public imports:open"]);
-
     await db.delete(app.todos, second.id).wait({ tier: "local" });
     await expectTodoSummaries(db, ["Adopt alpha public flow:done"]);
     expect(await db.one(app.todos.where({ id: second.id }))).toBeNull();
@@ -688,6 +687,11 @@ describe("alpha public package flow", () => {
       list: "launch",
     });
     await expectTodoSummaries(db, ["Adopt alpha public flow:done", "Prove public imports:open"]);
+    await waitForSnapshotSummaries(
+      snapshots,
+      ["Adopt alpha public flow:done", "Prove public imports:open"],
+      "pre-delete subscribed todos",
+    );
 
     await withTimeout(
       db.delete(app.todos, secondRow.id).wait({ tier: "edge" }),
@@ -702,6 +706,15 @@ describe("alpha public package flow", () => {
       }),
     ).toBeNull();
 
+    // Edge settlement proves the committed read frontier, not that the
+    // independently scheduled application subscription callback has already
+    // consumed that frontier. Before releasing the subscription, wait for its
+    // required delivery of the post-delete view.
+    await waitForSnapshotSummaries(
+      snapshots,
+      ["Adopt alpha public flow:done"],
+      "post-delete retained todo",
+    );
     unsubscribe();
     expect(
       snapshots.some(
