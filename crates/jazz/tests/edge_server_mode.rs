@@ -42,6 +42,44 @@ fn ranked_todo_schema() -> Schema {
         .build()
 }
 
+/// The public stream deliberately carries no separate reset bit or serving-tier
+/// metadata: its first item is the reset reduction, and `pending` is its
+/// public settlement signal. Assert that that reduction is exact rather than
+/// merely checking its additions, so a stale replacement cannot hide beside a
+/// correctly ordered snapshot.
+fn assert_exact_settled_initial_reset(
+    label: &str,
+    delta: jazz::tools::OrderedRowDelta,
+    expected_ids: &[ObjectId],
+) {
+    assert!(
+        !delta.pending,
+        "{label} initial reset must be settled at the edge tier"
+    );
+    assert!(
+        delta.removed.is_empty(),
+        "{label} initial reset must not remove rows from an empty reduction: {:?}",
+        delta.removed
+    );
+    assert!(
+        delta.updated.is_empty(),
+        "{label} initial reset must not carry replacement updates: {:?}",
+        delta.updated
+    );
+    assert_eq!(
+        delta.added.len(),
+        expected_ids.len(),
+        "{label} initial reset has exactly the expected additions"
+    );
+    for (index, (added, expected_id)) in delta.added.iter().zip(expected_ids).enumerate() {
+        assert_eq!(added.index, index, "{label} reset position is exact");
+        assert_eq!(
+            added.id, *expected_id,
+            "{label} reset addition preserves default row-id order"
+        );
+    }
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn subscription_orders_by_unprojected_field() {
     tokio::task::LocalSet::new()
@@ -196,7 +234,6 @@ async fn maintained_unordered_limit_and_offset_windows_open_offline() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-#[ignore = "known red; tracked in TEST_BURNDOWN.md"]
 async fn public_root_default_order_and_windows_are_stable_across_reset() {
     tokio::task::LocalSet::new()
         .run_until(async {
@@ -249,15 +286,7 @@ async fn public_root_default_order_and_windows_are_stable_across_reset() {
             let SubscriptionStreamItem::Delta(first) = first else {
                 panic!("default root subscription was rejected");
             };
-            assert_eq!(
-                first
-                    .added
-                    .into_iter()
-                    .map(|row| row.id)
-                    .collect::<Vec<_>>(),
-                row_id_order,
-                "initial maintained reset preserves default root order"
-            );
+            assert_exact_settled_initial_reset("initial maintained reset", first, &row_id_order);
             drop(initial);
 
             let mut rehydrated = client
@@ -271,15 +300,7 @@ async fn public_root_default_order_and_windows_are_stable_across_reset() {
             let SubscriptionStreamItem::Delta(reset) = reset else {
                 panic!("rehydrated default root subscription was rejected");
             };
-            assert_eq!(
-                reset
-                    .added
-                    .into_iter()
-                    .map(|row| row.id)
-                    .collect::<Vec<_>>(),
-                row_id_order,
-                "rehydrated maintained reset preserves default root order"
-            );
+            assert_exact_settled_initial_reset("rehydrated maintained reset", reset, &row_id_order);
 
             for (query, expected) in [
                 (
@@ -302,15 +323,7 @@ async fn public_root_default_order_and_windows_are_stable_across_reset() {
                 let SubscriptionStreamItem::Delta(delta) = item else {
                     panic!("default-ordered window was rejected");
                 };
-                assert_eq!(
-                    delta
-                        .added
-                        .into_iter()
-                        .map(|row| row.id)
-                        .collect::<Vec<_>>(),
-                    expected,
-                    "maintained window follows the root default row-id order"
-                );
+                assert_exact_settled_initial_reset("maintained window reset", delta, &expected);
             }
 
             client.shutdown().await.expect("shutdown test client");
