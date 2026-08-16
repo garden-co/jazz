@@ -12839,6 +12839,36 @@ fn subscription_opening_publication_follows_upstream_coverage_lifecycle() {
 }
 
 #[test]
+fn local_tier_full_propagation_publishes_truthful_empty_opening() {
+    let schema = schema();
+    let client = open_db(0xc1, AuthorId::from_bytes([0xc1; 16]), &schema);
+    let query = Query::from("todos");
+
+    let mut subscription = prepared_subscribe(&client, &query, ReadOpts::default()).unwrap();
+    let event = subscription
+        .try_next_event()
+        .expect("Local tier must publish its local opening while propagation continues upstream");
+    let SubscriptionEvent::Delta {
+        reset,
+        publishable,
+        tier,
+        added,
+        updated,
+        removed,
+        ..
+    } = event
+    else {
+        panic!("Local tier opening must be a delta");
+    };
+    assert!(reset);
+    assert!(publishable);
+    assert_eq!(tier, DurabilityTier::Local);
+    assert!(added.is_empty());
+    assert!(updated.is_empty());
+    assert!(removed.is_empty());
+}
+
+#[test]
 fn malformed_authority_opening_keeps_shared_coverage_provisional() {
     let schema = schema();
     let client = open_db(0xc1, AuthorId::from_bytes([0xc1; 16]), &schema);

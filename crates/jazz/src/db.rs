@@ -2344,6 +2344,7 @@ where
             upstream_subscription_handles = opened.handles;
             suppress_provisional_opening = authorization_mode
                 == QueryAuthorizationMode::ClientLocal
+                && read_tier >= DurabilityTier::Edge
                 && opened.awaits_initial_authority_response
                 && snapshot.root_count == 0
                 && snapshot.edges.is_empty();
@@ -2390,6 +2391,7 @@ where
         // known while opening a fresh upstream handle, but an already-open
         // link has the same receipt requirement.
         suppress_provisional_opening |= authorization_mode == QueryAuthorizationMode::ClientLocal
+            && read_tier >= DurabilityTier::Edge
             && remote_read_tier.is_some()
             && !settled
             && snapshot.root_count == 0
