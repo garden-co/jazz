@@ -774,6 +774,11 @@ enum CurrentQueryProgramOutput {
 struct CurrentQuerySourceResolver<'a, S> {
     node: &'a mut NodeState<S>,
     read_view: &'a ReadView<RequestedSourceStage>,
+    /// A maintained trusted subscription must remain connected when its first
+    /// branch write materializes a sparse partition.  It receives an empty
+    /// process-local source at compile time; the durable partition is still
+    /// published only by the first write.
+    prepare_branch_subscription_sources: bool,
     inline_sources: BTreeMap<SourceId, Vec<CurrentRow>>,
     access_paths: BTreeMap<SourceId, CurrentAccessPath>,
     /// Query-local enum boundary targets, keyed by logical source.  Defining
@@ -1675,17 +1680,29 @@ where
             .node
             .physical_table_id_for_schema(self.read_view.read_schema, &request.source.table)
             .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
-        // The graph can name a sparse branch source before it has rows. The
-        // receiving ViewUpdate path provisions that physical partition before
-        // staging its first witness. A metadata-only receiver, however, has
-        // no such table and must expose its frozen base without creating a
-        // branch-content existence oracle; the rebuild on first witness
-        // reopens its maintained view against the live source.
         if !self
             .node
             .branches
             .branch_partitions
             .contains(&(table_id, branch_id))
+            && self.prepare_branch_subscription_sources
+        {
+            self.node
+                .prepare_branch_subscription_source_partition(
+                    &request.source.table,
+                    self.read_view.read_schema,
+                    branch_id,
+                )
+                .map_err(|_| source_resolution_error(request, SourceGap::BranchOverlay))?;
+        }
+        // Metadata-only readers intentionally do not receive an empty source
+        // table: exposing only the frozen base until their first authorized
+        // witness avoids turning sparse partition existence into metadata.
+        if self
+            .node
+            .database
+            .table_schema(&physical_branch_history_table_name(table_id, branch_id))
+            .is_err()
         {
             return Ok(CurrentSourceGraph {
                 graph: frozen_base,
@@ -6919,9 +6936,16 @@ where
     ) -> Result<QueryProgram, Error> {
         let trace_request = capability_trace_enabled().then(|| request.clone());
         let read_view = request.reads.primary.clone();
+        let prepare_branch_subscription_sources = request.authorization_mode
+            == QueryAuthorizationMode::TrustedServing
+            && request
+                .output
+                .facts
+                .contains(&ProgramFactKey::ResultMembership);
         let mut resolver = CurrentQuerySourceResolver {
             node: self,
             read_view: &read_view,
+            prepare_branch_subscription_sources,
             inline_sources,
             access_paths,
             current_projection_targets: BTreeMap::new(),
@@ -15809,6 +15833,7 @@ mod tests {
         let mut resolver = CurrentQuerySourceResolver {
             node: &mut node,
             read_view: &read_view,
+            prepare_branch_subscription_sources: false,
             inline_sources: BTreeMap::new(),
             access_paths: BTreeMap::new(),
             current_projection_targets: BTreeMap::new(),
@@ -18665,6 +18690,781 @@ mod tests {
         assert!(
             report.contains("BranchOverlay"),
             "unexpected capability report: {report}"
+        );
+    }
+
+    #[test]
+    fn branch_program_maintained_view_tracks_local_overlay_replacement() {
+        let (_dir, mut node) = open_node();
+        let branch_id = BranchId::from_bytes([0x43; 16]);
+        node.create_branch(branch_id).unwrap();
+        let issue = row(7);
+        node.commit_mergeable_on_branch(
+            branch_id,
+            MergeableCommit::new("issues", issue, 1_000).cells(BTreeMap::from([
+                ("title".to_owned(), Value::String("first title".to_owned())),
+                ("state".to_owned(), Value::String("open".to_owned())),
+                ("assignee".to_owned(), Value::Uuid(author(0xa1).0)),
+                ("priority".to_owned(), Value::U64(1)),
+            ])),
+        )
+        .unwrap();
+        let shape = Query::from("issues")
+            .validate(&node.catalogue.schema)
+            .unwrap();
+        let binding = shape.bind(BTreeMap::new()).unwrap();
+        let read_view = ReadViewSpec {
+            source: ReadViewSourceSpec::Branch {
+                branch: branch_id.0,
+            },
+            ..ReadViewSpec::default()
+        };
+        let (mut local, initial) = node
+            .open_maintained_view_subscription_in_authorization_mode(
+                &shape,
+                &binding,
+                AuthorId::SYSTEM,
+                DurabilityTier::Local,
+                &read_view,
+                None,
+                QueryAuthorizationMode::TrustedServing,
+            )
+            .unwrap();
+        assert_eq!(initial.root_count, 1);
+
+        node.commit_mergeable_on_branch(
+            branch_id,
+            MergeableCommit::new("issues", issue, 2_000).cells(BTreeMap::from([
+                ("title".to_owned(), Value::String("second title".to_owned())),
+                ("state".to_owned(), Value::String("open".to_owned())),
+                ("assignee".to_owned(), Value::Uuid(author(0xa1).0)),
+                ("priority".to_owned(), Value::U64(1)),
+            ])),
+        )
+        .unwrap();
+        let update = node
+            .drain_local_maintained_view_subscription(&mut local, None)
+            .unwrap()
+            .expect("branch overlay replacement must reach the maintained terminal");
+        assert!(
+            update.added.iter().any(|(_, row)| row.row_uuid() == issue),
+            "replacement must leave a current row in the maintained result"
+        );
+
+        node.commit_mergeable_on_branch(
+            branch_id,
+            MergeableCommit::new("issues", issue, 3_000).deletion(DeletionEvent::Deleted),
+        )
+        .unwrap();
+        let deletion = node
+            .drain_local_maintained_view_subscription(&mut local, None)
+            .unwrap()
+            .expect("branch deletion must reach the maintained terminal");
+        assert!(
+            deletion.removed.iter().any(|occurrence| {
+                *occurrence
+                    == crate::tools::OutputOccurrenceId::single_source(
+                        crate::tools::ObjectId::from_uuid(issue.0),
+                    )
+            }),
+            "branch deletion must retract the overlay row"
+        );
+
+        node.commit_mergeable_on_branch(
+            branch_id,
+            MergeableCommit::new("issues", issue, 4_000).deletion(DeletionEvent::Restored),
+        )
+        .unwrap();
+        let restoration = node
+            .drain_local_maintained_view_subscription(&mut local, None)
+            .unwrap()
+            .expect("branch restoration must reach the maintained terminal");
+        assert!(
+            restoration
+                .added
+                .iter()
+                .any(|(_, row)| row.row_uuid() == issue),
+            "branch restoration must reintroduce the overlay row"
+        );
+    }
+
+    #[test]
+    fn branch_program_maintained_view_survives_first_overlay_partition_write() {
+        let (_dir, mut node) = open_node();
+        let branch_id = BranchId::from_bytes([0x44; 16]);
+        let issue = row(7);
+        commit_global_issue(&mut node, 7, "open", author(0xa1), 1);
+        node.create_branch(branch_id).unwrap();
+        let table_id = node
+            .physical_table_id_for_schema(node.catalogue.current_schema_version_id, "issues")
+            .unwrap();
+        assert!(
+            !node
+                .branches
+                .branch_partitions
+                .contains(&(table_id, branch_id)),
+            "the durable sparse partition must not exist before the first overlay write"
+        );
+
+        let shape = Query::from("issues")
+            .validate(&node.catalogue.schema)
+            .unwrap();
+        let binding = shape.bind(BTreeMap::new()).unwrap();
+        let read_view = ReadViewSpec {
+            source: ReadViewSourceSpec::Branch {
+                branch: branch_id.0,
+            },
+            ..ReadViewSpec::default()
+        };
+        let (mut subscription, initial) = node
+            .open_maintained_view_subscription_in_authorization_mode(
+                &shape,
+                &binding,
+                AuthorId::SYSTEM,
+                DurabilityTier::Edge,
+                &read_view,
+                None,
+                QueryAuthorizationMode::TrustedServing,
+            )
+            .unwrap();
+        assert_eq!(
+            initial.root_count, 1,
+            "frozen base is available before overlay"
+        );
+        assert!(
+            !node
+                .branches
+                .branch_partitions
+                .contains(&(table_id, branch_id)),
+            "opening the maintained view must not publish a branch partition"
+        );
+
+        let first_overlay = node
+            .commit_mergeable_on_branch(
+                branch_id,
+                MergeableCommit::new("issues", issue, 2_000).cells(BTreeMap::from([
+                    (
+                        "title".to_owned(),
+                        Value::String("first overlay".to_owned()),
+                    ),
+                    ("state".to_owned(), Value::String("open".to_owned())),
+                    ("assignee".to_owned(), Value::Uuid(author(0xa1).0)),
+                    ("priority".to_owned(), Value::U64(7)),
+                ])),
+            )
+            .unwrap();
+        node.apply_fate_update(
+            first_overlay,
+            Fate::Accepted,
+            None,
+            Some(DurabilityTier::Edge),
+        )
+        .unwrap();
+        assert!(
+            node.branches
+                .branch_partitions
+                .contains(&(table_id, branch_id)),
+            "the first accepted overlay write must durably publish its partition"
+        );
+        let update = node
+            .drain_local_maintained_view_subscription(&mut subscription, None)
+            .unwrap()
+            .expect("first overlay write must keep the pre-existing subscription live");
+        assert!(
+            update.added.iter().any(|(_, row)| {
+                row.row_uuid() == issue
+                    && row.cell(node.table("issues").unwrap(), "title")
+                        == Some(Value::String("first overlay".to_owned()))
+            }),
+            "the first accepted overlay write must produce its exact replacement delta"
+        );
+    }
+
+    #[test]
+    fn branch_program_maintained_views_isolate_sibling_first_writes() {
+        let (_dir, mut node) = open_node();
+        let first_branch = BranchId::from_bytes([0x45; 16]);
+        let sibling_branch = BranchId::from_bytes([0x46; 16]);
+        let issue = row(7);
+        commit_global_issue(&mut node, 7, "open", author(0xa1), 1);
+        node.create_branch(first_branch).unwrap();
+        node.create_branch(sibling_branch).unwrap();
+
+        let shape = Query::from("issues")
+            .validate(&node.catalogue.schema)
+            .unwrap();
+        let binding = shape.bind(BTreeMap::new()).unwrap();
+        let first_view = ReadViewSpec {
+            source: ReadViewSourceSpec::Branch {
+                branch: first_branch.0,
+            },
+            ..ReadViewSpec::default()
+        };
+        let sibling_view = ReadViewSpec {
+            source: ReadViewSourceSpec::Branch {
+                branch: sibling_branch.0,
+            },
+            ..ReadViewSpec::default()
+        };
+        let (mut first_subscription, first_initial) = node
+            .open_maintained_view_subscription_in_authorization_mode(
+                &shape,
+                &binding,
+                AuthorId::SYSTEM,
+                DurabilityTier::Edge,
+                &first_view,
+                None,
+                QueryAuthorizationMode::TrustedServing,
+            )
+            .unwrap();
+        let (mut sibling_subscription, sibling_initial) = node
+            .open_maintained_view_subscription_in_authorization_mode(
+                &shape,
+                &binding,
+                AuthorId::SYSTEM,
+                DurabilityTier::Edge,
+                &sibling_view,
+                None,
+                QueryAuthorizationMode::TrustedServing,
+            )
+            .unwrap();
+        assert_eq!(first_initial.root_count, 1);
+        assert_eq!(sibling_initial.root_count, 1);
+
+        let first_write = node
+            .commit_mergeable_on_branch(
+                first_branch,
+                MergeableCommit::new("issues", issue, 2_000).cells(BTreeMap::from([
+                    ("title".to_owned(), Value::String("first branch".to_owned())),
+                    ("state".to_owned(), Value::String("open".to_owned())),
+                    ("assignee".to_owned(), Value::Uuid(author(0xa1).0)),
+                    ("priority".to_owned(), Value::U64(7)),
+                ])),
+            )
+            .unwrap();
+        node.apply_fate_update(
+            first_write,
+            Fate::Accepted,
+            None,
+            Some(DurabilityTier::Edge),
+        )
+        .unwrap();
+        let first_update = node
+            .drain_local_maintained_view_subscription(&mut first_subscription, None)
+            .unwrap()
+            .expect("first branch must receive its own accepted overlay update");
+        assert!(
+            first_update
+                .added
+                .iter()
+                .any(|(_, row)| row.row_uuid() == issue)
+        );
+        assert!(
+            node.drain_local_maintained_view_subscription(&mut sibling_subscription, None)
+                .unwrap()
+                .is_none(),
+            "a sibling branch subscription must not receive first branch deltas"
+        );
+    }
+
+    #[test]
+    fn branch_program_maintained_view_settles_overlay_fates_at_every_tier() {
+        for (tier, acceptance) in [
+            (DurabilityTier::Local, (None, DurabilityTier::Edge)),
+            (DurabilityTier::Edge, (None, DurabilityTier::Edge)),
+            (
+                DurabilityTier::Global,
+                (Some(GlobalSeq(4)), DurabilityTier::Global),
+            ),
+        ] {
+            let (_dir, mut node) = open_node();
+            let branch_id = BranchId::from_bytes([tier as u8 + 0x50; 16]);
+            let issue = row(7);
+            let frozen_only_issue = row(8);
+            commit_global_issue(&mut node, 7, "open", author(0xa1), 1);
+            commit_global_issue(&mut node, 8, "open", author(0xa1), 2);
+            node.create_branch(branch_id).unwrap();
+            let initial_overlay = node
+                .commit_mergeable_on_branch(
+                    branch_id,
+                    MergeableCommit::new("issues", issue, 2_500).cells(BTreeMap::from([
+                        (
+                            "title".to_owned(),
+                            Value::String("initial overlay".to_owned()),
+                        ),
+                        ("state".to_owned(), Value::String("open".to_owned())),
+                        ("assignee".to_owned(), Value::Uuid(author(0xa1).0)),
+                        ("priority".to_owned(), Value::U64(7)),
+                    ])),
+                )
+                .unwrap();
+            node.apply_fate_update(
+                initial_overlay,
+                Fate::Accepted,
+                Some(GlobalSeq(3)),
+                Some(DurabilityTier::Global),
+            )
+            .unwrap();
+
+            let shape = Query::from("issues")
+                .validate(&node.catalogue.schema)
+                .unwrap();
+            let binding = shape.bind(BTreeMap::new()).unwrap();
+            let read_view = ReadViewSpec {
+                source: ReadViewSourceSpec::Branch {
+                    branch: branch_id.0,
+                },
+                ..ReadViewSpec::default()
+            };
+            let (mut subscription, initial) = node
+                .open_maintained_view_subscription_in_authorization_mode(
+                    &shape,
+                    &binding,
+                    AuthorId::SYSTEM,
+                    tier,
+                    &read_view,
+                    None,
+                    QueryAuthorizationMode::TrustedServing,
+                )
+                .unwrap();
+            assert_eq!(
+                initial.root_count, 2,
+                "{tier:?} subscription must include the frozen base"
+            );
+
+            let replacement = node
+                .commit_mergeable_on_branch(
+                    branch_id,
+                    MergeableCommit::new("issues", issue, 3_000).cells(BTreeMap::from([
+                        (
+                            "title".to_owned(),
+                            Value::String("overlay title".to_owned()),
+                        ),
+                        ("state".to_owned(), Value::String("open".to_owned())),
+                        ("assignee".to_owned(), Value::Uuid(author(0xa1).0)),
+                        ("priority".to_owned(), Value::U64(7)),
+                    ])),
+                )
+                .unwrap();
+            if tier == DurabilityTier::Local {
+                assert!(
+                    node.drain_local_maintained_view_subscription(&mut subscription, None)
+                        .unwrap()
+                        .is_some(),
+                    "Local subscriptions must see pending branch writes"
+                );
+            } else {
+                assert!(
+                    node.drain_local_maintained_view_subscription(&mut subscription, None)
+                        .unwrap()
+                        .is_none(),
+                    "{tier:?} subscriptions must not expose pending branch writes"
+                );
+            }
+            node.apply_fate_update(
+                replacement,
+                Fate::Accepted,
+                acceptance.0,
+                Some(acceptance.1),
+            )
+            .unwrap();
+            if tier >= DurabilityTier::Edge {
+                let update = node
+                    .drain_local_maintained_view_subscription(&mut subscription, None)
+                    .unwrap()
+                    .expect("accepted branch replacement must reach the requested tier");
+                assert!(update.added.iter().any(|(_, row)| row.row_uuid() == issue));
+            }
+
+            let deletion = node
+                .commit_mergeable_on_branch(
+                    branch_id,
+                    MergeableCommit::new("issues", frozen_only_issue, 4_000)
+                        .deletion(DeletionEvent::Deleted),
+                )
+                .unwrap();
+            let deletion_acceptance = match tier {
+                DurabilityTier::Global => (Some(GlobalSeq(5)), DurabilityTier::Global),
+                _ => (None, DurabilityTier::Edge),
+            };
+            if tier == DurabilityTier::Local {
+                let pending_deletion = node
+                    .drain_local_maintained_view_subscription(&mut subscription, None)
+                    .unwrap()
+                    .expect("Local branch deletion must publish while pending");
+                assert!(pending_deletion.removed.iter().any(|occurrence| {
+                    *occurrence
+                        == crate::tools::OutputOccurrenceId::single_source(
+                            crate::tools::ObjectId::from_uuid(frozen_only_issue.0),
+                        )
+                }));
+            } else {
+                assert!(
+                    node.drain_local_maintained_view_subscription(&mut subscription, None)
+                        .unwrap()
+                        .is_none(),
+                    "{tier:?} subscriptions must not expose pending branch deletion"
+                );
+            }
+            node.apply_fate_update(
+                deletion,
+                Fate::Accepted,
+                deletion_acceptance.0,
+                Some(deletion_acceptance.1),
+            )
+            .unwrap();
+            if tier >= DurabilityTier::Edge {
+                let deletion_update = node
+                    .drain_local_maintained_view_subscription(&mut subscription, None)
+                    .unwrap()
+                    .expect("accepted branch deletion must reach the requested tier");
+                assert!(
+                    deletion_update.removed.iter().any(|occurrence| {
+                        *occurrence
+                            == crate::tools::OutputOccurrenceId::single_source(
+                                crate::tools::ObjectId::from_uuid(frozen_only_issue.0),
+                            )
+                    }),
+                    "{tier:?} branch deletion must mask frozen-base membership"
+                );
+            }
+
+            let restoration = node
+                .commit_mergeable_on_branch(
+                    branch_id,
+                    MergeableCommit::new("issues", frozen_only_issue, 5_000)
+                        .deletion(DeletionEvent::Restored),
+                )
+                .unwrap();
+            let restoration_acceptance = match tier {
+                DurabilityTier::Global => (Some(GlobalSeq(6)), DurabilityTier::Global),
+                _ => (None, DurabilityTier::Edge),
+            };
+            if tier == DurabilityTier::Local {
+                let pending_restoration = node
+                    .drain_local_maintained_view_subscription(&mut subscription, None)
+                    .unwrap()
+                    .expect("Local branch restore must publish while pending");
+                assert!(
+                    pending_restoration
+                        .added
+                        .iter()
+                        .any(|(_, row)| row.row_uuid() == frozen_only_issue)
+                );
+            } else {
+                assert!(
+                    node.drain_local_maintained_view_subscription(&mut subscription, None)
+                        .unwrap()
+                        .is_none(),
+                    "{tier:?} subscriptions must not expose pending branch restore"
+                );
+            }
+            node.apply_fate_update(
+                restoration,
+                Fate::Accepted,
+                restoration_acceptance.0,
+                Some(restoration_acceptance.1),
+            )
+            .unwrap();
+            if tier >= DurabilityTier::Edge {
+                let restoration_update = node
+                    .drain_local_maintained_view_subscription(&mut subscription, None)
+                    .unwrap()
+                    .expect("accepted branch restore must reach the requested tier");
+                assert!(
+                    restoration_update
+                        .added
+                        .iter()
+                        .any(|(_, row)| row.row_uuid() == frozen_only_issue),
+                    "{tier:?} branch restore must re-expose the frozen base"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn branch_program_maintained_view_retracts_rejected_pending_overlay_versions() {
+        for tier in [
+            DurabilityTier::Local,
+            DurabilityTier::Edge,
+            DurabilityTier::Global,
+        ] {
+            let (_dir, mut node) = open_node();
+            let branch_id = BranchId::from_bytes([tier as u8 + 0x60; 16]);
+            let issue = row(7);
+            let rejected_only = row(9);
+            commit_global_issue(&mut node, 7, "open", author(0xa1), 1);
+            node.create_branch(branch_id).unwrap();
+            let accepted = node
+                .commit_mergeable_on_branch(
+                    branch_id,
+                    MergeableCommit::new("issues", issue, 2_500).cells(BTreeMap::from([
+                        (
+                            "title".to_owned(),
+                            Value::String("accepted overlay".to_owned()),
+                        ),
+                        ("state".to_owned(), Value::String("open".to_owned())),
+                        ("assignee".to_owned(), Value::Uuid(author(0xa1).0)),
+                        ("priority".to_owned(), Value::U64(7)),
+                    ])),
+                )
+                .unwrap();
+            node.apply_fate_update(
+                accepted,
+                Fate::Accepted,
+                Some(GlobalSeq(3)),
+                Some(DurabilityTier::Global),
+            )
+            .unwrap();
+
+            let shape = Query::from("issues")
+                .validate(&node.catalogue.schema)
+                .unwrap();
+            let binding = shape.bind(BTreeMap::new()).unwrap();
+            let read_view = ReadViewSpec {
+                source: ReadViewSourceSpec::Branch {
+                    branch: branch_id.0,
+                },
+                ..ReadViewSpec::default()
+            };
+            let (mut subscription, initial) = node
+                .open_maintained_view_subscription_in_authorization_mode(
+                    &shape,
+                    &binding,
+                    AuthorId::SYSTEM,
+                    tier,
+                    &read_view,
+                    None,
+                    QueryAuthorizationMode::TrustedServing,
+                )
+                .unwrap();
+            assert!(initial.rows.iter().any(|current| {
+                current.row_uuid() == issue
+                    && current.cell(node.table("issues").unwrap(), "title")
+                        == Some(Value::String("accepted overlay".to_owned()))
+            }));
+
+            let rejected_replacement = node
+                .commit_mergeable_on_branch(
+                    branch_id,
+                    MergeableCommit::new("issues", issue, 3_000).cells(BTreeMap::from([
+                        (
+                            "title".to_owned(),
+                            Value::String("rejected replacement".to_owned()),
+                        ),
+                        ("state".to_owned(), Value::String("open".to_owned())),
+                        ("assignee".to_owned(), Value::Uuid(author(0xa1).0)),
+                        ("priority".to_owned(), Value::U64(8)),
+                    ])),
+                )
+                .unwrap();
+            if tier == DurabilityTier::Local {
+                let pending = node
+                    .drain_local_maintained_view_subscription(&mut subscription, None)
+                    .unwrap()
+                    .expect("Local must expose a pending replacement");
+                assert!(pending.added.iter().any(|(_, current)| {
+                    current.row_uuid() == issue
+                        && current.cell(node.table("issues").unwrap(), "title")
+                            == Some(Value::String("rejected replacement".to_owned()))
+                }));
+            } else {
+                assert!(
+                    node.drain_local_maintained_view_subscription(&mut subscription, None)
+                        .unwrap()
+                        .is_none(),
+                    "{tier:?} must not expose a pending replacement"
+                );
+            }
+            node.apply_fate_update(
+                rejected_replacement,
+                Fate::Rejected(crate::tx::RejectionReason::AuthorizationDenied),
+                None,
+                None,
+            )
+            .unwrap();
+            if tier == DurabilityTier::Local {
+                let retracted = node
+                    .drain_local_maintained_view_subscription(&mut subscription, None)
+                    .unwrap()
+                    .expect("rejecting a pending replacement must restore the accepted winner");
+                assert!(retracted.added.iter().any(|(_, current)| {
+                    current.row_uuid() == issue
+                        && current.cell(node.table("issues").unwrap(), "title")
+                            == Some(Value::String("accepted overlay".to_owned()))
+                }));
+            } else {
+                assert!(
+                    node.drain_local_maintained_view_subscription(&mut subscription, None)
+                        .unwrap()
+                        .is_none(),
+                    "a rejected replacement must never perturb {tier:?}"
+                );
+            }
+
+            let rejected_insert = node
+                .commit_mergeable_on_branch(
+                    branch_id,
+                    MergeableCommit::new("issues", rejected_only, 4_000).cells(BTreeMap::from([
+                        (
+                            "title".to_owned(),
+                            Value::String("rejected insert".to_owned()),
+                        ),
+                        ("state".to_owned(), Value::String("open".to_owned())),
+                        ("assignee".to_owned(), Value::Uuid(author(0xa1).0)),
+                        ("priority".to_owned(), Value::U64(9)),
+                    ])),
+                )
+                .unwrap();
+            if tier == DurabilityTier::Local {
+                let pending = node
+                    .drain_local_maintained_view_subscription(&mut subscription, None)
+                    .unwrap()
+                    .expect("Local must expose a pending insert");
+                assert!(
+                    pending
+                        .added
+                        .iter()
+                        .any(|(_, current)| current.row_uuid() == rejected_only)
+                );
+            } else {
+                assert!(
+                    node.drain_local_maintained_view_subscription(&mut subscription, None)
+                        .unwrap()
+                        .is_none(),
+                    "{tier:?} must not expose a pending insert"
+                );
+            }
+            node.apply_fate_update(
+                rejected_insert,
+                Fate::Rejected(crate::tx::RejectionReason::AuthorizationDenied),
+                None,
+                None,
+            )
+            .unwrap();
+            if tier == DurabilityTier::Local {
+                let retracted = node
+                    .drain_local_maintained_view_subscription(&mut subscription, None)
+                    .unwrap()
+                    .expect("rejecting a pending insert must retract it");
+                assert!(retracted.removed.iter().any(|occurrence| {
+                    *occurrence
+                        == crate::tools::OutputOccurrenceId::single_source(
+                            crate::tools::ObjectId::from_uuid(rejected_only.0),
+                        )
+                }));
+            } else {
+                assert!(
+                    node.drain_local_maintained_view_subscription(&mut subscription, None)
+                        .unwrap()
+                        .is_none(),
+                    "a rejected insert must never perturb {tier:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn branch_program_tier_filter_preserves_claim_policy_fields() {
+        let schema = JazzSchema::new([TableSchema::new(
+            "rooms",
+            [
+                ColumnSchema::new("name", ColumnType::String),
+                ColumnSchema::new("join_code", ColumnType::String),
+            ],
+        )
+        .with_read_policy(Policy::shape(
+            Query::from("rooms").filter(eq(col("join_code"), claim("join_code"))),
+        ))
+        .with_write_policy(Policy::public())]);
+        let (_dir, mut node) =
+            open_node_with_uuid(NodeUuid::from_bytes([0x71; 16]), schema.clone());
+        let identity = author(0x72);
+        node.set_session_claims(
+            identity,
+            BTreeMap::from([(
+                "join_code".to_owned(),
+                Value::String("branch-secret".to_owned()),
+            )]),
+        );
+        let branch_id = BranchId::from_bytes([0x73; 16]);
+        node.create_branch(branch_id).unwrap();
+        let room = row(7);
+        let tx_id = node
+            .commit_mergeable_on_branch(
+                branch_id,
+                MergeableCommit::new("rooms", room, 1_000).cells(BTreeMap::from([
+                    ("name".to_owned(), Value::String("branch room".to_owned())),
+                    (
+                        "join_code".to_owned(),
+                        Value::String("branch-secret".to_owned()),
+                    ),
+                ])),
+            )
+            .unwrap();
+        node.apply_fate_update(
+            tx_id,
+            Fate::Accepted,
+            Some(GlobalSeq(1)),
+            Some(DurabilityTier::Global),
+        )
+        .unwrap();
+        let shape = Query::from("rooms").validate(&schema).unwrap();
+        let binding = shape.bind(BTreeMap::new()).unwrap();
+        let rows = node
+            .query_rows_on_branch_query_engine(branch_id, &shape, &binding, identity)
+            .unwrap();
+        assert_eq!(
+            rows.iter().map(CurrentRow::row_uuid).collect::<Vec<_>>(),
+            vec![room]
+        );
+        let (_, snapshot) = node
+            .open_maintained_view_subscription_in_authorization_mode(
+                &shape,
+                &binding,
+                identity,
+                DurabilityTier::Global,
+                &ReadViewSpec {
+                    source: ReadViewSourceSpec::Branch {
+                        branch: branch_id.0,
+                    },
+                    ..ReadViewSpec::default()
+                },
+                None,
+                QueryAuthorizationMode::TrustedServing,
+            )
+            .unwrap();
+        assert_eq!(
+            snapshot
+                .rows
+                .iter()
+                .map(CurrentRow::row_uuid)
+                .collect::<Vec<_>>(),
+            vec![room]
+        );
+        let (_, local_snapshot) = node
+            .open_maintained_view_subscription_in_authorization_mode(
+                &shape,
+                &binding,
+                identity,
+                DurabilityTier::Global,
+                &ReadViewSpec {
+                    source: ReadViewSourceSpec::Branch {
+                        branch: branch_id.0,
+                    },
+                    ..ReadViewSpec::default()
+                },
+                None,
+                QueryAuthorizationMode::ClientLocal,
+            )
+            .unwrap();
+        assert_eq!(
+            local_snapshot
+                .rows
+                .iter()
+                .map(CurrentRow::row_uuid)
+                .collect::<Vec<_>>(),
+            vec![room]
         );
     }
 

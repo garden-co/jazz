@@ -884,6 +884,8 @@ async fn explicit_branch_subscription_should_match_claims_select_query() {
             let server = JazzServer::start_with_schema(schema.clone()).await;
             let branch = BranchId(uuid::Uuid::from_bytes([0x42; 16]));
             let branch_row = RowUuid(uuid::Uuid::from_bytes([0x43; 16]));
+            let sibling = BranchId(uuid::Uuid::from_bytes([0x44; 16]));
+            let sibling_row = RowUuid(uuid::Uuid::from_bytes([0x45; 16]));
             server
                 .seed_branch_row_for_test(
                     branch,
@@ -901,9 +903,29 @@ async fn explicit_branch_subscription_should_match_claims_select_query() {
                     ]),
                 )
                 .await;
+            server
+                .seed_branch_row_for_test(
+                    sibling,
+                    "rooms",
+                    sibling_row,
+                    BTreeMap::from([
+                        (
+                            "name".to_owned(),
+                            CoreValue::String("sibling branch room".to_owned()),
+                        ),
+                        (
+                            "join_code".to_owned(),
+                            CoreValue::String("branch-secret".to_owned()),
+                        ),
+                    ]),
+                )
+                .await;
 
             let branch_query = QueryBuilder::new("rooms")
                 .branch(branch.0.to_string())
+                .build();
+            let sibling_query = QueryBuilder::new("rooms")
+                .branch(sibling.0.to_string())
                 .build();
             let root_query = QueryBuilder::new("rooms").branch("main").build();
             let matching = TestingClient::builder()
@@ -924,6 +946,28 @@ async fn explicit_branch_subscription_should_match_claims_select_query() {
                     .iter()
                     .any(|(id, _)| *id == jazz::tools::ObjectId::from_uuid(branch_row.0)),
                 "branch query must traverse the selected branch view: {branch_rows:?}"
+            );
+            assert!(
+                branch_rows
+                    .iter()
+                    .all(|(id, _)| *id != jazz::tools::ObjectId::from_uuid(sibling_row.0)),
+                "one branch must not read its sibling's overlay: {branch_rows:?}"
+            );
+            let sibling_rows = matching
+                .query(sibling_query, Some(DurabilityTier::EdgeServer))
+                .await
+                .expect("matching claim queries sibling branch");
+            assert!(
+                sibling_rows
+                    .iter()
+                    .any(|(id, _)| *id == jazz::tools::ObjectId::from_uuid(sibling_row.0)),
+                "sibling branch query must see its own overlay: {sibling_rows:?}"
+            );
+            assert!(
+                sibling_rows
+                    .iter()
+                    .all(|(id, _)| *id != jazz::tools::ObjectId::from_uuid(branch_row.0)),
+                "sibling query must not reuse the first branch's cached result: {sibling_rows:?}"
             );
             let root_rows = matching
                 .query(root_query, Some(DurabilityTier::EdgeServer))

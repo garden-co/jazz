@@ -70,6 +70,145 @@ fn branch_read_is_base_snapshot_plus_overlay_writes() {
 }
 
 #[test]
+fn branch_target_commit_unit_is_visible_after_global_acceptance() {
+    let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
+    let (_core_dir, mut core) = open_history_complete_node_with_schema(node(2), schema());
+    let mut oracle = Oracle::new();
+    commit_global_and_oracle(
+        &mut writer,
+        &mut core,
+        &mut oracle,
+        MergeableCommit::new("todos", row(1), 10).cells(title_cells("frozen base")),
+    );
+    commit_global_and_oracle(
+        &mut writer,
+        &mut core,
+        &mut oracle,
+        MergeableCommit::new("todos", row(2), 11).cells(title_cells("delete then restore base")),
+    );
+
+    let branch_id = branch(0x71);
+    writer.create_branch(branch_id).unwrap();
+    core.create_branch(branch_id).unwrap();
+    let tx_id = writer
+        .commit_mergeable_on_branch(
+            branch_id,
+            MergeableCommit::new("todos", row(1), 20).cells(title_cells("accepted overlay")),
+        )
+        .unwrap();
+    let unit = writer.commit_unit_for(tx_id).unwrap();
+    let updates = core.apply_sync_message(unit).unwrap();
+    let [fate] = updates.as_slice() else {
+        panic!("core must emit exactly one branch fate update: {updates:?}");
+    };
+    let SyncMessage::FateUpdate {
+        tx_id: accepted,
+        fate: Fate::Accepted,
+        global_seq: Some(_),
+        durability: Some(DurabilityTier::Global),
+    } = fate
+    else {
+        panic!("branch commit must be globally accepted: {fate:?}");
+    };
+    assert_eq!(*accepted, tx_id);
+    writer.apply_sync_message(fate.clone()).unwrap();
+
+    let update_tx = writer
+        .commit_mergeable_on_branch(
+            branch_id,
+            MergeableCommit::new("todos", row(1), 30).cells(title_cells("accepted update")),
+        )
+        .unwrap();
+    let update_unit = writer.commit_unit_for(update_tx).unwrap();
+    let update_fates = core.apply_sync_message(update_unit).unwrap();
+    let [update_fate] = update_fates.as_slice() else {
+        panic!("core must emit exactly one update fate: {update_fates:?}");
+    };
+    assert!(matches!(
+        update_fate,
+        SyncMessage::FateUpdate {
+            tx_id,
+            fate: Fate::Accepted,
+            global_seq: Some(_),
+            durability: Some(DurabilityTier::Global),
+        } if *tx_id == update_tx
+    ));
+    writer.apply_sync_message(update_fate.clone()).unwrap();
+
+    let delete_tx = writer
+        .commit_mergeable_on_branch(
+            branch_id,
+            MergeableCommit::new("todos", row(2), 40).deletion(DeletionEvent::Deleted),
+        )
+        .unwrap();
+    let delete_unit = writer.commit_unit_for(delete_tx).unwrap();
+    let delete_fates = core.apply_sync_message(delete_unit).unwrap();
+    let [delete_fate] = delete_fates.as_slice() else {
+        panic!("core must emit exactly one deletion fate: {delete_fates:?}");
+    };
+    assert!(matches!(
+        delete_fate,
+        SyncMessage::FateUpdate {
+            tx_id,
+            fate: Fate::Accepted,
+            global_seq: Some(_),
+            durability: Some(DurabilityTier::Global),
+        } if *tx_id == delete_tx
+    ));
+    writer.apply_sync_message(delete_fate.clone()).unwrap();
+
+    let shape = Query::from("todos").validate(&core.catalogue.schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let deleted_rows = core
+        .query_rows_on_branch(branch_id, &shape, &binding)
+        .unwrap()
+        .into_iter()
+        .map(current_row_pair)
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(
+        deleted_rows,
+        BTreeMap::from([(row(1), title_cells("accepted update"))]),
+        "a branch deletion masks the frozen-base row"
+    );
+
+    let restore_tx = writer
+        .commit_mergeable_on_branch(
+            branch_id,
+            MergeableCommit::new("todos", row(2), 50).deletion(DeletionEvent::Restored),
+        )
+        .unwrap();
+    let restore_unit = writer.commit_unit_for(restore_tx).unwrap();
+    let restore_fates = core.apply_sync_message(restore_unit).unwrap();
+    let [restore_fate] = restore_fates.as_slice() else {
+        panic!("core must emit exactly one restoration fate: {restore_fates:?}");
+    };
+    assert!(matches!(
+        restore_fate,
+        SyncMessage::FateUpdate {
+            tx_id,
+            fate: Fate::Accepted,
+            global_seq: Some(_),
+            durability: Some(DurabilityTier::Global),
+        } if *tx_id == restore_tx
+    ));
+    writer.apply_sync_message(restore_fate.clone()).unwrap();
+    let restored_rows = core
+        .query_rows_on_branch(branch_id, &shape, &binding)
+        .unwrap()
+        .into_iter()
+        .map(current_row_pair)
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(
+        restored_rows,
+        BTreeMap::from([
+            (row(1), title_cells("accepted update")),
+            (row(2), title_cells("delete then restore base")),
+        ]),
+        "a branch restoration re-exposes the frozen base"
+    );
+}
+
+#[test]
 fn branch_read_filter_shape_uses_shared_branch_source_lowering() {
     let (_dir, mut core) = open_history_complete_node_with_schema(node(2), schema());
     let branch_id = branch(0x41);

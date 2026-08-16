@@ -2015,10 +2015,7 @@ where
         table: String,
         schema_version: SchemaVersionId,
         branch_id: BranchId,
-    ) -> Result<(), Error>
-    where
-        S: ReopenableStorage,
-    {
+    ) -> Result<(), Error> {
         let table_id = self.physical_table_id_for_schema(schema_version, &table)?;
         if !self
             .branches
@@ -2033,7 +2030,7 @@ where
             vec![Value::U64(table_id.0), Value::Uuid(branch_id.0)],
         );
         self.database.commit_batch(batch)?;
-        if let Err(rebuild_error) = self.rebuild_database_slot() {
+        if let Err(sync_error) = self.synchronize_physical_version_tables() {
             self.branches
                 .branch_partitions
                 .remove(&(table_id, branch_id));
@@ -2046,20 +2043,45 @@ where
                 ]),
             );
             self.database.commit_batch(rollback)?;
-            self.rebuild_database_slot()?;
-            return Err(rebuild_error);
+            return Err(sync_error);
         }
         Ok(())
+    }
+
+    /// Install an empty, process-local branch history source for an already
+    /// authorized maintained subscription.  The durable partition record stays
+    /// absent until its first branch write, but the IVM graph can subscribe to
+    /// a real empty table and therefore survives that first write without a
+    /// database rebuild or a source-shaped metadata oracle.
+    pub(super) fn prepare_branch_subscription_source_partition(
+        &mut self,
+        table: &str,
+        schema_version: SchemaVersionId,
+        branch_id: BranchId,
+    ) -> Result<(), Error> {
+        let table_id = self.physical_table_id_for_schema(schema_version, table)?;
+        if self
+            .branches
+            .branch_partitions
+            .contains(&(table_id, branch_id))
+        {
+            return Ok(());
+        }
+        self.branches
+            .branch_partitions
+            .insert((table_id, branch_id));
+        let result = self.synchronize_physical_version_tables();
+        self.branches
+            .branch_partitions
+            .remove(&(table_id, branch_id));
+        result
     }
 
     pub(super) fn ensure_branch_target_partitions(
         &mut self,
         branch_id: BranchId,
         versions: &[VersionRecord],
-    ) -> Result<(), Error>
-    where
-        S: ReopenableStorage,
-    {
+    ) -> Result<(), Error> {
         self.ensure_branch_open(branch_id)?;
         let partitions = versions
             .iter()
