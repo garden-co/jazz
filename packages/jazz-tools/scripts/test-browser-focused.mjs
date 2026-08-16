@@ -52,6 +52,11 @@ export function parseArgs(argv) {
 
 export function run(argv, spawn = spawnSync) {
   const { file, args } = parseArgs(argv);
+  const preflight = spawn("node", ["../../dev/artifacts/verify-correctness-test-artifacts.mjs"], {
+    cwd: fileURLToPath(new URL("..", import.meta.url)),
+    stdio: "inherit",
+  });
+  if ((preflight.status ?? 1) !== 0) return preflight.status ?? 1;
   const result = spawn("pnpm", args, {
     cwd: fileURLToPath(new URL("..", import.meta.url)),
     stdio: "inherit",

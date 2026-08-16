@@ -58,9 +58,7 @@ A **full-diff full recompute is sometimes correctness-preserving, not a failure*
 example, a permission change can make an old exclusive transaction newly
 visible, and the test expects exactly one `full_diff_recomputes_out`. Large reset
 rehydrates deliberately avoid a duplicate groove hydration and full-diff from
-stored peer state thereafter. There is no `LARGE_REHYDRATE_RESULT_ROWS` constant;
-the nearby `1024` constant in code is the large-value checkpoint operation
-interval, not a result-set rehydrate threshold.
+stored peer state thereafter. There is no `LARGE_REHYDRATE_RESULT_ROWS` constant.
 
 ### C.3 Current-row reads
 
@@ -71,9 +69,9 @@ global-current tables**, not a history argmax graph, while remaining
 semantically equivalent to visible current rows (`INV-PERF-7`,
 `visible_current_graph` / `write_global_current_update`, ch. 14). This makes
 cold current-only hydration **O(current rows), not O(history depth)** for
-degenerate whole-table global shapes (`INV-PERF-8`), addressing the S6 cold-load
-memory blowup by routing global current-row subscriptions through the
-global-current tables (receipt: `benches/cold_subscription.rs`).
+degenerate whole-table global shapes (`INV-PERF-8`) by routing global
+current-row subscriptions through the global-current tables (receipt:
+`benches/cold_subscription.rs`).
 
 **Implementation status (verified).**
 `denormalized_current_content_witness_matches_history_payload_bytes` verifies
@@ -93,10 +91,7 @@ JAZZ_PENDING_SIZES=0 cargo bench -p jazz --bench cold_subscription`): global
 current-row update wall time changed from 1.589 ms at depth 100 and 7.481 ms at
 depth 1000 to 0.986 ms and 0.945 ms. This receipt measures the current-row path,
 not historical history-read removal directly; both runs already reported zero
-history row reads in this phase. Smoke run `20260702T181821Z` records the write
-cost of the denormalized metadata: in `jazz/large_value_checkpointing`, one
-current-row write increased from 172 bytes to 217 bytes, and the total last
-commit write increased from 898 bytes to 943 bytes.
+history row reads in this phase.
 
 ### C.4 Levers and hot spots
 
@@ -124,8 +119,8 @@ Measurement categories stay separate so that a slow propagation path is not
 mistaken for a slow settlement path. The S4 "throughput regression" was a
 measurement conflation: retained baselines included per-commit peer refresh (~23
 tx/s) while refresh-suppressed engine throughput was much higher; the real issue
-is propagation fan-out, not settlement. Gates (`[needs: column-delta]`, `[needs:
-text-merge]`, `[needs: payload-inventory]`) stay _visibly_ gated, never silently
+is propagation fan-out, not settlement. Gates (`[needs: payload-inventory]`)
+stay _visibly_ gated, never silently
 counted as measured.
 
 ### C.6 Developer feedback throughput (implementation guidance)
@@ -325,7 +320,7 @@ Two work items:
   degenerate whole-table current-row subscriptions, or also simple filtered global
   queries answerable from global-current indexes?
 - 🔶 **Db-surface bench migration order.** With B1/B1.5 landed (S3 has a Db-surface
-  mode), decide which of S4/S5/S6/S7/S9 migrate to the public API next (ch. 13).
+  mode), decide which of S4/S5/S7/S9 migrate to the public API next (ch. 13).
 - 🔶 **Storage physics receipts.** The old storage-physics note is folded here:
   keep physical-layout, compaction/compression, WAL, and cold/warm-open work
   attached to benchmark receipts rather than unmeasured design claims.

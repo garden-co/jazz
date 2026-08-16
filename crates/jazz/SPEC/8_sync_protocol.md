@@ -12,19 +12,19 @@ deployment roles are chapter 9.
 Invariant digest:
 
 - `INV-SYNC-5`: A receiver applying a fate update MUST NOT move `global_seq` backward and MUST raise observed durability only by a supplied `Some(DurabilityTier)` claim using monotone max semantics; `None` MUST leave durability unchanged.
-- `INV-SYNC-7`: A `ViewUpdate` result set MUST be member-grained for result membership and typed-fact-grained for non-row program facts; it MUST NOT model subscription membership as a transaction-grained set. Ordinary current row entries are `ResultMemberEntry::Row(RealRowMemberEntry)` values with a `(table, row_uuid, content_tx_id)` projection. Synthetic payloads, relation/path, coverage, policy, predicate, and large-value material travel as typed `ProgramFactEntry` add/remove deltas. Relation facts MUST carry the dimensions needed by lowering (kind, versions, depth, edge id, branch, role, order, hole state) rather than requiring an opaque side channel.
+- `INV-SYNC-7`: A `ViewUpdate` result set MUST be member-grained for result membership and typed-fact-grained for non-row program facts; it MUST NOT model subscription membership as a transaction-grained set. Ordinary current row entries are `ResultMemberEntry::Row(RealRowMemberEntry)` values with a `(table, row_uuid, content_tx_id)` projection. Synthetic payloads, relation/path, coverage, policy, and predicate material travel as typed `ProgramFactEntry` add/remove deltas. Relation facts MUST carry the dimensions needed by lowering (kind, versions, depth, edge id, branch, role, order, hole state) rather than requiring an opaque side channel.
 - `INV-SYNC-8`: A view server MUST use `peer_payload_inventory.complete_tx_payloads` only for tx-level complete payloads covered by the peer payload inventory; payload dedup MUST be peer-scoped, not subscription-scoped, and partial bundles MUST remain eligible for later payload emission until complete-tx payload coverage is established.
 - `INV-SYNC-9`: A receiver MUST treat an unknown `peer_payload_inventory.complete_tx_payloads` reference as missing dedup knowledge and fall back to repair, while rejecting any result add whose transaction is unavailable or insufficiently witnessed for that subscription view.
 - `INV-SYNC-10`: A reset-result-set `ViewUpdate` MUST set `reset_result_set = true`; applying it MUST clear the receiver's settled subscription result set before applying the replacement result members and program facts.
 - `INV-SYNC-11`: Reset-result-set `ViewUpdate`s MUST preserve per-peer payload dedup when peer state survives, while resending the subscription result set as a complete replacement.
 - `INV-SYNC-12`: Downstream subscription view updates MUST contain accepted/settled state only and MUST NOT emit pending versions to non-origin peers.
-- `INV-SYNC-13`: Downstream view construction MUST apply the peer identity's read policy before emitting result-set entries, version bundles, complete tx payload refs, or content extents.
+- `INV-SYNC-13`: Downstream view construction MUST apply the peer identity's read policy before emitting result-set entries, version bundles, or complete tx payload refs.
 - `INV-SYNC-14`: A read-policy revocation MUST remove the affected row from future settled subscription result sets but MUST NOT require redaction of previously delivered local copies.
 - `INV-SYNC-15`: Exclusive transaction payloads MAY be delivered, stored, and participate partially at the transaction level; receiver-visible subscription state MUST expose them only when complete for the maintained subscription view being served, and partial fragments MUST NOT update whole-database current indexes.
 - `INV-SYNC-16`: A mergeable transaction MAY be delivered and applied partially; each visible mergeable version can contribute without waiting for `tx.n_total_writes`.
 - `INV-SYNC-17`: `ViewUpdate` emission for a result add MUST include enough deletion-register context to reconstruct visible absence/presence for that row.
+- `INV-SYNC-27`: Shared deletion-history storage is local representation only: sync payloads continue to identify deletion versions by logical table, row, transaction, schema and branch lineage, and receivers MUST resolve the sender's record through their own stable physical mapping.
 - `INV-SYNC-18`: An edge acting as mergeable fate authority MUST defer fate assignment until the relevant permission-scope subscription has settled for the writer and affected tables.
-- `INV-SYNC-19`: `FetchContentExtent` handling MUST reject an extent whose row context mismatches the requested row or whose content is not visible to the peer identity.
 - `INV-SYNC-20`: Incremental query view updates MUST be observationally equivalent to a full rehydrate for the same canonical program instance, including enter/leave churn within a single drain cycle and closure-row replacement.
 - `INV-SYNC-21`: Wire `TxId` and row-version payloads MUST use node UUIDs and schema version IDs, not node-local integer aliases.
 - `INV-SYNC-22`: An edge MUST share upstream permission-scope subscriptions whenever one settled subscription can satisfy every dependent acceptance gate.
@@ -34,6 +34,7 @@ Invariant digest:
 - `INV-SYNC-26`: A receiver detecting a referenced version without its body MUST be able to request exactly those `(table, row_uuid, tx_time, tx_node_id)` payloads, and the server MUST serve them subject to ordinary read policy. The repair vocabulary and server/client repair helpers are implemented and activated for declared known-state subscriptions.
 - `INV-SYNC-27`: A fast known-state declaration MUST only be made for contiguously applied, unevicted served streams; any local eviction touching stored row-version bodies invalidates persisted fast declarations before another declaration can be made.
 - `INV-SYNC-29`: A fast known-state declaration carrying authorization progress may suppress a reset for a pre-cursor membership difference only when its server-stamped authorization-progress token matches the serving peer's current token for that reader and canonical binding view. `crates/jazz/src/peer.rs::tests::fast_authorization_progress_bounds_membership_resets` enforces both bounds.
+- `INV-SYNC-30`: `settled_through` is a durable canonical-view history cursor for known-state payload dedup and repair, not a subscription or one-shot coverage receipt. Edge/Global settlement and coverage additionally require a fresh confirming `ViewUpdate` from the selected continuously active upstream connection; disconnect, restart, edge switch, or any update from a nonselected upstream invalidates all selected-authority receipts immediately unless an exact recomputation closure is proven.
 - `INV-SYNC-28`: Structured-output wire v6 MUST carry authoritative terminal resets and typed root/path edits in atomic logical view updates, fragment only at the transport boundary, and provide no partial semantic-update path.
 - `INV-TX-2`: Committing an exclusive transaction MUST store the commit locally as `Fate::Pending` with `DurabilityTier::Local` and emit exactly one `SyncMessage::CommitUnit`.
 - `INV-TX-3`: A commit unit whose Transaction.ntotalwrites does not equal the delivered version count MUST be rejected by the fate authority as RejectionReason::MalformedCommit(...)...
@@ -120,7 +121,6 @@ The message variants and their payloads are:
 | `SubscribeRejected`                                                                | down           | `{ subscription: SubscriptionKey, reason: SubscribeRejectReason }`                                                                   |
 | `Unsubscribe`                                                                      | up             | `{ subscription: SubscriptionKey }`                                                                                                  |
 | `ViewUpdate`                                                                       | down           | `{ subscription, reset_result_set, version_bundles, peer_payload_inventory, result_member_adds/removes, program_fact_adds/removes }` |
-| `FetchContentExtent` / `ContentExtents`                                            | bulk lane      | `{ owner: LargeValueOwnerRef, extent }` / `{ extents: Vec<ContentExtent> }`                                                          |
 | `PublishSchemaWithLens` / `PublishLens` / `SetCurrentWriteSchema` / `CatalogueAck` | catalogue lane | ch. 10                                                                                                                               |
 
 A `VersionBundle`, carried in `ViewUpdate.version_bundles`, is `{ tx, versions,
@@ -201,7 +201,7 @@ typed result member), full transaction-payload coverage
 (`peer_payload_inventory.complete_tx_payloads` / `CompleteTxPayloadCoverage`),
 subscription-scoped exclusive completeness (`ViewCompleteExclusiveCoverage`),
 source/read-frontier coverage, policy decisions/witnesses, predicate output
-sets, and large-value extents. Subscription-scoped exclusive completeness is a
+sets. Subscription-scoped exclusive completeness is a
 visibility rule for a particular view, not a reusable tx-level reference.
 
 Receiver apply is single-mode at the semantic boundary. For each receiver apply
@@ -246,6 +246,14 @@ deletion-register witness to reconstruct the row's visible presence/absence.
 `INV-SYNC-20` — incremental view updates are observationally equivalent to a full
 reset `ViewUpdate` for the same canonical program instance (ch. 6).
 
+The universal deletion-history table is not a wire namespace. A commit still
+carries a logical table and a deletion `VersionRecord`; receiver catalogue
+admission resolves that table/schema to its receiver-local `PhysicalTableId` and
+persists the event under its local `(branch_lineage, physical_table_id, row)`
+prefix. A payload cannot choose or forge a physical id, and a shared storage
+layout never changes table-scoped sync or authorization semantics
+(`INV-SYNC-27`).
+
 ### 8.5 Subscription Attach, Reset, And Detach
 
 `Subscribe` attaches one usage-site subscription id to a registered shape and a
@@ -283,7 +291,7 @@ survives view reset and detach while peer state survives (`INV-SYNC-11`).
 
 Sync never emits view material before applying the receiving peer's read policy.
 During view construction, the peer identity's policy is checked before any result
-entry, bundle, ref, or content extent is emitted (`INV-SYNC-13`, ch. 7).
+entry, bundle, or ref is emitted (`INV-SYNC-13`, ch. 7).
 Revocation affects future delivery: it removes a row from future settled result
 sets but never redacts an already-delivered local copy (`INV-SYNC-14`).
 
@@ -328,11 +336,6 @@ Protocol size limits are enforced at the layer that can recover correctly:
   over-limit commit unit is rejected as
   `Fate::Rejected(MalformedCommit(_))`, the connection remains live, and later
   well-formed commit units may still settle.
-- A `ContentExtent` response is capped at 1 MiB of bytes per extent. This is a
-  bulk-lane semantic admission limit: it is comfortably above ch. 12's current
-  ~64 KiB blob chunk target while preventing one content response from becoming
-  an unbounded allocation. The content lane may split larger values into
-  multiple extents.
 - Structured-output v4 adds named `MAX_STRUCTURED_RESULT_DEPTH` and
   `MAX_STRUCTURED_RESULT_WIDTH` limits in `protocol_limits.rs`. A receiver MUST
   enforce both before recursively decoding/allocating an untrusted structured
@@ -386,14 +389,11 @@ reference-counted by dependent gates; this is covered by
 (`crates/jazz/tests/four_tier.rs`). Whether and how a broader scope can satisfy a
 narrower one remains an open design question below.
 
-### 8.10 Content extents and catalogue lanes
+### 8.10 Catalogue lane
 
-Large-value content uses a bulk lane rather than being forced through ordinary
-view payloads. A `FetchContentExtent` request is authorized against row context
-and read policy: an extent whose row mismatches the request or is not visible to
-the peer is refused (`INV-SYNC-19`, ch. 12). Catalogue messages
-(`PublishSchemaWithLens`, `PublishLens`, `SetCurrentWriteSchema`, `CatalogueAck`) share
-this protocol lane; their semantics are chapter 10.
+Catalogue messages (`PublishSchemaWithLens`, `PublishLens`,
+`SetCurrentWriteSchema`, `CatalogueAck`) share this protocol lane; their
+semantics are chapter 10.
 
 _Further invariants._ `INV-SYNC-21` — wire `TxId` and row-version payloads use
 node UUIDs and schema-version IDs, never node-local integer aliases (ch. 2).
@@ -465,12 +465,25 @@ expressible incremental repair and resets only if that repair cannot be encoded
 as normal additions/removals. Conversely, an authorization-token mismatch with
 only post-cursor additions is reconstructible and therefore must not reset.
 
-Every `ViewUpdate` carries `settled_through`, the serving node's applied global
-watermark when the update was assembled. Its meaning is per binding view: this
-update reflects every global change at or before that position for the served
-view. A stale cursor can under-claim knowledge and cause extra bodies to ship;
+Every `ViewUpdate` carries `settled_through`, the core-assigned global cursor
+through which the canonical binding view was evaluated. Its meaning is per
+binding view: this update reflects every global change at or before that
+position for the served view. It may be persisted and reused across reconnects
+or edges serving the same authoritative database lineage for known-state payload
+dedup and repair. It is not an active-connection receipt: a subscription is
+settled, and a usage-site one-shot attachment is remotely covered, only after
+the selected continuously live upstream connection has sent a fresh confirming
+`ViewUpdate`. Disconnect, client restart, edge switch, or applying any view
+update from a nonselected upstream immediately retires all selected-authority receipts and
+makes cached rows unsettled/local until the selected authority reconfirms. A stale cursor can
+under-claim knowledge and cause extra bodies to ship;
 it cannot over-claim because rows entering the view after `p` have membership
 settle positions after `p`, and therefore do not satisfy the skip rule below.
+After a nonselected update at cut `p`, a selected link's queued confirmation at
+an earlier cut cannot restore settlement; its confirming `settled_through` must
+reach at least `p`. The same floor applies to fallback-staged or deferred
+updates marked ineligible for an authority receipt, even if their link becomes
+selected before the update is finally applied.
 
 The serving side's skip rule is one comparison (`INV-SYNC-24`): a version body
 may be omitted iff the receiver's membership in it is believed — "row in the

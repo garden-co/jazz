@@ -8,7 +8,6 @@ function makeFakeDb(overrides: Record<string, unknown> = {}) {
   return {
     db: {
       setDevMode: vi.fn(),
-      subscribeAll: () => () => {},
       getConfig: () => ({
         appId: "app1",
         serverUrl: "http://server",
@@ -93,25 +92,7 @@ describe("installInspectorHost", () => {
     expect((window as any)[INSPECTOR_HOST_GLOBAL]).toBeUndefined();
   });
 
-  it("hands the overlay a stable channel into the host store with shutdown masked", () => {
-    const iframeWindow = { postMessage: () => {} } as unknown as Window;
-    const shutdown = vi.fn();
-    const fake = makeFakeDb({ shutdown });
-    installInspectorHost(fake.db, iframeWindow, "http://localhost");
-    const handle = (window as any)[INSPECTOR_HOST_GLOBAL];
-    const channel = handle.getSubscriptionChannel();
-    expect(typeof channel.subscribeAll).toBe("function");
-    // The overlay's client calls shutdown?.() on unmount — it must be masked so
-    // tearing down the overlay can never shut the host's store down.
-    expect(channel.shutdown).toBeUndefined();
-    expect(shutdown).not.toHaveBeenCalled();
-    // Stable identity: the client registry dedupes on channel identity, so
-    // every handle read must yield the same object.
-    expect(handle.getSubscriptionChannel()).toBe(channel);
-    expect(handle.getConnectionConfig().subscriptionChannel).toBe(channel);
-  });
-
-  it("publishes a config of appId + channel only — no credentials, server URL, or storage", () => {
+  it("publishes a persistent config that joins the host broker", () => {
     const iframeWindow = { postMessage: () => {} } as unknown as Window;
     const fake = makeFakeDb({
       getConfig: () => ({
@@ -125,36 +106,14 @@ describe("installInspectorHost", () => {
     });
     installInspectorHost(fake.db, iframeWindow, "http://localhost");
     const config = (window as any)[INSPECTOR_HOST_GLOBAL].getConnectionConfig();
-    expect(Object.keys(config).sort()).toEqual(["appId", "subscriptionChannel"]);
-    expect(config.appId).toBe("a");
-  });
-
-  it("binds the channel owner's Db asynchronously for an async-facade host", async () => {
-    const posts: any[] = [];
-    const iframeWindow = { postMessage: (m: any) => posts.push(m) } as unknown as Window;
-    const { db: ownerDb } = makeFakeDb();
-    const channel = {
-      subscribeAll: () => () => {},
-      ownerDb: () => Promise.resolve(ownerDb),
-    };
-    const facade = {
-      getConfig: () => ({ appId: "app1", secret: "seed" }),
-      getSubscriptionChannel: () => channel,
-    };
-
-    installInspectorHost(facade as any, iframeWindow, "http://localhost");
-
-    const handle = (window as any)[INSPECTOR_HOST_GLOBAL];
-    // Before the owner resolves: empty subscriptions, no crash.
-    expect(handle.getActiveSubscriptions()).toEqual([]);
-    expect(handle.getSubscriptionChannel().subscribeAll).toBeDefined();
-
-    await Promise.resolve();
-    await Promise.resolve();
-
-    expect((ownerDb as any).setDevMode).toHaveBeenCalledWith(true);
-    expect(handle.getActiveSubscriptions()[0].id).toBe("s1");
-    expect(handle.getWasmSchema()).toEqual({ todos: { columns: [] } });
-    expect(posts.length).toBeGreaterThan(0);
+    expect(config).toMatchObject({
+      appId: "a",
+      serverUrl: "http://server",
+      secret: "seed",
+      adminSecret: "adm",
+      driver: { type: "persistent", dbName: "a" },
+    });
+    expect(config.cookieSession).toBeUndefined();
+    expect(typeof config.runtimeSources.brokerWorkerUrl).toBe("string");
   });
 });

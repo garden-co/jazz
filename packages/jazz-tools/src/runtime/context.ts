@@ -5,7 +5,7 @@
 import type { StorageDriver, WasmSchema } from "../drivers/types.js";
 
 /**
- * Runtime source overrides for Jazz WASM startup.
+ * Runtime source overrides for Jazz WASM and worker startup.
  *
  * These are primarily used by browser and edge-style runtimes.
  */
@@ -13,12 +13,15 @@ export interface RuntimeSourcesConfig {
   /**
    * Base URL for Jazz runtime files.
    *
-   * When set, Jazz derives `jazz_wasm_bg.wasm`.
+   * When set, Jazz derives `jazz_wasm_bg.wasm` and the browser broker worker.
    */
   baseUrl?: string;
 
   /** Explicit URL for the WASM binary. Overrides `baseUrl`. */
   wasmUrl?: string;
+
+  /** Explicit URL for the browser broker SharedWorker entry script. Overrides `baseUrl`. */
+  brokerWorkerUrl?: string;
 
   /** Explicit in-memory WASM source bytes. Overrides URL-based resolution. */
   wasmSource?: BufferSource;

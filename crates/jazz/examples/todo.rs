@@ -59,7 +59,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             author: AuthorId::from_bytes([0xa1; 16]),
         },
         id_source: Some(Box::new(SeededRowIdSource::new(0x1111))),
-        large_value_checkpoint_op_interval: 1024,
     }))?;
 
     let insert_milk = db.insert("todos", todo_cells("buy milk", false))?;

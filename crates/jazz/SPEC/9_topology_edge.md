@@ -30,7 +30,7 @@ Invariant digest:
 - `INV-EDGE-11`: Fate and durability MUST remain separate axes: edge-accepted does not imply `DurabilityTier::Global`; receivers MUST raise observed durability only from explicit durability claims.
 - `INV-EDGE-12`: Edge authority and merge coordination MUST route upstream through core rather than directly between edges.
 - `INV-EDGE-13`: Resubmitting the same commit unit through another edge MUST be idempotent by `TxId` when the payload matches, and conflicting payloads with the same `TxId` MUST be rejected as `ConflictingCommitUnit`.
-- `INV-EDGE-14`: An edge cache MUST NOT evict fate-pending units, permission-scope results currently backing edge acceptance, parked commit families, large-value op metadata, or edge-accepted versions not yet globally durable.
+- `INV-EDGE-14`: An edge cache MUST NOT evict fate-pending units, permission-scope results currently backing edge acceptance, parked commit families, or edge-accepted versions not yet globally durable.
 - `INV-EDGE-15`: After eviction, an edge MUST recover required payloads through resubscription without assuming complete local history.
 - `INV-EDGE-16`: Duplicate merges of the same concurrent mergeable frontier MUST be legal (identical cells); when independent edge merges diverge, an upstream tier MUST reconcile them by folding over the de-duplicated raw head set (not by re-merging merged values), so `Counter` never double-counts a shared ancestor.
 - `INV-EDGE-17`: An edge permission-scope subscription MUST be keyed by `(policy_shape, writer_claim)` — the write policy's query shape bound to the writer's `claim("sub")` — and MUST NOT hydrate a whole-table scope. A public-write table (no write policy) opens no scope and settles immediately.
@@ -104,6 +104,13 @@ hydrates permission scopes, and core remains history-complete. Scenario smoke
 benches may collapse this into in-process nodes while preserving the same role
 boundaries; browser OPFS and worker ownership are integrability concerns, not
 alternate semantics.
+
+The main-thread client is deliberately non-durable: its authored transactions
+start at `Pending`/`None`. The worker relay persists the unchanged commit unit and
+returns `Pending`/`Local`; that durability acknowledgement does not assign fate.
+The relay forwards later Edge/Global durability and authority fates back over the
+same client-worker link. A worker without an upstream can therefore satisfy
+`Local` waits while Edge/Global waits remain unavailable.
 
 ### 9.3 Relays
 
@@ -222,10 +229,8 @@ a wire check.
 ### 9.8 Eviction and refetch
 
 An edge is a cache, so it may shed cold state — but only the regenerable kind.
-Cold globally-accepted row versions, large-value content extent bytes, and
-materialized checkpoint bytes are evictable. The pin set is never evictable:
-large-value op metadata a serving node needs for membership checks (ch. 12),
-fate-pending units, edge-accepted versions not yet globally durable (not
+Cold globally-accepted row versions are evictable. The pin set is never
+evictable: fate-pending units, edge-accepted versions not yet globally durable (not
 refetchable from core until they reach `Global`, §9.6), the scope results backing
 an acceptance gate (§9.5), and parked families (`INV-EDGE-14`, `INV-EDGE-15`).
 
@@ -234,8 +239,8 @@ than assuming complete local history (`INV-EDGE-15`).
 
 **Implementation status (verified 2026-07-27).** The current recovery path
 forgets evicted payload coverage and rehydrates; it is covered by
-`evicted_content_bytes_are_restored_by_fetch_and_known_state_rehydrate`
-(`crates/jazz/src/node/tests/content_store.rs`). The optional byte budget and
+`peer_eviction_forgets_payload_coverage_for_rehydrate`.
+The optional byte budget and
 write/settle-recency eviction policy are implementation details, not topology
 invariants.
 
@@ -260,8 +265,7 @@ rehydrates live session views under the selected policy.
 
 Client and edge cache limits are topology policy. Storage may evict cold
 coverage only when doing so preserves fate-pending units, authority evidence,
-large-value content needed by accepted rows, and enough resume/catalogue state to
-refetch accurately.
+enough resume/catalogue state to refetch accurately.
 
 ## Open Questions
 

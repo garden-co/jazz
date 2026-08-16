@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use crate::db::WireTransportAdapter;
@@ -19,6 +20,7 @@ use crate::tools::public_schema::Schema;
 #[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
 use crate::tools::server::CatalogueRocksDbStorage;
 use crate::tools::server::core_websocket_transport::WebSocketTransport;
+use crate::tools::server::core_websocket_transport::validate_catalogue_bootstrap_upstream_url;
 use crate::tools::server::routes;
 use crate::tools::server::{
     CatalogueMemoryStorage, DynCatalogueStorage, ServerState, ServerTopology, StoredCatalogue,
@@ -38,6 +40,23 @@ pub struct BuiltServer {
     #[cfg_attr(not(test), allow(dead_code))]
     pub state: Arc<ServerState>,
     pub app: Router,
+}
+
+impl BuiltServer {
+    /// Stop this server and wait until its owned runtime and durable storage
+    /// have been closed.
+    ///
+    /// A builder owns a shell even when it is used without the test-server
+    /// listener wrapper. Callers that reopen the same persistent path must use
+    /// this lifecycle boundary rather than relying on field drop order. The
+    /// close work runs on the server's dedicated lifecycle thread, so callers
+    /// may await this method from any async executor. The operation is
+    /// idempotent: subsequent calls return the terminal shutdown phase
+    /// recorded by the state.
+    pub async fn shutdown(&self) -> crate::tools::server::ShutdownPhase {
+        self.state.shutdown.request_shutdown();
+        self.state.run_shutdown_finalization().await
+    }
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -150,6 +169,14 @@ impl ServerBuilder {
             None => None,
         };
         validate_server_config(&auth_config, topology)?;
+        if topology == ServerTopology::Edge {
+            validate_catalogue_bootstrap_upstream_url(
+                self.upstream_url
+                    .as_deref()
+                    .expect("edge topology has an upstream URL"),
+                self.app_id,
+            )?;
+        }
         let jwt_verifier = build_jwt_verifier(&auth_config).await?;
         log_auth_config(&auth_config, topology);
 
@@ -164,7 +191,6 @@ impl ServerBuilder {
             core_server_shell_storage_config.clone(),
             topology,
         )?;
-        let edge_upstream_shell = core_server_shell.clone();
         let core_server_shell_storage_config = core_server_shell_storage_config.ok();
 
         let state = Arc::new(ServerState {
@@ -178,21 +204,21 @@ impl ServerBuilder {
             http_client,
             core_server_shell: std::sync::RwLock::new(core_server_shell),
             core_server_shell_storage_config,
+            dynamic_edge_upstream_ready: AtomicBool::new(true),
             shutdown: crate::tools::server::ShutdownController::new(self.shutdown_timeout),
         });
 
-        if let (ServerTopology::Edge, Some(upstream_url), Some(shell), Some(admin_secret)) = (
+        if let (ServerTopology::Edge, Some(upstream_url), Some(admin_secret)) = (
             topology,
             self.upstream_url.clone(),
-            edge_upstream_shell,
             state.auth_config.admin_secret.clone(),
         ) {
             spawn_edge_upstream_connector(
                 state.clone(),
-                shell,
                 upstream_url,
                 self.app_id,
                 admin_secret,
+                self.edge_cache_budget,
             );
         }
 
@@ -258,6 +284,12 @@ impl ServerBuilder {
             ServerSchemaMode::Dynamic => latest_catalogue_schema,
         };
         let Some(schema) = schema else {
+            if topology == ServerTopology::Edge {
+                return crate::tools::server::core_server_shell::ServerShellHandle::try_start_dynamic_edge_from_storage(
+                    storage_config?,
+                    self.edge_cache_budget,
+                );
+            }
             return Ok(None);
         };
         let storage_config = storage_config?;
@@ -378,10 +410,10 @@ fn test_schema_branches(schema: Option<&Schema>) -> Vec<String> {
 
 fn spawn_edge_upstream_connector(
     state: Arc<ServerState>,
-    shell: crate::tools::server::core_server_shell::ServerShellHandle,
     upstream_url: String,
     app_id: AppId,
     admin_secret: String,
+    edge_cache_budget: Option<EdgeCacheBudget>,
 ) {
     tokio::spawn(async move {
         let retry_delay = Duration::from_millis(100);
@@ -389,12 +421,39 @@ fn spawn_edge_upstream_connector(
             if state.shutdown.is_shutting_down() {
                 return;
             }
-            let wake_shell = shell.clone();
-            let wake = Arc::new(move || wake_shell.notify_activity());
             let auth = crate::tools::websocket_prelude_auth::AuthConfig {
                 admin_secret: Some(admin_secret.clone()),
                 ..Default::default()
             };
+            let shell = match state.core_server_shell() {
+                Some(shell) => shell,
+                None => match WebSocketTransport::connect_catalogue_bootstrap(
+                    &upstream_url,
+                    app_id,
+                    AuthorId::SYSTEM,
+                    auth.clone(),
+                )
+                .await
+                {
+                    Ok(snapshot) => {
+                        match state.start_dynamic_edge_shell(snapshot, edge_cache_budget) {
+                            Ok(shell) => shell,
+                            Err(error) => {
+                                info!("edge catalogue bootstrap pending: {}", error);
+                                tokio::time::sleep(retry_delay).await;
+                                continue;
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        info!("edge catalogue bootstrap pending: {}", error);
+                        tokio::time::sleep(retry_delay).await;
+                        continue;
+                    }
+                },
+            };
+            let wake_shell = shell.clone();
+            let wake = Arc::new(move || wake_shell.notify_activity());
             match WebSocketTransport::connect_with_wake(
                 &upstream_url,
                 app_id,
@@ -418,6 +477,7 @@ fn spawn_edge_upstream_connector(
                         .await
                         .is_ok()
                     {
+                        state.mark_dynamic_edge_upstream_ready();
                         shell.notify_activity();
                         return;
                     }
@@ -562,6 +622,373 @@ mod tests {
     use crate::tools::AppId;
     use crate::tools::server::catalogue::CatalogueStore;
 
+    async fn serve_for_dynamic_bootstrap(
+        built: BuiltServer,
+    ) -> (String, Arc<ServerState>, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let address = listener.local_addr().expect("test listener address");
+        let state = built.state.clone();
+        let task = tokio::spawn(async move {
+            axum::serve(listener, built.app)
+                .await
+                .expect("serve test server");
+        });
+        (format!("ws://{address}"), state, task)
+    }
+
+    fn dynamic_bootstrap_schema() -> crate::tools::public_schema::Schema {
+        crate::tools::public_schema::SchemaBuilder::new()
+            .table(
+                crate::tools::public_schema::TableSchema::builder("notes")
+                    .column("id", crate::tools::public_schema::ColumnType::Uuid)
+                    .column("body", crate::tools::public_schema::ColumnType::Text),
+            )
+            .build()
+    }
+
+    #[tokio::test]
+    async fn dynamic_edge_bootstraps_authenticated_catalogue_before_first_client() {
+        let app_id = AppId::from_name("dynamic-edge-bootstrap-first-client");
+        let auth = AuthConfig {
+            admin_secret: Some("bootstrap-secret".to_owned()),
+            ..Default::default()
+        };
+        let core = ServerBuilder::new(app_id)
+            .with_schema(dynamic_bootstrap_schema())
+            .with_auth_config(auth.clone())
+            .with_storage(StorageBackend::InMemory)
+            .build()
+            .await
+            .expect("build authority core");
+        let (core_url, core_state, core_task) = serve_for_dynamic_bootstrap(core).await;
+        let expected = core_state
+            .core_server_shell()
+            .expect("core has runtime shell")
+            .trusted_catalogue_snapshot_for_test()
+            .await
+            .expect("read authority catalogue");
+
+        // This uses the separate snapshot-only wire exchange: no downstream
+        // edge session or application schema exists before it succeeds.
+        let edge = ServerBuilder::new(app_id)
+            .with_auth_config(auth.clone())
+            .with_storage(StorageBackend::InMemory)
+            .with_upstream_url(core_url.clone())
+            .build()
+            .await
+            .expect("build blank dynamic edge");
+        assert!(edge.state.core_server_shell().is_none());
+        let (edge_url, edge_state, edge_task) = serve_for_dynamic_bootstrap(edge).await;
+
+        let ready_shell = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if let Some(shell) = edge_state.core_server_shell_for_client() {
+                    return shell;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("edge becomes ready from idle bootstrap");
+        assert_eq!(
+            ready_shell
+                .trusted_catalogue_snapshot_for_test()
+                .await
+                .expect("read adopted edge catalogue"),
+            expected,
+            "edge must adopt the authority genesis, lineage, and policy-bearing schema exactly"
+        );
+
+        // The first normal downstream connection is admitted only after Ready;
+        // it is deliberately a separate connection from bootstrap.
+        let client = WebSocketTransport::connect(
+            &edge_url,
+            app_id,
+            AuthorId::from_bytes([0x44; 16]),
+            crate::tools::websocket_prelude_auth::AuthConfig {
+                admin_secret: Some("bootstrap-secret".to_owned()),
+                ..Default::default()
+            },
+        )
+        .await;
+        assert!(
+            client.is_ok(),
+            "ready edge admits first normal client: {client:?}"
+        );
+
+        edge_task.abort();
+        core_task.abort();
+    }
+
+    /// A dynamically bootstrapped Edge may have adopted a catalogue before its
+    /// normal upstream session has been admitted. A downstream websocket in
+    /// that interval must receive RetryLater rather than create a write whose
+    /// final fate has no route back to its client session.
+    #[tokio::test]
+    async fn dynamic_edge_rejects_client_until_normal_upstream_session_is_attached() {
+        let app_id = AppId::from_name("dynamic-edge-client-before-upstream");
+        let auth = AuthConfig {
+            admin_secret: Some("bootstrap-secret".to_owned()),
+            ..Default::default()
+        };
+        let core = ServerBuilder::new(app_id)
+            .with_schema(dynamic_bootstrap_schema())
+            .with_auth_config(auth.clone())
+            .with_storage(StorageBackend::InMemory)
+            .build()
+            .await
+            .expect("build authority core");
+        let (_core_url, core_state, core_task) = serve_for_dynamic_bootstrap(core).await;
+        let snapshot = core_state
+            .core_server_shell()
+            .expect("core has runtime shell")
+            .trusted_catalogue_snapshot_for_test()
+            .await
+            .expect("read authority catalogue");
+
+        // The unreachable upstream keeps the ordinary connector in its retry
+        // loop. Publish only the authenticated snapshot as the narrow window
+        // that used to admit a client before that connector attached.
+        let edge = ServerBuilder::new(app_id)
+            .with_auth_config(auth.clone())
+            .with_storage(StorageBackend::InMemory)
+            .with_upstream_url("http://127.0.0.1:9")
+            .build()
+            .await
+            .expect("build blank dynamic edge");
+        edge.state
+            .start_dynamic_edge_shell(snapshot, None)
+            .expect("adopt dynamic edge catalogue");
+        assert!(edge.state.core_server_shell().is_some());
+        assert!(
+            edge.state.core_server_shell_for_client().is_none(),
+            "raw adopted shell is not externally Ready before normal upstream admission"
+        );
+        let (edge_url, _edge_state, edge_task) = serve_for_dynamic_bootstrap(edge).await;
+
+        let error = WebSocketTransport::connect(
+            &edge_url,
+            app_id,
+            AuthorId::from_bytes([0x44; 16]),
+            crate::tools::websocket_prelude_auth::AuthConfig {
+                admin_secret: Some("bootstrap-secret".to_owned()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("downstream admission waits for the normal upstream route");
+        assert!(
+            matches!(error, crate::tools::server::core_websocket_transport::WebSocketClientError::ServerRejected(ref message) if message.contains("bootstrapping") && message.contains("retry shortly")),
+            "unready dynamic edge must give retryable admission failure: {error}"
+        );
+
+        edge_task.abort();
+        core_task.abort();
+    }
+
+    #[tokio::test]
+    async fn dynamic_catalogue_bootstrap_rejects_wrong_authority_credential() {
+        let app_id = AppId::from_name("dynamic-edge-bootstrap-auth-denial");
+        let core = ServerBuilder::new(app_id)
+            .with_schema(dynamic_bootstrap_schema())
+            .with_auth_config(AuthConfig {
+                admin_secret: Some("right-secret".to_owned()),
+                ..Default::default()
+            })
+            .with_storage(StorageBackend::InMemory)
+            .build()
+            .await
+            .expect("build authority core");
+        let (core_url, _core_state, core_task) = serve_for_dynamic_bootstrap(core).await;
+        let error = WebSocketTransport::connect_catalogue_bootstrap(
+            core_url,
+            app_id,
+            AuthorId::SYSTEM,
+            crate::tools::websocket_prelude_auth::AuthConfig {
+                admin_secret: Some("wrong-secret".to_owned()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("wrong bootstrap credential must not obtain a catalogue");
+        assert!(
+            matches!(error, crate::tools::server::core_websocket_transport::WebSocketClientError::ServerRejected(ref message) if message.contains("AuthFailed")),
+            "unexpected bootstrap auth result: {error}"
+        );
+        core_task.abort();
+    }
+
+    #[tokio::test]
+    async fn dynamic_catalogue_bootstrap_requires_the_reserved_edge_identity() {
+        let app_id = AppId::from_name("dynamic-edge-bootstrap-identity-denial");
+        let core = ServerBuilder::new(app_id)
+            .with_schema(dynamic_bootstrap_schema())
+            .with_auth_config(AuthConfig {
+                admin_secret: Some("bootstrap-secret".to_owned()),
+                ..Default::default()
+            })
+            .with_storage(StorageBackend::InMemory)
+            .build()
+            .await
+            .expect("build authority core");
+        let (core_url, _core_state, core_task) = serve_for_dynamic_bootstrap(core).await;
+        let error = WebSocketTransport::connect_catalogue_bootstrap(
+            core_url,
+            app_id,
+            AuthorId::from_bytes([0x46; 16]),
+            crate::tools::websocket_prelude_auth::AuthConfig {
+                admin_secret: Some("bootstrap-secret".to_owned()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("normal privileged client identity must not request bootstrap");
+        assert!(
+            matches!(error, crate::tools::server::core_websocket_transport::WebSocketClientError::ServerRejected(ref message) if message.contains("AuthFailed")),
+            "bootstrap identity boundary returned {error}"
+        );
+        core_task.abort();
+    }
+
+    #[tokio::test]
+    async fn dynamic_catalogue_bootstrap_rejects_generic_backend_credential() {
+        let app_id = AppId::from_name("dynamic-edge-bootstrap-backend-denial");
+        let core = ServerBuilder::new(app_id)
+            .with_schema(dynamic_bootstrap_schema())
+            .with_auth_config(AuthConfig {
+                admin_secret: Some("bootstrap-admin-secret".to_owned()),
+                backend_secret: Some("ordinary-backend-secret".to_owned()),
+                ..Default::default()
+            })
+            .with_storage(StorageBackend::InMemory)
+            .build()
+            .await
+            .expect("build authority core");
+        let (core_url, _core_state, core_task) = serve_for_dynamic_bootstrap(core).await;
+        let error = WebSocketTransport::connect_catalogue_bootstrap(
+            core_url,
+            app_id,
+            AuthorId::SYSTEM,
+            crate::tools::websocket_prelude_auth::AuthConfig {
+                backend_secret: Some("ordinary-backend-secret".to_owned()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("backend credential must not read an authority catalogue");
+        assert!(
+            matches!(error, crate::tools::server::core_websocket_transport::WebSocketClientError::ServerRejected(ref message) if message.contains("AuthFailed")),
+            "generic backend credential crossed bootstrap boundary: {error}"
+        );
+        core_task.abort();
+    }
+
+    #[tokio::test]
+    async fn dynamic_edge_keeps_unready_after_malformed_snapshot_then_accepts_retry() {
+        let app_id = AppId::from_name("dynamic-edge-bootstrap-malformed-retry");
+        let auth = AuthConfig {
+            admin_secret: Some("bootstrap-secret".to_owned()),
+            ..Default::default()
+        };
+        let core = ServerBuilder::new(app_id)
+            .with_schema(dynamic_bootstrap_schema())
+            .with_auth_config(auth.clone())
+            .with_storage(StorageBackend::InMemory)
+            .build()
+            .await
+            .expect("build authority core");
+        let snapshot = core
+            .state
+            .core_server_shell()
+            .expect("core has shell")
+            .trusted_catalogue_snapshot_for_test()
+            .await
+            .expect("read authority snapshot");
+        let edge = ServerBuilder::new(app_id)
+            .with_auth_config(auth)
+            .with_storage(StorageBackend::InMemory)
+            .with_upstream_url("ws://127.0.0.1:9")
+            .build()
+            .await
+            .expect("build blank edge");
+        let mut malformed = snapshot.clone();
+        malformed.schemas.push(
+            malformed
+                .schemas
+                .first()
+                .expect("authority has genesis")
+                .clone(),
+        );
+        assert!(
+            edge.state
+                .start_dynamic_edge_shell(malformed, None)
+                .is_err()
+        );
+        assert!(
+            edge.state.core_server_shell().is_none(),
+            "failed adoption must not publish a shell to downstream clients"
+        );
+        assert!(
+            edge.state
+                .start_dynamic_edge_shell(snapshot.clone(), None)
+                .is_ok()
+        );
+        let first_shell = edge
+            .state
+            .core_server_shell()
+            .expect("retry publishes ready shell");
+        let second_shell = edge
+            .state
+            .start_dynamic_edge_shell(snapshot, None)
+            .expect("duplicate driver wake is idempotent");
+        assert_eq!(
+            first_shell
+                .trusted_catalogue_snapshot_for_test()
+                .await
+                .expect("read first ready shell"),
+            second_shell
+                .trusted_catalogue_snapshot_for_test()
+                .await
+                .expect("read duplicate-ready shell"),
+            "a duplicate bootstrap wake reuses the already-published shell"
+        );
+    }
+
+    #[tokio::test]
+    async fn blank_dynamic_edge_rejects_downstream_with_retry_later_until_ready() {
+        let app_id = AppId::from_name("dynamic-edge-unready-downstream");
+        let edge = ServerBuilder::new(app_id)
+            .with_auth_config(AuthConfig {
+                admin_secret: Some("edge-secret".to_owned()),
+                ..Default::default()
+            })
+            .with_storage(StorageBackend::InMemory)
+            .with_upstream_url("ws://127.0.0.1:9")
+            .build()
+            .await
+            .expect("build blank edge");
+        assert!(edge.state.core_server_shell().is_none());
+        let (edge_url, _edge_state, edge_task) = serve_for_dynamic_bootstrap(edge).await;
+        let error = WebSocketTransport::connect(
+            edge_url,
+            app_id,
+            AuthorId::from_bytes([0x45; 16]),
+            crate::tools::websocket_prelude_auth::AuthConfig {
+                admin_secret: Some("edge-secret".to_owned()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("unready edge must not admit a downstream session");
+        assert!(
+            matches!(error, crate::tools::server::core_websocket_transport::WebSocketClientError::ServerRejected(ref message) if message.contains("bootstrapping") && message.contains("retry shortly")),
+            "unready edge must return an explicit retry-later diagnosis: {error}"
+        );
+        edge_task.abort();
+    }
+
     #[tokio::test]
     async fn edge_upstream_mode_builds_with_admin_secret() {
         let app_id =
@@ -579,6 +1006,27 @@ mod tests {
             .await;
 
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn edge_builder_rejects_remote_plaintext_bootstrap_upstream() {
+        let result = ServerBuilder::new(AppId::from_name("edge-plaintext-bootstrap-rejected"))
+            .with_storage(StorageBackend::InMemory)
+            .with_auth_config(AuthConfig {
+                admin_secret: Some("admin-secret".to_owned()),
+                ..Default::default()
+            })
+            .with_upstream_url("http://core.example.test")
+            .build()
+            .await;
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("remote plaintext bootstrap must fail configuration"),
+        };
+        assert!(
+            error.contains("plaintext ws:// bootstrap"),
+            "error: {error}"
+        );
     }
 
     #[test]
@@ -742,7 +1190,7 @@ mod tests {
             )
             .build();
 
-        {
+        let retained_state = {
             let built = ServerBuilder::new(app_id)
                 .with_schema(schema.clone())
                 .with_storage(StorageBackend::RocksDb {
@@ -755,10 +1203,20 @@ mod tests {
             assert!(built.state.core_server_shell().is_some());
             assert!(data_dir.path().join(CATALOGUE_ROCKSDB_DIR).exists());
             assert!(data_dir.path().join(SERVER_SHELL_ROCKSDB_DIR).exists());
-        }
+            assert_eq!(
+                built.shutdown().await,
+                crate::tools::server::ShutdownPhase::StorageClosed,
+                "the public builder lifecycle must join the shell before its RocksDB path is reopened"
+            );
+            Arc::clone(&built.state)
+        };
+        assert!(
+            retained_state.core_server_shell().is_none(),
+            "shutdown must retire the shell even if request/router state outlives BuiltServer"
+        );
 
         let rebuilt = ServerBuilder::new(app_id)
-            .with_schema(schema)
+            .with_schema(schema.clone())
             .with_storage(StorageBackend::RocksDb {
                 path: data_dir.path().to_path_buf(),
             })
@@ -768,6 +1226,175 @@ mod tests {
 
         assert!(rebuilt.state.core_server_shell().is_some());
         assert!(data_dir.path().join(SERVER_SHELL_ROCKSDB_DIR).exists());
+        rebuilt.shutdown().await;
+
+        // Some direct builder consumers own only `BuiltServer` and use Rust
+        // scope exit as their lifecycle. Its last-shell fallback must join as
+        // well: this reopen has no timeout or sleep to mask an owner-thread
+        // race.
+        {
+            let dropped = ServerBuilder::new(app_id)
+                .with_schema(schema.clone())
+                .with_storage(StorageBackend::RocksDb {
+                    path: data_dir.path().to_path_buf(),
+                })
+                .build()
+                .await
+                .expect("build RocksDB server for direct-drop lifecycle");
+            assert!(dropped.state.core_server_shell().is_some());
+        }
+
+        let reopened_after_drop = ServerBuilder::new(app_id)
+            .with_schema(schema)
+            .with_storage(StorageBackend::RocksDb {
+                path: data_dir.path().to_path_buf(),
+            })
+            .build()
+            .await
+            .expect("reopen RocksDB server after direct builder drop");
+        assert!(reopened_after_drop.state.core_server_shell().is_some());
+        assert_eq!(
+            reopened_after_drop.shutdown().await,
+            crate::tools::server::ShutdownPhase::StorageClosed
+        );
+        drop(retained_state);
+    }
+
+    #[cfg(feature = "rocksdb")]
+    #[tokio::test]
+    async fn rocksdb_builder_reopens_after_first_shutdown_waiter_is_aborted() {
+        let data_dir = tempfile::TempDir::new().expect("temp data dir");
+        let app_id = AppId::from_name("rocksdb-server-shell-aborted-shutdown");
+        let schema = crate::tools::public_schema::SchemaBuilder::new()
+            .table(
+                crate::tools::public_schema::TableSchema::builder("todos")
+                    .column("id", crate::tools::public_schema::ColumnType::Uuid),
+            )
+            .build();
+        let built = ServerBuilder::new(app_id)
+            .with_schema(schema.clone())
+            .with_storage(StorageBackend::RocksDb {
+                path: data_dir.path().to_path_buf(),
+            })
+            .build()
+            .await
+            .expect("build RocksDB server");
+        let state = Arc::clone(&built.state);
+        let request = state
+            .shutdown
+            .try_enter_app_request()
+            .expect("running server accepts request");
+        state.shutdown.request_shutdown();
+
+        let first_state = Arc::clone(&state);
+        let first = tokio::spawn(async move { first_state.run_shutdown_finalization().await });
+        let mut phases = state.shutdown.subscribe();
+        while *phases.borrow_and_update()
+            != crate::tools::server::ShutdownPhase::DrainingConnections
+        {
+            phases
+                .changed()
+                .await
+                .expect("detached finalizer remains alive");
+        }
+        first.abort();
+        let _ = first.await;
+        drop(request);
+        assert_eq!(
+            state.run_shutdown_finalization().await,
+            crate::tools::server::ShutdownPhase::StorageClosed
+        );
+
+        let reopened = ServerBuilder::new(app_id)
+            .with_schema(schema)
+            .with_storage(StorageBackend::RocksDb {
+                path: data_dir.path().to_path_buf(),
+            })
+            .build()
+            .await
+            .expect("reopen RocksDB after aborted shutdown waiter");
+        assert_eq!(
+            reopened.shutdown().await,
+            crate::tools::server::ShutdownPhase::StorageClosed
+        );
+    }
+
+    #[cfg(feature = "rocksdb")]
+    #[test]
+    fn rocksdb_builder_shutdown_survives_initiating_runtime_drop() {
+        let data_dir = tempfile::TempDir::new().expect("temp data dir");
+        let app_id = AppId::from_name("rocksdb-server-shell-foreign-shutdown");
+        let schema = crate::tools::public_schema::SchemaBuilder::new()
+            .table(
+                crate::tools::public_schema::TableSchema::builder("todos")
+                    .column("id", crate::tools::public_schema::ColumnType::Uuid),
+            )
+            .build();
+        let (built, state, request) = {
+            let first_runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("first shutdown runtime");
+            let built = first_runtime
+                .block_on(
+                    ServerBuilder::new(app_id)
+                        .with_schema(schema.clone())
+                        .with_storage(StorageBackend::RocksDb {
+                            path: data_dir.path().to_path_buf(),
+                        })
+                        .build(),
+                )
+                .expect("build RocksDB server");
+            let state = Arc::clone(&built.state);
+            let request = state
+                .shutdown
+                .try_enter_app_request()
+                .expect("running server accepts request");
+            state.shutdown.request_shutdown();
+            first_runtime.block_on(async {
+                let first_state = Arc::clone(&state);
+                tokio::spawn(async move { first_state.run_shutdown_finalization().await });
+                let mut phases = state.shutdown.subscribe();
+                while *phases.borrow_and_update()
+                    != crate::tools::server::ShutdownPhase::DrainingConnections
+                {
+                    phases
+                        .changed()
+                        .await
+                        .expect("dedicated finalizer remains alive");
+                }
+            });
+            // Dropping `first_runtime` cancels the initiating caller after it
+            // has begun but before the request guard lets teardown progress.
+            (built, state, request)
+        };
+        drop(request);
+
+        let second_runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("second shutdown runtime");
+        let reopened = second_runtime.block_on(async {
+            assert_eq!(
+                tokio::time::timeout(std::time::Duration::from_secs(1), built.shutdown())
+                    .await
+                    .expect("later runtime reaches durable-close barrier"),
+                crate::tools::server::ShutdownPhase::StorageClosed
+            );
+            assert!(state.core_server_shell().is_none());
+            ServerBuilder::new(app_id)
+                .with_schema(schema)
+                .with_storage(StorageBackend::RocksDb {
+                    path: data_dir.path().to_path_buf(),
+                })
+                .build()
+                .await
+                .expect("reopen RocksDB after live shutdown")
+        });
+        assert_eq!(
+            second_runtime.block_on(reopened.shutdown()),
+            crate::tools::server::ShutdownPhase::StorageClosed
+        );
     }
 
     #[tokio::test]

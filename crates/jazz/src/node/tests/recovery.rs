@@ -68,7 +68,6 @@ fn open_receipt_counts_physical_recovery_scans_exactly() {
         schema,
         storage,
         false,
-        LARGE_VALUE_CHECKPOINT_OP_INTERVAL,
     )
     .unwrap();
 
@@ -96,7 +95,6 @@ fn open_receipt_attributes_catalogue_finalization_when_aliases_are_first_persist
         schema,
         storage,
         false,
-        LARGE_VALUE_CHECKPOINT_OP_INTERVAL,
     )
     .unwrap();
 
@@ -608,7 +606,6 @@ fn pending_replay_fixture_transaction(tx_id: TxId, made_by: AuthorId) -> Transac
         user_metadata_json: None,
         target_lineage: crate::tx::BranchLineage::Root,
         branch_merge: None,
-        merge_strategy: None,
     }
 }
 
@@ -649,6 +646,123 @@ fn legacy_pending_transaction_ids_for(
     }
     scan.tx_ids.sort();
     scan
+}
+
+// Replay discovery is an internal storage boundary, so a delegating failpoint
+// is the narrowest way to prove the public recovery API propagates an index
+// scan failure instead of interpreting it as an empty replay set.
+#[derive(Clone)]
+struct FailReplayScanStorage {
+    inner: MemoryStorage,
+    fail_scans: Rc<Cell<bool>>,
+}
+
+impl FailReplayScanStorage {
+    fn new(column_families: &[&str]) -> Self {
+        Self {
+            inner: MemoryStorage::new(column_families),
+            fail_scans: Rc::new(Cell::new(false)),
+        }
+    }
+}
+
+impl OrderedKvStorage for FailReplayScanStorage {
+    fn get(
+        &self,
+        cf: &ColumnFamilyName,
+        key: &Key,
+    ) -> Result<Option<StorageValue>, groove::storage::Error> {
+        self.inner.get(cf, key)
+    }
+
+    fn set(
+        &self,
+        cf: &ColumnFamilyName,
+        key: &Key,
+        value: &[u8],
+    ) -> Result<(), groove::storage::Error> {
+        self.inner.set(cf, key, value)
+    }
+
+    fn delete(&self, cf: &ColumnFamilyName, key: &Key) -> Result<(), groove::storage::Error> {
+        self.inner.delete(cf, key)
+    }
+
+    fn scan_range(
+        &self,
+        cf: &ColumnFamilyName,
+        start: &Key,
+        end: &Key,
+        visit: &mut ScanVisitor<'_>,
+    ) -> Result<(), groove::storage::Error> {
+        if self.fail_scans.replace(false) {
+            return Err(groove::storage::Error::InvalidStorageLayout(
+                "injected replay index scan failure".to_owned(),
+            ));
+        }
+        self.inner.scan_range(cf, start, end, visit)
+    }
+
+    fn scan_prefix(
+        &self,
+        cf: &ColumnFamilyName,
+        prefix: &Key,
+        visit: &mut ScanVisitor<'_>,
+    ) -> Result<(), groove::storage::Error> {
+        if self.fail_scans.replace(false) {
+            return Err(groove::storage::Error::InvalidStorageLayout(
+                "injected replay index scan failure".to_owned(),
+            ));
+        }
+        self.inner.scan_prefix(cf, prefix, visit)
+    }
+
+    fn write_many(&self, operations: &[WriteOperation<'_>]) -> Result<(), groove::storage::Error> {
+        self.inner.write_many(operations)
+    }
+
+    fn column_family_names(&self) -> Option<Vec<String>> {
+        self.inner.column_family_names()
+    }
+}
+
+impl ReopenableStorage for FailReplayScanStorage {
+    fn reopen(
+        mut self,
+        column_families: &[&str],
+    ) -> Result<Self, groove::storage::Error> {
+        self.inner = self.inner.reopen(column_families)?;
+        Ok(self)
+    }
+}
+
+#[test]
+fn pending_replay_index_scan_failure_is_not_treated_as_empty() {
+    let schema = schema();
+    let column_families = schema.column_families();
+    let column_family_refs = column_families
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let storage = FailReplayScanStorage::new(&column_family_refs);
+    let mut node_under_test = NodeState::new(node(1), schema, storage.clone()).unwrap();
+    let tx_id = node_under_test
+        .commit_mergeable(MergeableCommit::new("todos", row(4), 10).cells(title_cells("pending")))
+        .unwrap();
+
+    storage.fail_scans.set(true);
+    let error = node_under_test
+        .pending_transaction_ids_for(node(1), AuthorId::SYSTEM)
+        .unwrap_err();
+    assert!(error.to_string().contains("injected replay index scan failure"));
+
+    assert_eq!(
+        node_under_test
+            .pending_transaction_ids_for(node(1), AuthorId::SYSTEM)
+            .unwrap(),
+        vec![tx_id],
+        "a failed discovery scan must not clear replayable state"
+    );
 }
 
 #[test]
@@ -1001,7 +1115,6 @@ fn recovery_ignores_foreign_tx_ids_when_restoring_next_own_ingest_seq() {
                 user_metadata_json: None,
                 target_lineage: crate::tx::BranchLineage::Root,
                 branch_merge: None,
-            merge_strategy: None,
             },
             vec![version_record(
                 row(2),

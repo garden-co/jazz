@@ -12,9 +12,11 @@ usage() {
   cat >&2 <<'EOF'
 Usage: dev/t [--lib | --test TARGET] [--exact] FILTER [-- LIBTEST-OPTIONS...]
 
-Runs a focused Jazz test with -p jazz --no-default-features --features test.
-The default target is --lib.  --exact requires FILTER to be the fully-qualified
-test name reported by Cargo; without it FILTER is a substring.
+Runs exactly one focused Jazz test with -p jazz --no-default-features --features
+test. The default target is --lib. Cargo's --list inventory is authoritative:
+the wrapper resolves a unique canonical module-path test name from FILTER, then
+runs that resolved name with --exact. --exact requires FILTER itself to already
+be that full canonical name; without it FILTER is a literal substring.
 
 Examples:
   dev/t subscription::tests::reopens
@@ -129,12 +131,20 @@ if [[ -z "$matches" ]]; then
   exit 1
 fi
 match_count="$(printf '%s\n' "$matches" | grep -c . || true)"
+if ((match_count != 1)); then
+  echo "dev/t: filter must resolve exactly one test, but matched $match_count:" >&2
+  printf '%s\n' "$matches" >&2
+  echo "dev/t: use a longer module path or --exact with a canonical inventory name." >&2
+  exit 1
+fi
 printf 'dev/t: inventory matched %s test(s):\n%s\n' "$match_count" "$matches"
 
-run_args=(test "${cargo_args[@]}" "$filter" -- "${extra_args[@]}")
-if [[ "$exact" == true ]]; then
-  run_args+=(--exact)
-fi
+# Always execute the one canonical name selected from Cargo's own inventory.
+# This prevents Cargo's substring filter from silently broadening after a new
+# similarly named test is added, and makes a zero-test run impossible here.
+resolved_test="$matches"
+
+run_args=(test "${cargo_args[@]}" "$resolved_test" -- "${extra_args[@]}" --exact)
 printf 'dev/t: run command:'
 printf ' %q' cargo "${run_args[@]}"
 printf '\n'

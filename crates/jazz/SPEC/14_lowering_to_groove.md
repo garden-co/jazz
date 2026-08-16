@@ -21,10 +21,10 @@ Invariant digest:
 - `INV-LOWER-1`: Jazz schemas MUST be lowered into a `groove::schema::DatabaseSchema` before opening the node's `groove::db::Database`.
 - `INV-LOWER-2`: The physical content-history table for each `PhysicalTableId` MUST have composite primary key `(row_uuid, tx_time, tx_node_id)`.
 - `INV-LOWER-3`: Node-local aliases in `jazz_nodes.id` and `jazz_schema_versions.id` MUST NOT be wire identities; wire tx/schema references MUST use `NodeUuid` and `SchemaVersionId`.
-- `INV-LOWER-4`: Content and deletion-register versions MUST resolve through their schema's durable physical mapping to separate per-lineage tables; a single lowered version row MUST NOT contain both user cells and `_deletion`.
-- `INV-LOWER-5`: Visible current rows MUST be computed as current content winners anti-joined with current deletion winners where `_deletion == deleted`.
-- `INV-LOWER-6`: Local/non-global current-row lowering MUST use groove `arg_max_by` over `(tx_time, tx_node_id)` per `row_uuid` for both content and deletion-register tables.
-- `INV-LOWER-7`: Global current-row reads MUST use the physical lineage's content and register global-current tables, not scan full history, and MUST exclude rows whose register winner is `Deleted`.
+- `INV-LOWER-4`: Content versions MUST resolve through their schema's durable physical mapping while deletion-register versions resolve through the shared deletion-history relation by stable physical-table and branch lineage; a single immutable version row MUST NOT contain both user cells and `_deletion`.
+- `INV-LOWER-5`: Combined current rows MUST be maintained from independently selected content and deletion winners and expose an explicit visibility state.
+- `INV-LOWER-6`: Local/non-global current-row maintenance MUST use bounded per-row currency selection for both content and deletion history; deletion access MUST be prefix-bounded by branch lineage and physical table id.
+- `INV-LOWER-7`: Global current-row reads MUST use the physical lineage's combined global-current table, not scan immutable history or anti-join a register source.
 - `INV-LOWER-8`: `jazz_global_changes` MUST be keyed by `(physical_table_id, row_uuid, layer, global_seq)` and expose global-sequence and physical-table/global-sequence indexes.
 - `INV-LOWER-9`: Query lowering MUST begin from a resolved visible-current source and therefore MUST apply deletion visibility before user filters/joins/reachable traversal.
 - `INV-LOWER-10`: Parameterized query plans MUST be prepared as groove shapes with binding descriptor and stable name `jazz-query:<shape_id>`, then executed through `Database::bind_shape`; maintained subscription views with hidden routing provenance MUST prepare a clean output graph plus an internal routing graph through `Database::prepare_one_sink_with_routing`.
@@ -34,8 +34,7 @@ Invariant digest:
 - `INV-LOWER-14`: Sync query updates SHOULD consume maintained terminal facts for result membership, path/correlation coverage, payload/replacement/version witnesses, policy witnesses, and read-frontier settlement; query-row recompute paths are migration/oracle debt, not an alternate production engine.
 - `INV-LOWER-15`: Whole-table current-row sync views MUST be represented as the normal table-rooted row-set shape, not a separate current-row serving engine; their result set must match the node's lowered `current_rows` result while migration code still exists.
 - `INV-LOWER-16`: Exclusive predicate validation for non-degenerate shape predicates MUST compare predicate-output-set terminal facts for the shape+binding at `base_snapshot.global_base` to the corresponding current predicate-output-set facts.
-- `INV-LOWER-17`: `ColumnSchema::text` and `ColumnSchema::blob` MUST lower user cell storage to nullable `GrooveColumnType::Bytes`.
-- `INV-LOWER-18`: Counter merge strategy MUST NOT be accepted for nullable, non-integer, or large-value columns.
+- `INV-LOWER-18`: Counter merge strategy MUST NOT be accepted for nullable or non-integer columns.
 - `INV-LOWER-19`: Lowered record wrapper field indexes MUST match the groove schema record descriptors used at node open.
 - `INV-LOWER-20`: RLS policy declarations MUST be valid Jazz query shapes; read policy MUST lower through the query engine as part of the policy-composed read graph, while write-time acceptance MAY continue to evaluate policy predicates directly in `node/policy.rs` until write-policy prepared-shape lowering lands.
 - `INV-LOWER-21`: One-shot reads, live subscriptions, sync views, and transaction-validation reads MUST consume the same lowered semantic query program; callback/reset/retry/propagation behavior MUST NOT select a second evaluator or become part of query shape identity. Runtime consumers request compiler evidence as app rows plus named terminal facts.
@@ -43,6 +42,7 @@ Invariant digest:
 - `INV-LOWER-23`: Position-bounded historical cuts and branch-base reads MUST use the
   `by_table_global_seq` bounded range path when sound, returning the same rows as the
   full-scan currentness oracle while touching only the requested global-sequence range.
+- `INV-LOWER-29`: The shared deletion-history relation MUST expose seekable `(branch_lineage, physical_table_id, row_uuid)` and table-prefix access paths. No logical-table read, rebuild, or branch operation may lower to an unbounded scan over unrelated table lineages.
 - `INV-LOWER-24`: Dry-run policy probes and recursion seed hydration MUST use the same deterministic source access-path selection as ordinary one-shot reads, with equivalence to the full-scan path and counters proving the selected path.
 - `INV-LOWER-25`: A lens-projected maintained source MUST emit the same net weighted current-row and witness deltas as applying the selected natural lens path to the authoritative source.
 - `INV-LOWER-26`: A structured query MUST expose one authoritative terminal output relation. Groove MUST assemble nested paths into that terminal; a child change semantically replaces or patches its owning root output, and public carriers MUST NOT require a second relation-edge delta stream.
@@ -60,16 +60,6 @@ _above_ that substrate; it defines no independent storage or query engine for
 those concerns. A node opens its `groove::db::Database` from a lowered `groove`
 schema and never bypasses it for queryable record storage, current-row
 maintenance, or query/sync evaluation (`INV-LOWER-1`).
-
-There is one deliberate exception: **large-value content bytes** do not lower to
-groove's IVM machinery. Op-log _metadata_ lowers normally (it rides commit units
-as ordinary cells), but content bytes live in direct extent, metadata, and
-checkpoint stores below the IVM layer (ch. 12). The boundary is precise:
-anything queryable lowers to groove; anything only ever ranged-read lives in the
-content stores. Query and sync row results carry large-value handles, not bodies. Value-returning APIs
-materialize those handles by pulling authorized content extents and folding
-op-log extents at the access boundary; encoded ops and content handles do not
-escape as application cell bytes.
 
 ### 14.2 Schema → groove
 
@@ -153,25 +143,26 @@ maintained reads have the same row-membership semantics. A later incompatible
 winner retracts rather than exposing a stale compatible predecessor, and no
 downstream operator can turn it into a runtime failure.
 
-_Further invariants._ `INV-LOWER-2`, `INV-LOWER-4` — content and deletion lower
-to distinct tables belonging to the resolved `PhysicalTableId`, each with PK
-`(row_uuid, tx_time, tx_node_id)`, never mixing user cells and `_deletion`.
-`INV-LOWER-17` — `text`/`blob` lower their cell type to nullable groove `Bytes`.
-`INV-LOWER-18` — `Counter` is rejected on nullable/non-integer/large-value
-columns. `INV-LOWER-19` — lowered record-wrapper field indices match the groove
+_Further invariants._ `INV-LOWER-2`, `INV-LOWER-4` — content lowers per resolved
+`PhysicalTableId` with PK `(row_uuid, tx_time, tx_node_id)`, while deletion
+lowers to a universal sparse relation whose PK begins
+`(branch_lineage, physical_table_id, row_uuid)`; immutable rows never mix user
+cells and `_deletion`.
+`INV-LOWER-18` — `Counter` is rejected on nullable/non-integer columns.
+`INV-LOWER-19` — lowered record-wrapper field indices match the groove
 descriptors (debug-asserted).
 
 ### 14.3 Current rows → groove
 
-Current-row visibility is the point where content and deletion history become
-the row set seen by queries and sync. Visible current rows are computed in groove
-as **content-current anti-joined with deletion-current** (ch. 4, `INV-LOWER-5`).
-Non-global tiers use groove `arg_max_by` over `(tx_time, tx_node_id)` per
-`row_uuid` on the history and register tables (`INV-LOWER-6`); the global tier
-reads the physical lineage's global-current tables directly, excluding rows
-whose register winner is `Deleted`, rather than scanning history
-(`INV-LOWER-7`). The `jazz_global_changes` indexes keyed by
-`PhysicalTableId` back global-base probes (`INV-LOWER-8`, ch. 5).
+Current-row maintenance is the point where content and deletion history become
+the row set seen by queries and sync. A combined current row holds independent
+content/deletion winner references, deletion event, visibility, and projected
+cells (`INV-LOWER-5`). Non-global tiers maintain it with bounded per-row winner
+selection; deletion access is a prefix seek into the universal deletion history
+(`INV-LOWER-6`, `INV-LOWER-29`). The global tier reads the physical lineage's
+combined global-current table directly rather than scanning history or
+anti-joining a register (`INV-LOWER-7`). The `jazz_global_changes` indexes keyed
+by `PhysicalTableId` back global-base probes (`INV-LOWER-8`, ch. 5).
 
 ### 14.4 Queries → groove
 
@@ -210,7 +201,7 @@ read may choose different callback, reset, retry, propagation, and waiting
 behavior, but the compiler-facing way to ask for evidence is only app rows plus
 named terminal facts such as result membership, relation edges, read-frontier
 settlement, payload witnesses, policy decisions/witnesses, predicate output
-sets, and large-value extents.
+sets.
 Those runtime choices MUST consume the same lowered program. They must not
 select a second evaluator or make coverage state part of the query shape
 identity (`INV-LOWER-21`).

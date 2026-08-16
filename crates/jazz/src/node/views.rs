@@ -621,6 +621,7 @@ where
             peer_payload_inventory: PeerPayloadInventory {
                 complete_tx_payloads: peer_payload_inventory_refs,
                 authorization_progress: None,
+                opening_pending: false,
             },
             result_member_adds: result_member_adds.into_iter().collect(),
             result_member_removes: result_member_removes.into_iter().collect(),
@@ -767,6 +768,7 @@ where
             version_bundles,
             peer_complete_tx_payload_refs,
             authorization_progress,
+            opening_pending,
             result_member_adds,
             result_member_removes,
             terminal_operations,
@@ -805,11 +807,6 @@ where
             }
             Err(error) => return Err(error),
         };
-        if let Some(progress) = authorization_progress {
-            self.query
-                .authorization_progress_by_binding_view
-                .insert(binding_view_key, progress);
-        }
         if reset_result_set {
             self.query
                 .pending_terminal_operations_by_binding_view
@@ -1045,6 +1042,20 @@ where
                 .initial_hydration_binding_views
                 .remove(&binding_view_key);
         }
+        if let Some(progress) = authorization_progress {
+            self.query
+                .authorization_progress_by_binding_view
+                .insert(binding_view_key, progress);
+        }
+        if opening_pending {
+            self.query
+                .pending_opening_binding_views
+                .insert(binding_view_key);
+        } else {
+            self.query
+                .pending_opening_binding_views
+                .remove(&binding_view_key);
+        }
         let generation = self
             .query
             .applied_view_update_generations
@@ -1275,7 +1286,6 @@ where
             user_metadata_json,
             target_lineage,
             branch_merge,
-            merge_strategy,
             ..
         } = stored_tx.tx.clone();
         let tx_payload = Transaction {
@@ -1291,7 +1301,6 @@ where
             user_metadata_json,
             target_lineage,
             branch_merge,
-            merge_strategy,
         };
         let mut versions = Vec::with_capacity(tx_versions.len());
         for version in tx_versions {
@@ -1323,31 +1332,10 @@ where
         &mut self,
         version: &VersionRow,
     ) -> Result<VersionRow, Error> {
-        let authored_schema = self
-            .schema_version_for_alias(version.schema_version_alias())
-            .ok_or(Error::InvalidStoredValue(
-                "maintained witness schema version alias must exist",
-            ))?;
-        let has_authored_layout = self
-            .table_in_schema(version.table(), authored_schema)
-            .is_ok_and(|table| {
-                let descriptor = if version.layer() == VersionLayer::Deletion {
-                    table.register_storage_table().record_schema()
-                } else {
-                    table.history_storage_table().record_schema()
-                };
-                version.record.descriptor() == &descriptor
-                    && !table.columns.iter().any(|column| {
-                        column.large_value.is_some()
-                            && version.cell(&table, &column.name).is_ok_and(|value| {
-                                matches!(value, Some(Value::Bytes(bytes)) if bytes.starts_with(LARGE_VALUE_HANDLE_MAGIC))
-                            })
-                    })
-            });
-        if has_authored_layout {
-            return Ok(version.clone());
-        }
-
+        // A maintained witness is decoded from the current-query graph. Its
+        // logical table can therefore be the read-schema projection while its
+        // schema alias still names the authored schema. Reload the immutable
+        // history row before interpreting that projected table as authored.
         for storage_table in
             self.version_storage_sources_for_layer(version.table(), version.layer())?
         {
@@ -1364,6 +1352,44 @@ where
             if canonical.schema_version_alias() == version.schema_version_alias() {
                 return Ok(canonical);
             }
+        }
+
+        let authored_schema = self
+            .schema_version_for_alias(version.schema_version_alias())
+            .ok_or(Error::InvalidStoredValue(
+                "maintained witness schema version alias must exist",
+            ))?;
+        let Ok(authored_table) = self.table_in_schema(version.table(), authored_schema) else {
+            return Err(Error::MaintainedViewMissingBundleWitness(
+                "maintained witness is a projection without its canonical history row",
+            ));
+        };
+        let authored_descriptor = if version.layer() == VersionLayer::Deletion {
+            authored_table.register_storage_table().record_schema()
+        } else {
+            authored_table.history_storage_table().record_schema()
+        };
+        let has_authored_layout = version.record.descriptor() == &authored_descriptor;
+
+        // Some maintained rows are legitimate materialized/synthetic versions
+        // (for example, synthesized merge output) and therefore have no persisted
+        // history identity to reload. They may cross the boundary only when
+        // their authored descriptor is complete. `authored_columns` lets us
+        // distinguish such a row from a query projection whose selected-out
+        // authored cells were replaced by typed nulls.
+        let has_complete_authored_payload = has_authored_layout
+            && (version.layer() == VersionLayer::Deletion
+                || match version.authored_columns(&authored_table)? {
+                    Some(authored) => authored.iter().all(|column| {
+                        version
+                            .cell(&authored_table, column)
+                            .is_ok_and(|value| value.is_some())
+                    }),
+                    // Legacy complete rows predate authored-column metadata.
+                    None => true,
+                });
+        if has_complete_authored_payload {
+            return Ok(version.clone());
         }
         Err(Error::MaintainedViewMissingBundleWitness(
             "maintained witness is missing its canonical history row",

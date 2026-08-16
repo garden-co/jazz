@@ -17,6 +17,14 @@ Before writing any test in Rust crates, always read `crates/jazz/TESTING_GUIDELI
 
 **Builds:** `pnpm build:core` (all the packages), `pnpm test` (everything), via turbo.
 
+**Focused Rust tests:** use `dev/t`, rather than a raw filtered `cargo test`.
+It lists the selected `jazz` test target first, resolves one canonical Rust
+module-path name, and runs that name with `--exact`; a miss or an ambiguous
+filter is an error before any test run. For a library test, use
+`dev/t unique::module::test_name`; for an integration target, use
+`dev/t --test target_name unique::module::test_name`. The wrapper preserves the
+core gate's `-p jazz --no-default-features --features test` selection.
+
 **Canonical gates:** do not let born-red or rotted targets accumulate silently.
 For ordinary Rust/core work, the full gate set is:
 

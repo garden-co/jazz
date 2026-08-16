@@ -572,7 +572,7 @@ fn branch_creation_persists_no_overlay_partition_until_first_write() {
     )
     .unwrap();
     let table_id = core
-        .physical_table_id_for_schema(core.current_write_schema().schema, "todos")
+        .physical_table_id_for_schema(core.current_write_schema().unwrap().schema, "todos")
         .unwrap();
     assert!(
         core.branches
@@ -607,7 +607,7 @@ fn branch_overlay_partition_creation_rebuilds_live_database_without_storage_reop
         BTreeMap::from([(row(0x22), title_cells("branch partition write"))])
     );
     let table_id = core
-        .physical_table_id_for_schema(core.current_write_schema().schema, "todos")
+        .physical_table_id_for_schema(core.current_write_schema().unwrap().schema, "todos")
         .unwrap();
     assert!(
         core.branches
@@ -738,8 +738,12 @@ fn branch_overlay_spans_schema_renames_and_merge_back_after_restart() {
     assert_eq!(
         core.database
             .primary_key_scan_raw(
-                &physical_branch_register_table_name(base_table_id, branch_id),
-                &[],
+                SHARED_DELETION_HISTORY_TABLE,
+                &[
+                    Value::U8(1),
+                    Value::Uuid(branch_id.0),
+                    Value::U64(base_table_id.0),
+                ],
             )
             .unwrap()
             .len(),
@@ -1474,7 +1478,6 @@ fn ordinary_commit_unit_routes_to_branch_target_without_touching_root() {
 }
 
 #[test]
-#[ignore = "known red; tracked in TEST_BURNDOWN.md"]
 fn invalid_branch_targets_do_not_persist_poison_partitions() {
     let (_writer_dir, mut writer) = open_history_complete_node_with_schema(node(1), schema());
     let branch_id = branch(0x65);
@@ -1525,19 +1528,26 @@ fn invalid_branch_targets_do_not_persist_poison_partitions() {
     let (unknown_table_dir, mut unknown_table) =
         open_history_complete_node_with_schema(node(3), schema());
     unknown_table.create_root_branch(branch_id).unwrap();
+    assert_eq!(tx.target_lineage, crate::tx::BranchLineage::Branch(branch_id));
     let unknown_table_record = VersionRecord::new(
         "unknown_table",
-        version.schema_version(),
+        unknown_table.catalogue.current_schema_version_id,
         version.record().clone(),
     );
-    assert!(
-        unknown_table
-            .apply_sync_message(SyncMessage::CommitUnit {
-                tx: tx.clone(),
-                versions: vec![unknown_table_record],
-            })
-            .is_err()
-    );
+    let updates = unknown_table
+        .apply_sync_message(SyncMessage::CommitUnit {
+            tx: tx.clone(),
+            versions: vec![unknown_table_record],
+        })
+        .unwrap();
+    assert!(updates.iter().any(|update| matches!(
+        update,
+        SyncMessage::FateUpdate {
+            tx_id: candidate,
+            fate: Fate::Rejected(RejectionReason::MalformedCommit(_)),
+            ..
+        } if *candidate == tx_id
+    )));
     assert!(
         !unknown_table
             .branches

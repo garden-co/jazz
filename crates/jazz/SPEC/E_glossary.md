@@ -30,12 +30,15 @@ Invariant digest: no `INV-*` ids are defined or cited by this chapter.
 
 - **`TxTime`** — packed HLC time: 48-bit ms + 16-bit counter.
 - **`TxId`** — `TxTime` + creating `NodeUuid`; the transaction's identity.
-- **`GlobalSeq`** — the core-assigned serialization position ("seq").
+- **`GlobalSeq`** — the core-assigned serialization position ("seq"). A
+  persisted `settled_through: GlobalSeq` is known-state possession for
+  payload dedup/repair, not proof of a live authority connection or a settled
+  Edge/Global subscription (ch. 8, `INV-SYNC-30`).
 
 ### Schema (ch. 2, ch. 10)
 
 - **`JazzSchema` / `TableSchema` / `ColumnSchema`** — the logical schema.
-- **`MergeStrategy::{Lww, Counter}`** · **`LargeValueKind::{Text, Blob}`**.
+- **`MergeStrategy::{Lww, Counter}`**.
 - **schema version** — a content-addressed `SchemaVersionId`; **migration lens**
   — bidirectional translation between versions; **catalogue** — the published
   schema, lens, and pointer store; **current write schema** — the moving write

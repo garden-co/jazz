@@ -160,6 +160,15 @@ describe("Invite Flow E2E", () => {
       "Private chat editor should appear",
     );
 
+    await waitFor(
+      () =>
+        [...aliceContainer.querySelectorAll("button")].some(
+          (button) => button.querySelector(".lucide-send") && !button.disabled,
+        ),
+      10000,
+      "Private chat composer should become ready",
+    );
+
     // Send the secret message
     const aliceEditor = aliceContainer.querySelector<HTMLElement>("#messageEditor")!;
     const aliceSendButton = [...aliceContainer.querySelectorAll("button")].find((b) =>
@@ -172,7 +181,10 @@ describe("Invite Flow E2E", () => {
     }
 
     await waitFor(
-      () => aliceContainer.textContent?.includes(randomSecret) ?? false,
+      () =>
+        [...aliceContainer.querySelectorAll("article")].some((article) =>
+          article.textContent?.includes(randomSecret),
+        ),
       10000,
       "Secret message should appear for user A",
     );

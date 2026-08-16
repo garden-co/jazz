@@ -5,32 +5,27 @@
  * The schema is pushed explicitly so clients don't need adminSecret.
  */
 
+import type { TestProject } from "vitest/node";
 import { startLocalJazzServer, deploy, type LocalJazzServerHandle } from "jazz-tools/testing";
 import permissions from "../../permissions.js";
 import { app } from "../../schema.js";
 
-const TEST_PORT = parseInt(process.env.TEST_PORT!, 10);
 const ADMIN_SECRET = "test-admin-secret-for-moon-lander-tests";
 const APP_ID = "00000000-0000-0000-0000-000000000003";
 
-let server: Promise<LocalJazzServerHandle> | null = null;
+let server: LocalJazzServerHandle | null = null;
 
-export async function setup(): Promise<void> {
-  if (server) {
-    await server;
-    return;
-  }
+export async function setup(project: TestProject): Promise<void> {
+  if (server) return;
 
-  server = startLocalJazzServer({
+  server = await startLocalJazzServer({
     appId: APP_ID,
-    port: TEST_PORT,
     adminSecret: ADMIN_SECRET,
   });
-
-  const handle = await server;
+  project.provide("jazzServerUrl", server.url);
 
   await deploy({
-    serverUrl: handle.url,
+    serverUrl: server.url,
     appId: APP_ID,
     adminSecret: ADMIN_SECRET,
     schema: app,
@@ -39,5 +34,5 @@ export async function setup(): Promise<void> {
 }
 
 export async function teardown(): Promise<void> {
-  await (await server)?.stop();
+  await server?.stop();
 }

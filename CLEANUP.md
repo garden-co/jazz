@@ -47,8 +47,9 @@ can distinguish moved code from changed behavior.
 
 ### 3. Remove dead and obsolete seams
 
-- Remove the unused `ResultTransitions::observed_delta_batches` field.
-- Remove or justify the unused singular `structured_app_row` hook.
+- Remove or justify apparently dead hooks. For example, the singular
+  `structured_app_row` accessor is live: incremental updates use it to
+  materialize only the roots reported as changed.
 - Remove stale compatibility comments that refer to already-landed PRs.
 - Consolidate duplicated subscription-carrier normalization helpers.
 - Remove production paths retained only for compatibility tests, or explicitly
@@ -101,7 +102,8 @@ identities internally.
 - Avoid rerunning Rust differential binaries already selected by the workspace
   test run.
 - Add compiler caching for macOS and Windows release builds.
-- Make focused Rust commands fail when they execute zero tests.
+- [done] Make focused Rust commands resolve and run exactly one canonical test;
+  `dev/t` rejects zero or ambiguous matches before invoking the test runner.
 - Check generated-artifact provenance automatically at consumption time.
 - Bound browser logs and stop quickly on repeated infrastructure failures.
 
@@ -111,7 +113,7 @@ Continue `JARGON_BURNDOWN.md` for terms such as route, terminal, carrier, fact,
 witness, maintained, settled, and authoritative. Prefer better concepts and
 abstractions over merely adding definitions.
 
-Add and maintain a short representation-ownership map:
+Add and maintain the short [representation-ownership map](crates/jazz/SPEC/18_representation_ownership.md):
 
 ```text
 query -> normalized query -> lowered graph -> terminal schema

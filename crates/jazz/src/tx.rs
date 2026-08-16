@@ -6,7 +6,6 @@
 //! are grounded in `jazz/README.md`.
 
 use crate::ids::{AuthorId, BranchId, NodeUuid, RowUuid};
-use crate::merge_strategy::ColumnSpecHash;
 use crate::query::{BindingId, Query, ShapeId};
 use crate::schema::TableSchema;
 use crate::time::{GlobalSeq, TxTime};
@@ -47,8 +46,6 @@ pub struct Transaction {
     /// Receivers persist and forward this metadata but do not use it for
     /// transaction admission, parent prerequisites, fate, or row merging.
     pub branch_merge: Option<BranchMergeProvenance>,
-    /// Strategy runtime that produced this transaction when it is a recorded merge.
-    pub merge_strategy: Option<RecordedMergeStrategy>,
 }
 
 /// Canonical operational history lineage for transaction routing and local
@@ -169,17 +166,6 @@ pub struct ContributionDot {
     pub tx_id: TxId,
     /// Exact field or operation introduced by that transaction.
     pub coordinate: ContributionCoordinate,
-}
-
-/// Runtime strategy tag recorded on system-created merge transactions.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
-pub struct RecordedMergeStrategy {
-    /// Stable strategy id.
-    pub id: String,
-    /// Strategy implementation version.
-    pub version: u32,
-    /// Hash of the declared column merge spec in force.
-    pub column_spec_hash: ColumnSpecHash,
 }
 
 /// Deletion register event carried by a row version.

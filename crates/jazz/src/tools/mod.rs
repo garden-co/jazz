@@ -37,16 +37,14 @@ use thiserror::Error;
 
 pub use app_id::AppId;
 pub use public_schema::{
-    AuthMode, BatchId, ColumnDescriptor, ColumnMergeStrategy, ColumnType, LargeValueHandle,
-    LargeValueKind, Operation, OrderedRowDelta, PolicyExpr, Query, QueryBuilder, QueryResult,
-    QueryResultField, Row, RowDelta, RowDescriptor, Schema, SchemaBuilder, SchemaHash, Session,
-    TableName, TablePolicies, TableSchema, Value, WriteContext, permissions, policy_expr,
+    AuthMode, BatchId, ColumnDescriptor, ColumnMergeStrategy, ColumnType, Operation,
+    OrderedRowDelta, PolicyExpr, Query, QueryBuilder, QueryResult, QueryResultField, Row, RowDelta,
+    RowDescriptor, Schema, SchemaBuilder, SchemaHash, Session, TableName, TablePolicies,
+    TableSchema, Value, WriteContext, permissions, policy_expr,
 };
 pub use schema_lens::{Direction, Lens, LensOp, LensTransform};
 pub use transaction::OpenBatchId;
 
-#[cfg(feature = "client")]
-pub use crate::db::TextEdit;
 #[cfg(feature = "client")]
 pub use client::{JazzClient, JazzTransaction};
 

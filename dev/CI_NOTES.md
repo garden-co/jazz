@@ -3,6 +3,28 @@
 Per Anselm's directive: every CI-relevant removal or alteration documented in detail.
 "Add" items are new coverage; nothing existing is silently dropped.
 
+## ADD (2026-08-15): bounded real M3 differential smoke
+
+- **What**: `test-rust-differential` runs the ignored M3 oracle explicitly with
+  `JAZZ_SEED=11`, churn depths `10,1000`, and three differential steps, under a
+  a 60-second process timeout. CI compiles only the `--lib` test binary before
+  applying that timeout, then invokes its fully qualified test path with
+  `--exact --ignored`, so cold compilation and similarly named control tests do
+  not consume the semantic execution budget. It is separate from the workspace
+  Rust suite and leaves its Rust target cache disabled.
+- **Why**: this is a genuine maintained-vs-one-shot execution (not an ignored
+  test selection) that measured green in 4.10s locally. It preserves all oracle
+  assertions while keeping the critical path short.
+- **Boundary**: this is deliberately one canonical seed, not a claim that the
+  full randomized gate is green. Canonical seed 47 fails at fuzz-step-1 and
+  seed 4,372,288 at fuzz-step-2 with a structured-terminal descriptor/layout
+  disagreement. Compile with `cargo test -p jazz --lib --no-run
+--message-format=json`, then replay either emitted libtest with `timeout 60s
+env JAZZ_SEED=<seed> JAZZ_DIFFERENTIAL_CHURN_DEPTHS=10,1000
+JAZZ_DIFFERENTIAL_STEP_COUNT=3 <emitted jazz libtest>
+node::tests::harness::m3_maintained_one_shot_differential_oracle --exact
+--ignored`; both remain recorded in `TEST_BURNDOWN.md`.
+
 ## ALTER: exempt benchmark ledgers from `pnpm format:check` (lint job)
 
 - **What**: add `dev/benchmarks/SMOKE_LEDGER.md` and

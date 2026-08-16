@@ -1922,7 +1922,6 @@ fn open_db_node(
             author,
         },
         id_source: Some(Box::new(SeededRowIdSource::new(node_uuid_seed(node_uuid)))),
-        large_value_checkpoint_op_interval: 1024,
     }))
     .unwrap();
     DbNode { _dir: dir, db }
@@ -1945,7 +1944,6 @@ fn open_client_db(
             author,
         },
         id_source: Some(Box::new(SeededRowIdSource::new(node_uuid_seed(node_uuid)))),
-        large_value_checkpoint_op_interval: 1024,
     }))
     .unwrap();
     if let Some(writes) = NonZeroUsize::new(initial_sync_flush_cadence) {

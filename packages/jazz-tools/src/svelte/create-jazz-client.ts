@@ -1,5 +1,1 @@
-export {
-  createExtensionJazzClient,
-  createJazzClient,
-  type JazzClient,
-} from "../web/create-jazz-client.js";
+export { createJazzClient, type JazzClient } from "../web/create-jazz-client.js";

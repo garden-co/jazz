@@ -2,7 +2,7 @@ import { createEffect, onCleanup, type Accessor } from "solid-js";
 import { createStore, reconcile } from "solid-js/store";
 import type { AuthState } from "../runtime/auth-state.js";
 import type { Session } from "../runtime/context.js";
-import type { SyncJazzClient } from "../web/create-jazz-client.js";
+import type { JazzClient } from "../web/create-jazz-client.js";
 
 interface StoreState {
   authState: AuthState | null;
@@ -14,7 +14,7 @@ const NULL_STATE: StoreState = {
   session: null,
 };
 
-function getStoreState(client: SyncJazzClient | undefined): StoreState {
+function getStoreState(client: JazzClient | undefined): StoreState {
   if (!client || typeof client.db?.getAuthState !== "function") {
     return NULL_STATE;
   }
@@ -26,7 +26,7 @@ function getStoreState(client: SyncJazzClient | undefined): StoreState {
   };
 }
 
-export function createSolidJazzClientStore(client: Accessor<SyncJazzClient | undefined>) {
+export function createSolidJazzClientStore(client: Accessor<JazzClient | undefined>) {
   const [store, setStore] = createStore<StoreState>(getStoreState(client()));
 
   createEffect(() => {

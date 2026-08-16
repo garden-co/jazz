@@ -17,7 +17,6 @@ import type {
   WasmRow,
   StorageDriver,
 } from "../drivers/types.js";
-import { getRuntimeSchemaCacheKey } from "../drivers/schema-wire.js";
 import type { RuntimeSourcesConfig, Session } from "./context.js";
 import {
   ExclusiveWriteHandle,
@@ -37,7 +36,6 @@ import {
   type QueryVisibility,
   resolveEffectiveQueryExecutionOptions,
   type DeleteOptions,
-  type AuthConfig,
   type OpenBatchId,
   type BatchId,
   type PermissionAdvice,
@@ -49,15 +47,8 @@ import { translateQuery } from "./query-adapter.js";
 import { transformRow, transformRows } from "./row-transformer.js";
 import { toWriteRecord } from "./value-converter.js";
 import { SubscriptionManager, type SubscriptionDelta } from "./subscription-manager.js";
-import type { SubscriptionChannel } from "./subscription-channel.js";
 import { createAuthStateStore, type AuthState, type AuthStateStoreOptions } from "./auth-state.js";
 import { resolveClientSessionSync } from "./client-session.js";
-import {
-  createBinaryLargeValueFileStorage,
-  type BinaryLargeValueFileApp,
-  type FileReadOptions,
-  type FileWriteOptions,
-} from "./file-storage.js";
 import { analyzeRelations } from "../codegen/relation-analyzer.js";
 import { isPermissionIntrospectionColumn, magicColumnType } from "../magic-columns.js";
 import {
@@ -67,7 +58,12 @@ import {
   type NormalizedBuiltQuery,
 } from "./query-builder-shape.js";
 import { resolveSelectedColumns } from "./select-projection.js";
-import { resolveTelemetryCollectorUrlFromEnv } from "./sync-telemetry.js";
+import {
+  BrowserConnectionManager,
+  DirectConnectionManager,
+  type ConnectionManager,
+  type DbForConnection,
+} from "./connection-manager/index.js";
 
 type WasmLogLevel = "error" | "warn" | "info" | "debug" | "trace";
 type AnyRuntimeSource = RuntimeSource<any>;
@@ -113,51 +109,10 @@ export interface DbConfig {
   devMode?: boolean;
   /** Local-first auth via a local seed. Mutually exclusive with jwtToken. */
   secret?: string;
-  /**
-   * Client-factory option. Defaults to true at `createJazzClient`: subscriptions
-   * are served over an API-level channel and no main-thread Db is exposed.
-   * `createDb` itself ignores this field.
-   */
-  asyncSubscriptionsOnly?: boolean;
-  /**
-   * Client-factory option used when `asyncSubscriptionsOnly` is true, or when a
-   * synchronous-mode subscription opts into `subscriptionMode: "async"`.
-   * `createDb` itself ignores this field.
-   */
-  subscriptionChannel?: SubscriptionChannel;
 }
 
 function resolveStorageDriver(driver?: StorageDriver): StorageDriver {
   return driver ?? { type: "persistent" };
-}
-
-function shouldBypassLocalPolicies(config: DbConfig): boolean {
-  return !!config.adminSecret;
-}
-
-function stripSchemaPolicies(schema: WasmSchema): WasmSchema {
-  return Object.fromEntries(
-    Object.entries(schema).map(([tableName, tableSchema]) => [
-      tableName,
-      {
-        ...tableSchema,
-        policies: undefined,
-      },
-    ]),
-  ) as WasmSchema;
-}
-
-const policyStrippedSchemaCache = new WeakMap<WasmSchema, WasmSchema>();
-
-function getPolicyStrippedSchema(schema: WasmSchema): WasmSchema {
-  const cached = policyStrippedSchemaCache.get(schema);
-  if (cached) {
-    return cached;
-  }
-
-  const strippedSchema = stripSchemaPolicies(schema);
-  policyStrippedSchemaCache.set(schema, strippedSchema);
-  return strippedSchema;
 }
 
 function trimOptionalString(value?: string | null): string | null {
@@ -182,6 +137,7 @@ export function resolveDefaultPersistentDbName(config: DbConfig): string {
   const session = resolveClientSessionSync({
     appId: config.appId,
     jwtToken: config.jwtToken,
+    cookieSession: config.cookieSession,
   });
 
   if (!session?.user_id || session.authMode === "anonymous") {
@@ -217,11 +173,7 @@ type DbRuntimeOperationContext = {
 };
 
 function nativeDbQueryOptions(options?: QueryOptions): QueryOptions {
-  if (!options?.subscriptionMode) {
-    return options ?? {};
-  }
-  const { subscriptionMode: _subscriptionMode, ...nativeOptions } = options;
-  return nativeOptions;
+  return options ?? {};
 }
 
 function limitQueryToOne<T>(query: QueryBuilder<T>): QueryBuilder<T> {
@@ -676,20 +628,16 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
   constructor(
     readonly kind: TKind,
     private readonly resolveClient: (schema: WasmSchema) => JazzClient,
-    ownerClient: JazzClient,
-    session?: Session,
-    attribution?: string,
+    private readonly session?: Session,
+    private readonly attribution?: string,
+    ownerClient?: JazzClient,
   ) {
-    dbTxHandleBindings.set(this, {
-      ownerClient,
-      openBatchId: ownerClient.beginTransaction(kind, session, attribution),
-      session,
-      attribution,
-    });
+    if (ownerClient) this.bindOwnerClient(ownerClient);
   }
 
   private bindTable<T, Init>(table: TableProxy<T, Init>): DbTransactionHandleBinding {
-    this.resolveClient(table._schema);
+    const client = this.resolveClient(table._schema);
+    if (!dbTxHandleBindings.has(this)) this.bindOwnerClient(client);
     return this.requireBinding("table operation");
   }
 
@@ -699,6 +647,15 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
 
   private requireBinding(operation: string): DbTransactionHandleBinding {
     return getDbTxHandleBinding(this, operation);
+  }
+
+  private bindOwnerClient(ownerClient: JazzClient): void {
+    dbTxHandleBindings.set(this, {
+      ownerClient,
+      openBatchId: ownerClient.beginTransaction(this.kind, this.session, this.attribution),
+      session: this.session,
+      attribution: this.attribution,
+    });
   }
 
   openBatchId(): OpenBatchId {
@@ -927,12 +884,10 @@ export type TransactionScope<TKind extends TransactionKind = TransactionKind> = 
  * ```
  */
 export class Db {
-  private clients = new Map<string, JazzClient>();
-  private clientSchemas = new Map<string, WasmSchema>();
   private config: DbConfig;
   private readonly runtimeSource: AnyRuntimeSource;
   private readonly authStateStore;
-  private disposeCoreTelemetry: (() => void) | null = null;
+  private connection: ConnectionManager;
   private _localFirstSecret: string | null = null;
   private localFirstRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   private isShuttingDown = false;
@@ -947,7 +902,6 @@ export class Db {
   private readonly mutationErrorListeners = new Set<(event: MutationErrorEvent) => void>();
   private readonly pendingMutationErrorEvents: MutationErrorEvent[] = [];
   private nextActiveQuerySubscriptionTraceId = 1;
-  private isTransportDisconnected = false;
 
   /**
    * Protected constructor - use {@link createDb} in regular app code.
@@ -960,6 +914,26 @@ export class Db {
     this.config = config;
     this.runtimeSource = runtimeSource;
     this.authStateStore = createAuthStateStore(config, authStateOptions);
+    this.connection = new DirectConnectionManager(this.dbForConnection());
+  }
+
+  private dbForConnection(): DbForConnection {
+    // oxlint-disable-next-line typescript/no-this-alias
+    const thisDb = this;
+    return {
+      get config() {
+        return thisDb.config;
+      },
+      get runtimeSource() {
+        return thisDb.runtimeSource;
+      },
+      get isShuttingDown() {
+        return thisDb.isShuttingDown;
+      },
+      markUnauthenticated: (reason) => this.markUnauthenticated(reason),
+      clearAuthError: () => this.authStateStore.clearError(),
+      onMutationError: (event) => this.handleMutationError(event),
+    };
   }
 
   /** @internal Store the seed used for local-first auth and optionally schedule token refresh. */
@@ -1024,9 +998,7 @@ export class Db {
 
     this.config.jwtToken = jwtToken;
 
-    for (const client of this.clients.values()) {
-      client.updateAuthToken(jwtToken);
-    }
+    this.connection.updateAuth({ jwtToken });
 
     return true;
   }
@@ -1044,9 +1016,7 @@ export class Db {
 
     this.config.cookieSession = cookieSession;
 
-    for (const client of this.clients.values()) {
-      client.updateCookieSession(cookieSession);
-    }
+    this.connection.updateAuth({ cookieSession });
 
     return true;
   }
@@ -1059,79 +1029,60 @@ export class Db {
     return new Db(config, runtimeSource);
   }
 
+  /** @internal Create a Db whose durable peer lives in a dedicated browser worker. */
+  static async createWithBrowserWorker(
+    config: DbConfig,
+    runtimeSource: AnyRuntimeSource,
+  ): Promise<Db> {
+    const db = new Db(config, runtimeSource);
+    const connection = new BrowserConnectionManager(db.dbForConnection());
+    db.connection = connection;
+    await connection.start();
+    return db;
+  }
+
   /**
    * Get or create a JazzClient for the given schema.
    * Synchronous because the runtime source is loaded before Db is created.
    *
    */
   protected getClient(schema: WasmSchema): JazzClient {
-    const runtimeSchema =
-      this.runtimeSource.supportsPolicyBypass && shouldBypassLocalPolicies(this.config)
-        ? getPolicyStrippedSchema(schema)
-        : schema;
-
-    // Use the canonical schema JSON as the client cache key, but memoize it by
-    // schema identity so write-heavy paths don't stringify the same schema per row.
-    const key = getRuntimeSchemaCacheKey(runtimeSchema);
-    if (!this.clients.has(key)) {
-      this.installMainThreadCoreTelemetry();
-      const client = this.runtimeSource.createClient({
-        config: { ...this.config },
-        schema: runtimeSchema,
-        onAuthFailure: (reason) => {
-          this.markUnauthenticated(reason);
-        },
-      });
-
-      this.attachMutationErrorHandler(client);
-
-      if (this.config.serverUrl && !this.isTransportDisconnected) {
-        client.connectTransport(this.config.serverUrl, this.transportAuthConfig());
-      } else if (this.config.serverUrl) {
-        // A schema-specific client can be created lazily after Db.disconnect().
-        // Put its runtime behind the reconnect barrier immediately too; otherwise
-        // its first edge/global operation could run as if the Db were connected.
-        void client.disconnectTransport().catch(() => undefined);
-      }
-      this.clients.set(key, client);
-      this.clientSchemas.set(key, runtimeSchema);
-    }
-
-    return this.clients.get(key)!;
+    return this.connection.getClient(schema);
   }
 
-  private transportAuthConfig(): AuthConfig {
-    return {
-      jwt_token: this.config.jwtToken,
-      admin_secret: this.config.adminSecret,
-      backend_secret: this.config.backendSecret,
-      backend_session: this.config.cookieSession,
-    };
+  protected getCurrentClient(): JazzClient | null {
+    return this.connection.getCurrentClient();
+  }
+
+  protected async ensureReady(tier?: DurabilityTier): Promise<void> {
+    await this.connection.ensureReady(tier);
+  }
+
+  private wrapWriteWait<THandle extends WriteHandle<unknown>>(handle: THandle): THandle {
+    const wait = handle.wait.bind(handle);
+    handle.wait = (async (options: { tier: DurabilityTier }) => {
+      await this.ensureReady(options.tier);
+      return wait(options);
+    }) as THandle["wait"];
+    return handle;
   }
 
   protected getRuntimeOperationContext(): DbRuntimeOperationContext | null {
     return this.runtimeOperationContextOverride;
   }
 
-  private attachMutationErrorHandler(client: JazzClient): void {
-    client.onMutationError((event) => {
-      if (this.mutationErrorListeners.size === 0) {
-        console.error("Unhandled Jazz mutation error", event);
-        this.pendingMutationErrorEvents.push(event);
-        return;
-      }
-      for (const listener of this.mutationErrorListeners) {
-        listener(event);
-      }
-    });
+  private handleMutationError(event: MutationErrorEvent): void {
+    if (this.mutationErrorListeners.size === 0) {
+      console.error("Unhandled Jazz mutation error", event);
+      this.pendingMutationErrorEvents.push(event);
+      return;
+    }
+    for (const listener of this.mutationErrorListeners) {
+      listener(event);
+    }
   }
 
-  /**
-   * @internal Runs one synchronous high-level Db operation with an explicit
-   * session context. The browser worker subscription channel uses this when a
-   * shared worker Db serves edge-client requests for multiple identities.
-   */
-  __withRuntimeOperationContext<TResult>(
+  private withRuntimeOperationContext<TResult>(
     context: DbRuntimeOperationContext,
     operation: () => TResult,
   ): TResult {
@@ -1142,24 +1093,6 @@ export class Db {
     } finally {
       this.runtimeOperationContextOverride = previous;
     }
-  }
-
-  private installMainThreadCoreTelemetry(): void {
-    const collectorUrl = this.resolveTelemetryCollectorUrl();
-    if (!collectorUrl || this.disposeCoreTelemetry) {
-      return;
-    }
-
-    this.disposeCoreTelemetry =
-      this.runtimeSource.installTelemetry?.({
-        config: this.config,
-        collectorUrl,
-        runtimeThread: "main",
-      }) ?? null;
-  }
-
-  private resolveTelemetryCollectorUrl(): string | undefined {
-    return resolveTelemetryCollectorUrlFromEnv() ?? this.config.telemetryCollectorUrl;
   }
 
   updateAuthToken(jwtToken: string | null): void {
@@ -1230,8 +1163,7 @@ export class Db {
       throw new Error("Cannot disconnect a Db that is shutting down.");
     }
 
-    this.isTransportDisconnected = true;
-    await Promise.all(Array.from(this.clients.values(), (client) => client.disconnectTransport()));
+    await this.connection.disconnect();
   }
 
   /**
@@ -1243,15 +1175,7 @@ export class Db {
       throw new Error("Cannot reconnect a Db that is shutting down.");
     }
 
-    this.isTransportDisconnected = false;
-    if (!this.config.serverUrl) {
-      return;
-    }
-
-    const auth = this.transportAuthConfig();
-    for (const client of this.clients.values()) {
-      client.connectTransport(this.config.serverUrl, auth);
-    }
+    await this.connection.reconnect();
   }
 
   /**
@@ -1276,13 +1200,11 @@ export class Db {
 
   /**
    * The engine-normalized runtime schema of this Db's live client, or null
-   * before any client exists. First-client-wins when a Db holds several
-   * clients — a dev-introspection accessor (inspector host handle, devtools
-   * bridge), not a general schema API.
+   * before the client exists. This is a dev-introspection accessor (inspector
+   * host handle, devtools bridge), not a general schema API.
    */
   getRuntimeSchema(): WasmSchema | null {
-    const client = this.clients.values().next().value;
-    return client ? client.getSchema() : null;
+    return this.connection.getRuntimeSchema();
   }
 
   /**
@@ -1311,8 +1233,10 @@ export class Db {
       context?.session,
       context?.attribution,
     );
-    return inserted.mapValue((row) =>
-      transformOutputRow(table, transformRow(row, table._schema, table._table)),
+    return this.wrapWriteWait(
+      inserted.mapValue((row) =>
+        transformOutputRow(table, transformRow(row, table._schema, table._table)),
+      ),
     );
   }
 
@@ -1344,8 +1268,10 @@ export class Db {
       context?.session,
       context?.attribution,
     );
-    return restored.mapValue((row) =>
-      transformOutputRow(table, transformRow(row, table._schema, table._table)),
+    return this.wrapWriteWait(
+      restored.mapValue((row) =>
+        transformOutputRow(table, transformRow(row, table._schema, table._table)),
+      ),
     );
   }
 
@@ -1368,7 +1294,9 @@ export class Db {
       table._table,
     );
     const context = this.getRuntimeOperationContext();
-    return client.upsert(table._table, values, options, context?.session, context?.attribution);
+    return this.wrapWriteWait(
+      client.upsert(table._table, values, options, context?.session, context?.attribution),
+    );
   }
 
   /**
@@ -1391,13 +1319,8 @@ export class Db {
       table._table,
     );
     const context = this.getRuntimeOperationContext();
-    return client.update(
-      table._table,
-      id,
-      updates,
-      options,
-      context?.session,
-      context?.attribution,
+    return this.wrapWriteWait(
+      client.update(table._table, id, updates, options, context?.session, context?.attribution),
     );
   }
 
@@ -1409,7 +1332,9 @@ export class Db {
   delete<T, Init>(table: TableProxy<T, Init>, id: string, options?: DeleteOptions): WriteHandle {
     const client = this.getClient(table._schema);
     const context = this.getRuntimeOperationContext();
-    return client.delete(table._table, id, options, context?.session, context?.attribution);
+    return this.wrapWriteWait(
+      client.delete(table._table, id, options, context?.session, context?.attribution),
+    );
   }
 
   /** Request authoritative permission advice for inserting a row. */
@@ -1464,13 +1389,18 @@ export class Db {
 
   private createTransaction<TKind extends TransactionKind>(kind: TKind): Transaction<TKind> {
     const context = this.getRuntimeOperationContext();
-    const ownerClient = this.getClient({});
+    const ownerClient = this.getCurrentClient();
+    if (kind === "exclusive" && !ownerClient) {
+      throw new Error(
+        "Cannot begin an exclusive transaction before the JazzClient has been created. Run a query or mutation first.",
+      );
+    }
     return new Transaction(
       kind,
       (schema) => this.getClient(schema),
-      ownerClient,
       context?.session,
       context?.attribution,
+      ownerClient ?? undefined,
     );
   }
 
@@ -1532,41 +1462,7 @@ export class Db {
    * Delete browser OPFS storage for this Db's active namespace.
    */
   async deleteClientStorage(): Promise<void> {
-    if (resolveStorageDriver(this.config.driver).type !== "persistent") {
-      throw new Error("deleteClientStorage() is only available when driver.type='persistent'.");
-    }
-
-    if (typeof window === "undefined") {
-      console.error("deleteClientStorage() is only available in browser runtimes.");
-      return;
-    }
-
-    const clients = [...this.clients.values()];
-    if (clients.length === 0) {
-      const client = this.getClient({});
-      clients.push(client);
-    }
-
-    const [resetClient, ...otherClients] = clients;
-    let closeError: unknown = null;
-    for (const client of otherClients) {
-      try {
-        await client.shutdown();
-      } catch (error) {
-        closeError ??= error;
-      }
-    }
-
-    try {
-      if (closeError) {
-        throw closeError;
-      }
-      await resetClient!.clearClientStorage();
-      await resetClient!.shutdown();
-    } finally {
-      this.clients.clear();
-      this.clientSchemas.clear();
-    }
+    await this.connection.deleteClientStorage();
   }
 
   /**
@@ -1601,6 +1497,8 @@ export class Db {
     const wasmQuery = translateQuery(builderJson, planningSchema);
     const usesRelationTraversal = queryUsesRelationTraversal(builtQuery);
     const context = this.getRuntimeOperationContext();
+    const effectiveTier = resolveEffectiveQueryExecutionOptions(this.config, queryOptions).tier;
+    await this.ensureReady(effectiveTier);
     const rows =
       context || usesRelationTraversal
         ? await client.query(wasmQuery, queryOptions, context?.readSession ?? context?.session)
@@ -1628,50 +1526,6 @@ export class Db {
   async one<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T | null> {
     const results = await this.all(limitQueryToOne(query), options);
     return results[0] ?? null;
-  }
-
-  /**
-   * Create a `files` row whose `data` column stores the whole Blob as a binary large value.
-   */
-  async createFileFromBlob<FileRow extends { id: string }, FileInit>(
-    app: BinaryLargeValueFileApp<FileRow, FileInit>,
-    blob: Blob,
-    options?: FileWriteOptions,
-  ): Promise<FileRow> {
-    return createBinaryLargeValueFileStorage(this, app).fromBlob(blob, options);
-  }
-
-  /**
-   * Create a `files` row whose `data` column stores the whole stream as a binary large value.
-   */
-  async createFileFromStream<FileRow extends { id: string }, FileInit>(
-    app: BinaryLargeValueFileApp<FileRow, FileInit>,
-    stream: ReadableStream<unknown>,
-    options?: FileWriteOptions,
-  ): Promise<FileRow> {
-    return createBinaryLargeValueFileStorage(this, app).fromStream(stream, options);
-  }
-
-  /**
-   * Load a binary-large-value file row as a browser ReadableStream.
-   */
-  async loadFileAsStream<FileRow extends { id: string }, FileInit>(
-    app: BinaryLargeValueFileApp<FileRow, FileInit>,
-    fileOrId: string | FileRow,
-    options?: FileReadOptions,
-  ): Promise<ReadableStream<Uint8Array>> {
-    return createBinaryLargeValueFileStorage(this, app).toStream(fileOrId, options);
-  }
-
-  /**
-   * Load a binary-large-value file row as a Blob.
-   */
-  async loadFileAsBlob<FileRow extends { id: string }, FileInit>(
-    app: BinaryLargeValueFileApp<FileRow, FileInit>,
-    fileOrId: string | FileRow,
-    options?: FileReadOptions,
-  ): Promise<Blob> {
-    return createBinaryLargeValueFileStorage(this, app).toBlob(fileOrId, options);
   }
 
   /**
@@ -1763,7 +1617,22 @@ export class Db {
     if (queryOptions.tier == null || queryOptions.tier === "local") {
       callback(manager.seed([]));
     }
-    startNativeSubscription();
+    if (this.connection.shouldDeferSubscriptionStart(queryOptions.tier)) {
+      // The worker can only classify the initial authority-tier snapshot as
+      // settled after its own server transport is attached. Delay native
+      // subscription creation until that topology is ready; the native stream
+      // then owns the settled-snapshot gate and remains the sole data source.
+      void this.ensureReady(queryOptions.tier)
+        .then(startNativeSubscription)
+        .catch((error: unknown) => {
+          if (unsubscribed) return;
+          setTimeout(() => {
+            throw error;
+          }, 0);
+        });
+    } else {
+      startNativeSubscription();
+    }
     if (
       this.config.serverUrl &&
       queryOptions.propagation !== "local-only" &&
@@ -1775,7 +1644,7 @@ export class Db {
       const seedRows =
         session == null
           ? seedQuery()
-          : this.__withRuntimeOperationContext({ session }, () => seedQuery());
+          : this.withRuntimeOperationContext({ session }, () => seedQuery());
       void seedRows
         .then((rows) => {
           if (unsubscribed) return;
@@ -1801,7 +1670,7 @@ export class Db {
 
   /**
    * Shutdown the Db and release all resources.
-   * Closes all memoized JazzClient connections.
+   * Closes the Db's runtime client.
    *
    * Idempotent: concurrent or repeated calls share the same in-flight promise.
    */
@@ -1820,13 +1689,7 @@ export class Db {
     this.clearActiveQuerySubscriptionTraces();
     this.mutationErrorListeners.clear();
 
-    this.disposeCoreTelemetry?.();
-    this.disposeCoreTelemetry = null;
-    for (const client of this.clients.values()) {
-      await client.shutdown();
-    }
-    this.clients.clear();
-    this.clientSchemas.clear();
+    await this.connection.shutdown();
   }
 
   private notifyActiveQuerySubscriptionTraceListeners(): void {
@@ -1995,7 +1858,11 @@ export async function createDbWithRuntimeSource<RuntimeConfig extends DbConfig>(
     resolvedConfig = { ...resolvedConfig, jwtToken };
   }
 
-  const db = Db.create(resolvedConfig, runtimeSource as AnyRuntimeSource);
+  const driver = resolveStorageDriver(resolvedConfig.driver);
+  const db =
+    runtimeSource.supportsBrowserWorker && isBrowserRuntime() && driver.type === "persistent"
+      ? await Db.createWithBrowserWorker(resolvedConfig, runtimeSource as AnyRuntimeSource)
+      : Db.create(resolvedConfig, runtimeSource as AnyRuntimeSource);
 
   if (localFirstSecret) {
     db.initLocalFirstAuth(localFirstSecret, 3600, !config.jwtToken);
@@ -2006,4 +1873,8 @@ export async function createDbWithRuntimeSource<RuntimeConfig extends DbConfig>(
 
 export async function createDb(config: DbConfig): Promise<Db> {
   return await createDbWithRuntimeSource(config, new DefaultRuntimeSource());
+}
+
+function isBrowserRuntime(): boolean {
+  return typeof window !== "undefined" && typeof Worker !== "undefined";
 }

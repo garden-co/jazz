@@ -13,8 +13,7 @@ use crate::db::{
     ErrorCode as CoreDbErrorCode, ExclusiveTxOps, LocalUpdates as CoreLocalUpdates,
     PeerConnection as CorePeerConnection, Propagation as CorePropagation, ReadOpts as CoreReadOpts,
     SubscriptionEvent as CoreSubscriptionEvent, SubscriptionOutputRow as CoreSubscriptionOutputRow,
-    TextEdit as CoreTextEdit, TickScheduler, TickUrgency, Transport as CoreTransport,
-    WireTransportAdapter,
+    TickScheduler, TickUrgency, Transport as CoreTransport, WireTransportAdapter,
 };
 use crate::groove::records::Value as CoreValue;
 use crate::groove::storage::MemoryStorage as CoreMemoryStorage;
@@ -33,9 +32,7 @@ use crate::tools::public_api::types::{
 };
 use crate::tools::public_schema::Schema;
 use crate::tools::public_schema::TableName;
-use crate::tools::public_schema::{
-    ColumnType, LargeValueHandle, Query, Session, TableSchema, Value, WriteContext,
-};
+use crate::tools::public_schema::{ColumnType, Query, Session, TableSchema, Value, WriteContext};
 use crate::tools::public_schema::{OrderedRowDelta, QueryResult, Row};
 use crate::tools::server::core_websocket_transport::WebSocketTransport;
 use crate::tools::server::public_schema_convert::convert_public_schema;
@@ -73,7 +70,6 @@ enum BackendConnection {
 
 const QUERY_COVERAGE_TIMEOUT: Duration = Duration::from_secs(5);
 const DEFAULT_TEST_WAIT_TIMEOUT_MULTIPLIER: u32 = 8;
-const LARGE_VALUE_HANDLE_MAGIC: &[u8] = b"JLVH2";
 const MAX_TICK_DRIVER_RECOVERY_ATTEMPTS: u32 = 12;
 const TICK_DRIVER_RETRY_BASE_DELAY: Duration = Duration::from_millis(50);
 const TICK_DRIVER_RETRY_MAX_DELAY: Duration = Duration::from_secs(2);
@@ -171,9 +167,6 @@ enum TickDriverErrorClass {
 fn classify_tick_driver_error(error: &CoreDbError) -> TickDriverErrorClass {
     match error.code {
         CoreDbErrorCode::Backpressure => TickDriverErrorClass::Retry,
-        CoreDbErrorCode::Protocol if error.message.starts_with("missing content extent:") => {
-            TickDriverErrorClass::Retry
-        }
         CoreDbErrorCode::Protocol if error.message == "websocket pump is closed" => {
             TickDriverErrorClass::Reconnect
         }
@@ -319,17 +312,6 @@ impl Backend {
         }
     }
 
-    fn hydrate_large_value_handle(
-        &self,
-        handle: &[u8],
-    ) -> std::result::Result<Vec<u8>, CoreDbError> {
-        match self {
-            Self::Memory(db) => db.hydrate_large_value_handle(handle),
-            #[cfg(feature = "rocksdb")]
-            Self::RocksDb(db) => db.hydrate_large_value_handle(handle),
-        }
-    }
-
     fn insert(
         &self,
         table: &str,
@@ -439,20 +421,6 @@ impl Backend {
             Self::Memory(db) => Ok(db.update(table, row_id, cells)?.mergeable_tx_id()),
             #[cfg(feature = "rocksdb")]
             Self::RocksDb(db) => Ok(db.update(table, row_id, cells)?.mergeable_tx_id()),
-        }
-    }
-
-    fn edit_text(
-        &self,
-        table: &str,
-        row_id: CoreRowUuid,
-        column: &str,
-        edit: CoreTextEdit,
-    ) -> std::result::Result<CoreTxId, CoreDbError> {
-        match self {
-            Self::Memory(db) => Ok(db.edit_text(table, row_id, column, edit)?.mergeable_tx_id()),
-            #[cfg(feature = "rocksdb")]
-            Self::RocksDb(db) => Ok(db.edit_text(table, row_id, column, edit)?.mergeable_tx_id()),
         }
     }
 
@@ -929,21 +897,6 @@ impl ClientDb {
         Ok(tx_id)
     }
 
-    fn edit_text(&self, row_id: ObjectId, column: &str, edit: CoreTextEdit) -> Result<CoreTxId> {
-        let mut inner = self.inner.borrow_mut();
-        let table = inner.row_tables.get(&row_id).cloned().ok_or_else(|| {
-            JazzError::Write(
-                "text edit requires a row created or observed by this client".to_string(),
-            )
-        })?;
-        let tx_id = inner
-            .db
-            .edit_text(&table, CoreRowUuid(*row_id.uuid()), column, edit)
-            .map_err(|error| JazzError::Write(error.to_string()))?;
-        inner.remember_write(row_id, &table, tx_id);
-        Ok(tx_id)
-    }
-
     fn stage_update(
         &self,
         batch_id: OpenBatchId,
@@ -1023,14 +976,6 @@ impl ClientDb {
             .transactions
             .insert(batch_id, ExclusiveTransactionState { writes: Vec::new() });
         Ok(batch_id)
-    }
-
-    fn hydrate_large_value_handle(&self, handle: &LargeValueHandle) -> Result<Vec<u8>> {
-        self.inner
-            .borrow()
-            .db
-            .hydrate_large_value_handle(handle.as_bytes())
-            .map_err(|error| JazzError::Query(error.to_string()))
     }
 
     fn commit_transaction(&self, batch_id: OpenBatchId) -> Result<BatchId> {
@@ -1402,6 +1347,7 @@ impl ClientDbInner {
                         added,
                         updated,
                         removed,
+                        settled,
                         ..
                     } => {
                         let previous_rows: Vec<OutputOccurrenceId> = current_rows
@@ -1470,6 +1416,8 @@ impl ClientDbInner {
                         let Ok(delta) = delta else {
                             break;
                         };
+                        let mut delta = delta;
+                        delta.pending = !settled;
                         let _ = tx.send(SubscriptionStreamItem::Delta(delta));
                     }
                     CoreSubscriptionEvent::Rejected { reason } => {
@@ -1743,10 +1691,6 @@ fn public_to_core_value(value: Value) -> Result<CoreValue> {
         Value::Timestamp(value) => Ok(CoreValue::U64(value)),
         Value::Uuid(value) => Ok(CoreValue::Uuid(*value.uuid())),
         Value::Bytea(value) => Ok(CoreValue::Bytes(value)),
-        Value::LargeValue(_) => Err(JazzError::Write(
-            "large-value handles are read-only query results; write Bytea content instead"
-                .to_string(),
-        )),
         Value::Null => Ok(CoreValue::Nullable(None)),
         Value::Array(values) => values
             .into_iter()
@@ -1816,9 +1760,6 @@ fn core_to_public_value(value: CoreValue) -> Result<Value> {
         CoreValue::U64(value) => Ok(Value::Timestamp(value)),
         CoreValue::F64(value) => Ok(Value::Double(value)),
         CoreValue::Uuid(value) => Ok(Value::Uuid(ObjectId::from_uuid(value))),
-        CoreValue::Bytes(value) if value.starts_with(LARGE_VALUE_HANDLE_MAGIC) => {
-            Ok(Value::LargeValue(LargeValueHandle::from_bytes(value)))
-        }
         CoreValue::Bytes(value) => Ok(Value::Bytea(value)),
         CoreValue::Nullable(None) => Ok(Value::Null),
         CoreValue::Nullable(Some(value)) => core_to_public_value(*value),
@@ -3053,27 +2994,6 @@ impl JazzClient {
         }
     }
 
-    /// Apply explicit byte-position edits to a text-document column.
-    pub fn edit_text(
-        &self,
-        object_id: ObjectId,
-        column: &str,
-        edit: CoreTextEdit,
-    ) -> Result<BatchId> {
-        if self
-            .write_context
-            .as_ref()
-            .and_then(|ctx| ctx.batch_id)
-            .is_some()
-        {
-            return Err(JazzError::Write(
-                "text edits are not supported inside exclusive transactions".to_string(),
-            ));
-        }
-        let tx_id = self.db.edit_text(object_id, column, edit)?;
-        Ok(core_batch_id(tx_id))
-    }
-
     /// Delete a row.
     pub fn delete(&self, object_id: ObjectId) -> Result<Option<BatchId>> {
         {
@@ -3114,24 +3034,6 @@ impl JazzClient {
 
     pub async fn wait_for_batch(&self, batch_id: BatchId, tier: DurabilityTier) -> Result<()> {
         self.db.wait_for_batch(batch_id, tier).await
-    }
-
-    /// Fetch and materialize the bytes behind a large-value handle returned by a query.
-    pub async fn hydrate_large_value(&self, handle: &LargeValueHandle) -> Result<Vec<u8>> {
-        self.db.ensure_tick_driver_running()?;
-        let deadline = tokio::time::Instant::now() + QUERY_COVERAGE_TIMEOUT;
-        loop {
-            self.db.ensure_tick_driver_running()?;
-            match self.db.hydrate_large_value_handle(handle) {
-                Ok(bytes) => return Ok(bytes),
-                Err(error) => {
-                    if tokio::time::Instant::now() >= deadline {
-                        return Err(error);
-                    }
-                }
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
     }
 
     /// Unsubscribe from a subscription.

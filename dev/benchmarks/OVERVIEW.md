@@ -38,7 +38,6 @@ result.
 | `cold_subscription`         | global update and local current-row materialization over increasing history depth | history depth, pending local state, current-row hydration |
 | `validation`                | multi-client exclusive ingest against an independent simplified model             | clients, rows, contention, OCC, and predicate sets        |
 | `sync`                      | mixed commits over UI → worker → edge → core with periodic view updates           | commit mix, topology, view cadence, known-state reuse     |
-| `large_value_checkpointing` | small text edits followed by checkpointed versus full replay                      | text history, checkpoint interval, body size              |
 | `merge_back_cost`           | branch creation, mergeable writes, merge-back, and current-row count              | branch write count; not a complete offline-sync scenario  |
 | `relation_include_delivery` | one-row relation/include delivery over a 1k–20k accumulated-view ladder           | incremental delivery work versus retained view size       |
 

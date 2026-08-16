@@ -3,7 +3,7 @@ use std::fmt;
 
 use crate::groove::records::ScalarEnumSchema;
 use crate::groove::schema::ColumnType;
-use crate::schema::{ColumnSchema, JazzSchema, LargeValueKind, MergeStrategy, TableSchema};
+use crate::schema::{ColumnSchema, JazzSchema, MergeStrategy, TableSchema};
 use serde_json::Value;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -158,49 +158,21 @@ fn convert_column(
         column_type_value,
         &format!("{path}.column_type"),
     )?;
-    if let Some(kind) = object.get("large_value") {
-        let kind = kind.as_str().ok_or_else(|| {
-            err(
-                format!("{path}.large_value"),
-                "large_value must be a string",
-            )
-        })?;
-        if !matches!(column.column_type, ColumnType::Bytes) {
-            return Err(err(
-                format!("{path}.large_value"),
-                "large_value is only supported on Bytea columns",
-            ));
-        }
-        column.large_value = Some(match kind {
-            "Blob" => LargeValueKind::Blob,
-            "Text" => LargeValueKind::Text,
-            _ => {
-                return Err(err(
-                    format!("{path}.large_value"),
-                    "large_value must be Blob or Text",
-                ));
-            }
-        });
-    } else if object
+    if object.contains_key("large_value") {
+        return Err(err(
+            format!("{path}.large_value"),
+            "this column extension has been removed from this core version",
+        ));
+    }
+    if object
         .get("large")
         .and_then(Value::as_bool)
         .unwrap_or(false)
     {
-        match column.column_type {
-            ColumnType::String => {
-                column.column_type = ColumnType::Bytes;
-                column.large_value = Some(LargeValueKind::Text);
-            }
-            ColumnType::Bytes => {
-                column.large_value = Some(LargeValueKind::Blob);
-            }
-            _ => {
-                return Err(err(
-                    format!("{path}.large"),
-                    "large columns must be Text/String or Bytea",
-                ));
-            }
-        }
+        return Err(err(
+            format!("{path}.large"),
+            "this column extension has been removed from this core version",
+        ));
     }
     if object
         .get("timestamp")
@@ -438,46 +410,6 @@ mod tests {
     }
 
     #[test]
-    fn converts_public_large_value_marker() {
-        let schema = convert_admin_schema(&json!({
-            "files": {
-                "columns": [
-                    {
-                        "name": "data",
-                        "column_type": { "type": "Bytea" },
-                        "large_value": "Blob"
-                    }
-                ]
-            }
-        }))
-        .expect("schema converts");
-
-        let column = &schema.tables[0].columns[0];
-        assert_eq!(column.column_type, ColumnType::Bytes);
-        assert_eq!(column.large_value, Some(LargeValueKind::Blob));
-    }
-
-    #[test]
-    fn converts_public_text_large_value_marker() {
-        let schema = convert_admin_schema(&json!({
-            "docs": {
-                "columns": [
-                    {
-                        "name": "body",
-                        "column_type": { "type": "Bytea" },
-                        "large_value": "Text"
-                    }
-                ]
-            }
-        }))
-        .expect("schema converts");
-
-        let column = &schema.tables[0].columns[0];
-        assert_eq!(column.column_type, ColumnType::Bytes);
-        assert_eq!(column.large_value, Some(LargeValueKind::Text));
-    }
-
-    #[test]
     fn converts_public_counter_merge_strategy() {
         let schema = convert_admin_schema(&json!({
             "counters": {
@@ -578,5 +510,37 @@ mod tests {
         let table = &schema.tables[0];
         assert_eq!(table.columns[0].column_type, ColumnType::String);
         assert_eq!(table.columns[1].column_type, ColumnType::String.nullable());
+    }
+
+    #[test]
+    fn rejects_removed_large_value_descriptor_field() {
+        let err = convert_admin_schema(&json!({
+            "files": {
+                "columns": [{
+                    "name": "data",
+                    "column_type": "Bytea",
+                    "large_value": "Blob"
+                }]
+            }
+        }))
+        .unwrap_err();
+
+        assert_eq!(err.path, "$.files.columns[0].large_value");
+    }
+
+    #[test]
+    fn rejects_removed_truthy_large_column_flag() {
+        let err = convert_admin_schema(&json!({
+            "files": {
+                "columns": [{
+                    "name": "data",
+                    "column_type": "Bytea",
+                    "large": true
+                }]
+            }
+        }))
+        .unwrap_err();
+
+        assert_eq!(err.path, "$.files.columns[0].large");
     }
 }

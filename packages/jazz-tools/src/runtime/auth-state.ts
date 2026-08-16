@@ -83,6 +83,13 @@ export function createAuthStateStore(input: ClientSessionInput, options?: AuthSt
       return state;
     },
 
+    clearError(): AuthState {
+      if (state.error === undefined) return state;
+      state = { authMode: state.authMode, session: state.session };
+      emit();
+      return state;
+    },
+
     applyJwtToken(jwtToken?: string): AuthState {
       if (options?.lockAuthenticatedState) {
         return state;

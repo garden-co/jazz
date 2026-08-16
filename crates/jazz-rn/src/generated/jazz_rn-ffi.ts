@@ -183,11 +183,6 @@ interface NativeModuleInterface {
     ptr: bigint,
     uniffi_out_err: UniffiRustCallStatus
   ): void;
-  ubrn_uniffi_jazz_rn_fn_method_rndb_hydrate_large_value(
-    ptr: bigint,
-    handle: Uint8Array,
-    uniffi_out_err: UniffiRustCallStatus
-  ): Uint8Array;
   ubrn_uniffi_jazz_rn_fn_method_rndb_insert_with_id_encoded(
     ptr: bigint,
     table: Uint8Array,
@@ -664,7 +659,6 @@ interface NativeModuleInterface {
   ubrn_uniffi_jazz_rn_checksum_method_rndb_detach_query(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rndb_exclusive_tx(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rndb_free(): number;
-  ubrn_uniffi_jazz_rn_checksum_method_rndb_hydrate_large_value(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rndb_insert_with_id_encoded(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rndb_insert_with_id_encoded_for_identity(): number;
   ubrn_uniffi_jazz_rn_checksum_method_rndb_local_current_row(): number;

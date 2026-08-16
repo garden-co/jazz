@@ -18,8 +18,6 @@ pub(crate) struct AppRowOutputRequest {
     pub(crate) public_terminal: bool,
     /// Public payload projection requested at the app boundary.
     pub(crate) projection: PayloadProjection,
-    /// Large-value materialization requested for app rows.
-    pub(crate) large_values: Vec<LargeValueRequest>,
 }
 
 /// Public app-row payload projection.
@@ -65,8 +63,6 @@ pub(crate) struct AppPathProjection {
     /// What app projection does when hidden relation facts show incomplete/null
     /// child coverage.
     pub(crate) hole_policy: PathHolePolicy,
-    /// Large-value materialization requested for this path child.
-    pub(crate) large_values: Vec<LargeValueRequest>,
 }
 
 /// App path cardinality.
@@ -85,46 +81,6 @@ pub(crate) enum PathHolePolicy {
     KeepParentWithHoles,
     /// Drop parent rows whose required path is incomplete.
     DropIncompleteParent,
-}
-
-/// Large-value materialization requested relative to the enclosing result/path.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) struct LargeValueRequest {
-    /// Column names.
-    pub(crate) columns: BTreeSet<String>,
-    /// Materialization mode.
-    pub(crate) materialization: LargeValueMaterialization,
-    /// Byte ranges requested for materialization.
-    pub(crate) ranges: LargeValueRangeRequest,
-}
-
-/// Large-value materialization mode.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) enum LargeValueMaterialization {
-    /// Inline bytes into the row-record payload.
-    Inline,
-    /// Return handles only.
-    Handle,
-    /// Return authorized extent descriptors.
-    Extents,
-}
-
-/// Large-value byte range request.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) enum LargeValueRangeRequest {
-    /// Entire value.
-    WholeValue,
-    /// Explicit ranges.
-    Ranges(Vec<ByteRange>),
-}
-
-/// Byte range.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) struct ByteRange {
-    /// Inclusive start byte.
-    pub(crate) start: u64,
-    /// Exclusive end byte, or `None` for EOF.
-    pub(crate) end: Option<u64>,
 }
 
 /// Stable key for safe sharing of compiled semantic work.
@@ -211,13 +167,6 @@ pub(crate) enum ProgramFactKey {
     },
     /// Point row-read facts.
     PointReads { present: bool },
-    /// Authorized/materialized large-value extents.
-    LargeValueExtents {
-        /// Owner source.
-        owner: ResultId,
-        /// Requested large-value materialization.
-        request: LargeValueRequest,
-    },
 }
 
 /// Stable identity for one policy-decision terminal fact.

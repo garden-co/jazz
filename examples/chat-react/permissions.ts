@@ -17,8 +17,8 @@ export default definePermissions(app, ({ policy, session, allOf, anyOf, allowedT
       userIsChatMember(chat),
       // Users may update only non-protected fields. `createdBy` and `isPublic` cannot be updated.
       policy.chats.exists.where({
-        id: chat.id,
         createdBy: chat.createdBy,
+        id: chat.id,
         isPublic: chat.isPublic,
       }),
     ]),
@@ -58,13 +58,4 @@ export default definePermissions(app, ({ policy, session, allOf, anyOf, allowedT
   policy.strokes.allowRead.where(allowedTo.read("canvasId"));
   policy.strokes.allowInsert.where(allowedTo.read("canvasId"));
   policy.strokes.allowDelete.where({ ownerId: session.user_id });
-
-  policy.attachments.allowRead.where(allowedTo.read("messageId"));
-  policy.attachments.allowInsert.where(allowedTo.read("messageId"));
-  policy.attachments.allowDelete.where(allowedTo.delete("messageId"));
-
-  policy.files.allowInsert.where({});
-
-  policy.files.allowRead.where(allowedTo.readReferencing(policy.attachments, "fileId"));
-  policy.files.allowDelete.where(allowedTo.deleteReferencing(policy.attachments, "fileId"));
 });

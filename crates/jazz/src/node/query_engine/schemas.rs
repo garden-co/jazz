@@ -27,6 +27,12 @@ pub(crate) struct AppRowSchema {
     pub(crate) carrier: AppRowCarrier,
     /// Per-field override for mixed collector records, keyed by descriptor name.
     pub(crate) field_carriers: BTreeMap<String, AppRowCarrier>,
+    /// Explicit physical descriptor field -> public output name mapping.
+    ///
+    /// This is distinct from the carrier: a logical include can legally begin
+    /// with `user_`, which is otherwise the physical CurrentRow source-cell
+    /// namespace.
+    pub(crate) public_field_names: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -109,8 +115,6 @@ pub(crate) enum ProgramFactSchema {
     PredicateOutputSet(PredicateOutputSetSchema),
     /// Point row-read facts for exclusive transaction validation.
     PointReads(PointReadFactSchema),
-    /// Large-value authorization/materialization extents.
-    LargeValueExtents(LargeValueExtentSchema),
 }
 
 /// Authorized row-id terminal row schema.
@@ -474,29 +478,6 @@ pub(crate) struct WindowResultSchema {
     pub(crate) order_fields: Vec<TypedOutputField>,
     /// Internal retained window-position witness, when needed by the graph.
     pub(crate) position_witness_field: Option<String>,
-}
-
-/// Large-value authorization/materialization extent schema.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct LargeValueExtentSchema {
-    /// Row containing the large-value column.
-    pub(crate) owner: VersionedRowRefSchema,
-    /// Column name field.
-    pub(crate) column_field: String,
-    /// Byte range field.
-    pub(crate) range_field: String,
-    /// Content digest field.
-    pub(crate) digest_field: String,
-    /// Field distinguishing handle/chunk/inline materialization.
-    pub(crate) materialization_field: String,
-    /// App-row handle field linked to these authorized extents.
-    pub(crate) handle_field: String,
-    /// Durability/source tier field for the extent.
-    pub(crate) tier_field: String,
-    /// Source coverage field for the extent.
-    pub(crate) source_coverage_field: String,
-    /// Field distinguishing complete/incomplete extent coverage.
-    pub(crate) completeness_field: String,
 }
 
 /// Predicate-read fact schema.

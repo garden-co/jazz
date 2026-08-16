@@ -109,6 +109,8 @@ pub enum EncodedSubscriptionEvent {
     Delta {
         /// Whether this delta replaces all previously observed state.
         reset: bool,
+        /// Whether this event represents an authority-backed observation.
+        publishable: bool,
         /// Postcard-encoded row delta. Empty of rows when
         /// `terminal_operations` carries the change instead.
         delta: Vec<u8>,
@@ -544,6 +546,7 @@ pub fn encode_subscription_event(
     match event {
         SubscriptionEvent::Delta {
             reset,
+            publishable,
             added,
             updated,
             removed,
@@ -568,6 +571,7 @@ pub fn encode_subscription_event(
                 encode_terminal_payload(terminal_operations, terminal_layout.as_ref())?;
             Ok(EncodedSubscriptionEvent::Delta {
                 reset: *reset,
+                publishable: *publishable,
                 delta,
                 terminal_operations,
                 terminal_layouts,
@@ -606,6 +610,7 @@ pub fn subscription_event_to_json(event: &SubscriptionEvent) -> Result<JsonValue
     match encode_subscription_event(event)? {
         EncodedSubscriptionEvent::Delta {
             reset,
+            publishable,
             delta,
             terminal_operations,
             terminal_layouts,
@@ -614,6 +619,7 @@ pub fn subscription_event_to_json(event: &SubscriptionEvent) -> Result<JsonValue
         } => Ok(serde_json::json!({
             "type": "delta",
             "reset": reset,
+            "publishable": publishable,
             "delta": delta,
             "terminalOperations": terminal_operations,
             "terminalLayouts": terminal_layouts,
@@ -883,6 +889,7 @@ mod tests {
         let removed_row = test_row(0x33, "removed");
         let event = SubscriptionEvent::Delta {
             reset: false,
+            publishable: true,
             added: vec![SubscriptionOutputRow {
                 occurrence_id: occurrence(&added_row),
                 row: added_row,
@@ -937,6 +944,7 @@ mod tests {
         };
         let event = SubscriptionEvent::Delta {
             reset: false,
+            publishable: true,
             added: vec![SubscriptionOutputRow {
                 occurrence_id: occurrence(&row),
                 row,

@@ -5,7 +5,7 @@
 
 use super::*;
 use crate::oracle::{ModelRowVersion, Oracle, OracleTxState, ParallelMaterializationOracle};
-use crate::peer::{PeerMetrics, PeerState};
+use crate::peer::{PeerEvictionPins, PeerMetrics, PeerState};
 use crate::protocol::{
     CurrentWriteSchema, LensOp, MigrationLens, RegisterShapeOptions, SchemaLineagePublication,
     SchemaVersion, TableLens, VersionRecord,
@@ -41,7 +41,6 @@ include!("m3_differential.rs");
 include!("counter_merge.rs");
 include!("merge_heads.rs");
 include!("recovery.rs");
-include!("content_store.rs");
 include!("edge_authority.rs");
 include!("general.rs");
 include!("view_update_capture.rs");

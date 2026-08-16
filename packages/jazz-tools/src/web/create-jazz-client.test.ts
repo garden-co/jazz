@@ -4,7 +4,6 @@ import type { DbConfig } from "../runtime/db.js";
 
 const mocks = vi.hoisted(() => {
   const createDb = vi.fn();
-  const createDbFromInspectedPage = vi.fn();
   const trackPromise = vi.fn(<T>(promise: Promise<T>) => promise);
   const orchestratorInstances: Array<{
     config: { appId: string };
@@ -33,7 +32,6 @@ const mocks = vi.hoisted(() => {
 
   return {
     createDb,
-    createDbFromInspectedPage,
     trackPromise,
     orchestratorInstances,
     MockSubscriptionsOrchestrator,
@@ -42,7 +40,6 @@ const mocks = vi.hoisted(() => {
     },
     reset() {
       createDb.mockReset();
-      createDbFromInspectedPage.mockReset();
       trackPromise.mockReset();
       orchestratorInstances.length = 0;
       initError = null;
@@ -60,15 +57,7 @@ vi.mock("../subscriptions-orchestrator.js", () => ({
   trackPromise: mocks.trackPromise,
 }));
 
-vi.mock("../dev-tools/index.js", () => ({
-  createDbFromInspectedPage: mocks.createDbFromInspectedPage,
-}));
-
-import {
-  createExtensionJazzClient,
-  createJazzClient,
-  type JazzClientConfig,
-} from "./create-jazz-client.js";
+import { createJazzClient, type JazzClientConfig } from "./create-jazz-client.js";
 import { getSubscriptionStore } from "../subscription-store-internal.js";
 
 const originalWindow = (globalThis as { window?: unknown }).window;
@@ -105,9 +94,8 @@ describe("framework-agnostic/createAgnosticJazzClient", () => {
   });
 
   it("AGC-01: initialises orchestrator and shuts down cleanly", async () => {
-    const config: JazzClientConfig<false> = {
+    const config: JazzClientConfig = {
       appId: "solid-unit-1",
-      asyncSubscriptionsOnly: false,
     };
     const session: Session = {
       user_id: "local:alice",
@@ -126,7 +114,7 @@ describe("framework-agnostic/createAgnosticJazzClient", () => {
     expect(mocks.orchestratorInstances).toHaveLength(1);
     const manager = mocks.orchestratorInstances[0]!;
     expect(manager.config).toEqual({ appId: config.appId });
-    expect(manager.db).not.toBe(db);
+    expect(manager.db).toBe(db);
     expect(manager.init).toHaveBeenCalledTimes(1);
 
     expect(client.db).toBe(db);
@@ -143,9 +131,8 @@ describe("framework-agnostic/createAgnosticJazzClient", () => {
   });
 
   it("AGC-02: rejects when db creation fails", async () => {
-    const config: JazzClientConfig<false> = {
+    const config: JazzClientConfig = {
       appId: "solid-unit-2",
-      asyncSubscriptionsOnly: false,
     };
     const dbError = new Error("createDb failed");
 
@@ -156,9 +143,8 @@ describe("framework-agnostic/createAgnosticJazzClient", () => {
   });
 
   it("AGC-03: rejects when orchestrator init fails", async () => {
-    const config: JazzClientConfig<false> = {
+    const config: JazzClientConfig = {
       appId: "solid-unit-3",
-      asyncSubscriptionsOnly: false,
     };
     const initError = new Error("orchestrator init failed");
     const db = createMockDb();
@@ -172,9 +158,8 @@ describe("framework-agnostic/createAgnosticJazzClient", () => {
   });
 
   it("AGC-04: forwards runtimeSources through framework client creation", async () => {
-    const config: JazzClientConfig<false> = {
+    const config: JazzClientConfig = {
       appId: "solid-unit-4",
-      asyncSubscriptionsOnly: false,
       runtimeSources: {
         baseUrl: "/assets/jazz/",
         wasmUrl: "/assets/jazz/custom.wasm",
@@ -196,9 +181,8 @@ describe("framework-agnostic/createAgnosticJazzClient", () => {
   });
 
   it("AGC-05: collapses same-identity clients onto one runtime", async () => {
-    const config: JazzClientConfig<false> = {
+    const config: JazzClientConfig = {
       appId: "web-client-dedup-shared",
-      asyncSubscriptionsOnly: false,
       serverUrl: "https://jazz.example.com",
     };
     mocks.createDb.mockResolvedValue(createMockDb(config.appId, null, config));
@@ -226,14 +210,12 @@ describe("framework-agnostic/createAgnosticJazzClient", () => {
 
     const first = await createJazzClient({
       appId: "web-client-dedup-multi",
-      asyncSubscriptionsOnly: false,
       secret: "principal-A",
-    } satisfies JazzClientConfig<false>);
+    } satisfies JazzClientConfig);
     const second = await createJazzClient({
       appId: "web-client-dedup-multi",
-      asyncSubscriptionsOnly: false,
       secret: "principal-B",
-    } satisfies JazzClientConfig<false>);
+    } satisfies JazzClientConfig);
 
     expect(mocks.createDb).toHaveBeenCalledTimes(2);
     expect(first.db).not.toBe(second.db);
@@ -245,9 +227,8 @@ describe("framework-agnostic/createAgnosticJazzClient", () => {
   it("AGC-07: exposes window.__jazz.clearStorage for the only live namespace", async () => {
     (globalThis as { window?: unknown }).window = {} as unknown;
 
-    const config: JazzClientConfig<false> = {
+    const config: JazzClientConfig = {
       appId: "web-client-unit-5",
-      asyncSubscriptionsOnly: false,
       driver: { type: "persistent", dbName: "alice-cache" },
     };
     const db = createMockDb(config.appId, null, config);
@@ -277,14 +258,12 @@ describe("framework-agnostic/createAgnosticJazzClient", () => {
   it("AGC-08: requires a namespace when multiple live contexts exist", async () => {
     (globalThis as { window?: unknown }).window = {} as unknown;
 
-    const aliceConfig: JazzClientConfig<false> = {
+    const aliceConfig: JazzClientConfig = {
       appId: "web-client-unit-6-alice",
-      asyncSubscriptionsOnly: false,
       driver: { type: "persistent", dbName: "alice-cache" },
     };
-    const bobConfig: JazzClientConfig<false> = {
+    const bobConfig: JazzClientConfig = {
       appId: "web-client-unit-6-bob",
-      asyncSubscriptionsOnly: false,
       driver: { type: "persistent", dbName: "bob-cache" },
     };
     const aliceDb = createMockDb(aliceConfig.appId, null, aliceConfig);
@@ -315,47 +294,5 @@ describe("framework-agnostic/createAgnosticJazzClient", () => {
 
     await aliceClient.shutdown();
     await bobClient.shutdown();
-  });
-});
-
-describe("framework-agnostic/createAgnosticExtensionJazzClient", () => {
-  beforeEach(() => {
-    mocks.reset();
-    mocks.trackPromise.mockImplementation((promise) => promise);
-  });
-
-  it("AGC-EXT-01: creates client from inspected page", async () => {
-    const db = createMockDb("devtools-app");
-    mocks.createDbFromInspectedPage.mockResolvedValue(db);
-
-    const client = await createExtensionJazzClient();
-
-    expect(mocks.createDbFromInspectedPage).toHaveBeenCalledTimes(1);
-    expect(db.getConfig).toHaveBeenCalledTimes(1);
-    expect(mocks.orchestratorInstances).toHaveLength(1);
-    expect(mocks.orchestratorInstances[0]!.config).toEqual({
-      appId: "devtools-app",
-    });
-    expect(client.db).toBe(db);
-    expect(client.session).toBeNull();
-    expect("manager" in client).toBe(false);
-    expect(getSubscriptionStore(client)).toBe(mocks.orchestratorInstances[0]!);
-  });
-
-  it("AGC-EXT-02: rejects when config is missing", async () => {
-    const db = { shutdown: vi.fn(), getConfig: vi.fn(() => null) };
-    mocks.createDbFromInspectedPage.mockResolvedValue(db);
-
-    await expect(createExtensionJazzClient()).rejects.toThrow(
-      "DevTools bridge did not provide an inspected page config.",
-    );
-  });
-
-  it("AGC-EXT-03: wraps with trackPromise", async () => {
-    const db = createMockDb();
-    mocks.createDbFromInspectedPage.mockResolvedValue(db);
-
-    await createExtensionJazzClient();
-    expect(mocks.trackPromise).toHaveBeenCalledTimes(1);
   });
 });

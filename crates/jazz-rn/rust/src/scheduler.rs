@@ -171,18 +171,18 @@ mod tests {
     #[test]
     fn coalesces_same_urgency_bursts() {
         // Internal scheduler behavior cannot be observed through Jazz's public
-        // database API, so this deliberately tests the binding mechanism.
+        // database API, so this deliberately tests the binding mechanism. Keep
+        // the queue undrained while issuing the burst: otherwise the detached
+        // worker may clear the pending flag between loop iterations, turning
+        // this into an operating-system scheduling test.
         let scheduler = RnScheduler::default();
         let (sender, receiver) = mpsc::channel();
-        scheduler.set_callback(Some(Box::new(Callback(sender))));
+        *scheduler.worker.lock().unwrap() = Some(sender);
         for _ in 0..16 {
             scheduler.schedule_tick(TickUrgency::Immediate);
         }
-        assert_eq!(
-            receiver.recv_timeout(Duration::from_secs(1)).unwrap(),
-            "immediate"
-        );
-        assert!(receiver.recv_timeout(Duration::from_millis(30)).is_err());
+        assert!(matches!(receiver.try_recv(), Ok(SchedulerJob::Immediate)));
+        assert!(receiver.try_recv().is_err());
         scheduler.shutdown();
     }
 

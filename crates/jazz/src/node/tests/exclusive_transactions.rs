@@ -238,7 +238,7 @@ fn tx_read_parent_cache_is_invalidated_by_same_row_write_without_changing_read_s
             .unwrap()
             .base_snapshot_rows
             .contains_key(&(
-                node.current_write_schema().schema,
+                node.current_write_schema().unwrap().schema,
                 "todos".to_owned(),
                 row
             ))
@@ -252,7 +252,7 @@ fn tx_read_parent_cache_is_invalidated_by_same_row_write_without_changing_read_s
             .unwrap()
             .base_snapshot_rows
             .contains_key(&(
-                node.current_write_schema().schema,
+                node.current_write_schema().unwrap().schema,
                 "todos".to_owned(),
                 row
             ))
@@ -358,7 +358,6 @@ fn exclusive_snapshot_global_base_uses_contiguous_global_watermark() {
                     predicate_read_set: None,
                     user_metadata_json: None,
                 branch_merge: None,
-            merge_strategy: None,
                 },
                 vec![version_record(
                     row(row_byte),
@@ -396,7 +395,6 @@ fn exclusive_snapshot_global_base_uses_contiguous_global_watermark() {
                 predicate_read_set: None,
                 user_metadata_json: None,
                 branch_merge: None,
-            merge_strategy: None,
             },
             vec![version_record(
                 row(2),

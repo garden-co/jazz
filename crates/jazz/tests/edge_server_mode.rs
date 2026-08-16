@@ -291,7 +291,9 @@ async fn public_root_default_order_and_windows_are_stable_across_reset() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-#[ignore = "known red; tracked in TEST_BURNDOWN.md"]
+/// An edge server sends every ordered-window boundary crossing to the client.
+/// Alice creates tied rows, then promotes and demotes a third row across the
+/// two-row window boundary.
 async fn maintained_window_uses_row_id_tie_breaker_and_tracks_rows_crossing_boundary() {
     tokio::task::LocalSet::new()
         .run_until(async {
@@ -390,6 +392,30 @@ async fn maintained_window_uses_row_id_tie_breaker_and_tracks_rows_crossing_boun
                 |deltas| has_added(deltas, promoted) && has_removed(deltas, tied[1]),
             )
             .await;
+            let promotion = updates
+                .iter()
+                .find(|delta| has_added(std::slice::from_ref(delta), promoted))
+                .expect("promotion delta is recorded");
+            assert_eq!(
+                promotion
+                    .added
+                    .iter()
+                    .find(|change| change.id == promoted)
+                    .expect("promoted row is added")
+                    .index,
+                0,
+                "a newly promoted row is inserted at its authoritative TopBy position"
+            );
+            assert_eq!(
+                promotion
+                    .removed
+                    .iter()
+                    .find(|change| change.id == tied[1])
+                    .expect("displaced row is removed")
+                    .index,
+                1,
+                "the displaced row retains its pre-update position"
+            );
 
             let batch = client
                 .update(
@@ -1202,6 +1228,194 @@ async fn edge_server_accepts_mergeable_write_while_core_down_then_promotes() {
         .await;
 }
 
+/// A core-origin write reaches subscribers connected through two independent
+/// edge servers.
+///
+/// Actors: carol writes directly to `core`; alice is connected to `edge_us`
+/// and bob to `edge_eu`.
+///
+/// ```text
+///                 /--upstream--> edge_us --> alice
+/// carol --> core -|
+///                 \--upstream--> edge_eu --> bob
+/// ```
+#[tokio::test(flavor = "current_thread")]
+async fn core_write_reaches_clients_on_both_edges() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = todo_schema();
+            let app_id = AppId::random();
+            let core = JazzServer::builder()
+                .with_app_id(app_id)
+                .with_schema(schema.clone())
+                .start()
+                .await;
+            let edge_us = JazzServer::builder()
+                .with_app_id(app_id)
+                .with_schema(schema.clone())
+                .with_upstream_url(core.base_url())
+                .start()
+                .await;
+            let edge_eu = JazzServer::builder()
+                .with_app_id(app_id)
+                .with_schema(schema.clone())
+                .with_upstream_url(core.base_url())
+                .start()
+                .await;
+
+            let alice = connect_user(&edge_us, schema.clone(), "alice-edge-us").await;
+            let bob = connect_user(&edge_eu, schema.clone(), "bob-edge-eu").await;
+            let carol = connect_user(&core, schema, "carol-core").await;
+            let mut alice_stream = alice
+                .subscribe(todo_query())
+                .await
+                .expect("alice subscribes through edge_us");
+            let mut bob_stream = bob
+                .subscribe(todo_query())
+                .await
+                .expect("bob subscribes through edge_eu");
+            let mut alice_log = Vec::new();
+            let mut bob_log = Vec::new();
+
+            let (todo_id, expected, batch_id) = carol
+                .insert(
+                    "todos",
+                    row_input!("title" => "core write for both edges", "done" => false),
+                )
+                .expect("carol writes directly to core");
+            carol
+                .wait_for_batch(
+                    batch_id.expect("ordinary mutation commits immediately"),
+                    DurabilityTier::GlobalServer,
+                )
+                .await
+                .expect("core write settles globally");
+
+            wait_for_subscription_update(
+                &mut alice_stream,
+                &mut alice_log,
+                Duration::from_secs(30),
+                "alice receives the core write through edge_us",
+                |deltas| has_added(deltas, todo_id),
+            )
+            .await;
+            wait_for_subscription_update(
+                &mut bob_stream,
+                &mut bob_log,
+                Duration::from_secs(30),
+                "bob receives the core write through edge_eu",
+                |deltas| has_added(deltas, todo_id),
+            )
+            .await;
+            wait_for_row(
+                &alice,
+                DurabilityTier::EdgeServer,
+                todo_id,
+                expected.clone(),
+                "alice's edge query contains the core write",
+            )
+            .await;
+            wait_for_row(
+                &bob,
+                DurabilityTier::EdgeServer,
+                todo_id,
+                expected,
+                "bob's edge query contains the core write",
+            )
+            .await;
+
+            carol.shutdown().await.expect("shutdown carol");
+            bob.shutdown().await.expect("shutdown bob");
+            alice.shutdown().await.expect("shutdown alice");
+            edge_eu.shutdown().await;
+            edge_us.shutdown().await;
+            core.shutdown().await;
+        })
+        .await;
+}
+
+/// A write accepted through one edge becomes globally visible through a peer
+/// edge, including its existing subscription.
+///
+/// Actors: alice writes through `edge_us`; bob is subscribed through
+/// `edge_eu`.
+///
+/// ```text
+/// alice --> edge_us --upstream--> core --upstream--> edge_eu --> bob
+/// ```
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "known red; tracked in TEST_BURNDOWN.md"]
+async fn edge_write_reaches_client_on_peer_edge() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = todo_schema();
+            let app_id = AppId::random();
+            let core = JazzServer::builder()
+                .with_app_id(app_id)
+                .with_schema(schema.clone())
+                .start()
+                .await;
+            let edge_us = JazzServer::builder()
+                .with_app_id(app_id)
+                .with_schema(schema.clone())
+                .with_upstream_url(core.base_url())
+                .start()
+                .await;
+            let edge_eu = JazzServer::builder()
+                .with_app_id(app_id)
+                .with_schema(schema.clone())
+                .with_upstream_url(core.base_url())
+                .start()
+                .await;
+
+            let alice = connect_user(&edge_us, schema.clone(), "alice-edge-us-writer").await;
+            let bob = connect_user(&edge_eu, schema, "bob-edge-eu-reader").await;
+            let mut bob_stream = bob
+                .subscribe(todo_query())
+                .await
+                .expect("bob subscribes through edge_eu");
+            let mut bob_log = Vec::new();
+
+            let (todo_id, expected, batch_id) = alice
+                .insert(
+                    "todos",
+                    row_input!("title" => "edge write for peer", "done" => true),
+                )
+                .expect("alice writes through edge_us");
+            alice
+                .wait_for_batch(
+                    batch_id.expect("ordinary mutation commits immediately"),
+                    DurabilityTier::GlobalServer,
+                )
+                .await
+                .expect("edge_us write settles globally through core");
+
+            wait_for_subscription_update(
+                &mut bob_stream,
+                &mut bob_log,
+                Duration::from_secs(30),
+                "bob receives edge_us write through edge_eu",
+                |deltas| has_added(deltas, todo_id),
+            )
+            .await;
+            wait_for_row(
+                &bob,
+                DurabilityTier::EdgeServer,
+                todo_id,
+                expected,
+                "bob's edge query contains the peer-edge write",
+            )
+            .await;
+
+            bob.shutdown().await.expect("shutdown bob");
+            alice.shutdown().await.expect("shutdown alice");
+            edge_eu.shutdown().await;
+            edge_us.shutdown().await;
+            core.shutdown().await;
+        })
+        .await;
+}
+
 #[test]
 fn topology_matrix_conformance_smoke_inventory() {
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1216,7 +1430,6 @@ fn topology_matrix_conformance_smoke_inventory() {
         MergeableWrite,
         RlsNarrowedRead,
         ReconnectKnownState,
-        LargeValueRefetch,
     }
 
     struct Cell {
@@ -1242,11 +1455,6 @@ fn topology_matrix_conformance_smoke_inventory() {
             coverage: "text_document_merge::offline_concurrent_text_edits_reconnect_and_converge",
         },
         Cell {
-            topology: Topology::ClientCore,
-            scenario: Scenario::LargeValueRefetch,
-            coverage: "large_blob_permissions::large_blob_values_follow_ordinary_row_permissions",
-        },
-        Cell {
             topology: Topology::ClientEdgeCore,
             scenario: Scenario::MergeableWrite,
             coverage: "edge_server_mode::edge_server_accepts_mergeable_write_while_core_down_then_promotes",
@@ -1260,11 +1468,6 @@ fn topology_matrix_conformance_smoke_inventory() {
             topology: Topology::ClientEdgeCore,
             scenario: Scenario::ReconnectKnownState,
             coverage: "text_document_merge::offline_concurrent_text_edits_reconnect_and_converge",
-        },
-        Cell {
-            topology: Topology::ClientEdgeCore,
-            scenario: Scenario::LargeValueRefetch,
-            coverage: "catalogue_sync_integration::large_blob_values_follow_ordinary_row_permissions",
         },
         Cell {
             topology: Topology::ClientRelayEdgeCore,
@@ -1281,11 +1484,6 @@ fn topology_matrix_conformance_smoke_inventory() {
             scenario: Scenario::ReconnectKnownState,
             coverage: "text_document_merge::offline_concurrent_text_edits_reconnect_and_converge + seeded m3 sync close-out soak",
         },
-        Cell {
-            topology: Topology::ClientRelayEdgeCore,
-            scenario: Scenario::LargeValueRefetch,
-            coverage: "catalogue_sync_integration::large_blob_values_follow_ordinary_row_permissions + 7a refetch-after-eviction coverage",
-        },
     ];
 
     let topologies = [
@@ -1297,7 +1495,6 @@ fn topology_matrix_conformance_smoke_inventory() {
         Scenario::MergeableWrite,
         Scenario::RlsNarrowedRead,
         Scenario::ReconnectKnownState,
-        Scenario::LargeValueRefetch,
     ];
 
     for topology in topologies {

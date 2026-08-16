@@ -522,7 +522,6 @@ fn row_set_output(facts: BTreeSet<ProgramFactKey>) -> RowSetOutputRequest {
         app_rows: Some(AppRowOutputRequest {
             public_terminal: true,
             projection: PayloadProjection::ShapeDefault,
-            large_values: Vec::new(),
         }),
         facts,
     }
@@ -550,7 +549,6 @@ fn production_output_request(
             app_rows: Some(AppRowOutputRequest {
                 public_terminal: true,
                 projection: PayloadProjection::ShapeDefault,
-                large_values: Vec::new(),
             }),
             facts: if has_relation_paths {
                 BTreeSet::from([
@@ -794,7 +792,6 @@ fn app_path_projection(
         fields: FieldProjection::Fields(BTreeSet::from(["title".to_owned()])),
         children,
         hole_policy: PathHolePolicy::KeepParentWithHoles,
-        large_values: Vec::new(),
     }
 }
 
@@ -1022,6 +1019,70 @@ fn closure_requirements_merge_sparse_root_and_every_alias_hop_key() {
             Some(FieldRequirement::Fields(fields)) if *fields == BTreeSet::from(["org".to_owned()])
         ));
     }
+}
+
+#[test]
+fn scalar_inner_include_preserves_nullable_root_carrier_descriptor() {
+    // Internal lowering test: the descriptor mismatch exists between the
+    // compiler-owned terminal contract and Groove's inferred runtime output,
+    // before either representation reaches a public subscription API.
+    let root = source("todos", SourceRole::Root);
+    let target = source("todo_tags", SourceRole::Alias("include:0:0".to_owned()));
+    let mut input = row_set_input(0x2b);
+    input.shape.auxiliary_sources.insert(target.clone());
+    input
+        .shape
+        .closure_paths
+        .push(ClosurePath::ExplicitInclude {
+            id: "include:0:todo".to_owned(),
+            segments: vec![ClosurePathSegment {
+                parent: root.clone(),
+                target: target.clone(),
+                source_field: "todo".to_owned(),
+            }],
+            root_gate: Some(ClosureRootGate::Inner),
+        });
+    let request = QueryProgramRequest {
+        authorization_mode: QueryAuthorizationMode::TrustedServing,
+        reads: QueryReadSet::primary(ReadView {
+            read_schema: schema(0x10),
+            policy_schema: schema(0x11),
+            sources: BTreeMap::from([
+                (root, requested_current_source(DurabilityTier::Global)),
+                (target, requested_current_source(DurabilityTier::Global)),
+            ]),
+        }),
+        policy: system_policy_context(),
+        input,
+        output: row_set_output(BTreeSet::new()),
+    };
+
+    let program = lower_query_program(request, &mut InlineCollectorResolver::new(None))
+        .expect("scalar inner include lowers");
+    let terminal = program
+        .lowered
+        .terminals
+        .iter()
+        .find(|terminal| terminal.sink == "app_rows")
+        .expect("app-row terminal");
+    let OutputTerminalSchema::AppRows(app_rows) = &terminal.output else {
+        panic!("app-row terminal must carry its prepared descriptor");
+    };
+    let mut database = Database::new(DatabaseSchema::new([]), MemoryStorage::new(&[]))
+        .expect("inline descriptor database");
+    let runtime_rows = database
+        .query_graph(terminal.graph.clone())
+        .expect("infer scalar include terminal output");
+
+    assert_eq!(runtime_rows.descriptor, app_rows.descriptor);
+    let todo = runtime_rows
+        .descriptor
+        .field_index("user_todo")
+        .expect("whole-row terminal retains the source FK");
+    assert_eq!(
+        runtime_rows.descriptor.fields()[todo].value_type,
+        ValueType::Nullable(Box::new(ValueType::Uuid))
+    );
 }
 
 #[test]
@@ -1313,7 +1374,6 @@ fn current_source_select_projection_and_default_ordered_slice_lower() {
                     fields: FieldProjection::Fields(BTreeSet::from(["title".to_owned()])),
                     paths: Vec::new(),
                 }),
-                large_values: Vec::new(),
             }),
             facts: BTreeSet::new(),
         },
@@ -4469,35 +4529,4 @@ fn policy_context_carries_alpha_enforcement_mode() {
     };
 
     assert_ne!(permissive, enforcing);
-}
-
-#[test]
-fn large_value_extent_schema_names_authorized_materialization_contract() {
-    let member = VersionedRowRefSchema {
-        row: RowRefSchema {
-            source_field: "source".to_owned(),
-            table_field: "table".to_owned(),
-            row_field: "row_uuid".to_owned(),
-        },
-        version: Some(ResultMembershipVersionSchema::Content(
-            ContentVersionFields {
-                tx_time_field: "tx_time".to_owned(),
-                tx_node_field: "tx_node".to_owned(),
-            },
-        )),
-    };
-    let schema = LargeValueExtentSchema {
-        owner: member,
-        column_field: "column".to_owned(),
-        range_field: "range".to_owned(),
-        digest_field: "digest".to_owned(),
-        materialization_field: "materialization".to_owned(),
-        handle_field: "handle".to_owned(),
-        tier_field: "tier".to_owned(),
-        source_coverage_field: "source_coverage".to_owned(),
-        completeness_field: "complete".to_owned(),
-    };
-
-    assert_eq!(schema.digest_field, "digest");
-    assert_eq!(schema.completeness_field, "complete");
 }

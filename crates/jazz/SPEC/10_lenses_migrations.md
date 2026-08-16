@@ -28,9 +28,9 @@ Invariant digest:
 - `INV-LENS-15`: `ShapeId` MUST include the authored `SchemaVersionId`; identical canonical query bytes against different schema versions MUST produce different shape ids.
 - `INV-LENS-16`: A commit unit MUST NOT be rejected or rewritten solely because its authored schema differs from the current write schema.
 - `INV-LENS-17`: TransformColumn MUST be accepted only when its transform key is registered as bijective and canonical-equality-preserving.
-- `INV-LENS-18`: Large-value columns MAY be renamed by a lens but MUST NOT be content-transformed.
 - `INV-LENS-19`: Policy evaluation under lenses MUST translate data into the pinned permission evaluation schema and MUST NOT translate policy bundles.
 - `INV-LENS-20`: Published physical lineages and authored schema variants MUST NOT be automatically garbage-collected.
+- `INV-LENS-21`: A compatible table rename MUST retain its `PhysicalTableId`; deletion history and combined-current state therefore continue under that id without copying, rewriting, or rescanning unrelated lineages.
 
 ## Details
 
@@ -229,6 +229,13 @@ lens projection, and a pointer mismatch alone is never a rejection or rewrite
 condition (`INV-LENS-16`). A `RejectSourceDelta` declaration affects an explicit
 projection through that lens, not admission of history authored on either side.
 
+The same physical id is also the deletion-history routing key. A compatible
+`RenameTable` preserves it, so old and new logical names resolve to the same
+sparse deletion events and combined current row. Adding or incompatibly
+replacing a table allocates a new id and cannot observe old deletion events even
+if a caller reuses a `RowUuid`; dropped ids remain retained for history and are
+never reassigned (`INV-LENS-21`).
+
 A current-write-pointer flip is a core-ordered, monotone catalogue write
 (§10.2) and **never invalidates in-flight work**. The pointer selects the schema
 for new local authoring; it does not redirect commits another client already
@@ -237,10 +244,10 @@ authored under a different Active schema.
 ### 10.5 Reads: select, then project
 
 Reads begin from storage reality, then project into the requested schema. A read
-against schema S resolves its `PhysicalTableId`, selects content/deletion
-winners from that shared lineage by the **schema-agnostic `(tx_time, node)`
-ordering first**, and only then translates the winning cells into S
-(`INV-LENS-12`, ch. 4).
+against schema S resolves its `PhysicalTableId`, selects the combined current
+row (or independently selected historical winners at a fixed cut) from that
+shared lineage by the **schema-agnostic `(tx_time, node)` ordering first**, and
+only then translates the winning cells into S (`INV-LENS-12`, ch. 4).
 
 Natural lens projection applies supported operations deterministically in both
 directions and rejects unsupported transformations (`INV-LENS-13`). The shape's
@@ -292,16 +299,12 @@ keys `jazz.identity` and `identity`; `registered_transform_column_identity_is_ac
 and `transform_column_rejects_unregistered_transform_at_publish` cover that
 surface. Additional transform keys are status work, not an invariant.
 
-Large-value text/blob columns may be renamed, but `TransformColumn` over their
-content is rejected at lens publication (`INV-LENS-18`). **The core only ever
-receives resolved lenses**: a draft lens, such as an ambiguous diff where a
+**The core only ever receives resolved lenses**: a draft lens, such as an ambiguous diff where a
 drop+add might be a rename, is a product/tooling concept, and the validation tool
 refuses unresolved drafts upstream.
 
-Large-value checkpoints, payload handles, and extent references remain portable
-logical identities qualified by authored schema. Database-local
-`PhysicalTableId` and `PhysicalColumnId` values never cross those API/wire
-boundaries; local resolution happens only at the storage boundary.
+Database-local `PhysicalTableId` and `PhysicalColumnId` values never cross
+API/wire boundaries; local resolution happens only at the storage boundary.
 
 ### 10.9 Subsumed schema-file and schema-subset notes
 

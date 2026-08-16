@@ -49,7 +49,6 @@ fn open_db(seed: u64) -> Result<Db<MemoryStorage>, Box<dyn std::error::Error>> {
             author: AuthorId::from_bytes([0x55; 16]),
         },
         id_source: Some(Box::new(SeededRowIdSource::new(seed))),
-        large_value_checkpoint_op_interval: 1024,
     }))?)
 }
 

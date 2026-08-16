@@ -26,7 +26,7 @@ const schema = {
 
 function normalizeTestDelta(delta: SubscriptionWireDelta, testSchema: WasmSchema) {
   if (isNativeRowDelta(delta)) {
-    const columns = testSchema.todos?.columns ?? testSchema.binary_large_values?.columns;
+    const columns = testSchema.todos?.columns ?? testSchema.arrays?.columns;
     if (!columns) throw new Error("test schema has no decodable subscription table");
     return decodeNativeDelta(delta, columns);
   }
@@ -45,8 +45,8 @@ const writableTodoSchema = {
   },
 } satisfies WasmSchema;
 
-const binaryLargeValueSchema = {
-  binary_large_values: {
+const arraySchema = {
+  arrays: {
     columns: [{ name: "data", column_type: { type: "Bytea" }, nullable: false }],
   },
 } satisfies WasmSchema;
@@ -66,70 +66,63 @@ describe("NativeRuntimeAdapter server convergence", () => {
     globalThis.WebSocket = previousWebSocket;
   });
 
-  maybeIt(
-    "syncs writes between two JazzClient connections through /apps/:app/ws",
-    async () => {
-      globalThis.WebSocket ??= WebSocket as unknown as typeof globalThis.WebSocket;
+  it("syncs writes between two JazzClient connections through /apps/:app/ws", async () => {
+    globalThis.WebSocket ??= WebSocket as unknown as typeof globalThis.WebSocket;
 
-      const appId = "00000000-0000-0000-0000-00000000c001";
-      server = await startLocalJazzServer({
-        appId,
-        inMemory: true,
-        adminSecret: "native-runtime-convergence-admin",
-        schema: encodeSchema(schema),
-      });
+    const appId = "00000000-0000-0000-0000-00000000c001";
+    server = await startLocalJazzServer({
+      appId,
+      inMemory: true,
+      adminSecret: "native-runtime-convergence-admin",
+      schema: encodeSchema(schema),
+    });
 
-      const clientA = await createClient({ appId, serverUrl: server.url, peer: "alice" });
-      const clientB = await createClient({ appId, serverUrl: server.url, peer: "bob" });
-      clients.push(clientA, clientB);
+    const clientA = await createClient({ appId, serverUrl: server.url, peer: "alice" });
+    const clientB = await createClient({ appId, serverUrl: server.url, peer: "bob" });
+    clients.push(clientA, clientB);
 
-      clientA.connectTransport(server.url, { admin_secret: server.adminSecret });
-      clientB.connectTransport(server.url, { admin_secret: server.adminSecret });
+    clientA.connectTransport(server.url, { admin_secret: server.adminSecret });
+    clientB.connectTransport(server.url, { admin_secret: server.adminSecret });
 
-      const observedBySubscription = new Promise<string>((resolve) => {
-        clientB.subscribe(
-          JSON.stringify({ table: "todos" }),
-          (delta) => {
-            for (const change of normalizeTestDelta(delta, schema)) {
-              const firstValue = "row" in change ? change.row?.values[0] : undefined;
-              if (firstValue?.type === "Text") {
-                resolve(firstValue.value);
-              }
+    const observedBySubscription = new Promise<string>((resolve) => {
+      clientB.subscribe(
+        JSON.stringify({ table: "todos" }),
+        (delta) => {
+          for (const change of normalizeTestDelta(delta, schema)) {
+            const firstValue = "row" in change ? change.row?.values[0] : undefined;
+            if (firstValue?.type === "Text") {
+              resolve(firstValue.value);
             }
-          },
-          { tier: "local" },
-        );
-      });
-
-      const inserted = clientA.insert("todos", {
-        title: { type: "Text", value: "websocket convergence" },
-        done: { type: "Boolean", value: false },
-      });
-
-      await waitForPromise(
-        inserted.wait({ tier: "edge" }),
-        "client A insert did not settle at edge",
+          }
+        },
+        { tier: "local" },
       );
-      await waitForPromise(
-        observedBySubscription,
-        "client B subscription did not observe the native runtime insert",
-      );
+    });
 
-      const convergedRows = await waitFor(async () => {
-        const rows = await clientB.query(JSON.stringify({ table: "todos" }), { tier: "local" });
-        return rows.find((row) => row.id === inserted.value.id);
-      });
+    const inserted = clientA.insert("todos", {
+      title: { type: "Text", value: "websocket convergence" },
+      done: { type: "Boolean", value: false },
+    });
 
-      expect(convergedRows).toMatchObject({
-        id: inserted.value.id,
-        values: [
-          { type: "Text", value: "websocket convergence" },
-          { type: "Boolean", value: false },
-        ],
-      });
-    },
-    15_000,
-  );
+    await waitForPromise(inserted.wait({ tier: "edge" }), "client A insert did not settle at edge");
+    await waitForPromise(
+      observedBySubscription,
+      "client B subscription did not observe the native runtime insert",
+    );
+
+    const convergedRows = await waitFor(async () => {
+      const rows = await clientB.query(JSON.stringify({ table: "todos" }), { tier: "local" });
+      return rows.find((row) => row.id === inserted.value.id);
+    });
+
+    expect(convergedRows).toMatchObject({
+      id: inserted.value.id,
+      values: [
+        { type: "Text", value: "websocket convergence" },
+        { type: "Boolean", value: false },
+      ],
+    });
+  }, 15_000);
 
   maybeIt(
     "persists websocket writes across server restart",
@@ -275,19 +268,19 @@ describe("NativeRuntimeAdapter server convergence", () => {
       appId,
       inMemory: true,
       adminSecret: "native-runtime-bytea-convergence-admin",
-      schema: encodeSchema(binaryLargeValueSchema),
+      schema: encodeSchema(arraySchema),
     });
 
     const writer = await createClient({
       appId,
       serverUrl: server.url,
       peer: "bytea-writer",
-      schema: binaryLargeValueSchema,
+      schema: arraySchema,
     });
     clients.push(writer);
     writer.connectTransport(server.url, { admin_secret: server.adminSecret });
 
-    const inserted = writer.insert("binary_large_values", {
+    const inserted = writer.insert("arrays", {
       data: { type: "Bytea", value: Uint8Array.from([1, 2, 3, 4]) },
     });
     await waitForPromise(inserted.wait({ tier: "edge" }), "BYTEA insert did not settle at edge");
@@ -298,16 +291,16 @@ describe("NativeRuntimeAdapter server convergence", () => {
       appId,
       serverUrl: server.url,
       peer: "bytea-reader",
-      schema: binaryLargeValueSchema,
+      schema: arraySchema,
     });
     clients.push(reader);
     reader.connectTransport(server.url, { admin_secret: server.adminSecret });
 
     const replayedToSubscription = new Promise<Uint8Array>((resolve) => {
       reader.subscribe(
-        JSON.stringify({ table: "binary_large_values" }),
+        JSON.stringify({ table: "arrays" }),
         (delta) => {
-          for (const change of normalizeTestDelta(delta, binaryLargeValueSchema)) {
+          for (const change of normalizeTestDelta(delta, arraySchema)) {
             if ("row" in change && change.row?.id === inserted.value.id) {
               const firstValue = change.row.values[0];
               if (firstValue?.type === "Bytea") {

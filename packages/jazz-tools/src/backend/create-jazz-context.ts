@@ -194,6 +194,10 @@ class BackendDb extends Db {
   protected override getClient(_schema: WasmSchema): JazzClient {
     return this.client;
   }
+
+  protected override getCurrentClient(): JazzClient {
+    return this.client;
+  }
 }
 
 function assertValidBackendConfig(config: BackendContextConfig): void {

@@ -20,11 +20,10 @@ use crate::protocol::SyncMessage;
 use crate::protocol_limits::{validate_logical_message_len, validate_wire_frame_len};
 
 /// Current Jazz wire protocol version.
-/// Version 7 carries the exact root record descriptor for terminal operations
-/// inside `SyncMessage::ViewUpdate`.  This is a semantic payload-layout change:
-/// older peers cannot safely decode maintained terminal rows, so negotiation
-/// deliberately rejects them rather than guessing a layout.
-pub const WIRE_PROTOCOL_VERSION: u16 = 7;
+/// Version 9 removes the specialized large-value sync messages and schema
+/// metadata. This is an intentional breaking baseline: older peers cannot
+/// safely decode the reduced payload vocabulary, so negotiation rejects them.
+pub const WIRE_PROTOCOL_VERSION: u16 = 9;
 
 /// No optional features.
 pub const FEATURE_NONE: WireFeatures = 0;
@@ -1065,7 +1064,6 @@ mod tests {
                         user_metadata_json: None,
                         target_lineage: crate::tx::BranchLineage::Root,
                         branch_merge: None,
-                        merge_strategy: None,
                     },
                     versions: vec![
                         VersionRecord::from_cells(
@@ -1309,6 +1307,7 @@ mod tests {
                 peer_payload_inventory: crate::protocol::PeerPayloadInventory {
                     complete_tx_payloads: vec![tx_id],
                     authorization_progress: None,
+                    opening_pending: false,
                 },
                 result_member_adds: Vec::new(),
                 result_member_removes: Vec::new(),
@@ -1330,7 +1329,6 @@ mod tests {
                     user_metadata_json: None,
                     target_lineage: crate::tx::BranchLineage::Root,
                     branch_merge: None,
-                    merge_strategy: None,
                 },
                 versions: Vec::new(),
             },
@@ -1387,6 +1385,7 @@ mod tests {
             peer_payload_inventory: crate::protocol::PeerPayloadInventory {
                 complete_tx_payloads: vec![tx_id],
                 authorization_progress: None,
+                opening_pending: false,
             },
             result_member_adds: vec![entry.into()],
             result_member_removes: Vec::new(),
@@ -1460,7 +1459,7 @@ mod tests {
             WIRE_PROTOCOL_VERSION,
             FEATURE_SYNC_MESSAGE_PAYLOAD,
         )
-        .expect_err("terminal descriptor protocol must not negotiate with an old peer");
+        .expect_err("current wire protocol must not negotiate with an old peer");
 
         assert_eq!(error.code, WireErrorCode::UnsupportedProtocolVersion);
         assert_eq!(error.retry, WireRetry::Never);

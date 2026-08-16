@@ -43,6 +43,51 @@ export interface RuntimeTelemetryContext<RuntimeConfig extends DbConfig = DbConf
   runtimeThread: "main" | "worker";
 }
 
+export interface BrowserWorkerConnection {
+  ready(): Promise<void>;
+  waitForServerConnection(): Promise<void>;
+  updateAuth(authJson: string, sessionClaims: Record<string, unknown>): Promise<void>;
+  attachFollowerPort(followerTabId: string, leadershipId: number, port: MessagePort): Promise<void>;
+  detachFollowerPort(followerTabId: string, leadershipId: number): Promise<void>;
+  disconnect(): Promise<void>;
+  reconnect(authJson: string, sessionClaims: Record<string, unknown>): Promise<void>;
+  deleteStorage(): Promise<void>;
+  /** @internal Test-only crash simulation for failover reconciliation coverage. */
+  simulateCrash(): Promise<void>;
+  simulatePendingAuthConfirmation(): Promise<void>;
+  shutdown(): Promise<void>;
+}
+
+export interface BrowserFollowerConnection {
+  ready(): Promise<void>;
+  waitForServerConnection(): Promise<void>;
+  updateAuth(authJson: string, sessionClaims: Record<string, unknown>): void;
+  detachForReconnect(): void;
+  shutdown(): Promise<void>;
+}
+
+export interface BrowserWorkerConnectionContext<RuntimeConfig extends DbConfig = DbConfig> {
+  config: RuntimeConfig;
+  schema: WasmSchema;
+  client: JazzClient;
+  leadershipId: number;
+  workerLockName: string;
+  onAuthFailure: (reason: AuthFailureReason) => void;
+  onAuthRestored: () => void;
+  onFailure: (error: unknown) => void;
+  onFollowerPortClosed: (followerTabId: string, leadershipId: number) => void;
+}
+
+export interface BrowserFollowerConnectionContext<RuntimeConfig extends DbConfig = DbConfig> {
+  config: RuntimeConfig;
+  client: JazzClient;
+  leadershipId: number;
+  port: MessagePort;
+  onAuthFailure: (reason: AuthFailureReason) => void;
+  onAuthRestored: () => void;
+  onFailure: (error: unknown) => void;
+}
+
 /**
  * Internal source for loading and wiring the native runtime.
  *
@@ -52,6 +97,8 @@ export interface RuntimeTelemetryContext<RuntimeConfig extends DbConfig = DbConf
  * concrete schemas.
  */
 export abstract class RuntimeSource<RuntimeConfig extends DbConfig = DbConfig> {
+  /** Set to true when this source can host browser persistence in a dedicated worker. */
+  readonly supportsBrowserWorker: boolean = false;
   /** Set to false when the runtime must receive schemas exactly as declared. */
   readonly supportsPolicyBypass: boolean = true;
 
@@ -64,6 +111,18 @@ export abstract class RuntimeSource<RuntimeConfig extends DbConfig = DbConfig> {
   }
 
   abstract createClient(context: RuntimeClientContext<RuntimeConfig>): JazzClient;
+
+  createBrowserWorkerConnection(
+    _context: BrowserWorkerConnectionContext<RuntimeConfig>,
+  ): BrowserWorkerConnection {
+    throw new Error("Db runtime source does not support browser worker connections");
+  }
+
+  createBrowserFollowerConnection(
+    _context: BrowserFollowerConnectionContext<RuntimeConfig>,
+  ): BrowserFollowerConnection {
+    throw new Error("Db runtime source does not support browser follower connections");
+  }
 
   installTelemetry(
     _context: RuntimeTelemetryContext<RuntimeConfig>,

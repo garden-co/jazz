@@ -28,8 +28,9 @@ Invariant digest:
 - `INV-BRANCH-16`: A branch-scoped subscription MUST include BranchId in its identity.
 - `INV-BRANCH-17`: A branch merge MUST be calculated locally from readable source and target views and emitted as one ordinary atomic mergeable transaction on the target, with no branch-specific fate or authority admission path; successful merge MUST leave the source branch open.
 - `INV-BRANCH-18`: `Discarded` MUST be the only terminal branch state; discard makes a branch read-only while retaining overlay history, and merge MUST NOT close or otherwise mutate source lifecycle state.
+- `INV-BRANCH-38`: Branch deletion events MUST share the universal deletion history but be keyed by `BranchLineage`; a branch event MUST update only that branch's combined current row and MUST never affect root or sibling visibility.
 - `INV-BRANCH-19`: Branch-merge provenance MUST define field-grained non-causal substitutions from each emitted target `(table,row,layer,column-or-operation)` to the exact source contribution dots the authorized merger claims it represents; a later local calculator MUST expand those substitutions rather than treating derived payload as new native contributions.
-- `INV-BRANCH-20`: A local merge calculator MUST subtract the field-grained contribution closure already represented by the target from the source contribution closure, recursively expanding structurally valid substitutions, so merging in both directions MUST NOT echo target-originated counter deltas, large-value operations, or scalar writes back to their origin.
+- `INV-BRANCH-20`: A local merge calculator MUST subtract the field-grained contribution closure already represented by the target from the source contribution closure, recursively expanding structurally valid substitutions, so merging in both directions MUST NOT echo target-originated counter deltas or scalar writes back to their origin.
 - `INV-BRANCH-21`: Incorporating another lineage into a branch MUST use the same ordinary merge-transaction calculation as merging a branch into main; branch rebase is not a separate operation.
 - `INV-BRANCH-22`: A merge-back squash's row-version parents MUST be only the target row/layer heads observed at the merge snapshot; source-branch transactions MUST NOT be causal parents of the target transaction.
 - `INV-BRANCH-23`: For each row/layer/column touched by novel source contributions, the local calculator MUST derive the equivalent ordinary target write contribution under that column's normal merge strategy, including cumulative explicit authorship and explicit writes equal to their prior value, while excluding inherited materialized cells.
@@ -137,11 +138,14 @@ and siblings: branch overlay writes never affect parent/main current reads
 (`INV-BRANCH-8`), and a read on one branch never observes a sibling's overlay
 (`INV-BRANCH-9`).
 
-Branch overlays are stored in one content-history and deletion-register table
-per `(PhysicalTableId, BranchId)`. Rows retain their authored
-`SchemaVersionAlias`, while `jazz_branch_partitions` records only the stable
-physical table and branch identities. Reads and merge-back project mixed-schema
-winners into their requested schema.
+Branch overlays are stored in one content-history partition per
+`(PhysicalTableId, BranchId)`. Their sparse deletion events instead live in the
+universal deletion history under `BranchLineage::Branch(BranchId)` and the same
+physical-table id. A branch write updates that branch lineage's combined current
+row only. Rows retain their authored `SchemaVersionAlias`, while
+`jazz_branch_partitions` records only the stable physical table and branch
+identities. Reads and merge-back project mixed-schema winners into their
+requested schema (`INV-BRANCH-38`).
 
 ### 11.4 Branch writes (v1: mergeable-only)
 
@@ -225,8 +229,7 @@ user write introduces stable contribution dots:
 (origin lineage, origin TxId, table, row, layer, column-or-operation)
 ```
 
-Large-value operations retain their existing operation identities. An ordinary
-branch-merge transaction introduces no new native dots for its calculated
+An ordinary branch-merge transaction introduces no new native dots for its calculated
 payload. Instead, its typed metadata records a non-causal provenance edge:
 
 ```text

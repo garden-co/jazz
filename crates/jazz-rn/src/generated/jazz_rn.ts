@@ -939,10 +939,6 @@ export interface RnDbInterface {
    */
   free() /*throws*/ : void;
   /**
-   * Hydrate a large-value handle returned in a row payload.
-   */
-  hydrateLargeValue(handle: ArrayBuffer) /*throws*/ : ArrayBuffer;
-  /**
    * Insert a caller-supplied row id.
    */
   insertWithIdEncoded(
@@ -1704,27 +1700,6 @@ export class RnDb extends UniffiAbstractObject implements RnDbInterface {
         );
       },
       /*liftString:*/ FfiConverterString.lift
-    );
-  }
-
-  /**
-   * Hydrate a large-value handle returned in a row payload.
-   */
-  hydrateLargeValue(handle: ArrayBuffer): ArrayBuffer /*throws*/ {
-    return FfiConverterArrayBuffer.lift(
-      uniffiCaller.rustCallWithError(
-        /*liftError:*/ FfiConverterTypeJazzRnError.lift.bind(
-          FfiConverterTypeJazzRnError
-        ),
-        /*caller:*/ (callStatus) => {
-          return nativeModule().ubrn_uniffi_jazz_rn_fn_method_rndb_hydrate_large_value(
-            uniffiTypeRnDbObjectFactory.clonePointer(this),
-            FfiConverterArrayBuffer.lower(handle),
-            callStatus
-          );
-        },
-        /*liftString:*/ FfiConverterString.lift
-      )
     );
   }
 
@@ -3807,14 +3782,6 @@ function uniffiEnsureInitialized() {
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
       'uniffi_jazz_rn_checksum_method_rndb_free'
-    );
-  }
-  if (
-    nativeModule().ubrn_uniffi_jazz_rn_checksum_method_rndb_hydrate_large_value() !==
-    1168
-  ) {
-    throw new UniffiInternalError.ApiChecksumMismatch(
-      'uniffi_jazz_rn_checksum_method_rndb_hydrate_large_value'
     );
   }
   if (

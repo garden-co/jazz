@@ -47,6 +47,7 @@ where
         kind: OpenTransactionKind,
         provisional_author: AuthorId,
     ) -> Result<(), Error> {
+        self.require_catalogue_ready()?;
         if self.open_tx.open_transactions.contains_key(&id)
             || self.open_tx.closed_batches.contains(&id)
         {
@@ -666,14 +667,13 @@ where
             user_metadata_json: open_tx.user_metadata_json,
             target_lineage: crate::tx::BranchLineage::Root,
             branch_merge: None,
-            merge_strategy: None,
         };
         self.ingest_transaction_and_versions(
             tx.clone(),
             versions.clone(),
             Fate::Pending,
             None,
-            DurabilityTier::Local,
+            self.authored_commit_durability,
         )?;
         self.open_tx.open_transactions.remove(&open_batch_id);
         self.open_tx.closed_batches.insert(open_batch_id);

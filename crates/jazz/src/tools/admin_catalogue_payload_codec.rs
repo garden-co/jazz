@@ -11,17 +11,14 @@ use crate::tools::object::ObjectId;
 use crate::tools::public_api::policy::{CmpOp, Operation, PolicyExpr, PolicyValue};
 use crate::tools::public_api::types::{
     ColumnDescriptor, ColumnMergeStrategy, ColumnName, ColumnType, EnumCaseDescriptor,
-    LargeValueKind, RowDescriptor, Schema, SchemaHash, TableName, TablePolicies, TableSchema,
-    Value,
+    RowDescriptor, Schema, SchemaHash, TableName, TablePolicies, TableSchema, Value,
 };
 
 use crate::tools::schema_lens::{LensOp, LensTransform};
 
 /// Current encoding version.
-const SCHEMA_VERSION: u8 = 7;
-const SCHEMA_VERSION_WITHOUT_LARGE_VALUE: u8 = 6;
+const SCHEMA_VERSION: u8 = 8;
 const LENS_VERSION: u8 = 3;
-const LENS_VERSION_WITHOUT_LARGE_VALUE: u8 = 2;
 const PERMISSIONS_VERSION: u8 = 1;
 const PERMISSIONS_BUNDLE_VERSION: u8 = 2;
 const PERMISSIONS_HEAD_VERSION: u8 = 2;
@@ -104,7 +101,7 @@ pub fn decode_schema(data: &[u8]) -> Result<Schema, CatalogueEncodingError> {
         });
     }
 
-    if data[0] != SCHEMA_VERSION && data[0] != SCHEMA_VERSION_WITHOUT_LARGE_VALUE {
+    if data[0] != SCHEMA_VERSION {
         return Err(CatalogueEncodingError::UnsupportedVersion {
             found: data[0],
             expected: SCHEMA_VERSION,
@@ -242,17 +239,6 @@ fn encode_column_descriptor(buf: &mut Vec<u8>, col: &ColumnDescriptor) {
         }
         None => buf.push(0),
     }
-    match col.large_value {
-        Some(LargeValueKind::Text) => {
-            buf.push(1);
-            buf.push(1);
-        }
-        Some(LargeValueKind::Blob) => {
-            buf.push(1);
-            buf.push(2);
-        }
-        None => buf.push(0),
-    }
 }
 
 fn decode_column_descriptor(
@@ -290,26 +276,6 @@ fn decode_column_descriptor(
     } else {
         None
     };
-    let large_value = if schema_version >= SCHEMA_VERSION {
-        let has_large_value = read_u8(data, offset)? != 0;
-        if !has_large_value {
-            None
-        } else {
-            match read_u8(data, offset)? {
-                1 => Some(LargeValueKind::Text),
-                2 => Some(LargeValueKind::Blob),
-                tag => {
-                    return Err(CatalogueEncodingError::InvalidTypeTag {
-                        tag,
-                        context: "column_large_value",
-                    });
-                }
-            }
-        }
-    } else {
-        None
-    };
-
     Ok(ColumnDescriptor {
         name: ColumnName::new(name),
         column_type,
@@ -317,7 +283,6 @@ fn decode_column_descriptor(
         references,
         default,
         merge_strategy,
-        large_value,
     })
 }
 
@@ -498,7 +463,7 @@ pub fn decode_lens_transform(data: &[u8]) -> Result<LensTransform, CatalogueEnco
     }
 
     let version = data[0];
-    if version != LENS_VERSION && version != LENS_VERSION_WITHOUT_LARGE_VALUE {
+    if version != LENS_VERSION {
         return Err(CatalogueEncodingError::UnsupportedVersion {
             found: version,
             expected: LENS_VERSION,
@@ -673,12 +638,8 @@ fn decode_table_schema(
     })
 }
 
-fn schema_version_for_lens_payload(lens_version: u8) -> u8 {
-    if lens_version >= LENS_VERSION {
-        SCHEMA_VERSION
-    } else {
-        SCHEMA_VERSION_WITHOUT_LARGE_VALUE
-    }
+fn schema_version_for_lens_payload(_lens_version: u8) -> u8 {
+    SCHEMA_VERSION
 }
 
 // ============================================================================
@@ -1460,9 +1421,6 @@ fn encode_value(buf: &mut Vec<u8>, value: &Value) {
             write_u32(buf, bytes.len() as u32);
             buf.extend_from_slice(bytes);
         }
-        Value::LargeValue(_) => {
-            panic!("large-value handles cannot be encoded into catalogue payloads")
-        }
         Value::Array(elements) => {
             buf.push(VALUE_ARRAY);
             write_u32(buf, elements.len() as u32);
@@ -1819,26 +1777,6 @@ mod tests {
         let column = table.columns.column("value").expect("counter column");
 
         assert_eq!(column.merge_strategy, Some(ColumnMergeStrategy::Counter));
-    }
-
-    #[test]
-    fn schema_roundtrip_preserves_large_value_columns() {
-        let mut schema = Schema::new();
-        schema.insert(
-            TableName::new("files"),
-            TableSchema::new(RowDescriptor::new(vec![
-                ColumnDescriptor::new("data", ColumnType::Bytea).large_value(LargeValueKind::Blob),
-            ])),
-        );
-
-        let encoded = encode_schema(&schema);
-        let decoded = decode_schema(&encoded).unwrap();
-        let table = decoded
-            .get(&TableName::new("files"))
-            .expect("decoded files table");
-        let column = table.columns.column("data").expect("data column");
-
-        assert_eq!(column.large_value, Some(LargeValueKind::Blob));
     }
 
     #[test]

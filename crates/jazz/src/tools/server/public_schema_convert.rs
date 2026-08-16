@@ -10,8 +10,8 @@ use crate::query::{
     PolicyBranch, Predicate, Query,
 };
 use crate::schema::{
-    ColumnSchema as CoreColumnSchema, JazzSchema, LargeValueKind as CoreLargeValueKind,
-    MergeStrategy, TableSchema as CoreTableSchema, WritePolicies,
+    ColumnSchema as CoreColumnSchema, JazzSchema, MergeStrategy, TableSchema as CoreTableSchema,
+    WritePolicies,
 };
 
 use crate::tools::public_api::policy::{CmpOp, PolicyValue};
@@ -21,8 +21,8 @@ use crate::tools::public_api::relation_ir::{
     RecursionBound as RelRecursionBound, RelExpr, RowIdRef, ValueRef as RelValueRef,
 };
 use crate::tools::public_schema::{
-    ColumnDescriptor, ColumnMergeStrategy, ColumnType, LargeValueKind, Operation, PolicyExpr,
-    Schema, TableName, TableSchema, Value,
+    ColumnDescriptor, ColumnMergeStrategy, ColumnType, Operation, PolicyExpr, Schema, TableName,
+    TableSchema, Value,
 };
 
 const DIRECT_USER_ID_CLAIM: &str = "user_id";
@@ -527,18 +527,6 @@ fn convert_column(
     let mut converted = CoreColumnSchema::new(column.name.as_str(), column_type);
     if let Some(default) = &column.default {
         converted.default = Some(convert_column_default(table, column, default)?);
-    }
-    if let Some(kind) = column.large_value {
-        if column.column_type != ColumnType::Bytea {
-            return Err(err(
-                format!("$.{}.{}", table.as_str(), column.name.as_str()),
-                "large_value is only supported on Bytea columns",
-            ));
-        }
-        converted.large_value = Some(match kind {
-            LargeValueKind::Text => CoreLargeValueKind::Text,
-            LargeValueKind::Blob => CoreLargeValueKind::Blob,
-        });
     }
     Ok(converted)
 }
@@ -1190,9 +1178,7 @@ fn append_exists_policy_clause(
         ));
     }
 
-    let mut join_column = None;
-    let mut source_column = None;
-    let mut correlated_filters = Vec::new();
+    let mut outer_correlations = Vec::new();
     let mut filters = Vec::new();
 
     let conditions = match condition {
@@ -1207,15 +1193,10 @@ fn append_exists_policy_clause(
                 op: CmpOp::Eq,
                 value: PolicyValue::SessionRef(path_segments),
             } if path_segments.len() == 2 && path_segments[0] == "__jazz_outer_row" => {
-                if join_column.is_none() {
-                    join_column = Some(column.clone());
-                    source_column = Some(path_segments[1].clone());
-                } else {
-                    correlated_filters.push(JoinCorrelation {
-                        join_column: column.clone(),
-                        source_column: path_segments[1].clone(),
-                    });
-                }
+                outer_correlations.push(JoinCorrelation {
+                    join_column: column.clone(),
+                    source_column: path_segments[1].clone(),
+                });
             }
             other => filters.push(convert_policy_predicate(
                 &exists_table_name,
@@ -1225,7 +1206,7 @@ fn append_exists_policy_clause(
         }
     }
 
-    let Some(join_column) = join_column else {
+    if outer_correlations.is_empty() {
         let mut query = query;
         query.joins.push(JoinVia {
             table: exists_table.to_owned(),
@@ -1239,8 +1220,15 @@ fn append_exists_policy_clause(
             nested_joins: Vec::new(),
         });
         return Ok(query);
-    };
-    let source_column = source_column.expect("join_column and source_column are set together");
+    }
+    let primary_index = outer_correlations
+        .iter()
+        .position(|correlation| correlation.join_column == "id")
+        .unwrap_or(0);
+    let primary = outer_correlations.remove(primary_index);
+    let join_column = primary.join_column;
+    let source_column = primary.source_column;
+    let correlated_filters = outer_correlations;
 
     if join_column == "id" {
         Ok(query.join_via_row_id_with_correlations(
@@ -2453,8 +2441,8 @@ mod tests {
     use crate::tools::public_api::types::EnumCaseDescriptor;
     use crate::tools::public_api::types::TableSchemaBuilder;
     use crate::tools::public_schema::{
-        ColumnDescriptor, ColumnType, LargeValueKind, PolicyExpr, RowDescriptor, Schema,
-        SchemaBuilder, TablePolicies, TableSchema,
+        ColumnDescriptor, ColumnType, PolicyExpr, RowDescriptor, Schema, SchemaBuilder,
+        TablePolicies, TableSchema,
     };
     use std::path::PathBuf;
     use uuid::Uuid;
@@ -2538,31 +2526,6 @@ mod tests {
                 .unwrap()
                 .column_type,
             GrooveColumnType::Bool
-        );
-    }
-
-    #[test]
-    fn converts_large_value_columns() {
-        let schema = [(
-            TableName::new("files"),
-            TableSchema::new(RowDescriptor::new(vec![
-                ColumnDescriptor::new("data", ColumnType::Bytea).large_value(LargeValueKind::Blob),
-            ])),
-        )]
-        .into_iter()
-        .collect();
-
-        let converted = convert_public_schema(&schema).unwrap();
-        let column = converted.tables[0]
-            .columns
-            .iter()
-            .find(|column| column.name == "data")
-            .unwrap();
-
-        assert_eq!(column.column_type, GrooveColumnType::Bytes);
-        assert_eq!(
-            column.large_value,
-            Some(crate::schema::LargeValueKind::Blob)
         );
     }
 
@@ -3197,15 +3160,25 @@ mod tests {
             .table(
                 TableSchemaBuilder::new("chats")
                     .column("name", ColumnType::Text)
+                    .column("createdBy", ColumnType::Text)
                     .column("isPublic", ColumnType::Boolean),
             )
             .table(
                 TableSchemaBuilder::new("messages")
                     .fk_column("chatId", "chats")
+                    .column("createdBy", ColumnType::Text)
                     .column("text", ColumnType::Text)
                     .policies(TablePolicies::new().with_select(PolicyExpr::Exists {
                         table: "chats".to_owned(),
                         condition: Box::new(PolicyExpr::And(vec![
+                            PolicyExpr::Cmp {
+                                column: "createdBy".to_owned(),
+                                op: CmpOp::Eq,
+                                value: PolicyValue::SessionRef(vec![
+                                    "__jazz_outer_row".to_owned(),
+                                    "createdBy".to_owned(),
+                                ]),
+                            },
                             PolicyExpr::Cmp {
                                 column: "id".to_owned(),
                                 op: CmpOp::Eq,
@@ -3238,6 +3211,13 @@ mod tests {
         assert_eq!(join.on_column, "id");
         assert_eq!(join.target, JoinTarget::RowId);
         assert_eq!(join.source_column.as_deref(), Some("chatId"));
+        assert_eq!(
+            join.correlated_filters,
+            vec![JoinCorrelation {
+                join_column: "createdBy".to_owned(),
+                source_column: "createdBy".to_owned(),
+            }]
+        );
         assert_eq!(
             join.filters,
             vec![Predicate::Eq(

@@ -37,15 +37,6 @@ describe("RnDbShim", () => {
     );
   });
 
-  it("copies large-value handles and hydrated bytes across the generated boundary", () => {
-    const hydrateLargeValue = vi.fn((_handle: ArrayBuffer) => buffer(4, 5, 6));
-    const db = shim({ hydrateLargeValue });
-    const backing = new Uint8Array([0, 1, 2, 3, 0]);
-
-    expect(db.hydrateLargeValue(backing.subarray(1, 4))).toEqual(new Uint8Array([4, 5, 6]));
-    expect(new Uint8Array(hydrateLargeValue.mock.calls[0]![0])).toEqual(new Uint8Array([1, 2, 3]));
-  });
-
   it("adapts the tick callback interface", () => {
     let generatedCallback: { onTickNeeded(urgency: string): void } | undefined;
     const db = shim({

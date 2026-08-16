@@ -13,7 +13,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use crate::db::{CommitUnitTrust, ConnectionSessionContext};
 use crate::groove::records::Value as CoreValue;
 use crate::ids::{AuthorId, NodeUuid};
-use crate::protocol_limits::{MAX_WIRE_FRAME_BYTES, validate_wire_frame_len};
+use crate::protocol_limits::{
+    MAX_WIRE_BATCH_FRAMES, MAX_WIRE_FRAME_BYTES, validate_wire_frame_len,
+};
 use crate::wire::{
     FEATURE_SYNC_MESSAGE_PAYLOAD, WIRE_PROTOCOL_VERSION, WireAuthorityEndpoint, WireError,
     WireErrorCode, WireFrame, WireHello, WirePeerRole, WireRetry, current_wire_features,
@@ -72,6 +74,17 @@ struct WebSocketAdmission {
     identity: AuthorId,
     claims: BTreeMap<String, CoreValue>,
     trust: CommitUnitTrust,
+    credential: WebSocketCredential,
+}
+
+/// Authentication class selected by the prelude.  `TrustedBackend` is still
+/// the normal commit-ingest trust level for both machine credentials, but the
+/// privileged catalogue bootstrap has a narrower authority boundary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WebSocketCredential {
+    Admin,
+    Backend,
+    Session,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -151,6 +164,10 @@ fn ws_live_admissions_for(key: WebSocketAdmissionKey) -> usize {
 struct WebSocketPrelude {
     peer_identity: String,
     auth: crate::tools::websocket_prelude_auth::AuthConfig,
+    /// A one-shot authenticated authority-catalogue transfer. This is not a
+    /// subscriber session and never admits application frames.
+    #[serde(default)]
+    bootstrap_catalogue: bool,
 }
 
 async fn ws_admission(
@@ -171,6 +188,7 @@ async fn ws_admission(
             identity: peer_identity,
             claims: BTreeMap::new(),
             trust: CommitUnitTrust::TrustedBackend,
+            credential: WebSocketCredential::Admin,
         });
     }
 
@@ -207,6 +225,7 @@ async fn ws_admission(
             identity: peer_identity,
             claims: BTreeMap::new(),
             trust: CommitUnitTrust::TrustedBackend,
+            credential: WebSocketCredential::Backend,
         });
     }
 
@@ -237,6 +256,7 @@ async fn ws_admission(
         identity: peer_identity,
         claims: session_claims(session)?,
         trust: CommitUnitTrust::Session,
+        credential: WebSocketCredential::Session,
     })
 }
 
@@ -483,6 +503,7 @@ async fn handle_ws_connection(
             return;
         }
     };
+    let bootstrap_catalogue = prelude.bootstrap_catalogue;
     let admission = match ws_admission(prelude, &request_headers, &state).await {
         Ok(admission) => admission,
         Err(error) => {
@@ -550,13 +571,89 @@ async fn handle_ws_connection(
     // endpoint (below), so this directional capability advertisement does not
     // turn a client self-assertion into authority proof.
 
-    let Some(core_server_shell) = state.core_server_shell() else {
+    if bootstrap_catalogue {
+        if admission.credential != WebSocketCredential::Admin
+            || admission.identity != AuthorId::SYSTEM
+            || state.topology != crate::tools::server::ServerTopology::Core
+        {
+            send_ws_error(
+                &mut socket,
+                WireError::new(
+                    WireErrorCode::AuthFailed,
+                    WireRetry::Never,
+                    "catalogue bootstrap requires the authenticated core authority",
+                ),
+            )
+            .await;
+            let _ = socket.close().await;
+            return;
+        }
+        let Some(core_server_shell) = state.core_server_shell() else {
+            send_ws_error(
+                &mut socket,
+                WireError::new(
+                    WireErrorCode::Internal,
+                    WireRetry::Later,
+                    "authority runtime is not ready to provide its catalogue",
+                ),
+            )
+            .await;
+            let _ = socket.close().await;
+            return;
+        };
+        let server_endpoint = WireAuthorityEndpoint {
+            node: NodeUuid::from_bytes([0x5e; 16]),
+            epoch: WS_NEXT_CONNECTION_EPOCH.fetch_add(1, Ordering::Relaxed),
+        };
+        let hello = match encode_frame(&WireFrame::Hello(
+            WireHello::current(WirePeerRole::Core, negotiated.features)
+                .with_authority(server_endpoint.node, server_endpoint.epoch),
+        )) {
+            Ok(frame) => frame,
+            Err(error) => {
+                send_ws_error(
+                    &mut socket,
+                    WireError::new(
+                        WireErrorCode::Internal,
+                        WireRetry::Never,
+                        format!("failed to encode bootstrap hello: {error}"),
+                    ),
+                )
+                .await;
+                let _ = socket.close().await;
+                return;
+            }
+        };
+        if send_ws_encoded_frames(&mut socket, &[hello]).await.is_err() {
+            return;
+        }
+        let frames = match core_server_shell
+            .encoded_trusted_catalogue_snapshot(negotiated.protocol_version, negotiated.features)
+            .await
+        {
+            Ok(frames) => frames,
+            Err(error) => {
+                send_ws_error(
+                    &mut socket,
+                    WireError::new(WireErrorCode::Internal, WireRetry::Later, error),
+                )
+                .await;
+                let _ = socket.close().await;
+                return;
+            }
+        };
+        let _ = send_ws_encoded_frames(&mut socket, &frames).await;
+        let _ = socket.close().await;
+        return;
+    }
+
+    let Some(core_server_shell) = state.core_server_shell_for_client() else {
         send_ws_error(
             &mut socket,
             WireError::new(
                 WireErrorCode::Internal,
-                WireRetry::Never,
-                "websocket requires a published schema",
+                WireRetry::Later,
+                "edge runtime is bootstrapping its authoritative catalogue; retry shortly",
             ),
         )
         .await;
@@ -805,9 +902,11 @@ fn decode_ws_encoded_frame_batch(bytes: &[u8]) -> Result<Vec<Vec<u8>>, postcard:
         return Err(postcard::Error::DeserializeUnexpectedEnd);
     }
     let frames = postcard::from_bytes::<Vec<Vec<u8>>>(bytes)?;
-    if frames
-        .iter()
-        .any(|frame| validate_wire_frame_len(frame.len()).is_err())
+    if frames.is_empty()
+        || frames.len() > MAX_WIRE_BATCH_FRAMES
+        || frames
+            .iter()
+            .any(|frame| validate_wire_frame_len(frame.len()).is_err())
     {
         return Err(postcard::Error::DeserializeUnexpectedEnd);
     }
@@ -852,7 +951,9 @@ fn encode_ws_frame_batches(frames: &[Vec<u8>]) -> Result<Vec<Vec<u8>>, postcard:
         let mut candidate = current.clone();
         candidate.push(frame.clone());
         let encoded = postcard::to_allocvec(&candidate)?;
-        if encoded.len() > MAX_WIRE_FRAME_BYTES && !current.is_empty() {
+        if (current.len() >= MAX_WIRE_BATCH_FRAMES || encoded.len() > MAX_WIRE_FRAME_BYTES)
+            && !current.is_empty()
+        {
             batches.push(postcard::to_allocvec(&current)?);
             current.clear();
         } else if encoded.len() > MAX_WIRE_FRAME_BYTES {
@@ -1132,6 +1233,7 @@ mod tests {
         let forged_peer = AuthorId::from_bytes([0x52; 16]);
         let prelude = WebSocketPrelude {
             peer_identity: hex::encode(forged_peer.as_bytes()),
+            bootstrap_catalogue: false,
             auth: crate::tools::websocket_prelude_auth::AuthConfig {
                 backend_secret: Some("backend-secret".to_owned()),
                 backend_session: Some(serde_json::json!({
@@ -1164,6 +1266,7 @@ mod tests {
         let user_id = uuid::Uuid::from_bytes(*identity.as_bytes()).to_string();
         let prelude = WebSocketPrelude {
             peer_identity: hex::encode(identity.as_bytes()),
+            bootstrap_catalogue: false,
             auth: crate::tools::websocket_prelude_auth::AuthConfig {
                 backend_secret: Some("backend-secret".to_owned()),
                 backend_session: Some(serde_json::json!({
@@ -1342,6 +1445,37 @@ mod tests {
             let decoded = decode_ws_encoded_frame_batch(&batch).expect("decode bounded batch");
             assert_eq!(decoded.len(), 1);
         }
+    }
+
+    #[test]
+    fn websocket_frame_batches_split_at_protocol_frame_count_cap() {
+        let frames = vec![vec![0x42]; MAX_WIRE_BATCH_FRAMES + 1];
+        let batches = encode_ws_frame_batches(&frames).expect("split bounded frame count");
+
+        assert_eq!(batches.len(), 2);
+        assert_eq!(
+            decode_ws_encoded_frame_batch(&batches[0])
+                .expect("decode first bounded batch")
+                .len(),
+            MAX_WIRE_BATCH_FRAMES
+        );
+        assert_eq!(
+            decode_ws_encoded_frame_batch(&batches[1])
+                .expect("decode remaining bounded batch")
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn websocket_frame_batch_decoder_rejects_empty_and_count_floods() {
+        let empty = postcard::to_allocvec(&Vec::<Vec<u8>>::new()).expect("encode empty batch");
+        assert!(decode_ws_encoded_frame_batch(&empty).is_err());
+
+        let flood = postcard::to_allocvec(&vec![Vec::<u8>::new(); MAX_WIRE_BATCH_FRAMES + 1])
+            .expect("encode count flood below physical byte cap");
+        assert!(flood.len() <= MAX_WIRE_FRAME_BYTES);
+        assert!(decode_ws_encoded_frame_batch(&flood).is_err());
     }
 
     #[test]
@@ -1671,6 +1805,16 @@ mod tests {
             tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
         >,
     ) -> (usize, usize) {
+        pump_core_websocket_transport_once_with_first_receive(client, ws, true).await
+    }
+
+    async fn pump_core_websocket_transport_once_with_first_receive(
+        client: &TestClient,
+        ws: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+        receive_after_client_send: bool,
+    ) -> (usize, usize) {
         let mut outbound = client.tick_take();
         let mut sent = 0;
         let mut received = 0;
@@ -1685,13 +1829,24 @@ mod tests {
                 .await
                 .expect("send client frames");
             sent += outbound.len();
-            let inbound = try_receive_ws_encoded_frames(ws).await;
+            let inbound = if receive_after_client_send {
+                try_receive_ws_encoded_frames(ws).await
+            } else {
+                Vec::new()
+            };
             if inbound.is_empty() {
                 outbound = client.tick_take();
             } else {
                 received += inbound.len();
                 outbound = client.receive_tick_take(inbound);
             }
+        }
+        // A server response may miss the short receive window immediately
+        // following the client frame. Keep an idle pump bidirectional: without
+        // this read, later pump calls with no client work would never observe
+        // that already-queued response.
+        if sent == 0 {
+            received += receive_core_websocket_transport_push_once(client, ws).await;
         }
         (sent, received)
     }
@@ -1888,6 +2043,46 @@ mod tests {
             vec!["after empty coverage".to_owned()]
         );
         client_b.detach_query(client_b_todos_attachment);
+    }
+
+    // Internal route-boundary guard: public client APIs do not expose a way to
+    // deliberately skip one websocket read. This forces that scheduling edge
+    // and proves an idle transport pump still consumes the queued response.
+    #[tokio::test(flavor = "current_thread")]
+    async fn ws_idle_pump_drains_response_after_missed_first_receive() {
+        let state = make_ws_convergence_test_state().await;
+        let addr = start_ws_test_server(state.clone()).await;
+        let client = TestClient::new(ws_public_schema_convert(), 0xb2, 0xb200).await;
+        let mut ws = open_negotiated_ws(addr, &state, AuthorId::from_bytes([0xb2; 16])).await;
+        let (_todos, attachment) = client.attach_todos_query();
+
+        let (sent, received) =
+            pump_core_websocket_transport_once_with_first_receive(&client, &mut ws, false).await;
+        assert!(
+            sent > 0,
+            "the query registration must reach the websocket route"
+        );
+        assert_eq!(
+            received, 0,
+            "the first pump deliberately skips its response"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !client.edge_attachment_is_covered(&attachment),
+            "the queued response must not be applied before the idle pump reads it"
+        );
+
+        let (sent, received) = pump_core_websocket_transport_once(&client, &mut ws).await;
+        assert_eq!(sent, 0, "the second pump must have no new client work");
+        assert!(
+            received > 0,
+            "the idle pump must consume the queued response"
+        );
+        assert!(
+            client.edge_attachment_is_covered(&attachment),
+            "the drained server response must cover the registered query"
+        );
+        client.detach_query(attachment);
     }
 
     #[tokio::test(flavor = "current_thread")]

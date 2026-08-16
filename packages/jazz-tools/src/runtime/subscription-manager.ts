@@ -65,6 +65,7 @@ type SubscriptionManagerSnapshot<T> = {
   orderedIds: string[];
   orderedIdIndex: Map<string, number>;
   terminalRootDecoders: Map<string, TerminalRootDecoder>;
+  deferredTerminalOperations: NativeTerminalOperation[];
 };
 
 type TerminalRootDecoder = {
@@ -219,6 +220,7 @@ function removeById<T extends { id: string }>(current: T[], id: string): void {
 }
 
 const RESULT_KEY_PROPERTY = "__jazzResultKey";
+const MAX_DEFERRED_TERMINAL_OPERATIONS = 1024;
 
 function withResultIdentity<T extends { id: string }>(item: T, key: string): T {
   Object.defineProperty(item, RESULT_KEY_PROPERTY, {
@@ -249,6 +251,8 @@ export class SubscriptionManager<T extends { id: string }> {
   private orderedIds: string[] = [];
   private orderedIdIndex = new Map<string, number>();
   private terminalRootDecoders = new Map<string, TerminalRootDecoder>();
+  /** Child edits received before a non-durable browser root hydration. */
+  private deferredTerminalOperations: NativeTerminalOperation[] = [];
 
   private removeId(id: string): void {
     const index = this.orderedIdIndex.get(id);
@@ -291,6 +295,7 @@ export class SubscriptionManager<T extends { id: string }> {
       try {
         if (reset) {
           this.clearRows();
+          this.deferredTerminalOperations = [];
         }
         this.registerTerminalRootLayouts(delta.terminalLayouts, nativeColumns);
         for (const key of [
@@ -321,9 +326,10 @@ export class SubscriptionManager<T extends { id: string }> {
           }
         }
         const wireResult = this.handleWireDelta(decoded, transform, reset);
-        if (delta.terminalOperations && delta.terminalOperations.length > 0) {
+        const terminalOperations = this.readyTerminalOperations(delta.terminalOperations ?? []);
+        if (terminalOperations.length > 0) {
           const terminalResult = this.handleTerminalOperations(
-            delta.terminalOperations,
+            terminalOperations,
             transform,
             nativeColumns,
           );
@@ -351,6 +357,7 @@ export class SubscriptionManager<T extends { id: string }> {
       orderedIds: [...this.orderedIds],
       orderedIdIndex: new Map(this.orderedIdIndex),
       terminalRootDecoders: new Map(this.terminalRootDecoders),
+      deferredTerminalOperations: [...this.deferredTerminalOperations],
     };
   }
 
@@ -361,6 +368,7 @@ export class SubscriptionManager<T extends { id: string }> {
     this.orderedIds = snapshot.orderedIds;
     this.orderedIdIndex = snapshot.orderedIdIndex;
     this.terminalRootDecoders = snapshot.terminalRootDecoders;
+    this.deferredTerminalOperations = snapshot.deferredTerminalOperations;
   }
 
   private registerTerminalRootLayouts(
@@ -410,6 +418,37 @@ export class SubscriptionManager<T extends { id: string }> {
     const descriptor = readDescriptor(reader);
     if (!reader.done()) throw new Error("terminal root descriptor has trailing bytes");
     return decodeNativeTerminalRowWithDescriptor(id, descriptor, columns, raw);
+  }
+
+  /**
+   * Preserve a child splice that raced ahead of its native root hydration.
+   * A root insert in this same frame satisfies the dependency because the
+   * terminal reducer pre-establishes such roots before applying children.
+   */
+  private readyTerminalOperations(incoming: NativeTerminalOperation[]): NativeTerminalOperation[] {
+    const operations = [...this.deferredTerminalOperations, ...incoming];
+    this.deferredTerminalOperations = [];
+    const insertedRoots = new Set(
+      operations
+        .filter((operation) => operation.path.length === 0 && "Insert" in operation.edit)
+        .map((operation) => this.terminalAddress(operation.root_key)),
+    );
+    const ready: NativeTerminalOperation[] = [];
+    for (const operation of operations) {
+      if (
+        operation.path.length > 0 &&
+        !insertedRoots.has(this.terminalAddress(operation.root_key)) &&
+        !this.terminalRows.has(this.terminalRootId(operation.root_key))
+      ) {
+        this.deferredTerminalOperations.push(operation);
+        continue;
+      }
+      ready.push(operation);
+    }
+    if (this.deferredTerminalOperations.length > MAX_DEFERRED_TERMINAL_OPERATIONS) {
+      throw new Error("terminal child edits arrived before their root beyond bounded limits");
+    }
+    return ready;
   }
 
   private handleTerminalOperations(
@@ -624,12 +663,32 @@ export class SubscriptionManager<T extends { id: string }> {
       return this.replaceWithResetDelta(delta);
     }
 
-    if (shouldApplyDeltaInBulk(delta)) {
-      this.applyBulkTypedDelta(delta);
+    // A new row version may render exactly the same public item. It is still
+    // useful to publish that update, but it cannot legitimately change query
+    // order. Preserve the retained position when a provisional source carries
+    // an older index while reconciling its worker baseline.
+    const inertEqualUpdates = new Set<string>();
+    for (const change of delta) {
+      if (change.kind !== RowChangeKind.Updated || change.item === undefined) continue;
+      const previous = this.currentResults.get(change.id);
+      if (previous !== undefined && sameSubscriptionItem(previous, change.item)) {
+        inertEqualUpdates.add(change.id);
+      }
+    }
+
+    const changesToApply = delta.filter(
+      (change) => change.kind !== RowChangeKind.Updated || !inertEqualUpdates.has(change.id),
+    );
+
+    if (shouldApplyDeltaInBulk(changesToApply)) {
+      this.applyBulkTypedDelta(changesToApply);
+      for (const change of delta) {
+        if (inertEqualUpdates.has(change.id)) change.index = this.orderedIdIndex.get(change.id)!;
+      }
       return { delta, all: this.all() } as SubscriptionDelta<T>;
     }
 
-    for (const change of delta) {
+    for (const change of changesToApply) {
       switch (change.kind) {
         case RowChangeKind.Added:
           const alreadyPresent = this.currentResults.has(change.id);
@@ -651,6 +710,10 @@ export class SubscriptionManager<T extends { id: string }> {
           }
           break;
       }
+    }
+
+    for (const change of delta) {
+      if (inertEqualUpdates.has(change.id)) change.index = this.orderedIdIndex.get(change.id)!;
     }
 
     return {
@@ -748,6 +811,36 @@ export class SubscriptionManager<T extends { id: string }> {
   get size(): number {
     return this.currentResults.size;
   }
+}
+
+function sameSubscriptionItem(left: unknown, right: unknown): boolean {
+  if (Object.is(left, right)) return true;
+  if (left instanceof Uint8Array && right instanceof Uint8Array) {
+    return (
+      left.byteLength === right.byteLength && left.every((byte, index) => byte === right[index])
+    );
+  }
+  if (Array.isArray(left) && Array.isArray(right)) {
+    return (
+      left.length === right.length &&
+      left.every((value, index) => sameSubscriptionItem(value, right[index]))
+    );
+  }
+  if (left === null || right === null || typeof left !== "object" || typeof right !== "object") {
+    return false;
+  }
+  const leftRecord = left as Record<string, unknown>;
+  const rightRecord = right as Record<string, unknown>;
+  const leftKeys = Object.keys(leftRecord);
+  const rightKeys = Object.keys(rightRecord);
+  return (
+    leftKeys.length === rightKeys.length &&
+    leftKeys.every(
+      (key) =>
+        Object.prototype.hasOwnProperty.call(rightRecord, key) &&
+        sameSubscriptionItem(leftRecord[key], rightRecord[key]),
+    )
+  );
 }
 
 export function isNativeRowDelta(delta: SubscriptionWireDelta): delta is NativeRowDelta {

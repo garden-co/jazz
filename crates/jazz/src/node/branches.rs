@@ -57,6 +57,7 @@ where
         branch_id: BranchId,
         created_by: AuthorId,
     ) -> Result<BranchRecord, Error> {
+        self.require_catalogue_ready()?;
         if let Some(existing) = self.branches.branches.get(&branch_id) {
             if existing.created_by == created_by
                 && existing.parent.is_none()
@@ -89,6 +90,7 @@ where
 
     /// Declare a root branch with no parent fallback.
     pub fn create_root_branch(&mut self, branch_id: BranchId) -> Result<BranchRecord, Error> {
+        self.require_catalogue_ready()?;
         let record = BranchRecord {
             branch_id,
             created_by: AuthorId(uuid::Uuid::nil()),
@@ -124,6 +126,7 @@ where
         &mut self,
         metadata: &crate::protocol::BranchMetadata,
     ) -> Result<(), Error> {
+        self.require_catalogue_ready()?;
         if !self
             .branches
             .pending_metadata_uploads
@@ -152,6 +155,7 @@ where
         &mut self,
         metadata: crate::protocol::BranchMetadata,
     ) -> Result<(), Error> {
+        self.require_catalogue_ready()?;
         self.admit_branch_metadata_with_upstream_relay(metadata, false)
     }
 
@@ -201,6 +205,7 @@ where
         metadata: crate::protocol::BranchMetadata,
         identity: AuthorId,
     ) -> Result<bool, Error> {
+        self.require_catalogue_ready()?;
         if metadata.created_by != identity {
             return Err(Error::InvalidStoredValue(
                 "branch metadata creator does not match authenticated session",
@@ -242,6 +247,7 @@ where
 
     /// Discard an open branch without deleting its overlay history.
     pub fn discard_branch(&mut self, branch_id: BranchId) -> Result<(), Error> {
+        self.require_catalogue_ready()?;
         let mut record = self
             .branches
             .branches
@@ -305,6 +311,7 @@ where
     where
         S: ReopenableStorage,
     {
+        self.require_catalogue_ready()?;
         if source == target {
             return Err(Error::BranchMergeCalculation(
                 "source and target lineage must differ",
@@ -435,17 +442,17 @@ where
                                     &table.name,
                                     source_authored,
                                 )? {
-                                    let column_schema = table_schema
+                                    if !table_schema
                                         .columns
                                         .iter()
-                                        .find(|candidate| candidate.name == column)
-                                        .ok_or(Error::BranchMergeCalculation(
+                                        .any(|candidate| candidate.name == column)
+                                    {
+                                        return Err(Error::BranchMergeCalculation(
                                             "authored source column is absent from current schema",
-                                        ))?;
+                                        ));
+                                    }
                                     if table_schema.merge_strategy(&column)
                                         != crate::schema::MergeStrategy::Lww
-                                        || column_schema.large_value.is_some()
-                                        || column_schema.text_merge_spec.is_some()
                                     {
                                         return Err(Error::BranchMergeCalculation(
                                             "column strategy lacks branch contribution capabilities",
@@ -569,6 +576,7 @@ where
 
     /// Branch-scoped exclusives are intentionally not implemented in v1.
     pub fn open_exclusive_on_branch(&mut self, _branch_id: BranchId) -> Result<OpenBatchId, Error> {
+        self.require_catalogue_ready()?;
         Err(Error::UnsupportedBranchExclusive)
     }
 
@@ -595,6 +603,7 @@ where
     where
         S: ReopenableStorage,
     {
+        self.require_catalogue_ready()?;
         if commits.is_empty() {
             return Err(Error::InvalidMergeableCommit(
                 "mergeable transaction requires at least one write",
@@ -683,7 +692,6 @@ where
             user_metadata_json: commits[0].user_metadata_json.clone(),
             target_lineage: BranchLineage::Branch(branch_id),
             branch_merge,
-            merge_strategy: commits[0].merge_strategy.clone(),
         };
         let tx_node_alias = self.ensure_node_alias(tx_id.node)?;
         let schema_version_alias = self.ensure_schema_version_alias(write_schema_version)?;
@@ -695,7 +703,7 @@ where
                 &tx,
                 Fate::Pending,
                 None,
-                DurabilityTier::Local,
+                self.authored_commit_durability,
             ),
         );
         let mut transaction_tables = BTreeSet::new();
@@ -730,7 +738,7 @@ where
                 self.branch_version_storage_write_binding(&stored, branch_id)?;
             batch.insert_raw(
                 branch_table.as_ref(),
-                history_primary_key(&stored),
+                self.version_storage_primary_key(&stored, BranchLineage::Branch(branch_id))?,
                 branch_record,
             );
         }
@@ -762,6 +770,7 @@ where
         binding: &Binding,
         identity: AuthorId,
     ) -> Result<Vec<CurrentRow>, Error> {
+        self.require_catalogue_ready()?;
         let Some(branch) = self.branches.branches.get(&branch_id).cloned() else {
             // Remote/session branch reads deliberately conflate an unknown
             // lineage with a lineage the caller is not allowed to enumerate.
@@ -788,6 +797,7 @@ where
         binding: &Binding,
         identity: AuthorId,
     ) -> Result<Vec<CurrentRow>, Error> {
+        self.require_catalogue_ready()?;
         if !self.branches.branches.contains_key(&branch_id) {
             return Ok(Vec::new());
         }
@@ -1138,16 +1148,26 @@ where
             return Ok(BTreeSet::new());
         }
         let mut row_ids = BTreeSet::new();
-        for storage_table in [
-            physical_branch_history_table_name(table_id, branch_id),
-            physical_branch_register_table_name(table_id, branch_id),
-        ] {
-            for raw in self.database.primary_key_scan_raw(&storage_table, &[])? {
-                row_ids.insert(RowUuid(
-                    raw.record()
-                        .get_uuid(HistoryRowRecord::FIELD_ROW_UUID_IDX)?,
-                ));
-            }
+        for raw in self.database.primary_key_scan_raw(
+            &physical_branch_history_table_name(table_id, branch_id),
+            &[],
+        )? {
+            row_ids.insert(RowUuid(
+                raw.record()
+                    .get_uuid(HistoryRowRecord::FIELD_ROW_UUID_IDX)?,
+            ));
+        }
+        let (branch_kind, branch_lineage_id) =
+            shared_deletion_lineage_values(BranchLineage::Branch(branch_id));
+        for raw in self.database.primary_key_scan_raw(
+            SHARED_DELETION_HISTORY_TABLE,
+            &[
+                Value::U8(branch_kind),
+                Value::Uuid(branch_lineage_id),
+                Value::U64(table_id.0),
+            ],
+        )? {
+            row_ids.insert(RowUuid(raw.record().get_uuid(3)?));
         }
         Ok(row_ids)
     }
@@ -1641,6 +1661,37 @@ where
             .contains(&(table_id, branch_id))
         {
             return Ok(Vec::new());
+        }
+        if layer == VersionLayer::Deletion {
+            let (branch_kind, branch_lineage_id) =
+                shared_deletion_lineage_values(BranchLineage::Branch(branch_id));
+            let raws = self
+                .database
+                .primary_key_scan_raw(
+                    SHARED_DELETION_HISTORY_TABLE,
+                    &[
+                        Value::U8(branch_kind),
+                        Value::Uuid(branch_lineage_id),
+                        Value::U64(table_id.0),
+                        Value::Uuid(row_uuid.0),
+                    ],
+                )?
+                .into_iter()
+                .map(|raw| raw.owned_record())
+                .collect::<Vec<_>>();
+            let mut versions = Vec::with_capacity(raws.len());
+            for raw in raws {
+                let version =
+                    self.decode_history_owned_record(table, SHARED_DELETION_HISTORY_TABLE, raw)?;
+                let tx_id = self.version_tx_id(&version)?;
+                if self
+                    .transaction_record(tx_id)
+                    .is_some_and(|tx| !matches!(tx.fate, Fate::Rejected(_)))
+                {
+                    versions.push(version);
+                }
+            }
+            return Ok(versions);
         }
         let storage_table = physical_branch_version_storage_table_name(table_id, layer, branch_id);
         let raws = self

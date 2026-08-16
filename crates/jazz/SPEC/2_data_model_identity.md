@@ -7,7 +7,7 @@ identities that name durable objects, the layout of rows and row versions, and
 the lowering from application schema to groove storage. It is limited to
 _identity and shape_. Transaction semantics (ch. 3), history and merging
 (ch. 4), reads (ch. 5), authorization (ch. 7), sync (ch. 8), schema evolution
-(ch. 10), branches (ch. 11), and large-value op-logs (ch. 12) all build on the
+(ch. 10), and branches (ch. 11) all build on the
 names defined here, but their behavior is specified in those chapters.
 
 Invariant digest:
@@ -20,19 +20,18 @@ Invariant digest:
 - `INV-DATA-5`: A `TxId` MUST identify a transaction as `(time: TxTime, node: NodeUuid)`; stored transaction rows MUST use primary key `(time, node_id)` where `node_id` is the local alias for the wire `NodeUuid`.
 - `INV-DATA-6`: `SchemaVersionId` MUST be UUIDv5 over `JazzSchema::canonical_bytes()` in namespace `SCHEMA_VERSION_NAMESPACE`.
 - `INV-DATA-7`: Canonical schema identity MUST change when a column's `MergeStrategy` changes.
-- `INV-DATA-8`: Canonical schema identity MUST distinguish plain `Bytes`, `LargeValueKind::Text`, and `LargeValueKind::Blob`.
 - `INV-DATA-9`: A declared `MergeStrategy::Counter` MUST be accepted only on non-nullable integer columns of type `U8`, `U16`, `U32`, or `U64`.
-- `INV-DATA-10`: A declared `MergeStrategy::Counter` MUST NOT be used with a large-value column.
 - `INV-DATA-11`: A merge strategy declaration MUST name an existing user column of the containing `TableSchema`.
 - `INV-DATA-12`: A table read or write policy, when present, MUST name the table it is attached to and MUST validate against the complete `JazzSchema`.
-- `INV-DATA-13`: `ColumnSchema::text` and `ColumnSchema::blob` MUST lower to nullable groove `Bytes` user cells in history storage.
 - `INV-DATA-14`: History storage MUST preserve each content version's row identity, transaction identity, schema identity, parent set, and user cells.
 - `INV-DATA-15`: Deletion-register storage MUST preserve each deletion version's row identity, transaction identity, schema identity, parent set, and deletion event.
 - `INV-DATA-16`: The wire row descriptor for replicated row payloads MUST include only `row_uuid`, `parents`, nullable `_deletion`, and nullable `user_{col}` cells; receiver-local currentness and authority-state columns MUST be excluded.
 - `INV-DATA-17`: A stored row version MUST belong to exactly one physical layer: content with user cells or deletion-register state with `_deletion` and no user cells.
 - `INV-DATA-18`: Derived global-current storage MUST identify the per-layer winner by row and preserve the content fields needed for global current reads.
 - `INV-DATA-19`: The global change stream MUST retain enough table, row, layer, and sequence information to reconstruct global as-of reads.
-- `INV-DATA-20`: Schema lowering MUST provide storage for metadata, transaction outcomes, row-version layers, globally accepted current state and change history, and large-value content.
+- `INV-DATA-20`: Schema lowering MUST provide storage for metadata, transaction outcomes, row-version layers, globally accepted current state, and change history.
+- `INV-DATA-21`: Deletion/register history MUST be one schema-independent immutable relation shared by every stable `PhysicalTableId`; its identity MUST include `(branch_lineage, physical_table_id, row_uuid, tx_time, tx_node_id)` so a row UUID never collides across logical tables or branch overlays.
+- `INV-DATA-22`: A per-lineage derived current row MUST carry the independently selected content winner and deletion winner/event, an explicit visibility bit, and projected content cells. It is node-local derived state, never replicated payload.
 
 ## Details
 
@@ -55,13 +54,6 @@ special-casing individual columns:
 The load-bearing consequence is that only replicated-immutable columns are ever
 shipped as row payload (`INV-CLASS-1`). Fate is shipped as fate messages, and
 node-local derived state is never shipped.
-
-These three classes cover stored _columns_. A `text`/`blob` column cell is an
-ordinary replicated-immutable column (§2.3). Its large _content bytes_ are not a
-fourth column class; they are an out-of-band **auxiliary content payload**,
-carried on a separate content channel and stored in direct content extent,
-metadata, and checkpoint stores below the IVM layer. Chapter 12 owns that
-content channel and defines the term "auxiliary content payload".
 
 ### 2.2 Identity types
 
@@ -93,25 +85,19 @@ the schema is a `JazzSchema { tables: Vec<TableSchema> }`; each table carries
 a `user_` prefix. A missing nullable user cell means the row version did not set
 that column.
 
-Large-value columns are declared as `text` or `blob`
-(`ColumnSchema::text`, `ColumnSchema::blob`). At this layer, they lower to
-nullable groove `Bytes` cells; ch. 12 owns the op-log mechanics for their large
-content bytes. The default merge strategy is column last-writer-wins by HLC
+The default merge strategy is column last-writer-wins by HLC
 (`MergeStrategy::Lww`). A counter declaration is accepted only on a non-nullable
-integer column (`U8`/`U16`/`U32`/`U64`) and never on a large-value column
-(`INV-DATA-9`, `INV-DATA-10`).
+integer column (`U8`/`U16`/`U32`/`U64`) (`INV-DATA-9`).
 
 **Implementation status.** The reference implementation currently provides
 `MergeStrategy::Counter` as its non-LWW built-in strategy. Its declaration
 constraints are covered by
 `schema::counter_merge_strategy_rejects_string_columns`,
-`schema::counter_merge_strategy_rejects_nullable_integer_columns`, and
-`schema::counter_merge_strategy_rejects_large_value_columns`.
+`schema::counter_merge_strategy_rejects_nullable_integer_columns`.
 
 _Further invariants._ `INV-DATA-11` — a merge-strategy declaration names an
 existing user column. `INV-DATA-12` — a table policy validates against the whole
-schema. `INV-DATA-13` — `text`/`blob` columns lower to nullable groove `Bytes`
-cells.
+schema.
 
 ### 2.4 Schema identity is content-addressed
 
@@ -120,7 +106,7 @@ of the same storage shape name the same version, while any storage-shape change
 names a different version. A `SchemaVersionId` is
 `Uuid::new_v5(SCHEMA_VERSION_NAMESPACE, JazzSchema::canonical_bytes())`
 (`INV-DATA-6`), domain-tagged `"jazz-schema-v0"`. The canonical bytes cover
-sorted tables, names, columns in declared order, types, large-value kind, merge
+sorted tables, names, columns in declared order, types, merge
 strategy, and references. They deliberately do **not** include read/write
 policies: policies are runtime/catalogue metadata attached to a storage schema
 version, so publishing permissions for the same tables can refresh authorization
@@ -128,9 +114,8 @@ without creating a second physical storage partition. Changing any storage-shape
 input yields a new `SchemaVersionId`. This content-addressing is what lets
 multiple storage schema versions coexist (ch. 10).
 
-_Further invariants._ `INV-DATA-7`, `INV-DATA-8` — `SchemaVersionId` changes when
-a column's merge strategy changes, and when a column switches among `Bytes` /
-`Text` / `Blob`.
+_Further invariants._ `INV-DATA-7` — `SchemaVersionId` changes when a column's
+merge strategy changes.
 
 ### 2.5 Rows, versions, and layers
 
@@ -140,9 +125,16 @@ identified by the row, the writing transaction, and the layer; versions form a
 DAG through `parents` (ch. 4 specifies domination and merging). A stored version
 belongs to exactly one layer (`INV-DATA-17`). Content versions live in the
 resolved `PhysicalTableId`'s history table and carry user cells under their
-`SchemaVersionAlias` descriptor. Deletion-register versions live in the same
-lineage's stable register table and carry a non-null `_deletion` with no user
-cells.
+`SchemaVersionAlias` descriptor. Deletion-register versions live in the one
+schema-independent deletion history relation and carry a non-null `_deletion`
+with no user cells. The record names the stable `PhysicalTableId` of its content
+lineage, rather than a logical table name or schema version. `PhysicalTableId`
+is allocated once when a table lineage is created and retained through
+compatible schema changes, including table renames; a dropped lineage is never
+silently reused. Its full identity also contains `BranchLineage` (`Root` or a
+`BranchId`) so branch overlay events are not main-history events. This permits
+exactly one sparse immutable deletion history across the database without
+cross-table or cross-branch row-UUID collisions (`INV-DATA-21`).
 
 The replicated wire payload for a version (`VersionRecord`) is exactly the
 replicated-immutable fields (§2.1): `row_uuid`, `parents`, a nullable
@@ -161,8 +153,8 @@ Storage lowering gives catalogue and system state a fixed Groove representation
 then add one set of application layer tables per `PhysicalTableId`, with Groove
 schema variants selected by `SchemaVersionAlias`. The fixed schema includes
 node/schema/catalogue metadata, transaction/audit tables, the append-only
-`jazz_global_changes` stream, and direct record stores for large values and
-maintained-query state. The exact table set, primary keys, and indexes are the
+`jazz_global_changes` stream, and maintained-query state. The exact table set,
+primary keys, and indexes are the
 reference in §2.7.
 
 ### 2.7 Reference implementation: identity encoding & storage lowering
@@ -186,17 +178,18 @@ from those tables on recovery.
   scaffolding `jazz_branches` / `jazz_branch_partitions` (behavior in ch. 11);
 - _transaction/audit_ — `jazz_transactions` keyed `(time, node_id)`,
   `jazz_rejected_transactions`;
-- _per physical lineage_ — `jazz_physical_{id}_history` and
-  `jazz_physical_{id}_register`, each keyed by
-  `(row_uuid, tx_time, tx_node_id)`; shared global-current, ahead-current, and
-  rejected-version tables; and optional branch overlay tables. Content rows use
-  `schema_version` as a Groove descriptor discriminator, while register rows use
-  a stable system descriptor (`INV-DATA-14`, `INV-DATA-15`, `INV-DATA-18`);
+- _per physical lineage_ — `jazz_physical_{id}_history`, keyed by
+  `(row_uuid, tx_time, tx_node_id)`, plus a per-lineage combined derived current
+  row. The database has exactly one `jazz_deletion_history`, keyed by
+  `(branch_lineage, physical_table_id, row_uuid, tx_time, tx_node_id)` and with
+  a seek/index prefix `(branch_lineage, physical_table_id, row_uuid)`. The
+  deletion record's `schema_version` is retained provenance, not a storage
+  partition. Content rows use `schema_version` as a Groove descriptor
+  discriminator, while deletion history uses a stable system descriptor
+  (`INV-DATA-14`, `INV-DATA-15`, `INV-DATA-18`, `INV-DATA-21`);
 - _change stream_ — the append-only `jazz_global_changes`, keyed
   `(physical_table_id, row_uuid, layer, global_seq)` with physical-table and
   global-sequence indexes (`INV-DATA-19`);
-- _large values_ — direct extent, stream-tail, and checkpoint record stores
-  (ch. 12).
 
 ### 2.14 Subsumed table-first row-history notes
 

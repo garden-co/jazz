@@ -221,7 +221,7 @@ pub(crate) struct ProgramPathId {
 pub(crate) enum ResultId {
     /// Real table rows. The row reference may come from one source occurrence,
     /// a union of real-row source alternatives, or a terminal projected row id;
-    /// it remains a real row for policy, version witnesses, and large values.
+    /// it remains a real row for policy and version witnesses.
     RealRow {
         /// Logical output table.
         table: String,

@@ -171,11 +171,12 @@ export function resolveInitialSyncFlushEvery(config: DbConfig): number {
 export function resolveRuntimeIdentity(
   config: DbConfig,
   persistentDbName?: string,
+  persistentNodeRole = "node",
 ): RuntimeIdentity {
   const subject = runtimeSubject(config);
   const seed = `${config.appId}:${config.env ?? "dev"}:${config.userBranch ?? "main"}:${subject ?? "anonymous"}`;
   const node = persistentDbName
-    ? deterministicRuntimeBytes(`${seed}:${persistentDbName}:node`)
+    ? deterministicRuntimeBytes(`${seed}:${persistentDbName}:${persistentNodeRole}`)
     : randomRuntimeBytes();
   const author = subject
     ? runtimeAuthorBytesForSubject(subject)

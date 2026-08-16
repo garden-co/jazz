@@ -3,14 +3,16 @@ use std::collections::BTreeMap;
 use groove::ivm::{TerminalEdit, TerminalOperation, TerminalPathSegment};
 use groove::records::{RecordDescriptor, Value, ValueType};
 use groove::schema::ColumnType;
+use jazz::binding_codec::{
+    RelationSnapshotPayload, RemovedRowPayload, Row, RowBatch, SubscriptionDeltaPayload,
+};
 use jazz::ids::{AuthorId, BranchId, MigrationLensId, NodeUuid, RowUuid, SchemaVersionId};
-use jazz::node::content_store::Extent;
 use jazz::protocol::{
-    BranchMetadata, CatalogueAck, CatalogueSnapshot, ContentExtent, CurrentWriteSchema,
-    LargeValueOwnerRef, LensOp, MigrationLens, PeerPayloadInventory, RegisterShapeOptions,
-    ResultRowEntry, RowVersionRef, SchemaLineagePublication, SchemaVersion, ShapeAst, Subscribe,
-    SubscribeRejectReason, SubscribeServerFailureCode, SubscriptionKey, SyncMessage, TableLens,
-    VersionBundle, VersionCarrier, VersionRecord, build_version_bundle_runs_from_singletons,
+    BranchMetadata, CatalogueAck, CatalogueSnapshot, CurrentWriteSchema, LensOp, MigrationLens,
+    PeerPayloadInventory, RegisterShapeOptions, ResultRowEntry, RowVersionRef,
+    SchemaLineagePublication, SchemaVersion, ShapeAst, Subscribe, SubscribeRejectReason,
+    SubscribeServerFailureCode, SubscriptionKey, SyncMessage, TableLens, VersionBundle,
+    VersionCarrier, VersionRecord, build_version_bundle_runs_from_singletons,
 };
 use jazz::query::{
     ArraySubquery, ArraySubqueryRequirement, BindingId, OrderDirection, Query, ShapeId, col, eq,
@@ -18,6 +20,7 @@ use jazz::query::{
 };
 use jazz::schema::{ColumnSchema, JazzSchema, TableSchema};
 use jazz::time::{GlobalSeq, TxTime};
+use jazz::tools::{ObjectId, ResultKey};
 use jazz::tx::{DurabilityTier, Fate, Transaction, TxId, TxKind};
 use jazz::wire::{
     FEATURE_SYNC_MESSAGE_PAYLOAD, WIRE_PROTOCOL_VERSION, WireEnvelope, WireFrame,
@@ -37,8 +40,12 @@ const NATIVE_QUERY_CODEC_FIXTURE_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/fixtures/native_query_codec.json"
 );
+const BINDING_CODEC_GOLDEN_FIXTURE_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/fixtures/binding_codec_golden.json"
+);
 
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
 struct Manifest {
     fixture_set: &'static str,
     codec: &'static str,
@@ -47,14 +54,13 @@ struct Manifest {
     fixtures: Vec<Fixture>,
 }
 
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
 struct Fixture {
     name: &'static str,
     message_family: &'static str,
     frame_hex: String,
     frame_base64: String,
     payload_hex: String,
-    decoded_debug: String,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -75,6 +81,30 @@ struct NativeRowCodecField {
     name: String,
     encoded_hex: String,
     decoded_hex: Option<String>,
+}
+
+/// Rust owns this fixture because the concrete wire values are emitted by the
+/// native Rust bindings.  NAPI and WASM intentionally have duplicate adapter
+/// structs today; TypeScript consumes these bytes too.  Keep the compact
+/// binary cases here until those adapters share one production encoder.
+#[derive(Deserialize, Serialize)]
+struct BindingCodecGoldenFixture {
+    format: String,
+    relation_snapshots: Vec<BindingCodecGoldenBinaryCase>,
+    subscription_deltas: Vec<BindingCodecGoldenBinaryCase>,
+    terminal: BindingCodecGoldenTerminal,
+}
+
+#[derive(Deserialize, Serialize)]
+struct BindingCodecGoldenBinaryCase {
+    name: String,
+    payload_hex: String,
+}
+
+#[derive(Deserialize, Serialize)]
+struct BindingCodecGoldenTerminal {
+    events: serde_json::Value,
+    rejections: serde_json::Value,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -102,15 +132,6 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
         binding_id,
         read_view: Default::default(),
     };
-    let content_extent = Extent {
-        schema: schema_version,
-        table: "docs".to_owned(),
-        writer: author,
-        row,
-        column: "body".to_owned(),
-        offset: 16,
-        len: 12,
-    };
     let lineage_source = SchemaVersion::new(JazzSchema::new([TableSchema::new(
         "todos",
         [ColumnSchema::new("title", ColumnType::String)],
@@ -119,7 +140,7 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
         "todos",
         [
             ColumnSchema::new("title", ColumnType::String),
-            ColumnSchema::text("body"),
+            ColumnSchema::new("body", ColumnType::String),
         ],
     )]));
     let lineage_target_id = lineage_target.id;
@@ -257,6 +278,7 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
                 peer_payload_inventory: PeerPayloadInventory {
                     complete_tx_payloads: vec![tx_id],
                     authorization_progress: Some(9),
+                    opening_pending: false,
                 },
                 result_member_adds: vec![result_row_entry(tx_id).into()],
                 result_member_removes: Vec::new(),
@@ -324,7 +346,6 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
                     user_metadata_json: Some("{\"fixture\":\"wire\"}".to_owned()),
                     target_lineage: jazz::tx::BranchLineage::Root,
                     branch_merge: None,
-                    merge_strategy: None,
                 },
                 versions: Vec::new(),
             },
@@ -348,7 +369,6 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
                         [0x42; 16],
                     )),
                     branch_merge: None,
-                    merge_strategy: None,
                 },
                 versions: Vec::new(),
             },
@@ -362,7 +382,7 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
                     "todos",
                     [
                         ColumnSchema::new("title", ColumnType::String),
-                        ColumnSchema::text("body"),
+                        ColumnSchema::new("body", ColumnType::String),
                     ],
                 )]))),
             },
@@ -423,14 +443,6 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
             }),
         ),
         (
-            "fetch_content_extent_body",
-            "FetchContentExtent",
-            SyncMessage::FetchContentExtent {
-                owner: LargeValueOwnerRef::current_row(row),
-                extent: content_extent.clone(),
-            },
-        ),
-        (
             "catalogue_snapshot_todos_lineage",
             "CatalogueSnapshot",
             SyncMessage::CatalogueSnapshot(Box::new(CatalogueSnapshot {
@@ -441,17 +453,6 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
                     schema: lineage_target_id,
                 },
             })),
-        ),
-        (
-            "content_extents_body_bytes",
-            "ContentExtents",
-            SyncMessage::ContentExtents {
-                extents: vec![ContentExtent {
-                    owner: LargeValueOwnerRef::current_row(row),
-                    extent: content_extent,
-                    bytes: b"hello world!".to_vec(),
-                }],
-            },
         ),
         (
             "fetch_row_versions_todos",
@@ -501,7 +502,6 @@ fn mixed_version_carriers(
                     user_metadata_json: None,
                     target_lineage: jazz::tx::BranchLineage::Root,
                     branch_merge: None,
-                    merge_strategy: None,
                 },
                 versions: vec![
                     VersionRecord::from_cells(
@@ -549,21 +549,18 @@ fn fixture_manifest() -> Manifest {
                 payload.clone(),
             ));
             let frame_bytes = encode_frame(&frame).expect("wire frame encodes");
-            let decoded = decode_sync_message(&payload).expect("fixture payload decodes");
-
             Fixture {
                 name,
                 message_family,
                 frame_hex: hex(&frame_bytes),
                 frame_base64: base64(&frame_bytes),
                 payload_hex: hex(&payload),
-                decoded_debug: format!("{decoded:?}"),
             }
         })
         .collect();
 
     Manifest {
-        fixture_set: "jazz-wire-message-frames-v7",
+        fixture_set: "jazz-wire-message-frames-v9",
         codec: "postcard WireFrame::Message(WireEnvelope { payload: encode_sync_message(..) })",
         protocol_version: WIRE_PROTOCOL_VERSION,
         features: FEATURE_SYNC_MESSAGE_PAYLOAD,
@@ -572,7 +569,6 @@ fn fixture_manifest() -> Manifest {
 }
 
 #[test]
-#[ignore = "known red; tracked in TEST_BURNDOWN.md"]
 fn wire_message_frame_fixtures_are_current() {
     let actual = serde_json::to_string_pretty(&fixture_manifest())
         .expect("fixture manifest serializes")
@@ -587,18 +583,26 @@ fn wire_message_frame_fixtures_are_current() {
     assert_eq!(
         actual, expected,
         "wire fixtures changed; review compatibility and run \
-         `JAZZ_UPDATE_WIRE_FIXTURES=1 cargo test -p jazz --test wire_fixtures` to accept"
+         `JAZZ_UPDATE_WIRE_FIXTURES=1 cargo test -p jazz --test wire_fixtures \
+         wire_message_frame_fixtures_are_current -- --ignored --exact` to accept"
     );
 }
 
 #[test]
 fn wire_message_frame_fixtures_decode_to_expected_messages() {
-    for (fixture, (_, _, expected)) in fixture_manifest()
+    let fixture_manifest: Manifest =
+        serde_json::from_str(include_str!("../fixtures/wire_message_frames.json"))
+            .expect("wire fixture manifest deserializes");
+
+    for (fixture, (name, message_family, expected)) in fixture_manifest
         .fixtures
         .into_iter()
         .zip(wire_fixture_messages())
     {
+        assert_eq!(fixture.name, name);
+        assert_eq!(fixture.message_family, message_family);
         let frame_bytes = parse_hex(&fixture.frame_hex);
+        assert_eq!(base64(&frame_bytes), fixture.frame_base64);
         let WireFrame::Message(envelope) =
             jazz::wire::decode_frame(&frame_bytes).expect("fixture frame decodes")
         else {
@@ -608,7 +612,10 @@ fn wire_message_frame_fixtures_decode_to_expected_messages() {
         assert_eq!(envelope.protocol_version, WIRE_PROTOCOL_VERSION);
         assert_eq!(envelope.features, FEATURE_SYNC_MESSAGE_PAYLOAD);
         assert_eq!(envelope.session, None);
-        assert_eq!(decode_sync_message(&envelope.payload).unwrap(), expected);
+        assert_eq!(hex(&envelope.payload), fixture.payload_hex);
+        let decoded = decode_sync_message(&envelope.payload)
+            .unwrap_or_else(|error| panic!("fixture {name} fails to decode: {error}"));
+        assert_eq!(decoded, expected);
     }
 }
 
@@ -758,6 +765,292 @@ fn native_query_codec_fixture_round_trips_relation_shapes() {
             decoded, expected,
             "{name} fixture decodes to the expected query"
         );
+    }
+}
+
+// The native NAPI and WASM bindings currently own duplicate postcard adapter
+// structs.  This fixture freezes their common byte contract before the later
+// extraction makes them thin adapters.  It is intentionally lower-level than
+// a public DB test: the thing under test is the binding representation itself.
+#[test]
+fn binding_codec_golden_fixture_is_current() {
+    let actual = binding_codec_golden_fixture();
+
+    if std::env::var_os("JAZZ_UPDATE_BINDING_CODEC_GOLDENS").is_some() {
+        std::fs::write(
+            BINDING_CODEC_GOLDEN_FIXTURE_PATH,
+            serde_json::to_string_pretty(&actual).expect("binding codec fixture serializes") + "\n",
+        )
+        .expect("binding codec fixture writes");
+        return;
+    }
+
+    let expected = include_str!("../fixtures/binding_codec_golden.json");
+    // `oxfmt` owns JSON whitespace and deliberately compacts short byte
+    // arrays. The fixture contract is its parsed, ordered JSON value; compare
+    // that value so the explicit Rust updater and the repository formatter can
+    // both be canonical without creating a born-red formatting loop.
+    let expected: serde_json::Value =
+        serde_json::from_str(expected).expect("binding codec fixture parses");
+    assert_eq!(
+        serde_json::to_value(actual).expect("binding codec fixture value serializes"),
+        expected,
+        "binding codec goldens changed; review the NAPI/WASM compatibility contract and run \\
+         `JAZZ_UPDATE_BINDING_CODEC_GOLDENS=1 cargo test -p jazz --test wire_fixtures \\
+         binding_codec_golden_fixture_is_current -- --exact` to accept"
+    );
+}
+
+fn binding_codec_golden_fixture() -> BindingCodecGoldenFixture {
+    use groove::records::Value;
+
+    let current_descriptor = RecordDescriptor::new([
+        ("row_uuid", ValueType::Uuid),
+        (
+            "user_title",
+            ValueType::Nullable(Box::new(ValueType::String)),
+        ),
+    ]);
+    let logical_descriptor =
+        RecordDescriptor::new([("row_uuid", ValueType::Uuid), ("title", ValueType::String)]);
+    let todo_one_id = RowUuid::from_bytes([0x11; 16]);
+    let todo_two_id = RowUuid::from_bytes([0x12; 16]);
+    let note_id = RowUuid::from_bytes([0x21; 16]);
+    let deleted_todo_id = RowUuid::from_bytes([0x13; 16]);
+    let todo_one = current_descriptor
+        .create(&[
+            Value::Uuid(todo_one_id.0),
+            Value::Nullable(Some(Box::new(Value::String("first".to_owned())))),
+        ])
+        .expect("golden current row encodes");
+    let todo_two = current_descriptor
+        .create(&[
+            Value::Uuid(todo_two_id.0),
+            Value::Nullable(Some(Box::new(Value::String("second".to_owned())))),
+        ])
+        .expect("golden current row encodes");
+    let todo_updated = current_descriptor
+        .create(&[
+            Value::Uuid(todo_one_id.0),
+            Value::Nullable(Some(Box::new(Value::String("updated".to_owned())))),
+        ])
+        .expect("golden updated row encodes");
+    let note = logical_descriptor
+        .create(&[Value::Uuid(note_id.0), Value::String("note".to_owned())])
+        .expect("golden logical row encodes");
+    let deleted_todo = current_descriptor
+        .create(&[Value::Uuid(deleted_todo_id.0), Value::Nullable(None)])
+        .expect("golden deleted row encodes");
+
+    let empty_snapshot = RelationSnapshotPayload {
+        root_count: 0,
+        rows: Vec::new(),
+    };
+    let batching_snapshot = RelationSnapshotPayload {
+        root_count: 4,
+        rows: vec![
+            RowBatch {
+                table: "todos",
+                descriptor: current_descriptor.clone(),
+                rows: vec![
+                    Row {
+                        row_id: todo_one_id,
+                        deleted: false,
+                        raw: &todo_one,
+                    },
+                    Row {
+                        row_id: todo_two_id,
+                        deleted: false,
+                        raw: &todo_two,
+                    },
+                ],
+            },
+            RowBatch {
+                table: "notes",
+                descriptor: logical_descriptor.clone(),
+                rows: vec![Row {
+                    row_id: note_id,
+                    deleted: false,
+                    raw: &note,
+                }],
+            },
+            // Batching is contiguous only: returning to `todos` after `notes`
+            // must create a new batch, even though its descriptor is identical.
+            RowBatch {
+                table: "todos",
+                descriptor: current_descriptor.clone(),
+                rows: vec![Row {
+                    row_id: deleted_todo_id,
+                    deleted: true,
+                    raw: &deleted_todo,
+                }],
+            },
+        ],
+    };
+    let v1 = ResultKey::from(ObjectId::from_uuid(uuid::Uuid::from_bytes([0xa1; 16])));
+    let v2 = ResultKey::from_union_occurrence(
+        ObjectId::from_uuid(uuid::Uuid::from_bytes([0xb1; 16])),
+        [ObjectId::from_uuid(uuid::Uuid::from_bytes([0xb2; 16]))],
+        [(0, "matched-arm".to_owned())],
+    )
+    .expect("typed golden occurrence is valid");
+    let delta = SubscriptionDeltaPayload {
+        added: vec![RowBatch {
+            table: "todos",
+            descriptor: current_descriptor.clone(),
+            rows: vec![Row {
+                row_id: todo_one_id,
+                deleted: false,
+                raw: &todo_one,
+            }],
+        }],
+        updated: vec![RowBatch {
+            table: "notes",
+            descriptor: logical_descriptor.clone(),
+            rows: vec![Row {
+                row_id: note_id,
+                deleted: false,
+                raw: &note,
+            }],
+        }],
+        removed: vec![RemovedRowPayload {
+            table: "todos".to_owned(),
+            row_id: deleted_todo_id,
+        }],
+        added_occurrence_keys: vec![v1],
+        updated_occurrence_keys: vec![v2.clone()],
+        removed_occurrence_keys: vec![v2],
+    };
+
+    let current_layout = jazz::db::TerminalRootLayout {
+        id: "current-row-v1".to_owned(),
+        root_descriptor: current_descriptor.clone(),
+        root_key_slot: 0,
+        root_key_field_name: "row_uuid".to_owned(),
+        public_fields: vec![jazz::db::TerminalRootPublicField {
+            name: "title".to_owned(),
+            descriptor_field_name: "user_title".to_owned(),
+            slot: 1,
+            carrier: jazz::db::TerminalRootCarrier::CurrentRow,
+        }],
+        carrier: jazz::db::TerminalRootCarrier::CurrentRow,
+    };
+    let logical_layout = jazz::db::TerminalRootLayout {
+        id: "logical-v1".to_owned(),
+        root_descriptor: logical_descriptor.clone(),
+        root_key_slot: 0,
+        root_key_field_name: "row_uuid".to_owned(),
+        public_fields: vec![jazz::db::TerminalRootPublicField {
+            name: "title".to_owned(),
+            descriptor_field_name: "title".to_owned(),
+            slot: 1,
+            carrier: jazz::db::TerminalRootCarrier::Logical,
+        }],
+        carrier: jazz::db::TerminalRootCarrier::Logical,
+    };
+    let current_key = std::iter::once(10)
+        .chain(todo_one_id.0.as_bytes().iter().copied())
+        .collect::<Vec<_>>();
+    let logical_key = std::iter::once(10)
+        .chain(note_id.0.as_bytes().iter().copied())
+        .collect::<Vec<_>>();
+    let current_insert = TerminalOperation {
+        root_descriptor: current_descriptor.clone(),
+        root_key: current_key.clone(),
+        path: Vec::new(),
+        edit: TerminalEdit::Insert {
+            index: 0,
+            key: current_key.clone(),
+            value: todo_one.clone(),
+        },
+    };
+    let logical_insert = TerminalOperation {
+        root_descriptor: logical_descriptor.clone(),
+        root_key: logical_key.clone(),
+        path: Vec::new(),
+        edit: TerminalEdit::Insert {
+            index: 0,
+            key: logical_key.clone(),
+            value: note.clone(),
+        },
+    };
+    let current_update = TerminalOperation {
+        root_descriptor: current_descriptor.clone(),
+        root_key: current_key.clone(),
+        path: Vec::new(),
+        edit: TerminalEdit::Update {
+            key: current_key.clone(),
+            value: todo_updated,
+        },
+    };
+    let logical_remove = TerminalOperation {
+        root_descriptor: logical_descriptor.clone(),
+        root_key: logical_key.clone(),
+        path: Vec::new(),
+        edit: TerminalEdit::Remove {
+            key: logical_key.clone(),
+        },
+    };
+    let logical_move = TerminalOperation {
+        root_descriptor: logical_descriptor,
+        root_key: logical_key.clone(),
+        path: Vec::new(),
+        edit: TerminalEdit::Move {
+            key: logical_key,
+            index: 1,
+        },
+    };
+    BindingCodecGoldenFixture {
+        format: "jazz-binding-codec-golden-v1".to_owned(),
+        relation_snapshots: vec![
+            BindingCodecGoldenBinaryCase {
+                name: "empty_root_count_zero".to_owned(),
+                payload_hex: hex(
+                    &postcard::to_allocvec(&empty_snapshot).expect("empty snapshot encodes")
+                ),
+            },
+            BindingCodecGoldenBinaryCase {
+                name: "adjacent_and_nonadjacent_batches_with_deleted_row".to_owned(),
+                payload_hex: hex(
+                    &postcard::to_allocvec(&batching_snapshot).expect("snapshot encodes")
+                ),
+            },
+        ],
+        subscription_deltas: vec![BindingCodecGoldenBinaryCase {
+            name: "added_updated_removed_with_v1_and_v2_occurrence_keys".to_owned(),
+            payload_hex: hex(&postcard::to_allocvec(&delta).expect("subscription delta encodes")),
+        }],
+        terminal: BindingCodecGoldenTerminal {
+            // These are the exact NAPI/WASM event field names.  Publication is
+            // represented by a non-empty `terminalLayouts` list, not an
+            // invented flag on a layout object.
+            events: serde_json::json!([
+                {
+                    "type": "delta",
+                    "terminalLayouts": [jazz::binding_codec::terminal_layout_to_json(&current_layout).expect("current layout encodes")],
+                    "terminalOperations": jazz::binding_codec::terminal_operations_to_json(&[current_insert], &current_layout.id).expect("current insert encodes")
+                },
+                {
+                    "type": "delta",
+                    "terminalLayouts": [jazz::binding_codec::terminal_layout_to_json(&logical_layout).expect("logical layout encodes")],
+                    "terminalOperations": jazz::binding_codec::terminal_operations_to_json(&[logical_insert], &logical_layout.id).expect("logical insert encodes")
+                },
+                {
+                    "type": "delta",
+                    "terminalLayouts": [],
+                    "terminalOperations": jazz::binding_codec::terminal_operations_to_json(&[current_update], &current_layout.id).expect("current update encodes")
+                },
+                {
+                    "type": "delta",
+                    "terminalLayouts": [],
+                    "terminalOperations": jazz::binding_codec::terminal_operations_to_json(&[logical_move, logical_remove], &logical_layout.id).expect("logical move/remove encodes")
+                }
+            ]),
+            rejections: serde_json::json!([
+                { "type": "UnsupportedShapeCapability", "detail": "terminal layout missing" },
+                { "type": "ServerFailure", "code": "TableNotFound" }
+            ]),
+        },
     }
 }
 

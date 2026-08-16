@@ -40,7 +40,19 @@ export async function waitFor(
     if (await check()) return;
     await new Promise((r) => setTimeout(r, 50));
   }
-  throw new Error(`Timeout: ${message}`);
+  const syncState = [...document.querySelectorAll<HTMLElement>('[data-testid="sync-debug"]')].map(
+    (element) => ({
+      settled: element.dataset.syncSettled,
+      localRows: element.dataset.syncLocalRows,
+      totalDeposits: element.dataset.syncTotalDeposits,
+      uncollected: element.dataset.syncUncollected,
+      playerX: element.querySelector<HTMLElement>('[data-testid="game-container"]')?.dataset
+        .playerX,
+      landerX: element.querySelector<HTMLElement>('[data-testid="game-container"]')?.dataset
+        .landerX,
+    }),
+  );
+  throw new Error(`Timeout: ${message}; sync=${JSON.stringify(syncState)}`);
 }
 
 /** Read a numeric data attribute from the game container. */

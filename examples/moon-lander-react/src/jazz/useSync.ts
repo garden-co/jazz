@@ -11,8 +11,8 @@
  *   app.fuel_deposits    — which deposits are on the surface and who collected them
  *   app.chat_messages    — recent chat messages
  *
- * Writes go through SyncManager (see SyncManager.ts), which batches them on a
- * 200ms interval to avoid write storms on every physics frame.
+ * Writes go through SyncManager (see SyncManager.ts), which coalesces
+ * insignificant physics updates while preserving immediate gameplay writes.
  */
 
 import { useAll, useDb } from "jazz-tools/react";
@@ -97,9 +97,13 @@ export function useSync(playerId: string): SyncResult {
     return FUEL_TYPES.map((ft) => counts.get(ft) ?? DEPOSITS_PER_TYPE);
   }, [remotePlayers, localFuelType]);
 
-  // Uncollected deposits — what the game renders on the surface.
-  // "edge" tier: loading until the edge subscription connects, which drives settled detection.
-  const allUncollected = useAll(app.fuel_deposits.where({ collected: false }), { tier: "edge" });
+  // Uncollected deposits — local-first live data drives the game immediately.
+  // A separate edge-tier subscription is only the reconciliation readiness
+  // barrier; edge-gated streams intentionally withhold provisional local rows.
+  const allUncollected = useAll(app.fuel_deposits.where({ collected: false }));
+  const edgeUncollected = useAll(app.fuel_deposits.where({ collected: false }), {
+    tier: "edge",
+  });
 
   // This player's collected deposits (compound WHERE = precise local tracking).
   // WHERE ENTRY fires immediately when this player collects (both fields match).
@@ -113,7 +117,7 @@ export function useSync(playerId: string): SyncResult {
   // as a plain row update without needing WHERE re-evaluation.
   const { data: allCollectedDeposits = [] } = useAll(app.fuel_deposits.where({ collected: true }));
 
-  const settled = !allUncollected.isLoading;
+  const settled = !allUncollected.isLoading && !edgeUncollected.isLoading;
   const uncollectedDeposits = allUncollected.data ?? [];
   const myCollectedDeposits = localCollectedDeposits;
 
@@ -178,7 +182,7 @@ export function useSync(playerId: string): SyncResult {
   }, [allChatMessages]);
 
   // ---------------------------------------------------------------------------
-  // SyncManager — owns all DB writes, batched on a 200ms interval
+  // SyncManager — owns all DB writes and coalesces insignificant state updates
   // ---------------------------------------------------------------------------
 
   const syncRef = useRef<SyncManager | null>(null);
@@ -186,18 +190,34 @@ export function useSync(playerId: string): SyncResult {
   const sync = syncRef.current;
   useEffect(() => () => sync.destroy(), [sync]);
 
-  sync.setInputs({
-    settled,
-    localPlayerSettled: !localPlayerRowsResult.isLoading,
-    uncollectedDeposits,
-    myCollectedDeposits: effectiveMyCollected,
-    allDepositsRaw,
-    localPlayerRows,
-    perTypeLimits,
-    perTypeCounts,
-    myCollectedCount: effectiveMyCollected.length,
-    debugTotalDeposits: allDepositsRaw.length,
-  });
+  const syncInputs = useMemo<SyncInputs>(
+    () => ({
+      settled,
+      localPlayerSettled: !localPlayerRowsResult.isLoading,
+      uncollectedDeposits,
+      myCollectedDeposits: effectiveMyCollected,
+      allDepositsRaw,
+      localPlayerRows,
+      perTypeLimits,
+      perTypeCounts,
+      myCollectedCount: effectiveMyCollected.length,
+      debugTotalDeposits: allDepositsRaw.length,
+    }),
+    [
+      settled,
+      localPlayerRowsResult.isLoading,
+      uncollectedDeposits,
+      effectiveMyCollected,
+      allDepositsRaw,
+      localPlayerRows,
+      perTypeLimits,
+      perTypeCounts,
+    ],
+  );
+
+  useEffect(() => {
+    sync.setInputs(syncInputs);
+  }, [sync, syncInputs]);
 
   return {
     deposits,
@@ -212,7 +232,7 @@ export function useSync(playerId: string): SyncResult {
     sendMessage: (text) => sync.sendMessage(text),
     updateState: (state) => sync.updateState(state),
 
-    syncInputs: sync.inputs,
+    syncInputs,
     remotePlayerCount: remotePlayers.length,
     chatMessageCount: allChatMessages.length,
     gameState: sync.latestState,

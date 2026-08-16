@@ -1,13 +1,13 @@
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
-use std::io::{self, BufRead, BufReader};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::path::Path;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::rc::Rc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures_util::{FutureExt, StreamExt};
 use jazz::db::{
@@ -45,6 +45,101 @@ fn jazz_server_command() -> Command {
         .env_remove("JAZZ_UPSTREAM_URL")
         .env_remove("JAZZ_SERVER_ANONYMOUS_SUBJECT");
     command
+}
+
+fn jazz_tools_command() -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_jazz-tools"));
+    command
+        .env_remove("JAZZ_SERVER_PORT")
+        .env_remove("JAZZ_SERVER_DATA_DIR")
+        .env_remove("JAZZ_SERVER_IN_MEMORY")
+        .env_remove("JAZZ_ADMIN_SECRET")
+        .env_remove("JAZZ_UPSTREAM_URL")
+        .env_remove("JAZZ_BOUND_PORT_FILE");
+    command
+}
+
+#[cfg(unix)]
+fn wait_for_successful_exit(child: &mut Child, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(status) = child.try_wait().expect("poll jazz-tools server") {
+            assert!(status.success(), "jazz-tools server exited with {status}");
+            return;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("jazz-tools server did not exit within {timeout:?}");
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[cfg(unix)]
+fn start_jazz_tools_server(data_dir: &Path, bound_port_file: &Path) -> Child {
+    let mut child = jazz_tools_command()
+        .args([
+            "server",
+            "00000000-0000-0000-0000-000000000001",
+            "--port",
+            "0",
+            "--data-dir",
+            data_dir.to_str().expect("temp path is utf-8"),
+            "--bound-port-file",
+            bound_port_file.to_str().expect("temp path is utf-8"),
+            "--shutdown-timeout-secs",
+            "1",
+            "--admin-secret",
+            "sigterm-test-secret",
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn jazz-tools server");
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !bound_port_file.exists() {
+        if let Some(status) = child.try_wait().expect("poll jazz-tools startup") {
+            panic!("jazz-tools server exited before binding: {status}");
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("jazz-tools server did not bind within 10s");
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    child
+}
+
+#[cfg(unix)]
+fn publish_empty_schema_and_wait_for_live_core(bound_port_file: &Path, data_dir: &Path) {
+    let port = std::fs::read_to_string(bound_port_file)
+        .expect("read bound port")
+        .parse::<u16>()
+        .expect("bound port is numeric");
+    let body = r#"{"schema":{}}"#;
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect admin schema API");
+    write!(
+        stream,
+        "POST /apps/00000000-0000-0000-0000-000000000001/admin/schemas HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nX-Jazz-Admin-Secret: sigterm-test-secret\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    )
+    .expect("publish schema request");
+    let mut response = String::new();
+    stream
+        .read_to_string(&mut response)
+        .expect("read schema publish response");
+    assert!(
+        response.starts_with("HTTP/1.1 201"),
+        "schema publication failed: {response}"
+    );
+    assert!(
+        data_dir.join("server-shell.rocksdb").is_dir(),
+        "published schema must start a live core backed by RocksDB"
+    );
 }
 
 fn schema_hex(schema: &JazzSchema) -> String {
@@ -572,6 +667,31 @@ fn server_command_reports_wired_loopback_shape() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn jazz_tools_server_sigterm_exits_cleanly_and_releases_storage() {
+    let temp_dir = tempfile::tempdir().expect("create server temp dir");
+    let data_dir = temp_dir.path().join("data");
+    let first_port_file = temp_dir.path().join("first-port");
+    let mut first = start_jazz_tools_server(&data_dir, &first_port_file);
+    publish_empty_schema_and_wait_for_live_core(&first_port_file, &data_dir);
+
+    // SAFETY: `first.id()` names the live child process spawned above.
+    let result = unsafe { libc::kill(first.id() as libc::pid_t, libc::SIGTERM) };
+    assert_eq!(result, 0, "send SIGTERM to jazz-tools server");
+    wait_for_successful_exit(&mut first, Duration::from_secs(10));
+
+    // Reopening the same RocksDB directory proves controlled shutdown released
+    // the process-local storage lock rather than merely stopping the listener.
+    let second_port_file = temp_dir.path().join("second-port");
+    let mut second = start_jazz_tools_server(&data_dir, &second_port_file);
+    assert!(data_dir.join("server-shell.rocksdb").is_dir());
+    // SAFETY: `second.id()` names the live child process spawned above.
+    let result = unsafe { libc::kill(second.id() as libc::pid_t, libc::SIGTERM) };
+    assert_eq!(result, 0, "send SIGTERM to restarted jazz-tools server");
+    wait_for_successful_exit(&mut second, Duration::from_secs(10));
+}
+
 #[test]
 fn server_command_defaults_to_data_dir_and_accepts_aliases() {
     let data_dir = std::env::temp_dir().join(format!(
@@ -824,6 +944,27 @@ fn websocket_reconnect_resets_structured_terminal_before_live_patches() {
     reader.wire = reconnected_wire;
     reader.socket = connect_server_ws(&server.ws_url, subject);
     assert!(pump_websocket(&mut reader.socket, &reader.db, &reader.wire));
+
+    // Replacing the upstream invalidates the old authority receipt before the
+    // new link can speak. Preserve the cached structured value, but publish
+    // that it is no longer settled before accepting the reconnect reset.
+    let reconnect_demoted = block_on(subscription.next()).expect("reconnect authority demotion");
+    assert!(matches!(
+        reconnect_demoted,
+        SubscriptionEvent::Delta {
+            reset: false,
+            added,
+            updated,
+            removed,
+            terminal_operations,
+            settled: false,
+            ..
+        } if added.is_empty()
+            && updated.is_empty()
+            && removed.is_empty()
+            && terminal_operations.is_empty()
+    ));
+
     let reconnect_reset = block_on(subscription.next()).expect("authoritative reconnect reset");
     let SubscriptionEvent::Delta {
         reset,
@@ -836,8 +977,8 @@ fn websocket_reconnect_resets_structured_terminal_before_live_patches() {
     };
     assert!(reset);
     assert!(
-        added.is_empty(),
-        "reset state arrives through version carriers"
+        !added.is_empty(),
+        "a structured reset publishes its authoritative root relation"
     );
     assert!(terminal_operations.is_empty());
     while subscription.next().now_or_never().flatten().is_some() {}

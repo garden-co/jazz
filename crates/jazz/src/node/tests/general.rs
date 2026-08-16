@@ -427,55 +427,7 @@ fn writer_subscription_reads_own_pending_at_local_tier() {
     );
 }
 
-#[test]
-fn blob_column_round_trips_opaque_bytes() {
-    let (_temp_dir, mut node) = open_node_with_schema(
-        node(0x44),
-        JazzSchema::new([TableSchema::new(
-            "notes",
-            [crate::schema::ColumnSchema::blob("body")],
-        )]),
-    );
-    let row = row(0x44);
-    let body = (0..16_384)
-        .map(|idx| ((idx * 31 + 7) % 251) as u8)
-        .collect::<Vec<_>>();
 
-    let tx_id = node
-        .commit_mergeable(
-            MergeableCommit::new("notes", row, 10).cells(BTreeMap::from([(
-                "body".to_owned(),
-                Value::Bytes(body.clone()),
-            )])),
-        )
-        .unwrap();
-    let versions = node.query_versions_for_tx(tx_id).unwrap();
-    let payload = versions[0]
-        .cell(&node.catalogue.schema.tables[0].clone(), "body")
-        .unwrap()
-        .unwrap();
-    let Value::Bytes(payload) = payload else {
-        panic!("expected encoded text op payload");
-    };
-    let ops = crate::node::text_oplog::decode(&payload).unwrap();
-    let [
-        crate::node::text_oplog::Op::Insert {
-            content: crate::node::text_oplog::Content::Ref(extent),
-            ..
-        },
-    ] = ops.as_slice()
-    else {
-        panic!("expected extent-backed insert op");
-    };
-    assert_eq!(node.content_store().read(extent).unwrap(), body);
-
-    let rows = node.current_rows("notes", DurabilityTier::Local).unwrap();
-    assert_eq!(rows.len(), 1);
-    let Some(Value::Bytes(handle)) = rows[0].cell_at(0) else {
-        panic!("expected large-value handle");
-    };
-    assert_eq!(node.hydrate_large_value_handle(&handle).unwrap(), body);
-}
 #[test]
 fn late_lower_hlc_child_is_rejected_at_admission() {
     let (_dir, mut core) = open_node_with_uuid(node(9));
@@ -498,7 +450,6 @@ fn late_lower_hlc_child_is_rejected_at_admission() {
                 user_metadata_json: None,
                 target_lineage: crate::tx::BranchLineage::Root,
                 branch_merge: None,
-            merge_strategy: None,
             },
             vec![version_record(row, Vec::new(), title_cells("parent"), None)],
             u64::MAX - SKEW_TOLERANCE_MS,
@@ -529,7 +480,6 @@ fn late_lower_hlc_child_is_rejected_at_admission() {
                 user_metadata_json: None,
                 target_lineage: crate::tx::BranchLineage::Root,
                 branch_merge: None,
-            merge_strategy: None,
             },
             vec![version_record(
                 row,
@@ -584,7 +534,6 @@ fn unlawful_child_with_known_parent_rejects_before_global_state() {
                 user_metadata_json: None,
                 target_lineage: crate::tx::BranchLineage::Root,
                 branch_merge: None,
-            merge_strategy: None,
             },
             vec![version_record(row, Vec::new(), title_cells("parent"), None)],
             u64::MAX - SKEW_TOLERANCE_MS,
@@ -614,7 +563,6 @@ fn unlawful_child_with_known_parent_rejects_before_global_state() {
                 user_metadata_json: None,
                 target_lineage: crate::tx::BranchLineage::Root,
                 branch_merge: None,
-            merge_strategy: None,
             },
             vec![version_record(
                 row,

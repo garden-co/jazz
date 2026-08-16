@@ -56,17 +56,17 @@ afterEach(async () => {
   await db.shutdown();
 });
 
-describe("db exclusive transaction reads browser integration", () => {
-  it("opens the snapshot before the first schema view is registered", async () => {
-    const tx = db.beginExclusiveTransaction();
-    const receipt = db.insert(todos, {
-      title: "committed after schema-free begin",
-      done: false,
-    });
-    await receipt.batchId;
+describe("db exclusive transaction initialization browser integration", () => {
+  it("rejects beginning before the JazzClient exists", () => {
+    expect(() => db.beginExclusiveTransaction()).toThrow(
+      "Cannot begin an exclusive transaction before the JazzClient has been created. Run a query or mutation first.",
+    );
+  });
+});
 
-    await expect(tx.all<Todo>(makeTodoQuery())).resolves.toEqual([]);
-    await tx.rollback();
+describe("db exclusive transaction reads browser integration", () => {
+  beforeEach(async () => {
+    await db.all<Todo>(makeTodoQuery());
   });
 
   it("anchors a read-only transaction snapshot when begin is called", async () => {

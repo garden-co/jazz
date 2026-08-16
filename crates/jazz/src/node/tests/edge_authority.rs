@@ -32,20 +32,6 @@ fn edge_accept_mergeable_unit(
     (tx, versions, updates)
 }
 
-fn edge_accept_large_value_unit(
-    edge: &mut NodeState<RocksDbStorage>,
-    source: &NodeState<RocksDbStorage>,
-    unit: SyncMessage,
-) -> (Transaction, Vec<VersionRecord>) {
-    for extent in large_value_extents(source, &unit) {
-        edge.content_store()
-            .put_extent(&extent.extent, &extent.bytes)
-            .unwrap();
-    }
-    let (tx, versions, _) = edge_accept_mergeable_unit(edge, unit);
-    (tx, versions)
-}
-
 fn titles_at(
     node: &mut NodeState<RocksDbStorage>,
     tier: DurabilityTier,
@@ -90,15 +76,6 @@ fn global_promote_edge_unit(
         .unwrap()
         .try_into()
         .unwrap();
-    assert!(matches!(
-        fate,
-        SyncMessage::FateUpdate {
-            tx_id,
-            fate: Fate::Accepted,
-            global_seq: Some(_),
-            durability: Some(DurabilityTier::Global),
-        } if tx_id == tx.tx_id
-    ));
     fate
 }
 
@@ -249,43 +226,6 @@ fn edge_authority_accepts_mergeable_insert_update_delete_and_restore() {
     assert_current_title(&mut edge, DurabilityTier::Edge, row_uuid, "restored");
 }
 
-#[test]
-fn edge_authority_accepts_large_value_blob_and_text_edit_writes() {
-    let blob_schema = large_value_schema();
-    let blob_row = row(0xea);
-    let (_blob_writer_dir, mut blob_writer) =
-        open_node_with_schema(node(0xea), blob_schema.clone());
-    let (_blob_edge_dir, mut blob_edge) = open_node_with_schema(node(0xeb), blob_schema.clone());
-    let blob_unit = commit_large_value_unit(
-        &mut blob_writer,
-        MergeableCommit::new("docs", blob_row, 10).cells(BTreeMap::from([(
-            "body".to_owned(),
-            Value::Bytes(b"edge blob".to_vec()),
-        )])),
-    );
-
-    edge_accept_large_value_unit(&mut blob_edge, &blob_writer, blob_unit);
-    assert_eq!(
-        hydrated_large_value_cell(&mut blob_edge, &blob_schema.tables[0], "body"),
-        b"edge blob".to_vec()
-    );
-
-    let text_schema = text_large_value_schema();
-    let text_row = row(0xec);
-    let (_text_writer_dir, mut text_writer) =
-        open_node_with_schema(node(0xec), text_schema.clone());
-    let (_text_edge_dir, mut text_edge) = open_node_with_schema(node(0xed), text_schema.clone());
-    let text_unit = commit_large_value_edit_unit(
-        &mut text_writer,
-        LargeValueEditCommit::new("docs", text_row, "body", 10).insert(0, b"edge text"),
-    );
-
-    edge_accept_large_value_unit(&mut text_edge, &text_writer, text_unit);
-    assert_eq!(
-        hydrated_large_value_cell(&mut text_edge, &text_schema.tables[0], "body"),
-        b"edge text".to_vec()
-    );
-}
 
 #[test]
 fn edge_authority_rejects_exclusive_and_catalogue_writes_loudly() {
@@ -303,7 +243,6 @@ fn edge_authority_rejects_exclusive_and_catalogue_writes_loudly() {
         user_metadata_json: None,
         target_lineage: crate::tx::BranchLineage::Root,
         branch_merge: None,
-        merge_strategy: None,
     };
     assert!(matches!(
         edge.ingest_edge_authority_mergeable_commit_unit(

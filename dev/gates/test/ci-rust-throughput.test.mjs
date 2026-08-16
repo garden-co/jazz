@@ -11,6 +11,10 @@ const setupBuildAction = fs.readFileSync(
   path.join(root, ".github/actions/setup-build/action.yml"),
   "utf8",
 );
+const setupBlacksmithAction = fs.readFileSync(
+  path.join(root, ".github/actions/setup-blacksmith/action.yml"),
+  "utf8",
+);
 const installRustTool = fs.readFileSync(
   path.join(root, ".github/actions/install-rust-tool/action.yml"),
   "utf8",
@@ -19,9 +23,17 @@ const packageBuild = fs.readFileSync(
   path.join(root, ".github/workflows/build-jazz-packages.yml"),
   "utf8",
 );
+const otherWorkflows = fs
+  .readdirSync(path.join(root, ".github/workflows"))
+  .filter((name) => name.endsWith(".yml") && name !== "ci.yml")
+  .map((name) => fs.readFileSync(path.join(root, ".github/workflows", name), "utf8"));
 const packageJson = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
 const toolBundleValidator = fs.readFileSync(
   path.join(root, "dev/ci/validate-tool-bundle.mjs"),
+  "utf8",
+);
+const m3Differential = fs.readFileSync(
+  path.join(root, "crates/jazz/src/node/tests/m3_differential.rs"),
   "utf8",
 );
 const jobs = (() => {
@@ -44,26 +56,11 @@ const job = (name) => {
   assert.notEqual(source, undefined, `missing ${name} job`);
   return source;
 };
-const trustedRunnerExpression =
-  "${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || github.event.pull_request.user.login == 'dependabot[bot]') && 'blacksmith-4vcpu-ubuntu-2404' || 'jazz-ci' }}";
-const untrustedPullRequestPredicate =
-  "github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || github.event.pull_request.user.login == 'dependabot[bot]')";
-const assertUsesTrustedRunnerPool = (jobName, jobSource) => {
-  assert.ok(
-    jobSource.includes(`runs-on: ${trustedRunnerExpression}`),
-    `${jobName} must use jazz-ci for pushes and trusted PRs, while fork PRs use Blacksmith`,
-  );
-  assert.doesNotMatch(
-    jobSource,
-    /^    runs-on: jazz-ci$/m,
-    `${jobName} must not run fork or Dependabot PRs unconditionally on jazz-ci`,
-  );
+const assertUsesBlacksmithRunner = (jobName, jobSource) => {
+  const cpu = jobName === "test-ts" ? 16 : 4;
+  assert.match(jobSource, new RegExp(`runs-on: blacksmith-${cpu}vcpu-ubuntu-2404`));
+  assert.doesNotMatch(jobSource, /^    runs-on: jazz-ci$/m);
 };
-const expectedRunner = ({ eventName, headRepository, repository, pullRequestUser }) =>
-  eventName === "pull_request" &&
-  (headRepository !== repository || pullRequestUser === "dependabot[bot]")
-    ? "blacksmith-4vcpu-ubuntu-2404"
-    : "jazz-ci";
 const integrationCheckStep = (typescriptJob) => {
   const start = typescriptJob.indexOf("name: Check integration workspace");
   assert.notEqual(start, -1, "missing integration workspace check");
@@ -88,15 +85,21 @@ const assertIntegrationCheckIsGating = (typescriptJob) => {
 
 test("Rust CI uses pinned prebuilt tools without charging Rust-only jobs for wasm-pack", () => {
   const lint = job("lint");
-  const rust = job("test-rust");
+  const workspaceRust = job("test-rust-workspace");
+  const differentialRust = job("test-rust-differential");
   const typescript = job("test-ts");
 
   assert.doesNotMatch(workflow, /cargo install cargo-nextest/);
-  assert.match(rust, /tool: cargo-nextest@0\.9\.143/);
-  assert.doesNotMatch(rust, /ensure:rust-toolchain|wasm-pack/);
-  assert.doesNotMatch(rust, /rust-components:/);
-  assert.doesNotMatch(lint, /ensure:rust-toolchain|wasm-pack/);
-  assert.match(typescript, /tool: wasm-pack@0\.13\.1/);
+  assert.match(setupBlacksmithAction, /cargo-nextest --version \| grep -F "0\.9\.143"/);
+  assert.match(setupBlacksmithAction, /wasm-pack --version \| grep -F "0\.13\.1"/);
+  for (const rust of [workspaceRust, differentialRust]) {
+    assert.doesNotMatch(rust, /install-rust-tool|ensure:rust-toolchain|wasm-pack/);
+    assert.doesNotMatch(rust, /rust-components:/);
+  }
+  assert.doesNotMatch(lint, /install-rust-tool|ensure:rust-toolchain|wasm-pack/);
+  assert.doesNotMatch(typescript, /install-rust-tool/);
+  for (const source of [lint, workspaceRust, differentialRust, typescript])
+    assert.match(source, /uses: \.\/\.github\/actions\/setup-blacksmith/);
 });
 
 test("build setup scopes mutable pnpm and sccache state to the agent temp directory", () => {
@@ -202,6 +205,11 @@ test("trusted runners consume the validated immutable tool bundle", () => {
     /echo "RUSTC=\/opt\/jazz-ci\/toolchains\/v1\/rustup\/toolchains\/1\.93\.1-x86_64-unknown-linux-gnu\/bin\/rustc" >> "\$\{GITHUB_ENV\}"/,
   );
   assert.match(setupBuildAction, /Jobs are clients only/);
+  assert.match(
+    setupBuildAction,
+    /name: Cache Rust build artifacts[\s\S]*if: inputs\.rust-toolchain != '' && inputs\.rust-cache == 'true' && steps\.provisioned-tools\.outputs\.active != 'true'[\s\S]*uses: Swatinem\/rust-cache@/,
+    "rust-cache cleanup must never mutate a provisioned runner's shared Rust homes",
+  );
   assert.doesNotMatch(
     setupBuildAction.match(
       /if \[\[ '\$\{\{ steps\.provisioned-tools\.outputs\.active \}\}' == 'true' \]\]; then[\s\S]*?else/,
@@ -209,25 +217,183 @@ test("trusted runners consume the validated immutable tool bundle", () => {
     /sccache --(?:start|stop)-server/,
   );
   assert.match(fallbackBranch, /sccache --start-server/);
+  assert.throws(
+    () =>
+      assert.match(
+        setupBuildAction.replace(
+          " && steps.provisioned-tools.outputs.active != 'true'\n      uses: Swatinem/rust-cache@",
+          "\n      uses: Swatinem/rust-cache@",
+        ),
+        /name: Cache Rust build artifacts[\s\S]*if: inputs\.rust-toolchain != '' && inputs\.rust-cache == 'true' && steps\.provisioned-tools\.outputs\.active != 'true'[\s\S]*uses: Swatinem\/rust-cache@/,
+      ),
+    /rust-cache/,
+  );
 });
 
-test("Rust CI does not rerun differential integration binaries selected by the workspace test gate", () => {
-  const rust = job("test-rust", "test-ts");
+test("Rust CI splits a bounded real differential-oracle smoke behind a stable aggregate", () => {
+  const workspace = job("test-rust-workspace");
+  const differential = job("test-rust-differential");
+  const aggregate = job("test-rust");
+  const compileStepName = "name: Compile M3 differential oracle libtest";
+  const runStepName = "name: Run maintained-vs-one-shot differential oracle smoke";
+  const assertM3CompileThenRun = (source) => {
+    const compileStart = source.indexOf(compileStepName);
+    const runStart = source.indexOf(runStepName);
+    assert.ok(compileStart !== -1, "missing M3 libtest compile step");
+    assert.ok(runStart !== -1, "missing M3 semantic execution step");
+    assert.ok(compileStart < runStart, "compile the M3 libtest before its semantic execution");
+    assert.match(
+      source.slice(compileStart, runStart),
+      /shell: bash/,
+      "the M3 compile step must not inherit the container's sh default",
+    );
+    assert.doesNotMatch(
+      source.slice(compileStart, runStart),
+      /\btimeout\b/,
+      "cold compilation must not consume the semantic-execution timeout",
+    );
+    assert.match(
+      source.slice(runStart),
+      /timeout 60s env/,
+      "the direct libtest execution must remain bounded",
+    );
+    assert.match(
+      source.slice(runStart),
+      /shell: bash/,
+      "the M3 semantic execution step must not inherit the container's sh default",
+    );
+  };
 
   assert.match(
-    rust,
-    /run-rust-tests\.mjs --timeout-seconds 780 -- --workspace --lib --bins --tests --features test/,
+    workspace,
+    /run-rust-tests\.mjs --timeout-seconds 780 --nextest-profile jazz-ci -- --workspace --lib --bins --tests --features test/,
   );
   for (const testTarget of [
     "incremental_delivery_canary",
     "shared_coverage_differential",
     "warm_reopen_differential",
   ]) {
-    assert.doesNotMatch(rust, new RegExp(`cargo test -p jazz --test ${testTarget}`));
+    assert.doesNotMatch(workspace, new RegExp(`cargo test -p jazz --test ${testTarget}`));
   }
+  assert.match(differential, /cargo test -p jazz --lib --no-run --message-format=json/);
+  assert.match(differential, /message\.target\.name === "jazz"/);
   assert.match(
-    rust,
-    /JAZZ_SEED_COUNT=50 cargo test -p jazz m3_maintained_one_shot_differential_oracle/,
+    differential,
+    /echo "M3_ORACLE_TEST_BINARY=\$\{test_binary\}" >> "\$\{GITHUB_ENV\}"/,
+  );
+  assert.match(
+    differential,
+    /timeout 60s env[\s\\]+JAZZ_SEED=11[\s\\]+JAZZ_DIFFERENTIAL_CHURN_DEPTHS=10,1000[\s\\]+JAZZ_DIFFERENTIAL_STEP_COUNT=3[\s\\]+"\$\{M3_ORACLE_TEST_BINARY\}" node::tests::harness::m3_maintained_one_shot_differential_oracle --exact --ignored/,
+  );
+  assertM3CompileThenRun(differential);
+  assert.match(
+    m3Differential,
+    /#\[ignore = "known red; tracked in TEST_BURNDOWN\.md"\]\n(?:pub )?fn m3_maintained_one_shot_differential_oracle/,
+  );
+  assert.doesNotMatch(workspace, /m3_maintained_one_shot_differential_oracle/);
+  assert.match(aggregate, /if: always\(\)/);
+  assert.match(aggregate, /needs: \[test-rust-workspace, test-rust-differential\]/);
+  assert.match(aggregate, /WORKSPACE_RESULT: \$\{\{ needs\.test-rust-workspace\.result \}\}/);
+  assert.match(aggregate, /DIFFERENTIAL_RESULT: \$\{\{ needs\.test-rust-differential\.result \}\}/);
+  assert.match(aggregate, /test "\$\{WORKSPACE_RESULT\}" = success/);
+  assert.match(aggregate, /test "\$\{DIFFERENTIAL_RESULT\}" = success/);
+  assert.match(differential, /rust-cache: "false"/);
+  assert.throws(
+    () =>
+      assert.match(
+        differential.replace('rust-cache: "false"', 'rust-cache: "true"'),
+        /rust-cache: "false"/,
+      ),
+    /rust-cache/,
+  );
+  assert.throws(
+    () =>
+      assert.match(
+        differential.replace(
+          "cargo test -p jazz --lib --no-run --message-format=json",
+          "cargo test -p jazz --no-run --message-format=json",
+        ),
+        /cargo test -p jazz --lib --no-run --message-format=json/,
+      ),
+    /--lib/,
+  );
+  assert.throws(
+    () => assert.match(differential.replace("--exact --ignored", "--ignored"), /--exact --ignored/),
+    /exact/,
+  );
+  assert.throws(
+    () =>
+      assertM3CompileThenRun(
+        differential.replace(
+          `${compileStepName}\n        shell: bash\n        run:`,
+          `${compileStepName}\n        run:`,
+        ),
+      ),
+    /compile step must not inherit the container's sh default/,
+  );
+  assert.throws(
+    () =>
+      assertM3CompileThenRun(
+        differential.replace(
+          `${runStepName}\n        shell: bash\n        run:`,
+          `${runStepName}\n        run:`,
+        ),
+      ),
+    /semantic execution step must not inherit the container's sh default/,
+  );
+  assert.throws(
+    () =>
+      assertM3CompileThenRun(
+        differential.replace(
+          "cargo test -p jazz --lib --no-run --message-format=json",
+          "timeout 60s cargo test -p jazz --lib --no-run --message-format=json",
+        ),
+      ),
+    /cold compilation must not consume the semantic-execution timeout/,
+  );
+  assert.throws(
+    () =>
+      assertM3CompileThenRun(
+        differential
+          .replace(compileStepName, "__M3_STEP_SWAP__")
+          .replace(runStepName, compileStepName)
+          .replace("__M3_STEP_SWAP__", runStepName),
+      ),
+    /compile the M3 libtest before its semantic execution/,
+  );
+});
+
+test("Blacksmith setup can exclude nondeterministic jobs from the Rust artifact cache", () => {
+  assert.match(setupBlacksmithAction, /inputs:[\s\S]*rust-cache:[\s\S]*default: "true"/);
+  assert.match(
+    setupBlacksmithAction,
+    /name: Cache Rust build artifacts\n      if: inputs\.rust-cache == 'true'/,
+  );
+  assert.throws(
+    () =>
+      assert.match(
+        setupBlacksmithAction.replace("if: inputs.rust-cache == 'true'\n", ""),
+        /if: inputs\.rust-cache == 'true'/,
+      ),
+    /rust-cache/,
+  );
+});
+
+test("Rust CI uses a contention-tolerant but finite Nextest watchdog", () => {
+  const nextest = fs.readFileSync(path.join(root, ".config/nextest.toml"), "utf8");
+  const localProfile = nextest.match(/\[profile\.jazz\]([\s\S]*?)(?=\n\[|$)/)?.[1] ?? "";
+  const ciProfile = nextest.match(/\[profile\.jazz-ci\]([\s\S]*?)(?=\n\[|$)/)?.[1] ?? "";
+
+  assert.match(localProfile, /slow-timeout = \{ period = "60s", terminate-after = 1 \}/);
+  assert.match(ciProfile, /fail-fast = false/);
+  assert.match(ciProfile, /slow-timeout = \{ period = "180s", terminate-after = 1 \}/);
+  assert.throws(
+    () =>
+      assert.match(
+        ciProfile.replace("terminate-after = 1", "terminate-after = 0"),
+        /terminate-after = 1/,
+      ),
+    /terminate-after = 1/,
   );
 });
 
@@ -235,7 +401,7 @@ test("the TypeScript CI job checks the integration workspace before TypeScript a
   const typescript = job("test-ts");
 
   assert.match(
-    setupBuildAction,
+    setupBlacksmithAction,
     /echo "JAZZ_TEST_ARTIFACT_LOCK_PATH=\$\{RUNNER_TEMP\}\/jazz-test-artifacts\.lock" >> "\$\{GITHUB_ENV\}"/,
   );
 
@@ -251,66 +417,65 @@ test("the TypeScript CI job checks the integration workspace before TypeScript a
       typescript.indexOf("name: Build correctness-test artifacts"),
     "workspace check must fail before the expensive correctness artifact build",
   );
-  assertUsesTrustedRunnerPool("test-ts", typescript);
+  assertUsesBlacksmithRunner("test-ts", typescript);
 });
 
-test("every CI job uses jazz-ci only for trusted work and Blacksmith for untrusted PRs", () => {
+test("every CI job uses an independently sized Blacksmith runner", () => {
   for (const [name, source] of jobs) {
-    assertUsesTrustedRunnerPool(name, source);
+    assertUsesBlacksmithRunner(name, source);
   }
 });
 
-test("trusted-runner policy keeps forks and same-repository Dependabot PRs hosted", () => {
-  const repository = "gardencmp/jazz";
-  assert.equal(expectedRunner({ eventName: "push", repository }), "jazz-ci");
-  assert.equal(
-    expectedRunner({ eventName: "pull_request", headRepository: repository, repository }),
-    "jazz-ci",
-  );
-  assert.equal(
-    expectedRunner({ eventName: "pull_request", headRepository: "fork/jazz", repository }),
-    "blacksmith-4vcpu-ubuntu-2404",
-  );
-  assert.equal(
-    expectedRunner({
-      eventName: "pull_request",
-      headRepository: repository,
-      repository,
-      pullRequestUser: "dependabot[bot]",
-    }),
-    "blacksmith-4vcpu-ubuntu-2404",
-  );
-  assert.match(workflow, /github\.event\.pull_request\.user\.login == 'dependabot\[bot\]'/);
-  assert.doesNotMatch(workflow, /github\.actor/);
-});
-
-test("TypeScript cache mounts use the same untrusted-PR predicate as the runner", () => {
+test("Turbo cache uses pinned OIDC policy, signing, and excludes fork PRs", () => {
   const typescript = job("test-ts");
-  assert.ok(
-    typescript.includes(
-      `sccache-sticky-disk: \${{ ${untrustedPullRequestPredicate} && 'true' || 'false' }}`,
-    ),
+  assert.match(
+    typescript,
+    /if: github\.event_name != 'pull_request' \|\| github\.event\.pull_request\.head\.repo\.full_name == github\.repository/,
   );
-  assert.equal(
-    typescript.split(`if: ${untrustedPullRequestPredicate}`).length - 1,
-    2,
-    "Turbo and Playwright sticky-disk mounts must both follow the runner trust boundary",
+  assert.match(typescript, /policy: pol_0b019736-e95d-4f60-a5dd-e9415148834c/);
+  assert.match(typescript, /audience: https:\/\/github\.com\/garden-co/);
+  assert.match(typescript, /team: garden-co/);
+  assert.match(
+    typescript,
+    /TURBO_REMOTE_CACHE_SIGNATURE_KEY: \$\{\{ secrets\.TURBO_REMOTE_CACHE_SIGNATURE_KEY \}\}/,
   );
+  assert.match(fs.readFileSync(path.join(root, "turbo.json"), "utf8"), /"signature": true/);
+  for (const releaseWorkflow of otherWorkflows)
+    assert.doesNotMatch(
+      releaseWorkflow,
+      /setup-turborepo-remote-cache-action|TURBO_REMOTE_CACHE_SIGNATURE_KEY/,
+      "release/deployment workflows must not consume the PR-populated CI cache",
+    );
 });
 
-test("trusted-runner contract rejects planted unsafe runner changes", () => {
-  const lint = job("lint");
-  assert.throws(
-    () => assertUsesTrustedRunnerPool("lint", lint.replace(trustedRunnerExpression, "jazz-ci")),
-    /must use jazz-ci for pushes and trusted PRs, while fork PRs use Blacksmith/,
+test("shared Rust cache separates read-only PRs from trusted writers", () => {
+  for (const name of ["lint", "test-rust-workspace", "test-rust-differential", "test-ts"]) {
+    const source = job(name);
+    assert.match(source, /role-to-assume: \$\{\{ vars\.SCCACHE_PR_READER_AWS_ROLE_ARN \}\}/);
+    assert.match(source, /role-to-assume: \$\{\{ vars\.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN \}\}/);
+  }
+  assert.match(workflow, /SCCACHE_S3_KEY_PREFIX: jazz-ci\/v1\/production\/blacksmith-v1/);
+  assert.doesNotMatch(
+    workflow,
+    /SCCACHE_S3_RW_MODE/,
+    "sccache has no S3 read-only switch; the distinct IAM roles enforce this boundary",
   );
+  assert.match(setupBlacksmithAction, /SCCACHE_MULTILEVEL_CHAIN=disk,s3/);
+  assert.match(setupBlacksmithAction, /SCCACHE_MULTILEVEL_WRITE_ERROR_POLICY=l0/);
+});
+
+test("Blacksmith and cache trust contracts reject planted unsafe changes", () => {
+  const typescript = job("test-ts");
   assert.throws(
-    () =>
-      assertUsesTrustedRunnerPool(
-        "lint",
-        lint.replace(" || github.event.pull_request.user.login == 'dependabot[bot]'", ""),
-      ),
-    /must use jazz-ci for pushes and trusted PRs, while fork PRs use Blacksmith/,
+    () => assertUsesBlacksmithRunner("test-ts", typescript.replace("blacksmith-16vcpu", "jazz-ci")),
+    /blacksmith-16vcpu/,
+  );
+  assert.doesNotMatch(
+    typescript.replace(
+      "github.event.pull_request.head.repo.full_name == github.repository",
+      "true",
+    ),
+    /if: github\.event_name != 'pull_request' \|\| github\.event\.pull_request\.head\.repo\.full_name == github\.repository/,
   );
 });
 
@@ -363,8 +528,11 @@ test("TypeScript CI overlaps independent Node and browser suites after one artif
   assert.match(typescript, /name: Run Node and browser test suites in parallel/);
   assert.match(typescript, /run: dev\/gates\/run-ts-tests\.sh/);
   assert.match(runner, /--concurrency=2/);
-  assert.match(runner, /setsid bash -c "\$\{node_tests_command\}" &/);
-  assert.match(runner, /setsid bash -c "\$\{browser_tests_command\}" &/);
+  assert.match(runner, /setsid bash -c "\$\{node_tests_command\}" >"\$\{node_tests_log\}" 2>&1 &/);
+  assert.match(
+    runner,
+    /setsid bash -c "\$\{browser_tests_command\}" >"\$\{browser_tests_log\}" 2>&1 &/,
+  );
   assert.match(runner, /trap 'interrupt 130' INT/);
   assert.match(runner, /trap 'interrupt 143' TERM/);
   assert.match(runner, /kill -TERM -- "-\$\{child_pid\}"/);
@@ -372,6 +540,8 @@ test("TypeScript CI overlaps independent Node and browser suites after one artif
   assert.match(runner, /node_tests_status=\$\?/);
   assert.match(runner, /wait "\$\{browser_tests_pid\}"/);
   assert.match(runner, /browser_tests_status=\$\?/);
+  assert.match(runner, /cat "\$\{node_tests_log\}"/);
+  assert.match(runner, /cat "\$\{browser_tests_log\}"/);
   assert.match(runner, /Node test suite exit status:/);
   assert.match(runner, /Browser test suite exit status:/);
   assert.match(runner, /node_tests_status.*-ne 0 \|\|.*browser_tests_status.*-ne 0/);

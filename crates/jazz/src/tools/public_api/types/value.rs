@@ -25,7 +25,6 @@ pub enum Value {
     Uuid(ObjectId),
     BatchId([u8; 16]),
     Bytea(Vec<u8>),
-    LargeValue(LargeValueHandle),
     /// Homogeneous array of values.
     Array(Vec<Value>),
     /// Heterogeneous row/tuple of values (for nested rows in arrays).
@@ -44,19 +43,6 @@ pub enum Value {
     Null,
 }
 
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LargeValueHandle {
-    bytes: Vec<u8>,
-}
-
-impl fmt::Debug for LargeValueHandle {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("LargeValueHandle")
-            .field("len", &self.bytes.len())
-            .finish()
-    }
-}
-
 impl fmt::Debug for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -70,7 +56,6 @@ impl fmt::Debug for Value {
             // Batch ids are fixed-size semantic identifiers, unlike payloads.
             Self::BatchId(value) => write!(f, "BatchId({})", hex::encode(value)),
             Self::Bytea(value) => f.debug_struct("Bytea").field("len", &value.len()).finish(),
-            Self::LargeValue(value) => f.debug_tuple("LargeValue").field(value).finish(),
             // Avoid a collection of nested byte values making an error log unbounded.
             Self::Array(values) => f.debug_struct("Array").field("len", &values.len()).finish(),
             Self::Row { id, values } => f
@@ -85,20 +70,6 @@ impl fmt::Debug for Value {
                 .finish(),
             Self::Null => f.write_str("Null"),
         }
-    }
-}
-
-impl LargeValueHandle {
-    pub fn from_bytes(bytes: Vec<u8>) -> Self {
-        Self { bytes }
-    }
-
-    pub fn as_bytes(&self) -> &[u8] {
-        &self.bytes
-    }
-
-    pub fn into_bytes(self) -> Vec<u8> {
-        self.bytes
     }
 }
 
@@ -121,7 +92,6 @@ enum ValueHuman {
     Uuid(ObjectId),
     BatchId([u8; 16]),
     Bytea(Vec<u8>),
-    LargeValue(LargeValueHandle),
     Array(Vec<ValueHuman>),
     Row(RowHuman),
     Enum(EnumHuman),
@@ -260,7 +230,6 @@ impl From<&Value> for ValueHuman {
             Value::Uuid(v) => ValueHuman::Uuid(*v),
             Value::BatchId(v) => ValueHuman::BatchId(*v),
             Value::Bytea(v) => ValueHuman::Bytea(v.clone()),
-            Value::LargeValue(v) => ValueHuman::LargeValue(v.clone()),
             Value::Array(v) => ValueHuman::Array(v.iter().map(ValueHuman::from).collect()),
             Value::Row { id, values } => ValueHuman::Row(RowHuman {
                 id: *id,
@@ -287,7 +256,6 @@ impl From<ValueHuman> for Value {
             ValueHuman::Uuid(v) => Value::Uuid(v),
             ValueHuman::BatchId(v) => Value::BatchId(v),
             ValueHuman::Bytea(v) => Value::Bytea(v),
-            ValueHuman::LargeValue(v) => Value::LargeValue(v),
             ValueHuman::Array(v) => Value::Array(v.into_iter().map(Value::from).collect()),
             ValueHuman::Row(r) => Value::Row {
                 id: r.id,
@@ -340,7 +308,6 @@ impl PartialEq for Value {
             (Value::Uuid(a), Value::Uuid(b)) => a == b,
             (Value::BatchId(a), Value::BatchId(b)) => a == b,
             (Value::Bytea(a), Value::Bytea(b)) => a == b,
-            (Value::LargeValue(a), Value::LargeValue(b)) => a == b,
             (
                 Value::Enum {
                     case: a_case,
@@ -384,7 +351,6 @@ impl Value {
             Value::Uuid(_) => Some(ColumnType::Uuid),
             Value::BatchId(_) => Some(ColumnType::BatchId),
             Value::Bytea(_) => Some(ColumnType::Bytea),
-            Value::LargeValue(_) => Some(ColumnType::Bytea),
             Value::Array(elements) => {
                 // Infer element type from first element; empty arrays have no inferable type
                 elements
@@ -541,13 +507,6 @@ mod tests {
     #[test]
     fn binary_value_debug_is_bounded_and_content_safe_even_when_nested() {
         assert_eq!(format!("{:?}", Value::Bytea(vec![])), "Bytea { len: 0 }");
-        assert_eq!(
-            format!(
-                "{:?}",
-                Value::LargeValue(LargeValueHandle::from_bytes(vec![7; 3]))
-            ),
-            "LargeValue(LargeValueHandle { len: 3 })"
-        );
 
         let secret = b"do-not-log-this-payload";
         let nested = Value::Row {

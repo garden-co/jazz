@@ -19,11 +19,12 @@
 
 import { act } from "react";
 import { createRoot } from "react-dom/client";
+import { generateAuthSecret } from "jazz-tools";
 import { afterEach, describe, expect, it } from "vitest";
 import { commands } from "vitest/browser";
 import { App } from "../../src/App";
-import { FUEL_TYPES } from "../../src/game/constants";
-import { ADMIN_SECRET, APP_ID, APP_ID_MULTI, TEST_PORT } from "./test-constants";
+import { FUEL_TYPES, LANDER_INTERACT_RADIUS, MOON_SURFACE_WIDTH } from "../../src/game/constants";
+import { ADMIN_SECRET, APP_ID, APP_ID_MULTI, TEST_SERVER_URL } from "./test-constants";
 import {
   type MountEntry,
   pressKey,
@@ -58,6 +59,7 @@ async function mountApp(opts: {
   adminSecret?: string;
 }): Promise<HTMLDivElement> {
   const { physicsSpeed, spawnX, playerId, localFirstSecret, adminSecret, ...config } = opts;
+  const secret = localFirstSecret ?? (adminSecret ? undefined : generateAuthSecret());
   const el = document.createElement("div");
   document.body.appendChild(el);
   const root = createRoot(el);
@@ -70,7 +72,7 @@ async function mountApp(opts: {
           config: {
             appId: config.appId ?? APP_ID,
             ...config,
-            ...(localFirstSecret ? { auth: { localFirstSecret } } : {}),
+            ...(secret ? { secret } : {}),
             ...(adminSecret ? { adminSecret } : {}),
           },
           playerId: playerId ?? crypto.randomUUID(),
@@ -89,6 +91,42 @@ async function mountApp(opts: {
   );
 
   return el;
+}
+
+function deltaToLander(el: HTMLDivElement): number {
+  const playerX = readNum(el, "player-x");
+  const landerX = readNum(el, "lander-x");
+  let delta = landerX - playerX;
+  if (delta > MOON_SURFACE_WIDTH / 2) delta -= MOON_SURFACE_WIDTH;
+  if (delta < -MOON_SURFACE_WIDTH / 2) delta += MOON_SURFACE_WIDTH;
+  return delta;
+}
+
+async function walkToLander(el: HTMLDivElement, timeoutMs = 10_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const delta = deltaToLander(el);
+    if (Math.abs(delta) <= LANDER_INTERACT_RADIUS) {
+      // Engine state is mirrored to data attributes on a 50 ms interval. Wait
+      // once with no movement held so a stale near-lander snapshot cannot make
+      // the test interact after the physics position has already passed it.
+      await new Promise((resolve) => setTimeout(resolve, 75));
+      if (Math.abs(deltaToLander(el)) <= LANDER_INTERACT_RADIUS) return;
+      continue;
+    }
+
+    const [key, code] = delta < 0 ? ["a", "KeyA"] : ["d", "KeyD"];
+    const nearLander = Math.abs(delta) <= LANDER_INTERACT_RADIUS + 80;
+    pressKey(key, code);
+    if (nearLander) await waitFrames(1);
+    else await new Promise((resolve) => setTimeout(resolve, 50));
+    releaseKey(key, code);
+    if (nearLander) await new Promise((resolve) => setTimeout(resolve, 75));
+    else await waitFrames(1);
+  }
+  throw new Error(
+    `Timed out walking back to lander (player=${readNum(el, "player-x")}, lander=${readNum(el, "lander-x")})`,
+  );
 }
 
 afterEach(async () => {
@@ -281,7 +319,7 @@ describe("Moon Lander — Cross-Client Sync", () => {
        *   enter lander ────→  burst releases  ──→   deposit reappears
        *                       collected=false        deposit-count recovers
        */
-      const serverUrl = `http://127.0.0.1:${TEST_PORT}`;
+      const serverUrl = TEST_SERVER_URL;
       const playerId = crypto.randomUUID();
 
       const el = await mountApp({
@@ -318,18 +356,13 @@ describe("Moon Lander — Cross-Client Sync", () => {
       const inventory = readStr(el, "inventory");
       if (inventory === "") return; // didn't collect anything; skip gracefully
 
-      // collectDeposit now uses DELETE+INSERT so the deposit gets a new ID.
-      // The game engine's collectedIds tracks the OLD ID, so deposit-count
-      // doesn't reflect the collection. Use sync-uncollected (raw edge count)
-      // which correctly drops when delete fires WHERE EXIT.
+      // Use the subscription-derived count instead of the engine's animated
+      // deposit count so the assertion observes the database transition.
       const syncEl = el.querySelector('[data-testid="sync-debug"]')!;
       const countAfterCollect = parseInt(syncEl.getAttribute("data-sync-uncollected") ?? "0", 10);
       const collected = countBefore - countAfterCollect;
 
-      pressKey("a", "KeyA");
-      await new Promise((r) => setTimeout(r, 4000));
-      releaseKey("a", "KeyA");
-      await waitFrames(5);
+      await walkToLander(el);
 
       pressKey("e", "KeyE");
       await waitForAttr(el, "player-mode", "in_lander", 5000);
@@ -339,8 +372,8 @@ describe("Moon Lander — Cross-Client Sync", () => {
       await waitForAttr(el, "player-mode", "walking", 3000);
       releaseKey("e", "KeyE");
 
-      // Use data-sync-uncollected (raw DB count from the edge subscription,
-      // not filtered by local collectedIds) so the assertion is reliable.
+      // Use the live database count, not the engine's local collectedIds view,
+      // so the assertion observes the released deposit re-entering the query.
       await waitFor(
         () => {
           try {

@@ -1,10 +1,12 @@
-use std::collections::VecDeque;
 use std::fmt;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crate::db::ConnectionSessionContext;
+use crate::db::{ConnectionSessionContext, WireTransportAdapter};
 use crate::ids::{AuthorId, NodeUuid};
+use crate::protocol_limits::{
+    MAX_WIRE_BATCH_FRAMES, MAX_WIRE_FRAME_BYTES, validate_wire_frame_len,
+};
 use crate::wire::{
     FEATURE_SYNC_MESSAGE_PAYLOAD, TransportError, WIRE_PROTOCOL_VERSION, WireAuthorityEndpoint,
     WireError, WireFrame, WireHello, WirePeerRole, WireTransport, current_wire_features,
@@ -12,21 +14,28 @@ use crate::wire::{
 };
 use futures::{SinkExt as _, StreamExt as _};
 use std::sync::atomic::{AtomicU64, Ordering};
-use tokio::sync::mpsc;
-use tokio_tungstenite::connect_async;
+use tokio::sync::{Notify, Semaphore, mpsc};
+use tokio_tungstenite::connect_async_with_config;
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 
 use crate::tools::AppId;
 use crate::tools::websocket_prelude_auth::AuthConfig;
 
 const WS_CLIENT_REQUIRED_FEATURES: u64 = FEATURE_SYNC_MESSAGE_PAYLOAD;
 const WS_CLIENT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
-// The serving route caps each WebSocket message at one MiB. Keep a small
-// postcard framing reserve so a burst of individually-valid wire frames never
-// becomes an invalid WebSocket message.
-const WS_CLIENT_BATCH_BYTES: usize = 1 << 20;
+// The serving route caps client-to-server WebSocket messages at one MiB. Keep
+// a small postcard framing reserve so a burst of individually-valid wire
+// frames never becomes an invalid request message.
+const WS_CLIENT_OUTBOUND_BATCH_BYTES: usize = 1 << 20;
 const POSTCARD_FRAME_LENGTH_RESERVE: usize = 5;
 const POSTCARD_BATCH_LENGTH_RESERVE: usize = 5;
+/// Bound a malicious upstream before the wire reassembler gets a chance to
+/// retain fragments. This applies equally to normal and bootstrap links. The
+/// sender waits when full, so a valid fragmented maximum-size catalogue is
+/// streamed through as its consumer drains rather than rejected mid-message.
+const WS_CLIENT_INBOUND_FRAME_SLOTS: usize = 64;
+const WS_CLIENT_MAX_QUEUED_BYTES: usize = 8 << 20;
 static NEXT_CLIENT_CONNECTION_EPOCH: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug)]
@@ -71,7 +80,9 @@ impl fmt::Display for WebSocketClientError {
 impl std::error::Error for WebSocketClientError {}
 
 pub struct WebSocketTransport {
-    inbound: Arc<Mutex<VecDeque<Vec<u8>>>>,
+    inbound: Arc<Mutex<mpsc::Receiver<InboundFrame>>>,
+    inbound_error: Arc<Mutex<Option<String>>>,
+    inbound_notify: Arc<Notify>,
     outbound: mpsc::UnboundedSender<Vec<u8>>,
     wake: Arc<dyn Fn() + Send + Sync>,
     task: tokio::task::JoinHandle<()>,
@@ -80,10 +91,17 @@ pub struct WebSocketTransport {
     session_context: Option<ConnectionSessionContext>,
 }
 
+struct InboundFrame {
+    bytes: Vec<u8>,
+    // Keeping the permit with the queued frame makes the byte bound apply
+    // until the synchronous wire consumer has actually removed the frame.
+    _budget: tokio::sync::OwnedSemaphorePermit,
+}
+
 impl fmt::Debug for WebSocketTransport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("WebSocketTransport")
-            .field("inbound", &self.inbound)
+            .field("inbound", &"bounded streaming channel")
             .field("outbound", &self.outbound)
             .field("task", &self.task)
             .finish_non_exhaustive()
@@ -107,14 +125,91 @@ impl WebSocketTransport {
         auth: AuthConfig,
         wake: Arc<dyn Fn() + Send + Sync>,
     ) -> Result<Self, WebSocketClientError> {
+        Self::connect_with_wake_and_bootstrap(base_url, app_id, peer_identity, auth, wake, false)
+            .await
+    }
+
+    /// Open the authenticated snapshot-only bootstrap exchange.  The returned
+    /// transport is deliberately short-lived: after adoption the edge opens a
+    /// fresh ordinary peer connection against the now-ready runtime.
+    pub(crate) async fn connect_catalogue_bootstrap(
+        base_url: impl AsRef<str>,
+        app_id: AppId,
+        peer_identity: AuthorId,
+        auth: AuthConfig,
+    ) -> Result<crate::protocol::CatalogueSnapshot, WebSocketClientError> {
+        validate_catalogue_bootstrap_upstream_url(base_url.as_ref(), app_id)
+            .map_err(WebSocketClientError::ServerRejected)?;
+        let transport = Self::connect_with_wake_and_bootstrap(
+            base_url,
+            app_id,
+            peer_identity,
+            auth,
+            Arc::new(|| {}),
+            true,
+        )
+        .await?;
+        let (protocol_version, features, session_context) =
+            transport.negotiated_transport_metadata();
+        let inbound_error = Arc::clone(&transport.inbound_error);
+        let inbound_notify = Arc::clone(&transport.inbound_notify);
+        let mut wire = WireTransportAdapter::new_with_session_context(
+            transport,
+            protocol_version,
+            features,
+            None,
+            session_context,
+        );
+        let deadline = tokio::time::Instant::now() + WS_CLIENT_HANDSHAKE_TIMEOUT;
+        loop {
+            let notified = inbound_notify.notified();
+            match wire.try_recv_strict() {
+                Ok(Some(message)) => {
+                    return match message {
+                        crate::protocol::SyncMessage::CatalogueSnapshot(snapshot) => Ok(*snapshot),
+                        _ => Err(WebSocketClientError::ServerRejected(
+                            "bootstrap peer sent application traffic instead of a catalogue snapshot"
+                                .to_owned(),
+                        )),
+                    };
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    return Err(WebSocketClientError::ServerRejected(format!(
+                        "bootstrap wire validation failed: {:?}: {}",
+                        error.code, error.message
+                    )));
+                }
+            }
+            if let Some(error) = inbound_error.lock().ok().and_then(|error| error.clone()) {
+                return Err(WebSocketClientError::ServerRejected(error));
+            }
+            tokio::select! {
+                _ = notified => {}
+                _ = tokio::time::sleep_until(deadline) => {
+                    return Err(WebSocketClientError::HandshakeTimeout);
+                }
+            }
+        }
+    }
+
+    async fn connect_with_wake_and_bootstrap(
+        base_url: impl AsRef<str>,
+        app_id: AppId,
+        peer_identity: AuthorId,
+        auth: AuthConfig,
+        wake: Arc<dyn Fn() + Send + Sync>,
+        bootstrap_catalogue: bool,
+    ) -> Result<Self, WebSocketClientError> {
         let url = ws_url(base_url.as_ref(), app_id);
-        let (mut ws, _) = connect_async(url)
+        let (mut ws, _) = connect_async_with_config(url, Some(client_websocket_config()), false)
             .await
             .map_err(WebSocketClientError::Connect)?;
 
         let prelude = serde_json::to_vec(&WebSocketClientPrelude {
             peer_identity: hex::encode(peer_identity.as_bytes()),
             auth,
+            bootstrap_catalogue,
         })
         .map_err(WebSocketClientError::EncodePrelude)?;
         ws.send(Message::Binary(prelude.into()))
@@ -175,17 +270,27 @@ impl WebSocketTransport {
             None
         };
 
-        let inbound = Arc::new(Mutex::new(VecDeque::new()));
+        let (inbound_tx, inbound_rx) = mpsc::channel(WS_CLIENT_INBOUND_FRAME_SLOTS);
+        let inbound = Arc::new(Mutex::new(inbound_rx));
+        let inbound_error = Arc::new(Mutex::new(None));
+        let inbound_notify = Arc::new(Notify::new());
+        let inbound_budget = Arc::new(Semaphore::new(WS_CLIENT_MAX_QUEUED_BYTES));
         let (outbound, outbound_rx) = mpsc::unbounded_channel();
         let task = tokio::spawn(run_ws_pump(
             ws,
-            inbound.clone(),
+            inbound_tx,
+            inbound_budget,
+            Arc::clone(&inbound_error),
+            Arc::clone(&inbound_notify),
             outbound_rx,
             Arc::clone(&wake),
+            bootstrap_catalogue,
         ));
 
         Ok(Self {
             inbound,
+            inbound_error,
+            inbound_notify,
             outbound,
             wake,
             task,
@@ -225,18 +330,15 @@ impl WireTransport for WebSocketTransport {
 
     fn try_recv_frame(&mut self) -> Option<Vec<u8>> {
         let mut inbound = self.inbound.lock().ok()?;
-        #[cfg(feature = "sync-autopsy")]
-        let before = inbound.len();
-        let frame = inbound.pop_front();
+        let frame = inbound.try_recv().ok();
         #[cfg(feature = "sync-autopsy")]
         if let Some(frame) = &frame {
             crate::db::sync_autopsy::record(format!(
-                "client websocket pop inbound before={before} after={} bytes={}",
-                inbound.len(),
-                frame.len()
+                "client websocket pop inbound bytes={}",
+                frame.bytes.len()
             ));
         }
-        frame
+        frame.map(|frame| frame.bytes)
     }
 }
 
@@ -244,6 +346,12 @@ impl WireTransport for WebSocketTransport {
 struct WebSocketClientPrelude {
     peer_identity: String,
     auth: AuthConfig,
+    #[serde(default, skip_serializing_if = "is_false")]
+    bootstrap_catalogue: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 fn ws_url(base_url: &str, app_id: AppId) -> String {
@@ -253,6 +361,65 @@ fn ws_url(base_url: &str, app_id: AppId) -> String {
         .trim_end_matches('/')
         .to_owned();
     format!("{base}/apps/{app_id}/ws")
+}
+
+fn client_websocket_config() -> WebSocketConfig {
+    WebSocketConfig::default()
+        // The server can batch raw wire frames up to this protocol boundary;
+        // logical catalogue snapshots still span many such WebSocket messages.
+        .max_message_size(Some(MAX_WIRE_FRAME_BYTES))
+        .max_frame_size(Some(MAX_WIRE_FRAME_BYTES))
+}
+
+pub(crate) fn validate_catalogue_bootstrap_upstream_url(
+    base_url: &str,
+    app_id: AppId,
+) -> Result<(), String> {
+    validate_bootstrap_upstream_url(&ws_url(base_url, app_id)).map_err(|error| error.to_string())
+}
+
+/// Bootstrap relies on the configured upstream transport for server identity:
+/// `wss://` gets the existing WebSocket/TLS validation, while plaintext is
+/// deliberately limited to loopback by default.  This is not mutual TLS or a
+/// new cryptographic authority proof; operators must configure a trusted WSS
+/// endpoint for remote edges.
+fn validate_bootstrap_upstream_url(base_url: &str) -> Result<(), WebSocketClientError> {
+    let url = reqwest::Url::parse(base_url).map_err(|error| {
+        WebSocketClientError::ServerRejected(format!("invalid bootstrap upstream URL: {error}"))
+    })?;
+    if url.scheme() != "ws" {
+        return Ok(());
+    }
+    let loopback = url.host_str().is_some_and(|host| {
+        let host = host.trim_matches(['[', ']']);
+        host.eq_ignore_ascii_case("localhost")
+            || host
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|address| address.is_loopback())
+    });
+    let explicitly_allowed = std::env::var("JAZZ_ALLOW_INSECURE_EDGE_BOOTSTRAP_WS")
+        .ok()
+        .as_deref()
+        == Some("1");
+    if loopback || explicitly_allowed {
+        Ok(())
+    } else {
+        Err(WebSocketClientError::ServerRejected(
+            "plaintext ws:// bootstrap is allowed only for loopback; configure wss:// or set JAZZ_ALLOW_INSECURE_EDGE_BOOTSTRAP_WS=1 for an explicit development override"
+                .to_owned(),
+        ))
+    }
+}
+
+fn fail_inbound(
+    error_slot: &Arc<Mutex<Option<String>>>,
+    notify: &Notify,
+    error: impl Into<String>,
+) {
+    if let Ok(mut slot) = error_slot.lock() {
+        *slot = Some(error.into());
+    }
+    notify.notify_waiters();
 }
 
 async fn receive_server_hello(
@@ -294,9 +461,13 @@ async fn run_ws_pump(
     mut ws: tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
     >,
-    inbound: Arc<Mutex<VecDeque<Vec<u8>>>>,
+    inbound: mpsc::Sender<InboundFrame>,
+    inbound_budget: Arc<Semaphore>,
+    inbound_error: Arc<Mutex<Option<String>>>,
+    inbound_notify: Arc<Notify>,
     mut outbound: mpsc::UnboundedReceiver<Vec<u8>>,
     wake: Arc<dyn Fn() + Send + Sync>,
+    bootstrap_catalogue: bool,
 ) {
     loop {
         tokio::select! {
@@ -311,7 +482,9 @@ async fn run_ws_pump(
                     + POSTCARD_FRAME_LENGTH_RESERVE;
                 while let Ok(frame) = outbound.try_recv() {
                     let frame_bytes = frame.len() + POSTCARD_FRAME_LENGTH_RESERVE;
-                    if batch_bytes.saturating_add(frame_bytes) > WS_CLIENT_BATCH_BYTES {
+                    if batch.len() >= MAX_WIRE_BATCH_FRAMES
+                        || batch_bytes.saturating_add(frame_bytes) > WS_CLIENT_OUTBOUND_BATCH_BYTES
+                    {
                         let Ok(bytes) = postcard::to_allocvec(&batch) else {
                             return;
                         };
@@ -344,29 +517,214 @@ async fn run_ws_pump(
                 }
             }
             message = ws.next() => {
-                let Some(Ok(Message::Binary(bytes))) = message else {
-                    return;
+                let bytes = match message {
+                    Some(Ok(Message::Binary(bytes))) => bytes,
+                    Some(Ok(_)) => {
+                        fail_inbound(&inbound_error, &inbound_notify, "websocket peer sent a non-binary wire batch");
+                        let _ = ws.close(None).await;
+                        return;
+                    }
+                    Some(Err(error)) => {
+                        fail_inbound(&inbound_error, &inbound_notify, format!("websocket receive failed: {error}"));
+                        return;
+                    }
+                    None => {
+                        fail_inbound(&inbound_error, &inbound_notify, "websocket peer closed before completing wire exchange");
+                        return;
+                    }
                 };
-                let Ok(frames) = postcard::from_bytes::<Vec<Vec<u8>>>(&bytes) else {
-                    return;
+                let frames = match decode_inbound_batch(&bytes, bootstrap_catalogue) {
+                    Ok(frames) => frames,
+                    Err(error) => {
+                        fail_inbound(&inbound_error, &inbound_notify, error);
+                        let _ = ws.close(None).await;
+                        return;
+                    }
                 };
-                let Ok(mut queue) = inbound.lock() else {
-                    return;
-                };
-                #[cfg(feature = "sync-autopsy")]
-                let before = queue.len();
                 #[cfg(feature = "sync-autopsy")]
                 let frame_count = frames.len();
-                queue.extend(frames);
+                for frame in frames {
+                    if let Err(error) = validate_wire_frame_len(frame.len()) {
+                        fail_inbound(&inbound_error, &inbound_notify, error);
+                        let _ = ws.close(None).await;
+                        return;
+                    }
+                    let permits = u32::try_from(frame.len()).expect("wire frame limit fits u32");
+                    let Ok(budget) = Arc::clone(&inbound_budget).acquire_many_owned(permits).await else {
+                        return;
+                    };
+                    if inbound.send(InboundFrame { bytes: frame, _budget: budget }).await.is_err() {
+                        return;
+                    }
+                    // A maximum logical message can exceed the bounded
+                    // channel. Wake on every frame so its consumer drains
+                    // before the producer blocks on a later fragment.
+                    inbound_notify.notify_one();
+                    wake();
+                }
                 #[cfg(feature = "sync-autopsy")]
                 crate::db::sync_autopsy::record(format!(
-                    "client websocket received batch frames={frame_count} inbound_before={before} inbound_after={} bytes={}",
-                    queue.len(),
+                    "client websocket received batch frames={frame_count} bytes={}",
                     bytes.len()
                 ));
-                drop(queue);
-                wake();
             }
         }
+    }
+}
+
+fn decode_inbound_batch(bytes: &[u8], bootstrap_catalogue: bool) -> Result<Vec<Vec<u8>>, String> {
+    let frames = postcard::from_bytes::<Vec<Vec<u8>>>(bytes)
+        .map_err(|_| "websocket peer sent malformed wire batch".to_owned())?;
+    if frames.len() > MAX_WIRE_BATCH_FRAMES {
+        return Err(format!(
+            "websocket inbound batch exceeds frame-count limit of {MAX_WIRE_BATCH_FRAMES}"
+        ));
+    }
+    if bootstrap_catalogue && frames.is_empty() {
+        return Err("bootstrap peer sent an empty wire batch".to_owned());
+    }
+    Ok(frames)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::Transport;
+    use std::collections::{BTreeMap, VecDeque};
+
+    #[derive(Clone)]
+    struct FrameSink(Arc<Mutex<VecDeque<Vec<u8>>>>);
+
+    impl WireTransport for FrameSink {
+        fn send_frame(&mut self, frame: Vec<u8>) -> Result<(), TransportError> {
+            self.0.lock().expect("frame sink lock").push_back(frame);
+            Ok(())
+        }
+
+        fn try_recv_frame(&mut self) -> Option<Vec<u8>> {
+            None
+        }
+    }
+
+    fn valid_fragmented_wire_message_larger_than_ingress_budget() -> Vec<Vec<u8>> {
+        let frames = Arc::new(Mutex::new(VecDeque::new()));
+        let sink = FrameSink(Arc::clone(&frames));
+        let features = FEATURE_SYNC_MESSAGE_PAYLOAD | crate::wire::FEATURE_MESSAGE_FRAGMENTATION;
+        let mut sender = WireTransportAdapter::new(sink, WIRE_PROTOCOL_VERSION, features, None);
+        let body = (0..(WS_CLIENT_MAX_QUEUED_BYTES + 1))
+            .map(|index| char::from((index % 251) as u8))
+            .collect::<String>();
+        sender
+            .send(crate::protocol::SyncMessage::SessionClaims {
+                identity: AuthorId::SYSTEM,
+                claims: BTreeMap::from([(
+                    "catalogue_fixture".to_owned(),
+                    crate::groove::records::Value::String(body),
+                )]),
+            })
+            .expect("encode valid fragmented logical message");
+        let frames = frames
+            .lock()
+            .expect("frame sink lock")
+            .drain(..)
+            .collect::<Vec<_>>();
+        assert!(frames.len() > 1, "message must be wire fragmented");
+        assert!(frames.iter().map(Vec::len).sum::<usize>() > WS_CLIENT_MAX_QUEUED_BYTES);
+        frames
+    }
+
+    #[test]
+    fn bootstrap_ingress_budget_is_finite() {
+        let budget = Arc::new(Semaphore::new(WS_CLIENT_MAX_QUEUED_BYTES));
+        let held = Arc::clone(&budget)
+            .try_acquire_many_owned(WS_CLIENT_MAX_QUEUED_BYTES as u32)
+            .expect("fill finite ingress byte budget");
+        assert!(
+            budget.try_acquire().is_err(),
+            "cap+1 byte is backpressured rather than allocated"
+        );
+        drop(held);
+    }
+
+    #[test]
+    fn websocket_rejects_oversized_physical_messages_before_batch_decode() {
+        let config = client_websocket_config();
+        assert_eq!(config.max_message_size, Some(MAX_WIRE_FRAME_BYTES));
+        assert_eq!(config.max_frame_size, Some(MAX_WIRE_FRAME_BYTES));
+    }
+
+    #[tokio::test]
+    async fn fragmented_bootstrap_larger_than_ingress_budget_streams_with_backpressure() {
+        let (sender, mut receiver) = mpsc::channel::<InboundFrame>(1);
+        let budget = Arc::new(Semaphore::new(WS_CLIENT_MAX_QUEUED_BYTES));
+        let consumer = tokio::spawn(async move {
+            let mut received = 0_usize;
+            while let Some(frame) = receiver.recv().await {
+                received += frame.bytes.len();
+            }
+            received
+        });
+        let frames = valid_fragmented_wire_message_larger_than_ingress_budget();
+        let expected = frames.iter().map(Vec::len).sum::<usize>();
+        for frame in frames {
+            let budget_permit = Arc::clone(&budget)
+                .acquire_many_owned(frame.len() as u32)
+                .await
+                .expect("consumer makes progress under ingress backpressure");
+            sender
+                .send(InboundFrame {
+                    bytes: frame,
+                    _budget: budget_permit,
+                })
+                .await
+                .expect("stream frame");
+        }
+        drop(sender);
+        assert_eq!(consumer.await.expect("consumer task"), expected);
+    }
+
+    #[test]
+    fn malformed_or_truncated_batch_wakes_bootstrap_with_a_terminal_error() {
+        let error = Arc::new(Mutex::new(None));
+        let notify = Notify::new();
+        fail_inbound(&error, &notify, "websocket peer sent malformed wire batch");
+        assert_eq!(
+            error.lock().expect("queue lock").as_deref(),
+            Some("websocket peer sent malformed wire batch")
+        );
+    }
+
+    #[test]
+    fn bootstrap_count_flood_or_empty_batch_is_rejected_before_ingress_staging() {
+        let empty = postcard::to_allocvec(&Vec::<Vec<u8>>::new()).expect("encode empty batch");
+        assert!(
+            decode_inbound_batch(&empty, true)
+                .expect_err("bootstrap must reject empty batches")
+                .contains("empty")
+        );
+
+        let flood = postcard::to_allocvec(&vec![Vec::<u8>::new(); MAX_WIRE_BATCH_FRAMES + 1])
+            .expect("encode count flood below physical byte cap");
+        assert!(flood.len() <= MAX_WIRE_FRAME_BYTES);
+        assert!(
+            decode_inbound_batch(&flood, false)
+                .expect_err("count flood must be rejected before channel staging")
+                .contains("frame-count limit")
+        );
+    }
+
+    #[test]
+    fn remote_plaintext_bootstrap_requires_explicit_override() {
+        assert!(validate_bootstrap_upstream_url("ws://127.0.0.1:4200").is_ok());
+        assert!(validate_bootstrap_upstream_url("ws://[::1]:4200").is_ok());
+        assert!(validate_bootstrap_upstream_url("wss://core.example.test").is_ok());
+        assert!(validate_bootstrap_upstream_url("ws://[::2]:4200").is_err());
+        assert!(validate_bootstrap_upstream_url("ws://core.example.test").is_err());
+        assert!(
+            validate_bootstrap_upstream_url("ws://core.example.test")
+                .expect_err("remote plaintext bootstrap must fail")
+                .to_string()
+                .contains("plaintext ws:// bootstrap")
+        );
     }
 }

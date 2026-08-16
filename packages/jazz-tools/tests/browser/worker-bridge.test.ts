@@ -126,16 +126,22 @@ function getActiveRoleBridge(db: Db): any {
   return getBrowserConnection(db)?.activeRoleBridge ?? null;
 }
 
-function getPersistentBrowserRuntime(db: Db): any {
-  return (db as any).runtimeSource?.persistentOwnerRuntime ?? null;
-}
-
 function getPrivateWorker(db: Db): Worker | null {
-  return getPersistentBrowserRuntime(db)?.worker ?? getActiveRoleBridge(db)?.worker ?? null;
+  return getActiveRoleBridge(db)?.workerBridge?.worker ?? null;
 }
 
 function getFollowerPortBridge(db: Db): any {
   return getActiveRoleBridge(db)?.followerPortBridge ?? null;
+}
+
+function clearPrivateWorkerBridge(db: Db): void {
+  const role = getActiveRoleBridge(db);
+  const bridge = role?.workerBridge;
+  if (!bridge) return;
+  bridge.closed = true;
+  bridge.pump?.close();
+  role.workerBridge = null;
+  role.bridgeReady = null;
 }
 
 function summarizeWorkerMessage(
@@ -205,6 +211,44 @@ function attachWorkerMessageProbe(db: Db): WorkerMessageProbe {
 /** QueryBuilder that selects all todos. */
 const allTodos: QueryBuilder<Todo> = app.todos;
 
+// A small published schema family used to prove that the persistent worker
+// rehydrates catalogue state, including its migration lens, before a current
+// client issues its first query after reopening.
+const catalogueSchemaV1 = {
+  todos: s.table({
+    title: s.string(),
+    completed: s.boolean(),
+  }),
+};
+
+const catalogueSchemaV2 = {
+  todos: s.table({
+    title: s.string(),
+    completed: s.boolean(),
+    description: s.string().optional(),
+  }),
+};
+
+const catalogueAppV1 = s.defineApp(catalogueSchemaV1);
+const catalogueAppV2 = s.defineApp(catalogueSchemaV2);
+const { todos: catalogueTodos } = catalogueAppV2;
+type CatalogueTodo = s.RowOf<typeof catalogueTodos>;
+const allCatalogueTodos: QueryBuilder<CatalogueTodo> = catalogueAppV2.todos;
+
+const cataloguePermissionsV1 = s.definePermissions(catalogueAppV1, ({ policy }) => [
+  policy.todos.allowRead.always(),
+  policy.todos.allowInsert.always(),
+  policy.todos.allowUpdate.always(),
+  policy.todos.allowDelete.always(),
+]);
+
+const cataloguePermissionsV2 = s.definePermissions(catalogueAppV2, ({ policy }) => [
+  policy.todos.allowRead.always(),
+  policy.todos.allowInsert.always(),
+  policy.todos.allowUpdate.always(),
+  policy.todos.allowDelete.always(),
+]);
+
 /**
  * Structurally valid JWT with a deliberately invalid signature: parses fine on
  * the client (sub/exp claims) but the testing server rejects it at handshake.
@@ -232,6 +276,7 @@ function todosByProject(projectId: string): QueryBuilder<Todo> {
 describe("Worker Bridge with OPFS", () => {
   const ctx = new TestCleanup();
   const remoteBrowserDbIds = new Set<string>();
+  const errorListeners = new Set<(event: ErrorEvent) => void>();
 
   function trackRemoteBrowserDb(id: string): string {
     remoteBrowserDbIds.add(id);
@@ -332,6 +377,10 @@ describe("Worker Bridge with OPFS", () => {
   }
 
   afterEach(async () => {
+    for (const listener of errorListeners) {
+      globalThis.removeEventListener("error", listener);
+    }
+    errorListeners.clear();
     for (const id of remoteBrowserDbIds) {
       try {
         await closeRemoteBrowserDb(id);
@@ -673,7 +722,7 @@ describe("Worker Bridge with OPFS", () => {
     expect(await db.all(allTodos, { tier: "local" })).toHaveLength(1);
   });
 
-  it.fails("resolves a fresh-namespace storage reset while a second fresh tab is open", async () => {
+  it("resolves a fresh-namespace storage reset while a second fresh tab is open", async () => {
     const dbName = uniqueDbName("delete-storage-fresh-two-tabs");
     const dbA = track(
       await createDb({ appId: "test-app", driver: { type: "persistent", dbName } }),
@@ -697,7 +746,7 @@ describe("Worker Bridge with OPFS", () => {
     );
   });
 
-  it.fails("retries OPFS storage deletion after a transient browser lock", async () => {
+  it("retries OPFS storage deletion after a transient browser lock", async () => {
     const dbName = uniqueDbName("delete-storage-transient-lock");
     const db = track(
       await createDb({
@@ -745,7 +794,7 @@ describe("Worker Bridge with OPFS", () => {
     expect(await db.all(allTodos, { tier: "local" })).toEqual([]);
   });
 
-  it.fails("deletes OPFS storage across leader and follower tabs when requested from a follower", async () => {
+  it("deletes OPFS storage across leader and follower tabs when requested from a follower", async () => {
     const dbName = uniqueDbName("delete-storage-follower");
     const dbA = track(
       await createDb({
@@ -835,6 +884,101 @@ describe("Worker Bridge with OPFS", () => {
     const rows = await reopened.all(allTodos, { tier: "local" });
     expect(rows).toEqual([]);
   });
+
+  it("rehydrates current catalogue schema and lens state after persistent worker reopen", async () => {
+    const protocolErrors: string[] = [];
+    const recordProtocolError = (event: ErrorEvent) => {
+      const message = event.error instanceof Error ? event.error.message : event.message;
+      if (message.includes("invalid catalogue update")) {
+        protocolErrors.push(message);
+      }
+    };
+    globalThis.addEventListener("error", recordProtocolError);
+    errorListeners.add(recordProtocolError);
+
+    const dbName = uniqueDbName("catalogue-current-schema-rehydrate");
+    const testingServer = await publishCatalogueSchemaFamily("catalogue-current-schema-rehydrate");
+
+    const seeded = track(
+      await createDb({
+        appId: testingServer.appId,
+        serverUrl: testingServer.serverUrl,
+        adminSecret: testingServer.adminSecret,
+        driver: { type: "persistent", dbName },
+      }),
+    );
+
+    const marker = `catalogue-current-schema-rehydrate-${Date.now()}`;
+    await seeded
+      .insert(catalogueTodos, {
+        title: marker,
+        completed: false,
+        description: "written with the current schema",
+      })
+      .wait({ tier: "edge" });
+
+    await waitForCatalogueTodos(
+      seeded,
+      (rows) => rows.some((row) => row.title === marker && row.description?.includes("current")),
+      "initial current-schema query should read the persisted row",
+      15_000,
+      "local",
+    );
+
+    await seeded.shutdown();
+    untrack(seeded);
+
+    const reopened = track(
+      await createDb({
+        appId: testingServer.appId,
+        serverUrl: testingServer.serverUrl,
+        adminSecret: testingServer.adminSecret,
+        driver: { type: "persistent", dbName },
+      }),
+    );
+
+    const rowsAfterReopen = await waitForCatalogueTodos(
+      reopened,
+      (rows) => rows.some((row) => row.title === marker && row.description?.includes("current")),
+      "reopened persistent worker should rehydrate current schema and lenses before querying",
+      15_000,
+      "local",
+    );
+    expect(rowsAfterReopen.find((row) => row.title === marker)?.completed).toBe(false);
+
+    const remote = track(
+      await createDb({
+        appId: testingServer.appId,
+        serverUrl: testingServer.serverUrl,
+        adminSecret: testingServer.adminSecret,
+        driver: { type: "persistent", dbName: uniqueDbName("catalogue-remote-authority") },
+      }),
+    );
+    const remoteMarker = `catalogue-remote-authority-${Date.now()}`;
+    await remote
+      .insert(catalogueTodos, {
+        title: remoteMarker,
+        completed: true,
+        description: "written by an independent server-connected client",
+      })
+      .wait({ tier: "edge" });
+
+    const authoritativeRows = await waitForCatalogueTodos(
+      reopened,
+      (rows) => rows.some((row) => row.title === remoteMarker && row.completed),
+      "reopened worker should receive authoritative current-schema rows from the server",
+      15_000,
+      "edge",
+    );
+    expect(authoritativeRows.find((row) => row.title === remoteMarker)?.description).toContain(
+      "independent",
+    );
+
+    await sleep(100);
+    expect(protocolErrors).toEqual([]);
+    globalThis.removeEventListener("error", recordProtocolError);
+    errorListeners.delete(recordProtocolError);
+  }, 60_000);
 
   // -------------------------------------------------------------------------
   // 5. Durable insert resolves at local tier
@@ -2011,7 +2155,7 @@ describe("Worker Bridge with OPFS", () => {
   // 8. Leader election + cross-tab peer routing
   // -------------------------------------------------------------------------
 
-  it.fails("routes follower writes through the elected leader", async () => {
+  it("routes follower writes through the elected leader", async () => {
     const dbName = uniqueDbName("leader-route");
     const dbA = track(
       await createDb({
@@ -2026,6 +2170,12 @@ describe("Worker Bridge with OPFS", () => {
       }),
     );
     const { leader, follower } = await waitForLeaderAndFollower(dbA, dbB);
+
+    // Browser persistence is initialized lazily on first schema use.
+    await Promise.all([
+      leader.all(allTodos, { tier: "local" }),
+      follower.all(allTodos, { tier: "local" }),
+    ]);
 
     await waitForCondition(
       async () => getPrivateWorker(leader) !== null && getPrivateWorker(follower) === null,
@@ -2067,7 +2217,7 @@ describe("Worker Bridge with OPFS", () => {
     unsubscribe();
   });
 
-  it.fails("syncs a follower opened after the leader is already ready", async () => {
+  it("syncs a follower opened after the leader is already ready", async () => {
     const dbName = uniqueDbName("late-follower-route");
     const leader = track(
       await createDb({
@@ -2111,7 +2261,7 @@ describe("Worker Bridge with OPFS", () => {
     expect(followerRows.some((row) => row.title === "Created before second tab")).toBe(true);
   });
 
-  it.fails("gates a late follower subscription's first snapshot on the leader data port", async () => {
+  it("hydrates a late follower subscription through the leader data port", async () => {
     const dbName = uniqueDbName("late-follower-subscribe");
     const leader = track(
       await createDb({
@@ -2150,12 +2300,10 @@ describe("Worker Bridge with OPFS", () => {
     );
 
     await waitForCondition(
-      async () => snapshots.length > 0,
+      async () => snapshots.some((rows) => rows.some((row) => row.title === title)),
       8000,
-      "Late follower subscription should produce an initial snapshot",
+      "Late follower subscription should hydrate the persisted row",
     );
-
-    expect(snapshots[0].some((row) => row.title === title)).toBe(true);
 
     unsubscribe();
   });
@@ -2215,11 +2363,12 @@ describe("Worker Bridge with OPFS", () => {
     expect(Array.isArray(rows)).toBe(true);
   });
 
-  it.fails("fans out an auth failure to follower tabs", async () => {
-    const { appId, serverUrl } = await getJazzServerInfo(uniqueDbName("auth-fanout"));
+  it("fans out auth loss and accepts same-principal refresh from a follower tab", async () => {
+    const { appId, serverUrl } = await publishSyncServerSchemaAndPermissions("auth-fanout");
     const dbName = uniqueDbName("auth-fanout");
-    const validJwt = await getJazzServerJwtForUser("auth-fanout-user", undefined, appId);
-    const invalidJwt = makeStructurallyValidJwt("auth-fanout-user");
+    const userId = "00000000-0000-0000-0000-00000000fa01";
+    const validJwt = await getJazzServerJwtForUser(userId, undefined, appId);
+    const invalidJwt = makeStructurallyValidJwt(userId);
 
     const dbA = track(
       await createDb({
@@ -2256,7 +2405,6 @@ describe("Worker Bridge with OPFS", () => {
     expect(follower.getAuthState().error).toBeUndefined();
 
     leader.updateAuthToken(invalidJwt);
-    getActiveRoleBridge(leader)?.replayServerConnection?.();
 
     await waitForCondition(
       async () => leader.getAuthState().error === "invalid",
@@ -2268,9 +2416,22 @@ describe("Worker Bridge with OPFS", () => {
       20000,
       "Follower should turn unauthenticated through the worker auth fan-out",
     );
+
+    follower.updateAuthToken(validJwt);
+
+    await waitForCondition(
+      async () => follower.getAuthState().error === undefined,
+      20000,
+      "Follower should recover after submitting a same-principal token refresh",
+    );
+    await waitForCondition(
+      async () => leader.getAuthState().error === undefined,
+      20000,
+      "Leader should receive the refreshed auth state from the shared worker",
+    );
   }, 60000);
 
-  it.fails("fails over to follower after leader shutdown", async () => {
+  it("fails over to follower after leader shutdown", async () => {
     const dbName = uniqueDbName("leader-failover");
     const dbA = track(
       await createDb({
@@ -2308,7 +2469,7 @@ describe("Worker Bridge with OPFS", () => {
     );
   });
 
-  it.fails("reconciles a follower write that was pending when the leader crashes", async () => {
+  it("reconciles a follower write that was pending when the leader crashes", async () => {
     const dbName = uniqueDbName("leader-crash-pending-follower-write");
     const dbA = track(
       await createDb({
@@ -2327,12 +2488,12 @@ describe("Worker Bridge with OPFS", () => {
     const marker = `pending-follower-write-${Date.now()}`;
     let pendingWrite!: Promise<unknown>;
     let pendingWriteState: "pending" | "resolved" | "rejected" = "pending";
+    await leader.all(allTodos, { tier: "local" });
     await waitForCondition(
       async () => getPrivateWorker(leader) !== null && getPrivateWorker(follower) === null,
       8000,
       "Broker should keep the follower bridged through the elected leader",
     );
-    await leader.all(allTodos, { tier: "local" });
     await waitForCondition(
       async () => {
         void getBrowserConnection(follower)?.followerReady?.catch(() => {});
@@ -2408,7 +2569,7 @@ describe("Worker Bridge with OPFS", () => {
     expect(rows.some((row) => row.title === marker)).toBe(true);
   });
 
-  it.fails("resolves a pending follower local-wait when the bridged leader crashes with the write in flight", async () => {
+  it("resolves a pending follower local-wait when the bridged leader crashes with the write in flight", async () => {
     // Faithful version of the failover-during-pending-write case. Unlike a write
     // made while the follower is detached (which only ever buffers locally and
     // replays on self-promotion), here the follower stays *bridged* to the
@@ -2539,7 +2700,7 @@ describe("Worker Bridge with OPFS", () => {
     expect(reopenedRows.some((row) => row.title === marker)).toBe(true);
   });
 
-  it.fails("re-elects cleanly when a closed leader tab is reopened", async () => {
+  it("re-elects cleanly when a closed leader tab is reopened", async () => {
     const dbName = uniqueDbName("leader-reopen");
     const dbA = track(
       await createDb({
@@ -2644,6 +2805,59 @@ async function waitForTodos(
   tier?: "local" | "edge",
 ): Promise<Todo[]> {
   return waitForQuery(db, allTodos, predicate, label, timeoutMs, tier);
+}
+
+async function waitForCatalogueTodos(
+  db: Db,
+  predicate: (rows: CatalogueTodo[]) => boolean,
+  label: string,
+  timeoutMs = 15_000,
+  tier?: "local" | "edge",
+): Promise<CatalogueTodo[]> {
+  return waitForQuery(db, allCatalogueTodos, predicate, label, timeoutMs, tier);
+}
+
+async function publishCatalogueSchemaFamily(scope: string): Promise<JazzServerInfo> {
+  const testingServer = await getJazzServerInfo(uniqueDbName(`worker-bridge-${scope}`));
+  const { appId, serverUrl, adminSecret } = testingServer;
+
+  const v1 = await deploy({
+    appId,
+    serverUrl,
+    adminSecret,
+    schema: catalogueAppV1.wasmSchema,
+    permissions: cataloguePermissionsV1,
+  });
+
+  const v2 = await deploy({
+    appId,
+    serverUrl,
+    adminSecret,
+    schema: catalogueAppV2.wasmSchema,
+  });
+
+  const migration = s.defineMigration({
+    fromHash: v1.schema.hash,
+    toHash: v2.schema.hash,
+    from: catalogueSchemaV1,
+    to: catalogueSchemaV2,
+    migrate: {
+      todos: {
+        description: s.add.string({ default: null }),
+      },
+    },
+  });
+
+  await deploy({
+    appId,
+    serverUrl,
+    adminSecret,
+    schema: catalogueAppV2.wasmSchema,
+    permissions: cataloguePermissionsV2,
+    migration,
+  });
+
+  return testingServer;
 }
 
 async function publishSyncServerSchemaAndPermissions(

@@ -27,14 +27,15 @@ export function uniqueDbName(label: string): string {
 
 /** Abruptly terminate a Db's OPFS worker without running its normal close path. */
 export function simulateCrash(db: Db): void {
-  const runtime = (db as any).runtimeSource?.persistentOwnerRuntime;
-  const worker = runtime?.worker as Worker | undefined;
-  if (!runtime || !worker) {
+  const role = (db as any).connection?.activeRoleBridge;
+  const bridge = role?.workerBridge;
+  const worker = bridge?.worker as Worker | undefined;
+  if (!bridge || !worker) {
     throw new Error("persistent browser worker is unavailable");
   }
   worker.terminate();
   // Prevent later test cleanup from trying to exchange messages with the dead worker.
-  runtime.closed = true;
+  bridge.closed = true;
 }
 
 // ---------------------------------------------------------------------------

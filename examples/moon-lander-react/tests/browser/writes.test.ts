@@ -138,7 +138,7 @@ function makeDeposit(overrides: Partial<FuelDeposit> & { fuelType: string }): Fu
 /**
  * Minimal db mock that captures insert and update calls.
  *
- * reconcileDeposits only uses these two methods. Both return a promise for a
+ * reconcileDeposits only uses these two methods. Both return a synchronous
  * write handle whose wait method records the requested durability tier.
  */
 function mockDb() {
@@ -152,7 +152,7 @@ function mockDb() {
 
   return {
     db: {
-      insert: vi.fn(async (table: unknown, data: Record<string, unknown>) => {
+      insert: vi.fn((table: unknown, data: Record<string, unknown>) => {
         const id = `new-${inserts.length}`;
         return {
           value: { id, ...data },
@@ -162,7 +162,7 @@ function mockDb() {
           },
         };
       }),
-      update: vi.fn(async (table: unknown, id: string, data: Record<string, unknown>) => ({
+      update: vi.fn((table: unknown, id: string, data: Record<string, unknown>) => ({
         wait: async (options?: { tier?: string }) => {
           updates.push({ table, id, data, tier: options?.tier ?? "edge" });
         },

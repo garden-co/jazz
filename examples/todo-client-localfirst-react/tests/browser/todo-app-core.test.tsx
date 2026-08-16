@@ -8,14 +8,18 @@
 
 import { describe, it, expect, afterEach } from "vitest";
 import { createRoot, type Root } from "react-dom/client";
-import { act } from "react";
+import { act, useEffect } from "react";
 import { App } from "../../src/App.js";
+import { app } from "../../schema.js";
 import { APP_ID, ADMIN_SECRET, SERVER_URL } from "./test-constants.js";
 import type { DbConfig } from "jazz-tools";
+import { useDb } from "jazz-tools/react";
 
 type TestWindow = Window & {
   __jazz?: { shutdown(namespace?: string): Promise<void> };
 };
+
+const EDGE_READINESS_PROJECT_NAME = "__edge-readiness-sentinel__";
 
 function uniqueDbName(label: string): string {
   return `test-${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -71,6 +75,22 @@ async function addTodoAndWaitForLocalDurability(el: HTMLDivElement, title: strin
   await localWriteDurable;
 }
 
+function EdgeReadinessProbe({ onSettled }: { onSettled: (error: Error | null) => void }) {
+  const db = useDb();
+  useEffect(() => {
+    // This disjoint, empty projects query establishes the edge carrier without
+    // requesting the todos relation whose reconnect path this canary measures.
+    void db.all(app.projects.where({ name: EDGE_READINESS_PROJECT_NAME }), { tier: "edge" }).then(
+      (projects) => {
+        if (projects.length === 0) onSettled(null);
+        else onSettled(new Error("edge readiness sentinel unexpectedly exists"));
+      },
+      (error: unknown) => onSettled(error instanceof Error ? error : new Error(String(error))),
+    );
+  }, [db, onSettled]);
+  return null;
+}
+
 describe("React Todo App core browser canary", () => {
   const mounts: Array<{ root: Root; container: HTMLDivElement }> = [];
 
@@ -80,14 +100,20 @@ describe("React Todo App core browser canary", () => {
     secret?: string;
     adminSecret?: string;
     driver?: DbConfig["driver"];
+    onEdgeSettled?: (error: Error | null) => void;
   }): Promise<HTMLDivElement> {
+    const { onEdgeSettled, ...dbConfig } = config;
     const el = document.createElement("div");
     document.body.appendChild(el);
     const r = createRoot(el);
     mounts.push({ root: r, container: el });
 
     await act(async () => {
-      r.render(<App config={{ appId: config.appId ?? "test-app", ...config }} />);
+      r.render(
+        <App config={{ appId: dbConfig.appId ?? "test-app", ...dbConfig }}>
+          {onEdgeSettled && <EdgeReadinessProbe onSettled={onEdgeSettled} />}
+        </App>,
+      );
     });
 
     await waitFor(
@@ -265,21 +291,41 @@ describe("React Todo App core browser canary", () => {
       "writer should render the locally durable todo while reader is offline",
     );
 
+    let edgeResult: Error | null | undefined;
     const reconnectedReader = await mountApp({
       appId: APP_ID,
       driver: { type: "persistent", dbName: readerDbName },
       serverUrl: SERVER_URL,
       adminSecret: ADMIN_SECRET,
       secret: readerSecret,
+      onEdgeSettled: (error) => {
+        edgeResult = error;
+      },
     });
     await waitFor(
+      () => edgeResult !== undefined,
+      15000,
+      "reopened reader should establish edge-readiness before catch-up",
+    );
+    if (edgeResult) throw edgeResult;
+
+    // The prior online row is already in this reader's OPFS store. Check that
+    // local rehydration separately, so a later failure is unambiguously the
+    // websocket catch-up stage rather than a remount failure.
+    await waitFor(
+      () => hasTodoTitle(reconnectedReader, onlineTitle),
+      5000,
+      "reopened reader should rehydrate its known local row before reconnecting",
+    );
+
+    await waitFor(
       () => hasTodoTitle(reconnectedReader, offlineTitle),
-      20000,
+      30000,
       "reopened reader should catch up the offline-window write after websocket reconnect",
     );
 
     expect(todoTitles(reconnectedReader)).toEqual(
       expect.arrayContaining([onlineTitle, offlineTitle]),
     );
-  });
+  }, 100000);
 });

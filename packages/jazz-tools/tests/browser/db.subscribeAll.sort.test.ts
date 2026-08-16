@@ -311,6 +311,26 @@ describe("db.subscribeAll sorting browser integration", () => {
         );
 
         expect(latestIds(snapshots)).toEqual(expectedById);
+
+        await db.delete(todos, expectedById[1]!);
+        await waitForCondition(
+          () => latestRows(snapshots).length === 2,
+          10_000,
+          "expected default-order deletion",
+        );
+        expect(latestIds(snapshots)).toEqual([expectedById[0]!, expectedById[2]!]);
+
+        const {
+          value: { id: insertedId },
+        } = await db.insert(todos, { title: "Inserted", rank: 0, done: false });
+        await waitForCondition(
+          () => latestRows(snapshots).some((row) => row.id === insertedId),
+          10_000,
+          "expected default-order insertion",
+        );
+        expect(latestIds(snapshots)).toEqual(
+          [expectedById[0]!, expectedById[2]!, insertedId].toSorted((a, b) => a.localeCompare(b)),
+        );
       } finally {
         unsubscribe();
       }
@@ -666,6 +686,36 @@ describe("db.subscribeAll sorting browser integration", () => {
       );
 
       expect(latestIds(snapshots)).toEqual([idB, idC, idA]);
+    } finally {
+      unsubscribe();
+      await db2.shutdown();
+    }
+  });
+
+  it("restores canonical id order across restart when orderBy is omitted", async () => {
+    const appId = uniqueDbName("default-restart");
+    const dbName = uniqueDbName("default-restart");
+
+    const db1 = await createDb({ appId, driver: { type: "persistent", dbName } });
+    const ids = [] as string[];
+    ids.push((await db1.insert(todos, { title: "First", rank: 3, done: false })).value.id);
+    ids.push((await db1.insert(todos, { title: "Second", rank: 1, done: false })).value.id);
+    ids.push((await db1.insert(todos, { title: "Third", rank: 2, done: false })).value.id);
+    await db1.shutdown();
+
+    const db2 = await createDb({ appId, driver: { type: "persistent", dbName } });
+    const snapshots: Todo[][] = [];
+    const unsubscribe = db2.subscribeAll(makeTodosQuery({}), (delta) => {
+      snapshots.push(delta.all);
+    });
+
+    try {
+      await waitForCondition(
+        () => latestRows(snapshots).length === 3,
+        10_000,
+        "expected default-ordered snapshot after restart",
+      );
+      expect(latestIds(snapshots)).toEqual(ids.toSorted((a, b) => a.localeCompare(b)));
     } finally {
       unsubscribe();
       await db2.shutdown();

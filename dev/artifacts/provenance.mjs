@@ -124,7 +124,16 @@ const inputsFor = {
 function artifactHashes(root, kind) {
   const paths =
     kind === "wasm"
-      ? [join(root, "crates/jazz-wasm/pkg/jazz_wasm_bg.wasm")]
+      ? // Browser tests import the generated JS and declarations as well as the
+        // binary.  Hash the complete generated binding surface: a stale glue
+        // file can silently drop a new Rust argument while the `.wasm` itself is
+        // perfectly current.
+        [
+          join(root, "crates/jazz-wasm/pkg/jazz_wasm_bg.wasm"),
+          join(root, "crates/jazz-wasm/pkg/jazz_wasm.js"),
+          join(root, "crates/jazz-wasm/pkg/jazz_wasm.d.ts"),
+          join(root, "crates/jazz-wasm/pkg/jazz_wasm_bg.wasm.d.ts"),
+        ]
       : readdirSync(join(root, "crates/jazz-napi"), { withFileTypes: true })
           .filter((entry) => entry.isFile() && entry.name.endsWith(".node"))
           .map((entry) => join(root, "crates/jazz-napi", entry.name));

@@ -99,8 +99,11 @@ pub use groove;
 
 /// Shared, fail-closed state for authority-issued authorization-scope receipts.
 pub mod authorization_scope;
+/// Shared binary row payload contract for the NAPI and WASM bindings.
+pub mod binding_codec;
 /// Binding-neutral codecs and database-open helpers shared by native runtimes.
 pub mod binding_support;
+
 /// Disabled-by-default counters used by the native cold-settle attribution bench.
 #[cfg(feature = "cold-settle-attribution")]
 pub mod cold_settle_attribution;
@@ -110,12 +113,6 @@ pub mod db;
 pub use db::block_on;
 /// Wire-stable identifiers.
 pub mod ids;
-/// Built-in JSON document merge strategy.
-pub mod json_merge;
-/// Built-in simple block-granular markdown text merge strategy.
-pub mod markdown_strategy;
-/// Shared text merge strategy machinery.
-pub mod merge_strategy;
 /// Storage-backed node implementation and local API.
 pub mod node;
 /// Independent semantic oracle used by tests and harnesses.
@@ -135,8 +132,6 @@ pub mod result_tree;
 pub mod schema;
 /// Operational server-shell APIs formerly provided by jazz-server.
 pub mod serving;
-/// Pure plaintext operation substrate and deterministic text-merge walk.
-pub mod text_merge;
 /// Logical time and sequence counters.
 pub mod time;
 /// Public client, server, and CLI support APIs formerly provided by jazz-tools.

@@ -76,7 +76,6 @@ test("jazz-sim catalog defines fast scenarios and encoded wire canaries", () => 
   assert.ok(ids.has("jazz-sim:s3_permissions"));
   assert.ok(ids.has("jazz-sim:s4_order_processing"));
   assert.ok(ids.has("jazz-sim:s5_durable_stream"));
-  assert.ok(ids.has("jazz-sim:s6_text_traces"));
   assert.ok(ids.has("jazz-sim:s7_migrations"));
   assert.ok(ids.has("jazz-sim:s9_durable_execution"));
   assert.ok(ids.has("jazz-sim:s2_canvas:wire_frames"));

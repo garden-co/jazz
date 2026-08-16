@@ -28,6 +28,27 @@ fn metrics_schema() -> Schema {
         .build()
 }
 
+fn count_named_metrics_schema() -> Schema {
+    SchemaBuilder::new()
+        .table(
+            TableSchema::builder("metrics")
+                .column("count", ColumnType::Text)
+                .column("score", ColumnType::Integer),
+        )
+        .build()
+}
+
+fn mixed_metrics_schema() -> Schema {
+    SchemaBuilder::new()
+        .table(
+            TableSchema::builder("metrics")
+                .column("bucket", ColumnType::Text)
+                .column("score", ColumnType::Integer)
+                .column("high", ColumnType::BigInt),
+        )
+        .build()
+}
+
 fn nullable_metrics_schema() -> Schema {
     SchemaBuilder::new()
         .table(
@@ -155,16 +176,32 @@ async fn wait_for_values(
 struct ObservedSubscription {
     stream: SubscriptionStream,
     descriptor: RecordDescriptor,
+    group_field_count: usize,
+    output_functions: Vec<AggregateFunction>,
     rows: Vec<Row>,
     observed_initial_delta: bool,
     delivered_deltas: usize,
 }
 
 impl ObservedSubscription {
-    fn new(stream: SubscriptionStream, descriptor: RecordDescriptor) -> Self {
+    fn new(
+        stream: SubscriptionStream,
+        query: &jazz::tools::Query,
+        descriptor: RecordDescriptor,
+    ) -> Self {
+        let aggregate = query
+            .aggregate
+            .as_ref()
+            .expect("aggregate subscription query");
+        // Decode with the same key that core query normalization uses, rather
+        // than reconstructing a function ordering in this observer. The key
+        // includes function, input column, and generated alias.
+        let output_functions = query.canonical_aggregate_functions();
         Self {
             stream,
             descriptor,
+            group_field_count: usize::from(aggregate.group_by.is_some()),
+            output_functions,
             rows: Vec::new(),
             observed_initial_delta: false,
             delivered_deltas: 0,
@@ -196,18 +233,58 @@ impl ObservedSubscription {
     }
 
     fn values(&self) -> Vec<Vec<Value>> {
-        // Public aggregate subscription rows use a synthetic row id plus the
-        // query columns. The observer removes only that id envelope, then
-        // decodes the user-visible aggregate columns from delivered bytes.
+        // Maintained aggregate delivery preserves the compiler record rather
+        // than reserializing a public row. Its fixed prefix carries the
+        // synthetic membership identity; the query fields follow it under
+        // their physical names. Decode that real wire shape, then expose only
+        // the public query columns to assertions below.
+        let query_fields = self.descriptor.fields();
+        let output_wire_type = |field: &jazz::groove::records::DescriptorField,
+                                function: AggregateFunction| {
+            if function == AggregateFunction::Count {
+                field.value_type.clone()
+            } else {
+                ValueType::Nullable(Box::new(field.value_type.clone()))
+            }
+        };
+        let first_output = query_fields
+            .get(self.group_field_count)
+            .expect("aggregate query has an output field");
+        let first_function = *self
+            .output_functions
+            .first()
+            .expect("aggregate query has an output function");
         let descriptor = RecordDescriptor::new(
-            std::iter::once(("row_uuid".to_owned(), ValueType::Uuid)).chain(
-                self.descriptor.fields().iter().map(|field| {
-                    (
-                        field.name.clone().expect("named aggregate field"),
-                        ValueType::Nullable(Box::new(field.value_type.clone())),
-                    )
-                }),
-            ),
+            [
+                ("row_uuid".to_owned(), ValueType::Uuid),
+                ("table_name".to_owned(), ValueType::String),
+                ("synthetic_row".to_owned(), ValueType::String),
+                (
+                    "synthetic_replacement".to_owned(),
+                    output_wire_type(first_output, first_function),
+                ),
+            ]
+            .into_iter()
+            .chain(query_fields.iter().enumerate().map(|(index, field)| {
+                let name = field.name.as_deref().expect("named aggregate field");
+                let is_group_field = index < self.group_field_count;
+                let physical_name = if is_group_field {
+                    format!("user_{name}")
+                } else {
+                    format!("__jazz_aggregate_{name}")
+                };
+                (
+                    physical_name,
+                    if is_group_field {
+                        field.value_type.clone()
+                    } else {
+                        output_wire_type(
+                            field,
+                            self.output_functions[index - self.group_field_count],
+                        )
+                    },
+                )
+            })),
         );
         let mut values = self
             .rows
@@ -217,7 +294,7 @@ impl ObservedSubscription {
                     .to_values()
                     .unwrap_or_else(|err| panic!("decode delivered subscription row: {err}"))
                     .into_iter()
-                    .skip(1)
+                    .skip(4)
                     .take(self.descriptor.fields().len())
                     .map(|value| match value {
                         GrooveValue::Nullable(None) => Value::Null,
@@ -465,7 +542,6 @@ fn aggregate_query(
 }
 
 #[tokio::test(flavor = "current_thread")]
-#[ignore = "known red; tracked in TEST_BURNDOWN.md"]
 async fn aggregate_subscription_count_and_grouped_sum_track_full_state() {
     tokio::task::LocalSet::new()
         .run_until(async {
@@ -492,6 +568,7 @@ async fn aggregate_subscription_count_and_grouped_sum_track_full_state() {
                     .subscribe(count_query.clone())
                     .await
                     .expect("subscribe count aggregate"),
+                &count_query,
                 aggregate_descriptor([("count", ValueType::U64)]),
             );
             let mut sum_stream = ObservedSubscription::new(
@@ -499,6 +576,7 @@ async fn aggregate_subscription_count_and_grouped_sum_track_full_state() {
                     .subscribe(grouped_sum_query.clone())
                     .await
                     .expect("subscribe grouped sum aggregate"),
+                &grouped_sum_query,
                 aggregate_descriptor([
                     ("bucket", ValueType::String),
                     ("sum_score", ValueType::I32),
@@ -608,6 +686,146 @@ async fn aggregate_subscription_count_and_grouped_sum_track_full_state() {
         .await;
 }
 
+/// A group column named `count` remains distinct from a SUM output on the
+/// maintained subscription stream.
+///
+/// writer ──insert──► server ──aggregate delivery──► subscriber
+#[tokio::test(flavor = "current_thread")]
+async fn aggregate_subscription_group_field_named_count_uses_structural_wire_slots() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = count_named_metrics_schema();
+            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let writer = JazzClient::connect(server.make_client_context_for_user(
+                schema.clone(),
+                "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaa21",
+            ))
+            .await
+            .expect("connect writer");
+            let subscriber = JazzClient::connect(
+                server.make_client_context_for_user(schema, "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaa22"),
+            )
+            .await
+            .expect("connect subscriber");
+            let query = QueryBuilder::new("metrics")
+                .sum("score")
+                .group_by("count")
+                .build();
+            let mut stream = ObservedSubscription::new(
+                subscriber
+                    .subscribe(query.clone())
+                    .await
+                    .expect("subscribe grouped sum"),
+                &query,
+                aggregate_descriptor([("count", ValueType::String), ("sum_score", ValueType::I32)]),
+            );
+            stream
+                .wait_for_values(Vec::new(), "initial grouped sum is empty")
+                .await;
+
+            let (_, _, batch) = writer
+                .insert("metrics", row_input!("count" => "group", "score" => 1))
+                .expect("insert grouped sum metric");
+            writer
+                .wait_for_batch(
+                    batch.expect("ordinary mutation commits immediately"),
+                    DurabilityTier::EdgeServer,
+                )
+                .await
+                .expect("grouped sum insert settles");
+            stream
+                .wait_for_values(
+                    vec![vec![Value::Text("group".to_owned()), Value::Integer(1)]],
+                    "group field count and aggregate sum remain distinct",
+                )
+                .await;
+        })
+        .await;
+}
+
+/// Maintained delivery orders mixed and repeated aggregate functions with the
+/// same canonical key as core query normalization.
+///
+/// writer ──insert──► server ──aggregate replacement──► subscriber
+#[tokio::test(flavor = "current_thread")]
+async fn aggregate_subscription_uses_core_canonical_order_for_mixed_outputs() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = mixed_metrics_schema();
+            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let writer = JazzClient::connect(server.make_client_context_for_user(
+                schema.clone(),
+                "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaa23",
+            ))
+            .await
+            .expect("connect writer");
+            let subscriber = JazzClient::connect(
+                server.make_client_context_for_user(schema, "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaa24"),
+            )
+            .await
+            .expect("connect subscriber");
+            let query = QueryBuilder::new("metrics")
+                .count()
+                .sum("high")
+                .sum("score")
+                .avg("score")
+                .group_by("bucket")
+                .build();
+            let mut stream = ObservedSubscription::new(
+                subscriber
+                    .subscribe(query.clone())
+                    .await
+                    .expect("subscribe mixed aggregate outputs"),
+                &query,
+                // The core key sorts AVG before SUM and then orders repeated
+                // SUM outputs by their input column and generated alias.
+                aggregate_descriptor([
+                    ("bucket", ValueType::String),
+                    ("avg_score", ValueType::F64),
+                    ("count", ValueType::U64),
+                    ("sum_high", ValueType::I64),
+                    ("sum_score", ValueType::I32),
+                ]),
+            );
+            stream
+                .wait_for_values(Vec::new(), "initial mixed aggregate is empty")
+                .await;
+
+            for (score, high) in [(3, 10_i64), (1, 5_i64)] {
+                let (_, _, batch) = writer
+                    .insert(
+                        "metrics",
+                        row_input!(
+                            "bucket" => "group",
+                            "score" => score,
+                            "high" => Value::BigInt(high),
+                        ),
+                    )
+                    .expect("insert mixed aggregate metric");
+                writer
+                    .wait_for_batch(
+                        batch.expect("ordinary mutation commits immediately"),
+                        DurabilityTier::EdgeServer,
+                    )
+                    .await
+                    .expect("mixed aggregate insert settles");
+            }
+            stream
+                .wait_for_values(
+                    vec![vec![
+                        Value::Text("group".to_owned()),
+                        Value::Double(2.0),
+                        Value::Timestamp(2),
+                        Value::BigInt(15),
+                        Value::Integer(4),
+                    ]],
+                    "mixed aggregate replacement keeps canonical output order",
+                )
+                .await;
+        })
+        .await;
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn aggregate_sum_public_boundary_preserves_nullable_results() {
     tokio::task::LocalSet::new()
@@ -681,7 +899,6 @@ async fn aggregate_sum_public_boundary_preserves_nullable_results() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-#[ignore = "known red; tracked in TEST_BURNDOWN.md"]
 async fn grouped_null_aggregate_membership_survives_absence_and_replacement() {
     tokio::task::LocalSet::new()
         .run_until(async {
@@ -708,6 +925,7 @@ async fn grouped_null_aggregate_membership_survives_absence_and_replacement() {
                     .subscribe(query.clone())
                     .await
                     .expect("subscribe grouped nullable aggregate"),
+                &query,
                 aggregate_descriptor([
                     ("bucket", ValueType::String),
                     ("count", ValueType::U64),
@@ -819,7 +1037,6 @@ async fn grouped_null_aggregate_membership_survives_absence_and_replacement() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-#[ignore = "known red; tracked in TEST_BURNDOWN.md"]
 async fn maintained_integer_sum_accumulates_multiple_deltas_and_retracts_empty_group() {
     tokio::task::LocalSet::new()
         .run_until(async {
@@ -845,6 +1062,7 @@ async fn maintained_integer_sum_accumulates_multiple_deltas_and_retracts_empty_g
                     .subscribe(grouped_sum_query.clone())
                     .await
                     .expect("subscribe grouped sum aggregate"),
+                &grouped_sum_query,
                 aggregate_descriptor([
                     ("bucket", ValueType::String),
                     ("sum_score", ValueType::I32),
@@ -916,7 +1134,6 @@ async fn maintained_integer_sum_accumulates_multiple_deltas_and_retracts_empty_g
 }
 
 #[tokio::test(flavor = "current_thread")]
-#[ignore = "known red; tracked in TEST_BURNDOWN.md"]
 async fn maintained_bigint_sum_replaces_a_multi_row_group_after_insert() {
     tokio::task::LocalSet::new()
         .run_until(async {
@@ -945,6 +1162,7 @@ async fn maintained_bigint_sum_replaces_a_multi_row_group_after_insert() {
                     .subscribe(query.clone())
                     .await
                     .expect("subscribe grouped bigint sum"),
+                &query,
                 aggregate_descriptor([
                     ("bucket", ValueType::String),
                     ("sum_score", ValueType::I64),
@@ -969,7 +1187,6 @@ async fn maintained_bigint_sum_replaces_a_multi_row_group_after_insert() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-#[ignore = "known red; tracked in TEST_BURNDOWN.md"]
 async fn maintained_double_sum_and_avg_replace_a_multi_row_group_after_insert() {
     tokio::task::LocalSet::new()
         .run_until(async {
@@ -1002,6 +1219,7 @@ async fn maintained_double_sum_and_avg_replace_a_multi_row_group_after_insert() 
                     .subscribe(sum_query.clone())
                     .await
                     .expect("subscribe grouped double sum"),
+                &sum_query,
                 aggregate_descriptor([
                     ("bucket", ValueType::String),
                     ("sum_score", ValueType::F64),
@@ -1012,6 +1230,7 @@ async fn maintained_double_sum_and_avg_replace_a_multi_row_group_after_insert() 
                     .subscribe(avg_query.clone())
                     .await
                     .expect("subscribe grouped double avg"),
+                &avg_query,
                 aggregate_descriptor([
                     ("bucket", ValueType::String),
                     ("avg_score", ValueType::F64),
@@ -1052,7 +1271,6 @@ async fn maintained_double_sum_and_avg_replace_a_multi_row_group_after_insert() 
 }
 
 #[tokio::test(flavor = "current_thread")]
-#[ignore = "known red; tracked in TEST_BURNDOWN.md"]
 async fn maintained_min_and_max_replace_multi_row_groups() {
     tokio::task::LocalSet::new()
         .run_until(async {
@@ -1071,16 +1289,20 @@ async fn maintained_min_and_max_replace_multi_row_groups() {
             .expect("connect client");
             insert_metric_at_tier(&writer, "same", 10, DurabilityTier::EdgeServer).await;
             insert_metric_at_tier(&writer, "same", 4, DurabilityTier::EdgeServer).await;
+            let min_query = QueryBuilder::new("metrics")
+                .min("score")
+                .group_by("bucket")
+                .build();
+            let max_query = QueryBuilder::new("metrics")
+                .max("score")
+                .group_by("bucket")
+                .build();
             let mut min_stream = ObservedSubscription::new(
                 client
-                    .subscribe(
-                        QueryBuilder::new("metrics")
-                            .min("score")
-                            .group_by("bucket")
-                            .build(),
-                    )
+                    .subscribe(min_query.clone())
                     .await
                     .expect("subscribe grouped min"),
+                &min_query,
                 aggregate_descriptor([
                     ("bucket", ValueType::String),
                     ("min_score", ValueType::I32),
@@ -1088,14 +1310,10 @@ async fn maintained_min_and_max_replace_multi_row_groups() {
             );
             let mut max_stream = ObservedSubscription::new(
                 client
-                    .subscribe(
-                        QueryBuilder::new("metrics")
-                            .max("score")
-                            .group_by("bucket")
-                            .build(),
-                    )
+                    .subscribe(max_query.clone())
                     .await
                     .expect("subscribe grouped max"),
+                &max_query,
                 aggregate_descriptor([
                     ("bucket", ValueType::String),
                     ("max_score", ValueType::I32),
@@ -1576,6 +1794,7 @@ async fn aggregate_subscription_spy_stays_at_policy_visible_truth() {
                 spy.subscribe(count_query.clone())
                     .await
                     .expect("subscribe spy aggregate"),
+                &count_query,
                 aggregate_descriptor([("count", ValueType::U64)]),
             );
 

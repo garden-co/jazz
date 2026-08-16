@@ -109,14 +109,16 @@ authority has accepted or rejected a transaction. Durability records how far the
 transaction has settled. Because those questions are independent, the two axes
 move independently.
 
-A freshly committed local write is `Pending`/`Local`. When the global authority
-accepts it, the transaction becomes `Accepted`, receives the next `GlobalSeq`
-(advancing the allocator and the contiguous watermark), and reaches
-`DurabilityTier::Global` (`INV-TX-11`). Accepted global transactions then
-maintain the per-layer global-current tables and change stream (`INV-TX-21`, ch.
-4). Crucially, **local durability does not imply upstream survival**: a
-committed local transaction that has not reached an upstream tier can be lost if
-local storage is destroyed (`INV-TX-12`).
+A freshly committed write on a durable local runtime is `Pending`/`Local`. An
+in-memory client instead authors it as `Pending`/`None`: the write is immediately available
+to local reads, but a `Local` wait remains pending until a durable peer explicitly
+returns `Pending`/`Local`. When the global authority accepts it, the transaction
+becomes `Accepted`, receives the next `GlobalSeq` (advancing the allocator and
+the contiguous watermark), and reaches `DurabilityTier::Global` (`INV-TX-11`).
+Accepted global transactions then maintain the per-layer global-current tables
+and change stream (`INV-TX-21`, ch. 4). Crucially, **local durability does not
+imply upstream survival**: a committed local transaction that has not reached an
+upstream tier can be lost if local storage is destroyed (`INV-TX-12`).
 
 _Further invariants._ `INV-TX-10` — applying a fate update never moves
 `global_seq` backward and raises `durability` only monotonically.
@@ -174,8 +176,8 @@ ordinary sync receipt into acceptance authority.
 
 Authority admission ensures that a verdict is based on complete inputs and on
 the same checks for every commit unit. The fate authority first parks — and does
-not decide — any unit that is missing parent transactions, schema versions, or
-large-value content. It decides only once all prerequisites are present; a
+not decide — any unit that is missing parent transactions or schema versions.
+It decides only once all prerequisites are present; a
 duplicate parked unit parks only once (`INV-TX-5`).
 
 After prerequisites are present, the authority rejects units that violate

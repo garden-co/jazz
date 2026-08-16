@@ -35,8 +35,10 @@ class InspectorConnectionErrorBoundary extends Component<
 /**
  * The dev-overlay inspector. Same-origin with the host page, it reads the
  * connection config the loader published on `window.__jazzInspectorHost`, opens
- * its OWN worker connection (like the standalone build, inheriting the host's
- * credential) via the shared `JazzProvider` — reusing its StrictMode-safe,
+ * its own browser client with the host's persistent broker coordinates via the
+ * shared `JazzProvider`. Its main-thread Db remains in-memory while the
+ * BrowserConnectionManager joins the host's worker-backed store. The provider
+ * supplies the StrictMode-safe,
  * refcounted client lifecycle rather than hand-rolling one — and shows the
  * host's active subscriptions from the one-way push. No devtools bridge.
  */
@@ -82,7 +84,11 @@ export function InspectorApp() {
 
   return (
     <InspectorConnectionErrorBoundary>
-      <JazzProvider config={config} fallback={<p style={{ padding: 16 }}>Connecting…</p>}>
+      <JazzProvider
+        config={config}
+        autoAttachDevTools={false}
+        fallback={<p style={{ padding: 16 }}>Connecting…</p>}
+      >
         <DevtoolsProvider wasmSchema={wasmSchema} runtime="overlay">
           <MemoryRouter>
             <InspectorRoutes />

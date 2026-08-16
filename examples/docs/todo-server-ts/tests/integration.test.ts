@@ -29,6 +29,9 @@ describe("Todo Server Integration", () => {
   let baseUrl: string;
   let upstream: LocalJazzServerHandle | undefined;
 
+  // This awaits two native durable-server readiness boundaries (upstream and
+  // backend). Keep individual request tests on the suite default, while
+  // allowing this explicit lifecycle setup to contend safely with CI workers.
   beforeAll(async () => {
     upstream = await startLocalJazzServer();
 
@@ -51,7 +54,7 @@ describe("Todo Server Integration", () => {
     // Start on random available port
     server = await startServer(todoServer, 0);
     baseUrl = server.baseUrl;
-  });
+  }, 20_000);
 
   afterAll(async () => {
     if (server) {

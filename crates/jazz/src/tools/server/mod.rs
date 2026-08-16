@@ -1,4 +1,6 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock as StdRwLock};
+use std::thread;
 
 use crate::serving::StorageConfig;
 use crate::tools::AppId;
@@ -73,12 +75,93 @@ pub struct ServerState {
     /// Sendable handle to the local-owner server shell for the websocket route.
     pub(crate) core_server_shell: StdRwLock<Option<core_server_shell::ServerShellHandle>>,
     pub(crate) core_server_shell_storage_config: Option<StorageConfig>,
+    /// A dynamically bootstrapped Edge has a valid local catalogue before it
+    /// has an authenticated normal upstream session. Do not admit downstream
+    /// writes in that window: they cannot yet be bound to a fate route.
+    dynamic_edge_upstream_ready: AtomicBool,
     pub shutdown: ShutdownController,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only synchronization point immediately before the production
+    /// snapshot helper acquires the shell lock.
+    static CLIENT_SHELL_SNAPSHOT_BEFORE_LOCK_HOOK: std::cell::RefCell<Option<Box<dyn FnMut()>>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn run_client_shell_snapshot_before_lock_hook() {
+    CLIENT_SHELL_SNAPSHOT_BEFORE_LOCK_HOOK.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().as_mut() {
+            hook();
+        }
+    });
+}
+
+#[cfg(test)]
+fn with_client_shell_snapshot_before_lock_hook<T>(
+    hook: impl FnMut() + 'static,
+    callback: impl FnOnce() -> T,
+) -> T {
+    CLIENT_SHELL_SNAPSHOT_BEFORE_LOCK_HOOK.with(|slot| {
+        assert!(
+            slot.borrow().is_none(),
+            "snapshot hook is already installed"
+        );
+        *slot.borrow_mut() = Some(Box::new(hook));
+    });
+    let result = callback();
+    CLIENT_SHELL_SNAPSHOT_BEFORE_LOCK_HOOK.with(|slot| {
+        slot.borrow_mut().take();
+    });
+    result
+}
+
+/// Snapshot a shell and its dynamic-admission generation under one lock.
+///
+/// The readiness flag is atomic because the connector publishes it from an
+/// async task, but it is read while the shell lock is held. Dynamic bootstrap
+/// updates both values under that same write lock, so a client cannot pair the
+/// old generation's `true` with the newly published shell.
+fn client_shell_snapshot<T: Clone>(
+    topology: ServerTopology,
+    shell: &StdRwLock<Option<T>>,
+    dynamic_edge_upstream_ready: &AtomicBool,
+) -> Option<T> {
+    #[cfg(test)]
+    run_client_shell_snapshot_before_lock_hook();
+    let shell = shell.read().unwrap();
+    if topology == ServerTopology::Edge && !dynamic_edge_upstream_ready.load(Ordering::Acquire) {
+        return None;
+    }
+    shell.clone()
 }
 
 impl ServerState {
     pub(crate) fn core_server_shell(&self) -> Option<core_server_shell::ServerShellHandle> {
         self.core_server_shell.read().unwrap().clone()
+    }
+
+    /// Shell eligible for an ordinary downstream websocket session. Bootstrap
+    /// code may inspect the raw shell, but a dynamically bootstrapped Edge
+    /// remains RetryLater until its regular authenticated upstream is attached.
+    pub(crate) fn core_server_shell_for_client(
+        &self,
+    ) -> Option<core_server_shell::ServerShellHandle> {
+        client_shell_snapshot(
+            self.topology,
+            &self.core_server_shell,
+            &self.dynamic_edge_upstream_ready,
+        )
+    }
+
+    pub(crate) fn mark_dynamic_edge_upstream_ready(&self) {
+        // Serialize this Ready transition with dynamic shell publication and
+        // client snapshots. The connector calls this only after it has
+        // attached the normal upstream to this shell generation.
+        let _shell = self.core_server_shell.read().unwrap();
+        self.dynamic_edge_upstream_ready
+            .store(true, Ordering::Release);
     }
 
     pub(crate) fn start_core_server_shell(
@@ -103,11 +186,65 @@ impl ServerState {
         Ok(started)
     }
 
-    pub async fn run_shutdown_finalization(&self) -> ShutdownPhase {
-        if !self.shutdown.try_begin_finalization() {
-            return self.shutdown.phase();
+    /// Atomically publish a normal edge runtime after its independent
+    /// authenticated catalogue bootstrap completed. Holding the state lock
+    /// across construction makes downstream admission observe either no shell
+    /// (retry later) or the fully adopted ready shell, never a half-ready one.
+    pub(crate) fn start_dynamic_edge_shell(
+        &self,
+        snapshot: crate::protocol::CatalogueSnapshot,
+        edge_cache_budget: Option<crate::node::EdgeCacheBudget>,
+    ) -> Result<core_server_shell::ServerShellHandle, String> {
+        if self.topology != ServerTopology::Edge {
+            return Err("dynamic catalogue bootstrap is only valid for edge topology".to_owned());
         }
+        let storage_config = self
+            .core_server_shell_storage_config
+            .clone()
+            .ok_or_else(|| "server shell storage is not configured".to_owned())?;
+        let mut core_server_shell = self.core_server_shell.write().unwrap();
+        if let Some(existing) = core_server_shell.clone() {
+            return Ok(existing);
+        }
+        let started =
+            core_server_shell::ServerShellHandle::start_dynamic_edge_with_catalogue_snapshot(
+                storage_config,
+                edge_cache_budget,
+                snapshot,
+            )?;
+        self.dynamic_edge_upstream_ready
+            .store(false, Ordering::Release);
+        *core_server_shell = Some(started.clone());
+        Ok(started)
+    }
 
+    /// Start (once) and await the server-wide teardown barrier.
+    ///
+    /// The first caller only launches the owned finalizer; it does not own the
+    /// finalizer future. The finalizer runs on a dedicated lifecycle thread
+    /// with its own Tokio runtime, so HTTP request cancellation, test-task
+    /// abortion, and shutdown of the initiating runtime cannot strand another
+    /// lifecycle caller in a transient phase while the same durable storage
+    /// path is reopened.
+    pub async fn run_shutdown_finalization(self: &Arc<Self>) -> ShutdownPhase {
+        if self.shutdown.try_begin_finalization() {
+            self.shutdown.set_phase(ShutdownPhase::ShuttingDown);
+            let state = Arc::clone(self);
+            if let Err(error) = thread::Builder::new()
+                .name("jazz-server-finalizer".to_owned())
+                .spawn(move || run_shutdown_finalizer(state))
+            {
+                tracing::error!(%error, "failed to start shutdown finalizer thread");
+                // The finalizer never started, so `Failed` is the only
+                // truthful terminal result. It must not be mistaken for a
+                // storage-close/reopen barrier.
+                self.shutdown.set_phase(ShutdownPhase::Failed);
+            }
+        }
+        self.shutdown.wait_for_finalization().await
+    }
+
+    async fn finalize_shutdown(&self) -> ShutdownPhase {
         self.shutdown.set_phase(ShutdownPhase::DrainingConnections);
         let mut failed = false;
         let websockets_drained = self.shutdown.wait_for_websocket_drain().await;
@@ -140,6 +277,16 @@ impl ServerState {
         }
 
         self.shutdown.set_phase(ShutdownPhase::ClosingStorage);
+        // All websocket work has drained, so no route may still be using the
+        // shell. Join its dedicated owner thread before exposing this server's
+        // durable paths to a reopen or allowing process teardown to proceed.
+        let shell = self.core_server_shell.write().unwrap().take();
+        if let Some(shell) = shell
+            && let Err(error) = shell.shutdown().await
+        {
+            tracing::error!(%error, "shutdown server shell storage failed");
+            failed = true;
+        }
         if let Err(error) = self.catalogue.close(&self.catalogue_store) {
             tracing::error!(%error, "shutdown catalogue storage close failed");
             failed = true;
@@ -155,10 +302,36 @@ impl ServerState {
     }
 }
 
+fn run_shutdown_finalizer(state: Arc<ServerState>) {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| format!("failed to create shutdown runtime: {error}"))?;
+        Ok::<_, String>(runtime.block_on(state.finalize_shutdown()))
+    }));
+
+    match result {
+        Ok(Ok(_terminal)) => {}
+        Ok(Err(error)) => {
+            tracing::error!(%error, "shutdown finalizer setup failed");
+            state.shutdown.set_phase(ShutdownPhase::Failed);
+        }
+        Err(_) => {
+            tracing::error!("shutdown finalizer panicked");
+            // A panic may leave resources live. Do not publish
+            // `StorageClosed`; callers must treat Failed as unsafe to reopen.
+            state.shutdown.set_phase(ShutdownPhase::Failed);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::mpsc;
+    use std::sync::{Arc, RwLock};
+    use std::thread;
     use std::time::Duration;
 
     use super::*;
@@ -171,6 +344,8 @@ mod tests {
     struct CloseObservingStorage {
         close_calls: Arc<AtomicUsize>,
     }
+
+    struct PanicFlushStorage;
 
     impl CatalogueStorage for CloseObservingStorage {
         fn scan_catalogue_entries(
@@ -197,6 +372,34 @@ mod tests {
 
         fn close(&self) -> CatalogueStorageResult<()> {
             self.close_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    impl CatalogueStorage for PanicFlushStorage {
+        fn scan_catalogue_entries(
+            &self,
+        ) -> CatalogueStorageResult<Vec<crate::tools::server::catalogue_entry::CatalogueEntry>>
+        {
+            Ok(Vec::new())
+        }
+
+        fn upsert_catalogue_entry(
+            &mut self,
+            _entry: &crate::tools::server::catalogue_entry::CatalogueEntry,
+        ) -> CatalogueStorageResult<()> {
+            Ok(())
+        }
+
+        fn flush(&self) -> CatalogueStorageResult<()> {
+            panic!("test finalizer panic")
+        }
+
+        fn flush_wal(&self) -> CatalogueStorageResult<()> {
+            Ok(())
+        }
+
+        fn close(&self) -> CatalogueStorageResult<()> {
             Ok(())
         }
     }
@@ -246,8 +449,51 @@ mod tests {
             jwt_verifier: None,
             core_server_shell: StdRwLock::new(None),
             core_server_shell_storage_config: None,
+            dynamic_edge_upstream_ready: AtomicBool::new(true),
             shutdown: ShutdownController::new(timeout),
         })
+    }
+
+    /// Dynamic publication must not let a downstream reader pair the prior
+    /// generation's readiness with the newly published shell. The test hook
+    /// synchronizes the actual production snapshot helper at its pre-lock
+    /// boundary; it is not a hand-written model of that helper.
+    #[test]
+    fn dynamic_client_shell_snapshot_cannot_mix_ready_generation_with_new_shell() {
+        let shell = Arc::new(RwLock::new(Some("old")));
+        let ready = Arc::new(AtomicBool::new(true));
+        let mut write = shell.write().unwrap();
+        let (at_lock_boundary_tx, at_lock_boundary_rx) = mpsc::channel();
+        let (continue_tx, continue_rx) = mpsc::channel();
+        let fixed_shell = Arc::clone(&shell);
+        let fixed_ready = Arc::clone(&ready);
+        let fixed_reader = thread::spawn(move || {
+            with_client_shell_snapshot_before_lock_hook(
+                move || {
+                    at_lock_boundary_tx
+                        .send(())
+                        .expect("tell publisher reader reached production lock boundary");
+                    continue_rx
+                        .recv()
+                        .expect("publisher releases production reader");
+                },
+                || client_shell_snapshot(ServerTopology::Edge, &fixed_shell, &fixed_ready),
+            )
+        });
+        at_lock_boundary_rx
+            .recv()
+            .expect("reader reached production helper lock boundary");
+        *write = Some("new");
+        ready.store(false, Ordering::Release);
+        drop(write);
+        continue_tx
+            .send(())
+            .expect("release reader after publication");
+        assert_eq!(
+            fixed_reader.join().expect("fixed reader joins"),
+            None,
+            "the lock-first production helper observes the new generation as unready"
+        );
     }
 
     #[tokio::test]
@@ -287,6 +533,171 @@ mod tests {
             close_calls.load(Ordering::SeqCst),
             0,
             "storage must not be closed while app request guards are still active"
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_finalization_closes_dynamic_catalogue_storage_after_drain() {
+        let close_calls = Arc::new(AtomicUsize::new(0));
+        let state = build_test_state_with_storage(
+            Box::new(CloseObservingStorage {
+                close_calls: Arc::clone(&close_calls),
+            }),
+            Duration::from_millis(10),
+        );
+
+        state.shutdown.request_shutdown();
+        let phase = state.run_shutdown_finalization().await;
+
+        assert_eq!(phase, ShutdownPhase::StorageClosed);
+        assert_eq!(state.shutdown.phase(), ShutdownPhase::StorageClosed);
+        assert_eq!(
+            close_calls.load(Ordering::SeqCst),
+            1,
+            "drained shutdown must explicitly close dynamic catalogue storage"
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_shutdown_finalizers_wait_for_the_same_storage_close() {
+        let state = build_test_state_with_shutdown_timeout(Duration::from_secs(1)).await;
+        let request = state
+            .shutdown
+            .try_enter_app_request()
+            .expect("running server accepts request");
+        state.shutdown.request_shutdown();
+
+        let first_state = Arc::clone(&state);
+        let first = tokio::spawn(async move { first_state.run_shutdown_finalization().await });
+
+        let mut phases = state.shutdown.subscribe();
+        while *phases.borrow_and_update() != ShutdownPhase::DrainingConnections {
+            phases
+                .changed()
+                .await
+                .expect("first finalizer remains alive");
+        }
+
+        let second_state = Arc::clone(&state);
+        let second = tokio::spawn(async move { second_state.run_shutdown_finalization().await });
+        tokio::task::yield_now().await;
+        assert!(
+            !second.is_finished(),
+            "a reentrant finalizer must wait for the durable-close barrier"
+        );
+
+        drop(request);
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), first)
+                .await
+                .expect("first finalizer completes")
+                .expect("first finalizer task"),
+            ShutdownPhase::StorageClosed
+        );
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), second)
+                .await
+                .expect("second finalizer completes")
+                .expect("second finalizer task"),
+            ShutdownPhase::StorageClosed
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_shutdown_finalizers_share_failed_result() {
+        let state = build_test_state_with_shutdown_timeout(Duration::from_millis(10)).await;
+        let _request = state
+            .shutdown
+            .try_enter_app_request()
+            .expect("running server accepts request");
+        state.shutdown.request_shutdown();
+
+        let first_state = Arc::clone(&state);
+        let first = tokio::spawn(async move { first_state.run_shutdown_finalization().await });
+        let second_state = Arc::clone(&state);
+        let second = tokio::spawn(async move { second_state.run_shutdown_finalization().await });
+
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), first)
+                .await
+                .expect("first failed finalizer completes")
+                .expect("first finalizer task"),
+            ShutdownPhase::Failed
+        );
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), second)
+                .await
+                .expect("second failed finalizer completes")
+                .expect("second finalizer task"),
+            ShutdownPhase::Failed
+        );
+    }
+
+    #[tokio::test]
+    async fn aborting_first_shutdown_waiter_does_not_strand_finalization() {
+        let state = build_test_state_with_shutdown_timeout(Duration::from_secs(1)).await;
+        let request = state
+            .shutdown
+            .try_enter_app_request()
+            .expect("running server accepts request");
+        state.shutdown.request_shutdown();
+
+        let first_state = Arc::clone(&state);
+        let first = tokio::spawn(async move { first_state.run_shutdown_finalization().await });
+        let mut phases = state.shutdown.subscribe();
+        while *phases.borrow_and_update() != ShutdownPhase::DrainingConnections {
+            phases
+                .changed()
+                .await
+                .expect("detached finalizer remains alive");
+        }
+
+        first.abort();
+        let _ = first.await;
+        drop(request);
+
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), state.run_shutdown_finalization())
+                .await
+                .expect("later shutdown caller reaches terminal result"),
+            ShutdownPhase::StorageClosed
+        );
+    }
+
+    #[tokio::test]
+    async fn panicked_shutdown_finalizer_publishes_failed_to_later_callers() {
+        let state =
+            build_test_state_with_storage(Box::new(PanicFlushStorage), Duration::from_secs(1));
+        state.shutdown.request_shutdown();
+
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), state.run_shutdown_finalization())
+                .await
+                .expect("initial waiter receives panic result"),
+            ShutdownPhase::Failed
+        );
+        assert_eq!(
+            state.run_shutdown_finalization().await,
+            ShutdownPhase::Failed,
+            "later callers share Failed rather than a transient phase"
+        );
+    }
+
+    #[tokio::test]
+    async fn foreign_executor_shutdown_uses_dedicated_lifecycle_thread() {
+        let state = build_test_state_with_shutdown_timeout(Duration::from_secs(1)).await;
+        // The caller's executor is irrelevant: the finalizer has its own
+        // current-thread Tokio runtime.
+        state.shutdown.request_shutdown();
+        let foreign_state = Arc::clone(&state);
+        assert_eq!(
+            std::thread::spawn(move || {
+                futures::executor::block_on(foreign_state.run_shutdown_finalization())
+            })
+            .join()
+            .expect("foreign executor thread"),
+            ShutdownPhase::StorageClosed,
+            "foreign executor waits for the real durable-close barrier"
         );
     }
 }

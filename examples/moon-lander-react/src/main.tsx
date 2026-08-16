@@ -1,8 +1,9 @@
 import { createRoot } from "react-dom/client";
+import { BrowserAuthSecretStore } from "jazz-tools";
 import { App } from "./App.js";
 import { getOrCreatePlayerId } from "./game/player.js";
 
-function main() {
+async function main() {
   const params = new URLSearchParams(window.location.search);
 
   // URL search params override plugin-injected defaults (used by isolated
@@ -17,8 +18,10 @@ function main() {
   // means the local player row and deposits persist, avoiding ghost duplicates.
   const dbName = params.get("dbName") ?? `moon-lander-${playerId.slice(0, 8)}`;
 
-  const localFirstSecret = params.get("localFirstSecret") ?? undefined;
   const adminSecret = params.get("adminSecret") ?? undefined;
+  const localFirstSecret =
+    params.get("localFirstSecret") ??
+    (adminSecret ? undefined : await BrowserAuthSecretStore.getOrCreateSecret({ appId }));
 
   console.info(
     "[moon-lander] Connecting to Jazz server at %s (secret=%s, admin=%s)",
@@ -37,11 +40,13 @@ function main() {
         appId,
         dbName,
         serverUrl,
-        ...(localFirstSecret ? { auth: { localFirstSecret } } : {}),
+        ...(localFirstSecret ? { secret: localFirstSecret } : {}),
         ...(adminSecret ? { adminSecret } : {}),
       }}
     />,
   );
 }
 
-main();
+void main().catch((error) => {
+  console.error("[moon-lander] Failed to start", error);
+});

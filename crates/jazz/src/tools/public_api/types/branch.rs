@@ -181,19 +181,6 @@ fn hash_column_descriptor(hasher: &mut blake3::Hasher, col: &ColumnDescriptor) {
         hasher.update(&[0]);
     }
 
-    if let Some(kind) = col.large_value {
-        hasher.update(&[1]);
-        match kind {
-            LargeValueKind::Text => {
-                hasher.update(&[1]);
-            }
-            LargeValueKind::Blob => {
-                hasher.update(&[2]);
-            }
-        }
-    } else {
-        hasher.update(&[0]);
-    }
     hasher.update(&[0]); // delimiter
 }
 
@@ -235,11 +222,6 @@ fn hash_value(hasher: &mut blake3::Hasher, value: &Value) {
             hasher.update(&[11]);
             hasher.update(&(v.len() as u64).to_le_bytes());
             hasher.update(v);
-        }
-        Value::LargeValue(v) => {
-            hasher.update(&[13]);
-            hasher.update(&(v.as_bytes().len() as u64).to_le_bytes());
-            hasher.update(v.as_bytes());
         }
         Value::Array(values) => {
             hasher.update(&[7]);

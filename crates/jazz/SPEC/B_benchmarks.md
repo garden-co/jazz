@@ -27,8 +27,8 @@ In dependency order: **S0** micro primitives (HLC, domination, deletion
 resolution, ingest/commit-unit/read-set costs) · **S1** relevance-scaled
 query-driven partial sync · **S2** realtime canvas (mergeable, tier `none`) ·
 **S3** recursive permission-filtered sync · **S4** serializable order processing
-(exclusive, TPC-C-derived) · **S5** durable streams · **S6** collaborative text ·
-**S7** migration lenses · **S8** branching · **S9** durable execution. Every
+(exclusive, TPC-C-derived) · **S5** durable streams · **S7** migration lenses ·
+**S8** branching · **S9** durable execution. Every
 _implemented_ harness runs against the current feature set; **S8 has no harness yet** (`[needs: scenario
 harness]`).
 
@@ -71,15 +71,11 @@ double-advances.
 
 ### B.4 Honesty rules (the meta-learnings)
 
-- **Measure the generality tax, don't hide it.** S5/S6 model append streams and
-  text as _full-value rewrites_ (`content: bytes`), not hand-modeled app logs or
-  CRDT structures — that's the point, and it motivates `[needs: column-delta]`.
-- **Pair storage ratios with read latency.** S2 and S6 forbid reporting a
-  compressed-history byte ratio alone, because O(history) replay can win bytes and
-  lose the product claim — the time-travel/history-depth read latency must ship
-  alongside.
-- **Label by durability envelope.** S6 CRDT comparisons distinguish in-memory
-  (CPU/latency floor) from durable (apples-to-apples storage/cold-load) baselines.
+- **Measure the generality tax, don't hide it.** S5 models append streams as
+  _full-value rewrites_ (`content: bytes`), not hand-modeled app logs.
+- **Pair storage ratios with read latency.** S2 forbids reporting a
+  compressed-history byte ratio alone, because O(history) replay can win bytes
+  and lose the product claim; history-depth read latency must ship alongside.
 - **Scale discipline is anti-gaming.** S4 grows aggregate throughput by adding
   warehouses and data, not request rate against fixed hot rows.
 - **Server cost tracks relevance.** S1/S5 share the thesis that server cost
@@ -142,14 +138,13 @@ shape in-process; browser OPFS and worker ownership remain integrability gates
 
 **Latest Plan-1 smoke baseline (2026-07-02, ledger run
 `20260702T005632Z`, git `48e6a65aa`, dirty tree).** All smoke scenarios are
-green: jazz (`cold_subscription`, `sync`, `validation`, `merge_back_cost`,
-`large_value_checkpointing`) and jazz-sim (`micro`, S1–S7, S9). S2's historical
+green: jazz (`cold_subscription`, `sync`, `validation`, `merge_back_cost`) and
+jazz-sim (`micro`, S1–S5, S7, S9). S2's historical
 load phase is not counted as a hidden pass: it emits visible gated rows with
 `needs: "historical-implicit-include-source-coverage"` for the known
 `Source(Coverage)` capability gap. Earlier Plan-1 ledger runs record the repaired
-historical S4/S6 failures: the former S4 edge-routing assertion and the former S6
-`MissingTransaction` failure at the ~2500-edit failure size no longer reproduce,
-and the S4 retained line now reports settlement and propagation-inclusive
+historical S4 failure: the former edge-routing assertion no longer reproduces,
+and the retained line now reports settlement and propagation-inclusive
 throughput separately. The first artifact-backed smoke run is
 `20260702T002815Z`; the first warm execution-only run after JSONL artifacts is
 `20260702T003434Z`; the profile baseline run is `20260702T005457Z`.
@@ -184,9 +179,9 @@ summary path.
 
 **Scaling signals — mostly bench artifacts, not an engine cliff (investigated
 2026-06-15).** Initial default-run numbers _looked_ superlinear (S9 aggregate
-92→13 transitions/s with "history metadata" 9 KB→121 KB/step; S6 text replay
-33 edits/s at 2000 commits) but investigation showed these are largely measurement
-and harness problems, not engine O(n²):
+92→13 transitions/s with "history metadata" 9 KB→121 KB/step), but
+investigation showed this is largely a measurement and harness problem, not an
+engine O(n²) cliff:
 
 - **S9** — `history_metadata_bytes_per_step` is a _misleading metric_: it divides
   the whole RocksDB directory by committed transitions, but the run pre-seeds
@@ -197,20 +192,14 @@ and harness problems, not engine O(n²):
   events. Fix (bench): split fixture bytes from transition-history bytes and
   compute per-step from bytes added after seeding; report aggregate-with-assertions
   separately; treat cold resume as its own workload.
-- **S6** — a real but bench-side issue: the DB-surface replay writes the whole text
-  blob through `Db::update` every edit instead of `Db::edit_text`/`TextEdit`
-  (forcing materialize + diff of a growing value), and opens nodes with checkpoint
-  interval `1` (a full document checkpoint per tx). Fix (bench): replay via
-  `edit_text`, use bounded checkpoint retention + the production interval.
-
-No fundamental engine ingest superlinearity is demonstrated by these runs. By
-contrast the **cold-load read path is validated flat**: `cold_subscription`
-current-row reads are ~122 µs regardless of history depth (1k/5k/10k), scaling
-only with the ahead-of-global count. Other setup gaps: S2 reports
-`bytes_floor: 0` (entropy-floor anchor uncomputed for canvas). Hotspot note: S3
-cold/block-tree load is dominated by
-`NodeState::expand_query_closure`, `PeerState::rehydrate_current_rows`,
-`OrderedKvStorage::prefix`, and global-layer-winner lookups (samply, 2026-06-15).
+  No fundamental engine ingest superlinearity is demonstrated by these runs. By
+  contrast the **cold-load read path is validated flat**: `cold_subscription`
+  current-row reads are ~122 µs regardless of history depth (1k/5k/10k), scaling
+  only with the ahead-of-global count. Other setup gaps: S2 reports
+  `bytes_floor: 0` (entropy-floor anchor uncomputed for canvas). Hotspot note: S3
+  cold/block-tree load is dominated by
+  `NodeState::expand_query_closure`, `PeerState::rehydrate_current_rows`,
+  `OrderedKvStorage::prefix`, and global-layer-winner lookups (samply, 2026-06-15).
 
 Gap kinds: **FEATURE** means a required capability is not implemented, not
 available through the needed surface, or not incrementally maintained where the
@@ -264,18 +253,8 @@ wired.
 | S5 durable stream    | log-file floor                                           | Yes                      | `s5_durable_stream.rs` has `run_log_floor` and emits log floor bytes/token and elapsed time.                                                                                                                                                                                                                                                                                  |
 | S5 durable stream    | SQLite WAL baseline                                      | Yes                      | `s5_durable_stream.rs` uses `rusqlite` in `run_sqlite_baseline` and emits SQLite bytes/token and elapsed time.                                                                                                                                                                                                                                                                |
 | S5 durable stream    | prefix-monotone oracle                                   | Yes                      | `s5_durable_stream.rs` asserts tailer/resumer content convergence and prefix monotonicity for the generated stream, matching `INV-BENCH-8`.                                                                                                                                                                                                                                   |
-| S5 durable stream    | column-delta efficiency target                           | Partial                  | FEATURE: the scenario intentionally rewrites full bytes values; no structural column-delta path was found in `jazz/src/node/content_store.rs` or the sync benches, so bytes/token are baseline numbers only.                                                                                                                                                                  |
+| S5 durable stream    | column-delta efficiency target                           | Partial                  | FEATURE: the scenario intentionally rewrites full bytes values; the ordinary value path has no structural column-delta encoding, so bytes/token are baseline numbers only.                                                                                                                                                                                                    |
 | S5 durable stream    | evicted-prefix resumer                                   | No                       | FEATURE: the `[needs: eviction]` phase is specified but not implemented.                                                                                                                                                                                                                                                                                                      |
-| S6 text              | trace replay                                             | Yes                      | `jazz-sim/benches/s6_text_traces.rs` emits `phase: trace_replay` plus `db_surface_trace_replay`, throughput, echo latency, history bytes/edit, zstd anchors, and final/prefix correctness.                                                                                                                                                                                    |
-| S6 text              | live observation                                         | Yes                      | `s6_text_traces.rs` emits `phase: live_observation` with observer p95, synced bytes, and link floor.                                                                                                                                                                                                                                                                          |
-| S6 text              | cold load: current only                                  | Yes                      | `s6_text_traces.rs` emits `phase: cold_load` current-only latency and current bytes.                                                                                                                                                                                                                                                                                          |
-| S6 text              | cold load: full history                                  | Partial                  | FEATURE: `s6_text_traces.rs` marks full-history load as gated until a history subscription load path exists.                                                                                                                                                                                                                                                                  |
-| S6 text              | point-in-time reads                                      | Yes                      | `s6_text_traces.rs` emits `phase: point_in_time_read` for cut percentages with direct-prefix replay correctness.                                                                                                                                                                                                                                                              |
-| S6 text              | storage                                                  | Yes                      | `s6_text_traces.rs` reports history/metadata bytes per edit and zstd final-doc / JSON-op-log anchors.                                                                                                                                                                                                                                                                         |
-| S6 text              | CRDT adversary comparisons                               | Partial                  | BASELINE: `s6_text_traces.rs` has in-process adversary comparison fields and Automerge/diamond-style paths, but these are local/library baselines, not the full pinned eg-walker/dmonad external-result matrix for every trace.                                                                                                                                               |
-| S6 text              | memory                                                   | Partial                  | ORACLE: the bench reports `peak_memory_proxy_bytes` as peak document characters/bytes, not process peak RSS; useful but not the spec's memory metric.                                                                                                                                                                                                                         |
-| S6 text              | concurrent merge                                         | No                       | FEATURE: current text semantics remain whole-value HLC-LWW; the concurrent merge phase is gated by `[needs: text-merge]` despite `jazz/src/node/text_oplog.rs` existing.                                                                                                                                                                                                      |
-| S6 text              | column-delta efficiency target                           | Partial                  | FEATURE: full text values are rewritten per edit; no structural column-delta maintenance was found, so storage/wire ratios are baseline numbers only.                                                                                                                                                                                                                         |
 | S7 migrations        | mixed-version steady state                               | Partial                  | HARNESS: `jazz-sim/benches/s7_migrations.rs` is a smoke-style executable over a schema chain and `MigrationLens` with JSONL phase output, but still has no retained reporting matrix.                                                                                                                                                                                         |
 | S7 migrations        | lens-tax measurement                                     | No                       | HARNESS: no native vs 1-hop/3-hop latency, write translation, or sync-byte overhead output was found.                                                                                                                                                                                                                                                                         |
 | S7 migrations        | rollout wave                                             | No                       | HARNESS: no mid-stream population migration phase or latency/recompute metrics were found.                                                                                                                                                                                                                                                                                    |
@@ -293,8 +272,6 @@ Landed capabilities were retired from the gate list; git history is the record.
 | gate                         | status | evidence                                                                                                                                                                                                                           |
 | ---------------------------- | ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `[needs: payload-inventory]` | FUTURE | Reconnect/resume delta-resubscribe from peer payload inventory is still not the measured path in S1/S5/S9; steady-state complete-tx payload dedup (`PeerState.shipped_complete_tx_payloads`, appendix C) is a different mechanism. |
-| `[needs: column-delta]`      | FUTURE | S5/S6 intentionally rewrite full `bytes`/text column values; no structural column-delta encoding path was found in `jazz/src/node/content_store.rs` or the scenario benches.                                                       |
-| `[needs: text-merge]`        | FUTURE | `jazz/src/node/text_oplog.rs` exists, but current S6 scenario semantics are still whole-value HLC-LWW; no rich-text three-way merge strategy is wired into the phase.                                                              |
 | `[needs: eviction]`          | FUTURE | S5's evicted-prefix resumer phase is specified but no eviction/resume benchmark path was found.                                                                                                                                    |
 
 #### Existing infrastructure inventory
@@ -314,12 +291,10 @@ Landed capabilities were retired from the gate list; git history is the record.
   when `JAZZ_BENCH_RETAIN=1`. Legacy `scripts/bench_run.py` enriches groove
   scenario JSONL with `git_sha`, `git_dirty`, and host metadata.
 - **Bytes/token accounting.** Several benches have local helpers:
-  `view_update_bytes` / `bytes_floor` in S1/S2/S3/S6/S9, stream bytes/token in
-  `s5_durable_stream.rs`, text bytes/edit in `s6_text_traces.rs`, and storage
-  tree walkers in S5/S6/S9. This is useful but not shared infrastructure.
+  `view_update_bytes` / `bytes_floor` in S1/S2/S3/S9, stream bytes/token in
+  `s5_durable_stream.rs`, and storage tree walkers in S5/S9. This is useful but
+  not shared infrastructure.
 - **Memory accounting.** No reusable peak-RSS/process-memory utility was found.
-  S6 emits `peak_memory_proxy_bytes`, but it is derived from document length or
-  library-visible characters, not process peak RSS.
 - **Baselines.** Real `rusqlite` references exist in
   `jazz-sim/benches/s4_order_processing.rs`, `s5_durable_stream.rs`, and
   `s9_durable_execution.rs`; `groove/benches/scenario.rs` also has SQLite modes
@@ -327,8 +302,7 @@ Landed capabilities were retired from the gate list; git history is the record.
   is not a SQLite reference: its `BaselineModel` is a hand-rolled in-memory
   decision model for exclusive validation.
 - **External anchors.** S5 has an fsync-disciplined log floor and SQLite WAL
-  baseline; S6 has zstd anchors and local CRDT-library comparison scaffolding;
-  S2 lacks the required zstd JSON event-log storage anchor.
+  baseline; S2 lacks the required zstd JSON event-log storage anchor.
 - **Missing cross-cutting enablers.** Peak-RSS utility; a shared real SQLite
   reference runner where scenarios need same-schedule replay; shared
   bytes/token and bytes/floor accounting; shared oracle/counter wiring that
@@ -352,11 +326,9 @@ Landed capabilities were retired from the gate list; git history is the record.
 1. **INFRA / ORACLE:** factor shared oracle/counter gating and retained JSONL
    validation so every phase has explicit `INV-PERF-2` pass/fail counters
    instead of bespoke fields.
-2. **INFRA:** add a process peak-RSS utility and replace S6's
-   `peak_memory_proxy_bytes` with real memory metrics while keeping the proxy as
-   a debug field if useful.
-3. **INFRA:** share bytes/floor and bytes-per-token/edit accounting across
-   S1/S2/S3/S5/S6/S9; today every bench reimplements its own approximation.
+2. **INFRA:** add a reusable process peak-RSS utility.
+3. **INFRA:** share bytes/floor and bytes-per-token accounting across
+   S1/S2/S3/S5/S9; today every bench reimplements its own approximation.
 4. **HARNESS / BASELINE:** finish S2's history artifact: zstd JSON event-log
    anchors plus paired history-depth read latency in the same retained output.
 5. **HARNESS:** add the missing S1 phases: distinct-shape sweep, query churn,
@@ -372,16 +344,9 @@ Landed capabilities were retired from the gate list; git history is the record.
    S3 edge-profile permission-hydration phase is folded into item 0.)
 10. **HARNESS:** expand S5 Db-surface coverage from live smoke to the full
     remote tail/resume/resumer matrix.
-11. **FEATURE:** implement column-delta maintenance, then re-run S5/S6 storage
-    and wire bytes/token or bytes/edit as claims rather than baseline pain
-    measurements.
-12. **BASELINE:** complete S6's pinned CRDT/literature matrix across the trace
-    catalog, not only local comparison scaffolding.
-13. **FEATURE:** implement rich-text three-way merge before enabling S6
-    concurrent merge.
-14. **HARNESS:** graduate S7 from smoke to JSONL phases for mixed-version
+11. **HARNESS:** graduate S7 from smoke to JSONL phases for mixed-version
     steady state, lens tax, rollout wave, and late-offline reconnect.
-15. **HARNESS:** make S9 crash/restart a distinct failure phase, separate from
+12. **HARNESS:** make S9 crash/restart a distinct failure phase, separate from
     cold reattach.
 
 ### Shared setup and rules
@@ -440,10 +405,7 @@ gets fast by being wrong must fail, not report.
 
 **Feature gates.** Each phase is tagged by the feature set it needs: `[base]`
 runs on the currently-shipped engine, while `[needs: …]` phases depend on a
-not-yet-built feature — `[needs: column-delta]` (structural sharing / delta
-encoding of large column values across row versions) and `[needs: text-merge]` (a
-rich-text column merge strategy doing three-way merges against the version DAG's
-common ancestor). The suite lands incrementally; a `[needs: …]` phase is
+not-yet-built feature. The suite lands incrementally; a `[needs: …]` phase is
 specified now and activated when its feature ships, and the gates double as the
 demand signal for prioritizing those features.
 
@@ -923,130 +885,6 @@ full-replay state, byte-exact · a late resumer over an evicted prefix
 
 ---
 
-### 6. Collaborative text editing (real editing trace)
-
-_Motivation: large documents in a text column, edited as linear runs at
-random positions — the same value-versioning pressure as scenario 5 but with
-mid-value edits instead of appends. This is the arena where jazz competes
-directly with CRDT libraries, on their own canonical benchmark._
-
-#### The trace
-
-The [automerge-perf editing trace](https://github.com/automerge/automerge-perf):
-Martin Kleppmann's keystroke-by-keystroke recording of writing the LaTeX
-source of _“A Conflict-Free Replicated JSON Datatype”_ (Kleppmann &
-Beresford) — **182,315 single-character insertions and 77,463 deletions
-(259,778 edit operations)** producing a ~100KB final document; CC-BY-4.0;
-the standard benchmark for Automerge, Yjs, diamond-types, Loro, et al.
-
-#### Trace catalog (eg-walker superset)
-
-We adopt the [eg-walker evaluation set](https://arxiv.org/abs/2409.14252)
-verbatim as the literature-comparable core — their published per-trace
-results (stored size, load time, replay/merge time, memory) become free
-side-by-side baselines — organized by their taxonomy and extended with
-jazz-specific traces in each group:
-
-| label | trace                                                                                                                            | character                                                                                              | gate                                                                                  |
-| ----- | -------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------- |
-| S1    | _automerge-paper_ (Kleppmann LaTeX; 2 authors taking turns)                                                                      | sequential, keystroke                                                                                  | `[base]`                                                                              |
-| S2    | _seph-blog1_ (8,800-word blog post, 1 author)                                                                                    | sequential, keystroke                                                                                  | `[base]`                                                                              |
-| S3    | _egwalker_ (the eg-walker paper's own source, 2 authors)                                                                         | sequential, keystroke                                                                                  | `[base]`                                                                              |
-| W1    | Wikipedia revision history of one large page (pinned page + revision range + content hash; CC-BY-SA)                             | sequential, multi-author, **full-state revisions with reverts** — the brainless-dump model in the wild | `[base]`                                                                              |
-| C1    | _friendsforever_ (2 users realtime, 1s simulated latency, ~26k edits)                                                            | concurrent, fine-grained                                                                               | ingest/storage `[base]`; merged-content assertions `[needs: text-merge]`              |
-| C2    | _clownschool_ (2 users realtime, 0.5s latency, 5,380 txns, timestamps)                                                           | concurrent, fine-grained                                                                               | as C1                                                                                 |
-| A1    | `src/node.cc` from Node.js (git-derived)                                                                                         | async divergence, **human merge resolutions recorded**                                                 | DAG replay with recorded merges `[base]`; jazz-generated merges `[needs: text-merge]` |
-| A2    | `Makefile` from git.git (git-derived)                                                                                            | as A1                                                                                                  | as A1                                                                                 |
-| A3    | repo-corpus variant: every file of a busy repo over a commit range                                                               | async, thousands of text rows merged concurrently                                                      | as A1                                                                                 |
-| X1    | synthetic contention generator (seeded; K = 2–32 authors, Zipf edit positions, per-author offline windows from seconds to hours) | **contention as a dial** — the axis no recorded trace provides; offline divergence is jazz's home turf | ingest `[base]`; merge `[needs: text-merge]`                                          |
-
-Methodology adopted with the traces:
-
-- **mirror their per-trace metrics** — stored size, cold-load time,
-  replay/merge time, steady-state and peak memory — so every cell is
-  directly comparable with the eg-walker paper's tables;
-- run both **natural size** and their **~500k-inserted-characters
-  normalization** (repetition) — the latter for cross-trace comparability,
-  the former for realism;
-- **sourcing is pinned**: S and C traces from
-  [automerge-perf](https://github.com/automerge/automerge-perf) and
-  [josephg/editing-traces](https://github.com/josephg/editing-traces); A1/A2
-  from the paper's artifacts, or regenerated by their described method
-  (minimal edit operations per commit diff, pinned repo + commit range,
-  content-hashed into fixtures).
-
-The [dmonad/crdt-benchmarks](https://github.com/dmonad/crdt-benchmarks)
-suite remains in use for cross-library comparability where shapes overlap.
-
-**Semantic honesty up front**: jazz today merges text columns by whole-value
-HLC-LWW — concurrent edits to one document _replace_, they do not interleave.
-Character-level concurrent merging is `[needs: text-merge]`: a rich-text
-column merge strategy doing **three-way merges**, with the common ancestor
-supplied by the version DAG (`parents` gives it directly — this is the
-ancestor-aware strategy the README defers). The Kleppmann trace is
-single-author and sequential, so phases 1–4 are a fair fight on storage,
-throughput, and latency without merge semantics; the concurrent phase is
-specified now and activated with the feature.
-
-#### Modeling — brainless dump only
-
-One row per document, the full `text` column rewritten on every edit — the
-same thesis as scenario 5: no userland op-log modeling, no CRDT structures
-in app code; jazz owns the efficiency problem (`[needs: column-delta]`) and,
-later, the merge problem (`[needs: text-merge]`). The adversaries below are
-the systems where humans did that work by hand.
-
-#### Phases
-
-1. **Trace replay** `[base]`: single writer replays all 259,778 edits as
-   mergeable commits (batching axis: 1 / 32 / 256 edits per commit).
-   Metrics: ingest throughput (edits/s), local-echo latency, peak memory.
-2. **Live observation** `[base]`: writer replays at a realistic 10 edits/s
-   sample while a second client tails — edit→observer p95 at tier `none`.
-3. **Cold load** `[base]`: fresh client loads the finished document — current
-   state only vs. with full history; historical
-   states at 25/50/75% of the trace. The canvas pairing rule applies: any
-   storage claim is reported _with_ these latencies.
-4. **Storage** `[base]`: total store size and **history+metadata bytes per
-   edit** after full replay, against the anchors below.
-5. **Concurrent merge** `[needs: text-merge]`: replay the concurrent traces
-   below; the converged document must match the three-way strategy's
-   documented semantics (compared against CRDT-library output on the same
-   trace as a _semantic_, not byte, comparison — the strategies legitimately
-   differ).
-
-#### Adversarial comparisons
-
-Two explicitly-labeled tiers, because most CRDT libraries are in-memory and
-jazz is durable — the label _is_ the fairness mechanism:
-
-- **in-memory CRDT floor** (non-durable): diamond-types, Yjs, Loro replaying
-  the same trace — CPU/latency/memory floor;
-- **durable CRDT baseline**: Automerge with its persisted save format /
-  Yjs with a persistence backend — the apples-to-apples storage and
-  cold-load comparison (their save-file sizes on this trace are published
-  and reproducible);
-- **storage anchors**: zstd (3 and 19) of the final document, and of the
-  JSON edit-op log — the latter is the same anchor pattern as canvas.
-
-#### Metrics
-
-trace replay throughput vs. in-memory floor · storage ratio vs. durable CRDT
-baseline and zstd anchors · synced bytes per edit per observer ·
-history+metadata bytes per edit ·
-cold-load time (current vs. full history) vs. durable CRDT load · memory ·
-point-in-time read latency (paired with storage, per
-the canvas rule).
-
-#### Correctness
-
-final document byte-equals the reference string produced by directly
-applying the trace · every prefix replay equals the corresponding reference
-prefix · `[needs: text-merge]` concurrent convergence per the strategy's
-spec, identical on every node.
-
----
-
 ### 7. Parallel schema evolution (migration lenses)
 
 _Motivation: the no-stop-the-world migration claim — clients on different
@@ -1215,7 +1053,7 @@ Scenario mapping (the claim each cell tests):
 | S2 realtime          | all four                                                                                             | input-to-receipt latency; their convergence is server-ordered LWW without history — envelope label carries the asymmetry                                                                                                                                                                               |
 | S3 permissions       | InstantDB perms, Electric shape where-clauses, Zero query auth                                       | **revocation-to-disappearance vs their resubscribe/invalidation storm** — likely the suite's most differentiating chart                                                                                                                                                                                |
 | S4 serializable      | **Convex only** (the others do not claim serializable transactions)                                  | OCC vs OCC at the same guarantee — a fairer "same product" reference than local SQLite                                                                                                                                                                                                                 |
-| S5/S6                | none                                                                                                 | not their product; CRDT libraries remain the right adversaries                                                                                                                                                                                                                                         |
+| S5                   | none                                                                                                 | not their product; log and SQLite baselines remain the useful adversaries                                                                                                                                                                                                                              |
 | S9 durable execution | stateful-compute platforms (actor/durable-object model)                                              | ephemeral compute attaching to shared state: cold-attach latency, cross-instance coordination via exclusive txs vs single-threaded state islands, fan-out without pre-chunking the app. v1 is jazz-side metrics + architecture contrast (the incumbent platforms need their own cloud to run honestly) |
 
 Additional workload this tier motivates (also useful standalone):
@@ -1239,7 +1077,7 @@ headline artifacts — and only those — are what end up in README-level claims
 
 ### Open questions
 
-- 🔶 **Db-surface migration status** is mixed: some scenarios (S1/S2/S3/S5/S6)
+- 🔶 **Db-surface migration status** is mixed: some scenarios (S1/S2/S3/S5)
   have Db-surface smoke/summary paths while others remain peer-layer; state it
   per-scenario rather than as a blanket "blocked."
 - 🔶 **S7 is smoke-sized**; define the retained-run fields and matrix it must

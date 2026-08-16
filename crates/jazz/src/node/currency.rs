@@ -19,10 +19,26 @@ where
         row_uuid: RowUuid,
     ) -> Result<Vec<VersionRow>, Error> {
         let mut versions = Vec::new();
-        for storage_table in self.version_storage_sources(table)? {
+        for storage_table in self.version_storage_sources_for_layer(table, VersionLayer::Content)? {
             let raws = self
                 .database
                 .primary_key_scan_raw(&storage_table, &[Value::Uuid(row_uuid.0)])?
+                .into_iter()
+                .map(|raw| raw.owned_record())
+                .collect::<Vec<_>>();
+            for record in raws {
+                versions.push(self.decode_history_owned_record(table, &storage_table, record)?);
+            }
+        }
+        for storage_table in
+            self.version_storage_sources_for_layer(table, VersionLayer::Deletion)?
+        {
+            let raws = self
+                .database
+                .primary_key_scan_raw(
+                    &storage_table,
+                    &self.deletion_storage_prefix(table, BranchLineage::Root, Some(row_uuid))?,
+                )?
                 .into_iter()
                 .map(|raw| raw.owned_record())
                 .collect::<Vec<_>>();
@@ -94,9 +110,14 @@ where
     ) -> Result<Option<VersionRow>, Error> {
         let mut winner = None;
         for storage_table in self.version_storage_sources_for_layer(table, layer)? {
+            let prefix = if layer == VersionLayer::Deletion {
+                self.deletion_storage_prefix(table, BranchLineage::Root, Some(row_uuid))?
+            } else {
+                vec![Value::Uuid(row_uuid.0)]
+            };
             let Some(raw) = self
                 .database
-                .primary_key_last_raw(&storage_table, &[Value::Uuid(row_uuid.0)])?
+                .primary_key_last_raw(&storage_table, &prefix)?
                 .map(|raw| raw.owned_record())
             else {
                 continue;
@@ -136,10 +157,28 @@ where
 
     pub(super) fn query_table_versions(&mut self, table: &str) -> Result<Vec<VersionRow>, Error> {
         let mut versions_by_key = BTreeMap::new();
-        for storage_table in self.version_storage_sources(table)? {
+        for storage_table in self.version_storage_sources_for_layer(table, VersionLayer::Content)? {
             let raws = self
                 .database
                 .primary_key_scan_raw(&storage_table, &[])?
+                .into_iter()
+                .map(|raw| raw.owned_record())
+                .collect::<Vec<_>>();
+            for record in raws {
+                let version = self.decode_history_owned_record(table, &storage_table, record)?;
+                let tx_id = self.version_tx_id(&version)?;
+                versions_by_key.insert((version.row_uuid(), tx_id, version.layer()), version);
+            }
+        }
+        for storage_table in
+            self.version_storage_sources_for_layer(table, VersionLayer::Deletion)?
+        {
+            let raws = self
+                .database
+                .primary_key_scan_raw(
+                    &storage_table,
+                    &self.deletion_storage_prefix(table, BranchLineage::Root, None)?,
+                )?
                 .into_iter()
                 .map(|raw| raw.owned_record())
                 .collect::<Vec<_>>();
@@ -205,8 +244,18 @@ where
                     .map(|raw| raw.owned_record())
                     .collect::<Vec<_>>();
                 for record in raws {
+                    // The shared deletion index is transaction-scoped, not
+                    // table-scoped: one transaction may contain deletion rows
+                    // for several physical tables. Decode each row from its
+                    // embedded PhysicalTableId instead of imposing whichever
+                    // logical table happened to visit the shared source first.
+                    let requested_table = if storage_table == SHARED_DELETION_HISTORY_TABLE {
+                        ""
+                    } else {
+                        &table
+                    };
                     let version =
-                        self.decode_history_owned_record(&table, &storage_table, record)?;
+                        self.decode_history_owned_record(requested_table, &storage_table, record)?;
                     versions.push(version);
                 }
             }
@@ -250,10 +299,7 @@ where
                 table_mapping.table_id,
                 branch_id,
             ));
-            sources.push(physical_branch_register_table_name(
-                table_mapping.table_id,
-                branch_id,
-            ));
+            sources.push(SHARED_DELETION_HISTORY_TABLE.to_owned());
         }
         sources.sort();
         sources.dedup();
@@ -328,9 +374,36 @@ where
             .filter_map(|mapping| mapping.tables.get(table))
             .map(|mapping| match layer {
                 VersionLayer::Content => physical_history_table_name(mapping.table_id),
-                VersionLayer::Deletion => physical_register_table_name(mapping.table_id),
+                VersionLayer::Deletion => SHARED_DELETION_HISTORY_TABLE.to_owned(),
             })
             .collect()
+    }
+
+    pub(super) fn deletion_storage_prefix(
+        &self,
+        table: &str,
+        lineage: BranchLineage,
+        row_uuid: Option<RowUuid>,
+    ) -> Result<Vec<Value>, Error> {
+        let schema_version = if self
+            .table_in_schema(table, self.catalogue.current_write_schema.schema)
+            .is_ok()
+        {
+            self.catalogue.current_write_schema.schema
+        } else {
+            self.catalogue.current_schema_version_id
+        };
+        let table_id = self.physical_table_id_for_schema(schema_version, table)?;
+        let (branch_kind, branch_id) = shared_deletion_lineage_values(lineage);
+        let mut prefix = vec![
+            Value::U8(branch_kind),
+            Value::Uuid(branch_id),
+            Value::U64(table_id.0),
+        ];
+        if let Some(row_uuid) = row_uuid {
+            prefix.push(Value::Uuid(row_uuid.0));
+        }
+        Ok(prefix)
     }
 
     #[allow(dead_code)] // Stage 1 read primitive; production reads switch in Stage 2.
@@ -352,6 +425,68 @@ where
         storage_table: &str,
         record: OwnedRecord,
     ) -> Result<VersionRow, Error> {
+        if storage_table == SHARED_DELETION_HISTORY_TABLE {
+            let shared = record.to_values()?;
+            let Value::U64(table_id) = shared.get(2).ok_or(Error::InvalidStoredValue(
+                "shared deletion physical table id missing",
+            ))?
+            else {
+                return Err(Error::InvalidStoredValue(
+                    "shared deletion physical table id must be u64",
+                ));
+            };
+            let Value::U64(alias) = shared.get(6).ok_or(Error::InvalidStoredValue(
+                "shared deletion schema alias missing",
+            ))?
+            else {
+                return Err(Error::InvalidStoredValue(
+                    "shared deletion schema alias must be u64",
+                ));
+            };
+            let table_id = PhysicalTableId(*table_id);
+            let alias = SchemaVersionAlias(*alias);
+            let schema_version =
+                self.schema_version_for_alias(alias)
+                    .ok_or(Error::InvalidStoredValue(
+                        "shared deletion schema version alias must exist",
+                    ))?;
+            let stored_table = self
+                .catalogue
+                .physical_mappings
+                .get(&schema_version)
+                .and_then(|mapping| {
+                    mapping.tables.iter().find_map(|(logical_table, mapping)| {
+                        (mapping.table_id == table_id).then(|| logical_table.clone())
+                    })
+                })
+                .ok_or(Error::InvalidStoredValue(
+                    "shared deletion physical table mapping missing",
+                ))?;
+            let table = if requested_table.is_empty() || requested_table == stored_table {
+                stored_table.clone()
+            } else {
+                let requested_schema = if self
+                    .table_in_schema(requested_table, self.catalogue.current_write_schema.schema)
+                    .is_ok()
+                {
+                    self.catalogue.current_write_schema.schema
+                } else {
+                    self.catalogue.current_schema_version_id
+                };
+                (self.physical_table_id_for_schema(requested_schema, requested_table)? == table_id)
+                    .then(|| requested_table.to_owned())
+                    .ok_or(Error::InvalidStoredValue(
+                        "shared deletion row escaped requested physical-table prefix",
+                    ))?
+            };
+            let logical_table = self.table_in_schema(&stored_table, schema_version)?;
+            let descriptor = logical_table.register_storage_table().record_schema();
+            let logical = OwnedRecord::new(descriptor.create(&shared[3..])?, descriptor);
+            return Ok(VersionRow {
+                table: groove::Intern::new(table),
+                record: logical,
+            });
+        }
         let record_view = record.borrowed();
         let is_deletion = record_view.descriptor().field_index("_deletion").is_some();
         let table = if !storage_table.starts_with("jazz_physical_") {
@@ -559,9 +694,6 @@ where
                         .map_err(|_| Error::InvalidStoredValue("invalid branch merge provenance"))
                 })
                 .transpose()?,
-            merge_strategy: record
-                .get_nullable_string(TransactionRowRecord::FIELD_MERGE_STRATEGY_IDX)?
-                .and_then(decode_merge_strategy_tag),
         };
         let fate = fate_from_encoded_fields(record)?;
         Ok(StoredTransaction {
@@ -659,16 +791,21 @@ where
         tx_time: TxTime,
         tx_node_alias: NodeAlias,
     ) -> Result<Option<VersionRow>, Error> {
+        let key = if storage_table == SHARED_DELETION_HISTORY_TABLE {
+            let mut key =
+                self.deletion_storage_prefix(table, BranchLineage::Root, Some(row_uuid))?;
+            key.extend([Value::U64(tx_time.0), Value::U64(tx_node_alias.0)]);
+            key
+        } else {
+            vec![
+                Value::Uuid(row_uuid.0),
+                Value::U64(tx_time.0),
+                Value::U64(tx_node_alias.0),
+            ]
+        };
         let raw = self
             .database
-            .primary_key_get_raw(
-                storage_table,
-                &[
-                    Value::Uuid(row_uuid.0),
-                    Value::U64(tx_time.0),
-                    Value::U64(tx_node_alias.0),
-                ],
-            )?
+            .primary_key_get_raw(storage_table, &key)?
             .map(|raw| raw.owned_record());
         let Some(record) = raw else {
             return Ok(None);

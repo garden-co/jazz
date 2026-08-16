@@ -7,7 +7,6 @@
 //! `Db` facade and groove storage/IVM.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(feature = "testing")]
@@ -32,35 +31,24 @@ use crate::ids::{
     AuthorId, BranchId, MigrationLensId, NodeAlias, NodeUuid, PhysicalColumnId, PhysicalTableId,
     RowUuid, SchemaLineagePublicationId, SchemaVersionAlias, SchemaVersionId,
 };
-use crate::merge_strategy::{CanonicalizeInput, MergeStrategy as TextMergeStrategy};
 use crate::protocol::{
     BindingViewKey, CurrentWriteSchema, LensOp, MigrationLens, ProgramFactEntry, ReadViewKey,
     ResultMemberEntry, ResultRowEntry, RowVersionRef, SchemaLineagePublication, SchemaVersion,
     ShapeAst, Subscribe, SubscriptionKey, SyncMessage, VersionBundle, VersionCarrier,
     VersionRecord, ViewFactEntry, expand_version_carriers,
 };
-use crate::protocol_limits::MAX_CONTENT_EXTENT_BYTES;
 use crate::query::{Binding, BindingId, QueryError, ShapeId, ValidatedQuery};
 use crate::schema::{
-    CLEAN_CLOSE_MARKERS_STORE, ColumnSchema, JazzSchema, KNOWN_STATE_FACTS_STORE, LargeValueKind,
-    MergeStrategy, SETTLED_PROGRAM_FACTS_STORE, SETTLED_RESULT_MEMBERS_STORE,
-    STORAGE_CONSISTENCY_MARKERS_STORE, TableSchema, registered_column_transform,
+    JazzSchema, KNOWN_STATE_FACTS_STORE, MergeStrategy, SETTLED_PROGRAM_FACTS_STORE,
+    SETTLED_RESULT_MEMBERS_STORE, TableSchema, registered_column_transform,
 };
-use crate::text_merge::{Run as PlainTextRun, TextOp as PlainTextOp};
 use crate::time::{GlobalSeq, TxTime};
 use crate::tools::OpenBatchId;
 use crate::tx::{
-    AbsentRead, BranchMergeProvenance, DeletionEvent, DurabilityTier, Fate, HistoryEntry,
-    PredicateRead, RecordedMergeStrategy, RejectedTransaction, RejectedVersion, RejectionReason,
-    RowRead, Snapshot, Transaction, TransactionRecord, TxId, TxKind,
+    AbsentRead, BranchLineage, BranchMergeProvenance, DeletionEvent, DurabilityTier, Fate,
+    HistoryEntry, PredicateRead, RejectedTransaction, RejectedVersion, RejectionReason, RowRead,
+    Snapshot, Transaction, TransactionRecord, TxId, TxKind,
 };
-
-const TEXT_EXTENT_OPS_MAGIC: &[u8] = b"JTXTREF1";
-const LARGE_VALUE_HANDLE_MAGIC: &[u8] = b"JLVH2";
-const CLEAN_CLOSE_MARKER_NAME: &str = "node-clean-close";
-const CLEAN_CLOSE_MARKER_VERSION: u64 = 1;
-const STORAGE_CONSISTENCY_MARKER_NAME: &str = "settled-ahead-current-clean-through";
-const STORAGE_CONSISTENCY_MARKER_VERSION: u64 = 1;
 
 fn hydrate_nested_scalar_enum_cases(
     value_type: &records::ValueType,
@@ -370,9 +358,10 @@ fn reconcile_nested_scalar_enum_cases(
 }
 
 mod branches;
+mod catalogue_ingest;
 mod codec;
-pub mod content_store;
 mod currency;
+mod database_slot;
 mod eviction;
 mod global_state;
 mod ingest;
@@ -384,7 +373,6 @@ pub(crate) mod query_engine;
 mod query_eval;
 mod recovery;
 mod source_resolution;
-pub mod text_oplog;
 mod views;
 #[cfg(feature = "testing")]
 pub(crate) use query_eval::LocalMaintainedViewSubscriptionFootprint;
@@ -397,10 +385,9 @@ type ResultRowMembershipKey = crate::tools::OutputOccurrenceId;
 
 use branches::BranchRecord;
 use codec::*;
-use content_store::ContentStore;
+use database_slot::DatabaseSlot;
 use open_tx::*;
 use physical::*;
-use text_oplog::{Content as TextContent, Op as TextOp};
 
 pub use eviction::{EdgeCacheBudget, EdgeCacheBudgetReport, EdgeCacheClass, EvictColdReport};
 
@@ -447,16 +434,7 @@ mod tests;
 
 /// Default client-clock skew tolerance in milliseconds.
 pub const SKEW_TOLERANCE_MS: u64 = 30_000;
-/// Default local checkpoint cadence for large text/blob materialization.
-///
-/// Checkpoints are derived content-store state, never wire state. Every 1024
-/// replayed large-value ops, the node stores a materialized snapshot so later
-/// reads fold from the nearest checkpoint plus the suffix instead of the full
-/// history chain.
-pub(crate) const LARGE_VALUE_CHECKPOINT_OP_INTERVAL: usize = 1024;
-const LARGE_VALUE_MATERIALIZATION_CACHE_MAX_ENTRIES: usize = 128;
 const TX_VERSION_TABLE_CACHE_MAX_ENTRIES: usize = 4096;
-type LargeValueCacheKey = (SchemaVersionId, String, RowUuid, String, TxId);
 
 static NEXT_GROOVE_RUNTIME_TOKEN: AtomicU64 = AtomicU64::new(1);
 
@@ -537,6 +515,17 @@ pub struct NodeState<S> {
     self_node_alias: Option<NodeAlias>,
     /// Schema catalogue, migration lenses, and logical-to-physical mappings.
     catalogue: SchemaCatalogue,
+    /// Whether this runtime has an authoritative catalogue lineage that may
+    /// safely describe application data.  A dynamic edge starts
+    /// `Uninitialized`: its temporary system-only runtime schema is never a
+    /// database genesis and no query or write may use it.  The first trusted
+    /// catalogue snapshot installs the authority's exact genesis together
+    /// with its mappings and write pointer in one durable batch.
+    catalogue_bootstrap_state: CatalogueBootstrapState,
+    /// Whether this durable catalogue was installed through the dynamic-edge
+    /// bootstrap snapshot boundary and therefore carries a completion record
+    /// that must be refreshed with later trusted snapshots.
+    catalogue_bootstrap_marker: bool,
     /// In-memory branch records and branch-specific storage partitions.
     branches: Branches,
     /// Local logical time and global-application progress counters.
@@ -555,6 +544,12 @@ pub struct NodeState<S> {
     groove_runtime_token: u64,
     /// Whether this node has complete settled history for historical reads.
     history_complete: bool,
+    /// Durability recorded for commits authored by this process.
+    ///
+    /// Ordinary storage-backed nodes author at `Local`. A browser main-thread
+    /// runtime uses `None` because its in-memory preview is not durable until
+    /// the dedicated worker acknowledges persistence.
+    authored_commit_durability: DurabilityTier,
     /// Mapping from stable node UUIDs to compact on-disk aliases.
     pub(crate) node_aliases: BTreeMap<NodeUuid, NodeAlias>,
     /// Ahead-current overlay keys for rows whose non-global versions can affect local reads.
@@ -563,14 +558,6 @@ pub struct NodeState<S> {
     ahead_current_rows: BTreeSet<(String, RowUuid)>,
     /// Latest ahead-current key per table/layer/row for local overlay reads.
     ahead_current_latest: BTreeMap<(String, VersionLayer, RowUuid), (TxTime, NodeAlias)>,
-    /// Minimum number of large-value ops replayed before storing a checkpoint.
-    large_value_checkpoint_op_interval: usize,
-    /// Runtime counters for large-value materialization and checkpoint behavior.
-    large_value_metrics: LargeValueMetrics,
-    /// Immutable materialized large-value bytes keyed by exact version.
-    large_value_materialization_cache: BTreeMap<LargeValueCacheKey, Vec<u8>>,
-    /// Runtime registry for rung-3 text merge strategies.
-    text_merge_strategies: BTreeMap<(String, u32), Arc<dyn TextMergeStrategy>>,
     /// Runtime counters for sync parking, draining, and ingestion behavior.
     sync_metrics: SyncMetrics,
     /// Runtime counters for query-engine read authorization paths.
@@ -634,6 +621,22 @@ struct SchemaCatalogue {
     compiled_lens_cache: BTreeMap<CompiledLensCacheKey, Option<CompiledLensPath>>,
     /// Schema version currently used for newly authored writes.
     current_write_schema: CurrentWriteSchema,
+}
+
+/// Readiness of a dynamically catalogued node.
+///
+/// This is deliberately separate from the catalogue's current-write pointer.
+/// A pointer is meaningful only after a durable authority lineage exists;
+/// treating an empty constructor schema as that lineage manufactures a false
+/// genesis on an edge that has not yet heard from its core.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CatalogueBootstrapState {
+    /// No authority catalogue has been installed.  Application state must
+    /// fail closed until [`NodeState::apply_trusted_catalogue_snapshot`] is
+    /// called on the authenticated upstream path.
+    Uninitialized,
+    /// A durable genesis, mappings, and pointer have been installed.
+    Ready,
 }
 
 /// Branch metadata and branch-partition layout known by the node.
@@ -753,6 +756,7 @@ struct QueryServing {
     /// Binding views whose settled state was replaced by an authoritative
     /// server-provided reset since the last facade refresh.
     pending_authoritative_reset_binding_views: BTreeSet<BindingViewKey>,
+    pending_opening_binding_views: BTreeSet<BindingViewKey>,
     /// FIFO terminal edits received from the serving peer and not yet
     /// published by the local subscription facade.
     pending_terminal_operations_by_binding_view:
@@ -837,6 +841,266 @@ where
         Self::new_with_history_complete(node_uuid, schema, storage, false)
     }
 
+    /// Open an edge-local runtime before it has received an authenticated
+    /// authority catalogue.
+    ///
+    /// Unlike [`NodeState::new`], this deliberately does *not* create a
+    /// durable genesis from `JazzSchema::new([])`.  Its only valid transition
+    /// is installation of a trusted catalogue snapshot; application reads,
+    /// writes, and current-schema access fail closed beforehand.
+    pub(crate) fn new_catalogue_uninitialized(
+        node_uuid: NodeUuid,
+        storage: S,
+    ) -> Result<Self, Error>
+    where
+        S: ReopenableStorage,
+    {
+        let (storage, durable_genesis) = Self::discover_durable_catalogue_genesis(storage)?;
+        if let Some(schema) = durable_genesis {
+            // A fresh process cannot assume the temporary empty schema it
+            // would use for an uninitialized edge.  Recover the authority
+            // genesis from the durable catalogue first, then use the normal
+            // ready open path so all physical layouts are reconstructed from
+            // the real lineage.
+            return Self::new_with_options_inner(
+                node_uuid,
+                schema,
+                storage,
+                false,
+                CatalogueBootstrapState::Ready,
+                #[cfg(feature = "testing")]
+                None,
+            );
+        }
+        Self::new_with_options_inner(
+            node_uuid,
+            JazzSchema::new([]),
+            storage,
+            false,
+            CatalogueBootstrapState::Uninitialized,
+            #[cfg(feature = "testing")]
+            None,
+        )
+    }
+
+    /// Read only the fixed catalogue metadata layout to discover an already
+    /// durable authority genesis before choosing an application schema for a
+    /// fresh process.  This is the inverse of the uninitialized constructor:
+    /// it never uses `JazzSchema::new([])` as a genesis candidate.
+    fn discover_durable_catalogue_genesis(storage: S) -> Result<(S, Option<JazzSchema>), Error> {
+        let bootstrap_schema = JazzSchema::new([]);
+        // Dynamic discovery must inspect the fixed history/branch/fate stores
+        // too: an empty catalogue does not make an existing Jazz store safe to
+        // repurpose as an uninitialized edge.
+        let meta_schema = bootstrap_schema.lower_to_groove();
+        let meta_database = Database::new_with_storage_layout(
+            meta_schema,
+            storage,
+            StorageLayout::jazz_class_v1(),
+        )?;
+        let mut genesis = None;
+        let mut schemas = BTreeMap::new();
+        let mut bootstrap_ready = None;
+        let mut staged_lineages = BTreeMap::new();
+        let mut active_lineages = BTreeMap::new();
+        let mut has_catalogue_residue = false;
+        for raw in meta_database.primary_key_scan_raw("jazz_catalogue", &[])? {
+            has_catalogue_residue = true;
+            let record = raw.record();
+            match record.get_bytes(CatalogueRowRecord::FIELD_KIND_IDX)? {
+                b"genesis" => {
+                    let schema =
+                        SchemaVersionId(record.get_uuid(CatalogueRowRecord::FIELD_ID_IDX)?);
+                    if genesis.replace(schema).is_some() {
+                        return Err(Error::InvalidStoredValue(
+                            "duplicate catalogue genesis marker",
+                        ));
+                    }
+                }
+                b"schema" => {
+                    let schema: SchemaVersion = serde_json::from_slice(
+                        record.get_bytes(CatalogueRowRecord::FIELD_PAYLOAD_IDX)?,
+                    )?;
+                    if schema.id
+                        != SchemaVersionId(record.get_uuid(CatalogueRowRecord::FIELD_ID_IDX)?)
+                        || schemas.insert(schema.id, schema).is_some()
+                    {
+                        return Err(Error::InvalidStoredValue("catalogue schema id mismatch"));
+                    }
+                }
+                b"schema_lineage_active" => {
+                    let active: SchemaLineageActivation = serde_json::from_slice(
+                        record.get_bytes(CatalogueRowRecord::FIELD_PAYLOAD_IDX)?,
+                    )?;
+                    if active.id.0 != record.get_uuid(CatalogueRowRecord::FIELD_ID_IDX)?
+                        || active.catalogue_seq == 0
+                        || active_lineages
+                            .insert(active.id, active.catalogue_seq)
+                            .is_some()
+                    {
+                        return Err(Error::InvalidStoredValue(
+                            "catalogue bootstrap active lineage marker is malformed",
+                        ));
+                    }
+                }
+                b"schema_lineage_staged" => {
+                    let staged: StagedSchemaLineage = serde_json::from_slice(
+                        record.get_bytes(CatalogueRowRecord::FIELD_PAYLOAD_IDX)?,
+                    )?;
+                    if staged.publication.id.0
+                        != record.get_uuid(CatalogueRowRecord::FIELD_ID_IDX)?
+                        || staged.catalogue_seq == 0
+                        || staged_lineages
+                            .insert(staged.publication.id, staged)
+                            .is_some()
+                    {
+                        return Err(Error::InvalidStoredValue(
+                            "catalogue bootstrap staged lineage marker is malformed",
+                        ));
+                    }
+                }
+                b"bootstrap_ready" => {
+                    let ready: CatalogueBootstrapReady = serde_json::from_slice(
+                        record.get_bytes(CatalogueRowRecord::FIELD_PAYLOAD_IDX)?,
+                    )?;
+                    if ready.genesis.0 != record.get_uuid(CatalogueRowRecord::FIELD_ID_IDX)?
+                        || bootstrap_ready.replace(ready).is_some()
+                    {
+                        return Err(Error::InvalidStoredValue(
+                            "duplicate or malformed catalogue bootstrap marker",
+                        ));
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mapping_ids = meta_database
+            .primary_key_scan_raw("jazz_schema_versions", &[])?
+            .into_iter()
+            .map(|raw| {
+                Ok(SchemaVersionId(
+                    raw.record()
+                        .get_uuid(SchemaVersionAliasRowRecord::FIELD_UUID_IDX)?,
+                ))
+            })
+            .collect::<Result<BTreeSet<_>, Error>>()?;
+        let durable_pointer = meta_database
+            .primary_key_last_raw("jazz_catalogue_pointer", &[])?
+            .map(|raw| {
+                let record = raw.record();
+                Ok::<CurrentWriteSchema, Error>(CurrentWriteSchema {
+                    revision: record.get_u64(CataloguePointerRowRecord::FIELD_REVISION_IDX)?,
+                    schema: SchemaVersionId(
+                        record.get_uuid(CataloguePointerRowRecord::FIELD_SCHEMA_IDX)?,
+                    ),
+                })
+            })
+            .transpose()?;
+        let mut has_non_catalogue_residue = false;
+        for table in [
+            "jazz_transactions",
+            "jazz_branches",
+            "jazz_branch_partitions",
+            "jazz_rejected_transactions",
+            "jazz_pending_edges",
+            "jazz_merge_heads",
+            "jazz_global_changes",
+            "jazz_deletion_history",
+        ] {
+            if !meta_database.primary_key_scan_raw(table, &[])?.is_empty() {
+                has_non_catalogue_residue = true;
+                break;
+            }
+        }
+        let has_residue = has_catalogue_residue
+            || !mapping_ids.is_empty()
+            || durable_pointer.is_some()
+            || has_non_catalogue_residue;
+        let schema = match bootstrap_ready {
+            None if !has_residue => None,
+            None if has_non_catalogue_residue => {
+                return Err(Error::InvalidStoredValue(
+                    "dynamic catalogue state cannot initialize over durable history",
+                ));
+            }
+            None => {
+                return Err(Error::InvalidStoredValue(
+                    "dynamic catalogue state has no bootstrap completion marker",
+                ));
+            }
+            Some(ready) => {
+                let mut active_lineage_targets = BTreeSet::new();
+                let mut active_catalogue_sequences = BTreeSet::new();
+                for staged in staged_lineages.values() {
+                    Self::validate_durable_staged_lineage(staged, &schemas)?;
+                    match active_lineages.remove(&staged.publication.id) {
+                        Some(sequence) if sequence == staged.catalogue_seq => {
+                            if schemas.get(&staged.publication.schema.id)
+                                != Some(&staged.publication.schema)
+                                || !active_lineage_targets.insert(staged.publication.schema.id)
+                            {
+                                return Err(Error::InvalidStoredValue(
+                                    "catalogue bootstrap active lineage does not own its schema",
+                                ));
+                            }
+                            if !active_catalogue_sequences.insert(sequence) {
+                                return Err(Error::InvalidStoredValue(
+                                    "catalogue bootstrap active lineage marker is malformed",
+                                ));
+                            }
+                        }
+                        Some(_) => {
+                            return Err(Error::InvalidStoredValue(
+                                "catalogue bootstrap active lineage marker conflicts with payload",
+                            ));
+                        }
+                        None if schemas.contains_key(&staged.publication.schema.id)
+                            || mapping_ids.contains(&staged.publication.schema.id) =>
+                        {
+                            return Err(Error::InvalidStoredValue(
+                                "catalogue bootstrap inactive lineage has durable target state",
+                            ));
+                        }
+                        None => {}
+                    }
+                }
+                if !active_lineages.is_empty() {
+                    return Err(Error::InvalidStoredValue(
+                        "catalogue bootstrap active lineage is missing canonical payload",
+                    ));
+                }
+                let expected_schema_ids = std::iter::once(ready.genesis)
+                    .chain(active_lineage_targets)
+                    .collect::<BTreeSet<_>>();
+                if genesis != Some(ready.genesis)
+                    || durable_pointer != Some(ready.current_write_schema)
+                    || !schemas.contains_key(&ready.genesis)
+                    || schemas.keys().copied().collect::<BTreeSet<_>>() != expected_schema_ids
+                    || mapping_ids != expected_schema_ids
+                    || active_catalogue_sequences.len()
+                        != usize::try_from(ready.active_catalogue_seq).map_err(|_| {
+                            Error::InvalidStoredValue("catalogue bootstrap sequence exceeds usize")
+                        })?
+                    || active_catalogue_sequences
+                        .iter()
+                        .copied()
+                        .ne(1..=ready.active_catalogue_seq)
+                {
+                    return Err(Error::InvalidStoredValue(
+                        "catalogue bootstrap completion marker does not match durable catalogue",
+                    ));
+                }
+                Some(
+                    schemas
+                        .remove(&ready.genesis)
+                        .expect("validated durable genesis schema must exist")
+                        .schema,
+                )
+            }
+        };
+        Ok((meta_database.into_storage(), schema))
+    }
+
     /// Open or create a node that is known to hold complete settled history.
     ///
     /// This is the authority/local-complete constructor for historical reads.
@@ -854,32 +1118,6 @@ where
         Self::new_with_history_complete(node_uuid, schema, storage, true)
     }
 
-    /// Register a deterministic rung-3 text merge strategy for this process.
-    pub fn register_text_merge_strategy(&mut self, strategy: Arc<dyn TextMergeStrategy>) {
-        self.text_merge_strategies
-            .insert((strategy.id().to_owned(), strategy.version()), strategy);
-    }
-
-    /// Open or create a node with a specific local checkpoint density.
-    pub fn new_with_large_value_checkpoint_op_interval(
-        node_uuid: NodeUuid,
-        schema: JazzSchema,
-        storage: S,
-        history_complete: bool,
-        large_value_checkpoint_op_interval: usize,
-    ) -> Result<Self, Error>
-    where
-        S: ReopenableStorage,
-    {
-        Self::new_with_options(
-            node_uuid,
-            schema,
-            storage,
-            history_complete,
-            large_value_checkpoint_op_interval,
-        )
-    }
-
     /// Rebuild the groove layer over the same storage using the standard open path.
     pub fn reopen_in_place(self) -> Result<Self, Error>
     where
@@ -888,19 +1126,23 @@ where
         let NodeState {
             node_uuid,
             catalogue,
+            catalogue_bootstrap_state,
             database,
             history_complete,
-            text_merge_strategies,
             ..
         } = self;
         let storage = database.into_inner().into_storage();
-        let mut reopened = Self::new_with_history_complete(
-            node_uuid,
-            catalogue.schema,
-            storage,
-            history_complete,
-        )?;
-        reopened.text_merge_strategies = text_merge_strategies;
+        let reopened = match catalogue_bootstrap_state {
+            CatalogueBootstrapState::Uninitialized => {
+                Self::new_catalogue_uninitialized(node_uuid, storage)?
+            }
+            CatalogueBootstrapState::Ready => Self::new_with_history_complete(
+                node_uuid,
+                catalogue.schema,
+                storage,
+                history_complete,
+            )?,
+        };
         Ok(reopened)
     }
 
@@ -913,13 +1155,7 @@ where
     where
         S: ReopenableStorage,
     {
-        Self::new_with_options(
-            node_uuid,
-            schema,
-            storage,
-            history_complete,
-            LARGE_VALUE_CHECKPOINT_OP_INTERVAL,
-        )
+        Self::new_with_options(node_uuid, schema, storage, history_complete)
     }
 
     fn new_with_options(
@@ -927,7 +1163,6 @@ where
         schema: JazzSchema,
         storage: S,
         history_complete: bool,
-        large_value_checkpoint_op_interval: usize,
     ) -> Result<Self, Error>
     where
         S: ReopenableStorage,
@@ -937,7 +1172,7 @@ where
             schema,
             storage,
             history_complete,
-            large_value_checkpoint_op_interval,
+            CatalogueBootstrapState::Ready,
             #[cfg(feature = "testing")]
             None,
         )
@@ -950,7 +1185,6 @@ where
         schema: JazzSchema,
         storage: S,
         history_complete: bool,
-        large_value_checkpoint_op_interval: usize,
     ) -> Result<(Self, NodeOpenReceipt), Error>
     where
         S: ReopenableStorage,
@@ -961,7 +1195,7 @@ where
             schema,
             storage,
             history_complete,
-            large_value_checkpoint_op_interval,
+            CatalogueBootstrapState::Ready,
             Some(&mut receipt),
         )?;
         Ok((node, receipt))
@@ -972,7 +1206,7 @@ where
         schema: JazzSchema,
         storage: S,
         history_complete: bool,
-        large_value_checkpoint_op_interval: usize,
+        catalogue_bootstrap_state: CatalogueBootstrapState,
         #[cfg(feature = "testing")] mut receipt: Option<&mut NodeOpenReceipt>,
     ) -> Result<Self, Error>
     where
@@ -996,7 +1230,8 @@ where
             next_physical_column_id,
             current_write_schema,
             branch_partitions,
-        } = Self::open_catalogue_stage(schema.clone(), storage)?;
+            catalogue_bootstrap_marker,
+        } = Self::open_catalogue_stage(schema.clone(), storage, catalogue_bootstrap_state)?;
         #[cfg(feature = "testing")]
         if let (Some(receipt), Some(started)) = (&mut receipt, started) {
             receipt.catalogue_open = started.elapsed();
@@ -1036,6 +1271,21 @@ where
             }
             let mut batch = database.open_batch();
             Self::write_active_schema_lineage_to_batch(&mut batch, &staged)?;
+            if catalogue_bootstrap_marker {
+                let ready = CatalogueBootstrapReady {
+                    genesis: current_schema_version_id,
+                    current_write_schema,
+                    active_catalogue_seq: next,
+                };
+                batch.update(
+                    "jazz_catalogue",
+                    vec![
+                        Value::Bytes(b"bootstrap_ready".to_vec()),
+                        Value::Uuid(ready.genesis.0),
+                        Value::Bytes(serde_json::to_vec(&ready)?),
+                    ],
+                );
+            }
             database.commit_batch(batch)?;
             schemas.insert(
                 staged.publication.schema.id,
@@ -1084,6 +1334,8 @@ where
                 compiled_lens_cache: BTreeMap::new(),
                 current_write_schema,
             },
+            catalogue_bootstrap_state,
+            catalogue_bootstrap_marker,
             branches: Branches {
                 branches: BTreeMap::new(),
                 branch_partitions,
@@ -1119,6 +1371,7 @@ where
                 initial_hydration_binding_views: BTreeSet::new(),
                 deferred_publication_binding_views: BTreeSet::new(),
                 pending_authoritative_reset_binding_views: BTreeSet::new(),
+                pending_opening_binding_views: BTreeSet::new(),
                 pending_terminal_operations_by_binding_view: BTreeMap::new(),
             },
             open_tx: OpenTxState {
@@ -1130,14 +1383,11 @@ where
             database: DatabaseSlot::new(database),
             groove_runtime_token: next_groove_runtime_token(),
             history_complete,
+            authored_commit_durability: DurabilityTier::Local,
             node_aliases: BTreeMap::new(),
             ahead_current_keys: BTreeSet::new(),
             ahead_current_rows: BTreeSet::new(),
             ahead_current_latest: BTreeMap::new(),
-            large_value_checkpoint_op_interval: large_value_checkpoint_op_interval.max(1),
-            large_value_metrics: LargeValueMetrics::default(),
-            large_value_materialization_cache: BTreeMap::new(),
-            text_merge_strategies: BTreeMap::new(),
             sync_metrics: SyncMetrics::default(),
             query_engine_read_metrics: QueryEngineReadMetrics::default(),
             session_claims: BTreeMap::new(),
@@ -1230,11 +1480,6 @@ where
         Database::new_with_storage_layout(lowered, storage, layout).map_err(Error::from)
     }
 
-    /// Return the pure-storage large-value content store.
-    pub fn content_store(&self) -> ContentStore<'_, S> {
-        ContentStore::new(&self.database)
-    }
-
     pub(crate) fn applied_global_watermark(&self) -> GlobalSeq {
         self.clock.applied_global_watermark
     }
@@ -1242,6 +1487,14 @@ where
     /// Stable identity of the authority issuing wire-level receipts.
     pub(crate) fn node_uuid(&self) -> NodeUuid {
         self.node_uuid
+    }
+
+    pub(crate) fn authored_commit_durability(&self) -> DurabilityTier {
+        self.authored_commit_durability
+    }
+
+    pub(crate) fn set_non_durable_client(&mut self) {
+        self.authored_commit_durability = DurabilityTier::None;
     }
 
     /// Attach process-local auth claims to an accepted subscriber identity.
@@ -1349,6 +1602,7 @@ where
         self.query.initial_hydration_binding_views.clear();
         self.query.deferred_publication_binding_views.clear();
         self.query.pending_authoritative_reset_binding_views.clear();
+        self.query.pending_opening_binding_views.clear();
     }
 
     fn result_member_row_key(member: &ResultMemberEntry) -> Option<ResultRowMembershipKey> {
@@ -1428,6 +1682,7 @@ where
     fn open_catalogue_stage(
         schema: JazzSchema,
         storage: S,
+        catalogue_bootstrap_state: CatalogueBootstrapState,
     ) -> Result<CatalogueOpenState<S>, Error> {
         let current_schema_version_id = schema.version_id();
         let meta_schema = schema.lower_catalogue_meta_to_groove();
@@ -1440,10 +1695,10 @@ where
         let mut catalogue_lenses = BTreeMap::new();
         let mut staged_lineages_by_id = BTreeMap::new();
         let mut pending_lineages = BTreeMap::new();
-        let mut active_lineage_ids = BTreeSet::new();
-        let mut active_catalogue_seq = 0;
+        let mut active_lineages_by_id = BTreeMap::new();
         let mut pending_write_pointers = BTreeMap::new();
         let mut genesis_schema = None;
+        let mut catalogue_bootstrap_ready = None;
         for raw in meta_database.primary_key_scan_raw("jazz_catalogue", &[])? {
             let record = raw.record();
             match record.get_bytes(CatalogueRowRecord::FIELD_KIND_IDX)? {
@@ -1503,13 +1758,14 @@ where
                     let active: SchemaLineageActivation = serde_json::from_slice(
                         record.get_bytes(CatalogueRowRecord::FIELD_PAYLOAD_IDX)?,
                     )?;
-                    if active.id.0 != record.get_uuid(CatalogueRowRecord::FIELD_ID_IDX)? {
+                    if active.id.0 != record.get_uuid(CatalogueRowRecord::FIELD_ID_IDX)?
+                        || active.catalogue_seq == 0
+                        || active_lineages_by_id.insert(active.id, active).is_some()
+                    {
                         return Err(Error::InvalidStoredValue(
                             "active schema lineage id mismatch",
                         ));
                     }
-                    active_catalogue_seq = active_catalogue_seq.max(active.catalogue_seq);
-                    active_lineage_ids.insert(active.id);
                 }
                 b"write_pointer_pending" => {
                     let pointer: CurrentWriteSchema = serde_json::from_slice(
@@ -1526,14 +1782,58 @@ where
                         ));
                     }
                 }
+                b"bootstrap_ready" => {
+                    let ready: CatalogueBootstrapReady = serde_json::from_slice(
+                        record.get_bytes(CatalogueRowRecord::FIELD_PAYLOAD_IDX)?,
+                    )?;
+                    if ready.genesis.0 != record.get_uuid(CatalogueRowRecord::FIELD_ID_IDX)?
+                        || catalogue_bootstrap_ready.replace(ready).is_some()
+                    {
+                        return Err(Error::InvalidStoredValue(
+                            "duplicate or malformed catalogue bootstrap marker",
+                        ));
+                    }
+                }
                 _ => return Err(Error::InvalidStoredValue("unknown catalogue kind")),
             }
         }
         let mut staged_lineages = BTreeMap::new();
         let mut active_lineages_by_target = BTreeMap::new();
+        let mut lineage_targets = BTreeSet::new();
+        let mut active_lineages_by_seq = BTreeMap::new();
+        for active in active_lineages_by_id.values() {
+            if active_lineages_by_seq
+                .insert(active.catalogue_seq, active.id)
+                .is_some()
+            {
+                return Err(Error::InvalidStoredValue(
+                    "duplicate active catalogue sequence",
+                ));
+            }
+        }
         for staged in staged_lineages_by_id.into_values() {
-            if active_lineage_ids.contains(&staged.publication.id) {
+            Self::validate_durable_staged_lineage(&staged, &catalogue_schemas)?;
+            if staged.catalogue_seq == 0 {
+                return Err(Error::InvalidStoredValue(
+                    "staged schema lineage sequence must be nonzero",
+                ));
+            }
+            if !lineage_targets.insert(staged.publication.schema.id) {
+                return Err(Error::InvalidStoredValue(
+                    "duplicate durable schema lineage target",
+                ));
+            }
+            if let Some(active) = active_lineages_by_id.remove(&staged.publication.id) {
+                if active.catalogue_seq != staged.catalogue_seq {
+                    return Err(Error::InvalidStoredValue(
+                        "active schema lineage payload conflicts with marker",
+                    ));
+                }
                 active_lineages_by_target.insert(staged.publication.schema.id, staged);
+            } else if active_lineages_by_seq.contains_key(&staged.catalogue_seq) {
+                return Err(Error::InvalidStoredValue(
+                    "staged catalogue sequence conflicts with active lineage",
+                ));
             } else if staged_lineages
                 .insert(staged.catalogue_seq, staged)
                 .is_some()
@@ -1543,6 +1843,23 @@ where
                 ));
             }
         }
+        if !active_lineages_by_id.is_empty() {
+            return Err(Error::InvalidStoredValue(
+                "active schema lineage is missing canonical payload",
+            ));
+        }
+        for (expected, actual) in (1..).zip(active_lineages_by_seq.keys().copied()) {
+            if actual != expected {
+                return Err(Error::InvalidStoredValue(
+                    "active catalogue sequences are not contiguous",
+                ));
+            }
+        }
+        let active_catalogue_seq = active_lineages_by_seq
+            .keys()
+            .next_back()
+            .copied()
+            .unwrap_or(0);
         let mut schema_version_aliases = BTreeMap::new();
         let mut physical_mappings = BTreeMap::new();
         for raw in meta_database.primary_key_scan_raw("jazz_schema_versions", &[])? {
@@ -1609,6 +1926,22 @@ where
             }
             _ => {}
         }
+        if catalogue_bootstrap_state == CatalogueBootstrapState::Uninitialized
+            && (genesis_schema.is_some()
+                || !catalogue_schemas.is_empty()
+                || !catalogue_lenses.is_empty()
+                || !physical_mappings.is_empty()
+                || !schema_version_aliases.is_empty()
+                || active_catalogue_seq != 0
+                || !staged_lineages.is_empty()
+                || !pending_lineages.is_empty()
+                || !active_lineages_by_target.is_empty()
+                || !pending_write_pointers.is_empty())
+        {
+            return Err(Error::InvalidStoredValue(
+                "uninitialized catalogue open requires empty durable catalogue state",
+            ));
+        }
         let had_current_schema = catalogue_schemas.contains_key(&current_schema_version_id);
         if !had_current_schema {
             catalogue_schemas.insert(
@@ -1639,34 +1972,36 @@ where
                         .checked_add(1)
                         .ok_or(Error::InvalidStoredValue("schema version alias exhausted"))?,
                 ));
-            let mut batch = meta_database.open_batch();
-            if genesis_schema.is_none() {
-                batch.update(
-                    "jazz_catalogue",
-                    vec![
-                        Value::Bytes(b"genesis".to_vec()),
-                        Value::Uuid(current_schema_version_id.0),
-                        Value::Bytes(Vec::new()),
-                    ],
-                );
+            if catalogue_bootstrap_state == CatalogueBootstrapState::Ready {
+                let mut batch = meta_database.open_batch();
+                if genesis_schema.is_none() {
+                    batch.update(
+                        "jazz_catalogue",
+                        vec![
+                            Value::Bytes(b"genesis".to_vec()),
+                            Value::Uuid(current_schema_version_id.0),
+                            Value::Bytes(Vec::new()),
+                        ],
+                    );
+                }
+                if !had_current_schema {
+                    batch.update(
+                        "jazz_catalogue",
+                        vec![
+                            Value::Bytes(b"schema".to_vec()),
+                            Value::Uuid(current_schema_version_id.0),
+                            Value::Bytes(serde_json::to_vec(&SchemaVersion::new(schema.clone()))?),
+                        ],
+                    );
+                }
+                Self::write_schema_version_mapping_to_batch(
+                    &mut batch,
+                    alias,
+                    current_schema_version_id,
+                    &mapping,
+                )?;
+                meta_database.commit_batch(batch)?;
             }
-            if !had_current_schema {
-                batch.update(
-                    "jazz_catalogue",
-                    vec![
-                        Value::Bytes(b"schema".to_vec()),
-                        Value::Uuid(current_schema_version_id.0),
-                        Value::Bytes(serde_json::to_vec(&SchemaVersion::new(schema.clone()))?),
-                    ],
-                );
-            }
-            Self::write_schema_version_mapping_to_batch(
-                &mut batch,
-                alias,
-                current_schema_version_id,
-                &mapping,
-            )?;
-            meta_database.commit_batch(batch)?;
             schema_version_aliases.insert(current_schema_version_id, alias);
             physical_mappings.insert(current_schema_version_id, mapping);
         }
@@ -1708,7 +2043,41 @@ where
             next_physical_column_id,
             current_write_schema,
             branch_partitions,
+            catalogue_bootstrap_marker: catalogue_bootstrap_ready.is_some(),
         })
+    }
+
+    fn validate_durable_staged_lineage(
+        staged: &StagedSchemaLineage,
+        catalogue_schemas: &BTreeMap<SchemaVersionId, SchemaVersion>,
+    ) -> Result<(), Error> {
+        Self::validate_schema_lineage_publication(&staged.publication).map_err(|_| {
+            Error::InvalidStoredValue(
+                "staged schema lineage violates trusted publication invariants",
+            )
+        })?;
+        let source = catalogue_schemas
+            .get(&staged.publication.lens.source)
+            .ok_or(Error::InvalidStoredValue(
+                "staged schema lineage source is missing",
+            ))?;
+        Self::validate_migration_lens_between(
+            &staged.publication.lens,
+            source,
+            &staged.publication.schema,
+        )
+        .map_err(|_| Error::InvalidStoredValue("staged schema lineage lens is invalid"))?;
+        Self::validate_lineage_table_partition(
+            &source.schema,
+            &staged.publication.schema.schema,
+            &staged.publication.lens,
+            &staged.publication.new_tables,
+            &staged.publication.dropped_tables,
+        )
+        .map_err(|_| {
+            Error::InvalidStoredValue("staged schema lineage table partition is invalid")
+        })?;
+        Ok(())
     }
 
     /// Commit a local mergeable write and leave its fate pending.
@@ -1739,59 +2108,15 @@ where
         self.commit_mergeable_many_at(commits, made_at)
     }
 
-    /// Commit explicit text/blob edit operations for one large-value column.
-    pub fn commit_large_value_edit(&mut self, edit: LargeValueEditCommit) -> Result<TxId, Error> {
-        edit.validate()?;
-        if let Some(parent) =
-            self.current_layer_parent_tx_id(&edit.table, edit.row_uuid, VersionLayer::Content)?
-        {
-            self.merge_tx_time(parent.time);
-        }
-        let made_at = self.mint_tx_time(edit.now_ms);
-        self.commit_large_value_edit_at(edit, made_at)
-    }
-
     fn merge_commit_parent_times(&mut self, commits: &[MergeableCommit]) -> Result<(), Error> {
         for commit in commits {
-            if commit.parents.is_empty() {
-                let table_schema = self
-                    .table_in_schema(&commit.table, self.catalogue.current_write_schema.schema)?;
-                if table_schema
-                    .columns
-                    .iter()
-                    .any(|column| column.large_value.is_some())
-                {
-                    let layer = VersionLayer::for_commit(commit);
-                    if let Some(parent) =
-                        self.current_layer_parent_tx_id(&commit.table, commit.row_uuid, layer)?
-                    {
-                        self.merge_tx_time(parent.time);
-                    }
-                }
-            } else {
+            if !commit.parents.is_empty() {
                 for parent in &commit.parents {
                     self.merge_tx_time(parent.time);
                 }
             }
         }
         Ok(())
-    }
-
-    fn current_layer_parent_tx_id(
-        &mut self,
-        table: &str,
-        row_uuid: RowUuid,
-        layer: VersionLayer,
-    ) -> Result<Option<TxId>, Error> {
-        let table_schema =
-            self.table_in_schema(table, self.catalogue.current_write_schema.schema)?;
-        match self.query_local_layer_winner(&table_schema.name, row_uuid, layer)? {
-            Some(previous) => self.version_tx_id(&previous).map(Some),
-            None => self
-                .query_global_layer_winner(&table_schema.name, row_uuid, layer)?
-                .map(|previous| self.version_tx_id(&previous))
-                .transpose(),
-        }
     }
 
     fn commit_mergeable_at(
@@ -1816,6 +2141,7 @@ where
         made_at: TxTime,
         branch_merge: Option<BranchMergeProvenance>,
     ) -> Result<TxId, Error> {
+        self.require_catalogue_ready()?;
         let write_schema_version = self.catalogue.current_write_schema.schema;
         let commits = commits
             .into_iter()
@@ -1849,7 +2175,6 @@ where
             user_metadata_json,
             target_lineage: crate::tx::BranchLineage::Root,
             branch_merge,
-            merge_strategy: commits[0].1.merge_strategy.clone(),
         };
         let tx_node_alias = self.ensure_node_alias(tx_id.node)?;
         let mut batch = self.database.open_batch();
@@ -1860,7 +2185,7 @@ where
                 &tx,
                 Fate::Pending,
                 None,
-                DurabilityTier::Local,
+                self.authored_commit_durability,
             ),
         );
         let mut stored_versions = Vec::new();
@@ -1899,36 +2224,12 @@ where
                 .map(|version| (version.created_by(), version.created_at()))
                 .unwrap_or((commit.made_by, TxTime(commit.now_ms)));
 
-            let implicit_parent = if table_schema
-                .columns
-                .iter()
-                .any(|column| column.large_value.is_some())
-            {
-                previous_current
-                    .as_ref()
-                    .map(|previous| self.version_tx_id(previous))
-                    .transpose()?
-            } else {
-                None
-            };
-            let explicit_parent_count = commit.parents.len();
             let parents = if commit.parents.is_empty() {
-                implicit_parent.into_iter().collect()
+                Vec::new()
             } else {
                 commit.parents
             };
-            let cells = if explicit_parent_count > 1 && commit.merge_strategy.is_some() {
-                commit.cells
-            } else {
-                self.encode_large_value_cells(
-                    &table_schema,
-                    write_schema_version,
-                    commit.row_uuid,
-                    commit.made_by,
-                    commit.cells,
-                    previous_current.as_ref(),
-                )?
-            };
+            let cells = commit.cells;
             let authored_columns = Some(
                 commit
                     .authored_columns
@@ -1970,7 +2271,7 @@ where
             let (history_table, groove_record) = self.version_storage_write_binding(&stored)?;
             batch.insert_raw(
                 history_table.as_ref(),
-                history_primary_key(&stored),
+                self.version_storage_primary_key(&stored, BranchLineage::Root)?,
                 groove_record,
             );
             self.update_merge_heads_for_content_version(&mut batch, &stored)?;
@@ -1999,170 +2300,6 @@ where
         Ok(tx_id)
     }
 
-    fn commit_large_value_edit_at(
-        &mut self,
-        edit: LargeValueEditCommit,
-        made_at: TxTime,
-    ) -> Result<TxId, Error> {
-        let write_schema_version = self.catalogue.current_write_schema.schema;
-        let table_schema = self.table_in_schema(&edit.table, write_schema_version)?;
-        let column = table_schema
-            .columns
-            .iter()
-            .find(|column| column.name == edit.column)
-            .ok_or(Error::InvalidMergeableCommit(
-                "large-value edit column not found",
-            ))?;
-        if column.large_value.is_none() {
-            return Err(Error::InvalidMergeableCommit(
-                "large-value edit column must be text or blob",
-            ));
-        }
-        // Format-declared text columns currently accept whole-value writes only.
-        // Canonicalizing op streams would rewrite client-authored ops, so this
-        // remains a named staging limitation until an op-preserving design lands.
-        if column.text_merge_spec.is_some() {
-            return Err(Error::InvalidMergeableCommit(
-                "op edits on format-declared columns not supported yet",
-            ));
-        }
-
-        let tx_id = TxId::new(made_at, self.node_uuid);
-        let tx = Transaction {
-            tx_id,
-            kind: TxKind::Mergeable,
-            n_total_writes: 1,
-            made_by: edit.made_by,
-            permission_subject: None,
-            base_snapshot: None,
-            row_read_set: None,
-            absent_read_set: None,
-            predicate_read_set: None,
-            user_metadata_json: edit.user_metadata_json.clone(),
-            target_lineage: crate::tx::BranchLineage::Root,
-            branch_merge: None,
-            merge_strategy: None,
-        };
-        let tx_node_alias = self.ensure_node_alias(tx_id.node)?;
-        let previous_current = match self.query_local_layer_winner(
-            &table_schema.name,
-            edit.row_uuid,
-            VersionLayer::Content,
-        )? {
-            Some(previous) => Some(previous),
-            None => self.query_global_layer_winner(
-                &table_schema.name,
-                edit.row_uuid,
-                VersionLayer::Content,
-            )?,
-        };
-        let (created_by, created_at) = previous_current
-            .as_ref()
-            .map(|version| (version.created_by(), version.created_at()))
-            .unwrap_or((edit.made_by, TxTime(edit.now_ms)));
-        let parent_len = match previous_current.as_ref() {
-            Some(parent) => self.large_value_column_len(&table_schema, parent, &edit.column)?,
-            None => 0,
-        };
-        let table = edit.table.clone();
-        let row_uuid = edit.row_uuid;
-        let made_by = edit.made_by;
-        let updated_at = TxTime(edit.now_ms);
-        let column_name = edit.column.clone();
-        let inline_ops = edit.ops;
-        validate_large_value_edit_ranges(parent_len, &inline_ops)?;
-        let cell_payload = match column.large_value {
-            Some(LargeValueKind::Text) => {
-                let text_ops = large_value_edit_ops_to_legacy_text_ops(inline_ops);
-                let ops = self.extent_back_text_ops(
-                    write_schema_version,
-                    &table,
-                    made_by,
-                    row_uuid,
-                    &column_name,
-                    text_ops,
-                )?;
-                encode_extent_text_ops(&ops)
-            }
-            Some(LargeValueKind::Blob) => {
-                let text_ops = large_value_edit_ops_to_legacy_text_ops(inline_ops);
-                let ops = self.extent_back_text_ops(
-                    write_schema_version,
-                    &table,
-                    made_by,
-                    row_uuid,
-                    &column_name,
-                    text_ops,
-                )?;
-                text_oplog::encode(&ops)
-            }
-            None => {
-                return Err(Error::InvalidMergeableCommit(
-                    "large-value edit column must be text or blob",
-                ));
-            }
-        };
-        let cells = BTreeMap::from([(column_name.clone(), Value::Bytes(cell_payload))]);
-        let parents = previous_current
-            .as_ref()
-            .map(|previous| self.version_tx_id(previous))
-            .transpose()?
-            .into_iter()
-            .collect();
-        let schema_version_alias = self.ensure_schema_version_alias(write_schema_version)?;
-        let stored = VersionRow::from_parts_with_schema_version(
-            &table_schema,
-            VersionRowParts {
-                table,
-                row_uuid,
-                tx_node_alias,
-                schema_version_alias,
-                tx_time: made_at,
-                parents,
-                created_by,
-                created_at,
-                updated_by: made_by,
-                updated_at,
-                cells,
-                authored_columns: Some(BTreeSet::from([column_name.clone()])),
-                deletion: None,
-            },
-            (write_schema_version != self.catalogue.current_schema_version_id)
-                .then_some(write_schema_version),
-        )?;
-        let mut batch = self.database.open_batch();
-        batch.insert(
-            "jazz_transactions",
-            transaction_values(
-                tx_node_alias,
-                &tx,
-                Fate::Pending,
-                None,
-                DurabilityTier::Local,
-            ),
-        );
-        let (history_table, groove_record) = self.version_storage_write_binding(&stored)?;
-        batch.insert_raw(
-            history_table.as_ref(),
-            history_primary_key(&stored),
-            groove_record,
-        );
-        self.update_merge_heads_for_content_version(&mut batch, &stored)?;
-        self.write_ahead_current_insert(&mut batch, &stored)?;
-        for parent in stored.parents() {
-            if let Some(parent_alias) = self.node_aliases.get(&parent.node).copied() {
-                batch.insert(
-                    "jazz_pending_edges",
-                    pending_edge_values(tx_node_alias, tx_id, parent_alias, parent),
-                );
-            }
-        }
-        self.database.commit_batch(batch)?;
-        self.cache_tx_versions(tx_id, vec![stored.clone()]);
-        self.record_child_edges(tx_id, stored.parents());
-        Ok(tx_id)
-    }
-
     /// Commit a local mergeable write and return its sync commit unit.
     pub fn commit_mergeable_unit(
         &mut self,
@@ -2177,7 +2314,7 @@ where
     ///
     /// Used by the `Db` sync surface to upload a client's local writes upstream
     /// on a connection. Unlike [`NodeState::commit_mergeable_unit`] this reads the
-    /// stored versions (carrying any large-value extent refs), so the shipped
+    /// stored versions, so the shipped
     /// unit matches what the author actually stored.
     pub fn commit_unit_for(&mut self, tx_id: TxId) -> Result<SyncMessage, Error> {
         let tx = self
@@ -2222,6 +2359,7 @@ where
         table: &str,
         settled: DurabilityTier,
     ) -> Result<Vec<CurrentRow>, Error> {
+        self.require_catalogue_ready()?;
         let shape = crate::query::Query::from(table).validate(&self.catalogue.schema)?;
         let binding = shape.bind(BTreeMap::new())?;
         self.query_rows(&shape, &binding, settled)
@@ -2426,251 +2564,6 @@ where
         }
     }
 
-    fn encode_large_value_cells(
-        &mut self,
-        table: &TableSchema,
-        schema_version: SchemaVersionId,
-        row_uuid: RowUuid,
-        writer: AuthorId,
-        mut cells: BTreeMap<String, Value>,
-        parent: Option<&VersionRow>,
-    ) -> Result<BTreeMap<String, Value>, Error> {
-        for column in table
-            .columns
-            .iter()
-            .filter(|column| column.large_value.is_some())
-        {
-            let Some(Value::Bytes(new_value)) = cells.get(&column.name).cloned() else {
-                continue;
-            };
-            let parent_value = match parent {
-                Some(parent) => self.materialize_large_value_column(table, parent, &column.name)?,
-                None => Vec::new(),
-            };
-            match column.large_value {
-                Some(LargeValueKind::Text) => {
-                    let new_value =
-                        self.canonicalize_format_value(table, schema_version, column, &new_value)?;
-                    let ops = text_oplog::diff(&parent_value, &new_value)
-                        .into_iter()
-                        .collect::<Vec<_>>();
-                    let ops = self.extent_back_text_ops(
-                        schema_version,
-                        &table.name,
-                        writer,
-                        row_uuid,
-                        &column.name,
-                        ops,
-                    )?;
-                    cells.insert(
-                        column.name.clone(),
-                        Value::Bytes(encode_extent_text_ops(&ops)),
-                    );
-                }
-                Some(LargeValueKind::Blob) => {
-                    let ops = text_oplog::diff(&parent_value, &new_value)
-                        .into_iter()
-                        .collect::<Vec<_>>();
-                    let ops = self.extent_back_text_ops(
-                        schema_version,
-                        &table.name,
-                        writer,
-                        row_uuid,
-                        &column.name,
-                        ops,
-                    )?;
-                    cells.insert(column.name.clone(), Value::Bytes(text_oplog::encode(&ops)));
-                }
-                None => {}
-            }
-        }
-        Ok(cells)
-    }
-
-    fn canonicalize_format_value(
-        &self,
-        table: &TableSchema,
-        schema_version: SchemaVersionId,
-        column: &ColumnSchema,
-        authored: &[u8],
-    ) -> Result<Vec<u8>, Error> {
-        let Some(spec) = column.text_merge_spec.clone() else {
-            return Ok(authored.to_vec());
-        };
-        let Some(strategy) = self
-            .text_merge_strategies
-            .get(&(spec.strategy_id.clone(), spec.strategy_version))
-        else {
-            return Ok(authored.to_vec());
-        };
-        let input = CanonicalizeInput {
-            schema_version,
-            table: table.name.clone(),
-            column: column.name.clone(),
-            spec_hash: spec.spec_hash(),
-            spec,
-        };
-        match strategy.canonicalize(authored, &input) {
-            Ok(Some(canonical)) => Ok(canonical),
-            Ok(None) => Ok(authored.to_vec()),
-            Err(_) => Err(Error::InvalidMergeableCommit(
-                "format canonicalization failed",
-            )),
-        }
-    }
-
-    fn extent_back_text_ops(
-        &self,
-        schema: SchemaVersionId,
-        table: &str,
-        writer: AuthorId,
-        row_uuid: RowUuid,
-        column: &str,
-        ops: Vec<TextOp>,
-    ) -> Result<Vec<TextOp>, Error> {
-        ops.into_iter()
-            .map(|op| match op {
-                TextOp::Insert {
-                    pos,
-                    content: TextContent::Inline(bytes),
-                } => {
-                    let mut ops = Vec::new();
-                    for chunk in bytes.chunks(MAX_CONTENT_EXTENT_BYTES) {
-                        let extent = self
-                            .content_store()
-                            .append(schema, table, writer, row_uuid, column, chunk)?;
-                        ops.push(TextOp::Insert {
-                            pos,
-                            content: TextContent::Ref(extent),
-                        });
-                    }
-                    Ok(ops)
-                }
-                TextOp::Insert {
-                    content: TextContent::Ref(_),
-                    ..
-                } => Err(Error::InvalidStoredValue(
-                    "text op input already has ref content",
-                )),
-                TextOp::Delete { pos, len } => Ok(vec![TextOp::Delete { pos, len }]),
-            })
-            .collect::<Result<Vec<_>, Error>>()
-            .map(|chunks| chunks.into_iter().flatten().collect())
-    }
-
-    fn materialize_large_value_column(
-        &mut self,
-        table: &TableSchema,
-        winner: &VersionRow,
-        column: &str,
-    ) -> Result<Vec<u8>, Error> {
-        self.large_value_metrics.materializations =
-            self.large_value_metrics.materializations.saturating_add(1);
-        let winner_tx_id = self.version_tx_id(winner)?;
-        let authored_schema = self
-            .schema_version_for_alias(winner.schema_version_alias())
-            .ok_or(Error::InvalidStoredValue(
-                "large-value schema alias is unknown",
-            ))?;
-        let (authored_table, authored_column) =
-            self.authored_large_value_identity(authored_schema, table, column)?;
-        let (table_id, column_id) =
-            self.large_value_lineage_ids(authored_schema, &authored_table, &authored_column)?;
-        let cache_key = large_value_cache_key(
-            authored_schema,
-            &authored_table,
-            winner.row_uuid(),
-            &authored_column,
-            winner_tx_id,
-        );
-        if let Some(value) = self.large_value_materialization_cache.get(&cache_key) {
-            self.large_value_metrics.last_replayed_ops = 0;
-            self.large_value_metrics.last_replayed_versions = 0;
-            return Ok(value.clone());
-        }
-        let mut suffix = Vec::new();
-        let mut current = winner_tx_id;
-        let mut checkpoint = None;
-        loop {
-            let (version, version_table, version_column, version_schema) =
-                self.large_value_version_for_tx(current, winner.row_uuid(), table_id, column_id)?;
-            if let Some(value) = self.large_value_checkpoint(
-                version_schema,
-                &version_table,
-                version.row_uuid(),
-                &version_column,
-                current,
-            )? {
-                checkpoint = Some(value);
-                self.large_value_metrics.checkpoint_hits =
-                    self.large_value_metrics.checkpoint_hits.saturating_add(1);
-                break;
-            }
-            let parents = version.parents();
-            suffix.push((version, version_table, version_column));
-            match parents.as_slice() {
-                [] => break,
-                [parent] => current = *parent,
-                _ => current = self.large_value_primary_parent(&parents)?,
-            }
-        }
-        suffix.reverse();
-
-        let mut value = checkpoint.unwrap_or_default();
-        let mut replayed_ops = 0usize;
-        for (version, version_table, version_column) in &suffix {
-            let Some(Value::Bytes(payload)) = version.cell(version_table, version_column)? else {
-                continue;
-            };
-            match column_large_value_kind(version_table, version_column)? {
-                LargeValueKind::Text => {
-                    let op = self.decode_text_storage_op(&payload)?;
-                    replayed_ops = replayed_ops.checked_add(op.runs().len()).ok_or(
-                        Error::InvalidStoredValue("large value replay op count overflow"),
-                    )?;
-                    value = op
-                        .apply(&value)
-                        .map_err(|_| Error::InvalidStoredValue("invalid text op payload"))?;
-                }
-                LargeValueKind::Blob => {
-                    let stored_ops = text_oplog::decode(&payload)?;
-                    replayed_ops = replayed_ops.checked_add(stored_ops.len()).ok_or(
-                        Error::InvalidStoredValue("large value replay op count overflow"),
-                    )?;
-                    let ops = self.resolve_text_op_refs(stored_ops)?;
-                    value = text_oplog::replay(&value, &ops);
-                }
-            }
-        }
-        self.large_value_metrics.last_replayed_ops = replayed_ops;
-        self.large_value_metrics.total_replayed_ops = self
-            .large_value_metrics
-            .total_replayed_ops
-            .saturating_add(replayed_ops as u64);
-        self.large_value_metrics.last_replayed_versions = suffix.len();
-        if replayed_ops >= self.large_value_checkpoint_op_interval {
-            self.put_large_value_checkpoint(table, winner, column, &value)?;
-            self.large_value_metrics.checkpoint_writes =
-                self.large_value_metrics.checkpoint_writes.saturating_add(1);
-        }
-        self.cache_large_value_materialization(cache_key, value.clone());
-        Ok(value)
-    }
-
-    fn cache_large_value_materialization(&mut self, key: LargeValueCacheKey, value: Vec<u8>) {
-        if !self.large_value_materialization_cache.contains_key(&key)
-            && self.large_value_materialization_cache.len()
-                >= LARGE_VALUE_MATERIALIZATION_CACHE_MAX_ENTRIES
-            && let Some(oldest_key) = self
-                .large_value_materialization_cache
-                .first_key_value()
-                .map(|(key, _)| key.clone())
-        {
-            self.large_value_materialization_cache.remove(&oldest_key);
-        }
-        self.large_value_materialization_cache.insert(key, value);
-    }
-
     pub(super) fn cached_tx_version_tables(&self, tx_id: TxId) -> Option<BTreeSet<String>> {
         self.query.tx_version_tables_cache.get(&tx_id).cloned()
     }
@@ -2722,353 +2615,28 @@ where
         self.query.tx_version_tables_cache.remove(&tx_id);
     }
 
-    fn large_value_checkpoint(
-        &self,
-        schema: SchemaVersionId,
-        table: &TableSchema,
-        row_uuid: RowUuid,
-        column: &str,
-        version: TxId,
-    ) -> Result<Option<Vec<u8>>, Error> {
-        let (authored_table, authored_column) =
-            self.authored_large_value_identity(schema, table, column)?;
-        self.content_store().checkpoint(
-            schema,
-            &authored_table,
-            row_uuid,
-            &authored_column,
-            version,
-        )
-    }
-
-    fn put_large_value_checkpoint(
-        &self,
-        table: &TableSchema,
-        version: &VersionRow,
-        column: &str,
-        value: &[u8],
-    ) -> Result<(), Error> {
-        let tx_id = self.version_tx_id(version)?;
-        let authored_schema = self
-            .schema_version_for_alias(version.schema_version_alias())
-            .ok_or(Error::InvalidStoredValue(
-                "large-value schema alias is unknown",
-            ))?;
-        let (authored_table, authored_column) =
-            self.authored_large_value_identity(authored_schema, table, column)?;
-        self.content_store().put_checkpoint(
-            authored_schema,
-            &authored_table,
-            version.row_uuid(),
-            &authored_column,
-            tx_id,
-            value,
-        )
-    }
-
-    pub(super) fn checkpoint_large_values_for_tx(&mut self, tx_id: TxId) -> Result<(), Error> {
-        let versions = self.query_versions_for_tx(tx_id)?;
-        self.checkpoint_large_values_for_versions(&versions)
-    }
-
-    pub(super) fn checkpoint_large_values_for_versions(
-        &mut self,
-        versions: &[VersionRow],
-    ) -> Result<(), Error> {
-        for version in versions {
-            if version.layer() != VersionLayer::Content {
-                continue;
-            }
-            let schema_version = self
-                .schema_version_for_alias(version.schema_version_alias())
-                .ok_or(Error::InvalidStoredValue("unknown schema version alias"))?;
-            let table = self.table_in_schema(version.table(), schema_version)?;
-            for column in table
-                .columns
-                .iter()
-                .filter(|column| column.large_value.is_some())
-            {
-                if version.cell(&table, &column.name)?.is_none() {
-                    continue;
-                }
-                if self.large_value_replay_ops_since_checkpoint(&table, &version, &column.name)?
-                    < self.large_value_checkpoint_op_interval
-                {
-                    continue;
-                }
-                let _ = self.materialize_large_value_column(&table, &version, &column.name)?;
-            }
-        }
-        Ok(())
-    }
-
-    fn large_value_replay_ops_since_checkpoint(
-        &mut self,
-        table: &TableSchema,
-        winner: &VersionRow,
-        column: &str,
-    ) -> Result<usize, Error> {
-        let mut replayed_ops = 0usize;
-        let mut current = self.version_tx_id(winner)?;
-        let schema = self
-            .schema_version_for_alias(winner.schema_version_alias())
-            .ok_or(Error::InvalidStoredValue(
-                "large-value schema alias is unknown",
-            ))?;
-        let (authored_table, authored_column) =
-            self.authored_large_value_identity(schema, table, column)?;
-        let (table_id, column_id) =
-            self.large_value_lineage_ids(schema, &authored_table, &authored_column)?;
-        loop {
-            let (version, version_table, version_column, version_schema) =
-                self.large_value_version_for_tx(current, winner.row_uuid(), table_id, column_id)?;
-            if self
-                .large_value_checkpoint(
-                    version_schema,
-                    &version_table,
-                    version.row_uuid(),
-                    &version_column,
-                    current,
-                )?
-                .is_some()
-            {
-                return Ok(replayed_ops);
-            }
-            if let Some(Value::Bytes(payload)) = version.cell(&version_table, &version_column)? {
-                let op_count = match column_large_value_kind(&version_table, &version_column)? {
-                    LargeValueKind::Text => self.decode_text_storage_op(&payload)?.runs().len(),
-                    LargeValueKind::Blob => text_oplog::decode(&payload)?.len(),
-                };
-                replayed_ops =
-                    replayed_ops
-                        .checked_add(op_count)
-                        .ok_or(Error::InvalidStoredValue(
-                            "large value replay op count overflow",
-                        ))?;
-            }
-            let parents = version.parents();
-            match parents.as_slice() {
-                [] => return Ok(replayed_ops),
-                [parent] => current = *parent,
-                _ => current = self.large_value_primary_parent(&parents)?,
-            }
-        }
-    }
-
-    fn large_value_column_len(
-        &mut self,
-        table: &TableSchema,
-        winner: &VersionRow,
-        column: &str,
-    ) -> Result<usize, Error> {
-        if let Some(Value::Bytes(bytes)) = winner.cell(table, column)?
-            && bytes.starts_with(LARGE_VALUE_HANDLE_MAGIC)
-        {
-            return usize::try_from(decode_large_value_handle(&bytes)?.len)
-                .map_err(|_| Error::InvalidStoredValue("large-value handle length exceeds usize"));
-        }
-        let mut suffix = Vec::new();
-        let winner_tx = self.version_tx_id(winner)?;
-        let mut current = winner_tx;
-        let mut checkpoint_len = None;
-        let schema = self
-            .schema_version_for_alias(winner.schema_version_alias())
-            .ok_or(Error::InvalidStoredValue(
-                "large-value schema alias is unknown",
-            ))?;
-        let (authored_table, authored_column) = if self
-            .catalogue
-            .physical_mappings
-            .get(&schema)
-            .and_then(|mapping| mapping.tables.get(winner.table()))
-            .is_some_and(|mapping| mapping.columns.contains_key(column))
-        {
-            (winner.table().to_owned(), column.to_owned())
-        } else {
-            self.authored_large_value_identity(schema, table, column)?
-        };
-        let (table_id, column_id) =
-            self.large_value_lineage_ids(schema, &authored_table, &authored_column)?;
-        let authored_table_schema = self.table_in_schema(&authored_table, schema)?.clone();
-        loop {
-            let (version, version_table, version_column, version_schema) = if current == winner_tx {
-                (
-                    winner.clone(),
-                    authored_table_schema.clone(),
-                    authored_column.clone(),
-                    schema,
-                )
-            } else {
-                self.large_value_version_for_tx(current, winner.row_uuid(), table_id, column_id)?
-            };
-            if let Some(value) = self.large_value_checkpoint(
-                version_schema,
-                &version_table,
-                version.row_uuid(),
-                &version_column,
-                current,
-            )? {
-                checkpoint_len = Some(value.len());
-                break;
-            }
-            let parents = version.parents();
-            suffix.push((version, version_table, version_column));
-            match parents.as_slice() {
-                [] => break,
-                [parent] => current = *parent,
-                _ => current = self.large_value_primary_parent(&parents)?,
-            }
-        }
-        suffix.reverse();
-
-        let mut value_len = checkpoint_len.unwrap_or_default();
-        for (version, version_table, version_column) in &suffix {
-            let Some(Value::Bytes(payload)) = version.cell(version_table, version_column)? else {
-                continue;
-            };
-            match column_large_value_kind(version_table, version_column)? {
-                LargeValueKind::Text => {
-                    let op = self.decode_text_storage_op(&payload)?;
-                    let value = vec![0; value_len];
-                    value_len = op
-                        .apply(&value)
-                        .map_err(|_| Error::InvalidStoredValue("invalid text op payload"))?
-                        .len();
-                }
-                LargeValueKind::Blob => {
-                    for op in text_oplog::decode(&payload)? {
-                        match op {
-                            TextOp::Insert { content, .. } => {
-                                value_len =
-                                    value_len.checked_add(text_content_len(&content)?).ok_or(
-                                        Error::InvalidStoredValue("large value length overflow"),
-                                    )?;
-                            }
-                            TextOp::Delete { len, .. } => {
-                                value_len = value_len.checked_sub(len).ok_or(
-                                    Error::InvalidStoredValue("large value length underflow"),
-                                )?;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        Ok(value_len)
-    }
-
-    fn large_value_primary_parent(&mut self, parents: &[TxId]) -> Result<TxId, Error> {
-        parents
-            .iter()
-            .copied()
-            .map(|parent| {
-                let made_at = self
-                    .transaction_made_at(parent)?
-                    .ok_or(Error::MissingTransaction(parent))?;
-                Ok((made_at.sort_key(parent.node), parent))
-            })
-            .collect::<Result<Vec<_>, Error>>()?
-            .into_iter()
-            .max_by_key(|(key, _)| *key)
-            .map(|(_, parent)| parent)
-            .ok_or(Error::InvalidStoredValue(
-                "large value materialization requires at least one parent",
-            ))
-    }
-
-    /// Deterministic counters for large-value materialization and checkpoint use.
-    pub fn large_value_metrics(&self) -> &LargeValueMetrics {
-        &self.large_value_metrics
-    }
-
-    /// Reset large-value materialization counters.
-    pub fn reset_large_value_metrics(&mut self) {
-        self.large_value_metrics = LargeValueMetrics::default();
-    }
-
-    fn resolve_text_op_refs(&self, ops: Vec<TextOp>) -> Result<Vec<TextOp>, Error> {
-        ops.into_iter()
-            .map(|op| match op {
-                TextOp::Insert {
-                    pos,
-                    content: TextContent::Ref(extent),
-                } => Ok(TextOp::Insert {
-                    pos,
-                    content: TextContent::Inline(self.content_store().read(&extent)?),
-                }),
-                TextOp::Insert { .. } | TextOp::Delete { .. } => Ok(op),
-            })
-            .collect()
-    }
-
-    fn decode_text_storage_op(&self, payload: &[u8]) -> Result<PlainTextOp, Error> {
-        if let Some(extent_payload) = payload.strip_prefix(TEXT_EXTENT_OPS_MAGIC) {
-            let ops = self.resolve_text_op_refs(text_oplog::decode(extent_payload)?)?;
-            let mut runs = Vec::new();
-            let mut cursor = 0usize;
-            for op in ops {
-                match op {
-                    TextOp::Insert {
-                        pos,
-                        content: TextContent::Inline(bytes),
-                    } => {
-                        if pos > cursor {
-                            runs.push(PlainTextRun::Retain(pos - cursor));
-                            cursor = pos;
-                        }
-                        runs.push(PlainTextRun::Insert(bytes));
-                    }
-                    TextOp::Insert {
-                        content: TextContent::Ref(_),
-                        ..
-                    } => {
-                        return Err(Error::InvalidStoredValue(
-                            "text extent op refs must be resolved",
-                        ));
-                    }
-                    TextOp::Delete { pos, len } => {
-                        if pos > cursor {
-                            runs.push(PlainTextRun::Retain(pos - cursor));
-                            cursor = pos;
-                        }
-                        runs.push(PlainTextRun::Delete(len));
-                        cursor = cursor
-                            .checked_add(len)
-                            .ok_or(Error::InvalidStoredValue("text extent op cursor overflow"))?;
-                    }
-                }
-            }
-            return Ok(PlainTextOp::new(runs));
-        }
-        decode_plain_text_op(payload)
-    }
-
     fn materialize_current_row(
         &mut self,
-        table: &TableSchema,
+        _table: &TableSchema,
         row: CurrentRow,
     ) -> Result<CurrentRow, Error> {
-        if !table
-            .columns
-            .iter()
-            .any(|column| column.large_value.is_some())
-        {
-            return Ok(row);
-        }
-        let Some((tx_time, tx_node_alias)) = row.projected_tx_alias() else {
-            return Ok(row);
-        };
-        let Some(version) = self.query_version_by_alias(
-            &table.name,
-            row.row_uuid(),
-            VersionLayer::Content,
-            tx_time,
-            tx_node_alias,
-        )?
-        else {
-            return Ok(row);
-        };
-        self.current_row_from_materialized_version(table, &version)
+        Ok(row)
+    }
+
+    fn current_row_from_materialized_version(
+        &mut self,
+        table: &TableSchema,
+        version: &VersionRow,
+    ) -> Result<CurrentRow, Error> {
+        current_row_from_version_projection(table, version)
+    }
+
+    fn materialized_cells_for_version(
+        &mut self,
+        table: &TableSchema,
+        version: &VersionRow,
+    ) -> Result<BTreeMap<String, Value>, Error> {
+        version.cells(table)
     }
 
     pub(crate) fn local_current_row(
@@ -3228,355 +2796,7 @@ where
         }))
     }
 
-    fn current_row_from_materialized_version(
-        &mut self,
-        table: &TableSchema,
-        version: &VersionRow,
-    ) -> Result<CurrentRow, Error> {
-        if !table
-            .columns
-            .iter()
-            .any(|column| column.large_value.is_some())
-        {
-            return current_row_from_version_projection(table, version);
-        }
-        let cells = self.materialized_cells_for_version(table, version)?;
-        current_row_from_materialized_cells(table, version, &cells)
-    }
-
-    fn materialized_cells_for_version(
-        &mut self,
-        table: &TableSchema,
-        version: &VersionRow,
-    ) -> Result<BTreeMap<String, Value>, Error> {
-        if !table
-            .columns
-            .iter()
-            .any(|column| column.large_value.is_some())
-        {
-            return version.cells(table);
-        }
-        let mut cells = BTreeMap::new();
-        for column in &table.columns {
-            let value = if let Some(kind) = column.large_value {
-                Some(Value::Bytes(self.large_value_handle_for_version(
-                    table,
-                    version,
-                    &column.name,
-                    kind,
-                )?))
-            } else {
-                version.cell(table, &column.name)?
-            };
-            if let Some(value) = value {
-                cells.insert(column.name.clone(), value);
-            }
-        }
-        Ok(cells)
-    }
-
-    fn large_value_handle_for_version(
-        &mut self,
-        table: &TableSchema,
-        version: &VersionRow,
-        column: &str,
-        kind: LargeValueKind,
-    ) -> Result<Vec<u8>, Error> {
-        let canonical = self.canonical_history_version_for_maintained_witness(version)?;
-        let version = &canonical;
-        let authored_schema = self
-            .schema_version_for_alias(version.schema_version_alias())
-            .ok_or(Error::InvalidStoredValue(
-                "large-value schema alias is unknown",
-            ))?;
-        let (authored_table, authored_column) = if version.table() == table.name
-            && self
-                .table_in_schema(version.table(), authored_schema)
-                .is_ok_and(|authored| authored == *table)
-        {
-            (version.table().to_owned(), column.to_owned())
-        } else {
-            self.authored_large_value_identity(authored_schema, table, column)?
-        };
-        let authored_table_schema = self
-            .table_in_schema(&authored_table, authored_schema)?
-            .clone();
-        let len = self.large_value_column_len(&authored_table_schema, version, &authored_column)?;
-        let refs = self.large_value_extent_refs_for_version(
-            &authored_table_schema,
-            version,
-            &authored_column,
-            kind,
-        )?;
-        let tx_id = self.version_tx_id(version)?;
-        encode_large_value_handle(
-            authored_schema,
-            &authored_table,
-            version.row_uuid(),
-            &authored_column,
-            tx_id,
-            kind,
-            len,
-            refs,
-        )
-    }
-
-    /// Resolve projected view names back to the immutable logical names used by
-    /// the schema under which `version` was authored. Physical IDs are only a
-    /// local lookup aid; they never cross the handle/checkpoint boundary.
-    fn authored_large_value_identity(
-        &self,
-        authored_schema: SchemaVersionId,
-        view_table: &TableSchema,
-        view_column: &str,
-    ) -> Result<(String, String), Error> {
-        let authored_mapping = self
-            .catalogue
-            .physical_mappings
-            .get(&authored_schema)
-            .ok_or(Error::InvalidStoredValue(
-                "large-value authored schema mapping is missing",
-            ))?;
-        let mut resolved = BTreeSet::new();
-        for (view_schema, mapping) in &self.catalogue.physical_mappings {
-            let Some(view_mapping) = mapping.tables.get(&view_table.name) else {
-                continue;
-            };
-            let Some(column_id) = view_mapping.columns.get(view_column) else {
-                continue;
-            };
-            let view_descriptor_matches = self
-                .catalogue
-                .catalogue_schemas
-                .get(view_schema)
-                .and_then(|schema| {
-                    schema
-                        .schema
-                        .tables
-                        .iter()
-                        .find(|table| table.name == view_table.name)
-                })
-                == Some(view_table);
-            if !view_descriptor_matches {
-                continue;
-            }
-            for (authored_table, authored_table_mapping) in &authored_mapping.tables {
-                if authored_table_mapping.table_id != view_mapping.table_id {
-                    continue;
-                }
-                for (authored_column, authored_column_id) in &authored_table_mapping.columns {
-                    if authored_column_id == column_id {
-                        resolved.insert((authored_table.clone(), authored_column.clone()));
-                    }
-                }
-            }
-        }
-        match resolved.len() {
-            1 => Ok(resolved.into_iter().next().expect("one identity")),
-            0 => Err(Error::InvalidStoredValue(
-                "large-value view identity has no authored mapping",
-            )),
-            _ => Err(Error::InvalidStoredValue(
-                "large-value view identity has ambiguous authored mappings",
-            )),
-        }
-    }
-
-    fn large_value_lineage_ids(
-        &self,
-        schema: SchemaVersionId,
-        table: &str,
-        column: &str,
-    ) -> Result<(PhysicalTableId, PhysicalColumnId), Error> {
-        let table = self
-            .catalogue
-            .physical_mappings
-            .get(&schema)
-            .and_then(|mapping| mapping.tables.get(table))
-            .ok_or(Error::InvalidStoredValue(
-                "large-value table lineage mapping is missing",
-            ))?;
-        let column = table
-            .columns
-            .get(column)
-            .copied()
-            .ok_or(Error::InvalidStoredValue(
-                "large-value column lineage mapping is missing",
-            ))?;
-        Ok((table.table_id, column))
-    }
-
-    fn large_value_version_for_tx(
-        &mut self,
-        tx_id: TxId,
-        row_uuid: RowUuid,
-        table_id: PhysicalTableId,
-        column_id: PhysicalColumnId,
-    ) -> Result<(VersionRow, TableSchema, String, SchemaVersionId), Error> {
-        for version in self.query_versions_for_tx(tx_id)? {
-            if version.row_uuid() != row_uuid || version.layer() != VersionLayer::Content {
-                continue;
-            }
-            let schema = self
-                .schema_version_for_alias(version.schema_version_alias())
-                .ok_or(Error::InvalidStoredValue(
-                    "large-value ancestor schema alias is unknown",
-                ))?;
-            let Some(table_mapping) = self
-                .catalogue
-                .physical_mappings
-                .get(&schema)
-                .and_then(|mapping| mapping.tables.get(version.table()))
-            else {
-                continue;
-            };
-            if table_mapping.table_id != table_id {
-                continue;
-            }
-            let Some(column) = table_mapping
-                .columns
-                .iter()
-                .find_map(|(name, id)| (*id == column_id).then(|| name.clone()))
-            else {
-                continue;
-            };
-            let table = self.table_in_schema(version.table(), schema)?.clone();
-            return Ok((version, table, column, schema));
-        }
-        Err(Error::MissingTransaction(tx_id))
-    }
-
-    fn large_value_extent_refs_for_version(
-        &mut self,
-        table: &TableSchema,
-        winner: &VersionRow,
-        column: &str,
-        kind: LargeValueKind,
-    ) -> Result<Vec<content_store::Extent>, Error> {
-        if let Some(Value::Bytes(bytes)) = winner.cell(table, column)?
-            && bytes.starts_with(LARGE_VALUE_HANDLE_MAGIC)
-        {
-            return Ok(decode_large_value_handle(&bytes)?.refs);
-        }
-        let mut suffix = Vec::new();
-        let winner_tx = self.version_tx_id(winner)?;
-        let mut current = winner_tx;
-        let schema = self
-            .schema_version_for_alias(winner.schema_version_alias())
-            .ok_or(Error::InvalidStoredValue(
-                "large-value schema alias is unknown",
-            ))?;
-        let (authored_table, authored_column) = if self
-            .catalogue
-            .physical_mappings
-            .get(&schema)
-            .and_then(|mapping| mapping.tables.get(winner.table()))
-            .is_some_and(|mapping| mapping.columns.contains_key(column))
-        {
-            (winner.table().to_owned(), column.to_owned())
-        } else {
-            self.authored_large_value_identity(schema, table, column)?
-        };
-        let (table_id, column_id) =
-            self.large_value_lineage_ids(schema, &authored_table, &authored_column)?;
-        let authored_table_schema = self.table_in_schema(&authored_table, schema)?.clone();
-        loop {
-            let (version, version_table, version_column, _) = if current == winner_tx {
-                (
-                    winner.clone(),
-                    authored_table_schema.clone(),
-                    authored_column.clone(),
-                    schema,
-                )
-            } else {
-                self.large_value_version_for_tx(current, winner.row_uuid(), table_id, column_id)?
-            };
-            let parents = version.parents();
-            suffix.push((version, version_table, version_column));
-            match parents.as_slice() {
-                [] => break,
-                [parent] => current = *parent,
-                _ => current = self.large_value_primary_parent(&parents)?,
-            }
-        }
-        suffix.reverse();
-
-        let mut refs = Vec::new();
-        for (version, version_table, version_column) in &suffix {
-            let Some(Value::Bytes(payload)) = version.cell(version_table, version_column)? else {
-                continue;
-            };
-            match kind {
-                LargeValueKind::Text => {
-                    if let Some(extent_payload) = payload.strip_prefix(TEXT_EXTENT_OPS_MAGIC) {
-                        refs.extend(content_refs_in_text_ops(text_oplog::decode(
-                            extent_payload,
-                        )?));
-                    }
-                }
-                LargeValueKind::Blob => {
-                    refs.extend(content_refs_in_text_ops(text_oplog::decode(&payload)?));
-                }
-            }
-        }
-        refs.sort();
-        refs.dedup();
-        Ok(refs)
-    }
-
-    /// Materialize the bytes referenced by a large-value handle returned in a row cell.
-    pub fn hydrate_large_value_handle(&mut self, handle: &[u8]) -> Result<Vec<u8>, Error> {
-        let encoded_handle = handle;
-        let handle = decode_large_value_handle(handle)?;
-        if handle
-            .refs
-            .iter()
-            .any(|extent| extent.row != handle.row_uuid)
-        {
-            return Err(Error::InvalidStoredValue(
-                "large-value handle extent row mismatch",
-            ));
-        }
-        let table = self
-            .catalogue
-            .catalogue_schemas
-            .get(&handle.schema)
-            .and_then(|schema| {
-                schema
-                    .schema
-                    .tables
-                    .iter()
-                    .find(|table| table.name == handle.table)
-            })
-            .cloned()
-            .ok_or(Error::InvalidStoredValue(
-                "large-value handle authored schema path is unknown",
-            ))?;
-        let version = self
-            .query_versions_for_tx(handle.tx_id)?
-            .into_iter()
-            .find(|version| {
-                version.table() == handle.table
-                    && version.row_uuid() == handle.row_uuid
-                    && version.layer() == VersionLayer::Content
-            })
-            .ok_or(Error::MissingTransaction(handle.tx_id))?;
-        if column_large_value_kind(&table, &handle.column)? != handle.kind {
-            return Err(Error::InvalidStoredValue(
-                "large-value handle kind mismatch",
-            ));
-        }
-        let canonical =
-            self.large_value_handle_for_version(&table, &version, &handle.column, handle.kind)?;
-        if canonical != encoded_handle {
-            return Err(Error::InvalidStoredValue(
-                "large-value handle does not match canonical version content",
-            ));
-        }
-        self.materialize_large_value_column(&table, &version, &handle.column)
-    }
-
-    /// Subscribe to the raw history storage table.
+    /// Return local synchronization counters.
     pub fn sync_metrics(&self) -> &SyncMetrics {
         &self.sync_metrics
     }
@@ -3628,12 +2848,46 @@ where
         &self.catalogue.catalogue_lenses
     }
 
-    /// Current write-schema pointer known to this node.
-    pub fn current_write_schema(&self) -> CurrentWriteSchema {
-        self.catalogue.current_write_schema
+    /// Current dynamic-catalogue bootstrap state.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn catalogue_bootstrap_state(&self) -> CatalogueBootstrapState {
+        self.catalogue_bootstrap_state
     }
 
-    pub(crate) fn catalogue_snapshot(&self) -> crate::protocol::CatalogueSnapshot {
+    /// Return the authoritative current-write pointer, or fail closed before
+    /// an edge has adopted its first trusted catalogue snapshot.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn try_current_write_schema(&self) -> Result<CurrentWriteSchema, Error> {
+        self.require_catalogue_ready()?;
+        Ok(self.catalogue.current_write_schema)
+    }
+
+    /// Return the active read-schema only after an authority catalogue has
+    /// been durably adopted.  Dynamic-edge callers must use this instead of
+    /// treating the temporary system schema as an application schema.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn try_current_schema(&self) -> Result<&JazzSchema, Error> {
+        self.require_catalogue_ready()?;
+        Ok(&self.catalogue.schema)
+    }
+
+    pub(crate) fn require_catalogue_ready(&self) -> Result<(), Error> {
+        if self.catalogue_bootstrap_state == CatalogueBootstrapState::Uninitialized {
+            return Err(Error::CatalogueUninitialized);
+        }
+        Ok(())
+    }
+
+    /// Current write-schema pointer known to this node.
+    ///
+    /// An uninitialized dynamic edge has no current application schema; the
+    /// temporary system-only layout must not leak through this API.
+    pub fn current_write_schema(&self) -> Result<CurrentWriteSchema, Error> {
+        self.try_current_write_schema()
+    }
+
+    pub(crate) fn catalogue_snapshot(&self) -> Result<crate::protocol::CatalogueSnapshot, Error> {
+        self.require_catalogue_ready()?;
         let mut schemas = self
             .catalogue
             .catalogue_schemas
@@ -3648,11 +2902,11 @@ where
             .map(|lineage| (lineage.catalogue_seq, lineage.publication.clone()))
             .collect::<Vec<_>>();
         lineages.sort_by_key(|(catalogue_seq, _)| *catalogue_seq);
-        crate::protocol::CatalogueSnapshot {
+        Ok(crate::protocol::CatalogueSnapshot {
             schemas,
             lineages,
             current_write_schema: self.catalogue.current_write_schema,
-        }
+        })
     }
 
     /// Return a historical read handle at an exact global settle position.
@@ -3767,6 +3021,49 @@ where
         author: AuthorId,
     ) -> Result<Vec<TxId>, Error> {
         Ok(self.pending_transaction_scan_for(node, author)?.tx_ids)
+    }
+
+    /// Return unsettled transactions by `author`, irrespective of their
+    /// originating node. A dedicated browser relay uses this when it reopens:
+    /// relayed main-thread commits retain the main thread's node id, so the
+    /// relay's ordinary local-origin recovery scan cannot find them.
+    pub(crate) fn pending_transaction_ids_for_author(
+        &mut self,
+        author: AuthorId,
+    ) -> Result<Vec<TxId>, Error> {
+        let mut candidates = Vec::new();
+        for raw in self.database.index_scan_raw(
+            "jazz_transactions",
+            "by_global_seq",
+            &[Value::Nullable(None)],
+        )? {
+            let record = raw.record();
+            if AuthorId(record.get_uuid(TransactionRowRecord::FIELD_MADE_BY_IDX)?) != author
+                || !matches!(
+                    record.get_enum(TransactionRowRecord::FIELD_FATE_IDX)?,
+                    0 | 1
+                )
+                || durability_from_discriminant(
+                    record.get_enum(TransactionRowRecord::FIELD_DURABILITY_IDX)?,
+                )? >= DurabilityTier::Global
+            {
+                continue;
+            }
+            candidates.push((
+                NodeAlias(record.get_u64(TransactionRowRecord::FIELD_NODE_ID_IDX)?),
+                TxTime(record.get_u64(TransactionRowRecord::FIELD_TIME_IDX)?),
+            ));
+        }
+        let mut tx_ids = Vec::with_capacity(candidates.len());
+        for (alias, time) in candidates {
+            let Some(node) = self.resolve_node_alias(alias)? else {
+                continue;
+            };
+            tx_ids.push(TxId::new(time, node));
+        }
+        tx_ids.sort();
+        tx_ids.dedup();
+        Ok(tx_ids)
     }
 
     /// Find replayable local transactions in the null slice of
@@ -4061,96 +3358,6 @@ where
         self.persist_clean_close_marker()?;
         self.database.close()?;
         Ok(())
-    }
-
-    fn persist_clean_close_marker(&self) -> Result<(), Error> {
-        self.database
-            .direct_record_store(CLEAN_CLOSE_MARKERS_STORE)?
-            .set(
-                &clean_close_marker_key(),
-                &[
-                    Value::U64(CLEAN_CLOSE_MARKER_VERSION),
-                    Value::Uuid(self.node_uuid.0),
-                ],
-            )?;
-        Ok(())
-    }
-
-    fn take_valid_clean_close_marker(&mut self) -> Result<bool, Error> {
-        let store = self
-            .database
-            .direct_record_store(CLEAN_CLOSE_MARKERS_STORE)?;
-        let key = clean_close_marker_key();
-        let Some(record) = store.get(&key)? else {
-            return Ok(false);
-        };
-        store.delete(&key)?;
-
-        let version = match record.get_idx(0)? {
-            Value::U64(value) => value,
-            _ => return Ok(false),
-        };
-        let node = match record.get_idx(1)? {
-            Value::Uuid(value) => value,
-            _ => return Ok(false),
-        };
-        Ok(version == CLEAN_CLOSE_MARKER_VERSION && node == self.node_uuid.0)
-    }
-
-    pub(super) fn persist_storage_consistency_marker_through(
-        &self,
-        tx_time: TxTime,
-    ) -> Result<(), Error> {
-        let store = self
-            .database
-            .direct_record_store(STORAGE_CONSISTENCY_MARKERS_STORE)?;
-        let key = storage_consistency_marker_key();
-        if let Some(record) = store.get(&key)?
-            && matches!(
-                record.get_idx(0)?,
-                Value::U64(STORAGE_CONSISTENCY_MARKER_VERSION)
-            )
-            && matches!(record.get_idx(1)?, Value::Uuid(node) if node == self.node_uuid.0)
-            && let Value::U64(existing) = record.get_idx(2)?
-            && existing >= tx_time.0
-        {
-            return Ok(());
-        }
-        store.set(
-            &key,
-            &[
-                Value::U64(STORAGE_CONSISTENCY_MARKER_VERSION),
-                Value::Uuid(self.node_uuid.0),
-                Value::U64(tx_time.0),
-            ],
-        )?;
-        Ok(())
-    }
-
-    fn valid_storage_consistency_marker(&self) -> Result<Option<TxTime>, Error> {
-        let store = self
-            .database
-            .direct_record_store(STORAGE_CONSISTENCY_MARKERS_STORE)?;
-        let Some(record) = store.get(&storage_consistency_marker_key())? else {
-            return Ok(None);
-        };
-        let version = match record.get_idx(0)? {
-            Value::U64(value) => value,
-            _ => return Ok(None),
-        };
-        let node = match record.get_idx(1)? {
-            Value::Uuid(value) => value,
-            _ => return Ok(None),
-        };
-        let tx_time = match record.get_idx(2)? {
-            Value::U64(value) => value,
-            _ => return Ok(None),
-        };
-        if version == STORAGE_CONSISTENCY_MARKER_VERSION && node == self.node_uuid.0 {
-            Ok(Some(TxTime(tx_time)))
-        } else {
-            Ok(None)
-        }
     }
 
     fn recover_known_state_facts(&mut self) -> Result<(), Error> {
@@ -5188,6 +4395,17 @@ where
     ) -> Result<(), Error> {
         let schema = &staged.publication.schema;
         let lens = &staged.publication.lens;
+        // The active marker only carries an id and sequence. Persist its
+        // canonical payload in the same durable activation batch so recovery
+        // can prove both the prefix identity and its exact sequence.
+        batch.update(
+            "jazz_catalogue",
+            vec![
+                Value::Bytes(b"schema_lineage_staged".to_vec()),
+                Value::Uuid(staged.publication.id.0),
+                Value::Bytes(serde_json::to_vec(staged)?),
+            ],
+        );
         batch.update(
             "jazz_catalogue",
             vec![
@@ -5825,29 +5043,10 @@ where
 
     fn collect_missing_text_ancestor_refs(
         &mut self,
-        version: &VersionRecord,
-        missing: &mut BTreeSet<RowVersionRef>,
-        visited: &mut BTreeSet<RowVersionRef>,
+        _version: &VersionRecord,
+        _missing: &mut BTreeSet<RowVersionRef>,
+        _visited: &mut BTreeSet<RowVersionRef>,
     ) -> Result<(), Error> {
-        if !self.version_record_has_text_cell(version)? {
-            return Ok(());
-        }
-        for parent in version.parents() {
-            let parent_ref =
-                RowVersionRef::new(version.table().to_owned(), version.row_uuid(), parent);
-            if !visited.insert(parent_ref.clone()) {
-                continue;
-            }
-            if self.query_transaction(parent)?.is_none() {
-                missing.insert(parent_ref);
-                continue;
-            }
-            let Some(parent_version) = self.local_version_record_for_ref(&parent_ref)? else {
-                missing.insert(parent_ref);
-                continue;
-            };
-            self.collect_missing_text_ancestor_refs(&parent_version, missing, visited)?;
-        }
         Ok(())
     }
 
@@ -5880,14 +5079,6 @@ where
             }
         }
         Ok(None)
-    }
-
-    fn version_record_has_text_cell(&self, version: &VersionRecord) -> Result<bool, Error> {
-        let table = self.table_in_schema(version.table(), version.schema_version())?;
-        Ok(table.columns.iter().enumerate().any(|(position, column)| {
-            column.large_value == Some(LargeValueKind::Text)
-                && version.optional_cell_at(position).is_some()
-        }))
     }
 
     fn mint_tx_time(&mut self, now_ms: u64) -> TxTime {
@@ -6367,8 +5558,6 @@ pub struct SyncMetrics {
     /// Receiver ignored a peer complete-transaction inventory claim because the
     /// transaction was not yet available on this link.
     pub peer_payload_inventory_missing_fallbacks: u64,
-    /// Rung-3 text strategies that degraded to the builtin char-walk merge.
-    pub rung3_text_merge_fallbacks: u64,
 }
 
 /// Deterministic counters for query-engine read authorization.
@@ -6413,110 +5602,6 @@ pub struct QueryReadProfile {
     pub total: std::time::Duration,
 }
 
-/// Deterministic counters for large-value materialization and checkpoint use.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct LargeValueMetrics {
-    /// Number of large-value materializations performed.
-    pub materializations: u64,
-    /// Total decoded edit operations replayed across materializations.
-    pub total_replayed_ops: u64,
-    /// Edit operations replayed by the most recent materialization.
-    pub last_replayed_ops: usize,
-    /// Version rows replayed by the most recent materialization.
-    pub last_replayed_versions: usize,
-    /// Materializations that found and used a local checkpoint.
-    pub checkpoint_hits: u64,
-    /// Local checkpoints written by materialization.
-    pub checkpoint_writes: u64,
-}
-
-/// Explicit edit operation for one text/blob column.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum LargeValueEditOp {
-    /// Insert bytes at a parent-relative byte offset.
-    Insert(usize, Vec<u8>),
-    /// Delete bytes from a parent-relative byte range.
-    Delete(usize, usize),
-}
-
-/// Builder for a local mergeable text/blob edit commit.
-#[derive(Clone, Debug)]
-pub struct LargeValueEditCommit {
-    /// Target table.
-    pub table: String,
-    /// Target row.
-    pub row_uuid: RowUuid,
-    /// Target text/blob column.
-    pub column: String,
-    /// Author making the commit.
-    pub made_by: AuthorId,
-    /// Abstract wall clock at the committing node.
-    pub now_ms: u64,
-    /// Explicit edit operations.
-    pub ops: Vec<LargeValueEditOp>,
-    /// Optional application metadata.
-    pub user_metadata_json: Option<String>,
-}
-
-impl LargeValueEditCommit {
-    /// Construct an empty explicit edit commit builder.
-    pub fn new(
-        table: impl Into<String>,
-        row_uuid: RowUuid,
-        column: impl Into<String>,
-        now_ms: u64,
-    ) -> Self {
-        Self {
-            table: table.into(),
-            row_uuid,
-            column: column.into(),
-            made_by: AuthorId::SYSTEM,
-            now_ms,
-            ops: Vec::new(),
-            user_metadata_json: None,
-        }
-    }
-
-    /// Set the commit author.
-    pub fn made_by(mut self, made_by: AuthorId) -> Self {
-        self.made_by = made_by;
-        self
-    }
-
-    /// Append an insert operation.
-    pub fn insert(mut self, pos: usize, bytes: impl Into<Vec<u8>>) -> Self {
-        self.ops.push(LargeValueEditOp::Insert(pos, bytes.into()));
-        self
-    }
-
-    /// Append a delete operation.
-    pub fn delete(mut self, pos: usize, len: usize) -> Self {
-        self.ops.push(LargeValueEditOp::Delete(pos, len));
-        self
-    }
-
-    /// Replace the edit operations.
-    pub fn ops(mut self, ops: Vec<LargeValueEditOp>) -> Self {
-        self.ops = ops;
-        self
-    }
-
-    /// Attach application metadata.
-    pub fn user_metadata(mut self, json: String) -> Self {
-        self.user_metadata_json = Some(json);
-        self
-    }
-
-    fn validate(&self) -> Result<(), Error> {
-        if self.ops.is_empty() {
-            return Err(Error::InvalidMergeableCommit(
-                "large-value edit requires at least one operation",
-            ));
-        }
-        Ok(())
-    }
-}
-
 /// Builder for a local mergeable commit.
 #[derive(Clone)]
 pub struct MergeableCommit {
@@ -6540,8 +5625,6 @@ pub struct MergeableCommit {
     pub parents: Vec<TxId>,
     /// Optional application metadata.
     pub user_metadata_json: Option<String>,
-    /// Recorded merge strategy for system-created merge versions.
-    pub merge_strategy: Option<RecordedMergeStrategy>,
 }
 
 impl MergeableCommit {
@@ -6558,7 +5641,6 @@ impl MergeableCommit {
             deletion: None,
             parents: Vec::new(),
             user_metadata_json: None,
-            merge_strategy: None,
         }
     }
 
@@ -6618,11 +5700,6 @@ impl MergeableCommit {
         self
     }
 
-    pub(crate) fn merge_strategy(mut self, strategy: RecordedMergeStrategy) -> Self {
-        self.merge_strategy = Some(strategy);
-        self
-    }
-
     fn validate(&self) -> Result<(), Error> {
         validate_mergeable_write_shape(self.cells.is_empty(), self.deletion.is_some())
     }
@@ -6637,6 +5714,7 @@ pub(crate) struct ViewUpdateParts {
     pub(crate) version_bundles: Vec<VersionBundle>,
     pub(crate) peer_complete_tx_payload_refs: Vec<TxId>,
     pub(crate) authorization_progress: Option<u64>,
+    pub(crate) opening_pending: bool,
     pub(crate) result_member_adds: Vec<ResultMemberEntry>,
     pub(crate) result_member_removes: Vec<ResultMemberEntry>,
     pub(crate) terminal_operations: Vec<groove::ivm::TerminalOperation>,
@@ -6665,6 +5743,7 @@ struct CatalogueOpenState<S> {
     next_physical_column_id: u64,
     current_write_schema: CurrentWriteSchema,
     branch_partitions: BTreeSet<(PhysicalTableId, BranchId)>,
+    catalogue_bootstrap_marker: bool,
 }
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
@@ -6687,57 +5766,22 @@ struct SchemaLineageActivation {
     catalogue_seq: u64,
 }
 
+/// Durable completion receipt for an authority snapshot installed by an
+/// initially unconfigured dynamic edge.  Its record is the atomic boundary:
+/// discovery never repairs a prefix that lacks this exact join.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+struct CatalogueBootstrapReady {
+    genesis: SchemaVersionId,
+    current_write_schema: CurrentWriteSchema,
+    active_catalogue_seq: u64,
+}
+
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CatalogueActivationFailpoint {
     AfterStaged,
     AfterRegistration,
     BeforeSnapshotActivationCommit,
-}
-
-struct DatabaseSlot<S> {
-    database: Option<Database<S>>,
-}
-
-impl<S> DatabaseSlot<S> {
-    fn new(database: Database<S>) -> Self {
-        Self {
-            database: Some(database),
-        }
-    }
-
-    fn take(&mut self) -> Database<S> {
-        self.database
-            .take()
-            .expect("node database slot must be populated outside rebuild")
-    }
-
-    fn replace(&mut self, database: Database<S>) {
-        debug_assert!(self.database.is_none());
-        self.database = Some(database);
-    }
-
-    fn into_inner(mut self) -> Database<S> {
-        self.take()
-    }
-}
-
-impl<S> Deref for DatabaseSlot<S> {
-    type Target = Database<S>;
-
-    fn deref(&self) -> &Self::Target {
-        self.database
-            .as_ref()
-            .expect("node database slot must be populated")
-    }
-}
-
-impl<S> DerefMut for DatabaseSlot<S> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        self.database
-            .as_mut()
-            .expect("node database slot must be populated")
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -6775,327 +5819,6 @@ fn validate_mergeable_write_shape(cells_empty: bool, deletion_present: bool) -> 
             "mergeable commits must carry content cells or a deletion-register event",
         )),
     }
-}
-
-fn validate_large_value_edit_ranges(
-    parent_len: usize,
-    ops: &[LargeValueEditOp],
-) -> Result<(), Error> {
-    let text_ops = large_value_edit_ops_to_legacy_text_ops(ops.to_vec());
-    validate_text_edit_ranges(parent_len, &text_ops)
-}
-
-fn large_value_edit_ops_to_legacy_text_ops(ops: Vec<LargeValueEditOp>) -> Vec<TextOp> {
-    ops.into_iter()
-        .map(|op| match op {
-            LargeValueEditOp::Insert(pos, bytes) => TextOp::Insert {
-                pos,
-                content: TextContent::Inline(bytes),
-            },
-            LargeValueEditOp::Delete(pos, len) => TextOp::Delete { pos, len },
-        })
-        .collect()
-}
-
-fn encode_extent_text_ops(ops: &[TextOp]) -> Vec<u8> {
-    let mut bytes = Vec::from(TEXT_EXTENT_OPS_MAGIC);
-    bytes.extend(text_oplog::encode(ops));
-    bytes
-}
-
-fn encode_large_value_handle(
-    schema: SchemaVersionId,
-    table: &str,
-    row_uuid: RowUuid,
-    column: &str,
-    tx_id: TxId,
-    kind: LargeValueKind,
-    len: usize,
-    refs: Vec<content_store::Extent>,
-) -> Result<Vec<u8>, Error> {
-    let mut bytes = Vec::from(LARGE_VALUE_HANDLE_MAGIC);
-    bytes.extend_from_slice(schema.0.as_bytes());
-    write_handle_string(&mut bytes, table)?;
-    bytes.extend_from_slice(row_uuid.as_bytes());
-    write_handle_string(&mut bytes, column)?;
-    bytes.extend_from_slice(&tx_id.time.0.to_be_bytes());
-    bytes.extend_from_slice(tx_id.node.as_bytes());
-    bytes.push(match kind {
-        LargeValueKind::Text => 1,
-        LargeValueKind::Blob => 2,
-    });
-    bytes.extend_from_slice(
-        &u64::try_from(len)
-            .map_err(|_| Error::InvalidStoredValue("large-value handle length exceeds u64"))?
-            .to_be_bytes(),
-    );
-    bytes.extend_from_slice(
-        &u64::try_from(refs.len())
-            .map_err(|_| Error::InvalidStoredValue("large-value handle refs exceed u64"))?
-            .to_be_bytes(),
-    );
-    for extent in refs {
-        bytes.extend_from_slice(extent.schema.0.as_bytes());
-        write_handle_string(&mut bytes, &extent.table)?;
-        bytes.extend_from_slice(extent.writer.as_bytes());
-        bytes.extend_from_slice(extent.row.as_bytes());
-        let column = extent.column.as_bytes();
-        bytes.extend_from_slice(
-            &u32::try_from(column.len())
-                .map_err(|_| Error::InvalidStoredValue("large-value handle column too long"))?
-                .to_be_bytes(),
-        );
-        bytes.extend_from_slice(column);
-        bytes.extend_from_slice(&extent.offset.to_be_bytes());
-        bytes.extend_from_slice(&extent.len.to_be_bytes());
-    }
-    Ok(bytes)
-}
-
-fn write_handle_string(bytes: &mut Vec<u8>, value: &str) -> Result<(), Error> {
-    bytes.extend_from_slice(
-        &u32::try_from(value.len())
-            .map_err(|_| Error::InvalidStoredValue("large-value handle string too long"))?
-            .to_be_bytes(),
-    );
-    bytes.extend_from_slice(value.as_bytes());
-    Ok(())
-}
-
-fn content_refs_in_text_ops(ops: Vec<TextOp>) -> Vec<content_store::Extent> {
-    ops.into_iter()
-        .filter_map(|op| match op {
-            TextOp::Insert {
-                content: TextContent::Ref(extent),
-                ..
-            } => Some(extent),
-            TextOp::Insert { .. } | TextOp::Delete { .. } => None,
-        })
-        .collect()
-}
-
-struct DecodedLargeValueHandle {
-    schema: SchemaVersionId,
-    table: String,
-    row_uuid: RowUuid,
-    column: String,
-    tx_id: TxId,
-    kind: LargeValueKind,
-    len: u64,
-    refs: Vec<content_store::Extent>,
-}
-
-fn decode_large_value_handle(bytes: &[u8]) -> Result<DecodedLargeValueHandle, Error> {
-    let mut cursor = HandleCursor::new(
-        bytes
-            .strip_prefix(LARGE_VALUE_HANDLE_MAGIC)
-            .ok_or(Error::InvalidStoredValue("invalid large-value handle"))?,
-    );
-    let schema = SchemaVersionId(uuid::Uuid::from_bytes(cursor.read_array()?));
-    let table = cursor.read_string()?;
-    let row_uuid = RowUuid(uuid::Uuid::from_bytes(cursor.read_array()?));
-    let column = cursor.read_string()?;
-    let tx_time = TxTime(cursor.read_u64()?);
-    let tx_node = NodeUuid(uuid::Uuid::from_bytes(cursor.read_array()?));
-    let kind = match cursor.read_u8()? {
-        1 => LargeValueKind::Text,
-        2 => LargeValueKind::Blob,
-        _ => return Err(Error::InvalidStoredValue("invalid large-value handle kind")),
-    };
-    let len = cursor.read_u64()?;
-    let ref_count = cursor.read_u64()?;
-    let mut refs = Vec::new();
-    for _ in 0..ref_count {
-        refs.push(content_store::Extent {
-            schema: SchemaVersionId(uuid::Uuid::from_bytes(cursor.read_array()?)),
-            table: cursor.read_string()?,
-            writer: AuthorId(uuid::Uuid::from_bytes(cursor.read_array()?)),
-            row: RowUuid(uuid::Uuid::from_bytes(cursor.read_array()?)),
-            column: cursor.read_string()?,
-            offset: cursor.read_u64()?,
-            len: cursor.read_u64()?,
-        });
-    }
-    if !cursor.is_empty() {
-        return Err(Error::InvalidStoredValue(
-            "trailing large-value handle bytes",
-        ));
-    }
-    Ok(DecodedLargeValueHandle {
-        schema,
-        table,
-        row_uuid,
-        column,
-        tx_id: TxId::new(tx_time, tx_node),
-        kind,
-        len,
-        refs,
-    })
-}
-
-struct HandleCursor<'a> {
-    bytes: &'a [u8],
-    pos: usize,
-}
-
-impl<'a> HandleCursor<'a> {
-    fn new(bytes: &'a [u8]) -> Self {
-        Self { bytes, pos: 0 }
-    }
-
-    fn is_empty(&self) -> bool {
-        self.pos == self.bytes.len()
-    }
-
-    fn read_u8(&mut self) -> Result<u8, Error> {
-        let value = *self
-            .bytes
-            .get(self.pos)
-            .ok_or(Error::InvalidStoredValue("truncated large-value handle"))?;
-        self.pos += 1;
-        Ok(value)
-    }
-
-    fn read_u32(&mut self) -> Result<u32, Error> {
-        Ok(u32::from_be_bytes(self.read_array()?))
-    }
-
-    fn read_u64(&mut self) -> Result<u64, Error> {
-        Ok(u64::from_be_bytes(self.read_array()?))
-    }
-
-    fn read_array<const N: usize>(&mut self) -> Result<[u8; N], Error> {
-        self.read_bytes(N)?
-            .try_into()
-            .map_err(|_| Error::InvalidStoredValue("invalid large-value handle bytes"))
-    }
-
-    fn read_string(&mut self) -> Result<String, Error> {
-        let len = usize::try_from(self.read_u32()?)
-            .map_err(|_| Error::InvalidStoredValue("large-value handle string too long"))?;
-        String::from_utf8(self.read_bytes(len)?.to_vec())
-            .map_err(|_| Error::InvalidStoredValue("large-value handle string is not utf-8"))
-    }
-
-    fn read_bytes(&mut self, len: usize) -> Result<&'a [u8], Error> {
-        let end = self.pos.checked_add(len).ok_or(Error::InvalidStoredValue(
-            "large-value handle length overflow",
-        ))?;
-        let bytes = self
-            .bytes
-            .get(self.pos..end)
-            .ok_or(Error::InvalidStoredValue("truncated large-value handle"))?;
-        self.pos = end;
-        Ok(bytes)
-    }
-}
-
-fn decode_plain_text_op(payload: &[u8]) -> Result<PlainTextOp, Error> {
-    crate::text_merge::decode(payload)
-        .map_err(|_| Error::InvalidStoredValue("text op payload failed to decode"))
-}
-
-fn column_large_value_kind(table: &TableSchema, column: &str) -> Result<LargeValueKind, Error> {
-    table
-        .columns
-        .iter()
-        .find(|candidate| candidate.name == column)
-        .and_then(|column| column.large_value)
-        .ok_or(Error::InvalidStoredValue("large value column kind missing"))
-}
-
-fn validate_text_edit_ranges(parent_len: usize, ops: &[TextOp]) -> Result<(), Error> {
-    let mut value_len = parent_len;
-    for (op_index, op) in ops.iter().enumerate() {
-        let pos = match op {
-            TextOp::Insert { pos, .. } | TextOp::Delete { pos, .. } => *pos,
-        };
-        let adjusted_pos = adjusted_text_edit_pos(pos, &ops[..op_index], value_len)?;
-        match op {
-            TextOp::Insert { content, .. } => {
-                if adjusted_pos > value_len {
-                    return Err(Error::InvalidMergeableCommit(
-                        "large-value insert position is out of bounds",
-                    ));
-                }
-                value_len = value_len.checked_add(text_content_len(content)?).ok_or(
-                    Error::InvalidMergeableCommit("large-value edit length overflows"),
-                )?;
-            }
-            TextOp::Delete { len, .. } => {
-                let end = adjusted_pos
-                    .checked_add(*len)
-                    .ok_or(Error::InvalidMergeableCommit(
-                        "large-value delete range overflows",
-                    ))?;
-                if end > value_len {
-                    return Err(Error::InvalidMergeableCommit(
-                        "large-value delete range is out of bounds",
-                    ));
-                }
-                value_len -= len;
-            }
-        }
-    }
-    Ok(())
-}
-
-fn adjusted_text_edit_pos(
-    pos: usize,
-    prior_ops: &[TextOp],
-    value_len: usize,
-) -> Result<usize, Error> {
-    let mut adjusted = pos;
-    for prior_op in prior_ops {
-        match prior_op {
-            TextOp::Insert {
-                pos: prior_pos,
-                content,
-            } => {
-                if *prior_pos <= pos {
-                    adjusted = adjusted.checked_add(text_content_len(content)?).ok_or(
-                        Error::InvalidMergeableCommit("large-value edit position overflows"),
-                    )?;
-                }
-            }
-            TextOp::Delete {
-                pos: prior_pos,
-                len,
-            } => {
-                if *prior_pos < pos {
-                    let deleted_before_pos = (*len).min(pos - prior_pos);
-                    adjusted = adjusted.checked_sub(deleted_before_pos).ok_or(
-                        Error::InvalidMergeableCommit("large-value edit position underflows"),
-                    )?;
-                }
-            }
-        }
-    }
-    if adjusted > value_len {
-        return Err(Error::InvalidMergeableCommit(
-            "large-value edit position is out of bounds",
-        ));
-    }
-    Ok(adjusted)
-}
-
-fn text_content_len(content: &TextContent) -> Result<usize, Error> {
-    match content {
-        TextContent::Inline(bytes) => Ok(bytes.len()),
-        TextContent::Ref(extent) => usize::try_from(extent.len).map_err(|_| {
-            Error::InvalidMergeableCommit("large-value edit content length exceeds usize")
-        }),
-    }
-}
-
-fn large_value_cache_key(
-    schema: SchemaVersionId,
-    table: &str,
-    row_uuid: RowUuid,
-    column: &str,
-    tx_id: TxId,
-) -> LargeValueCacheKey {
-    (schema, table.to_owned(), row_uuid, column.to_owned(), tx_id)
 }
 
 #[cfg(test)]
@@ -7159,14 +5882,6 @@ fn binding_view_key_from_store_key(
         _ => return Err(Error::InvalidStoredValue(context)),
     };
     Ok(BindingViewKey::new(shape_id, binding_id, read_view))
-}
-
-fn clean_close_marker_key() -> [Value; 1] {
-    [Value::String(CLEAN_CLOSE_MARKER_NAME.to_owned())]
-}
-
-fn storage_consistency_marker_key() -> [Value; 1] {
-    [Value::String(STORAGE_CONSISTENCY_MARKER_NAME.to_owned())]
 }
 
 /// Details of a persisted current row that could not be decoded at the point of use.
@@ -7236,9 +5951,6 @@ pub enum Error {
     /// Stored value failed validation.
     #[error("invalid stored value: {0}")]
     InvalidStoredValue(&'static str),
-    /// Content extent bytes are referenced by stored history but not hydrated locally.
-    #[error("missing content extent: {0:?}")]
-    MissingContentExtent(content_store::Extent),
     /// Transaction was not known locally.
     #[error("missing transaction: {0:?}")]
     MissingTransaction(TxId),
@@ -7279,6 +5991,10 @@ pub enum Error {
     /// Durable staged catalogue activation failed and requires node reopen.
     #[error("catalogue activation failed; reopen required")]
     CatalogueActivationFailed,
+    /// A dynamically catalogued runtime has not yet received the trusted
+    /// authority snapshot that establishes its genesis, mappings, and pointer.
+    #[error("catalogue bootstrap is not ready")]
+    CatalogueUninitialized,
     /// Durable catalogue payload could not be encoded or decoded.
     #[error(transparent)]
     CatalogueCodec(#[from] serde_json::Error),

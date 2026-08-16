@@ -56,7 +56,6 @@ fn open_db(
             author,
         },
         id_source: Some(Box::new(SeededRowIdSource::new(u64::from(node_byte)))),
-        large_value_checkpoint_op_interval: 1024,
     }))?)
 }
 

@@ -7,7 +7,6 @@ import { Button } from "@/components/ui/button";
 import { useMyProfile } from "@/hooks/useMyProfile";
 import { waitForWrite } from "@/lib/db-write";
 import { app } from "../../../schema.js";
-import type { AttachmentData } from "./UploadModal";
 import { DurabilityTier } from "jazz-tools";
 
 interface MessageComposerProps {
@@ -57,49 +56,13 @@ export function MessageComposer({ chatId, disabled = false }: MessageComposerPro
     [userId, chatId, db, myProfile, sharedWriteOptions],
   );
 
-  const handleSendAttachment = useCallback(
-    async (attachment: AttachmentData) => {
-      if (!userId || !myProfile) {
-        throw new Error("Profile is still loading. Please try again.");
-      }
-
-      const storedFile = await db.createFileFromBlob(app, attachment.file, sharedWriteOptions);
-
-      const messageWriteResult = await Promise.resolve(
-        db.insert(app.messages, {
-          chatId,
-          text: "",
-          senderId: myProfile.id,
-          createdAt: new Date(),
-        }),
-      );
-      const message = messageWriteResult.value;
-
-      // The attachment policy follows messageId. Persist the parent before
-      // submitting the dependent row so server authorization can resolve it.
-      await messageWriteResult.wait(sharedWriteOptions);
-
-      const attachmentWriteResult = await Promise.resolve(
-        db.insert(app.attachments, {
-          messageId: message.id,
-          type: attachment.type,
-          name: attachment.file.name,
-          fileId: storedFile.id,
-          size: attachment.file.size,
-        }),
-      );
-      await attachmentWriteResult.wait(sharedWriteOptions);
-    },
-    [userId, chatId, db, myProfile, sharedWriteOptions],
-  );
-
   return (
     <div
       className="m-2 flex items-end gap-2"
       data-testid="message-composer"
       data-pending-sends={pendingSends}
     >
-      <ActionMenu chatId={chatId} onAttachment={handleSendAttachment} disabled={!composerReady} />
+      <ActionMenu chatId={chatId} disabled={!composerReady} />
 
       <Editor ref={editorRef} onSend={handleSend} disabled={!composerReady} />
 

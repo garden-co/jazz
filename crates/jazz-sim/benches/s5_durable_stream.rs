@@ -558,7 +558,7 @@ fn run_db_surface(config: &Config) -> DbSurfaceSummary {
 
 fn run_process_local_resume_canary(config: &Config) -> ResumeCanarySummary {
     let schema = schema();
-    let (_server_dir, server_state) = open_node(node(180), schema.clone());
+    let (_server_dir, server_state) = open_history_complete_node(node(180), schema.clone());
     let server = Node::new(server_state);
     let (_client_dir, client) = open_db(node(181), schema.clone());
     let streams = config.streams.max(16);
@@ -583,10 +583,7 @@ fn run_process_local_resume_canary(config: &Config) -> ResumeCanarySummary {
         block_on(client.subscribe(&prepared, ReadOpts::default())).expect("db subscribe");
 
     client.tick().expect("client fresh subscribe tick");
-    subscriber
-        .borrow_mut()
-        .serve_current_rows(STREAM_DOCS)
-        .expect("serve fresh rows");
+    server.tick().expect("server fresh subscribe tick");
     client.tick().expect("client fresh apply tick");
     let mut rows = Vec::new();
     drain_subscription_events(&mut watch, &mut rows);
@@ -627,6 +624,7 @@ fn run_process_local_resume_canary(config: &Config) -> ResumeCanarySummary {
     let (client_transport, server_transport) = queue_duplex();
     let _resumed_upstream = client.connect_upstream(client_transport);
     let resumed = server.accept_subscriber_with_resume(server_transport, AuthorId::SYSTEM, cursor);
+    server.mark_subscriber_connections_dirty_for_test();
 
     client.tick().expect("client resumed subscribe tick");
     server.tick().expect("server resumed tick");
@@ -1082,6 +1080,19 @@ fn open_node(node_uuid: NodeUuid, schema: JazzSchema) -> (TempDir, NodeState<Roc
     (dir, node)
 }
 
+fn open_history_complete_node(
+    node_uuid: NodeUuid,
+    schema: JazzSchema,
+) -> (TempDir, NodeState<RocksDbStorage>) {
+    let dir = tempfile::tempdir().unwrap();
+    let refs = schema.column_families();
+    let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage =
+        RocksDbStorage::open_with_durability(dir.path(), &refs, Durability::WalNoSync).unwrap();
+    let node = NodeState::new_history_complete(node_uuid, schema, storage).unwrap();
+    (dir, node)
+}
+
 fn open_db(node_uuid: NodeUuid, schema: JazzSchema) -> (TempDir, Db<RocksDbStorage>) {
     let dir = tempfile::tempdir().unwrap();
     let refs = schema.column_families();
@@ -1100,7 +1111,6 @@ fn open_db(node_uuid: NodeUuid, schema: JazzSchema) -> (TempDir, Db<RocksDbStora
                 .try_into()
                 .expect("node seed bytes"),
         )))),
-        large_value_checkpoint_op_interval: 1024,
     }))
     .expect("db open");
     (dir, db)

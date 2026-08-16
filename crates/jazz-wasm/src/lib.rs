@@ -182,42 +182,6 @@ impl From<WasmDbIdentity> for DbIdentity {
 }
 
 #[derive(Clone, Debug, Serialize)]
-struct WasmRowBatch<'a> {
-    table: &'a str,
-    descriptor: RecordDescriptor,
-    rows: Vec<WasmRow<'a>>,
-}
-
-#[derive(Clone, Debug, Serialize)]
-struct WasmRow<'a> {
-    row_id: RowUuid,
-    deleted: bool,
-    raw: &'a [u8],
-}
-
-#[derive(Clone, Debug, Serialize)]
-struct WasmRelationSnapshot<'a> {
-    root_count: u64,
-    rows: Vec<WasmRowBatch<'a>>,
-}
-
-#[derive(Clone, Debug, Serialize)]
-struct WasmSubscriptionDelta<'a> {
-    added: Vec<WasmRowBatch<'a>>,
-    updated: Vec<WasmRowBatch<'a>>,
-    removed: Vec<WasmRemovedRow>,
-    added_occurrence_keys: Vec<jazz::tools::ResultKey>,
-    updated_occurrence_keys: Vec<jazz::tools::ResultKey>,
-    removed_occurrence_keys: Vec<jazz::tools::ResultKey>,
-}
-
-#[derive(Clone, Debug, Serialize)]
-struct WasmRemovedRow {
-    table: String,
-    row_id: RowUuid,
-}
-
-#[derive(Clone, Debug, Serialize)]
 pub struct WasmWriteResult {
     row_id: RowUuid,
     tx_id: jazz::tx::TxId,
@@ -327,6 +291,7 @@ impl Clone for WasmDbInner {
 pub struct WasmTransport {
     inner: WasmTransportInner,
     queues: WasmWireQueues,
+    subscriber_identity: Option<AuthorId>,
 }
 
 enum WasmTransportInner {
@@ -1371,11 +1336,6 @@ impl WasmDb {
         encode_rows(&rows).map_err(to_js_error)
     }
 
-    #[wasm_bindgen(js_name = hydrateLargeValue)]
-    pub fn hydrate_large_value(&self, handle: Vec<u8>) -> Result<Vec<u8>, JsValue> {
-        with_wasm_db!(&self.inner, |db| db.hydrate_large_value_handle(&handle)).map_err(to_js_error)
-    }
-
     #[wasm_bindgen(js_name = one)]
     pub fn one(&self, query: &WasmPreparedQuery, opts: JsValue) -> Result<Vec<u8>, JsValue> {
         let opts = read_opts_from_js(opts)?;
@@ -1928,6 +1888,19 @@ impl WasmDb {
         self.inner.tick().map_err(to_js_error)
     }
 
+    /// Configure this runtime as the optimistic in-memory side of a browser
+    /// client/worker pair. Must be called before application writes begin.
+    #[wasm_bindgen(js_name = setNonDurableClient)]
+    pub fn set_non_durable_client(&self) -> Result<(), JsValue> {
+        match &self.inner {
+            WasmDbInner::Memory(db) => db.set_non_durable_client(),
+            #[cfg(target_arch = "wasm32")]
+            WasmDbInner::Browser(db) => db.set_non_durable_client(),
+            WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
+        }
+        Ok(())
+    }
+
     #[wasm_bindgen(js_name = connectUpstream)]
     pub fn connect_upstream(&self) -> Result<WasmTransport, JsValue> {
         let queues = WasmWireQueues::default();
@@ -1957,7 +1930,11 @@ impl WasmDb {
             },
             WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
         };
-        Ok(WasmTransport { inner, queues })
+        Ok(WasmTransport {
+            inner,
+            queues,
+            subscriber_identity: None,
+        })
     }
 
     /// Connect after the browser carrier has accepted the server Hello. The
@@ -2013,29 +1990,55 @@ impl WasmDb {
             },
             WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
         };
-        Ok(WasmTransport { inner, queues })
+        Ok(WasmTransport {
+            inner,
+            queues,
+            subscriber_identity: None,
+        })
     }
 
     #[wasm_bindgen(js_name = acceptSubscriber)]
-    pub fn accept_subscriber(&self, identity: Vec<u8>) -> Result<WasmTransport, JsValue> {
+    pub fn accept_subscriber(
+        &self,
+        identity: Vec<u8>,
+        claims: JsValue,
+    ) -> Result<WasmTransport, JsValue> {
         let identity = author_id_from_bytes(&identity)?;
+        let claims = claims_from_js(identity, claims)?;
         let queues = WasmWireQueues::default();
-        let transport = Box::new(WireTransportAdapter::current(WasmWireTransport {
-            queues: queues.clone(),
-        }));
+        // Like the JS-owned upstream carrier, this binding-local transport has
+        // no authenticated endpoint context for scoped receipt/view frames.
+        let transport = Box::new(WireTransportAdapter::new(
+            WasmWireTransport {
+                queues: queues.clone(),
+            },
+            jazz::wire::WIRE_PROTOCOL_VERSION,
+            jazz::wire::current_wire_features()
+                & !(jazz::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
+                    | jazz::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS),
+            None,
+        ));
         let inner = match &self.inner {
             WasmDbInner::Memory(db) => WasmTransportInner::Memory {
                 db: Rc::clone(db),
-                connection: Some(db.accept_subscriber(transport, identity)),
+                connection: Some(db.accept_subscriber_with_claims(
+                    transport,
+                    identity,
+                    claims.clone(),
+                )),
             },
             #[cfg(target_arch = "wasm32")]
             WasmDbInner::Browser(db) => WasmTransportInner::Browser {
                 db: Rc::clone(db),
-                connection: Some(db.accept_subscriber(transport, identity)),
+                connection: Some(db.accept_subscriber_with_claims(transport, identity, claims)),
             },
             WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
         };
-        Ok(WasmTransport { inner, queues })
+        Ok(WasmTransport {
+            inner,
+            queues,
+            subscriber_identity: Some(identity),
+        })
     }
 
     #[wasm_bindgen(js_name = mergeableTx)]
@@ -2114,6 +2117,28 @@ impl WasmDb {
 
 #[wasm_bindgen]
 impl WasmTransport {
+    #[wasm_bindgen(js_name = updateAuthenticatedClaims)]
+    pub fn update_authenticated_claims(&self, claims: JsValue) -> Result<(), JsValue> {
+        let identity = self
+            .subscriber_identity
+            .ok_or_else(|| JsValue::from_str("transport is not a subscriber link"))?;
+        let claims = claims_from_js(identity, claims)?;
+        match &self.inner {
+            WasmTransportInner::Memory { connection, .. } => connection
+                .as_ref()
+                .ok_or_else(|| JsValue::from_str("subscriber transport is closed"))?
+                .borrow_mut()
+                .update_authenticated_session_claims(claims),
+            #[cfg(target_arch = "wasm32")]
+            WasmTransportInner::Browser { connection, .. } => connection
+                .as_ref()
+                .ok_or_else(|| JsValue::from_str("subscriber transport is closed"))?
+                .borrow_mut()
+                .update_authenticated_session_claims(claims),
+        }
+        Ok(())
+    }
+
     #[wasm_bindgen(js_name = sendWireFrame)]
     pub fn send_wire_frame(&self, frame: Vec<u8>) {
         self.queues.inbound.borrow_mut().push_back(frame);
@@ -2649,16 +2674,13 @@ fn optional_bool_prop(value: &JsValue, name: &str) -> Result<Option<bool>, JsVal
 }
 
 fn encode_rows(rows: &[jazz::node::CurrentRow]) -> Result<Vec<u8>, postcard::Error> {
-    postcard::to_allocvec(&row_batches(rows))
+    jazz::binding_codec::encode_rows(rows)
 }
 
 fn encode_relation_snapshot(
     snapshot: &jazz::node::RelationSnapshot,
 ) -> Result<Vec<u8>, postcard::Error> {
-    postcard::to_allocvec(&WasmRelationSnapshot {
-        root_count: snapshot.root_count as u64,
-        rows: row_batches(&snapshot.rows),
-    })
+    jazz::binding_codec::encode_relation_snapshot(snapshot)
 }
 
 fn encode_subscription_delta<'a>(
@@ -2666,60 +2688,7 @@ fn encode_subscription_delta<'a>(
     updated: &'a [jazz::db::SubscriptionOutputRow],
     removed: &[jazz::db::RemovedRow],
 ) -> Result<Vec<u8>, postcard::Error> {
-    let added_rows = added.iter().map(|row| row.row.clone()).collect::<Vec<_>>();
-    let updated_rows = updated
-        .iter()
-        .map(|row| row.row.clone())
-        .collect::<Vec<_>>();
-    postcard::to_allocvec(&WasmSubscriptionDelta {
-        added: row_batches(&added_rows),
-        updated: row_batches(&updated_rows),
-        removed: removed
-            .iter()
-            .map(|row| WasmRemovedRow {
-                table: row.table.clone(),
-                row_id: row.row_uuid,
-            })
-            .collect(),
-        added_occurrence_keys: added
-            .iter()
-            .map(|row| jazz::tools::ResultKey::from_occurrence(row.occurrence_id.clone()))
-            .collect(),
-        updated_occurrence_keys: updated
-            .iter()
-            .map(|row| jazz::tools::ResultKey::from_occurrence(row.occurrence_id.clone()))
-            .collect(),
-        removed_occurrence_keys: removed
-            .iter()
-            .map(|row| jazz::tools::ResultKey::from_occurrence(row.occurrence_id.clone()))
-            .collect(),
-    })
-}
-
-fn row_batches(rows: &[jazz::node::CurrentRow]) -> Vec<WasmRowBatch<'_>> {
-    let mut batches: Vec<WasmRowBatch<'_>> = Vec::new();
-    for row in rows {
-        let (descriptor, raw) = row.encoded_record();
-        match batches.last_mut() {
-            Some(batch) if batch.table == row.table() && batch.descriptor == *descriptor => {
-                batch.rows.push(wasm_row(row, raw));
-            }
-            _ => batches.push(WasmRowBatch {
-                table: row.table(),
-                descriptor: *descriptor,
-                rows: vec![wasm_row(row, raw)],
-            }),
-        }
-    }
-    batches
-}
-
-fn wasm_row<'a>(row: &jazz::node::CurrentRow, raw: &'a [u8]) -> WasmRow<'a> {
-    WasmRow {
-        row_id: row.row_uuid(),
-        deleted: row.is_deleted(),
-        raw,
-    }
+    jazz::binding_codec::encode_subscription_delta(added, updated, removed)
 }
 
 fn subscription_stream_to_js(
@@ -2738,6 +2707,7 @@ fn subscription_chunk_to_js(
     match event {
         SubscriptionEvent::Delta {
             reset,
+            publishable,
             added,
             updated,
             removed,
@@ -2764,6 +2734,19 @@ fn subscription_chunk_to_js(
                     ));
                 }
             }
+            let terminal_layout_id = if terminal_operations.is_empty() {
+                ""
+            } else {
+                terminal_layout
+                    .as_ref()
+                    .ok_or_else(|| {
+                        JsValue::from_str(
+                            "terminal operation arrived without a prepared root layout",
+                        )
+                    })?
+                    .id
+                    .as_str()
+            };
             set_prop(&object, "type", JsValue::from_str("delta"))?;
             set_prop(
                 &object,
@@ -2773,10 +2756,11 @@ fn subscription_chunk_to_js(
             set_prop(
                 &object,
                 "terminalOperations",
-                terminal_operations_to_json(
+                jazz::binding_codec::terminal_operations_to_json(
                     &terminal_operations,
-                    terminal_layout.as_ref().map(|layout| layout.id.as_str()),
-                )?
+                    terminal_layout_id,
+                )
+                .map_err(to_js_error)?
                 .serialize(&serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true))
                 .map_err(to_js_error)?,
             )?;
@@ -2788,7 +2772,9 @@ fn subscription_chunk_to_js(
                 })?;
                 published_terminal_layouts
                     .insert(layout.id.clone())
-                    .then(|| terminal_layout_to_json(layout))
+                    .then(|| {
+                        jazz::binding_codec::terminal_layout_to_json(layout).map_err(to_js_error)
+                    })
                     .transpose()?
                     .into_iter()
                     .collect()
@@ -2803,6 +2789,7 @@ fn subscription_chunk_to_js(
                     .map_err(to_js_error)?,
             )?;
             set_prop(&object, "reset", JsValue::from_bool(reset))?;
+            set_prop(&object, "publishable", JsValue::from_bool(publishable))?;
             set_prop(&object, "settled", JsValue::from_bool(settled))?;
             set_prop(&object, "tier", JsValue::from_str(&format!("{tier:?}")))?;
         }
@@ -2845,62 +2832,6 @@ fn subscription_chunk_to_js(
         }
     };
     Ok(object.into())
-}
-
-/// Encode each terminal operation with the exact descriptor of its root
-/// payload.  Terminal bytes may be either logical output rows or nullable
-/// CurrentRow carriers, so consumers must not reconstruct this layout from a
-/// query projection.
-fn terminal_operations_to_json(
-    operations: &[jazz::groove::ivm::TerminalOperation],
-    root_layout_id: Option<&str>,
-) -> Result<serde_json::Value, JsValue> {
-    let mut encoded = serde_json::to_value(operations).map_err(to_js_error)?;
-    if operations.is_empty() {
-        return Ok(encoded);
-    }
-    let root_layout_id = root_layout_id.ok_or_else(|| {
-        JsValue::from_str("terminal operation arrived without a prepared root layout")
-    })?;
-    let encoded_operations = encoded
-        .as_array_mut()
-        .expect("terminal operations serialize as an array");
-    for wire in encoded_operations {
-        let serde_json::Value::Object(wire) = wire else {
-            unreachable!("terminal operation serializes as an object");
-        };
-        wire.remove("root_descriptor");
-        wire.insert(
-            "rootLayoutId".to_owned(),
-            serde_json::Value::String(root_layout_id.to_owned()),
-        );
-    }
-    Ok(encoded)
-}
-
-fn terminal_layout_to_json(
-    layout: &jazz::db::TerminalRootLayout,
-) -> Result<serde_json::Value, JsValue> {
-    let descriptor = postcard::to_allocvec(&layout.root_descriptor).map_err(to_js_error)?;
-    Ok(serde_json::json!({
-        "id": layout.id,
-        "rootDescriptor": descriptor,
-        "rootKeySlot": layout.root_key_slot,
-        "rootKeyFieldName": layout.root_key_field_name,
-        "publicFields": layout.public_fields.iter().map(|field| serde_json::json!({
-            "name": field.name,
-            "descriptorFieldName": field.descriptor_field_name,
-            "slot": field.slot,
-            "carrier": match field.carrier {
-                jazz::db::TerminalRootCarrier::CurrentRow => "CurrentRow",
-                jazz::db::TerminalRootCarrier::Logical => "Logical",
-            },
-        })).collect::<Vec<_>>(),
-        "carrier": match layout.carrier {
-            jazz::db::TerminalRootCarrier::CurrentRow => "CurrentRow",
-            jazz::db::TerminalRootCarrier::Logical => "Logical",
-        },
-    }))
 }
 
 fn set_prop(object: &js_sys::Object, name: &str, value: JsValue) -> Result<(), JsValue> {

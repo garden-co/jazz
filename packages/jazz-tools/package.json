@@ -125,7 +125,7 @@
   },
   "scripts": {
     "build": "pnpm build:runtime && pnpm build:test && pnpm build:svelte && pnpm build:solid",
-    "build:runtime": "node scripts/clean-dist.mjs && tsc",
+    "build:runtime": "node scripts/clean-dist.mjs && tsc && node scripts/bundle-broker-worker.mjs",
     "build:svelte": "svelte-package -i src/svelte -o dist/svelte --tsconfig tsconfig.svelte.json && node scripts/cleanup-generated-src-types.mjs",
     "build:solid": "vite build --config vite.config.solid.ts --mode solid-dom && vite build --config vite.config.solid.ts --mode solid-ssr && tsc --project tsconfig.solid.json --emitDeclarationOnly",
     "check": "tsc --noEmit",
@@ -136,7 +136,7 @@
     "test:svelte": "vitest run --config vitest.config.svelte.ts",
     "build:test": "node dist/cli.js validate --schema-dir tests/ts-dsl/fixtures/basic && tsc --project tsconfig.tests.json && pnpm typecheck:react-native",
     "typecheck:react-native": "tsc --project tsconfig.react-native-tests.json",
-    "test:browser": "vitest run --config vitest.config.browser.ts",
+    "test:browser": "node ../../dev/artifacts/verify-correctness-test-artifacts.mjs && vitest run --config vitest.config.browser.ts",
     "test:browser:focused": "node scripts/test-browser-focused.mjs",
     "test:browser:contract": "node scripts/test-browser-focused.test.mjs",
     "test:terminal-layout-contract": "vitest run --config vitest.config.ts src/runtime/terminal-layout-contract-matrix.test.ts --reporter=verbose --passWithNoTests=false",

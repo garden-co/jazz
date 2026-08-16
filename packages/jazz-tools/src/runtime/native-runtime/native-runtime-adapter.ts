@@ -86,7 +86,6 @@ export type NativeDb = {
   attachExclusiveTx?(openBatchId: string): Tx;
   all(query: PreparedQuery, opts: unknown): Uint8Array;
   allForIdentity(query: PreparedQuery, author: Uint8Array, opts: unknown): Uint8Array;
-  hydrateLargeValue?(handle: Uint8Array): Uint8Array;
   allRelationQuery?(queryJson: string, opts: unknown): Uint8Array;
   allRelationQueryForIdentity?(queryJson: string, author: Uint8Array, opts: unknown): Uint8Array;
   allRelationSnapshot?(query: PreparedQuery, opts: unknown): Uint8Array;
@@ -203,6 +202,7 @@ export type NativeDb = {
       | ((error: Error | null, urgency: string) => void),
   ): void;
   onMutationError(callback: (event: MutationErrorEvent) => void): void;
+  setNonDurableClient?(): void;
   connectUpstream(): Transport;
   connectUpstreamWithSession?(
     protocolVersion: number,
@@ -212,6 +212,7 @@ export type NativeDb = {
     localNode: Uint8Array,
     localEpoch: bigint,
   ): Transport;
+  acceptSubscriber?(author: Uint8Array, claims: Record<string, unknown>): Transport;
   tick(): void;
   close?(): void;
   free?(): void;
@@ -274,6 +275,8 @@ export type Transport = {
   sendWireFrame(frame: Uint8Array): void;
   sendWireFrames?(frames: readonly Uint8Array[]): void;
   tick(): number;
+  updateAuthenticatedClaims?(claims: Record<string, unknown>): void;
+  free?(): void;
 };
 
 type PendingTx = {
@@ -368,14 +371,9 @@ type NativeRowFieldPlan = {
   name: string;
   index: number;
   type?: ColumnType;
-  largeValue?: "Blob" | "Text";
   storageType: ValueType;
   includeInValues: boolean;
 };
-
-type LargeValueHydrator = (handle: Uint8Array) => Uint8Array;
-
-const LARGE_VALUE_HANDLE_MAGIC = Uint8Array.from([0x4a, 0x4c, 0x56, 0x48, 0x32]); // JLVH2
 
 const textDecoder = new TextDecoder();
 const byteHex = Array.from({ length: 256 }, (_, byte) => byte.toString(16).padStart(2, "0"));
@@ -412,6 +410,8 @@ export class NativeRuntimeAdapter implements Runtime {
   private readonly subscriptions = new Map<number, SubscriptionState>();
   private authFailureCallback: ((reason: string) => void) | null = null;
   private serverTransport: Transport | null = null;
+  private peerUpstreamAttached = false;
+  private nonDurableClient = false;
   private serverCarrier: WebSocketCarrier | null = null;
   private serverCarrierPromise: Promise<WebSocketCarrier> | null = null;
   private serverTransportError: Error | null = null;
@@ -422,6 +422,8 @@ export class NativeRuntimeAdapter implements Runtime {
   private serverEndpointUrl: string | null = null;
   private readonly queuedServerFrames: Uint8Array[] = [];
   private readonly pendingInboundServerFrames: Uint8Array[] = [];
+  private readonly peerTransportWorkListeners = new Set<() => void>();
+  private peerTransportActivityEpoch = 0;
   private coreTickScheduled = false;
   private coreTickRunning = false;
   private coreTickAgain = false;
@@ -429,14 +431,6 @@ export class NativeRuntimeAdapter implements Runtime {
   private serverPumpAgain = false;
   private closed = false;
   private nextSubscriptionId = 1;
-
-  private readonly hydrateLargeValue = (handle: Uint8Array): Uint8Array => {
-    const hydrate = this.db.hydrateLargeValue;
-    if (!hydrate) {
-      throw new Error("Native runtime cannot hydrate a large-value row handle");
-    }
-    return hydrate.call(this.db, handle);
-  };
 
   static fromDb(
     db: NativeDb,
@@ -518,7 +512,52 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   connectUpstreamPeer(): Transport {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.connectUpstreamPeer();
+    this.peerUpstreamAttached = true;
     return this.db.connectUpstream();
+  }
+
+  onPeerTransportWork(listener: () => void): () => void {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.onPeerTransportWork(listener);
+    this.peerTransportWorkListeners.add(listener);
+    return () => {
+      this.peerTransportWorkListeners.delete(listener);
+    };
+  }
+
+  notifyPeerTransportActivity(): void {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.notifyPeerTransportActivity();
+    this.peerTransportActivityEpoch += 1;
+  }
+
+  setNonDurableClient(): void {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.setNonDurableClient();
+    if (!this.db.setNonDurableClient) {
+      throw new Error("Native runtime does not expose non-durable client mode");
+    }
+    this.db.setNonDurableClient();
+    this.nonDurableClient = true;
+  }
+
+  acceptPeer(claims: Record<string, unknown> = {}): Transport {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.acceptPeer(claims);
+    if (!this.db.acceptSubscriber) {
+      throw new Error("Native runtime does not expose subscriber links");
+    }
+    return this.db.acceptSubscriber(this.peerIdentity, claims);
+  }
+
+  async waitForUpstreamServerConnection(): Promise<void> {
+    if (this !== this.ownerRuntime) {
+      return await this.ownerRuntime.waitForUpstreamServerConnection();
+    }
+    if (!this.serverCarrierPromise) return;
+    await this.serverCarrierPromise;
+  }
+
+  /** @internal */
+  isClosed(): boolean {
+    return this.ownerRuntime.closed;
   }
 
   close(): void {
@@ -543,10 +582,12 @@ export class NativeRuntimeAdapter implements Runtime {
     this.writes.clear();
     this.clearServerTransportErrorWaiters();
     this.resolveServerTransportWorkWaiters();
+    this.peerTransportWorkListeners.clear();
     this.queuedServerFrames.length = 0;
     this.pendingInboundServerFrames.length = 0;
     this.serverTransport?.close();
     this.serverTransport = null;
+    this.peerUpstreamAttached = false;
     this.serverCarrier?.close();
     this.serverCarrier = null;
     this.db.close?.();
@@ -829,11 +870,17 @@ export class NativeRuntimeAdapter implements Runtime {
         "Commit transaction failed: empty mergeable batch has no committed unit; roll it back instead",
       );
     }
-    const write = this.db.commitTransaction(openBatchId, pending.kind);
+    let write: Write;
+    try {
+      write = this.db.commitTransaction(openBatchId, pending.kind);
+    } catch (error) {
+      return Promise.reject(error);
+    }
     this.pendingTxs.delete(openBatchId);
     this.completedTxs.set(openBatchId, { kind: pending.kind, state: "committed" });
     this.pumpSubscriptions();
     this.scheduleServerPump();
+    this.notifyPeerTransportWork();
     return Promise.resolve(recordWrite(write, this.writes));
   }
 
@@ -846,22 +893,34 @@ export class NativeRuntimeAdapter implements Runtime {
     if (!write) {
       throw new Error(`Wait for batch failed: unknown batch ${batchId}`);
     }
-    this.throwServerTransportErrorForTier(tier);
-    this.pumpServerTransport();
-    this.throwServerTransportErrorForTier(tier);
-    const settlement = write.wait(tier);
-    const transportError = this.waitForServerTransportError(tier);
-    try {
-      await (transportError ? Promise.race([settlement, transportError.promise]) : settlement);
-      this.pumpSubscriptions();
-    } catch (error) {
-      const rejected = rejectedWaitError(batchId, error);
-      if (rejected) {
-        throw rejected;
+    for (;;) {
+      this.throwServerTransportErrorForTier(tier);
+      const observedServerWorkEpoch = this.serverTransportWorkEpoch;
+      this.pumpServerTransport();
+      this.throwServerTransportErrorForTier(tier);
+      const settlement = write.wait(tier);
+      const transportError = this.waitForServerTransportError(tier);
+      const transportWork = this.waitForServerTransportWork(tier, observedServerWorkEpoch);
+      try {
+        const wakes: Array<Promise<"settled" | "work"> | Promise<never>> = [
+          settlement.then(() => "settled" as const),
+        ];
+        if (transportError) wakes.push(transportError.promise);
+        if (transportWork) wakes.push(transportWork.promise.then(() => "work" as const));
+        if ((await Promise.race(wakes)) === "settled") {
+          this.pumpSubscriptions();
+          return;
+        }
+      } catch (error) {
+        const rejected = rejectedWaitError(batchId, error);
+        if (rejected) {
+          throw rejected;
+        }
+        throw error;
+      } finally {
+        transportError?.cancel();
+        transportWork?.cancel();
       }
-      throw error;
-    } finally {
-      transportError?.cancel();
     }
   }
 
@@ -889,7 +948,11 @@ export class NativeRuntimeAdapter implements Runtime {
     this.applySessionClaims(session);
     assertNoUnsupportedPermissionIntrospection(queryJson);
     const coreQueryJson = addNestedOuterColumns(queryJson);
-    const opts = readOptions(tier, queryIncludesDeleted(coreQueryJson), optionsJson);
+    // In browser mode the requested tier gates hydration through the worker,
+    // while the main-thread Db remains an in-memory materialized cache. Once
+    // coverage is confirmed, evaluate that cache at its Local tier.
+    const materializedTier = this.nonDurableClient ? "local" : tier;
+    const opts = readOptions(materializedTier, queryIncludesDeleted(coreQueryJson), optionsJson);
     if (queryUsesNativeRelationApi(coreQueryJson)) {
       if (this.readAuthorizationHost === "trusted-serving") {
         if (!this.db.allRelationQueryForIdentity) {
@@ -900,28 +963,17 @@ export class NativeRuntimeAdapter implements Runtime {
           session?.identity ?? this.peerIdentity,
           opts,
         );
-        return rowsFromBatches(
-          readRowBatches(payload),
-          this.schema,
-          undefined,
-          "full-record",
-          this.hydrateLargeValue,
-        );
+        return rowsFromBatches(readRowBatches(payload), this.schema);
       }
       if (!this.db.allRelationQuery) {
         throw new Error("Native runtime does not support relation queries");
       }
       const payload = this.db.allRelationQuery(coreQueryJson, opts);
-      return rowsFromBatches(
-        readRowBatches(payload),
-        this.schema,
-        undefined,
-        "full-record",
-        this.hydrateLargeValue,
-      );
+      return rowsFromBatches(readRowBatches(payload), this.schema);
     }
     const query = this.prepareQuery(coreQueryJson);
     const attachment = await this.attachQueryIfNeeded(tier, optionsJson, query, session);
+    if (this.closed) return [];
     this.attachLocalReadCoverageInBackground(tier, optionsJson, query, session);
     try {
       if (queryHasArraySubqueries(coreQueryJson)) {
@@ -938,8 +990,6 @@ export class NativeRuntimeAdapter implements Runtime {
             readRelationSnapshot(payload),
             this.schema,
             subscriptionOutputColumns(coreQueryJson, this.schema).rootColumns,
-            "full-record",
-            this.hydrateLargeValue,
           );
         }
         if (!this.db.allRelationSnapshot) {
@@ -950,33 +1000,20 @@ export class NativeRuntimeAdapter implements Runtime {
           readRelationSnapshot(payload),
           this.schema,
           subscriptionOutputColumns(coreQueryJson, this.schema).rootColumns,
-          "full-record",
-          this.hydrateLargeValue,
         );
       }
       const pendingTx = pendingTxFromOptions(optionsJson, this.pendingTxs);
       let rows = this.readPlainRows(query, opts, session ?? undefined, pendingTx);
-      let rowStates = rowsFromBatches(
-        readRowBatches(rows),
-        this.schema,
-        undefined,
-        "full-record",
-        this.hydrateLargeValue,
-      );
+      let rowStates = rowsFromBatches(readRowBatches(rows), this.schema);
       if (!pendingTx && (tier === "edge" || tier === "global") && rowStates.length > 0) {
         await this.refreshRowsFromEdge(session, rowStates);
+        if (this.closed) return [];
         rows = this.readPlainRows(query, opts, session ?? undefined, pendingTx);
-        rowStates = rowsFromBatches(
-          readRowBatches(rows),
-          this.schema,
-          undefined,
-          "full-record",
-          this.hydrateLargeValue,
-        );
+        rowStates = rowsFromBatches(readRowBatches(rows), this.schema);
       }
       return rowStates;
     } finally {
-      if (attachment !== undefined) this.db.detachQuery?.(attachment);
+      if (attachment !== undefined && !this.closed) this.db.detachQuery?.(attachment);
     }
   }
 
@@ -1199,6 +1236,7 @@ export class NativeRuntimeAdapter implements Runtime {
     const batchId = recordWrite(write, this.writes);
     this.pumpSubscriptions();
     this.scheduleServerPump();
+    this.notifyPeerTransportWork();
     const row = this.rowStateFromValues(table, rowId, values);
     return { id: row.id, values: row.values, kind: "committed", batchId };
   }
@@ -1207,6 +1245,7 @@ export class NativeRuntimeAdapter implements Runtime {
     const batchId = recordWrite(write, this.writes);
     this.pumpSubscriptions();
     this.scheduleServerPump();
+    this.notifyPeerTransportWork();
     return { kind: "committed", batchId };
   }
 
@@ -1224,13 +1263,9 @@ export class NativeRuntimeAdapter implements Runtime {
     if (!identity) return this.readRowForWriteMerge(table, rowId);
     const query = this.prepareQuery(JSON.stringify({ table }));
     const rows = this.readRowsForHost(query, readOptions(), identity);
-    return rowsFromBatches(
-      readRowBatches(rows),
-      this.schema,
-      undefined,
-      "full-record",
-      this.hydrateLargeValue,
-    ).find((row) => row.table === table && row.id === formatUuid(rowId));
+    return rowsFromBatches(readRowBatches(rows), this.schema).find(
+      (row) => row.table === table && row.id === formatUuid(rowId),
+    );
   }
 
   private readRowForWriteMerge(table: string, rowId: Uint8Array): RowState | undefined {
@@ -1241,21 +1276,14 @@ export class NativeRuntimeAdapter implements Runtime {
       const rows = rowsFromBatches(
         readRowBatches(exactReader.call(this.db, table, rowId)),
         this.schema,
-        undefined,
-        "full-record",
-        this.hydrateLargeValue,
       );
       return rows[0];
     }
     const query = this.prepareQuery(JSON.stringify({ table }));
     const rows = this.db.all(query, readOptions());
-    return rowsFromBatches(
-      readRowBatches(rows),
-      this.schema,
-      undefined,
-      "full-record",
-      this.hydrateLargeValue,
-    ).find((row) => row.table === table && row.id === formatUuid(rowId));
+    return rowsFromBatches(readRowBatches(rows), this.schema).find(
+      (row) => row.table === table && row.id === formatUuid(rowId),
+    );
   }
 
   private rowStateFromValues(
@@ -1370,7 +1398,7 @@ export class NativeRuntimeAdapter implements Runtime {
     session: RuntimeSession | null,
     rows: RowState[],
   ): Promise<void> {
-    if (!this.serverTransport || rows.length === 0) return;
+    if (!this.hasUpstream() || rows.length === 0) return;
     const seen = new Set<string>();
     for (const row of rows) {
       const key = rowKey(row.table, row.id);
@@ -1385,10 +1413,11 @@ export class NativeRuntimeAdapter implements Runtime {
       let attachment: unknown;
       try {
         attachment = await this.attachQueryIfNeeded("edge", null, query, session);
+        if (this.closed) return;
         const opts = readOptions("edge", false, null);
         this.readRowsForHost(query, opts, session?.identity);
       } finally {
-        if (attachment !== undefined) this.db.detachQuery?.(attachment);
+        if (attachment !== undefined && !this.closed) this.db.detachQuery?.(attachment);
       }
     }
   }
@@ -1414,10 +1443,10 @@ export class NativeRuntimeAdapter implements Runtime {
     query: PreparedQuery,
     session: RuntimeSession | null,
   ): Promise<unknown | undefined> {
-    if (tier == null || tier === "local") return;
-    const options = optionsJson == null ? {} : (JSON.parse(optionsJson) as Record<string, unknown>);
-    if (options.propagation != null && options.propagation !== "full") return;
-    if (!this.serverTransport) return;
+    if (this.closed) return;
+    if (tier == null || (tier === "local" && !this.nonDurableClient)) return;
+    if (!readPropagationIsFull(optionsJson) && !this.nonDurableClient) return;
+    if (!this.hasUpstream()) return;
     if (!this.db.attachQuery) return;
     const opts = readOptions(tier, false, optionsJson);
     let attachment: unknown;
@@ -1434,11 +1463,15 @@ export class NativeRuntimeAdapter implements Runtime {
       attachment = this.db.attachQuery(query, opts);
     }
     if (!this.db.queryAttachmentIsCovered) return attachment;
+    const minimumPeerActivityEpoch = this.nonDurableClient
+      ? this.peerTransportActivityEpoch
+      : undefined;
     await this.waitForQueryCoverage(
       attachment,
       query,
       readOptions(tier, false, optionsJson),
       session?.identity,
+      minimumPeerActivityEpoch,
     );
     return attachment;
   }
@@ -1451,13 +1484,14 @@ export class NativeRuntimeAdapter implements Runtime {
   ): void {
     if (tier != null && tier !== "local") return;
     if (!readPropagationIsFull(optionsJson)) return;
-    if (!this.serverTransport || !this.db.attachQuery) return;
+    if (this.nonDurableClient || !this.serverTransport || !this.db.attachQuery) return;
 
     const refresh = async () => {
       await this.serverCarrierPromise;
+      if (this.closed) return;
       const edgeOptionsJson = JSON.stringify({ propagation: "full" });
       const attachment = await this.attachQueryIfNeeded("edge", edgeOptionsJson, query, session);
-      if (attachment !== undefined) this.db.detachQuery?.(attachment);
+      if (attachment !== undefined && !this.closed) this.db.detachQuery?.(attachment);
     };
 
     void refresh().catch((error: unknown) => {
@@ -1479,15 +1513,24 @@ export class NativeRuntimeAdapter implements Runtime {
     query: PreparedQuery,
     opts: unknown,
     identity?: Uint8Array,
+    minimumPeerActivityEpoch?: number,
   ): Promise<void> {
     const deadline = Date.now() + 15_000;
     const tier = (opts as { tier?: string }).tier ?? "";
     while (Date.now() < deadline) {
+      // A query can still be waiting for an upstream coverage response while
+      // its owning browser runtime is being torn down. `close()` frees the
+      // WASM Db, so this background wait must not touch its attachment after
+      // that boundary.
+      if (this.closed) return;
       this.throwServerTransportErrorForTier(tier);
       this.pumpServerTransport();
       this.throwServerTransportErrorForTier(tier);
       if (this.db.queryAttachmentIsCovered) {
-        if (this.db.queryAttachmentIsCovered(attachment)) return;
+        const peerHasResponded =
+          minimumPeerActivityEpoch == null ||
+          this.peerTransportActivityEpoch > minimumPeerActivityEpoch;
+        if (peerHasResponded && this.db.queryAttachmentIsCovered(attachment)) return;
       }
       try {
         this.readRowsForHost(query, opts, identity);
@@ -1606,6 +1649,7 @@ export class NativeRuntimeAdapter implements Runtime {
 
   private scheduleCoreWake(urgency: "immediate" | "deferred"): void {
     if (this.closed) return;
+    this.notifyPeerTransportWork();
     if (urgency === "immediate") {
       this.scheduleCoreTick();
       return;
@@ -1636,6 +1680,7 @@ export class NativeRuntimeAdapter implements Runtime {
       this.db.tick();
       this.pumpSubscriptions();
       this.scheduleServerPump();
+      this.notifyPeerTransportWork();
     } finally {
       this.coreTickRunning = false;
     }
@@ -1715,6 +1760,7 @@ export class NativeRuntimeAdapter implements Runtime {
       this.failSubscription(subscription, subscriptionRejectionError(chunk.reason));
       return;
     }
+    if (chunk.type === "delta" && chunk.publishable === false) return;
     if (chunk.type === "snapshot") {
       const previousRows = subscription.rows;
       const wasOpened = subscription.opened;
@@ -1723,7 +1769,6 @@ export class NativeRuntimeAdapter implements Runtime {
         this.schema,
         subscription.outputColumns?.rootColumns,
         "full-record",
-        this.hydrateLargeValue,
       );
       subscription.rowIndexByKey = indexRowsByKey(subscription.rows);
       subscription.opened = true;
@@ -1762,7 +1807,7 @@ export class NativeRuntimeAdapter implements Runtime {
         packedResetRows.terminalLayouts = chunk.terminalLayouts;
         this.publishSubscriptionRows(subscription, packedResetRows, chunk.settled, true);
       } else {
-        materializePackedResetRows(subscription, this.schema, this.hydrateLargeValue);
+        materializePackedResetRows(subscription, this.schema);
         let applied;
         try {
           applied = applySubscriptionDeltaWithWireDelta(
@@ -1772,7 +1817,7 @@ export class NativeRuntimeAdapter implements Runtime {
             this.schema,
             chunk.reset === true,
             subscription.outputColumns,
-            this.hydrateLargeValue,
+            chunk.terminalOperations,
           );
         } catch (error) {
           const buffered = applySubscriptionDeltaToState(
@@ -1782,7 +1827,7 @@ export class NativeRuntimeAdapter implements Runtime {
             this.schema,
             chunk.reset === true,
             subscription.outputColumns,
-            this.hydrateLargeValue,
+            chunk.terminalOperations,
           );
           if (
             subscriptionRowsRequireBufferedPublication(
@@ -1911,7 +1956,8 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   private subscriptionCallbacksAreSettledGated(subscription: SubscriptionState): boolean {
-    return (subscription.opts as { tier?: unknown }).tier === "global";
+    const tier = (subscription.opts as { tier?: unknown }).tier;
+    return tier === "global" || (this.nonDurableClient && tier === "edge");
   }
 
   private deferSubscriptionRows(
@@ -1956,9 +2002,20 @@ export class NativeRuntimeAdapter implements Runtime {
     }, SERVER_PUMP_DEBOUNCE_MS);
   }
 
+  private notifyPeerTransportWork(): void {
+    for (const listener of this.peerTransportWorkListeners) {
+      listener();
+    }
+  }
+
+  private hasUpstream(): boolean {
+    return this.serverTransport != null || this.peerUpstreamAttached;
+  }
+
   private pumpServerTransport(): void {
     const transport = this.serverTransport;
     if (this.closed || !transport) return;
+    const receivedServerFrames = this.pendingInboundServerFrames.length > 0;
     this.drainPendingInboundServerFrames(transport);
     for (let round = 0; round < 32; round += 1) {
       transport.tick();
@@ -1967,6 +2024,9 @@ export class NativeRuntimeAdapter implements Runtime {
         this.sendServerFrames(frames);
       }
       this.pumpSubscriptions();
+      if (receivedServerFrames && round === 0) {
+        this.notifyPeerTransportWork();
+      }
       if (frames.length === 0) {
         return;
       }
@@ -3655,7 +3715,6 @@ export function rowsFromBatches(
   schema: WasmSchema,
   projectedColumns?: readonly ColumnDescriptor[],
   nestedRowCarrier: NestedRowCarrier = "full-record",
-  hydrateLargeValue?: LargeValueHydrator,
 ): RowState[] {
   const rows: RowState[] = [];
   for (const batch of batches) {
@@ -3666,13 +3725,7 @@ export function rowsFromBatches(
       const valuesByColumn = new Map<string, Value>();
 
       for (const field of fieldPlans) {
-        const value = decodePlannedField(
-          field,
-          decodeRecord,
-          row.raw,
-          nestedRowCarrier,
-          hydrateLargeValue,
-        );
+        const value = decodePlannedField(field, decodeRecord, row.raw, nestedRowCarrier);
         valuesByColumn.set(field.name, value);
         if (field.includeInValues) {
           values.push(value);
@@ -3717,16 +3770,14 @@ function nativeRowFieldPlans(
     if (!fieldName || isInternalField(fieldName) || isCurrentRowPhysicalField(fieldName)) continue;
 
     const name = publicFieldName(fieldName);
-    const column = columnsByName.get(name);
     const type =
       name === "$createdBy" || name === "$updatedBy"
         ? ({ type: "Uuid" } as const)
-        : (magicColumnType(name) ?? column?.column_type);
+        : (magicColumnType(name) ?? columnsByName.get(name)?.column_type);
     plans.push({
       name,
       index,
       type,
-      largeValue: column?.large_value,
       storageType: batch.descriptor[index]!.valueType,
       includeInValues: !isHiddenIncludeColumn(name) && !isProvenanceMagicColumn(name),
     });
@@ -3750,10 +3801,9 @@ function rowsFromRelationSnapshot(
   schema: WasmSchema,
   projectedColumns?: readonly ColumnDescriptor[],
   nestedRowCarrier: NestedRowCarrier = "full-record",
-  hydrateLargeValue?: LargeValueHydrator,
 ): RowState[] {
   const rows = stripRelationSnapshotMetadata(
-    rowsFromBatches(snapshot.rows, schema, projectedColumns, nestedRowCarrier, hydrateLargeValue),
+    rowsFromBatches(snapshot.rows, schema, projectedColumns, nestedRowCarrier),
     schema,
   );
   return rows.slice(0, snapshot.rootCount);
@@ -3810,7 +3860,7 @@ export function applySubscriptionDeltaWithWireDelta(
   schema: WasmSchema,
   reset = false,
   outputColumns: SubscriptionOutputColumns | null = null,
-  hydrateLargeValue?: LargeValueHydrator,
+  terminalOperations?: readonly NativeTerminalOperation[],
 ): { rows: RowState[]; rowIndexByKey: Map<string, number>; wireDelta: NativeRowDelta } {
   const { addedRows, updatedRows, removedEntries, rows, rowIndexByKey } =
     applySubscriptionDeltaToState(
@@ -3820,16 +3870,16 @@ export function applySubscriptionDeltaWithWireDelta(
       schema,
       reset,
       outputColumns,
-      hydrateLargeValue,
+      terminalOperations,
     );
   return {
     rows,
     rowIndexByKey,
     wireDelta: {
       ...nativeDeltaFromChanges(
-        addedRows,
-        updatedRows,
-        removedEntries,
+        subscriptionOutputRows(addedRows, outputColumns),
+        subscriptionOutputRows(updatedRows, outputColumns),
+        subscriptionOutputRemovals(removedEntries, outputColumns),
         rowIndexByKey,
         schema,
         outputColumns,
@@ -3839,6 +3889,20 @@ export function applySubscriptionDeltaWithWireDelta(
   };
 }
 
+function subscriptionOutputRows(
+  rows: RowState[],
+  outputColumns: SubscriptionOutputColumns | null,
+): RowState[] {
+  return outputColumns ? rows.filter((row) => row.table === outputColumns.rootTable) : rows;
+}
+
+function subscriptionOutputRemovals(
+  removed: Array<{ table: string; id: string; index: number; resultKeyBytes?: Uint8Array }>,
+  outputColumns: SubscriptionOutputColumns | null,
+): Array<{ id: string; index: number; resultKeyBytes?: Uint8Array }> {
+  return outputColumns ? removed.filter((row) => row.table === outputColumns.rootTable) : removed;
+}
+
 function applySubscriptionDeltaToState(
   currentRows: RowState[],
   currentIndexByKey: Map<string, number>,
@@ -3846,52 +3910,62 @@ function applySubscriptionDeltaToState(
   schema: WasmSchema,
   reset = false,
   outputColumns: SubscriptionOutputColumns | null = null,
-  hydrateLargeValue?: LargeValueHydrator,
+  terminalOperations?: readonly NativeTerminalOperation[],
 ): {
   addedRows: RowState[];
   updatedRows: RowState[];
-  removedEntries: Array<{ id: string; index: number; resultKeyBytes?: Uint8Array }>;
+  removedEntries: Array<{ table: string; id: string; index: number; resultKeyBytes?: Uint8Array }>;
   rows: RowState[];
   rowIndexByKey: Map<string, number>;
 } {
   const rowsByKey = reset
     ? new Map<string, RowState>()
     : new Map(currentRows.map((row) => [rowStateKey(row), row]));
-  const removedEntries: Array<{ id: string; index: number; resultKeyBytes?: Uint8Array }> = [];
+  const removedEntries: Array<{
+    table: string;
+    id: string;
+    index: number;
+    resultKeyBytes?: Uint8Array;
+  }> = [];
 
+  const addedRows = rowsFromSubscriptionBatches(delta.added, schema, outputColumns, "full-record");
+  const updatedRows = rowsFromSubscriptionBatches(
+    delta.updated,
+    schema,
+    outputColumns,
+    "full-record",
+  );
+  attachOccurrenceKeys(addedRows, delta.addedOccurrenceKeys);
+  attachOccurrenceKeys(updatedRows, delta.updatedOccurrenceKeys);
+
+  // A changed row can arrive as a remove/add pair because relational record
+  // bytes include the changed value. It remains the same public occurrence,
+  // though, and must retain its slot until an explicit terminal Move says
+  // otherwise. Deleting it first makes Map insertion order spuriously turn a
+  // title-only edit into a sort reorder.
+  const replacementKeys = new Set(addedRows.concat(updatedRows).map((row) => rowStateKey(row)));
   for (const [removedIndex, removed] of delta.removed.entries()) {
     const id = formatUuid(removed.rowId);
     const resultKeyBytes = delta.removedOccurrenceKeys[removedIndex];
     const key = resultKeyBytes
       ? occurrenceStateKey(resultKeyBytes, removed.table, id)
       : rowKey(removed.table, id);
-    removedEntries.push({ id, index: currentIndexByKey.get(key) ?? 0, resultKeyBytes });
+    if (replacementKeys.has(key)) continue;
+    removedEntries.push({
+      table: removed.table,
+      id,
+      index: currentIndexByKey.get(key) ?? 0,
+      resultKeyBytes,
+    });
     rowsByKey.delete(key);
   }
 
-  const projectedColumns = outputColumns?.rootColumns;
-  const nestedRowCarrier: NestedRowCarrier = "full-record";
-  const addedRows = rowsFromBatches(
-    delta.added,
-    schema,
-    projectedColumns,
-    nestedRowCarrier,
-    hydrateLargeValue,
-  );
-  const updatedRows = rowsFromBatches(
-    delta.updated,
-    schema,
-    projectedColumns,
-    nestedRowCarrier,
-    hydrateLargeValue,
-  );
-  attachOccurrenceKeys(addedRows, delta.addedOccurrenceKeys);
-  attachOccurrenceKeys(updatedRows, delta.updatedOccurrenceKeys);
   for (const row of addedRows.concat(updatedRows)) {
     rowsByKey.set(rowStateKey(row), row);
   }
 
   const rows = Array.from(rowsByKey.values());
+  applyTerminalRootOrdering(rows, terminalOperations, outputColumns?.rootTable);
   const rowIndexByKey = indexRowsByKey(rows);
   return {
     addedRows,
@@ -3900,6 +3974,56 @@ function applySubscriptionDeltaToState(
     rows,
     rowIndexByKey,
   };
+}
+
+/**
+ * Relation deltas describe row membership while terminal edits own public
+ * root positions. Root Remove edits therefore do not delete adapter state: a
+ * changed sort key is represented as Remove followed by Insert for the same
+ * occurrence, and the relation replacement already supplies its new payload.
+ * Apply only unambiguous flat-root Insert/Move positions here; composite
+ * occurrence keys intentionally remain opaque rather than guessing which
+ * duplicate physical row they address.
+ */
+function applyTerminalRootOrdering(
+  rows: RowState[],
+  operations: readonly NativeTerminalOperation[] | undefined,
+  rootTable: string | undefined,
+): void {
+  for (const operation of operations ?? []) {
+    if (operation.path.length !== 0) continue;
+    const rootEdit = operation.edit;
+    if (!("Insert" in rootEdit) && !("Move" in rootEdit)) continue;
+    const key = "Insert" in rootEdit ? rootEdit.Insert.key : rootEdit.Move.key;
+    if (key.length !== 17 || key[0] !== 10) continue;
+    const id = formatUuid(Uint8Array.from(key.slice(1)));
+    const matches = rows
+      .map((row, index) =>
+        row.id === id && (rootTable === undefined || row.table === rootTable) ? index : -1,
+      )
+      .filter((index) => index !== -1);
+    if (matches.length !== 1) continue;
+    const index = matches[0]!;
+    const target = "Insert" in rootEdit ? rootEdit.Insert.index : rootEdit.Move.index;
+    const [row] = rows.splice(index, 1);
+    rows.splice(Math.max(0, Math.min(target, rows.length)), 0, row!);
+  }
+}
+
+function rowsFromSubscriptionBatches(
+  batches: NativeRowBatch[],
+  schema: WasmSchema,
+  outputColumns: SubscriptionOutputColumns | null,
+  nestedRowCarrier: NestedRowCarrier,
+): RowState[] {
+  return batches.flatMap((batch) =>
+    rowsFromBatches(
+      [batch],
+      schema,
+      batch.table === outputColumns?.rootTable ? outputColumns.rootColumns : undefined,
+      nestedRowCarrier,
+    ),
+  );
 }
 
 function indexRowsByKey(rows: RowState[]): Map<string, number> {
@@ -3945,37 +4069,17 @@ function decodePlannedField(
   decodeRecord: (raw: Uint8Array, logicalIndex: number) => Uint8Array | null,
   raw: Uint8Array,
   nestedRowCarrier: NestedRowCarrier,
-  hydrateLargeValue?: LargeValueHydrator,
 ): Value {
   const bytes = decodeRecord(raw, field.index);
   if (bytes == null) return { type: "Null" };
   if (!field.type) return { type: "Bytea", value: bytes };
   try {
-    const value = decodeBytes(field.type, bytes, field.name, field.storageType, nestedRowCarrier);
-    if (
-      field.largeValue &&
-      value.type === "Bytea" &&
-      startsWithBytes(value.value, LARGE_VALUE_HANDLE_MAGIC)
-    ) {
-      if (!hydrateLargeValue) {
-        throw new Error(`large-value handle for ${field.name} has no native hydrator`);
-      }
-      return { type: "Bytea", value: hydrateLargeValue(value.value) };
-    }
-    return value;
+    return decodeBytes(field.type, bytes, field.name, field.storageType, nestedRowCarrier);
   } catch (error) {
     throw new Error(
       `${String(error)} while decoding ${field.name} as ${field.type.type} from storage tag ${field.storageType.tag} (${bytes.byteLength} bytes)`,
     );
   }
-}
-
-function startsWithBytes(value: Uint8Array, prefix: Uint8Array): boolean {
-  if (value.byteLength < prefix.byteLength) return false;
-  for (let index = 0; index < prefix.byteLength; index += 1) {
-    if (value[index] !== prefix[index]) return false;
-  }
-  return true;
 }
 
 function decodeBytes(
@@ -4238,6 +4342,7 @@ function normalizeSubscriptionChunk(chunk: unknown):
       terminalOperations?: NativeTerminalOperation[];
       terminalLayouts?: NativeTerminalRootLayout[];
       settled?: boolean;
+      publishable?: boolean;
     }
   | {
       type: "rejected";
@@ -4255,6 +4360,7 @@ function normalizeSubscriptionChunk(chunk: unknown):
     reason?: unknown;
     reset?: unknown;
     settled?: unknown;
+    publishable?: unknown;
     terminalOperations?: unknown;
     terminalLayouts?: unknown;
   };
@@ -4282,6 +4388,7 @@ function normalizeSubscriptionChunk(chunk: unknown):
         ? (record.terminalLayouts as NativeTerminalRootLayout[])
         : undefined,
       settled: typeof record.settled === "boolean" ? record.settled : undefined,
+      publishable: typeof record.publishable === "boolean" ? record.publishable : undefined,
     };
   }
   if (record.type === "rejected" || record.type === "Rejected") {
@@ -4444,15 +4551,7 @@ function plainResetChunkCanStayPacked(
   const sourceRowKeysOnly = chunk.delta.addedOccurrenceKeys.every(
     (key) => key.length === 17 && key[0] === 1,
   );
-  const hasLargeValues = chunk.delta.added.some((batch) => {
-    const columns =
-      subscription.outputColumns?.rootTable === batch.table
-        ? subscription.outputColumns.rootColumns
-        : schema[batch.table]?.columns;
-    return columns?.some((column) => column.large_value != null) ?? false;
-  });
-  const canStayPacked =
-    reset && noUpdated && noRemoved && identityProjection && sourceRowKeysOnly && !hasLargeValues;
+  const canStayPacked = reset && noUpdated && noRemoved && identityProjection && sourceRowKeysOnly;
   return canStayPacked;
 }
 
@@ -4524,18 +4623,13 @@ function nativeDescriptorMatchesColumns(
   });
 }
 
-function materializePackedResetRows(
-  subscription: SubscriptionState,
-  schema: WasmSchema,
-  hydrateLargeValue?: LargeValueHydrator,
-): void {
+function materializePackedResetRows(subscription: SubscriptionState, schema: WasmSchema): void {
   if (!subscription.packedResetBatches) return;
   subscription.rows = rowsFromBatches(
     subscription.packedResetBatches,
     schema,
     subscription.outputColumns?.rootColumns,
     "full-record",
-    hydrateLargeValue,
   );
   subscription.rowIndexByKey = indexRowsByKey(subscription.rows);
   subscription.packedResetBatches = null;

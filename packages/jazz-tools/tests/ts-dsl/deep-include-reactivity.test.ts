@@ -56,9 +56,7 @@ describe("deep-include reactivity", () => {
     await db.shutdown();
   });
 
-  // TEST_BURNDOWN_TS: deep-include reactivity > fires when a depth-1 via dependency is inserted (baseline)
-  // known red; tracked in TEST_BURNDOWN.md — depth-1 include updates do not reach the subscription.
-  it.skip("fires when a depth-1 via dependency is inserted (baseline)", async () => {
+  it("fires when a depth-1 via dependency is inserted (baseline)", async () => {
     const {
       value: { id: orgId },
     } = db.insert(app.orgs, { name: "Acme" });

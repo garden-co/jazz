@@ -494,6 +494,7 @@ fn receiver_batch_ingests_non_reset_complete_bundles_once() {
             version_bundles,
             peer_complete_tx_payload_refs: peer_payload_inventory.complete_tx_payloads,
             authorization_progress: None,
+            opening_pending: false,
             result_member_adds,
             result_member_removes,
             terminal_operations: Vec::new(),
@@ -559,7 +560,8 @@ fn receiver_batch_preloads_peer_inventory_bundles_before_membership() {
                 version_carriers: Vec::new(),
                 version_bundles: Vec::new(),
                 peer_complete_tx_payload_refs: Vec::new(),
-            authorization_progress: None,
+                authorization_progress: None,
+                opening_pending: false,
                 result_member_adds: vec![ResultMemberEntry::row((
                     "todos".to_owned().into(),
                     row_uuid,
@@ -584,7 +586,8 @@ fn receiver_batch_preloads_peer_inventory_bundles_before_membership() {
                     durability,
                 }],
                 peer_complete_tx_payload_refs: vec![tx_id],
-            authorization_progress: None,
+                authorization_progress: None,
+                opening_pending: false,
                 result_member_adds: Vec::new(),
                 result_member_removes: Vec::new(),
                 terminal_operations: Vec::new(),
@@ -626,7 +629,6 @@ fn receiver_batch_coalesces_partial_bundles_for_same_tx() {
         user_metadata_json: None,
         target_lineage: crate::tx::BranchLineage::Root,
         branch_merge: None,
-        merge_strategy: None,
     };
     let first = version_record(row(1), Vec::new(), title_cells("one"), None);
     let second = version_record(row(2), Vec::new(), title_cells("two"), None);
@@ -647,7 +649,8 @@ fn receiver_batch_coalesces_partial_bundles_for_same_tx() {
                     durability: DurabilityTier::Global,
                 }],
                 peer_complete_tx_payload_refs: Vec::new(),
-            authorization_progress: None,
+                authorization_progress: None,
+                opening_pending: false,
                 result_member_adds: vec![ResultMemberEntry::row((
                     "todos".to_owned().into(),
                     row(1),
@@ -672,7 +675,8 @@ fn receiver_batch_coalesces_partial_bundles_for_same_tx() {
                     durability: DurabilityTier::Global,
                 }],
                 peer_complete_tx_payload_refs: Vec::new(),
-            authorization_progress: None,
+                authorization_progress: None,
+                opening_pending: false,
                 result_member_adds: vec![ResultMemberEntry::row((
                     "todos".to_owned().into(),
                     row(2),
@@ -777,6 +781,7 @@ fn receiver_batch_replays_identical_whole_versions_and_rejects_conflicts() {
         }],
         peer_complete_tx_payload_refs: Vec::new(),
         authorization_progress: None,
+        opening_pending: false,
         result_member_adds,
         result_member_removes: Vec::new(),
         terminal_operations: Vec::new(),
@@ -898,7 +903,6 @@ fn sequential_partial_exclusive_bundles_index_the_complete_transaction() {
         user_metadata_json: None,
         target_lineage: crate::tx::BranchLineage::Root,
         branch_merge: None,
-        merge_strategy: None,
     };
     let updates = [
         (row(1), version_record(row(1), Vec::new(), title_cells("one"), None)),
@@ -945,7 +949,6 @@ fn completing_partial_exclusive_transaction_rejects_conflicting_metadata() {
         user_metadata_json: None,
         target_lineage: crate::tx::BranchLineage::Root,
         branch_merge: None,
-        merge_strategy: None,
     };
     reader
         .apply_view_update(partial_exclusive_view_update(
@@ -1000,7 +1003,8 @@ fn partial_exclusive_view_update(
             durability: DurabilityTier::Global,
         }],
         peer_complete_tx_payload_refs: Vec::new(),
-            authorization_progress: None,
+        authorization_progress: None,
+        opening_pending: false,
         result_member_adds: vec![ResultMemberEntry::row((
             "todos".to_owned().into(),
             row_uuid,
@@ -1098,6 +1102,7 @@ fn receiver_batch_resolves_current_winner_across_bundles() {
             ],
             peer_complete_tx_payload_refs: Vec::new(),
             authorization_progress: None,
+            opening_pending: false,
             result_member_adds: vec![ResultMemberEntry::row((
                 "todos".to_owned().into(),
                 row_uuid,
@@ -1139,7 +1144,6 @@ fn receiver_tracks_partial_mergeable_payload_coverage() {
         user_metadata_json: None,
         target_lineage: crate::tx::BranchLineage::Root,
         branch_merge: None,
-        merge_strategy: None,
     };
     let first = version_record(row(1), Vec::new(), title_cells("one"), None);
     let second = version_record(row(2), Vec::new(), title_cells("two"), None);
@@ -1460,7 +1464,6 @@ fn originating_causality_rejection_retains_child_payload() {
             user_metadata_json: None,
             target_lineage: crate::tx::BranchLineage::Root,
             branch_merge: None,
-            merge_strategy: None,
         },
         vec![version_record(row, Vec::new(), title_cells("parent"), None)],
         u64::MAX - SKEW_TOLERANCE_MS,
@@ -1725,13 +1728,33 @@ fn peer_rejects_sequenced_non_global_fate_without_crashing_the_node() {
 fn peer_rejects_sequenced_non_global_view_bundle_before_persisting_it() {
     let (_temp_dir, mut receiver) = open_node();
     let bad_tx = TxId::new(TxTime::from(10), node(8));
+    let subscription = receiver.whole_table_subscription_key("todos").unwrap();
+    receiver
+        .apply_sync_message(SyncMessage::ViewUpdate {
+            subscription,
+            settled_through: GlobalSeq(0),
+            reset_result_set: true,
+            version_carriers: Vec::new(),
+            version_bundles: Vec::new(),
+            peer_payload_inventory: crate::protocol::PeerPayloadInventory {
+                opening_pending: true,
+                ..Default::default()
+            },
+            result_member_adds: Vec::new(),
+            result_member_removes: Vec::new(),
+            terminal_operations: Vec::new(),
+            program_fact_adds: Vec::new(),
+            program_fact_removes: Vec::new(),
+        })
+        .unwrap();
+    let binding_view = receiver
+        .binding_view_key_for_subscription(subscription)
+        .unwrap();
+    let before_generation = receiver.applied_view_update_generation(binding_view);
+    assert!(receiver.opening_pending_for_binding_view(binding_view));
     let received = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         receiver.apply_sync_message(SyncMessage::ViewUpdate {
-            subscription: SubscriptionKey {
-                shape_id: ShapeId(uuid::Uuid::from_u128(1)),
-                binding_id: BindingId(uuid::Uuid::from_u128(2)),
-                read_view: Default::default(),
-            },
+            subscription,
             settled_through: GlobalSeq(0),
             reset_result_set: true,
             version_carriers: Vec::new(),
@@ -1749,14 +1772,16 @@ fn peer_rejects_sequenced_non_global_view_bundle_before_persisting_it() {
                     user_metadata_json: None,
                     target_lineage: crate::tx::BranchLineage::Root,
                     branch_merge: None,
-                    merge_strategy: None,
                 },
                 versions: Vec::new(),
                 fate: Fate::Accepted,
                 global_seq: Some(GlobalSeq(7)),
                 durability: DurabilityTier::Edge,
             }],
-            peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
+            peer_payload_inventory: crate::protocol::PeerPayloadInventory {
+                opening_pending: false,
+                ..Default::default()
+            },
             result_member_adds: Vec::new(),
             result_member_removes: Vec::new(),
             terminal_operations: Vec::new(),
@@ -1772,6 +1797,31 @@ fn peer_rejects_sequenced_non_global_view_bundle_before_persisting_it() {
         ))
     ));
     assert!(receiver.transaction_state(bad_tx).is_none());
+    assert!(receiver.opening_pending_for_binding_view(binding_view));
+    assert_eq!(
+        receiver.applied_view_update_generation(binding_view),
+        before_generation
+    );
+    receiver
+        .apply_sync_message(SyncMessage::ViewUpdate {
+            subscription,
+            settled_through: GlobalSeq(1),
+            reset_result_set: true,
+            version_carriers: Vec::new(),
+            version_bundles: Vec::new(),
+            peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
+            result_member_adds: Vec::new(),
+            result_member_removes: Vec::new(),
+            terminal_operations: Vec::new(),
+            program_fact_adds: Vec::new(),
+            program_fact_removes: Vec::new(),
+        })
+        .unwrap();
+    assert!(!receiver.opening_pending_for_binding_view(binding_view));
+    assert_eq!(
+        receiver.applied_view_update_generation(binding_view),
+        before_generation + 1
+    );
     assert!(receiver
         .commit_mergeable(MergeableCommit::new("todos", row(9), 11).cells(title_cells("alive")))
         .is_ok());
@@ -1798,50 +1848,6 @@ fn internal_sequenced_non_global_fate_trips_the_debug_assertion() {
     assert!(result.is_err());
 }
 
-#[test]
-fn content_extent_fetch_rejects_row_context_mismatch_and_invisible_content() {
-    let (_temp_dir, mut node) = open_node();
-    let author = user(0xa1);
-    let visible_row = row(7);
-    let other_row = row(8);
-    let extent = node
-        .content_store()
-        .append(
-            schema().version_id(),
-            "todos",
-            author,
-            visible_row,
-            "title",
-            b"unreferenced",
-        )
-        .unwrap();
-    let mut peer = PeerState::client_link(author);
-
-    assert!(matches!(
-        peer.handle_content_extent_fetch(
-            &mut node,
-            SyncMessage::FetchContentExtent {
-                owner: crate::protocol::LargeValueOwnerRef::current_row(other_row),
-                extent: extent.clone(),
-            },
-        ),
-        Err(Error::UnsupportedSyncMessage(
-            "content extent row context mismatch"
-        ))
-    ));
-    assert!(matches!(
-        peer.handle_content_extent_fetch(
-            &mut node,
-            SyncMessage::FetchContentExtent {
-                owner: crate::protocol::LargeValueOwnerRef::current_row(visible_row),
-                extent,
-            },
-        ),
-        Err(Error::UnsupportedSyncMessage(
-            "content extent is not visible for row"
-        ))
-    ));
-}
 
 #[test]
 fn row_version_fetch_returns_authorized_versions_and_omits_unauthorized_rows() {
@@ -2193,7 +2199,6 @@ fn seed_policy_graph_known_global(
                 user_metadata_json: None,
                 target_lineage: crate::tx::BranchLineage::Root,
                 branch_merge: None,
-                merge_strategy: None,
             },
             vec![version],
             Fate::Accepted,
@@ -3744,6 +3749,7 @@ fn view_updates_ship_current_versions_to_downstream_nodes() {
             version_bundles,
             peer_complete_tx_payload_refs: peer_payload_inventory_refs,
             authorization_progress: None,
+            opening_pending: false,
             result_member_adds,
             result_member_removes,
             terminal_operations: Vec::new(),
@@ -3806,6 +3812,7 @@ fn view_updates_use_peer_payload_inventory_refs_for_previously_shipped_complete_
             version_bundles,
             peer_complete_tx_payload_refs: peer_payload_inventory_refs,
             authorization_progress: None,
+            opening_pending: false,
             result_member_adds,
             result_member_removes,
             terminal_operations: Vec::new(),
@@ -3855,6 +3862,7 @@ fn view_updates_use_peer_payload_inventory_refs_for_previously_shipped_complete_
             version_bundles,
             peer_complete_tx_payload_refs: peer_payload_inventory_refs,
             authorization_progress: None,
+            opening_pending: false,
             result_member_adds,
             result_member_removes,
             terminal_operations: Vec::new(),
@@ -3881,6 +3889,7 @@ fn view_updates_downgrade_unknown_peer_payload_inventory_refs() {
             version_bundles: Vec::new(),
             peer_complete_tx_payload_refs: vec![missing],
             authorization_progress: None,
+            opening_pending: false,
             result_member_adds: Vec::new(),
             result_member_removes: Vec::new(),
             terminal_operations: Vec::new(),
@@ -3968,7 +3977,6 @@ fn duplicate_commit_units_compare_versions_without_wire_order() {
         user_metadata_json: None,
         target_lineage: crate::tx::BranchLineage::Root,
         branch_merge: None,
-        merge_strategy: None,
     };
     let versions = vec![
         version_record(row(1), Vec::new(), title_cells("a"), None),

@@ -16,7 +16,6 @@ use crate::ids::{
     AuthorId, BranchId, MigrationLensId, NodeUuid, RowUuid, SchemaLineagePublicationId,
     SchemaVersionId,
 };
-use crate::node::content_store::Extent;
 use crate::query::{BindingId, Query, RelationQuery, ShapeId};
 use crate::schema::{JazzSchema, TableSchema};
 use crate::time::GlobalSeq;
@@ -124,9 +123,12 @@ pub enum SyncMessage {
     ViewUpdate {
         /// Query binding result set addressed by this update.
         subscription: SubscriptionKey,
-        /// Serving node's contiguous applied global watermark when this update
-        /// was assembled. The update reflects every global change at or below
-        /// this position for the addressed view.
+        /// Core-assigned `GlobalSeq` through which the canonical binding view
+        /// was evaluated. It is durable known-state evidence, reusable after
+        /// reconnecting to an edge serving the same authoritative database
+        /// lineage for payload dedup/repair; it is not evidence that an
+        /// upstream connection is currently live and cannot alone settle a
+        /// subscription.
         settled_through: GlobalSeq,
         /// Whether receiver result_set should be reset first.
         reset_result_set: bool,
@@ -163,18 +165,6 @@ pub enum SyncMessage {
         program_fact_adds: Vec<ProgramFactEntry>,
         /// Non-row program fact removals, such as relation edges.
         program_fact_removes: Vec<ProgramFactEntry>,
-    },
-    /// Bulk-lane request for bytes backing one content extent.
-    FetchContentExtent {
-        /// Owner/version/read-view context used for authorization and membership checks.
-        owner: LargeValueOwnerRef,
-        /// Requested content extent.
-        extent: Extent,
-    },
-    /// Bulk-lane response carrying bytes for content extents.
-    ContentExtents {
-        /// Shipped extent payloads.
-        extents: Vec<ContentExtent>,
     },
     /// Repair-lane request for exact row-version payloads referenced by known-state dedup.
     FetchRowVersions {
@@ -380,7 +370,9 @@ pub struct AuthorizationScopeReceipt {
     pub claims_revision: u64,
     /// Policy/schema epoch used to compile the scope.
     pub policy_epoch: u64,
-    /// Complete authoritative history cut reflected by the support view.
+    /// Complete authoritative history cut reflected by the support view. Like
+    /// other `settled_through` cursors, this is durable history evidence; the
+    /// separately scoped authority epoch supplies connection liveness.
     pub settled_through: GlobalSeq,
     /// Authority authorization generation paired with that cut.
     pub authorization_progress: u64,
@@ -522,6 +514,11 @@ pub struct PeerPayloadInventory {
     /// Server-stamped authorization generation for the binding view carried by
     /// this update. It qualifies a subsequent fast known-state declaration.
     pub authorization_progress: Option<u64>,
+    /// Authority explicitly published a fail-closed opening snapshot while
+    /// authorization coverage is unavailable. This snapshot is observable but
+    /// remains pending until a later authoritative reset.
+    #[serde(default)]
+    pub opening_pending: bool,
 }
 
 /// One immutable row-version payload carried by a committed transaction.
@@ -1289,72 +1286,6 @@ fn common_run_table(bundles: &[VersionBundle]) -> Option<groove::Intern<String>>
     table.map(|table| groove::Intern::new(table.to_owned()))
 }
 
-/// Bytes for one immutable content extent.
-#[derive(Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
-pub struct ContentExtent {
-    /// Owner/version/read-view context for this immutable extent.
-    pub owner: LargeValueOwnerRef,
-    /// Extent name.
-    pub extent: Extent,
-    /// Immutable bytes stored at the extent.
-    pub bytes: Vec<u8>,
-}
-
-impl std::fmt::Debug for ContentExtent {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ContentExtent")
-            .field("owner", &self.owner)
-            .field("extent", &self.extent)
-            .field("bytes_len", &self.bytes.len())
-            .finish()
-    }
-}
-
-/// Authorized owner context for a binary large value extent.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
-pub struct LargeValueOwnerRef {
-    /// Optional table qualifier when the request is tied to a materialized row shape.
-    pub table: Option<groove::Intern<String>>,
-    /// Row that owns the large value column.
-    pub row: RowUuid,
-    /// Row-version state the value was observed through.
-    pub version: LargeValueVersionRef,
-    /// Serving-options identity that authorized observing this value.
-    pub read_view: ReadViewKey,
-}
-
-impl LargeValueOwnerRef {
-    /// Current/default read-view owner used by existing row-only fetch paths.
-    pub fn current_row(row: RowUuid) -> Self {
-        Self {
-            table: None,
-            row,
-            version: LargeValueVersionRef::CurrentVisible,
-            read_view: ReadViewKey::default(),
-        }
-    }
-}
-
-/// Version witness used to authorize a large value fetch.
-#[derive(
-    Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize,
-)]
-pub enum LargeValueVersionRef {
-    /// Resolve against the row version visible in the associated read view.
-    #[default]
-    CurrentVisible,
-    /// Resolve against a concrete content-version transaction.
-    Content {
-        /// Transaction that wrote the visible content value.
-        tx: TxId,
-    },
-    /// Resolve against a concrete deletion-register transaction.
-    Deletion {
-        /// Transaction that wrote the visible deletion register.
-        tx: TxId,
-    },
-}
-
 /// Wire handle for one usage-site subscription.
 ///
 /// This key addresses `Subscribe`, `ViewUpdate`, and `Unsubscribe` messages on
@@ -1424,7 +1355,7 @@ pub struct CoverageKey {
     pub shape_id: ShapeId,
     /// Deterministic binding id derived from canonical binding values.
     pub binding_id: BindingId,
-    /// Registration options that affect which rows can cover this view.
+    /// Registration options that affect the view or its upstream routing.
     pub opts: RegisterShapeOptions,
 }
 
@@ -1495,6 +1426,9 @@ pub struct RegisterShapeOptions {
     /// Semantic read-view request for this shape registration.
     #[serde(default)]
     pub read_view: ReadViewSpec,
+    /// Whether the serving node may register matching coverage with its own upstream.
+    #[serde(default = "default_propagate_upstream")]
+    pub propagate_upstream: bool,
 }
 
 impl Default for RegisterShapeOptions {
@@ -1502,6 +1436,7 @@ impl Default for RegisterShapeOptions {
         Self {
             tier: default_register_shape_tier(),
             read_view: ReadViewSpec::default(),
+            propagate_upstream: default_propagate_upstream(),
         }
     }
 }
@@ -1520,6 +1455,10 @@ impl RegisterShapeOptions {
 
 fn default_register_shape_tier() -> DurabilityTier {
     DurabilityTier::Global
+}
+
+fn default_propagate_upstream() -> bool {
+    true
 }
 
 /// Semantic read-view request carried over the wire before local resolution.
@@ -1555,7 +1494,8 @@ impl ReadViewSpec {
 /// Stable identity for read/serving options used by subscription coverage grouping.
 ///
 /// Despite the historical name, this key is derived from the full
-/// [`RegisterShapeOptions`], including durability tier and semantic read view.
+/// [`RegisterShapeOptions`], including durability tier, semantic read view, and
+/// upstream-routing intent.
 #[derive(
     Clone,
     Copy,
@@ -1576,7 +1516,7 @@ pub struct ReadViewKey {
 }
 
 impl ReadViewKey {
-    /// Derive a stable key for one semantic read-view request.
+    /// Derive a stable key for one registration request.
     pub fn from_register_shape_options(opts: &RegisterShapeOptions) -> Self {
         let canonical = opts.canonical();
         if canonical == RegisterShapeOptions::default() {
@@ -1740,7 +1680,8 @@ pub enum KnownStateDeclaration {
     Fast {
         /// Completeness class this declaration claims.
         completeness: KnownStateCompleteness,
-        /// Server-stamped settled-through position being echoed.
+        /// Durable known-state cursor being echoed for payload dedup/repair;
+        /// never an active-authority settlement receipt.
         position: GlobalSeq,
     },
     /// Fast declaration qualified by the authorization state under which the
@@ -1748,7 +1689,8 @@ pub enum KnownStateDeclaration {
     FastWithAuthorizationProgress {
         /// Completeness class this declaration claims.
         completeness: KnownStateCompleteness,
-        /// Server-stamped settled-through position being echoed.
+        /// Durable known-state cursor being echoed for payload dedup/repair;
+        /// never an active-authority settlement receipt.
         position: GlobalSeq,
         /// Server-stamped authorization generation echoed by the receiver.
         authorization_progress: u64,
@@ -2193,8 +2135,6 @@ pub enum ProgramFactEntry {
     PredicateOutputSet(PredicateOutputSetEntry),
     /// Point row-read validation fact.
     PointRead(PointReadEntry),
-    /// Large-value extent authorization/materialization fact.
-    LargeValueExtent(LargeValueExtentEntry),
 }
 
 /// Compatibility alias while current code still imports the previous name.
@@ -2514,19 +2454,6 @@ pub enum PredicateOutputSetRoleEntry {
     Base,
     /// Validation/current side.
     Now,
-}
-
-/// Large-value extent authorization/materialization fact.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
-pub struct LargeValueExtentEntry {
-    /// Owner/version/read-view context.
-    pub owner: LargeValueOwnerRef,
-    /// Column name.
-    pub column: String,
-    /// Authorized extent.
-    pub extent: Extent,
-    /// Content digest.
-    pub digest: Vec<u8>,
 }
 
 /// Namespace used for migration-lens UUIDv5 ids.
@@ -2991,28 +2918,6 @@ mod tests {
 
     fn schema_id(byte: u8) -> SchemaVersionId {
         SchemaVersionId::from_bytes([byte; 16])
-    }
-
-    #[test]
-    fn content_extent_debug_is_bounded_and_content_safe() {
-        let extent = ContentExtent {
-            owner: LargeValueOwnerRef::current_row(RowUuid::from_bytes([2; 16])),
-            extent: Extent {
-                schema: schema_id(1),
-                table: "documents".to_owned(),
-                writer: AuthorId::from_bytes([3; 16]),
-                row: RowUuid::from_bytes([2; 16]),
-                column: "body".to_owned(),
-                offset: 0,
-                len: 1_000_000,
-            },
-            bytes: vec![b'x'; 1_000_000],
-        };
-
-        let debug = format!("{extent:?}");
-        assert!(debug.contains("bytes_len: 1000000"));
-        assert!(debug.len() < 512);
-        assert!(!debug.contains("xxxxx"));
     }
 
     #[test]

@@ -24,9 +24,4 @@ export default s.definePermissions(app, ({ policy, session, anyOf }) => {
   policy.stops.allowInsert.where(isBandMember);
   policy.stops.allowUpdate.where(isBandMember);
   policy.stops.allowDelete.where(isBandMember);
-
-  policy.files.allowRead.where({});
-  policy.files.allowInsert.where(isBandMember);
-  policy.files.allowUpdate.where(isBandMember);
-  policy.files.allowDelete.where(isBandMember);
 });

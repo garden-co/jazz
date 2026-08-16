@@ -164,6 +164,40 @@ impl<'a> TestingClient<'a> {
         self.connect_with_context().await.1
     }
 
+    /// Connects through the public retry-later bootstrap boundary, preserving
+    /// one client context across attempts until the dynamic edge is ready.
+    pub async fn connect_after_retry_later(self, timeout: Duration) -> JazzClient {
+        let ready_table = self.ready_table.clone();
+        let ready_timeout = self.ready_timeout;
+        let context = self.build_context();
+        let deadline = tokio::time::Instant::now() + timeout;
+
+        let client = loop {
+            match JazzClient::connect(context.clone()).await {
+                Ok(client) => break client,
+                Err(error)
+                    if error.to_string().contains("bootstrapping")
+                        && error.to_string().contains("retry shortly")
+                        && tokio::time::Instant::now() < deadline =>
+                {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                Err(error) => panic!("connect test client after retry-later: {error}"),
+            }
+        };
+
+        if let Some(ready_table) = ready_table {
+            wait_for_edge_query_ready(
+                &client,
+                &ready_table,
+                ready_timeout.expect("ready timeout should be set when ready table is set"),
+            )
+            .await;
+        }
+
+        client
+    }
+
     /// Connects the client and also returns the exact `AppContext` used for
     /// the connection so callers can later reconnect with the same configuration.
     ///

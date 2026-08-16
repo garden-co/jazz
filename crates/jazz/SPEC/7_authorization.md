@@ -29,7 +29,6 @@ Invariant digest:
 - `INV-RLS-13`: Historical/as-of reads served for a link MUST evaluate read policy at the requested historical cut.
 - `INV-RLS-14`: Policy evaluation MUST deny when it cannot determine that a policy predicate is satisfied.
 - `INV-RLS-15`: If no read or write policy is declared for a table, the table MUST be public for that operation.
-- `INV-RLS-16`: Content extents for large values MUST be visible to an identity only when referenced by a version whose content row passes read policy for that identity.
 - `INV-RLS-17`: A write whose Transaction.madeby differs from the authenticated permission subject MUST be accepted only via a trusted serving node (a core/edge Node accepting a Trust...
 - `INV-RLS-18`: An uploaded commit unit MUST be authorized under the authenticated link identity: a Session link's madeby MUST equal that identity or be rejected, while a TrustedBacke...
 - `INV-RLS-19`: A required include MUST be treated as resolvable for a non-system
@@ -42,6 +41,10 @@ Invariant digest:
 - `INV-RLS-21`: A policy subplan MUST read its dependency tables as raw policy
   evidence without recursively applying those tables' own read policies, while
   still enforcing the complete outer policy under authenticated claims.
+- `INV-RLS-22`: A deletion event's authorization and downstream read eligibility
+  MUST resolve its stable physical table lineage back to the logical
+  table/schema at the relevant frontier; shared deletion storage MUST NOT widen
+  authority across tables.
 
 ## Details
 
@@ -286,8 +289,7 @@ authorization fails closed.
 
 _Further invariants._ `INV-RLS-8` — a deletion-register version is readable to a
 non-system identity only when the row has a global content winner that satisfies
-the read policy for that identity. `INV-RLS-16` — a large-value content extent is
-visible to an identity only when referenced by a version whose content row passes
+the read policy for that identity.
 that identity's read policy (ch. 12).
 
 ### 7.5 Exclusive atomicity and historical reads
@@ -343,6 +345,21 @@ client-supplied values must not widen those facts.
   composition. Range/null predicates remain fail-closed. Decide whether to add
   direct support for the remaining query predicates or reject them earlier in
   policy-specific validation.
+- 🔶 **Policy replacement across schema evolution.** The current implementation
+  selects the active policy-owning schema independently for each operation: a
+  newer schema replaces a read, insert, update, or delete policy only when it
+  declares the applicable clause; otherwise that operation can continue using
+  the preceding active policy definition. Decide whether this is the intended
+  migration model, or whether every newly activated schema must instead provide
+  a complete replacement policy bundle for every surviving table. A
+  policy-complete model must define whether an omitted clause means public,
+  inherited, or invalid, and catalogue validation must reject ambiguous partial
+  replacements. It must also define what replacement means when a table is
+  renamed, split, copied, or dropped: whether the old table's policy disappears,
+  remains available only for historical/old-schema operations, or must be
+  explicitly mapped or tombstoned by the lineage publication. The decision must
+  preserve deterministic authorization for old authored versions, live clients
+  on older schemas, historical reads, and operation-specific permission advice.
 - 🔶 **History visibility rule.** Decide whether current-row readability should
   imply visibility for all historical versions of that row, or whether history
   sync/read must evaluate read policy per historical cut.
