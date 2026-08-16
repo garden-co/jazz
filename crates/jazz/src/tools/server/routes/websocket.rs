@@ -1920,6 +1920,28 @@ mod tests {
         postcard::from_bytes(&bytes).unwrap_or_default()
     }
 
+    /// Unlike the transport pump's optional poll, setup has an explicit
+    /// protocol obligation: a successfully admitted query session must first
+    /// receive the authority catalogue. Wait for that required reply using the
+    /// route test's normal bounded-settlement deadline.
+    async fn receive_required_ws_encoded_frames(
+        ws: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+    ) -> Vec<Vec<u8>> {
+        let message = tokio::time::timeout(WS_PUMP_DEADLINE, ws.next())
+            .await
+            .expect("server must answer initial websocket query setup before the deadline")
+            .expect("server must keep the websocket open during initial query setup")
+            .expect("server must send a valid initial websocket query setup response");
+        let WsMessage::Binary(bytes) = message else {
+            panic!("server must answer initial websocket query setup with binary wire frames");
+        };
+        postcard::from_bytes(&bytes).expect(
+            "server must encode the initial websocket query setup response as a frame batch",
+        )
+    }
+
     async fn pump_core_websocket_transport_once(
         client: &TestClient,
         ws: &mut tokio_tungstenite::WebSocketStream<
@@ -2005,6 +2027,61 @@ mod tests {
         received
     }
 
+    /// Complete the protocol's catalogue/session setup before a route test
+    /// attributes a later response to its own operation. A newly admitted
+    /// session may first receive the authority catalogue, so treating that
+    /// setup traffic as an operation response makes ordering tests test the
+    /// handshake race rather than the stated route boundary.
+    async fn settle_ws_todos_query(
+        client: &TestClient,
+        ws: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+    ) -> (PreparedQuery, QueryAttachment) {
+        let (query, attachment) = client.attach_todos_query();
+        let initial_outbound = client.tick_take();
+        assert!(
+            !initial_outbound.is_empty(),
+            "query setup must send its initial wire frames"
+        );
+        ws.send(WsMessage::Binary(ws_frame_batch(&initial_outbound).into()))
+            .await
+            .expect("send initial websocket query setup");
+        let initial_inbound = receive_required_ws_encoded_frames(ws).await;
+        let mut decoder = WireStreamDecoder::new(current_wire_features())
+            .expect("current wire compression must be available");
+        let saw_catalogue = initial_inbound.iter().any(|frame| {
+            let Ok(WireFrame::Message(envelope)) = decode_frame(frame) else {
+                return false;
+            };
+            decoder
+                .decode_message(&envelope.payload, envelope.features)
+                .ok()
+                .and_then(|payload| decode_sync_message(&payload).ok())
+                .is_some_and(|message| matches!(message, SyncMessage::CatalogueSnapshot(_)))
+        });
+        assert!(
+            saw_catalogue,
+            "the first query setup response must carry the authority catalogue"
+        );
+        // Keep this exact observed setup response queued for the ordinary
+        // client tick. The following pump therefore exercises the same
+        // catalogue-then-query transition as a real connected client.
+        client.transport.push_inbound(initial_inbound);
+        let deadline = tokio::time::Instant::now() + WS_PUMP_DEADLINE;
+        while !client.edge_attachment_is_covered(&attachment)
+            && tokio::time::Instant::now() < deadline
+        {
+            let _ = pump_core_websocket_transport_once(client, ws).await;
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            client.edge_attachment_is_covered(&attachment),
+            "websocket setup must settle the initial query before testing a later operation"
+        );
+        (query, attachment)
+    }
+
     // Internal route-boundary test: until websocket has a public
     // high-level client facade, this wires two real crate::Db clients through
     // the real /apps/<APP_ID>/ws route and proves WireFrame batches
@@ -2019,7 +2096,6 @@ mod tests {
         let mut ws_a = open_negotiated_ws(addr, &state, AuthorId::from_bytes([0xa1; 16])).await;
         let mut ws_b = open_negotiated_ws(addr, &state, AuthorId::from_bytes([0xb2; 16])).await;
         let (client_b_todos, client_b_todos_attachment) = client_b.attach_todos_query();
-
         let _inserted = client_a.insert_todo("route sync");
 
         let mut frames_sent_to_server = 0;
@@ -2064,6 +2140,9 @@ mod tests {
         let addr = start_ws_test_server(state.clone()).await;
         let client = TestClient::new(ws_public_schema_convert(), 0xa1, 0xa100).await;
         let mut ws = open_negotiated_ws(addr, &state, AuthorId::from_bytes([0xa1; 16])).await;
+
+        let (_, setup_attachment) = settle_ws_todos_query(&client, &mut ws).await;
+        client.detach_query(setup_attachment);
 
         let early_tx = client.write_todo_tx_id("early fate");
         let mut final_tx = early_tx;
@@ -2175,6 +2254,9 @@ mod tests {
         let addr = start_ws_test_server(state.clone()).await;
         let client = TestClient::new(ws_public_schema_convert(), 0xb2, 0xb200).await;
         let mut ws = open_negotiated_ws(addr, &state, AuthorId::from_bytes([0xb2; 16])).await;
+
+        let (_, setup_attachment) = settle_ws_todos_query(&client, &mut ws).await;
+        client.detach_query(setup_attachment);
         let (_todos, attachment) = client.attach_todos_query();
 
         let (sent, received) =
