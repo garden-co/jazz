@@ -12851,6 +12851,88 @@ fn one_shot_propagated_query_attaches_fresh_usage_subscription_for_covered_bindi
     client.detach_query(second_attachment);
 }
 
+/// Ensures a dormant propagated query coverage group releases its maintained
+/// server runtime receiver before the same logical query opens again.
+///
+/// This is intentionally an internal lifecycle test: the public query API can
+/// observe the later re-open, but cannot expose the authority's receiver
+/// count. The count is the exact ownership boundary that prevents a dropped
+/// one-shot handle from retaining stale maintained source state.
+///
+/// ```text
+/// client ──open coverage──► server maintained receiver
+/// client ──drop last handle► server receiver removed
+/// client ──re-open────────► exactly one fresh receiver
+/// ```
+#[test]
+fn final_query_coverage_drop_releases_server_maintained_receiver_before_reopen() {
+    let schema = schema();
+    let owner = AuthorId::from_bytes([0xa1; 16]);
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let client = open_db(0xc1, client_author, &schema);
+    seed(&server, "todos", cells("initial", false, owner));
+
+    let (client_transport, server_transport) = duplex();
+    let _upstream = client.connect_upstream(client_transport);
+    let _subscriber = server.accept_subscriber(server_transport, client_author);
+    let query = Query::from("todos");
+    let prepared = prepared(&client, &query);
+    let baseline_receivers = server
+        .node()
+        .borrow()
+        .runtime_stats_for_test()
+        .active_subscriptions;
+
+    let attachment = client
+        .attach_query_with_opts(&prepared, global_subscribe_opts())
+        .expect("attach propagated one-shot coverage");
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+    assert!(client.query_attachment_is_covered(&attachment));
+    assert_eq!(
+        server
+            .node()
+            .borrow()
+            .runtime_stats_for_test()
+            .active_subscriptions,
+        baseline_receivers + 1,
+        "the server owns one maintained receiver while coverage is live"
+    );
+
+    client.detach_query(attachment);
+    client.tick().unwrap();
+    server.tick().unwrap();
+    assert_eq!(
+        server
+            .node()
+            .borrow()
+            .runtime_stats_for_test()
+            .active_subscriptions,
+        baseline_receivers,
+        "dropping the final coverage handle must unregister its server receiver"
+    );
+
+    let reopened = client
+        .attach_query_with_opts(&prepared, global_subscribe_opts())
+        .expect("re-open propagated one-shot coverage");
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+    assert!(client.query_attachment_is_covered(&reopened));
+    assert_eq!(
+        server
+            .node()
+            .borrow()
+            .runtime_stats_for_test()
+            .active_subscriptions,
+        baseline_receivers + 1,
+        "re-open installs exactly one fresh maintained receiver"
+    );
+    client.detach_query(reopened);
+}
+
 #[test]
 fn one_shot_borrowed_stream_coverage_stays_pinned_until_query_detach() {
     let schema = schema();

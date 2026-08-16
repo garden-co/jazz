@@ -9406,7 +9406,17 @@ where
                                             binding_id: coverage.binding_id,
                                             read_view: coverage.opts.read_view_key(),
                                         };
-                                        peer.forget_subscription(group_subscription);
+                                        // A coverage group owns a maintained Groove receiver.
+                                        // Forgetting only the peer-side cursor leaves that
+                                        // receiver dormant in the shared runtime; a later
+                                        // re-open of the same logical coverage then races a
+                                        // stale source subscription instead of observing the
+                                        // current authority membership. Tear down both pieces
+                                        // together when the final usage site goes away.
+                                        peer.forget_subscription_with_node(
+                                            &mut self.node.borrow_mut(),
+                                            group_subscription,
+                                        );
                                         coverage_groups.remove(&coverage);
                                         if propagated_upstream {
                                             upstream_subscriptions.borrow_mut().push(
