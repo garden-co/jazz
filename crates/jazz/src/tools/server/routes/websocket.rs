@@ -990,6 +990,8 @@ mod tests {
     use super::*;
     use std::cell::RefCell;
     use std::rc::Rc;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
     use std::time::Duration;
 
     use crate::db::{
@@ -1374,6 +1376,130 @@ mod tests {
         )));
         db.tick()
             .expect("client helper transport should accept db upstream frames");
+    }
+
+    // Route-level regression for the shell wake boundary.  A client DB tick
+    // commonly queues outbound work; that is not new work for the shell that
+    // is already executing the tick, so it must not schedule another one.
+    // Conversely a real server reply must wake the owner so the queued frame
+    // is consumed and its query coverage becomes observable.
+    #[tokio::test(flavor = "current_thread")]
+    async fn websocket_transport_wakes_only_for_inbound_db_work() {
+        let state = make_ws_convergence_test_state().await;
+        let addr = start_ws_test_server(state.clone()).await;
+        let base_url = format!("http://{addr}");
+        let auth = crate::tools::websocket_prelude_auth::AuthConfig {
+            admin_secret: Some("admin-secret".to_owned()),
+            ..Default::default()
+        };
+
+        // Settle a real handshake before exercising the raw outbound hook.
+        // The assertion immediately after `send_frame` is deliberate: the old
+        // implementation invoked this callback synchronously from that method.
+        let outbound_wakes = Arc::new(AtomicUsize::new(0));
+        let outbound_wake = {
+            let wakes = Arc::clone(&outbound_wakes);
+            Arc::new(move || {
+                wakes.fetch_add(1, AtomicOrdering::SeqCst);
+            }) as Arc<dyn Fn() + Send + Sync>
+        };
+        let mut outbound_probe = WebSocketTransport::connect_with_wake(
+            &base_url,
+            state.app_id,
+            AuthorId::from_bytes([0x71; 16]),
+            auth.clone(),
+            outbound_wake,
+        )
+        .await
+        .expect("negotiate outbound wake probe");
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        assert_eq!(outbound_wakes.load(AtomicOrdering::SeqCst), 0);
+        outbound_probe
+            .send_frame(Vec::new())
+            .expect("queue outbound probe frame");
+        assert_eq!(
+            outbound_wakes.load(AtomicOrdering::SeqCst),
+            0,
+            "outbound send_frame must not wake the already-active shell"
+        );
+        drop(outbound_probe);
+
+        let inbound_wakes = Arc::new(AtomicUsize::new(0));
+        let inbound_wake = {
+            let wakes = Arc::clone(&inbound_wakes);
+            Arc::new(move || {
+                wakes.fetch_add(1, AtomicOrdering::SeqCst);
+            }) as Arc<dyn Fn() + Send + Sync>
+        };
+        let transport = WebSocketTransport::connect_with_wake(
+            &base_url,
+            state.app_id,
+            AuthorId::from_bytes([0x72; 16]),
+            auth,
+            inbound_wake,
+        )
+        .await
+        .expect("negotiate inbound DB-work client");
+        let (protocol_version, features, session_context) =
+            transport.negotiated_transport_metadata();
+        let schema = ws_public_schema_convert();
+        let column_families = schema.column_families();
+        let refs = column_families
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        let db = Db::open(
+            DbConfig::new(
+                schema,
+                CoreMemoryStorage::new(&refs),
+                DbIdentity {
+                    node: NodeUuid::from_bytes([0x72; 16]),
+                    author: AuthorId::from_bytes([0x72; 16]),
+                },
+            )
+            .with_id_source(SeededRowIdSource::new(0x7200)),
+        )
+        .await
+        .expect("open client DB");
+        db.connect_upstream(Box::new(WireTransportAdapter::new_with_session_context(
+            transport,
+            protocol_version,
+            features,
+            None,
+            session_context,
+        )));
+        let query = db
+            .prepare_query(&db.table("todos"))
+            .expect("prepare client query");
+        let attachment = db
+            .attach_query_with_opts(
+                &query,
+                ReadOpts {
+                    tier: DurabilityTier::Edge,
+                    ..Default::default()
+                },
+            )
+            .expect("attach client query");
+        db.tick().expect("send valid client DB work");
+
+        tokio::time::timeout(WS_SETTLE_DEADLINE, async {
+            while inbound_wakes.load(AtomicOrdering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("server reply enqueues and wakes client DB work");
+
+        let deadline = tokio::time::Instant::now() + WS_SETTLE_DEADLINE;
+        while !db.query_attachment_is_covered(&attachment) && tokio::time::Instant::now() < deadline
+        {
+            db.tick().expect("deliver queued inbound DB work");
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            db.query_attachment_is_covered(&attachment),
+            "the woken client DB must deliver the server's query coverage"
+        );
     }
 
     async fn start_ws_test_server(state: Arc<ServerState>) -> std::net::SocketAddr {
