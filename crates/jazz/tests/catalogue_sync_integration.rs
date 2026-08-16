@@ -2341,7 +2341,6 @@ async fn multi_hop_column_renames_old_client_can_read_new_rows_impl() {
 /// bob (v2) query people ──► row from old users table
 /// ```
 #[tokio::test]
-#[ignore = "known red; tracked in TEST_BURNDOWN.md"]
 async fn table_rename_new_client_can_read_old_rows() {
     tokio::task::LocalSet::new()
         .run_until(table_rename_new_client_can_read_old_rows_impl())
