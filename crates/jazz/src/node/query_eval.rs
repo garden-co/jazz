@@ -18698,6 +18698,119 @@ mod tests {
         .expect("maintained branch compilation must provide deletion witnesses");
     }
 
+    /// A branch read renders a frozen root together with an overlay relation
+    /// through Groove's structured terminal, while its internal relation fact
+    /// retains the mixed canonical provenance needed for future deltas.
+    ///
+    /// alice --accept issue--> core --freeze branch base--> branch view
+    /// branch --write user----► branch view --array correlation--> issue.assigneeRows
+    ///
+    /// The public array payload is deliberately not assembled from
+    /// `RelationSnapshot::edges`: structured app rows are its sole owner. The
+    /// separate discriminator assertion pins the internal relation terminal so
+    /// a base root and overlay target cannot silently lose their correlation
+    /// witness while still returning an empty array.
+    #[test]
+    fn branch_relation_array_uses_frozen_root_and_overlay_target() {
+        let (_dir, mut node) = open_node();
+        let issue = row(0x71);
+        let overlay_user = author(0x72);
+        commit_global_issue(&mut node, 0x71, "open", overlay_user, 1);
+        let branch_id = BranchId::from_bytes([0x73; 16]);
+        node.create_branch(branch_id).expect("freeze branch base");
+        let live_root_update = node
+            .commit_mergeable(
+                MergeableCommit::new("issues", issue, 2_500)
+                    .made_by(AuthorId::SYSTEM)
+                    .cells(BTreeMap::from([
+                        (
+                            "title".to_owned(),
+                            Value::String("must not leak past branch base".to_owned()),
+                        ),
+                        ("state".to_owned(), Value::String("closed".to_owned())),
+                        ("assignee".to_owned(), Value::Uuid(overlay_user.0)),
+                        ("priority".to_owned(), Value::U64(0x71)),
+                    ])),
+            )
+            .expect("write post-branch global root update");
+        node.apply_fate_update(
+            live_root_update,
+            Fate::Accepted,
+            Some(GlobalSeq(2)),
+            Some(DurabilityTier::Global),
+        )
+        .expect("accept post-branch global root update");
+        node.commit_mergeable_on_branch(
+            branch_id,
+            MergeableCommit::new("users", RowUuid(overlay_user.0), 2_000).cells(BTreeMap::from([
+                ("name".to_owned(), Value::String("overlay user".to_owned())),
+            ])),
+        )
+        .expect("write overlay target");
+
+        let shape = Query::from("issues")
+            .filter(eq(col("id"), lit(Value::Uuid(issue.0))))
+            .array_subquery(ArraySubquery::new(
+                "assigneeRows",
+                "users",
+                "id",
+                "assignee",
+            ))
+            .validate(&node.catalogue.schema)
+            .expect("validate correlated branch query");
+        let binding = shape.bind(BTreeMap::new()).expect("bind query");
+        let read_view = ReadViewSpec {
+            source: ReadViewSourceSpec::Branch {
+                branch: branch_id.0,
+            },
+            ..ReadViewSpec::default()
+        };
+
+        let snapshot = node
+            .query_relation_snapshot_for_serving_in_read_view(
+                &shape,
+                &binding,
+                DurabilityTier::Local,
+                AuthorId::SYSTEM,
+                &read_view,
+            )
+            .expect("render branch relation snapshot");
+        assert_eq!(snapshot.root_count, 1);
+        assert_eq!(snapshot.rows.len(), 1);
+        let issue_table = node.table("issues").expect("issues table");
+        assert_eq!(
+            snapshot.rows[0].cell(issue_table, "title"),
+            Some(Value::String("issue-113".to_owned())),
+            "branch root must remain at the frozen base rather than leak the later global winner"
+        );
+        assert!(
+            snapshot.edges.is_empty(),
+            "structured rows own public arrays"
+        );
+        let (descriptor, raw) = snapshot.rows[0].encoded_record();
+        let Value::Array(assignees) = descriptor.bind(raw).get("assigneeRows").unwrap() else {
+            panic!("expected structured assignee array")
+        };
+        assert_eq!(assignees.len(), 1, "one overlay target must correlate");
+        let Value::Record(assignee) = &assignees[0] else {
+            panic!("expected structured assignee record")
+        };
+        assert_eq!(assignee.get("row_uuid"), Ok(Value::Uuid(overlay_user.0)));
+
+        assert_eq!(
+            node.query_relation_branch_discriminators_for_test(
+                &shape,
+                &binding,
+                DurabilityTier::Local,
+                AuthorId::SYSTEM,
+                &read_view,
+            )
+            .expect("relation terminal keeps mixed branch witnesses"),
+            vec![(None, Some(branch_id.0))],
+            "the frozen issue and overlay user must keep distinct canonical provenance"
+        );
+    }
+
     #[test]
     fn branch_program_maintained_view_tracks_local_overlay_replacement() {
         let (_dir, mut node) = open_node();
