@@ -6246,6 +6246,32 @@ fn duplex() -> (Box<dyn Transport>, Box<dyn Transport>) {
     )
 }
 
+/// In-memory transport pair with a read-only tap on server-to-client frames.
+/// The tap lets a Core-serving test inspect the canonical `ViewUpdate` before
+/// the receiving edge applies it.
+fn duplex_with_server_outbound_tap() -> (
+    Box<dyn Transport>,
+    Box<dyn Transport>,
+    Rc<RefCell<std::collections::VecDeque<SyncMessage>>>,
+) {
+    use std::collections::VecDeque;
+    let client_to_server = Rc::new(RefCell::new(VecDeque::new()));
+    let server_to_client = Rc::new(RefCell::new(VecDeque::new()));
+    (
+        Box::new(DuplexTransport {
+            outbound: Rc::clone(&client_to_server),
+            inbound: Rc::clone(&server_to_client),
+            session_context: None,
+        }),
+        Box::new(DuplexTransport {
+            outbound: Rc::clone(&server_to_client),
+            inbound: client_to_server,
+            session_context: None,
+        }),
+        server_to_client,
+    )
+}
+
 /// In-memory handshake pairing needs an internal test because it verifies the
 /// transport/admission boundary before any user-visible sync payload exists.
 fn duplex_with_admitted_session_context(
@@ -9653,6 +9679,123 @@ fn seed(db: &CoreDb, table: &str, cells: RowCells) -> RowUuid {
     let write = db.insert(table, cells).unwrap();
     block_on(write.wait(DurabilityTier::Global)).unwrap();
     write.row_uuid()
+}
+
+/// A Core immediately refreshes a peer-edge subscriber that was visited before
+/// a later client upload in the same service pass, so Bob receives Alice's
+/// later canonical row without needing an unrelated next websocket frame.
+///
+/// ```text
+/// bob --empty Global subscribe--> peer edge --> Core
+/// alice --later CommitUnit----------------------> Core
+///                                                |
+///                 Core ViewUpdate <--------------+
+/// bob <--- peer-edge local IVM refresh <---------+
+/// ```
+///
+/// The peer connection is deliberately accepted before Alice's connection.
+/// That makes Core service the already-covered peer first, then accept Alice's
+/// write. The one Core tick following Alice's upload must revisit the earlier
+/// peer before it returns; otherwise an event-driven websocket host has no
+/// reason to call Core again and Bob stays indefinitely at the old empty cut.
+#[test]
+fn core_later_client_upload_refreshes_earlier_peer_subscription_in_same_tick() {
+    let schema = schema();
+    let alice = AuthorId::from_bytes([0xa1; 16]);
+    let bob_author = AuthorId::from_bytes([0xb1; 16]);
+    let core = open_core(0xd1, AuthorId::SYSTEM, &schema);
+    let peer_edge = open_db(0xd2, AuthorId::SYSTEM, &schema);
+    let bob = open_db(0xd3, bob_author, &schema);
+
+    // Keep the Core-to-peer queue observable, and accept this peer before
+    // Alice so the ordering under test is fixed.
+    let (peer_transport, core_transport, core_to_peer) = duplex_with_server_outbound_tap();
+    let _peer_upstream = peer_edge.connect_upstream(peer_transport);
+    let _core_peer = core.accept_subscriber_with_trust(
+        core_transport,
+        AuthorId::SYSTEM,
+        CommitUnitTrust::TrustedBackend,
+    );
+    let (bob_transport, peer_client_transport) = duplex();
+    let _bob_upstream = bob.connect_upstream(bob_transport);
+    let _peer_client = peer_edge.accept_subscriber(peer_client_transport, bob_author);
+
+    let query = bob.table("todos");
+    let mut subscription = prepared_subscribe(&bob, &query, global_subscribe_opts()).unwrap();
+    let opening = (0..32)
+        .find_map(|_| {
+            bob.tick().unwrap();
+            peer_edge.tick().unwrap();
+            core.tick().unwrap();
+            peer_edge.tick().unwrap();
+            bob.tick().unwrap();
+            subscription.try_next_event()
+        })
+        .expect("Bob receives the established empty Global view");
+    assert!(event_settled(&opening));
+    assert!(opened_rows(opening).is_empty());
+    assert!(
+        core_to_peer.borrow().is_empty(),
+        "the empty opening has been fully consumed before Alice writes"
+    );
+
+    let alice_edge = open_db(0xd4, alice, &schema);
+    let (alice_transport, core_alice_transport) = duplex();
+    let _alice_upstream = alice_edge.connect_upstream(alice_transport);
+    let _core_alice = core.accept_subscriber(core_alice_transport, alice);
+    let write = alice_edge
+        .insert_with_id("todos", row(0xd5), cells("later row", false, alice))
+        .unwrap();
+
+    // One edge tick uploads Alice's local commit; one Core tick finalizes it
+    // and must also serve the earlier peer connection.
+    alice_edge.tick().unwrap();
+    core.tick().unwrap();
+    let later_view_updates = core_to_peer
+        .borrow()
+        .iter()
+        .filter(|message| {
+            matches!(
+                message,
+                SyncMessage::ViewUpdate {
+                    result_member_adds,
+                    settled_through,
+                    ..
+                } if *settled_through > GlobalSeq(0)
+                    && result_member_adds.iter().any(|member| {
+                        member.as_row().is_some_and(|(table, row_uuid, tx_id)| {
+                            table.as_str() == "todos"
+                                && row_uuid == row(0xd5)
+                                && tx_id == write.tx_id
+                        })
+                    })
+            )
+        })
+        .count();
+    assert_eq!(
+        later_view_updates, 1,
+        "the first Core service pass after Alice's upload sends the later canonical membership to the already-covered peer"
+    );
+
+    // Applying that upstream ViewUpdate must dirty and refresh the existing
+    // Bob connection in the same peer-edge service pass.
+    peer_edge.tick().unwrap();
+    bob.tick().unwrap();
+    let delivered = subscription
+        .try_next_event()
+        .expect("Bob receives the later row without a retry or a new query");
+    let (added, updated, removed) = delta_rows(delivered);
+    assert_eq!(row_ids(&added), vec![row(0xd5)]);
+    assert!(updated.is_empty());
+    assert!(removed.is_empty());
+
+    // The bounded second pass clears its dirty work. A quiet later tick must
+    // neither replay the unchanged view nor self-arm another serving loop.
+    core.tick().unwrap();
+    assert!(
+        core_to_peer.borrow().is_empty(),
+        "a post-cascade idle tick emits no unchanged peer update"
+    );
 }
 
 #[test]
