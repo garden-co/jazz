@@ -310,18 +310,14 @@ fn run_scenario(mode: CoverageMode) -> ScenarioReceipt {
         let prepared = client
             .prepare_query(&Query::from(table))
             .expect("prepare subscription query");
-        let mut stream =
+        let stream =
             block_on(client.subscribe(&prepared, global_read_opts())).expect("subscribe table");
-        traces
-            .get_mut(table)
-            .expect("trace bucket")
-            .push(event_trace(
-                &table_schemas,
-                block_on(stream.next_event()).expect("initial subscription event"),
-            ));
         streams.insert(table, stream);
     }
 
+    // A remote subscription has no autonomous executor: endpoint ticks carry
+    // its registration and reset.  Waiting for `next_event` before driving the
+    // endpoints spins forever because no endpoint can produce that event yet.
     drive(&server, &client, &mut streams, &table_schemas, &mut traces);
 
     server
