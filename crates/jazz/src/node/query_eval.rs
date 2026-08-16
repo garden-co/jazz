@@ -18654,10 +18654,10 @@ mod tests {
     }
 
     #[test]
-    fn branch_program_maintained_view_requires_branch_deletion_witness_source() {
-        // Internal compiler-boundary coverage: the public DB tests assert the
-        // user-visible subscription rejection, while this pins which output
-        // profile needs branch deletion witness metadata.
+    fn branch_program_maintained_view_provides_branch_deletion_witness_source() {
+        // A maintained branch source carries both the overlay content and its
+        // deletion witness, so replacement, delete, and restore can remain
+        // live without falling back to a one-shot branch read.
         let (_dir, mut node) = open_node();
         let branch_id = BranchId::from_bytes([0x42; 16]);
         node.create_branch(branch_id).unwrap();
@@ -18687,23 +18687,15 @@ mod tests {
             vec![row(1)]
         );
 
-        let error = node
-            .compile_branch_query_program_in_authorization_mode(
-                branch_id,
-                &shape,
-                &binding,
-                AuthorId::SYSTEM,
-                CurrentQueryProgramOutput::MaintainedView,
-                QueryAuthorizationMode::TrustedServing,
-            )
-            .unwrap_err();
-        let Error::QueryCapability(report) = error else {
-            panic!("expected branch witness capability gap, got {error:?}");
-        };
-        assert!(
-            report.contains("BranchOverlay"),
-            "unexpected capability report: {report}"
-        );
+        node.compile_branch_query_program_in_authorization_mode(
+            branch_id,
+            &shape,
+            &binding,
+            AuthorId::SYSTEM,
+            CurrentQueryProgramOutput::MaintainedView,
+            QueryAuthorizationMode::TrustedServing,
+        )
+        .expect("maintained branch compilation must provide deletion witnesses");
     }
 
     #[test]

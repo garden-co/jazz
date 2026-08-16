@@ -1085,8 +1085,11 @@ fn merge_back_branch_emits_ordinary_target_transaction_and_leaves_branch_open() 
         )
         .unwrap();
 
-    let merger = user(0x77);
-    let squash = core.merge_back_branch_as(branch_id, merger).unwrap();
+    // This test exercises merge transport/provenance, not identity policy.
+    // The fixture schema has no read policy, so use the trusted system form;
+    // identity-aware merge authorization is covered separately.
+    let merger = AuthorId::SYSTEM;
+    let squash = core.merge_back_branch(branch_id).unwrap();
     assert_eq!(
         core.branch_record(branch_id).unwrap().state,
         codec::BranchState::Open
@@ -1809,12 +1812,120 @@ fn merge_back_fails_whole_calculation_when_source_row_is_not_readable() {
             .cells(owner_cells(owner, "private")),
     )
     .unwrap();
+    core.commit_mergeable_on_branch(
+        branch_id,
+        MergeableCommit::new("todos", row(0x42), 11)
+            .made_by(owner)
+            .deletion(DeletionEvent::Deleted),
+    )
+    .unwrap();
 
     assert!(matches!(
         core.merge_back_branch_as(branch_id, outsider),
         Err(Error::AuthorizationDenied)
     ));
-    assert!(core.merge_back_branch_as(branch_id, owner).is_ok());
+    let merged = core.merge_back_branch_as(branch_id, owner).unwrap();
+    assert_eq!(core.transaction_record(merged).unwrap().made_by, owner);
+}
+
+#[test]
+fn identity_merge_back_of_public_deleted_row_preserves_initiator() {
+    let (_core_dir, mut core) = open_history_complete_node_with_schema(node(2), schema());
+    let merger = user(0x73);
+    let branch_id = branch(0x44);
+    core.create_root_branch(branch_id).unwrap();
+    core.commit_mergeable_on_branch(
+        branch_id,
+        MergeableCommit::new("todos", row(0x44), 10).cells(title_cells("public deleted")),
+    )
+    .unwrap();
+    core.commit_mergeable_on_branch(
+        branch_id,
+        MergeableCommit::new("todos", row(0x44), 11).deletion(DeletionEvent::Deleted),
+    )
+    .unwrap();
+
+    let merged = core.merge_back_branch_as(branch_id, merger).unwrap();
+    assert_eq!(core.transaction_record(merged).unwrap().made_by, merger);
+}
+
+#[test]
+fn deleted_merge_witness_uses_inherited_select_not_update_permission() {
+    let reader = user(0x74);
+    let editor = user(0x75);
+    let parent_policy = Query::from("parents").filter(eq(col("editor"), claim("sub")));
+    let schema = JazzSchema::new([
+        TableSchema::new(
+            "parents",
+            [
+                ColumnSchema::new("owner", ColumnType::Uuid),
+                ColumnSchema::new("editor", ColumnType::Uuid),
+            ],
+        )
+        .with_read_policy(Policy::owner_only("parents", "owner"))
+        .with_write_policies(crate::schema::WritePolicies {
+            insert_check: Some(parent_policy.clone()),
+            update_using: Some(parent_policy.clone()),
+            update_check: Some(parent_policy.clone()),
+            delete_using: Some(parent_policy),
+        }),
+        TableSchema::new(
+            "docs",
+            [
+                ColumnSchema::new("parent_id", ColumnType::Uuid),
+                ColumnSchema::new("title", ColumnType::String),
+            ],
+        )
+        .with_reference("parent_id", "parents")
+        .with_read_policy(Policy::shape(Query::from("docs").inherits("parent_id")))
+        .with_write_policy(Policy::public()),
+    ]);
+    let (_dir, mut core) = open_history_complete_node_with_schema(node(0x76), schema);
+    let parent = row(0x74);
+    let parent_tx = core
+        .commit_mergeable(
+            MergeableCommit::new("parents", parent, 1)
+                .made_by(AuthorId::SYSTEM)
+                .cells(BTreeMap::from([
+                    ("owner".to_owned(), Value::Uuid(reader.0)),
+                    ("editor".to_owned(), Value::Uuid(editor.0)),
+                ])),
+        )
+        .unwrap();
+    core.apply_fate_update(
+        parent_tx,
+        Fate::Accepted,
+        Some(GlobalSeq(1)),
+        Some(DurabilityTier::Global),
+    )
+    .unwrap();
+    let branch_id = branch(0x76);
+    core.create_branch(branch_id).unwrap();
+    let doc = row(0x76);
+    core.commit_mergeable_on_branch(
+        branch_id,
+        MergeableCommit::new("docs", doc, 2)
+            .made_by(AuthorId::SYSTEM)
+            .cells(BTreeMap::from([
+                ("parent_id".to_owned(), Value::Uuid(parent.0)),
+                ("title".to_owned(), Value::String("deleted".to_owned())),
+            ])),
+    )
+    .unwrap();
+    core.commit_mergeable_on_branch(
+        branch_id,
+        MergeableCommit::new("docs", doc, 3)
+            .made_by(AuthorId::SYSTEM)
+            .deletion(DeletionEvent::Deleted),
+    )
+    .unwrap();
+
+    assert!(matches!(
+        core.merge_back_branch_as(branch_id, editor),
+        Err(Error::AuthorizationDenied)
+    ));
+    let merged = core.merge_back_branch_as(branch_id, reader).unwrap();
+    assert_eq!(core.transaction_record(merged).unwrap().made_by, reader);
 }
 
 #[test]
