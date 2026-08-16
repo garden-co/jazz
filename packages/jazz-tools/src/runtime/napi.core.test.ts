@@ -555,6 +555,41 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     runtime.unsubscribe(handle);
   });
 
+  it("publishes a truthful local empty opening while full propagation continues upstream", async () => {
+    const { NapiDb } = await loadNapiModule();
+    const runtime = new NativeRuntimeAdapter(
+      { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
+      TEST_SCHEMA,
+      deterministicBytes("jazz-napi-native-runtime-provisional-empty:node"),
+      deterministicBytes("jazz-napi-native-runtime-provisional-empty:author"),
+      25,
+      true,
+    );
+    runtimes.push(runtime);
+
+    const defaultFullUpdates: unknown[] = [];
+    const defaultFull = runtime.createSubscription(
+      JSON.stringify({ table: "todos" }),
+      null,
+      "local",
+    );
+    runtime.executeSubscription(defaultFull, (delta: unknown) => defaultFullUpdates.push(delta));
+    expect(defaultFullUpdates).toHaveLength(1);
+
+    const localOnlyUpdates: unknown[] = [];
+    const localOnly = runtime.createSubscription(
+      JSON.stringify({ table: "todos" }),
+      null,
+      "local",
+      JSON.stringify({ propagation: "local-only" }),
+    );
+    runtime.executeSubscription(localOnly, (delta: unknown) => localOnlyUpdates.push(delta));
+    expect(localOnlyUpdates).toHaveLength(1);
+
+    runtime.unsubscribe(defaultFull);
+    runtime.unsubscribe(localOnly);
+  });
+
   it("returns raw NAPI subscription payloads as Uint8Array with registered terminal layouts", async () => {
     const { NapiDb } = await loadNapiModule();
     const node = deterministicBytes("jazz-napi-native-runtime-raw-subscription:node");

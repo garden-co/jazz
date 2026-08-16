@@ -73,6 +73,25 @@ fn open_core(node: u8, schema: &JazzSchema) -> Db<MemoryStorage> {
     .expect("open core database")
 }
 
+fn assert_truthful_empty_local_opening(event: Option<SubscriptionEvent>) {
+    let Some(SubscriptionEvent::Delta {
+        reset,
+        tier,
+        added,
+        updated,
+        removed,
+        ..
+    }) = event
+    else {
+        panic!("Local-tier subscription must publish an opening delta");
+    };
+    assert!(reset, "the local opening must replace prior membership");
+    assert_eq!(tier, DurabilityTier::Local);
+    assert!(added.is_empty());
+    assert!(updated.is_empty());
+    assert!(removed.is_empty());
+}
+
 #[cfg(feature = "rocksdb")]
 fn open_persistent_worker(
     path: &std::path::Path,
@@ -206,10 +225,7 @@ fn browser_worker_initial_view_preserves_newer_optimistic_membership() {
         .expect("prepare filtered todos query");
     let mut subscription = block_on(main_thread.subscribe(&open_todos, ReadOpts::default()))
         .expect("subscribe to open todos");
-    assert!(
-        subscription.try_next_event().is_none(),
-        "fresh remote coverage must withhold its provisional local snapshot"
-    );
+    assert_truthful_empty_local_opening(subscription.try_next_event());
 
     let insert = main_thread
         .insert(
@@ -438,10 +454,7 @@ fn browser_client_hydrates_local_subscription_from_worker_relay() {
         .expect("prepare todos query");
     let mut subscription =
         block_on(main_thread.subscribe(&todos, ReadOpts::default())).expect("subscribe to todos");
-    assert!(
-        subscription.try_next_event().is_none(),
-        "fresh remote coverage must withhold its provisional local snapshot"
-    );
+    assert_truthful_empty_local_opening(subscription.try_next_event());
 
     main_thread.tick().expect("request Local worker view");
     worker.tick().expect("serve Local worker view");
@@ -508,10 +521,7 @@ fn browser_client_local_only_subscription_stops_at_worker() {
         },
     ))
     .expect("subscribe locally through the worker");
-    assert!(
-        subscription.try_next_event().is_none(),
-        "worker-backed local-only coverage must withhold its provisional main-thread snapshot"
-    );
+    assert_truthful_empty_local_opening(subscription.try_next_event());
 
     main_thread.tick().expect("register worker-local coverage");
     for _ in 0..4 {
