@@ -340,12 +340,18 @@ impl ServerShellHandle {
         new_tables: Vec<String>,
         dropped_tables: Vec<String>,
     ) -> Result<SchemaVersionId, String> {
-        self.run(move |shell| {
-            shell
-                .publish_runtime_schema_with_lens(schema, lens, new_tables, dropped_tables)
-                .map_err(|error| error.to_string())
-        })
-        .await
+        let activity_tx = self.inner.activity_tx.clone();
+        let result = self
+            .run(move |shell| {
+                shell
+                    .publish_runtime_schema_with_lens(schema, lens, new_tables, dropped_tables)
+                    .map_err(|error| error.to_string())
+            })
+            .await;
+        if result.is_ok() {
+            notify_shell_activity(&activity_tx);
+        }
+        result
     }
 
     #[allow(dead_code)] // exercised only by the integration-test server feature

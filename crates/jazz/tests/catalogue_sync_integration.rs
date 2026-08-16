@@ -777,7 +777,6 @@ async fn edge_catalogue_http_reads_and_writes_forward_to_real_core_impl() {
 /// alice --------------------------------------------------------+--write--> core
 /// ```
 #[tokio::test]
-#[ignore = "known red; tracked in TEST_BURNDOWN.md"]
 async fn edge_catalogue_publish_reaches_peer_edge_through_core_sync() {
     tokio::task::LocalSet::new()
         .run_until(edge_catalogue_publish_reaches_peer_edge_through_core_sync_impl())
@@ -808,7 +807,7 @@ async fn edge_catalogue_publish_reaches_peer_edge_through_core_sync_impl() {
         .with_schema(schema.clone())
         .with_user_id(test_user_id("alice-peer-edge-catalogue"))
         .ready_on("users", Duration::from_secs(30))
-        .connect()
+        .connect_after_retry_later(Duration::from_secs(30))
         .await;
 
     let user_id = jazz::tools::ObjectId::new();
@@ -891,7 +890,7 @@ async fn persisted_stale_edge_reconnect_replays_catalogue_before_client_work_imp
         .with_schema(v1_schema.clone())
         .with_user_id(test_user_id("alice-stale-edge-v1"))
         .ready_on("users", Duration::from_secs(30))
-        .connect()
+        .connect_after_retry_later(Duration::from_secs(30))
         .await;
     alice_v1.shutdown().await.expect("shutdown v1 client");
     edge_before_restart.shutdown().await;
@@ -912,7 +911,7 @@ async fn persisted_stale_edge_reconnect_replays_catalogue_before_client_work_imp
         .with_schema(v2_schema.clone())
         .with_user_id(test_user_id("alice-stale-edge-v2"))
         .ready_on("users", Duration::from_secs(30))
-        .connect()
+        .connect_after_retry_later(Duration::from_secs(30))
         .await;
 
     let user_id = jazz::tools::ObjectId::new();

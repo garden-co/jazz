@@ -6291,6 +6291,108 @@ fn duplex_with_admitted_session_context(
     )
 }
 
+/// A trusted edge link receives each changed authority catalogue without
+/// first registering an application shape or subscription. Ordinary client
+/// sessions do not receive the authority-only snapshot.
+///
+/// ```text
+/// core --initial snapshot--> edge
+/// core --publish lineage--> edge (changed snapshot)
+/// core --publish lineage--x client session
+/// ```
+#[test]
+fn catalogue_fingerprint_change_is_eager_only_on_trusted_backend_link() {
+    // This stays internal because trust is authenticated by the host at the
+    // transport boundary; exposing it through a public client fixture would
+    // test the HTTP/WebSocket bootstrap race rather than this hop contract.
+    let base = schema();
+    let core = open_core(0x5e, AuthorId::SYSTEM, &base);
+
+    let (mut edge_transport, core_edge_transport) = duplex();
+    let edge_link = core.accept_subscriber_with_trust(
+        core_edge_transport,
+        AuthorId::from_bytes([0xe1; 16]),
+        CommitUnitTrust::TrustedBackend,
+    );
+    let (mut client_transport, core_client_transport) = duplex();
+    let client_link =
+        core.accept_subscriber(core_client_transport, AuthorId::from_bytes([0xc1; 16]));
+
+    edge_link.borrow_mut().tick().unwrap();
+    assert!(matches!(
+        edge_transport.try_recv(),
+        Some(SyncMessage::CatalogueSnapshot(_))
+    ));
+    assert!(edge_transport.try_recv().is_none());
+    edge_link.borrow_mut().tick().unwrap();
+    assert!(
+        edge_transport.try_recv().is_none(),
+        "an unchanged catalogue fingerprint must not resend its snapshot"
+    );
+    client_link.borrow_mut().tick().unwrap();
+    assert!(
+        client_transport.try_recv().is_none(),
+        "ordinary sessions must not receive authority catalogue snapshots"
+    );
+
+    let evolved = SchemaVersion::new(JazzSchema::new([TableSchema::new(
+        "todos",
+        [
+            ColumnSchema::new("title", ColumnType::String),
+            ColumnSchema::new("done", ColumnType::Bool),
+            ColumnSchema::new("owner", ColumnType::Uuid),
+            ColumnSchema::new("body", ColumnType::String),
+        ],
+    )
+    .with_read_policy(Policy::public())
+    .with_write_policy(Policy::public())]));
+    let lens = MigrationLens::new(
+        base.version_id(),
+        evolved.id,
+        vec![TableLens {
+            source_table: "todos".to_owned(),
+            target_table: "todos".to_owned(),
+            ops: vec![LensOp::AddColumn {
+                column: "body".to_owned(),
+                default: Value::String(String::new()),
+            }],
+        }],
+    );
+    core.server
+        .node()
+        .borrow_mut()
+        .apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
+            author: AuthorId::SYSTEM,
+            catalogue_seq: 1,
+            publication: Box::new(SchemaLineagePublication::new(
+                evolved.clone(),
+                lens,
+                Vec::<String>::new(),
+                Vec::<String>::new(),
+            )),
+        })
+        .unwrap();
+
+    edge_link.borrow_mut().tick().unwrap();
+    let Some(SyncMessage::CatalogueSnapshot(snapshot)) = edge_transport.try_recv() else {
+        panic!("trusted edge must receive the changed catalogue before any subscription");
+    };
+    assert!(
+        snapshot
+            .schemas
+            .iter()
+            .any(|schema| schema.id == evolved.id),
+        "changed snapshot carries the newly published schema"
+    );
+    assert!(edge_transport.try_recv().is_none());
+
+    client_link.borrow_mut().tick().unwrap();
+    assert!(
+        client_transport.try_recv().is_none(),
+        "catalogue changes stay authority-only on ordinary session links"
+    );
+}
+
 #[test]
 fn admitted_duplex_context_binds_peer_epochs_and_rejects_cross_wiring() {
     let identity = AuthorId::from_bytes([0x71; 16]);
