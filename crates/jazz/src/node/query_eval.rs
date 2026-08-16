@@ -5539,11 +5539,11 @@ where
             });
             if row_keys.insert((edge.target_table.to_string(), edge.target_row))
                 && let Some(version) = &edge.target_version
-                && let Some(row) = self.materialize_authoritative_reset_version_row(
+                && let Some(row) = self.materialize_authoritative_reset_relation_edge_target(
+                    shape.schema_version(),
                     edge.target_table.as_str(),
                     edge.target_row,
                     version.tx,
-                    None,
                 )?
             {
                 rows.push(row);
@@ -5671,6 +5671,39 @@ where
             row = row.project(&table, columns)?;
         }
         Ok(Some(row))
+    }
+
+    /// Materialize a relation target from an authority-owned reset through the
+    /// exact read schema carried by the subscription shape.  The reset stores
+    /// a version witness, not a rendered application row, so this must use the
+    /// same lens projection boundary as local maintained relation snapshots.
+    fn materialize_authoritative_reset_relation_edge_target(
+        &mut self,
+        read_schema: SchemaVersionId,
+        target_table_name: &str,
+        target_row: RowUuid,
+        tx_id: TxId,
+    ) -> Result<Option<CurrentRow>, Error> {
+        let target_table = self
+            .table_in_schema(target_table_name, read_schema)?
+            .clone();
+        let Some(tx_node_alias) = self.node_aliases.get(&tx_id.node).copied() else {
+            return Err(Error::MissingTransaction(tx_id));
+        };
+        let Some(version) = self.query_version_by_alias(
+            target_table_name,
+            target_row,
+            VersionLayer::Content,
+            tx_id.time,
+            tx_node_alias,
+        )?
+        else {
+            if self.query_transaction(tx_id)?.is_some() {
+                return Ok(None);
+            }
+            return Err(Error::MissingTransaction(tx_id));
+        };
+        self.projected_current_row_from_materialized_version(&target_table, read_schema, &version)
     }
 
     pub(crate) fn settled_through_for_binding_view(
@@ -9270,15 +9303,20 @@ where
         row_uuid: RowUuid,
         tx_id: TxId,
     ) -> Result<Option<CurrentRow>, Error> {
-        let table = self.table(table_name)?.clone();
+        let table = self
+            .table_in_schema(table_name, local.result_schema_version)?
+            .clone();
         let tx_versions = local.maintained.versions_by_tx(tx_id);
         let Some(version) =
             local_maintained_view_content_witness(&tx_versions, table_name, row_uuid)
         else {
             return Ok(None);
         };
-        self.current_row_from_materialized_version(&table, version)
-            .map(Some)
+        self.projected_current_row_from_materialized_version(
+            &table,
+            local.result_schema_version,
+            version,
+        )
     }
 
     fn materialize_local_maintained_view_relation_edge_row_with_cache(
@@ -9289,7 +9327,9 @@ where
         tx_id: TxId,
         cache: &mut LocalMaintainedMaterializationCache,
     ) -> Result<Option<CurrentRow>, Error> {
-        let table = self.table(table_name)?.clone();
+        let table = self
+            .table_in_schema(table_name, local.result_schema_version)?
+            .clone();
         let tx_versions = self.local_maintained_tx_versions(local, tx_id, cache);
         let Some(version) =
             local_maintained_view_content_witness(tx_versions, table_name, row_uuid)
@@ -9297,10 +9337,11 @@ where
             return Ok(None);
         };
         let version = version.clone();
-        self.current_row_from_materialized_version_with_materialization_cache(
-            &table, &version, cache,
+        self.projected_current_row_from_materialized_version(
+            &table,
+            local.result_schema_version,
+            &version,
         )
-        .map(Some)
     }
 
     fn materialize_local_maintained_view_result_member(
@@ -9594,6 +9635,42 @@ where
         _cache: &mut LocalMaintainedMaterializationCache,
     ) -> Result<CurrentRow, Error> {
         current_row_from_version_projection(table, version)
+    }
+
+    /// Render a maintained relation witness through the subscription's read
+    /// schema before exposing it as an application row.
+    ///
+    /// Relation-edge witnesses retain the authored immutable record so that
+    /// their identity and provenance remain exact.  They are not, however,
+    /// application payloads: indexing the authored record with the read
+    /// table's columns bypasses table/column lenses and misses defaults added
+    /// after that version.  The source graph has already established both
+    /// source-read authorization and the exact witness; this is solely the
+    /// read-view projection boundary for that selected witness.
+    fn projected_current_row_from_materialized_version(
+        &mut self,
+        read_table: &TableSchema,
+        read_schema: SchemaVersionId,
+        version: &VersionRow,
+    ) -> Result<Option<CurrentRow>, Error> {
+        let authored_schema = self
+            .schema_version_for_alias(version.schema_version_alias())
+            .ok_or(Error::InvalidStoredValue(
+                "relation edge witness schema version alias must exist",
+            ))?;
+        let authored_table = self
+            .table_in_schema(version.table(), authored_schema)?
+            .clone();
+        let mut cells = self.materialized_cells_for_version(&authored_table, version)?;
+        let Some(projected_table) =
+            self.translate_cells(authored_schema, read_schema, version.table(), &mut cells)?
+        else {
+            return Ok(None);
+        };
+        if projected_table != read_table.name {
+            return Ok(None);
+        }
+        current_row_from_materialized_cells(read_table, version, &cells).map(Some)
     }
 
     fn current_row_from_aggregate_result_payload(
@@ -10057,6 +10134,7 @@ where
                     .expect("target table was inserted");
                 let row = self.materialize_relation_edge_target_row(
                     read_view,
+                    shape.schema_version(),
                     target_table,
                     &candidate.edge.target_table,
                     candidate.edge.target_row,
@@ -10073,6 +10151,7 @@ where
     fn materialize_relation_edge_target_row(
         &mut self,
         read_view: &ReadViewSpec,
+        read_schema: SchemaVersionId,
         target_table: &TableSchema,
         target_table_name: &str,
         target_row: RowUuid,
@@ -10086,7 +10165,15 @@ where
             target_tx_time,
             target_tx_node,
         )? {
-            return self.current_row_from_materialized_version(target_table, &version);
+            return self
+                .projected_current_row_from_materialized_version(
+                    target_table,
+                    read_schema,
+                    &version,
+                )?
+                .ok_or(Error::InvalidStoredValue(
+                    "relation edge target version does not project into the read schema",
+                ));
         }
         let ReadViewSourceSpec::Branch { branch } = read_view.source else {
             return Err(Error::InvalidStoredValue(
@@ -10101,7 +10188,7 @@ where
             .ok_or(Error::InvalidStoredValue(
                 "relation edge target branch is missing",
             ))?;
-        self.branch_current_rows(target_table_name, &branch)?
+        self.branch_current_rows_for_schema(target_table_name, &branch, read_schema)?
             .into_iter()
             .find(|row| row.row_uuid() == target_row)
             .ok_or(Error::InvalidStoredValue(
@@ -16381,6 +16468,7 @@ mod tests {
         let row = node
             .materialize_relation_edge_target_row(
                 &ReadViewSpec::default(),
+                node.catalogue.current_schema_version_id,
                 &table,
                 "todos",
                 todo,
@@ -16401,6 +16489,168 @@ mod tests {
         assert_eq!(
             version.cell(&evolved_table, "body").unwrap(),
             Some(Value::String("partition-body".to_owned()))
+        );
+    }
+
+    /// Proves that an authoritative relation-edge witness is rendered through
+    /// the subscriber's newer read lens, rather than decoding the old
+    /// authored record with the new descriptor.
+    ///
+    /// alice(v1 row) ──relation witness──► bob(v2 read lens)
+    ///                                  └──► v2 defaulted cell
+    ///
+    /// This is deliberately an internal seam test: the production relation
+    /// snapshot receives only an exact `(table, row, tx)` witness here; the
+    /// broader client/edge scenario remains the black-box catalogue test.
+    #[test]
+    fn relation_edge_target_projects_old_witness_into_read_schema() {
+        let base = JazzSchema::new([TableSchema::new(
+            "todos",
+            [ColumnSchema::new("title", ColumnType::String)],
+        )]);
+        let (_dir, mut node) = open_node_with_uuid(NodeUuid::from_bytes([0xe4; 16]), base.clone());
+        let todo = row(0xe5);
+        let tx_id = node
+            .commit_mergeable(
+                MergeableCommit::new("todos", todo, 0xe6).cells(BTreeMap::from([(
+                    "title".to_owned(),
+                    Value::String("written-by-alice".to_owned()),
+                )])),
+            )
+            .expect("commit v1 todo");
+
+        let evolved_table = TableSchema::new(
+            "todos",
+            [
+                ColumnSchema::new("title", ColumnType::String),
+                ColumnSchema::new("body", ColumnType::String),
+            ],
+        );
+        let evolved = SchemaVersion::new(JazzSchema::new([evolved_table.clone()]));
+        node.apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
+            author: AuthorId::SYSTEM,
+            catalogue_seq: 1,
+            publication: Box::new(SchemaLineagePublication::new(
+                evolved.clone(),
+                MigrationLens::new(
+                    base.version_id(),
+                    evolved.id,
+                    vec![TableLens {
+                        source_table: "todos".to_owned(),
+                        target_table: "todos".to_owned(),
+                        ops: vec![LensOp::AddColumn {
+                            column: "body".to_owned(),
+                            default: Value::String("from-lens-default".to_owned()),
+                        }],
+                    }],
+                ),
+                Vec::<String>::new(),
+                Vec::<String>::new(),
+            )),
+        })
+        .expect("publish v2 lens");
+
+        let alias = *node
+            .node_aliases
+            .get(&tx_id.node)
+            .expect("local node alias");
+        let row = node
+            .materialize_relation_edge_target_row(
+                &ReadViewSpec::default(),
+                evolved.id,
+                &evolved_table,
+                "todos",
+                todo,
+                tx_id.time,
+                alias,
+            )
+            .expect("render projected relation target");
+        assert_eq!(
+            row.cell(&evolved_table, "title"),
+            Some(Value::String("written-by-alice".to_owned()))
+        );
+        assert_eq!(
+            row.cell(&evolved_table, "body"),
+            Some(Value::String("from-lens-default".to_owned()))
+        );
+    }
+
+    /// Proves that a remote authority reset renders an old joined target in
+    /// the subscription schema, including table rename and added-column lens
+    /// operations.
+    ///
+    /// alice(v1 users row) ──authority reset witness──► bob(v2 people read)
+    ///                                           └──► renamed table + default
+    ///
+    /// The direct seam is necessary because this reset path receives only the
+    /// authority's exact relation-edge version tuple; end-to-end delivery is
+    /// covered by the catalogue integration scenarios.
+    #[test]
+    fn authoritative_reset_relation_target_projects_old_renamed_witness() {
+        let base = JazzSchema::new([TableSchema::new(
+            "users",
+            [ColumnSchema::new("name", ColumnType::String)],
+        )]);
+        let (_dir, mut node) = open_node_with_uuid(NodeUuid::from_bytes([0xe7; 16]), base.clone());
+        let user = row(0xe8);
+        let tx_id = node
+            .commit_mergeable(
+                MergeableCommit::new("users", user, 0xe9).cells(BTreeMap::from([(
+                    "name".to_owned(),
+                    Value::String("alice".to_owned()),
+                )])),
+            )
+            .expect("commit v1 user");
+
+        let people = TableSchema::new(
+            "people",
+            [
+                ColumnSchema::new("name", ColumnType::String),
+                ColumnSchema::new("label", ColumnType::String),
+            ],
+        );
+        let evolved = SchemaVersion::new(JazzSchema::new([people.clone()]));
+        node.apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
+            author: AuthorId::SYSTEM,
+            catalogue_seq: 1,
+            publication: Box::new(SchemaLineagePublication::new(
+                evolved.clone(),
+                MigrationLens::new(
+                    base.version_id(),
+                    evolved.id,
+                    vec![TableLens {
+                        source_table: "users".to_owned(),
+                        target_table: "people".to_owned(),
+                        ops: vec![
+                            LensOp::RenameTable {
+                                from: "users".to_owned(),
+                                to: "people".to_owned(),
+                            },
+                            LensOp::AddColumn {
+                                column: "label".to_owned(),
+                                default: Value::String("migrated".to_owned()),
+                            },
+                        ],
+                    }],
+                ),
+                Vec::<String>::new(),
+                Vec::<String>::new(),
+            )),
+        })
+        .expect("publish people lens");
+
+        let row = node
+            .materialize_authoritative_reset_relation_edge_target(evolved.id, "people", user, tx_id)
+            .expect("render authority relation target")
+            .expect("authority has stored target witness");
+        assert_eq!(row.table(), "people");
+        assert_eq!(
+            row.cell(&people, "name"),
+            Some(Value::String("alice".to_owned()))
+        );
+        assert_eq!(
+            row.cell(&people, "label"),
+            Some(Value::String("migrated".to_owned()))
         );
     }
 
