@@ -93,6 +93,14 @@ target table sets without duplicates or omissions. A standalone unknown
 `PublishSchema` is invalid, and a later standalone `PublishLens` may add a
 cross-lens but cannot redefine a schema's physical mapping.
 
+The same ordered catalogue chain is part of a downstream view's reproducible
+input closure (ch. 8 §8.4.1). A receiver must not treat a subscription's read
+schema as an unproven local label: it parks canonical facts until it has the
+active authored schema and every ordered lens needed to project to that read
+schema. Catalogue sequence establishes the only permitted projection order;
+receiving a later schema or a terminal cache does not authorize skipping a
+missing predecessor.
+
 Opening an existing database with a caller-supplied schema that disagrees with
 its durable genesis is a hard bootstrap error. A joiner with no local lineage
 installs the authority's genesis record, then replays the dense Active/tombstone
@@ -282,8 +290,24 @@ descriptor variant. After the write pointer moves, new local writes use the
 `v2` discriminator. An older client's later `v1`-authored commit still uses the
 `v1` descriptor variant in that shared lineage (`INV-LENS-11`); neither it nor
 the original row is rewritten. A `v2` read scans the physical lineage, selects
-the winner first, and projects the winning authored variant into `v2`, including
-when the winner comes from a settled subscription cache (`INV-LENS-12`).
+the winner first in the authored lineage, and projects the winning authored
+variant into `v2`, including when the winner comes from a settled subscription
+cache (`INV-LENS-12`). Projection never lets two differently authored versions
+compete as `v2` rows, and a receiver may not use an unrelated local `v2` row to
+fill a missing `v1` winner witness.
+
+Concretely, suppose `v1.users { id, name, email }` becomes
+`v2.people { id, name, email_address }` through an ordered `RenameTable(users,
+people)` plus `RenameColumn(email, email_address)` lens. Alice's immutable
+`v1` version for `users/u1` remains a `v1`-encoded `VersionRecord`. For Bob's
+`v2.people` subscription, the authority sends that authored record with its
+`users`, `u1`, `v1`, transaction, branch, and source identity unchanged, plus
+the ordered catalogue/lens closure and any safe membership witness. Bob decodes
+the bytes as `v1.users`, applies the two lens operations, then feeds the logical
+`v2.people { id: u1, name, email_address }` fact into the local IVM. Bob's
+terminal may render a selected `{ name, email_address }` app row, but that row
+is not sent as a replacement for Alice's authored version; dropping it and
+rerunning the local IVM produces the same result (ch. 8 §8.4.1).
 
 ### 10.6 The lens op surface
 
