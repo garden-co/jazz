@@ -18,6 +18,33 @@ replaced the underlying mechanism with a simpler abstraction.
 
 ## Active terms
 
+### Cursor
+
+**Meaning today:** A compact progress position that lets a participant resume
+or deduplicate work within one explicitly defined stream or view. In sync code,
+for example, `settled_through: GlobalSeq` says that the receiver possesses the
+complete settled membership for that binding view through that global
+position. A connection resume cursor has a different, link-local scope.
+
+**Why it is opaque:** “Cursor” can sound like a database iterator, a pagination
+token, a live connection receipt, or proof that all local state is current. A
+cursor is none of those unless its type and contract explicitly say so. Its
+position is meaningful only together with the scope and completeness claim it
+advances.
+
+**Prefer:** Name the scope and guarantee: “binding-view settled position,”
+“connection resume position,” or “pagination token.” When using the generic
+word, state what history it advances and what possession it proves.
+
+**Design debt:** Several progress mechanisms use cursor language while carrying
+different authority, durability, and completeness guarantees. That makes it
+easy to mistake durable known-state possession for a current authority receipt
+or to reuse a position across the wrong view.
+
+**Exit criteria:** Progress types encode their scope and completeness, APIs and
+diagnostics use role-specific names, and correctness prose no longer relies on
+the unqualified word “cursor.”
+
 ### Typed policy claim
 
 **Meaning today:** A value from the session's claims after the query compiler
