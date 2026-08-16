@@ -1348,3 +1348,453 @@ where
         })
     }
 }
+
+#[cfg(test)]
+mod authorization_scope_compiler_tests {
+    use super::*;
+    use crate::ids::NodeUuid;
+    use crate::node::NodeState;
+    use crate::protocol::TableLens;
+    use crate::schema::WritePolicies;
+    use groove::schema::ColumnType;
+    use groove::storage::{Durability, RocksDbStorage};
+
+    fn table() -> crate::schema::TableSchema {
+        crate::schema::TableSchema::new("protected", Vec::<ColumnSchema>::new())
+            .with_read_policy(JazzQuery::from("read_support"))
+            .with_write_policies(WritePolicies {
+                insert_check: Some(JazzQuery::from("insert_support")),
+                update_using: Some(JazzQuery::from("old_support")),
+                update_check: Some(JazzQuery::from("new_support")),
+                delete_using: Some(JazzQuery::from("delete_support")),
+            })
+    }
+
+    #[test]
+    fn action_selects_exact_policy_dependencies() {
+        let table = table();
+        assert_eq!(
+            authorization_policy_queries(&table, AuthorizationScopeOperation::Read),
+            vec![authorization_query_from_read_policy(&table)]
+        );
+        assert_eq!(
+            authorization_policy_queries(&table, AuthorizationScopeOperation::Insert),
+            vec![JazzQuery::from("insert_support")]
+        );
+        assert_eq!(
+            authorization_policy_queries(&table, AuthorizationScopeOperation::Update),
+            vec![
+                JazzQuery::from("old_support"),
+                JazzQuery::from("new_support")
+            ]
+        );
+        assert_eq!(
+            authorization_policy_queries(&table, AuthorizationScopeOperation::Delete),
+            vec![JazzQuery::from("delete_support")]
+        );
+    }
+
+    #[test]
+    fn operation_key_keeps_row_and_candidate_out_of_shareable_scope_identity() {
+        let first = PermissionAdviceAction::Update {
+            table: "protected".to_owned(),
+            row: RowUuid::from_bytes([1; 16]),
+            patch: BTreeMap::new(),
+        };
+        let second = PermissionAdviceAction::Update {
+            table: "protected".to_owned(),
+            row: RowUuid::from_bytes([2; 16]),
+            patch: BTreeMap::new(),
+        };
+        let (operation, table_name) = authorization_scope_action(&first);
+        let policy_bytes =
+            postcard::to_allocvec(&(operation, authorization_policy_queries(&table(), operation)))
+                .unwrap();
+        let first_key = authorization_operation_key(
+            operation,
+            table_name,
+            &first,
+            postcard::to_allocvec(&first).unwrap(),
+        );
+        let second_key = authorization_operation_key(
+            operation,
+            table_name,
+            &second,
+            postcard::to_allocvec(&second).unwrap(),
+        );
+        assert_ne!(first_key, second_key);
+        assert_eq!(
+            policy_bytes,
+            postcard::to_allocvec(&(operation, authorization_policy_queries(&table(), operation)))
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn actual_compiler_uses_claims_and_access_edge_parent_inheritance() {
+        let schema = JazzSchema::new([
+            crate::schema::TableSchema::new(
+                "resources",
+                [ColumnSchema::new("owner", ColumnType::Uuid)],
+            )
+            .with_read_policy(JazzQuery::from("resources").filter(crate::query::eq(
+                crate::query::col("owner"),
+                crate::query::claim("sub"),
+            ))),
+            crate::schema::TableSchema::new(
+                "document_access_edges",
+                [ColumnSchema::new("resource_id", ColumnType::Uuid)],
+            )
+            .with_reference("resource_id", "resources")
+            .with_read_policy(JazzQuery::from("document_access_edges")),
+        ]);
+        let dir = tempfile::tempdir().unwrap();
+        let cfs = schema.column_families();
+        let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+        let storage =
+            RocksDbStorage::open_with_durability(dir.path(), &refs, Durability::WalNoSync).unwrap();
+        let mut node = NodeState::new(NodeUuid::from_bytes([7; 16]), schema, storage).unwrap();
+        let identity = AuthorId::from_bytes([8; 16]);
+        node.set_session_claims(
+            identity,
+            BTreeMap::from([("role".to_owned(), Value::String("editor".to_owned()))]),
+        );
+        let first_action = PermissionAdviceAction::Read {
+            table: "document_access_edges".to_owned(),
+            row: RowUuid::from_bytes([1; 16]),
+        };
+        let first = node
+            .authorization_support_scope(identity, &first_action)
+            .unwrap();
+        assert_eq!(first.subscriptions.len(), 1);
+        let raw = node
+            .table("document_access_edges")
+            .unwrap()
+            .read_policy
+            .clone()
+            .unwrap();
+        let raw_compiled = compile_permission_scope_policy(
+            raw,
+            node.session_claims.get(&identity),
+            &default_permission_scope_claim_values(identity),
+            &node.catalogue.schema,
+        )
+        .unwrap();
+        assert_ne!(
+            first.subscriptions[0].0.shape_id(),
+            raw_compiled.0.shape_id(),
+            "canonical access-edge parent inheritance must alter the compiled support"
+        );
+        let second_action = PermissionAdviceAction::Read {
+            table: "document_access_edges".to_owned(),
+            row: RowUuid::from_bytes([2; 16]),
+        };
+        let second = node
+            .authorization_support_scope(identity, &second_action)
+            .unwrap();
+        assert_eq!(
+            first.key, second.key,
+            "same compiled support should coalesce across rows"
+        );
+        assert_ne!(
+            first.operation, second.operation,
+            "row remains an ephemeral evaluation key"
+        );
+        node.set_session_claims(
+            identity,
+            BTreeMap::from([("role".to_owned(), Value::String("viewer".to_owned()))]),
+        );
+        let changed_claims = node
+            .authorization_support_scope(identity, &first_action)
+            .unwrap();
+        assert_ne!(first.key.claims_digest, changed_claims.key.claims_digest);
+    }
+
+    #[test]
+    fn actual_compiler_selects_write_clauses_and_skips_public_read_support() {
+        let claim_policy = |column: &str| {
+            JazzQuery::from("protected").filter(crate::query::eq(
+                crate::query::col(column),
+                crate::query::claim("sub"),
+            ))
+        };
+        let schema = JazzSchema::new([
+            crate::schema::TableSchema::new("public", Vec::<ColumnSchema>::new()),
+            crate::schema::TableSchema::new(
+                "protected",
+                [
+                    ColumnSchema::new("value", ColumnType::String),
+                    ColumnSchema::new("insert_owner", ColumnType::Uuid),
+                    ColumnSchema::new("old_owner", ColumnType::Uuid),
+                    ColumnSchema::new("new_owner", ColumnType::Uuid),
+                    ColumnSchema::new("delete_owner", ColumnType::Uuid),
+                ],
+            )
+            .with_write_policies(WritePolicies {
+                insert_check: Some(claim_policy("insert_owner")),
+                update_using: Some(claim_policy("old_owner")),
+                update_check: Some(claim_policy("new_owner")),
+                delete_using: Some(claim_policy("delete_owner")),
+            }),
+        ]);
+        let dir = tempfile::tempdir().unwrap();
+        let cfs = schema.column_families();
+        let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+        let storage =
+            RocksDbStorage::open_with_durability(dir.path(), &refs, Durability::WalNoSync).unwrap();
+        let mut node = NodeState::new(NodeUuid::from_bytes([9; 16]), schema, storage).unwrap();
+        let identity = AuthorId::from_bytes([3; 16]);
+        node.set_session_claims(
+            identity,
+            BTreeMap::from([("role".to_owned(), Value::String("editor".to_owned()))]),
+        );
+        let cells = BTreeMap::from([("value".to_owned(), Value::String("next".to_owned()))]);
+        let insert = node
+            .authorization_support_scope(
+                identity,
+                &PermissionAdviceAction::Insert {
+                    table: "protected".to_owned(),
+                    cells: cells.clone(),
+                },
+            )
+            .unwrap();
+        let update = node
+            .authorization_support_scope(
+                identity,
+                &PermissionAdviceAction::Update {
+                    table: "protected".to_owned(),
+                    row: RowUuid::from_bytes([1; 16]),
+                    patch: cells,
+                },
+            )
+            .unwrap();
+        let delete = node
+            .authorization_support_scope(
+                identity,
+                &PermissionAdviceAction::Delete {
+                    table: "protected".to_owned(),
+                    row: RowUuid::from_bytes([1; 16]),
+                },
+            )
+            .unwrap();
+        let public = node
+            .authorization_support_scope(
+                identity,
+                &PermissionAdviceAction::Read {
+                    table: "public".to_owned(),
+                    row: RowUuid::from_bytes([1; 16]),
+                },
+            )
+            .unwrap();
+        assert_eq!(insert.subscriptions.len(), 1);
+        assert_eq!(
+            update.subscriptions.len(),
+            2,
+            "update must hydrate both using and check support"
+        );
+        assert_eq!(delete.subscriptions.len(), 1);
+        assert!(
+            public.subscriptions.is_empty(),
+            "public read must not create a support subscription"
+        );
+        assert_ne!(insert.key, update.key);
+        assert_ne!(update.key, delete.key);
+    }
+
+    /// A newer read-only policy produces support for Alice's read while Bob's
+    /// insert retains the older schema's restrictive write-policy support.
+    #[test]
+    fn authorization_scope_uses_newer_read_only_policy_schema() {
+        // A structural v2 schema gains a restrictive read policy without any
+        // write policy. Read advice must compile v2's support query rather
+        // than treating the base v1 table as public.
+        let base = JazzSchema::new([crate::schema::TableSchema::new(
+            "notes",
+            [ColumnSchema::new("owner", ColumnType::Uuid)],
+        )
+        .with_write_policies(WritePolicies {
+            insert_check: Some(JazzQuery::from("notes").filter(crate::query::eq(
+                crate::query::col("owner"),
+                crate::query::claim("sub"),
+            ))),
+            update_using: None,
+            update_check: None,
+            delete_using: None,
+        })]);
+        let evolved = JazzSchema::new([crate::schema::TableSchema::new(
+            "notes",
+            [
+                ColumnSchema::new("owner", ColumnType::Uuid),
+                ColumnSchema::new("body", ColumnType::String),
+            ],
+        )
+        .with_read_policy(JazzQuery::from("notes").filter(crate::query::eq(
+            crate::query::col("body"),
+            crate::query::lit(Value::String("private".to_owned())),
+        )))]);
+        let dir = tempfile::tempdir().unwrap();
+        let refs = base.column_families();
+        let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
+        let storage =
+            RocksDbStorage::open_with_durability(dir.path(), &refs, Durability::WalNoSync).unwrap();
+        let mut node =
+            NodeState::new(NodeUuid::from_bytes([0x31; 16]), base.clone(), storage).unwrap();
+        let evolved_id = evolved.version_id();
+        node.apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
+            author: AuthorId::SYSTEM,
+            catalogue_seq: 1,
+            publication: Box::new(SchemaLineagePublication::new(
+                SchemaVersion::new(evolved),
+                MigrationLens::new(
+                    base.version_id(),
+                    evolved_id,
+                    vec![TableLens {
+                        source_table: "notes".to_owned(),
+                        target_table: "notes".to_owned(),
+                        ops: vec![LensOp::AddColumn {
+                            column: "body".to_owned(),
+                            default: Value::String(String::new()),
+                        }],
+                    }],
+                ),
+                Vec::<String>::new(),
+                Vec::<String>::new(),
+            )),
+        })
+        .unwrap();
+        node.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+            author: AuthorId::SYSTEM,
+            pointer: CurrentWriteSchema {
+                revision: 1,
+                schema: evolved_id,
+            },
+        })
+        .unwrap();
+
+        let scope = node
+            .authorization_support_scope(
+                AuthorId::from_bytes([0x32; 16]),
+                &PermissionAdviceAction::Read {
+                    table: "notes".to_owned(),
+                    row: RowUuid::from_bytes([0x33; 16]),
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            scope.subscriptions.len(),
+            1,
+            "v2-only body policy must compile into one support subscription"
+        );
+        let insert = node
+            .authorization_support_scope(
+                AuthorId::from_bytes([0x32; 16]),
+                &PermissionAdviceAction::Insert {
+                    table: "notes".to_owned(),
+                    cells: BTreeMap::from([(
+                        "owner".to_owned(),
+                        Value::Uuid(uuid::Uuid::from_bytes([0x32; 16])),
+                    )]),
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            insert.subscriptions.len(),
+            1,
+            "insert must retain v1's write-policy support after v2 adds only a read policy"
+        );
+    }
+
+    /// Alice's v1 `users` version is projected through a rename lens to v2
+    /// `people`, where Bob's terminal insert proof compiles the v2 policy.
+    ///
+    /// alice v1 write ──rename lens──► people action ──► bob's v2 support proof
+    #[test]
+    fn projected_rename_action_uses_terminal_policy_schema_for_support() {
+        let base = JazzSchema::new([crate::schema::TableSchema::new(
+            "users",
+            [ColumnSchema::new("owner", ColumnType::Uuid)],
+        )]);
+        let evolved = JazzSchema::new([crate::schema::TableSchema::new(
+            "people",
+            [
+                ColumnSchema::new("owner", ColumnType::Uuid),
+                ColumnSchema::new("body", ColumnType::String),
+            ],
+        )
+        .with_write_policies(WritePolicies {
+            insert_check: Some(JazzQuery::from("people").filter(crate::query::eq(
+                crate::query::col("body"),
+                crate::query::lit(Value::String("migrated".to_owned())),
+            ))),
+            update_using: None,
+            update_check: None,
+            delete_using: None,
+        })]);
+        let dir = tempfile::tempdir().unwrap();
+        let refs = base.column_families();
+        let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
+        let storage =
+            RocksDbStorage::open_with_durability(dir.path(), &refs, Durability::WalNoSync).unwrap();
+        let mut node =
+            NodeState::new(NodeUuid::from_bytes([0x41; 16]), base.clone(), storage).unwrap();
+        let evolved_id = evolved.version_id();
+        node.apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
+            author: AuthorId::SYSTEM,
+            catalogue_seq: 1,
+            publication: Box::new(SchemaLineagePublication::new(
+                SchemaVersion::new(evolved),
+                MigrationLens::new(
+                    base.version_id(),
+                    evolved_id,
+                    vec![TableLens {
+                        source_table: "users".to_owned(),
+                        target_table: "people".to_owned(),
+                        ops: vec![
+                            LensOp::RenameTable {
+                                from: "users".to_owned(),
+                                to: "people".to_owned(),
+                            },
+                            LensOp::AddColumn {
+                                column: "body".to_owned(),
+                                default: Value::String("migrated".to_owned()),
+                            },
+                        ],
+                    }],
+                ),
+                Vec::<String>::new(),
+                Vec::<String>::new(),
+            )),
+        })
+        .unwrap();
+        node.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+            author: AuthorId::SYSTEM,
+            pointer: CurrentWriteSchema {
+                revision: 1,
+                schema: evolved_id,
+            },
+        })
+        .unwrap();
+
+        let commit = MergeableCommit::new("users", RowUuid::from_bytes([0x42; 16]), 1).cells(
+            BTreeMap::from([(
+                "owner".to_owned(),
+                Value::Uuid(uuid::Uuid::from_bytes([0x43; 16])),
+            )]),
+        );
+        let version =
+            VersionRecord::from_commit(&commit, &base.tables[0], base.version_id()).unwrap();
+        let actions = node.authorization_actions_for_versions(&[version]).unwrap();
+        let [PermissionAdviceAction::Insert { table, .. }] = actions.as_slice() else {
+            panic!("v1 insert must project to one v2 insert action: {actions:?}");
+        };
+        assert_eq!(table, "people");
+        let scope = node
+            .authorization_support_scope(AuthorId::from_bytes([0x44; 16]), &actions[0])
+            .unwrap();
+        assert_eq!(
+            scope.subscriptions.len(),
+            1,
+            "v2 projected insert policy needs support"
+        );
+    }
+}
