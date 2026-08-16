@@ -1239,12 +1239,17 @@ where
     ) -> Result<WriteHandle<S>, Error> {
         let row = self.row_id_source.borrow_mut().next_row_id();
         let cells = self.apply_insert_defaults(table, cells)?;
-        let tx_id = self.node.node.borrow_mut().commit_mergeable_on_branch(
-            branch,
-            MergeableCommit::new(table, row, self.next_now_ms())
-                .made_by(self.identity.author)
-                .cells(cells),
-        )?;
+        let tx_id = self
+            .node
+            .node
+            .borrow_mut()
+            .commit_mergeable_on_branch_in_schema(
+                branch,
+                self.schema_version_id,
+                MergeableCommit::new(table, row, self.next_now_ms())
+                    .made_by(self.identity.author)
+                    .cells(cells),
+            )?;
         let local_tier = self.finalize_local_commit(tx_id)?;
         self.refresh_subscriptions()?;
         Ok(WriteHandle {
@@ -1269,7 +1274,8 @@ where
         cells: RowCells,
     ) -> Result<TxId, Error> {
         let cells = self.apply_insert_defaults(table, cells)?;
-        let tx_id = self.node.node.borrow_mut().commit_mergeable(
+        let tx_id = self.node.node.borrow_mut().commit_mergeable_in_schema(
+            self.schema_version_id,
             MergeableCommit::new(table, row, self.next_now_ms())
                 .made_by(made_by)
                 .cells(cells),
@@ -1302,8 +1308,9 @@ where
         if node.branch_record(branch).is_none() {
             node.create_branch(branch)?;
         }
-        let tx_id = node.commit_mergeable_on_branch(
+        let tx_id = node.commit_mergeable_on_branch_in_schema(
             branch,
+            self.schema_version_id,
             MergeableCommit::new(table, row, self.next_now_ms())
                 .made_by(made_by)
                 .cells(cells),
@@ -3892,17 +3899,24 @@ where
                 .collect::<Vec<_>>();
             (content_parents, deletion_parents)
         };
-        let tx_id = self.node.node.borrow_mut().commit_mergeable_many(vec![
-            MergeableCommit::new(table, row, self.next_now_ms())
-                .made_by(self.identity.author)
-                .parents(content_parents)
-                .cells(cells),
-            MergeableCommit::new(table, row, self.next_now_ms())
-                .made_by(self.identity.author)
-                .parents(deletion_parents)
-                .cells(BTreeMap::<String, Value>::new())
-                .deletion(DeletionEvent::Restored),
-        ])?;
+        let tx_id = self
+            .node
+            .node
+            .borrow_mut()
+            .commit_mergeable_many_in_schema(
+                self.schema_version_id,
+                vec![
+                    MergeableCommit::new(table, row, self.next_now_ms())
+                        .made_by(self.identity.author)
+                        .parents(content_parents)
+                        .cells(cells),
+                    MergeableCommit::new(table, row, self.next_now_ms())
+                        .made_by(self.identity.author)
+                        .parents(deletion_parents)
+                        .cells(BTreeMap::<String, Value>::new())
+                        .deletion(DeletionEvent::Restored),
+                ],
+            )?;
         let local_tier = self.finalize_local_commit(tx_id)?;
         self.refresh_subscriptions()?;
         Ok(WriteHandle {
@@ -3935,19 +3949,26 @@ where
                 .collect::<Vec<_>>();
             (content_parents, deletion_parents)
         };
-        let tx_id = self.node.node.borrow_mut().commit_mergeable_many(vec![
-            MergeableCommit::new(table, row, self.next_now_ms())
-                .made_by(identity)
-                .permission_subject(identity)
-                .parents(content_parents)
-                .cells(cells),
-            MergeableCommit::new(table, row, self.next_now_ms())
-                .made_by(identity)
-                .permission_subject(identity)
-                .parents(deletion_parents)
-                .cells(BTreeMap::<String, Value>::new())
-                .deletion(DeletionEvent::Restored),
-        ])?;
+        let tx_id = self
+            .node
+            .node
+            .borrow_mut()
+            .commit_mergeable_many_in_schema(
+                self.schema_version_id,
+                vec![
+                    MergeableCommit::new(table, row, self.next_now_ms())
+                        .made_by(identity)
+                        .permission_subject(identity)
+                        .parents(content_parents)
+                        .cells(cells),
+                    MergeableCommit::new(table, row, self.next_now_ms())
+                        .made_by(identity)
+                        .permission_subject(identity)
+                        .parents(deletion_parents)
+                        .cells(BTreeMap::<String, Value>::new())
+                        .deletion(DeletionEvent::Restored),
+                ],
+            )?;
         let local_tier = self.finalize_local_commit(tx_id)?;
         self.refresh_subscriptions()?;
         Ok(WriteHandle {
@@ -4013,17 +4034,24 @@ where
         let cells = self.apply_insert_defaults(table, cells)?;
         self.ensure_row_deleted(table, row, self.identity.author)?;
         let (content_parents, deletion_parents) = self.row_layer_parents(table, row)?;
-        let tx_id = self.node.node.borrow_mut().commit_mergeable_many(vec![
-            MergeableCommit::new(table, row, now_ms)
-                .made_by(self.identity.author)
-                .parents(content_parents)
-                .cells(cells),
-            MergeableCommit::new(table, row, now_ms)
-                .made_by(self.identity.author)
-                .parents(deletion_parents)
-                .cells(BTreeMap::<String, Value>::new())
-                .deletion(DeletionEvent::Restored),
-        ])?;
+        let tx_id = self
+            .node
+            .node
+            .borrow_mut()
+            .commit_mergeable_many_in_schema(
+                self.schema_version_id,
+                vec![
+                    MergeableCommit::new(table, row, now_ms)
+                        .made_by(self.identity.author)
+                        .parents(content_parents)
+                        .cells(cells),
+                    MergeableCommit::new(table, row, now_ms)
+                        .made_by(self.identity.author)
+                        .parents(deletion_parents)
+                        .cells(BTreeMap::<String, Value>::new())
+                        .deletion(DeletionEvent::Restored),
+                ],
+            )?;
         let local_tier = self.finalize_local_commit(tx_id)?;
         self.refresh_subscriptions()?;
         Ok(WriteHandle {
@@ -4046,19 +4074,26 @@ where
         let cells = self.apply_insert_defaults(table, cells)?;
         self.ensure_row_deleted(table, row, identity)?;
         let (content_parents, deletion_parents) = self.row_layer_parents(table, row)?;
-        let tx_id = self.node.node.borrow_mut().commit_mergeable_many(vec![
-            MergeableCommit::new(table, row, now_ms)
-                .made_by(identity)
-                .permission_subject(identity)
-                .parents(content_parents)
-                .cells(cells),
-            MergeableCommit::new(table, row, now_ms)
-                .made_by(identity)
-                .permission_subject(identity)
-                .parents(deletion_parents)
-                .cells(BTreeMap::<String, Value>::new())
-                .deletion(DeletionEvent::Restored),
-        ])?;
+        let tx_id = self
+            .node
+            .node
+            .borrow_mut()
+            .commit_mergeable_many_in_schema(
+                self.schema_version_id,
+                vec![
+                    MergeableCommit::new(table, row, now_ms)
+                        .made_by(identity)
+                        .permission_subject(identity)
+                        .parents(content_parents)
+                        .cells(cells),
+                    MergeableCommit::new(table, row, now_ms)
+                        .made_by(identity)
+                        .permission_subject(identity)
+                        .parents(deletion_parents)
+                        .cells(BTreeMap::<String, Value>::new())
+                        .deletion(DeletionEvent::Restored),
+                ],
+            )?;
         let local_tier = self.finalize_local_commit(tx_id)?;
         self.refresh_subscriptions()?;
         Ok(WriteHandle {
@@ -4178,7 +4213,11 @@ where
         }
         // Db is an untrusted client: structurally valid writes are staged and
         // sent optimistically. A serving authority assigns the policy fate.
-        let tx_id = self.node.node.borrow_mut().commit_mergeable(commit)?;
+        let tx_id = self
+            .node
+            .node
+            .borrow_mut()
+            .commit_mergeable_in_schema(self.schema_version_id, commit)?;
         let local_tier = self.finalize_local_commit(tx_id)?;
         self.refresh_subscriptions()?;
         Ok(WriteHandle {

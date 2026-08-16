@@ -592,6 +592,19 @@ where
         self.commit_mergeable_many_on_branch(branch_id, vec![commit])
     }
 
+    /// Commit a branch-local write under an admitted authored schema.
+    pub(crate) fn commit_mergeable_on_branch_in_schema(
+        &mut self,
+        branch_id: BranchId,
+        schema_version: SchemaVersionId,
+        commit: MergeableCommit,
+    ) -> Result<TxId, Error>
+    where
+        S: ReopenableStorage,
+    {
+        self.commit_mergeable_many_on_branch_in_schema(branch_id, schema_version, vec![commit])
+    }
+
     /// Commit multiple ordinary mergeable writes atomically into one branch
     /// target. The resulting transaction differs from a root commit only in
     /// its explicit target lineage and the target-relative policy/storage view.
@@ -603,7 +616,30 @@ where
     where
         S: ReopenableStorage,
     {
+        let schema_version = self.catalogue.current_write_schema.schema;
+        self.commit_mergeable_many_on_branch_in_schema(branch_id, schema_version, commits)
+    }
+
+    /// Commit branch-local writes atomically under one admitted authored schema.
+    pub(crate) fn commit_mergeable_many_on_branch_in_schema(
+        &mut self,
+        branch_id: BranchId,
+        schema_version: SchemaVersionId,
+        commits: Vec<MergeableCommit>,
+    ) -> Result<TxId, Error>
+    where
+        S: ReopenableStorage,
+    {
         self.require_catalogue_ready()?;
+        if !self
+            .catalogue
+            .catalogue_schemas
+            .contains_key(&schema_version)
+        {
+            return Err(Error::InvalidMergeableCommit(
+                "authored schema version is not admitted",
+            ));
+        }
         if commits.is_empty() {
             return Err(Error::InvalidMergeableCommit(
                 "mergeable transaction requires at least one write",
@@ -627,21 +663,21 @@ where
                 self.merge_tx_time(parent.time);
             }
         }
-        let write_schema_version = self.catalogue.current_write_schema.schema;
         for table in commits
             .iter()
             .map(|commit| commit.table.clone())
             .collect::<BTreeSet<_>>()
         {
-            self.persist_branch_partition(table, write_schema_version, branch_id)?;
+            self.persist_branch_partition(table, schema_version, branch_id)?;
         }
         let made_at = self.mint_tx_time(commits[0].now_ms);
-        self.commit_mergeable_many_on_branch_at(branch_id, commits, made_at, None)
+        self.commit_mergeable_many_on_branch_at(branch_id, schema_version, commits, made_at, None)
     }
 
     fn commit_mergeable_many_on_branch_at(
         &mut self,
         branch_id: BranchId,
+        write_schema_version: SchemaVersionId,
         commits: Vec<MergeableCommit>,
         made_at: TxTime,
         branch_merge: Option<BranchMergeProvenance>,
@@ -649,7 +685,6 @@ where
     where
         S: ReopenableStorage,
     {
-        let write_schema_version = self.catalogue.current_write_schema.schema;
         let branch = self
             .branches
             .branches
@@ -1772,6 +1807,7 @@ where
                 let made_at = self.mint_tx_time(0);
                 self.commit_mergeable_many_on_branch_at(
                     branch_id,
+                    write_schema_version,
                     commits,
                     made_at,
                     Some(branch_merge),

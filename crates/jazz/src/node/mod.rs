@@ -2083,6 +2083,20 @@ where
         self.commit_mergeable_at(commit, made_at)
     }
 
+    /// Commit one local mergeable write under an admitted authored schema.
+    ///
+    /// Client database handles retain the schema they were opened with even
+    /// when an authority later advances its separate current-write pointer.
+    /// Their canonical versions must retain that authored schema so receivers
+    /// can reconstruct through the ordered catalogue lineage.
+    pub(crate) fn commit_mergeable_in_schema(
+        &mut self,
+        schema_version: SchemaVersionId,
+        commit: MergeableCommit,
+    ) -> Result<TxId, Error> {
+        self.commit_mergeable_many_in_schema(schema_version, vec![commit])
+    }
+
     /// Commit multiple local mergeable writes as one transaction.
     pub fn commit_mergeable_many(&mut self, commits: Vec<MergeableCommit>) -> Result<TxId, Error> {
         if commits.is_empty() {
@@ -2101,6 +2115,47 @@ where
         self.merge_commit_parent_times(&commits)?;
         let made_at = self.mint_tx_time(commits[0].now_ms);
         self.commit_mergeable_many_at(commits, made_at)
+    }
+
+    /// Commit local mergeable writes under one admitted authored schema.
+    pub(crate) fn commit_mergeable_many_in_schema(
+        &mut self,
+        schema_version: SchemaVersionId,
+        commits: Vec<MergeableCommit>,
+    ) -> Result<TxId, Error> {
+        self.require_catalogue_ready()?;
+        if !self
+            .catalogue
+            .catalogue_schemas
+            .contains_key(&schema_version)
+        {
+            return Err(Error::InvalidMergeableCommit(
+                "authored schema version is not admitted",
+            ));
+        }
+        if commits.is_empty() {
+            return Err(Error::InvalidMergeableCommit(
+                "mergeable transaction requires at least one write",
+            ));
+        }
+        for commit in &commits {
+            commit.validate()?;
+            if commit.effective_permission_subject() != commits[0].effective_permission_subject() {
+                return Err(Error::InvalidMergeableCommit(
+                    "mergeable transaction permission subjects must match",
+                ));
+            }
+        }
+        self.merge_commit_parent_times(&commits)?;
+        let made_at = self.mint_tx_time(commits[0].now_ms);
+        self.commit_mergeable_many_at_with_schema_versions(
+            commits
+                .into_iter()
+                .map(|commit| (schema_version, commit))
+                .collect(),
+            made_at,
+            None,
+        )
     }
 
     fn merge_commit_parent_times(&mut self, commits: &[MergeableCommit]) -> Result<(), Error> {

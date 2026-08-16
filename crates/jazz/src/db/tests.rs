@@ -9931,6 +9931,146 @@ fn offline_branch_creation_and_commit_sync_metadata_before_data() {
 }
 
 #[test]
+fn fixed_schema_db_branch_and_bootstrap_writes_retain_authored_schema() {
+    let base = schema();
+    let evolved_schema = JazzSchema::new([TableSchema::new(
+        "todos",
+        [
+            ColumnSchema::new("title", ColumnType::String),
+            ColumnSchema::new("done", ColumnType::Bool),
+            ColumnSchema::new("owner", ColumnType::Uuid),
+            ColumnSchema::new("body", ColumnType::String),
+        ],
+    )
+    .with_read_policy(Policy::public())
+    .with_write_policy(Policy::public())]);
+    let evolved = SchemaVersion::new(evolved_schema.clone());
+    let identity = AuthorId::from_bytes([0xc2; 16]);
+    let writer = open_db(0xc2, identity, &base);
+    let publication = SchemaLineagePublication::new(
+        evolved.clone(),
+        MigrationLens::new(
+            base.version_id(),
+            evolved.id,
+            vec![TableLens {
+                source_table: "todos".to_owned(),
+                target_table: "todos".to_owned(),
+                ops: vec![LensOp::AddColumn {
+                    column: "body".to_owned(),
+                    default: Value::String("default-body".to_owned()),
+                }],
+            }],
+        ),
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    );
+    writer
+        .node
+        .node
+        .borrow_mut()
+        .apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
+            author: AuthorId::SYSTEM,
+            catalogue_seq: 1,
+            publication: Box::new(publication),
+        })
+        .unwrap();
+    writer
+        .node
+        .node
+        .borrow_mut()
+        .apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+            author: AuthorId::SYSTEM,
+            pointer: CurrentWriteSchema {
+                revision: 1,
+                schema: evolved.id,
+            },
+        })
+        .unwrap();
+
+    let branch = BranchId::from_bytes([0x52; 16]);
+    writer.create_branch_with_id(branch).unwrap();
+    let write = writer
+        .insert_on_branch(branch, "todos", cells("authored-base", false, identity))
+        .unwrap();
+    let SyncMessage::CommitUnit { tx, versions } = writer
+        .node
+        .node
+        .borrow_mut()
+        .commit_unit_for(write.mergeable_tx_id())
+        .unwrap()
+    else {
+        panic!("commit unit expected");
+    };
+    assert_eq!(versions[0].schema_version(), base.version_id());
+
+    let receiver = open_db(0xc3, identity, &evolved_schema);
+    receiver
+        .node
+        .node
+        .borrow_mut()
+        .apply_trusted_catalogue_snapshot(writer.node.node.borrow().catalogue_snapshot().unwrap())
+        .unwrap();
+    receiver.create_branch_with_id(branch).unwrap();
+    receiver
+        .node
+        .node
+        .borrow_mut()
+        .ingest_relay_commit_unit(tx, versions)
+        .unwrap();
+    let shape = Query::from("todos").validate(&evolved_schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let rows = receiver
+        .node
+        .node
+        .borrow_mut()
+        .query_rows_on_branch(branch, &shape, &binding)
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].cell_at(3),
+        Some(Value::String("default-body".to_owned()))
+    );
+
+    let seeded_row = RowUuid::from_bytes([0x53; 16]);
+    let seeded_tx = writer
+        .seed_settled_mergeable_for_bootstrap(
+            "todos",
+            seeded_row,
+            identity,
+            cells("seeded-base", true, identity),
+        )
+        .unwrap();
+    let SyncMessage::CommitUnit { tx, versions } = writer
+        .node
+        .node
+        .borrow_mut()
+        .commit_unit_for(seeded_tx)
+        .unwrap()
+    else {
+        panic!("commit unit expected");
+    };
+    assert_eq!(versions[0].schema_version(), base.version_id());
+    receiver
+        .node
+        .node
+        .borrow_mut()
+        .ingest_relay_commit_unit(tx, versions)
+        .unwrap();
+    let rows = receiver
+        .node
+        .node
+        .borrow_mut()
+        .query_rows(&shape, &binding, DurabilityTier::Local)
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].row_uuid(), seeded_row);
+    assert_eq!(
+        rows[0].cell_at(3),
+        Some(Value::String("default-body".to_owned()))
+    );
+}
+
+#[test]
 fn session_branch_metadata_rejects_creator_mismatch() {
     let schema = schema();
     let identity = AuthorId::from_bytes([0xc1; 16]);
