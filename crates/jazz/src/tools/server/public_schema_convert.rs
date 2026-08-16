@@ -519,6 +519,9 @@ fn convert_column(
     table: &TableName,
     column: &ColumnDescriptor,
 ) -> Result<CoreColumnSchema, SchemaConversionError> {
+    let path = format!("$.{}.{}", table.as_str(), column.name.as_str());
+    crate::tools::public_schema::validate_json_schemas(&column.column_type, column.name.as_str())
+        .map_err(|message| err(path, message))?;
     let mut column_type = convert_column_type(table, column.name.as_str(), &column.column_type)?;
     if column.nullable {
         column_type = column_type.nullable();
@@ -535,6 +538,17 @@ fn convert_column_default(
     column: &ColumnDescriptor,
     value: &Value,
 ) -> Result<GrooveValue, SchemaConversionError> {
+    crate::tools::public_schema::validate_json_value(
+        value,
+        &column.column_type,
+        column.name.as_str(),
+    )
+    .map_err(|message| {
+        err(
+            format!("$.{}.{}", table.as_str(), column.name.as_str()),
+            message,
+        )
+    })?;
     if matches!(value, Value::Null) {
         return Ok(GrooveValue::Nullable(None));
     }
@@ -2639,6 +2653,46 @@ mod tests {
                 GrooveValue::String("hello".to_owned()),
                 GrooveValue::Nullable(None),
             ]
+        );
+    }
+
+    // This is an internal converter test because public EnumPayload construction
+    // is intentionally not exposed until the client facade can round-trip enum
+    // values. It proves schema-default admission walks the selected case fields.
+    #[test]
+    fn rejects_schema_invalid_json_inside_payload_enum_default() {
+        let schema = SchemaBuilder::new()
+            .table(TableSchema::builder("events").column_with_default(
+                "event",
+                ColumnType::EnumPayload {
+                    cases: vec![EnumCaseDescriptor {
+                        name: "message".to_owned(),
+                        fields: vec![ColumnDescriptor::new(
+                            "payload",
+                            ColumnType::Json {
+                                schema: Some(serde_json::json!({
+                                    "type": "object",
+                                    "properties": { "name": { "type": "string" } },
+                                    "required": ["name"],
+                                })),
+                            },
+                        )],
+                    }],
+                },
+                Value::Enum {
+                    case: "message".to_owned(),
+                    values: vec![Value::Text("{\"name\":123}".to_owned())],
+                },
+            ))
+            .build();
+
+        let error = convert_public_schema(&schema)
+            .expect_err("schema-invalid payload-enum JSON default must reject conversion");
+        assert!(
+            error
+                .to_string()
+                .contains("JSON schema validation failed for column `event.message.payload`"),
+            "unexpected enum JSON default error: {error}"
         );
     }
 
