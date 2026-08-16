@@ -21,13 +21,11 @@ mod s7_migrations;
 mod s9_durable_execution;
 
 #[test]
-#[ignore = "known red; tracked in TEST_BURNDOWN.md"]
 fn s1_saas_smoke() {
     s1_saas::smoke();
 }
 
 #[test]
-#[ignore = "known red; tracked in TEST_BURNDOWN.md"]
 fn s1_saas_db_surface_smoke() {
     s1_saas::db_surface_smoke();
 }
@@ -43,19 +41,16 @@ fn s3_permissions_smoke() {
 }
 
 #[test]
-#[ignore = "known red; tracked in TEST_BURNDOWN.md"]
 fn s4_order_processing_smoke_debug_profile() {
     s4_order_processing::smoke();
 }
 
 #[test]
-#[ignore = "known red; tracked in TEST_BURNDOWN.md"]
 fn s5_durable_stream_smoke() {
     s5_durable_stream::smoke();
 }
 
 #[test]
-#[ignore = "known red; tracked in TEST_BURNDOWN.md"]
 fn s7_migrations_smoke() {
     s7_migrations::smoke();
 }
