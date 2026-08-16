@@ -1777,7 +1777,6 @@ async fn dynamic_server_live_subscription_replays_on_first_permissions_head_and_
 ///                                └──► user row with email: null
 /// ```
 #[tokio::test]
-#[ignore = "known red; tracked in TEST_BURNDOWN.md"]
 async fn column_addition_new_client_can_read_old_rows() {
     tokio::task::LocalSet::new()
         .run_until(column_addition_new_client_can_read_old_rows_impl())
