@@ -1316,7 +1316,7 @@ fn prepared_join_handle_recompiles_after_catalogue_runtime_rebuild() {
 }
 
 #[test]
-#[ignore = "prepared claim routing is unlanded; tracked separately from INV-RLS-21."]
+#[ignore = "future shared-prepared-descriptor claim-name/type collision guard; INV-RLS-21 keeps dependency-policy descriptors separate today"]
 fn prepared_binding_rejects_conflicting_claim_types_across_policies() {
     let root_policy = Query::from(DOCUMENTS)
         .filter(eq(col("team"), claim("shared_scope")))
