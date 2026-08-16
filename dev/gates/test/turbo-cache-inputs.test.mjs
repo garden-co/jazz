@@ -10,7 +10,12 @@ import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 const root = resolve(import.meta.dirname, "../../..");
-const tasks = ["@jazz/rust#build:crates", "jazz-wasm#build", "jazz-napi#build"];
+const tasks = [
+  "@jazz/rust#build:crates",
+  "jazz-wasm#build",
+  "jazz-wasm#build:fast",
+  "jazz-napi#build",
+];
 
 function dryGraph() {
   const output = execFileSync(
@@ -21,6 +26,7 @@ function dryGraph() {
       "run",
       "build:crates",
       "build",
+      "build:fast",
       "--filter=@jazz/rust",
       "--filter=jazz-wasm",
       "--filter=jazz-napi",

@@ -300,7 +300,13 @@ test("test artifact pipeline overlaps independent bindings and repairs NAPI only
   });
 
   const labels = calls.map((call) => call.label);
-  assert.deepEqual(labels.slice(0, 4), ["release NAPI", "CLI", "fast WASM", "jazz-tools"]);
+  assert.deepEqual(labels.slice(0, 5), [
+    "release NAPI",
+    "CLI",
+    "fast WASM",
+    "seal fast WASM provenance",
+    "jazz-tools",
+  ]);
   assert.equal(labels.filter((label) => label === "release NAPI").length, 1);
   assert.equal(labels.filter((label) => label === "repair release NAPI").length, 1);
   assert.ok(labels.indexOf("jazz-tools") > labels.indexOf("fast WASM"));
@@ -438,26 +444,44 @@ test("CI uses the correctness artifact path while package builds keep release WA
   );
   assert.doesNotMatch(workflow, /CARGO_TARGET_DIR/);
   assert.doesNotMatch(pipeline, /target\/test-artifacts-(?:wasm|napi)/);
+  for (const task of ["build", "build:crates", "build:fast"])
+    assert.match(
+      pipeline,
+      new RegExp(`"exec", "turbo", "run", "${task.replace(":", "\\:")}"`),
+      `${task} correctness artifact must run through Turbo`,
+    );
 });
 
 test("Turbo invalidates each native artifact only for its Cargo closure", () => {
   const turbo = JSON.parse(readFileSync(new URL("../../../turbo.json", import.meta.url), "utf8"));
   const napi = turbo.tasks["jazz-napi#build"];
   const wasm = turbo.tasks["jazz-wasm#build"];
+  const fastWasm = turbo.tasks["jazz-wasm#build:fast"];
+  const jazzTools = turbo.tasks["jazz-tools#build"];
   const cli = turbo.tasks["build:crates"];
   assert.equal(napi.dependsOn, undefined);
   assert.equal(wasm.dependsOn, undefined);
   for (const [task, inputs] of [
     [
       napi,
-      ["jazz-napi", "jazz", "groove", "opfs-btree"].map(
-        (crate) => `$TURBO_ROOT$/crates/${crate}/**`,
-      ),
+      [
+        "$TURBO_ROOT$/crates/jazz-napi/package.json",
+        "$TURBO_ROOT$/crates/jazz-napi/Cargo.toml",
+        "$TURBO_ROOT$/crates/jazz-napi/build.rs",
+        "$TURBO_ROOT$/crates/jazz-napi/scripts/**",
+        "$TURBO_ROOT$/crates/jazz-napi/src/**/*.rs",
+      ].concat(["jazz", "groove", "opfs-btree"].map((crate) => `$TURBO_ROOT$/crates/${crate}/**`)),
     ],
     [
       wasm,
-      ["jazz-wasm", "jazz", "groove", "opfs-btree"].map(
-        (crate) => `$TURBO_ROOT$/crates/${crate}/**`,
+      ["package.json", "Cargo.toml", "src/**/*.rs"].concat(
+        ["jazz", "groove", "opfs-btree"].map((crate) => `$TURBO_ROOT$/crates/${crate}/**`),
+      ),
+    ],
+    [
+      fastWasm,
+      ["package.json", "Cargo.toml", "src/**/*.rs"].concat(
+        ["jazz", "groove", "opfs-btree"].map((crate) => `$TURBO_ROOT$/crates/${crate}/**`),
       ),
     ],
     [
@@ -471,4 +495,13 @@ test("Turbo invalidates each native artifact only for its Cargo closure", () => 
     for (const input of inputs) assert.ok(task.inputs.includes(input), input);
     assert.equal(task.inputs.includes("$TURBO_ROOT$/crates/**/*.rs"), false);
   }
+  for (const generatedInput of [
+    "$TURBO_ROOT$/crates/jazz-napi/*.node",
+    "$TURBO_ROOT$/crates/jazz-napi/.jazz-artifact-manifest.json",
+    "$TURBO_ROOT$/crates/jazz-wasm/pkg/**",
+  ])
+    assert.ok(
+      jazzTools.inputs.includes(generatedInput),
+      `jazz-tools build hash omits ${generatedInput}`,
+    );
 });

@@ -1,5 +1,8 @@
 {
   "$schema": "https://turbo.build/schema.json",
+  "remoteCache": {
+    "signature": true
+  },
   "tasks": {
     "build": {
       "dependsOn": ["^build"],
@@ -32,7 +35,11 @@
         "scripts/build.js",
         "src/**/*.rs",
         "$TURBO_ROOT$/dev/artifacts/**",
-        "$TURBO_ROOT$/crates/jazz-napi/**",
+        "$TURBO_ROOT$/crates/jazz-napi/package.json",
+        "$TURBO_ROOT$/crates/jazz-napi/Cargo.toml",
+        "$TURBO_ROOT$/crates/jazz-napi/build.rs",
+        "$TURBO_ROOT$/crates/jazz-napi/scripts/**",
+        "$TURBO_ROOT$/crates/jazz-napi/src/**/*.rs",
         "$TURBO_ROOT$/crates/jazz/**",
         "$TURBO_ROOT$/crates/groove/**",
         "$TURBO_ROOT$/crates/opfs-btree/**",
@@ -53,7 +60,6 @@
         "Cargo.toml",
         "src/**/*.rs",
         "$TURBO_ROOT$/dev/artifacts/**",
-        "$TURBO_ROOT$/crates/jazz-wasm/**",
         "$TURBO_ROOT$/crates/jazz/**",
         "$TURBO_ROOT$/crates/groove/**",
         "$TURBO_ROOT$/crates/opfs-btree/**",
@@ -68,6 +74,43 @@
         "$TURBO_ROOT$/turbo.json"
       ],
       "outputs": ["pkg/**"]
+    },
+    "jazz-wasm#build:fast": {
+      "inputs": [
+        "package.json",
+        "Cargo.toml",
+        "src/**/*.rs",
+        "$TURBO_ROOT$/dev/artifacts/**",
+        "$TURBO_ROOT$/crates/jazz/**",
+        "$TURBO_ROOT$/crates/groove/**",
+        "$TURBO_ROOT$/crates/opfs-btree/**",
+        "$TURBO_ROOT$/crates/wasm-tracing/**",
+        "$TURBO_ROOT$/Cargo.toml",
+        "$TURBO_ROOT$/Cargo.lock",
+        "$TURBO_ROOT$/rust-toolchain.toml",
+        "$TURBO_ROOT$/.cargo/**",
+        "$TURBO_ROOT$/package.json",
+        "$TURBO_ROOT$/pnpm-lock.yaml",
+        "$TURBO_ROOT$/pnpm-workspace.yaml",
+        "$TURBO_ROOT$/turbo.json"
+      ],
+      "outputs": ["pkg/**"]
+    },
+    "jazz-tools#build": {
+      "inputs": [
+        "package.json",
+        "src/**",
+        "$TURBO_ROOT$/crates/jazz-napi/*.node",
+        "$TURBO_ROOT$/crates/jazz-napi/index.js",
+        "$TURBO_ROOT$/crates/jazz-napi/index.d.ts",
+        "$TURBO_ROOT$/crates/jazz-napi/.jazz-artifact-manifest.json",
+        "$TURBO_ROOT$/crates/jazz-wasm/pkg/**",
+        "$TURBO_ROOT$/package.json",
+        "$TURBO_ROOT$/pnpm-lock.yaml",
+        "$TURBO_ROOT$/pnpm-workspace.yaml",
+        "$TURBO_ROOT$/turbo.json"
+      ],
+      "outputs": ["dist/**"]
     },
     "build:crates": {
       "dependsOn": ["^build:crates"],

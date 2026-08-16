@@ -338,16 +338,40 @@ export async function buildTestArtifacts(run = command, scope = createBuildScope
   // CPUs. NAPI is the long pole and benefits most from running alone. Once it
   // is complete, CLI and fast WASM can share the remaining compile window;
   // jazz-tools then consumes both generated prerequisites.
-  await guardedRun("pnpm", ["--filter", "jazz-napi", "build"], "release NAPI");
-  const cli = guardedRun("pnpm", ["--filter", "@jazz/rust", "build:crates"], "CLI");
-  const wasm = guardedRun("pnpm", ["--filter", "jazz-wasm", "build:fast"], "fast WASM");
+  await guardedRun(
+    "pnpm",
+    ["exec", "turbo", "run", "build", "--filter=jazz-napi", "--only"],
+    "release NAPI",
+  );
+  const cli = guardedRun(
+    "pnpm",
+    ["exec", "turbo", "run", "build:crates", "--filter=@jazz/rust", "--only"],
+    "CLI",
+  );
+  const wasm = guardedRun(
+    "pnpm",
+    ["exec", "turbo", "run", "build:fast", "--filter=jazz-wasm", "--only"],
+    "fast WASM",
+  );
   try {
     await Promise.all([cli, wasm]);
   } catch (error) {
     await scope.drain();
     throw firstBuildError ?? error;
   }
-  await guardedRun("pnpm", ["--filter", "jazz-tools", "build"], "jazz-tools");
+  // The parallel CLI Cargo process can overlap the WASM build's first receipt.
+  // Seal the completed (or signed-cache-restored) artifact against the stable
+  // post-build checkout before any consumer uses it.
+  await guardedRun(
+    "node",
+    ["dev/artifacts/provenance.mjs", "write", "wasm", "fast"],
+    "seal fast WASM provenance",
+  );
+  await guardedRun(
+    "pnpm",
+    ["exec", "turbo", "run", "build", "--filter=jazz-tools", "--only"],
+    "jazz-tools",
+  );
 
   // A manifest is the contract that makes a cached/generated artifact safe to
   // consume. NAPI is built release because that is the loadable Linux mode;
@@ -356,6 +380,11 @@ export async function buildTestArtifacts(run = command, scope = createBuildScope
     "node",
     ["dev/artifacts/provenance.mjs", "verify", "wasm", "fast"],
     "verify fast WASM provenance",
+  );
+  await guardedRun(
+    "node",
+    ["dev/artifacts/provenance.mjs", "write", "napi", "release"],
+    "seal release NAPI provenance",
   );
 
   try {
@@ -370,7 +399,11 @@ export async function buildTestArtifacts(run = command, scope = createBuildScope
     // A damaged native artifact must not make every run pay a second build.
     // Repair only after the first load proves it necessary, then prove repair.
     console.warn(`test-artifacts: release NAPI did not load; repairing (${error.message})`);
-    await guardedRun("pnpm", ["--filter", "jazz-napi", "build"], "repair release NAPI");
+    await guardedRun(
+      "pnpm",
+      ["exec", "turbo", "run", "build", "--filter=jazz-napi", "--only", "--force"],
+      "repair release NAPI",
+    );
     await guardedRun("node", ["-e", "require('./crates/jazz-napi')"], "load repaired release NAPI");
   }
   await guardedRun(
