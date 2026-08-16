@@ -213,6 +213,7 @@ pub(crate) struct LocalMaintainedViewSubscription {
     tables: BTreeMap<String, TableSchema>,
     result_query: JazzQuery,
     result_table: String,
+    result_schema_version: SchemaVersionId,
     binding_view_key: BindingViewKey,
     result_select: Option<Vec<String>>,
     result_set: BTreeSet<ResultMemberEntry>,
@@ -8468,6 +8469,7 @@ where
             tables,
             result_query: shape.query().clone(),
             result_table: shape.query().table.clone(),
+            result_schema_version: shape.schema_version(),
             binding_view_key: settled_binding_view.unwrap_or_else(|| {
                 BindingViewKey::new(
                     shape.shape_id(),
@@ -9348,9 +9350,12 @@ where
             return Ok(Some(row));
         }
         let mut tx_versions = local.maintained.versions_by_tx(entry.2);
-        let version = if let Some(version) =
-            local_maintained_view_content_witness(&tx_versions, entry.0.as_str(), entry.1)
-        {
+        let version = if let Some(version) = self.maintained_witness_for_result_member(
+            &tx_versions,
+            local.result_schema_version,
+            entry.0.as_str(),
+            entry.1,
+        )? {
             version.clone()
         } else {
             let (content_winner, _) = local.maintained.replacement_for(entry.0.as_str(), entry.1);
@@ -9371,8 +9376,12 @@ where
                 // to materialize the newly admitted row. This is payload
                 // lookup, not a facade-side query or recompute.
                 let tx_versions = self.query_versions_for_tx(entry.2)?;
-                let Some(version) =
-                    local_maintained_view_content_witness(&tx_versions, entry.0.as_str(), entry.1)
+                let Some(version) = self.maintained_witness_for_result_member(
+                    &tx_versions,
+                    local.result_schema_version,
+                    entry.0.as_str(),
+                    entry.1,
+                )?
                 else {
                     return Ok(None);
                 };
@@ -9424,30 +9433,53 @@ where
                 .current_row_from_result_payload(&table, payload)
                 .map(Some);
         }
-        let tx_versions = self.local_maintained_tx_versions(local, entry.2, cache);
-        let version = if let Some(version) =
-            local_maintained_view_content_witness(tx_versions, entry.0.as_str(), entry.1)
-        {
+        let tx_versions = self
+            .local_maintained_tx_versions(local, entry.2, cache)
+            .to_vec();
+        let version = if let Some(version) = self.maintained_witness_for_result_member(
+            &tx_versions,
+            local.result_schema_version,
+            entry.0.as_str(),
+            entry.1,
+        )? {
             version.clone()
         } else {
-            let (content_winner, _) = local.maintained.replacement_for(entry.0.as_str(), entry.1);
-            let Some(content_winner) = content_winner else {
+            let tx_versions = self.query_versions_for_tx(entry.2)?;
+            let Some(version) = self.maintained_witness_for_result_member(
+                &tx_versions,
+                local.result_schema_version,
+                entry.0.as_str(),
+                entry.1,
+            )?
+            else {
                 return Ok(None);
             };
-            if self.version_tx_id(&content_winner)? != entry.2 {
-                return Ok(None);
-            }
-            let tx_versions = cache.tx_versions.entry(entry.2).or_default();
-            tx_versions.push(content_winner);
-            tx_versions
-                .last()
-                .ok_or(Error::MissingTransaction(entry.2))?
-                .clone()
+            version.clone()
         };
         self.current_row_from_materialized_version_with_materialization_cache(
             &table, &version, cache,
         )
         .map(Some)
+    }
+
+    pub(crate) fn maintained_witness_for_result_member<'a>(
+        &self,
+        versions: &'a [VersionRow],
+        result_schema: SchemaVersionId,
+        result_table: &str,
+        row_uuid: RowUuid,
+    ) -> Result<Option<&'a VersionRow>, Error> {
+        let table_id = self.physical_table_id_for_schema(result_schema, result_table)?;
+        for version in versions.iter().rev() {
+            if version.row_uuid() == row_uuid
+                && !version.is_register_record()
+                && version.deletion().is_none()
+                && self.physical_table_id_for_version(version)? == table_id
+            {
+                return Ok(Some(version));
+            }
+        }
+        Ok(None)
     }
 
     fn local_maintained_tx_versions<'a>(

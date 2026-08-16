@@ -1332,10 +1332,88 @@ where
         &mut self,
         version: &VersionRow,
     ) -> Result<VersionRow, Error> {
+        // The maintained graph can call its projected result table by a name
+        // that also existed in the authored schema.  Resolve that name once
+        // through the active catalogue and require the same physical table
+        // for every candidate below; a reused name is ambiguous and must fail
+        // closed rather than selecting the first matching row key.
+        let logical_candidates = self
+            .catalogue
+            .physical_mappings
+            .values()
+            .filter_map(|mapping| {
+                mapping
+                    .tables
+                    .get(version.table())
+                    .map(|mapping| mapping.table_id)
+            })
+            .collect::<BTreeSet<_>>();
+        let witness_tx_id = self.version_tx_id(version)?;
+        let physical_candidates = if logical_candidates.len() == 1 {
+            logical_candidates
+        } else {
+            self.query_versions_for_tx(witness_tx_id)?
+                .into_iter()
+                .filter(|candidate| {
+                    candidate.row_uuid() == version.row_uuid()
+                        && candidate.layer() == version.layer()
+                })
+                .filter_map(|candidate| self.physical_table_id_for_version(&candidate).ok())
+                .filter(|table_id| logical_candidates.contains(table_id))
+                .collect::<BTreeSet<_>>()
+        };
+        let [projected_table_id] = physical_candidates.iter().copied().collect::<Vec<_>>()[..]
+        else {
+            return Err(Error::InvalidStoredValue(
+                "maintained witness maps to zero or multiple physical tables",
+            ));
+        };
+        let authored_schema = self
+            .schema_version_for_alias(version.schema_version_alias())
+            .ok_or(Error::InvalidStoredValue(
+                "maintained witness schema version alias must exist",
+            ))?;
+        let authored_table = match self.table_in_schema(version.table(), authored_schema) {
+            Ok(table) => table.clone(),
+            Err(Error::TableNotFound(_)) => {
+                // A current-query source may have been projected through a
+                // later schema, so its logical name need not exist under the
+                // authored alias carried by its immutable history identity.
+                // Resolve it through the catalogue's unambiguous physical
+                // table id, then reload the actual stored row for the same
+                // physical table, row, transaction, and layer.  This is the
+                // same identity boundary used for repair payloads; reused or
+                // unknown logical names fail closed before history is read.
+                if let Some(canonical) = self
+                    .query_versions_for_tx(witness_tx_id)?
+                    .into_iter()
+                    .find(|candidate| {
+                        candidate.row_uuid() == version.row_uuid()
+                            && candidate.layer() == version.layer()
+                            && self
+                                .physical_table_id_for_version(candidate)
+                                .is_ok_and(|table_id| table_id == projected_table_id)
+                    })
+                {
+                    return Ok(canonical);
+                }
+                return Err(Error::MaintainedViewMissingBundleWitness(
+                    "maintained witness projection is missing its canonical history row",
+                ));
+            }
+            Err(error) => return Err(error),
+        };
+        let authored_descriptor = if version.layer() == VersionLayer::Deletion {
+            authored_table.register_storage_table().record_schema()
+        } else {
+            authored_table.history_storage_table().record_schema()
+        };
+        let has_authored_layout = version.record.descriptor() == &authored_descriptor;
+
         // A maintained witness is decoded from the current-query graph. Its
-        // logical table can therefore be the read-schema projection while its
-        // schema alias still names the authored schema. Reload the immutable
-        // history row before interpreting that projected table as authored.
+        // descriptor can be identical to history storage while selected-out
+        // cells are still typed nulls, so first prefer its immutable stored
+        // history identity even when the descriptors match.
         for storage_table in
             self.version_storage_sources_for_layer(version.table(), version.layer())?
         {
@@ -1349,27 +1427,12 @@ where
             else {
                 continue;
             };
-            if canonical.schema_version_alias() == version.schema_version_alias() {
+            if canonical.schema_version_alias() == version.schema_version_alias()
+                && self.physical_table_id_for_version(&canonical)? == projected_table_id
+            {
                 return Ok(canonical);
             }
         }
-
-        let authored_schema = self
-            .schema_version_for_alias(version.schema_version_alias())
-            .ok_or(Error::InvalidStoredValue(
-                "maintained witness schema version alias must exist",
-            ))?;
-        let Ok(authored_table) = self.table_in_schema(version.table(), authored_schema) else {
-            return Err(Error::MaintainedViewMissingBundleWitness(
-                "maintained witness is a projection without its canonical history row",
-            ));
-        };
-        let authored_descriptor = if version.layer() == VersionLayer::Deletion {
-            authored_table.register_storage_table().record_schema()
-        } else {
-            authored_table.history_storage_table().record_schema()
-        };
-        let has_authored_layout = version.record.descriptor() == &authored_descriptor;
 
         // Some maintained rows are legitimate materialized/synthetic versions
         // (for example, synthesized merge output) and therefore have no persisted

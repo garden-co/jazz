@@ -248,12 +248,42 @@ where
         row_uuid: RowUuid,
         identity: AuthorId,
     ) -> Result<bool, Error> {
+        self.dry_run_read_current_allows_in_schema(
+            table_name,
+            row_uuid,
+            self.catalogue.current_schema_version_id,
+            identity,
+        )
+    }
+
+    /// Evaluate a point-read policy in the schema that named the wire
+    /// request.  Repair requests may use a projected table from a catalogue
+    /// schema newer than this node's base API schema.
+    pub(crate) fn dry_run_read_current_allows_in_schema(
+        &mut self,
+        table_name: &str,
+        row_uuid: RowUuid,
+        schema_version: SchemaVersionId,
+        identity: AuthorId,
+    ) -> Result<bool, Error> {
+        let schema = if schema_version == self.catalogue.current_schema_version_id {
+            &self.catalogue.schema
+        } else {
+            &self
+                .catalogue
+                .catalogue_schemas
+                .get(&schema_version)
+                .ok_or(Error::InvalidStoredValue(
+                    "repair request schema is missing from catalogue",
+                ))?
+                .schema
+        };
         let shape = crate::query::Query::from(table_name)
             .filter(crate::query::eq(
                 crate::query::col("id"),
                 crate::query::lit(Value::Uuid(row_uuid.0)),
             ))
-            .validate(&self.catalogue.schema)?;
+            .validate_with_schema_version(schema, schema_version)?;
         let binding = shape.bind(BTreeMap::new())?;
         self.query_rows_for_link(&shape, &binding, DurabilityTier::Local, identity)
             .map(|rows| !rows.is_empty())
