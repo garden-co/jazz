@@ -491,6 +491,7 @@ impl PeerState {
             structured_app_row_changes: _,
             allow_storage_witness_fallback,
             observed_result_delta_batches,
+            requires_authoritative_membership_reconcile,
             terminal_operations,
         } = transitions;
         let result_add_count = result_member_adds.len();
@@ -502,12 +503,13 @@ impl PeerState {
             .get(&subscription)
             .map(PeerSubscriptionState::member_result_set)
             .unwrap_or_default();
-        if observed_result_delta_batches > 0
-            && result_member_adds.is_empty()
-            && result_member_removes.is_empty()
-            && terminal_operations.is_empty()
-            && program_fact_adds.is_empty()
-            && program_fact_removes.is_empty()
+        if requires_authoritative_membership_reconcile
+            || (observed_result_delta_batches > 0
+                && result_member_adds.is_empty()
+                && result_member_removes.is_empty()
+                && terminal_operations.is_empty()
+                && program_fact_adds.is_empty()
+                && program_fact_removes.is_empty())
         {
             let tier = self
                 .subscriptions
@@ -693,6 +695,7 @@ impl PeerState {
         let mut program_fact_removes = Vec::new();
         let mut allow_storage_witness_fallback = false;
         let mut observed_result_delta_batches = 0_usize;
+        let mut requires_authoritative_membership_reconcile = false;
         let mut terminal_operations = Vec::new();
         {
             let Some(maintained_subscription_view) = self
@@ -715,6 +718,8 @@ impl PeerState {
                                 &node.node_aliases,
                             )?;
                         observed_result_delta_batches += transitions.observed_result_delta_batches;
+                        requires_authoritative_membership_reconcile |=
+                            transitions.requires_authoritative_membership_reconcile;
                         terminal_operations.extend(transitions.terminal_operations);
                         program_fact_adds.extend(filter_program_facts_for_result_table(
                             transitions.program_fact_adds,
@@ -809,6 +814,7 @@ impl PeerState {
             structured_app_row_changes: BTreeSet::new(),
             allow_storage_witness_fallback,
             observed_result_delta_batches,
+            requires_authoritative_membership_reconcile,
             terminal_operations,
         })
     }
@@ -1263,6 +1269,7 @@ impl PeerState {
             structured_app_row_changes: _,
             allow_storage_witness_fallback: source_allow_storage_witness_fallback,
             observed_result_delta_batches: _,
+            requires_authoritative_membership_reconcile: _,
             terminal_operations: source_terminal_operations,
         } = source_transitions;
         if !source_adds.is_empty()

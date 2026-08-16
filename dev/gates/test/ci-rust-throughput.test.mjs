@@ -286,9 +286,11 @@ test("Rust CI splits a bounded real differential-oracle smoke behind a stable ag
     /timeout 60s env[\s\\]+JAZZ_SEED=11[\s\\]+JAZZ_DIFFERENTIAL_CHURN_DEPTHS=10,1000[\s\\]+JAZZ_DIFFERENTIAL_STEP_COUNT=3[\s\\]+"\$\{M3_ORACLE_TEST_BINARY\}" node::tests::harness::m3_maintained_one_shot_differential_oracle --exact --ignored/,
   );
   assertM3CompileThenRun(differential);
+  assert.match(differential, /full randomized matrix[\s\S]*long-running manual soak/);
+  assert.doesNotMatch(differential, /tracked red debt/);
   assert.match(
     m3Differential,
-    /#\[ignore = "known red; tracked in TEST_BURNDOWN\.md"\]\n(?:pub )?fn m3_maintained_one_shot_differential_oracle/,
+    /#\[ignore = "manual randomized differential soak; bounded seed 11 runs in CI"\]\n(?:pub )?fn m3_maintained_one_shot_differential_oracle/,
   );
   assert.doesNotMatch(workspace, /m3_maintained_one_shot_differential_oracle/);
   assert.match(aggregate, /if: always\(\)/);

@@ -267,7 +267,7 @@ fn m3_differential_seeds() -> Vec<u64> {
 }
 
 #[test]
-#[ignore = "known red; tracked in TEST_BURNDOWN.md"]
+#[ignore = "manual randomized differential soak; bounded seed 11 runs in CI"]
 fn m3_maintained_one_shot_differential_oracle() {
     run_m3_aggregate_churn_curve();
     for seed in m3_differential_seeds() {
@@ -816,6 +816,34 @@ fn m3_differential_revoke_mid_stream_and_reconnect_mid_stream() {
     core = reopen_node_at(&core_dir, node(0x75), schema);
     grant_edge_access(&mut core, &mut parents, 1);
     oracle.tick_and_assert(&mut core, 0, "after-reconnect-mid-stream");
+}
+
+#[test]
+fn m3_inherited_child_delete_with_concurrent_insert_reconciles_authoritatively() {
+    let schema = m3_differential_schema();
+    let (_core_dir, mut core) = open_node_with_schema(node(0x77), schema.clone());
+    seed_m3_differential_base(&mut core, 0);
+    let mut oracle =
+        DifferentialOracle::open(&mut core, &schema, m3_differential_shapes(&schema), 0);
+    let mut parents = m3_differential_parent_map(&mut core);
+
+    // The deletion witness for 0x71 and result-current insertion for 0x72
+    // reach the maintained peer in one flush. Reconciliation must replace
+    // the stale child, not let the unrelated visible add suppress the delete.
+    delete_with_parent(&mut core, &mut parents, "children", row(0x71), 700);
+    accept_with_parent(
+        &mut core,
+        &mut parents,
+        "children",
+        row(0x72),
+        701,
+        BTreeMap::from([
+            ("doc".to_owned(), Value::Uuid(row(0x11).0)),
+            ("status".to_owned(), Value::String("open".to_owned())),
+        ]),
+    );
+
+    oracle.tick_and_assert(&mut core, 0, "delete-and-insert-child");
 }
 
 fn m3_differential_schema() -> JazzSchema {

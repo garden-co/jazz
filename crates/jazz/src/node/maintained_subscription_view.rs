@@ -1,8 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::mem;
 
-use groove::ivm::{MultisinkDeltas, RecordDeltas, TerminalOperation};
-use groove::records::{BorrowedRecord, OwnedRecord, RecordDescriptor, RecordProjector, Value};
+use groove::ivm::{MultisinkDeltas, RecordDeltas, TerminalEdit, TerminalOperation};
+use groove::records::{
+    BorrowedRecord, EnumValue, OwnedRecord, RecordDescriptor, RecordProjector, Value, ValueType,
+};
 
 use super::codec::{
     VersionLayer, VersionRow, VersionRowParts, deletion_event_from_value,
@@ -139,6 +141,11 @@ pub(crate) struct ResultTransitions {
     pub(crate) terminal_operations: Vec<TerminalOperation>,
     pub(crate) allow_storage_witness_fallback: bool,
     pub(crate) observed_result_delta_batches: usize,
+    /// A deletion-register witness changed while its anti-joined result
+    /// terminal may be silent. The caller must replace this tick with an
+    /// authoritative membership reconciliation, even if other terminals
+    /// produced deltas concurrently.
+    pub(crate) requires_authoritative_membership_reconcile: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -231,6 +238,12 @@ impl MaintainedSubscriptionView {
             return Ok(ResultTransitions::default());
         }
         let observed_result_delta_batch = !deltas.is_empty() && kind.is_result_terminal();
+        // Deletion witnesses are part of the membership proof: a current-row
+        // anti-join can become empty solely because its deletion-register
+        // input changed. Groove reports that change through the witness
+        // terminal even when the result-current terminal is silent.
+        let requires_authoritative_membership_reconcile =
+            !deltas.is_empty() && kind.requires_authoritative_membership_reconcile();
         let mut decode_plan_cache = VersionDecodePlanCache::new();
         let decoded = deltas
             .iter()
@@ -249,6 +262,8 @@ impl MaintainedSubscriptionView {
         if observed_result_delta_batch {
             transitions.observed_result_delta_batches += 1;
         }
+        transitions.requires_authoritative_membership_reconcile =
+            requires_authoritative_membership_reconcile;
         Ok(transitions)
     }
 
@@ -263,22 +278,10 @@ impl MaintainedSubscriptionView {
         for (sink, terminal) in &deltas.terminal_sinks {
             if let MaintainedTerminalKind::StructuredAppRows { layout, .. } = schemas.get(sink)? {
                 for operation in &terminal.operations {
-                    if !terminal_operation_descriptor_matches_layout(operation, layout) {
-                        return Err(super::Error::InvalidStoredValue(
-                            "structured terminal operation descriptor disagrees with prepared root layout",
-                        ));
-                    }
+                    transitions
+                        .terminal_operations
+                        .push(rebind_terminal_operation_to_layout(operation, layout)?);
                 }
-                transitions
-                    .terminal_operations
-                    .extend(terminal.operations.iter().cloned().map(|mut operation| {
-                        // Enum registry identities are physical-occurrence metadata, not
-                        // a byte-layout change. Publish the prepared descriptor after the
-                        // rebound check above so every operation obeys the early-bound
-                        // terminal layout contract.
-                        operation.root_descriptor = layout.root_descriptor;
-                        operation
-                    }));
             }
         }
         for (sink, deltas) in deltas.sinks {
@@ -303,6 +306,8 @@ impl MaintainedSubscriptionView {
                 .extend(delta_transitions.structured_app_row_changes);
             transitions.observed_result_delta_batches +=
                 delta_transitions.observed_result_delta_batches;
+            transitions.requires_authoritative_membership_reconcile |=
+                delta_transitions.requires_authoritative_membership_reconcile;
         }
         Ok(transitions)
     }
@@ -656,18 +661,177 @@ impl MaintainedSubscriptionView {
     }
 }
 
-fn terminal_operation_descriptor_matches_layout(
+/// Rebind a runtime terminal operation to its early-bound prepared layout.
+///
+/// The runtime may tighten a root field from `Nullable(T)` to `T` after an
+/// inner proof.  That is not an alternate public layout: the prepared layout
+/// is the subscription's immutable decoding contract.  Re-encode only a
+/// root-level payload into that contract, preserving the source value as a
+/// present nullable cell.  Nested edits remain byte-addressed by their root
+/// descriptor, so they must already agree exactly.
+fn rebind_terminal_operation_to_layout(
     operation: &TerminalOperation,
     layout: &TerminalRootLayout,
-) -> bool {
-    operation.root_descriptor == layout.root_descriptor
-        || (operation.root_descriptor.fields().len() == layout.root_descriptor.fields().len()
-            && RecordProjector::new_registry_rebound(
+) -> Result<TerminalOperation, super::Error> {
+    if operation.root_descriptor == layout.root_descriptor {
+        return Ok(operation.clone());
+    }
+    if !terminal_descriptor_can_rebind_to_layout(
+        &operation.root_descriptor,
+        &layout.root_descriptor,
+    ) || (!operation.path.is_empty() && operation.root_descriptor != layout.root_descriptor)
+    {
+        return Err(super::Error::InvalidStoredValue(
+            "structured terminal operation descriptor disagrees with prepared root layout",
+        ));
+    }
+
+    let mut rebound = operation.clone();
+    match &mut rebound.edit {
+        TerminalEdit::Insert { value, .. } | TerminalEdit::Update { value, .. } => {
+            *value = reencode_terminal_root_record(
                 operation.root_descriptor,
-                layout.root_descriptor,
-                (0..operation.root_descriptor.fields().len()).map(|index| (index, index)),
-            )
-            .is_ok())
+                &layout.root_descriptor,
+                value,
+            )?;
+        }
+        TerminalEdit::Remove { .. } | TerminalEdit::Move { .. } => {}
+    }
+    rebound.root_descriptor = layout.root_descriptor;
+    Ok(rebound)
+}
+
+fn terminal_descriptor_can_rebind_to_layout(
+    source: &RecordDescriptor,
+    target: &RecordDescriptor,
+) -> bool {
+    source.fields().len() == target.fields().len()
+        && source
+            .fields()
+            .iter()
+            .zip(target.fields())
+            .all(|(source, target)| {
+                source.name == target.name
+                    && terminal_field_can_rebind_to_layout(&source.value_type, &target.value_type)
+            })
+}
+
+fn terminal_field_can_rebind_to_layout(source: &ValueType, target: &ValueType) -> bool {
+    source == target
+        || matches!(target, ValueType::Nullable(inner) if source == inner.as_ref())
+        || RecordProjector::new_registry_rebound(
+            RecordDescriptor::new([("value", source.clone())]),
+            RecordDescriptor::new([("value", target.clone())]),
+            [(0, 0)],
+        )
+        .is_ok()
+}
+
+fn reencode_terminal_root_record(
+    source: RecordDescriptor,
+    target: &RecordDescriptor,
+    raw: &[u8],
+) -> Result<Vec<u8>, super::Error> {
+    let values = source
+        .bind(raw)
+        .to_values()
+        .map_err(|_| super::Error::InvalidStoredValue("invalid structured terminal record"))?;
+    let values = source
+        .fields()
+        .iter()
+        .zip(target.fields())
+        .zip(values)
+        .map(|((source, target), value)| {
+            rebind_terminal_value(value, &source.value_type, &target.value_type)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    target.create(&values).map_err(|_| {
+        super::Error::InvalidStoredValue("structured terminal root re-encoding failed")
+    })
+}
+
+fn rebind_terminal_value(
+    value: Value,
+    source: &ValueType,
+    target: &ValueType,
+) -> Result<Value, super::Error> {
+    if source == target {
+        return Ok(value);
+    }
+    if let ValueType::Nullable(inner) = target
+        && source == inner.as_ref()
+    {
+        return Ok(Value::Nullable(Some(Box::new(value))));
+    }
+    if !terminal_field_can_rebind_to_layout(source, target) {
+        return Err(super::Error::InvalidStoredValue(
+            "structured terminal root value disagrees with prepared layout",
+        ));
+    }
+    match (value, source, target) {
+        (Value::Tuple(values), ValueType::Tuple(source), ValueType::Tuple(target)) => {
+            Ok(Value::Tuple(
+                values
+                    .into_iter()
+                    .zip(source)
+                    .zip(target)
+                    .map(|((value, source), target)| rebind_terminal_value(value, source, target))
+                    .collect::<Result<_, _>>()?,
+            ))
+        }
+        (Value::Array(values), ValueType::Array(source), ValueType::Array(target)) => {
+            Ok(Value::Array(
+                values
+                    .into_iter()
+                    .map(|value| rebind_terminal_value(value, source, target))
+                    .collect::<Result<_, _>>()?,
+            ))
+        }
+        (Value::Nullable(value), ValueType::Nullable(source), ValueType::Nullable(target)) => {
+            Ok(Value::Nullable(
+                value
+                    .map(|value| rebind_terminal_value(*value, source, target).map(Box::new))
+                    .transpose()?,
+            ))
+        }
+        (Value::Record(record), ValueType::Record(source), ValueType::Record(target)) => {
+            let values = record.to_values().map_err(|_| {
+                super::Error::InvalidStoredValue("invalid structured terminal record")
+            })?;
+            let values = source
+                .fields()
+                .iter()
+                .zip(target.fields())
+                .zip(values)
+                .map(|((source, target), value)| {
+                    rebind_terminal_value(value, &source.value_type, &target.value_type)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let raw = target.create(&values).map_err(|_| {
+                super::Error::InvalidStoredValue("structured terminal nested re-encoding failed")
+            })?;
+            Ok(Value::Record(OwnedRecord::new(raw, **target)))
+        }
+        (Value::Enum(value), ValueType::Enum(source), ValueType::Enum(target)) => {
+            let tag = value.tag();
+            let source_case = source.case(tag).map_err(|_| {
+                super::Error::InvalidStoredValue("invalid structured terminal enum tag")
+            })?;
+            let target_case = target.case(tag).map_err(|_| {
+                super::Error::InvalidStoredValue("prepared terminal enum tag is absent")
+            })?;
+            let record = rebind_terminal_value(
+                Value::Record(value.into_record()),
+                &ValueType::Record(Box::new(source_case.payload)),
+                &ValueType::Record(Box::new(target_case.payload)),
+            )?;
+            let Value::Record(record) = record else {
+                unreachable!("record rebinding preserves record value")
+            };
+            Ok(Value::Enum(EnumValue::new(tag, record)))
+        }
+        (value, _, _) => Ok(value),
+    }
 }
 
 impl MaintainedTerminalSchemas {
@@ -871,6 +1035,14 @@ impl MaintainedTerminalKind {
         matches!(
             self,
             MaintainedTerminalKind::ResultCurrent(_) | MaintainedTerminalKind::AggregateResult(_)
+        )
+    }
+
+    fn requires_authoritative_membership_reconcile(&self) -> bool {
+        matches!(
+            self,
+            MaintainedTerminalKind::VersionDeletion(_)
+                | MaintainedTerminalKind::ReplacementDeletion(_)
         )
     }
 }
@@ -1786,6 +1958,7 @@ mod tests {
 
     use super::*;
     use crate::ids::{NodeUuid, SchemaVersionAlias};
+    use crate::node::Error;
     use crate::node::codec::{VersionRow, VersionRowParts};
     use crate::protocol::ResultRowEntry;
     use crate::schema::{ColumnSchema, TableSchema};
@@ -1882,6 +2055,182 @@ mod tests {
             .hidden_fields
             .insert("__jazz_include_project".to_owned());
         assert_ne!(layout.id, terminal_root_layout(&without_nested).id);
+    }
+
+    fn layout(descriptor: RecordDescriptor) -> TerminalRootLayout {
+        TerminalRootLayout {
+            id: "test-layout".to_owned(),
+            root_key_slot: 0,
+            root_key_field_name: "row_uuid".to_owned(),
+            root_descriptor: descriptor,
+            public_fields: Vec::new(),
+            carrier: TerminalRootCarrier::Logical,
+        }
+    }
+
+    #[test]
+    fn terminal_operation_rebinds_tightened_root_field_to_prepared_nullable_layout() {
+        let source = RecordDescriptor::new([
+            ("row_uuid", ValueType::Uuid),
+            ("user_child", ValueType::Uuid),
+        ]);
+        let target = RecordDescriptor::new([
+            ("row_uuid", ValueType::Uuid),
+            ("user_child", ValueType::Nullable(Box::new(ValueType::Uuid))),
+        ]);
+        let row_uuid = row(0x71);
+        let raw = source
+            .create(&[Value::Uuid(row_uuid.0), Value::Uuid(row(0x72).0)])
+            .unwrap();
+        let operation = TerminalOperation {
+            root_descriptor: source,
+            root_key: row_uuid.0.as_bytes().to_vec(),
+            path: Vec::new(),
+            edit: TerminalEdit::Update {
+                key: row_uuid.0.as_bytes().to_vec(),
+                value: raw,
+            },
+        };
+
+        let rebound = rebind_terminal_operation_to_layout(&operation, &layout(target)).unwrap();
+        assert_eq!(rebound.root_descriptor, target);
+        let TerminalEdit::Update { value, .. } = rebound.edit else {
+            panic!("operation remains an update");
+        };
+        assert_eq!(
+            target.bind(&value).to_values().unwrap(),
+            vec![
+                Value::Uuid(row_uuid.0),
+                Value::Nullable(Some(Box::new(Value::Uuid(row(0x72).0)))),
+            ]
+        );
+    }
+
+    #[test]
+    fn terminal_operation_rebinds_nested_registry_only_record_layout() {
+        let source_metadata = RecordDescriptor::new([(
+            "status",
+            ValueType::EnumTag(
+                groove::records::ScalarEnumSchema::new("status", ["open"])
+                    .unwrap()
+                    .with_registry_id(11),
+            ),
+        )]);
+        let target_metadata = RecordDescriptor::new([(
+            "status",
+            ValueType::EnumTag(
+                groove::records::ScalarEnumSchema::new("status", ["open"])
+                    .unwrap()
+                    .with_registry_id(22),
+            ),
+        )]);
+        let source = RecordDescriptor::new([
+            ("row_uuid", ValueType::Uuid),
+            ("metadata", ValueType::Record(Box::new(source_metadata))),
+        ]);
+        let target = RecordDescriptor::new([
+            ("row_uuid", ValueType::Uuid),
+            ("metadata", ValueType::Record(Box::new(target_metadata))),
+        ]);
+        let row_uuid = row(0x71);
+        let raw = source
+            .create(&[
+                Value::Uuid(row_uuid.0),
+                Value::Record(OwnedRecord::new(
+                    source_metadata.create(&[Value::EnumTag(0)]).unwrap(),
+                    source_metadata,
+                )),
+            ])
+            .unwrap();
+        let operation = TerminalOperation {
+            root_descriptor: source,
+            root_key: row_uuid.0.as_bytes().to_vec(),
+            path: Vec::new(),
+            edit: TerminalEdit::Update {
+                key: row_uuid.0.as_bytes().to_vec(),
+                value: raw,
+            },
+        };
+
+        let rebound = rebind_terminal_operation_to_layout(&operation, &layout(target)).unwrap();
+        let TerminalEdit::Update { value, .. } = rebound.edit else {
+            panic!("operation remains an update");
+        };
+        let values = target.bind(&value).to_values().unwrap();
+        let Value::Record(metadata) = &values[1] else {
+            panic!("nested metadata remains a record");
+        };
+        assert_eq!(metadata.descriptor(), &target_metadata);
+        assert_eq!(metadata.to_values().unwrap(), vec![Value::EnumTag(0)]);
+    }
+
+    #[test]
+    fn terminal_operation_rebind_rejects_unrelated_prepared_field() {
+        let source = RecordDescriptor::new([
+            ("row_uuid", ValueType::Uuid),
+            ("user_child", ValueType::Uuid),
+        ]);
+        let target = RecordDescriptor::new([
+            ("row_uuid", ValueType::Uuid),
+            ("user_other", ValueType::Nullable(Box::new(ValueType::Uuid))),
+        ]);
+        let row_uuid = row(0x71);
+        let operation = TerminalOperation {
+            root_descriptor: source,
+            root_key: row_uuid.0.as_bytes().to_vec(),
+            path: Vec::new(),
+            edit: TerminalEdit::Remove {
+                key: row_uuid.0.as_bytes().to_vec(),
+            },
+        };
+
+        assert!(matches!(
+            rebind_terminal_operation_to_layout(&operation, &layout(target)),
+            Err(Error::InvalidStoredValue(
+                "structured terminal operation descriptor disagrees with prepared root layout"
+            ))
+        ));
+    }
+
+    fn witness_schema() -> VersionWitnessSchema {
+        VersionWitnessSchema {
+            descriptor: RecordDescriptor::new(std::iter::empty::<(String, ValueType)>()),
+            identity: crate::node::query_engine::VersionIdentityFields {
+                table_field: "table".to_owned(),
+                row_field: "row_uuid".to_owned(),
+                tx_time_field: "tx_time".to_owned(),
+                tx_node_field: "tx_node_id".to_owned(),
+                batch_id_field: None,
+                branch_or_prefix_field: None,
+                row_digest_field: None,
+                schema_field: "schema_version".to_owned(),
+                layer_field: "layer".to_owned(),
+            },
+            created_by_field: "created_by".to_owned(),
+            created_at_field: "created_at".to_owned(),
+            updated_by_field: "updated_by".to_owned(),
+            updated_at_field: "updated_at".to_owned(),
+            parents_field: "parents".to_owned(),
+            authored_columns_field: "authored_columns".to_owned(),
+            deletion_field: "_deletion".to_owned(),
+            user_fields: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn deletion_witnesses_force_authoritative_membership_reconciliation() {
+        assert!(
+            MaintainedTerminalKind::VersionDeletion(witness_schema())
+                .requires_authoritative_membership_reconcile()
+        );
+        assert!(
+            MaintainedTerminalKind::ReplacementDeletion(witness_schema())
+                .requires_authoritative_membership_reconcile()
+        );
+        assert!(
+            !MaintainedTerminalKind::VersionContent(witness_schema())
+                .requires_authoritative_membership_reconcile()
+        );
     }
 
     fn table() -> TableSchema {
