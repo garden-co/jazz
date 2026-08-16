@@ -215,6 +215,43 @@ fn table_rename_v1_to_v2_lens() -> Lens {
     )
 }
 
+/// A copy-on-write-specific target version with a physical column v1 cannot
+/// name. This makes the test witness the authored v2 route, rather than only
+/// the shared `id`/`email` lineage.
+fn table_rename_copy_on_write_schema_v2() -> jazz::tools::Schema {
+    SchemaBuilder::new()
+        .table(
+            TableSchema::builder("people")
+                .column("id", ColumnType::Uuid)
+                .column("email", ColumnType::Text)
+                .column_with_default(
+                    "v2_marker",
+                    ColumnType::Text,
+                    Value::Text("from-v1-default".to_string()),
+                ),
+        )
+        .build()
+}
+
+fn table_rename_copy_on_write_v1_to_v2_lens() -> Lens {
+    Lens::new(
+        SchemaHash::compute(&table_rename_schema_v1()),
+        SchemaHash::compute(&table_rename_copy_on_write_schema_v2()),
+        LensTransform::with_ops(vec![
+            LensOp::RenameTable {
+                old_name: "users".to_string(),
+                new_name: "people".to_string(),
+            },
+            LensOp::AddColumn {
+                table: "people".to_string(),
+                column: "v2_marker".to_string(),
+                column_type: ColumnType::Text,
+                default: Value::Text("from-v1-default".to_string()),
+            },
+        ]),
+    )
+}
+
 fn table_rename_join_user_values(id: jazz::tools::ObjectId, name: &str) -> HashMap<String, Value> {
     row_input!("id" => id, "name" => name)
 }
@@ -2672,7 +2709,6 @@ async fn table_rename_subscription_reacts_to_new_branch_updates_after_schema_evo
 }
 
 #[tokio::test]
-#[ignore = "known red; tracked in TEST_BURNDOWN.md"]
 async fn table_rename_update_and_delete_copy_on_write() {
     tokio::task::LocalSet::new()
         .run_until(table_rename_update_and_delete_copy_on_write_impl())
@@ -2682,8 +2718,10 @@ async fn table_rename_update_and_delete_copy_on_write() {
 async fn table_rename_update_and_delete_copy_on_write_impl() {
     let server = JazzServer::start().await;
     let v1_schema = table_rename_schema_v1();
-    let v2_schema = table_rename_schema_v2();
-    let v2_branch = format!("client-{}-main", SchemaHash::compute(&v2_schema).short());
+    let v2_schema = table_rename_copy_on_write_schema_v2();
+    // The public branch grammar accepts `main` or a UUID. The former
+    // schema-hash-derived client branch spelling was never a valid branch id.
+    let v2_branch = "main".to_owned();
 
     push_catalogue_in_memory(
         server.server_state(),
@@ -2691,7 +2729,7 @@ async fn table_rename_update_and_delete_copy_on_write_impl() {
         "dev",
         "main",
         &[v1_schema.clone(), v2_schema.clone()],
-        &[table_rename_v1_to_v2_lens()],
+        &[table_rename_copy_on_write_v1_to_v2_lens()],
     )
     .await
     .expect("push table-rename catalogue");
@@ -2726,6 +2764,17 @@ async fn table_rename_update_and_delete_copy_on_write_impl() {
         .await
         .expect("alice user reaches edge");
 
+    // Publishing a permissions head is the public operation that moves the
+    // server's current write pointer. Keep Alice's historical v1 write before
+    // this move, then exercise Bob's v2 copy-on-write update and delete.
+    publish_allow_all_permissions(
+        &server.base_url(),
+        server.app_id(),
+        server.admin_secret(),
+        &v2_schema,
+    )
+    .await;
+
     let bob =
         JazzClient::connect(server.make_client_context_for_user(
             v2_schema,
@@ -2738,10 +2787,16 @@ async fn table_rename_update_and_delete_copy_on_write_impl() {
     let batch_id = bob
         .update(
             row_id,
-            vec![(
-                "email".to_string(),
-                Value::Text("alice+updated@example.com".to_string()),
-            )],
+            vec![
+                (
+                    "email".to_string(),
+                    Value::Text("alice+updated@example.com".to_string()),
+                ),
+                (
+                    "v2_marker".to_string(),
+                    Value::Text("written-by-v2".to_string()),
+                ),
+            ],
         )
         .expect("bob updates renamed row");
     bob.wait_for_batch(
@@ -2766,6 +2821,7 @@ async fn table_rename_update_and_delete_copy_on_write_impl() {
                     == vec![
                         Value::Uuid(user_id),
                         Value::Text("alice+updated@example.com".to_string()),
+                        Value::Text("written-by-v2".to_string()),
                     ])
             .then_some(rows)
         },
