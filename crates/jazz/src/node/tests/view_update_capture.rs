@@ -444,6 +444,7 @@ impl MaintainedSubscriptionViewSubscription {
                 complete_exclusive_payloads: false,
                 previous_result_set,
                 previous_program_facts: BTreeSet::new(),
+                flat_tuple_source_tables: Vec::new(),
                 result_member_adds: result_member_adds
                     .into_iter()
                     .map(crate::protocol::ResultMemberEntry::from)

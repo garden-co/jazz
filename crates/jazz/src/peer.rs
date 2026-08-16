@@ -607,6 +607,7 @@ impl PeerState {
                     complete_exclusive_payloads: self.ship_complete_exclusive_payloads,
                     previous_result_set: previous_result_tx_ids,
                     previous_program_facts,
+                    flat_tuple_source_tables: flat_tuple_source_tables(shape),
                     result_member_adds,
                     result_member_removes,
                     program_fact_adds,
@@ -909,6 +910,11 @@ impl PeerState {
             .subscriptions
             .get(&subscription)
             .and_then(|state| state.known_state.clone());
+        let previous_program_facts = self
+            .subscriptions
+            .get(&subscription)
+            .map(PeerSubscriptionState::program_fact_set)
+            .unwrap_or_default();
         let known_membership_position = fast_current_membership_position(&known_state);
         let authorization_matches =
             self.fast_cursor_authorization_matches(subscription, &known_state);
@@ -1016,7 +1022,15 @@ impl PeerState {
                 known_state: bundle_known_state,
                 complete_exclusive_payloads: self.ship_complete_exclusive_payloads,
                 previous_result_set: BTreeSet::new(),
-                previous_program_facts: BTreeSet::new(),
+                // A non-reset rehydrate retains the receiver's existing fact
+                // set, so tuple-source closure must be diffed against it.
+                // A reset clears that receiver set before additions apply.
+                previous_program_facts: if reset_result_set {
+                    BTreeSet::new()
+                } else {
+                    previous_program_facts
+                },
+                flat_tuple_source_tables: flat_tuple_source_tables(shape),
                 result_member_adds,
                 result_member_removes,
                 program_fact_adds,
@@ -1365,6 +1379,7 @@ impl PeerState {
                     complete_exclusive_payloads: self.ship_complete_exclusive_payloads,
                     previous_result_set: BTreeSet::new(),
                     previous_program_facts: BTreeSet::new(),
+                    flat_tuple_source_tables: Vec::new(),
                     result_member_adds,
                     result_member_removes: Vec::new(),
                     program_fact_adds: Vec::new(),
@@ -2136,6 +2151,21 @@ impl From<MaintainedSubscriptionViewIndexFootprint> for MaintainedSubscriptionVi
             total_heap_bytes: footprint.total_heap_bytes,
         }
     }
+}
+
+fn flat_tuple_source_tables(shape: &ValidatedQuery) -> Vec<String> {
+    shape
+        .query()
+        .flat_join
+        .as_ref()
+        .map(|flat_join| {
+            flat_join
+                .sources
+                .iter()
+                .map(|source| source.table.clone())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 #[cfg(test)]

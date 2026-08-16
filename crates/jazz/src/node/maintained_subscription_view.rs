@@ -410,26 +410,26 @@ impl MaintainedSubscriptionView {
     pub(crate) fn tuple_source_versions_for_members(
         &self,
         members: &[ResultMemberEntry],
-    ) -> Vec<(ResultMemberEntry, VersionRow)> {
+        source_tables: &[String],
+    ) -> Vec<(ResultMemberEntry, usize, VersionRow)> {
         let mut tuples = Vec::new();
         for member in members {
             let Some(occurrence) = member.output_occurrence_id() else {
                 continue;
             };
-            let joined_rows = occurrence
-                .joined_sources()
-                .iter()
-                .map(|id| RowUuid(*id.uuid()))
-                .collect::<BTreeSet<_>>();
-            if joined_rows.is_empty() {
-                continue;
-            }
-            for weighted in self.versions.by_identity.values() {
-                if weighted.weight > 0
-                    && weighted.row.deletion().is_none()
-                    && joined_rows.contains(&weighted.row.row_uuid())
-                {
-                    tuples.push((member.clone(), weighted.row.clone()));
+            for (source_index, source) in occurrence.joined_sources().iter().enumerate() {
+                let Some(source_table) = source_tables.get(source_index) else {
+                    continue;
+                };
+                let source_row = RowUuid(*source.uuid());
+                for weighted in self.versions.by_identity.values() {
+                    if weighted.weight > 0
+                        && weighted.row.deletion().is_none()
+                        && weighted.row.table() == source_table
+                        && weighted.row.row_uuid() == source_row
+                    {
+                        tuples.push((member.clone(), source_index, weighted.row.clone()));
+                    }
                 }
             }
         }
@@ -517,6 +517,17 @@ impl MaintainedSubscriptionView {
             .filter_map(|member| self.result_payloads.get(member))
             .cloned()
             .map(ProgramFactEntry::ResultPayload)
+            .collect()
+    }
+
+    /// Current positive result memberships, including unchanged members during
+    /// a non-reset rehydrate. Tuple-source admissions are a closure over this
+    /// set, not merely over the membership delta.
+    pub(crate) fn active_result_members(&self) -> Vec<ResultMemberEntry> {
+        self.result_weights
+            .iter()
+            .filter(|(_, weight)| **weight > 0)
+            .map(|(member, _)| member.clone())
             .collect()
     }
 

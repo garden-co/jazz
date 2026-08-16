@@ -36,7 +36,7 @@ use super::query_engine::{
     ReachableContribution, ReadView, RequestedReadSet, RequestedSourceStage, ResolvedSource,
     ResultId, ResultMembershipVersionSchema, ResultRowRef, RowIdRef, RowProjection,
     RowRefSchema as QueryEngineRowRefSchema, RowSetExpr, RowSetNodeId, RowSetOutputRequest,
-    RowSetProgramInput, RowVisibility, SchemaFamilySelection, SchemaProjection,
+    RowSetProgramInput, RowVisibility, SchemaFamilySelection, SchemaProjection, SettledBindingRows,
     SortDirection as NormalizedSortDirection, SourceAuthorizationRequest, SourceExpr, SourceGap,
     SourceId, SourceMetadataFields, SourceMetadataRequirement, SourcePath, SourceRequest,
     SourceRequirements, SourceResolutionError, SourceResolver, SourceRole, SourceRowShape,
@@ -830,6 +830,7 @@ where
             SourceExpr::SettledBindingView {
                 projection,
                 binding_view,
+                rows,
             } => {
                 if request.visibility != RowVisibility::Visible {
                     return Err(source_resolution_error(request, SourceGap::Coverage));
@@ -847,6 +848,7 @@ where
                     &request.source.table,
                     self.read_view.read_schema,
                     *binding_view,
+                    *rows,
                 ) {
                     Ok(rows) => {
                         let table = self
@@ -8655,18 +8657,40 @@ where
         table: &str,
         read_schema: SchemaVersionId,
         binding_view: BindingViewKey,
+        rows: SettledBindingRows,
     ) -> Result<Vec<CurrentRow>, Error> {
         let Some(row_result_set) = self.query.settled_result_sets.get(&binding_view) else {
             return Ok(Vec::new());
         };
-        let mut row_entries = row_result_set
-            .iter()
-            .filter_map(ResultMemberEntry::as_row)
-            .map(|(entry_table, row_uuid, tx_id)| {
-                ((entry_table.to_string(), row_uuid, tx_id), None)
+        let mut row_entries = matches!(rows, SettledBindingRows::ResultMembers)
+            .then(|| {
+                row_result_set
+                    .iter()
+                    .filter_map(ResultMemberEntry::as_row)
+                    .map(|(entry_table, row_uuid, tx_id)| {
+                        ((entry_table.to_string(), row_uuid, tx_id), None)
+                    })
+                    .collect::<BTreeMap<_, Option<RowVersionRefEntry>>>()
             })
-            .collect::<BTreeMap<_, Option<RowVersionRefEntry>>>();
-        if let Some(program_facts) = self.query.settled_program_facts.get(&binding_view) {
+            .unwrap_or_default();
+        if let Some(program_facts) = self.query.settled_program_facts.get(&binding_view)
+            && matches!(rows, SettledBindingRows::ResultMembers)
+        {
+            row_entries.extend(program_facts.iter().filter_map(|fact| {
+                let ProgramFactEntry::RelationEdge(edge) = fact else {
+                    return None;
+                };
+                edge.target_version.as_ref().map(|version| {
+                    (
+                        (edge.target_table.to_string(), edge.target_row, version.tx),
+                        Some(version.clone()),
+                    )
+                })
+            }));
+        }
+        if let Some(program_facts) = self.query.settled_program_facts.get(&binding_view)
+            && matches!(rows, SettledBindingRows::FlatTupleContributor { .. })
+        {
             row_entries.extend(program_facts.iter().filter_map(|fact| {
                 let ProgramFactEntry::RelationEdge(edge) = fact else {
                     return None;
@@ -8682,8 +8706,12 @@ where
                 let ProgramFactEntry::ContributingMembers(contribution) = fact else {
                     return None;
                 };
-                if contribution.role.as_deref() != Some("flat_tuple_source")
-                    || !row_result_set.contains(&contribution.result)
+                if !matches!(
+                    rows,
+                    SettledBindingRows::FlatTupleContributor { source_index }
+                        if contribution.role.as_deref()
+                            == Some(&format!("flat_tuple_source:{source_index}"))
+                ) || !row_result_set.contains(&contribution.result)
                 {
                     return None;
                 }
@@ -15162,13 +15190,14 @@ mod tests {
     use crate::node::{MergeableCommit, NodeState};
     use crate::peer::PeerState;
     use crate::protocol::{
-        CurrentWriteSchema, MigrationLens, ReadViewSourceSpec, ReadViewSpec, RegisterShapeOptions,
-        RelationEdgeEntry, ResultRowLayer, RowVersionRefEntry, SchemaVersion, ShapeAst, Subscribe,
-        SyncMessage, TableLens,
+        CurrentWriteSchema, MigrationLens, ReadViewSourceSpec, ReadViewSpec, RealRowMemberEntry,
+        RegisterShapeOptions, RelationEdgeEntry, ResultRowLayer, RowVersionRefEntry, SchemaVersion,
+        ShapeAst, Subscribe, SyncMessage, TableLens,
     };
     use crate::query::{
-        Aggregate, ArraySubquery, JoinSourceLookup, OrderDirection, PolicyBranch, Query, claim,
-        col, contains, eq, gt, in_list, lit, lte, param,
+        Aggregate, ArraySubquery, FlatJoin, FlatJoinOn, FlatJoinSource, JoinSourceLookup,
+        OrderDirection, PolicyBranch, Query, claim, col, contains, eq, gt, in_list, lit, lte,
+        param,
     };
     use crate::schema::{JazzSchema, Policy, TableSchema};
 
@@ -16966,6 +16995,15 @@ mod tests {
         shape: &ValidatedQuery,
         binding: &Binding,
     ) {
+        subscribe_query_binding_with_opts(node, shape, binding, RegisterShapeOptions::default());
+    }
+
+    fn subscribe_query_binding_with_opts(
+        node: &mut NodeState<RocksDbStorage>,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        opts: RegisterShapeOptions,
+    ) {
         let values = shape
             .params()
             .keys()
@@ -16976,7 +17014,7 @@ mod tests {
             subscription: SubscriptionKey {
                 shape_id: shape.shape_id(),
                 binding_id: binding.binding_id(),
-                read_view: Default::default(),
+                read_view: opts.read_view_key(),
             },
             values,
             known_state: None,
@@ -17661,7 +17699,12 @@ mod tests {
             BTreeSet::from([ProgramFactEntry::RelationEdge(edge.clone())]),
         );
         let settled_rows = node
-            .settled_binding_view_source_rows("members", v3.id, binding_view)
+            .settled_binding_view_source_rows(
+                "members",
+                v3.id,
+                binding_view,
+                SettledBindingRows::ResultMembers,
+            )
             .expect("project canonical settled relation source through both lenses");
         assert_eq!(settled_rows.len(), 1);
         assert_eq!(settled_rows[0].table(), "members");
@@ -17683,6 +17726,425 @@ mod tests {
         assert_eq!(
             row.cell(&members, "origin"),
             Some(Value::String("v1".to_owned()))
+        );
+    }
+
+    /// A v2 flat join must correlate the lens-projected v1 post and author
+    /// cells, rather than only materializing each source independently.
+    ///
+    /// alice ──v1 users/posts──► node ──users→people lens──► v2 flat join
+    #[test]
+    fn flat_join_correlates_projected_v1_sources_across_table_rename() {
+        let v1 = JazzSchema::new([
+            TableSchema::new(
+                "users",
+                [
+                    ColumnSchema::new("id", ColumnType::Uuid),
+                    ColumnSchema::new("name", ColumnType::String),
+                ],
+            ),
+            TableSchema::new(
+                "posts",
+                [
+                    ColumnSchema::new("id", ColumnType::Uuid),
+                    ColumnSchema::new("author_id", ColumnType::Uuid),
+                    ColumnSchema::new("title", ColumnType::String),
+                ],
+            ),
+        ]);
+        let people = TableSchema::new(
+            "people",
+            [
+                ColumnSchema::new("id", ColumnType::Uuid),
+                ColumnSchema::new("name", ColumnType::String),
+            ],
+        );
+        let v2 = SchemaVersion::new(JazzSchema::new([
+            people,
+            TableSchema::new(
+                "posts",
+                [
+                    ColumnSchema::new("id", ColumnType::Uuid),
+                    ColumnSchema::new("author_id", ColumnType::Uuid),
+                    ColumnSchema::new("title", ColumnType::String),
+                ],
+            ),
+        ]));
+        let (_dir, mut node) = open_node_with_uuid(NodeUuid::from_bytes([0xf6; 16]), v1.clone());
+        let (_client_dir, mut client) =
+            open_node_with_uuid(NodeUuid::from_bytes([0xf9; 16]), v1.clone());
+        let author = row(0xf7);
+        let post = row(0xf8);
+        let author_tx = node
+            .commit_mergeable(
+                MergeableCommit::new("users", author, 1).cells(BTreeMap::from([
+                    ("id".to_owned(), Value::Uuid(author.0)),
+                    ("name".to_owned(), Value::String("alice".to_owned())),
+                ])),
+            )
+            .expect("commit v1 author");
+        node.apply_fate_update(
+            author_tx,
+            Fate::Accepted,
+            Some(GlobalSeq(1)),
+            Some(DurabilityTier::Global),
+        )
+        .expect("settle v1 author");
+        let post_tx = node
+            .commit_mergeable(
+                MergeableCommit::new("posts", post, 2).cells(BTreeMap::from([
+                    ("id".to_owned(), Value::Uuid(post.0)),
+                    ("author_id".to_owned(), Value::Uuid(author.0)),
+                    ("title".to_owned(), Value::String("hello".to_owned())),
+                ])),
+            )
+            .expect("commit v1 post");
+        node.apply_fate_update(
+            post_tx,
+            Fate::Accepted,
+            Some(GlobalSeq(2)),
+            Some(DurabilityTier::Global),
+        )
+        .expect("settle v1 post");
+        node.apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
+            author: AuthorId::SYSTEM,
+            catalogue_seq: 1,
+            publication: Box::new(SchemaLineagePublication::new(
+                v2.clone(),
+                MigrationLens::new(
+                    v1.version_id(),
+                    v2.id,
+                    vec![
+                        TableLens {
+                            source_table: "users".to_owned(),
+                            target_table: "people".to_owned(),
+                            ops: vec![LensOp::RenameTable {
+                                from: "users".to_owned(),
+                                to: "people".to_owned(),
+                            }],
+                        },
+                        TableLens {
+                            source_table: "posts".to_owned(),
+                            target_table: "posts".to_owned(),
+                            ops: Vec::new(),
+                        },
+                    ],
+                ),
+                Vec::<String>::new(),
+                Vec::<String>::new(),
+            )),
+        })
+        .expect("publish users to people lens");
+        client
+            .apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
+                author: AuthorId::SYSTEM,
+                catalogue_seq: 1,
+                publication: Box::new(SchemaLineagePublication::new(
+                    v2.clone(),
+                    MigrationLens::new(
+                        v1.version_id(),
+                        v2.id,
+                        vec![
+                            TableLens {
+                                source_table: "users".to_owned(),
+                                target_table: "people".to_owned(),
+                                ops: vec![LensOp::RenameTable {
+                                    from: "users".to_owned(),
+                                    to: "people".to_owned(),
+                                }],
+                            },
+                            TableLens {
+                                source_table: "posts".to_owned(),
+                                target_table: "posts".to_owned(),
+                                ops: Vec::new(),
+                            },
+                        ],
+                    ),
+                    Vec::<String>::new(),
+                    Vec::<String>::new(),
+                )),
+            })
+            .expect("publish users to people lens to client");
+        node.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+            author: AuthorId::SYSTEM,
+            pointer: CurrentWriteSchema {
+                revision: 1,
+                schema: v2.id,
+            },
+        })
+        .expect("activate v2 read schema");
+        client
+            .apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+                author: AuthorId::SYSTEM,
+                pointer: CurrentWriteSchema {
+                    revision: 1,
+                    schema: v2.id,
+                },
+            })
+            .expect("activate v2 client read schema");
+
+        for table in ["people", "posts"] {
+            let shape = Query::from(table)
+                .validate(&v2.schema)
+                .expect("validate source");
+            let binding = shape.bind(BTreeMap::new()).expect("bind source");
+            assert_eq!(
+                node.query_rows_at(&shape, &binding, GlobalSeq(2))
+                    .expect("read projected source")
+                    .len(),
+                1,
+                "{table} must independently project its v1 row"
+            );
+        }
+        let mut query = Query::from("posts");
+        query.flat_join = Some(FlatJoin {
+            root_alias: None,
+            sources: vec![FlatJoinSource {
+                table: "people".to_owned(),
+                alias: None,
+                on: FlatJoinOn {
+                    left: "posts.author_id".to_owned(),
+                    right: "people.id".to_owned(),
+                },
+            }],
+        });
+        let shape = query.validate(&v2.schema).expect("validate v2 flat join");
+        let binding = shape.bind(BTreeMap::new()).expect("bind v2 flat join");
+        let rows = node
+            .query_rows_at(&shape, &binding, GlobalSeq(2))
+            .expect("evaluate v2 flat join");
+        assert_eq!(rows.len(), 1, "projected v1 sources must still correlate");
+
+        let opts = RegisterShapeOptions {
+            tier: DurabilityTier::Global,
+            ..RegisterShapeOptions::default()
+        };
+        register_query_shape(&mut node, &shape, opts.clone());
+        subscribe_query_binding_with_opts(&mut node, &shape, &binding, opts.clone());
+        register_query_shape(&mut client, &shape, opts.clone());
+        subscribe_query_binding_with_opts(&mut client, &shape, &binding, opts.clone());
+        let binding_view =
+            BindingViewKey::new(shape.shape_id(), binding.binding_id(), opts.read_view_key());
+        let subscription = SubscriptionKey {
+            shape_id: shape.shape_id(),
+            binding_id: binding.binding_id(),
+            read_view: opts.read_view_key(),
+        };
+        let mut peer = PeerState::edge_client(AuthorId::SYSTEM);
+        let known_author = RowVersionRef::new("users", author, author_tx);
+        peer.declare_known_state(
+            subscription,
+            Some(KnownStateDeclaration::ExactVersionSet {
+                versions: vec![known_author.clone()],
+            }),
+        );
+        let update = peer
+            .rehydrate_query_with_opts(&mut node, &shape, &binding, opts.clone())
+            .expect("rehydrate maintained v2 flat join");
+        let missing = client
+            .missing_known_state_row_version_refs(&update)
+            .expect("detect omitted canonical contributor body");
+        assert_eq!(missing, vec![known_author]);
+        let repair = peer
+            .handle_row_versions_fetch(
+                &mut node,
+                SyncMessage::FetchRowVersions {
+                    requests: missing.clone(),
+                },
+            )
+            .expect("serve canonical contributor repair");
+        let [SyncMessage::RowVersionPayloads { version_bundles }] = repair.as_slice() else {
+            panic!("known contributor repair must carry row-version payloads");
+        };
+        client
+            .apply_row_version_payloads_for_requests(&missing, version_bundles.clone())
+            .expect("apply canonical contributor repair");
+        client
+            .apply_sync_message(update.clone())
+            .expect("apply maintained v2 flat join on client");
+        let SyncMessage::ViewUpdate {
+            reset_result_set,
+            result_member_adds,
+            ..
+        } = update
+        else {
+            panic!("flat join rehydrate must emit a view update");
+        };
+        assert!(reset_result_set);
+        assert_eq!(
+            result_member_adds.len(),
+            1,
+            "maintained v2 flat join must retain the projected source tuple"
+        );
+        let snapshot = client
+            .authoritative_reset_snapshot_for_binding_view(&shape, binding_view)
+            .expect("materialize applied flat-join authority snapshot")
+            .expect("applied flat-join authority snapshot");
+        assert_eq!(snapshot.root_count, 1);
+        // The authority payload can render this tuple, but the receiver's
+        // local IVM must instead rebuild it from canonical source versions.
+        assert_eq!(
+            client
+                .query_rows_for_client(&shape, &binding, DurabilityTier::Global, AuthorId::SYSTEM)
+                .expect("read applied v2 flat join on client")
+                .len(),
+            1,
+            "the client must retain the authority-maintained flat join tuple"
+        );
+
+        let updated_author_tx = node
+            .commit_mergeable(
+                MergeableCommit::new("people", author, 3).cells(BTreeMap::from([
+                    ("id".to_owned(), Value::Uuid(author.0)),
+                    ("name".to_owned(), Value::String("alice".to_owned())),
+                ])),
+            )
+            .expect("update renamed author");
+        node.apply_fate_update(
+            updated_author_tx,
+            Fate::Accepted,
+            Some(GlobalSeq(3)),
+            Some(DurabilityTier::Global),
+        )
+        .expect("settle renamed author update");
+        let replacement = peer
+            .query_update_for_subscription_with_opts(
+                &mut node,
+                subscription,
+                &shape,
+                &binding,
+                opts.clone(),
+            )
+            .expect("publish flat tuple replacement");
+        let SyncMessage::ViewUpdate {
+            reset_result_set,
+            version_carriers,
+            version_bundles,
+            result_member_adds,
+            result_member_removes,
+            program_fact_adds,
+            program_fact_removes,
+            ..
+        } = &replacement
+        else {
+            panic!("flat tuple replacement must emit a view update");
+        };
+        assert!(
+            !reset_result_set,
+            "unchanged result membership must take the non-reset rehydrate path"
+        );
+        assert!(
+            result_member_adds.is_empty() && result_member_removes.is_empty(),
+            "a no-op source version must retain the same result member"
+        );
+        let outgoing_contributor_adds = program_fact_adds
+            .iter()
+            .filter(|fact| {
+                matches!(
+                    fact,
+                    ProgramFactEntry::ContributingMembers(contribution)
+                        if contribution
+                            .role
+                            .as_deref()
+                            .is_some_and(|role| role.starts_with("flat_tuple_source:"))
+                )
+            })
+            .count();
+        let outgoing_contributor_removes = program_fact_removes
+            .iter()
+            .filter(|fact| {
+                matches!(
+                    fact,
+                    ProgramFactEntry::ContributingMembers(contribution)
+                        if contribution
+                            .role
+                            .as_deref()
+                            .is_some_and(|role| role.starts_with("flat_tuple_source:"))
+                )
+            })
+            .count();
+        assert_eq!(outgoing_contributor_adds, 1);
+        assert_eq!(outgoing_contributor_removes, 1);
+        let mut replacement_bundles = version_bundles.clone();
+        replacement_bundles.extend(
+            crate::protocol::expand_version_carriers(version_carriers)
+                .expect("expand replacement contributor bundles"),
+        );
+        assert_eq!(
+            replacement_bundles
+                .iter()
+                .filter(|bundle| bundle.tx.tx_id == updated_author_tx)
+                .flat_map(|bundle| &bundle.versions)
+                .count(),
+            1,
+            "the changed canonical contributor must ship exactly one body"
+        );
+        assert!(program_fact_removes.iter().any(|fact| {
+            matches!(
+                fact,
+                ProgramFactEntry::ContributingMembers(contribution)
+                    if contribution
+                        .role
+                        .as_deref()
+                        .is_some_and(|role| role.starts_with("flat_tuple_source:"))
+                        && contribution
+                            .contributor
+                            .as_real_row()
+                            .and_then(RealRowMemberEntry::row_projection)
+                            .is_some_and(|(table, row, tx)| table.to_string() == "users" && row == author && tx == author_tx)
+            )
+        }));
+        assert!(program_fact_adds.iter().any(|fact| {
+            matches!(
+                fact,
+                ProgramFactEntry::ContributingMembers(contribution)
+                    if contribution
+                        .role
+                        .as_deref()
+                        .is_some_and(|role| role.starts_with("flat_tuple_source:"))
+                        && contribution
+                            .contributor
+                            .as_real_row()
+                            .and_then(RealRowMemberEntry::row_projection)
+                            .is_some_and(|(table, row, tx)| table.to_string() == "people" && row == author && tx == updated_author_tx)
+            )
+        }));
+        client
+            .apply_sync_message(replacement)
+            .expect("apply flat tuple replacement");
+        let active_contributors = client
+            .query
+            .settled_program_facts
+            .get(&binding_view)
+            .expect("flat tuple facts remain scoped to the binding view")
+            .iter()
+            .filter(|fact| {
+                matches!(
+                    fact,
+                    ProgramFactEntry::ContributingMembers(contribution)
+                        if contribution
+                            .role
+                            .as_deref()
+                            .is_some_and(|role| role.starts_with("flat_tuple_source:"))
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(active_contributors.len(), 1);
+        assert!(matches!(
+            active_contributors[0],
+            ProgramFactEntry::ContributingMembers(contribution)
+                if contribution
+                    .contributor
+                    .as_real_row()
+                    .and_then(RealRowMemberEntry::row_projection)
+                    .is_some_and(|(table, row, tx)| table.to_string() == "people" && row == author && tx == updated_author_tx)
+        ));
+        assert_eq!(
+            client
+                .query_rows_for_client(&shape, &binding, DurabilityTier::Global, AuthorId::SYSTEM)
+                .expect("read retained flat tuple after no-op source version")
+                .len(),
+            1
         );
     }
 

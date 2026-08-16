@@ -24,6 +24,7 @@ pub(super) fn current_query_read_set(
                     SourceExpr::SettledBindingView {
                         projection: projection.clone(),
                         binding_view,
+                        rows: SettledBindingRows::ResultMembers,
                     }
                 } else {
                     SourceExpr::VisibleCurrent {
@@ -37,11 +38,19 @@ pub(super) fn current_query_read_set(
         })
         .collect::<BTreeMap<_, _>>();
     for source in &shape.auxiliary_sources {
-        // Auxiliary closure sources are not result members of the settled binding
-        // view. Keep the result/root source pinned to the settled view, but read
-        // implicit reference targets from current storage so serving can resolve
-        // their rows instead of treating missing result-set entries as coverage
-        // gaps.
+        if let Some(binding_view) = settled_binding_view
+            && let Some(source_index) = flat_tuple_source_index(source)
+        {
+            sources.insert(
+                source.clone(),
+                SourceExpr::SettledBindingView {
+                    projection: projection.clone(),
+                    binding_view,
+                    rows: SettledBindingRows::FlatTupleContributor { source_index },
+                },
+            );
+            continue;
+        }
         sources.insert(
             source.clone(),
             SourceExpr::VisibleCurrent {
@@ -56,6 +65,18 @@ pub(super) fn current_query_read_set(
         policy_schema,
         sources,
     })
+}
+
+fn flat_tuple_source_index(source: &SourceId) -> Option<usize> {
+    let [SourceRole::Alias(alias)] = source.path.components.as_slice() else {
+        return None;
+    };
+    alias
+        .strip_prefix("flat_join:")?
+        .split_once(':')?
+        .0
+        .parse()
+        .ok()
 }
 
 pub(super) fn historical_query_read_set(

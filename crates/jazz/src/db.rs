@@ -6445,7 +6445,7 @@ where
             retained.push(Rc::downgrade(&state));
             continue;
         }
-        let (snapshot, snapshot_source, settled, snapshot_tier, force_reset_event) = {
+        let (mut snapshot, mut snapshot_source, settled, snapshot_tier, force_reset_event) = {
             let mut state_ref = state.borrow_mut();
             let local_snapshot_is_empty =
                 state_ref.snapshot.root_count == 0 && state_ref.snapshot.edges.is_empty();
@@ -7062,7 +7062,44 @@ where
                 }
             }
         };
-        let previous = state.borrow().snapshot.clone();
+        let (previous, previous_source, has_maintained_subscription) = {
+            let state = state.borrow();
+            (
+                state.snapshot.clone(),
+                state.snapshot_source,
+                matches!(
+                    &state.kind,
+                    SubscriptionKind::Prepared {
+                        maintained_subscription: Some(_),
+                        ..
+                    }
+                ),
+            )
+        };
+        // A link snapshot is a relation facade without the terminal's flat
+        // tuple occurrence sidecar. Once a maintained terminal owns this
+        // stream, replace it from the terminal rather than installing an
+        // unaddressable facade snapshot.
+        if !force_reset_event
+            && has_maintained_subscription
+            && previous_source == SubscriptionSnapshotSource::LocalMaintained
+            && snapshot_source == SubscriptionSnapshotSource::LinkSnapshot
+        {
+            let materialized = {
+                let state = state.borrow();
+                let SubscriptionKind::Prepared {
+                    maintained_subscription: Some(maintained),
+                    ..
+                } = &state.kind
+                else {
+                    unreachable!("checked maintained subscription above");
+                };
+                node.borrow_mut()
+                    .materialize_local_maintained_relation_snapshot_with_occurrences(maintained)?
+            };
+            snapshot = materialized.snapshot;
+            snapshot_source = SubscriptionSnapshotSource::LocalMaintained;
+        }
         if force_reset_event || snapshot != previous || settled != previous_settled {
             let mut state = state.borrow_mut();
             let event = if force_reset_event {
@@ -7084,7 +7121,11 @@ where
                 )
             };
             state.snapshot = relation_snapshot_with_delta_slack(&snapshot);
-            state.snapshot_index = RelationSnapshotIndex::from_snapshot(&state.snapshot);
+            state.snapshot_index = maintained_snapshot_index_or_row_index(
+                &mut node.borrow_mut(),
+                &state.kind,
+                &state.snapshot,
+            )?;
             state.snapshot_source = snapshot_source;
             state.settled = settled;
             if state.sender.unbounded_send(event).is_ok() {
@@ -13154,6 +13195,36 @@ fn relation_snapshot_index_with_root_occurrences(
         ));
     }
     Ok(index)
+}
+
+/// Flat tuple identity is carried by the maintained terminal sidecar, not the
+/// public row: an external reset may omit hidden joined-row fields. Preserve
+/// that sidecar whenever its materialized snapshot is the replacement being
+/// installed; ordinary link-only snapshots retain row-derived indexing.
+fn maintained_snapshot_index_or_row_index<S>(
+    node: &mut NodeState<S>,
+    kind: &SubscriptionKind,
+    snapshot: &RelationSnapshot,
+) -> Result<RelationSnapshotIndex, Error>
+where
+    S: OrderedKvStorage,
+{
+    let SubscriptionKind::Prepared {
+        maintained_subscription: Some(maintained),
+        ..
+    } = kind
+    else {
+        return Ok(RelationSnapshotIndex::from_snapshot(snapshot));
+    };
+    let materialized =
+        node.materialize_local_maintained_relation_snapshot_with_occurrences(maintained)?;
+    if materialized.snapshot.root_count == snapshot.root_count {
+        return relation_snapshot_index_with_root_occurrences(
+            snapshot,
+            &materialized.root_occurrence_ids,
+        );
+    }
+    Ok(RelationSnapshotIndex::from_snapshot(snapshot))
 }
 
 fn relation_snapshot_with_delta_slack(snapshot: &RelationSnapshot) -> RelationSnapshot {

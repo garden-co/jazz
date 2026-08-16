@@ -1521,6 +1521,7 @@ fn supported_current_storage_projection(
         | SourceExpr::SettledBindingView {
             projection,
             binding_view: _,
+            rows: _,
         } => Some(projection),
         SourceExpr::WithOverlays { input, overlays } => {
             if overlays
