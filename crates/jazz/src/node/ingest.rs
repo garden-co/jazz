@@ -463,7 +463,12 @@ where
             }
 
             self.install_staged_schema_lineage_in_memory(&staged);
-            if self.synchronize_physical_version_tables().is_err() {
+            // A widened lineage adds new variant cases to existing physical
+            // current tables. Reopening the database installs those cases in
+            // Groove's projection registry; incremental table evolution only
+            // updates the stored table definitions, leaving a stale process
+            // unable to project a just-admitted v2 commit.
+            if self.rebuild_database_slot().is_err() {
                 self.remove_staged_schema_lineage_from_memory(&staged);
                 self.catalogue_activation_failed = true;
                 return Err(Error::CatalogueActivationFailed);

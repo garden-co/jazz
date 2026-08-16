@@ -75,10 +75,11 @@ pub struct ServerState {
     /// Sendable handle to the local-owner server shell for the websocket route.
     pub(crate) core_server_shell: StdRwLock<Option<core_server_shell::ServerShellHandle>>,
     pub(crate) core_server_shell_storage_config: Option<StorageConfig>,
-    /// A dynamically bootstrapped Edge has a valid local catalogue before it
-    /// has an authenticated normal upstream session. Do not admit downstream
-    /// writes in that window: they cannot yet be bound to a fate route.
-    dynamic_edge_upstream_ready: AtomicBool,
+    /// Whether the current Edge shell generation has a fully installed,
+    /// validated catalogue and local projection registry. A durable Ready
+    /// generation remains usable offline; blank and refreshing generations do
+    /// not admit new downstream sessions.
+    dynamic_edge_catalogue_ready: AtomicBool,
     pub shutdown: ShutdownController,
 }
 
@@ -126,12 +127,12 @@ fn with_client_shell_snapshot_before_lock_hook<T>(
 fn client_shell_snapshot<T: Clone>(
     topology: ServerTopology,
     shell: &StdRwLock<Option<T>>,
-    dynamic_edge_upstream_ready: &AtomicBool,
+    dynamic_edge_catalogue_ready: &AtomicBool,
 ) -> Option<T> {
     #[cfg(test)]
     run_client_shell_snapshot_before_lock_hook();
     let shell = shell.read().unwrap();
-    if topology == ServerTopology::Edge && !dynamic_edge_upstream_ready.load(Ordering::Acquire) {
+    if topology == ServerTopology::Edge && !dynamic_edge_catalogue_ready.load(Ordering::Acquire) {
         return None;
     }
     shell.clone()
@@ -143,25 +144,49 @@ impl ServerState {
     }
 
     /// Shell eligible for an ordinary downstream websocket session. Bootstrap
-    /// code may inspect the raw shell, but a dynamically bootstrapped Edge
-    /// remains RetryLater until its regular authenticated upstream is attached.
+    /// code may inspect the raw shell, but a blank or refreshing dynamic Edge
+    /// remains RetryLater until a complete catalogue generation is installed.
     pub(crate) fn core_server_shell_for_client(
         &self,
     ) -> Option<core_server_shell::ServerShellHandle> {
         client_shell_snapshot(
             self.topology,
             &self.core_server_shell,
-            &self.dynamic_edge_upstream_ready,
+            &self.dynamic_edge_catalogue_ready,
         )
     }
 
-    pub(crate) fn mark_dynamic_edge_upstream_ready(&self) {
+    pub(crate) fn mark_dynamic_edge_catalogue_ready(&self) {
         // Serialize this Ready transition with dynamic shell publication and
-        // client snapshots. The connector calls this only after it has
-        // attached the normal upstream to this shell generation.
+        // client snapshots. Callers reach this only after catalogue adoption
+        // and any required projection-registry rebuild have returned.
         let _shell = self.core_server_shell.read().unwrap();
-        self.dynamic_edge_upstream_ready
+        self.dynamic_edge_catalogue_ready
             .store(true, Ordering::Release);
+    }
+
+    fn mark_dynamic_edge_catalogue_refreshing(&self) {
+        // Serialize the transition with downstream shell snapshots. A failed
+        // registry install leaves this generation gated until a later complete
+        // authenticated refresh succeeds.
+        let _shell = self.core_server_shell.write().unwrap();
+        self.dynamic_edge_catalogue_ready
+            .store(false, Ordering::Release);
+    }
+
+    pub(crate) async fn refresh_dynamic_edge_catalogue(
+        &self,
+        shell: &core_server_shell::ServerShellHandle,
+        snapshot: crate::protocol::CatalogueSnapshot,
+    ) -> Result<(), String> {
+        self.mark_dynamic_edge_catalogue_refreshing();
+        shell.apply_trusted_catalogue_snapshot(snapshot).await?;
+        // Applying the snapshot returns only after a semantic transition has
+        // rebuilt its local projections. The newly validated durable
+        // generation may therefore serve offline even if normal upstream
+        // attachment is still retrying.
+        self.mark_dynamic_edge_catalogue_ready();
+        Ok(())
     }
 
     pub(crate) fn start_core_server_shell(
@@ -212,7 +237,7 @@ impl ServerState {
                 edge_cache_budget,
                 snapshot,
             )?;
-        self.dynamic_edge_upstream_ready
+        self.dynamic_edge_catalogue_ready
             .store(false, Ordering::Release);
         *core_server_shell = Some(started.clone());
         Ok(started)
@@ -449,7 +474,7 @@ mod tests {
             jwt_verifier: None,
             core_server_shell: StdRwLock::new(None),
             core_server_shell_storage_config: None,
-            dynamic_edge_upstream_ready: AtomicBool::new(true),
+            dynamic_edge_catalogue_ready: AtomicBool::new(true),
             shutdown: ShutdownController::new(timeout),
         })
     }

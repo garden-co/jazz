@@ -42,7 +42,11 @@ where
             || self.catalogue.physical_mappings != plan.catalogue.physical_mappings
             || self.catalogue.current_write_schema != plan.catalogue.current_write_schema;
         let previous_catalogue = std::mem::replace(&mut self.catalogue, plan.catalogue.clone());
-        if self.synchronize_physical_version_tables().is_err() {
+        // Snapshot replay can install widened mappings after a persistent edge
+        // restart. Rebuild the live projection registry as part of that
+        // semantic transition, not after client traffic begins. An identical
+        // trusted prefix is idempotent and must retain maintained/query state.
+        if runtime_semantics_changed && self.rebuild_database_slot().is_err() {
             self.catalogue = previous_catalogue;
             self.catalogue_activation_failed = true;
             return Err(Error::CatalogueActivationFailed);

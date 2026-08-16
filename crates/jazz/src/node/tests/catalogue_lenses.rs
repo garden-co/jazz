@@ -297,24 +297,54 @@ fn branch_commit_rejects_unadmitted_authored_schema_without_persistence() {
 }
 
 #[test]
-fn trusted_catalogue_snapshot_reopen_retains_the_idempotent_lineage_prefix() {
+fn trusted_catalogue_snapshot_rebuilds_transitions_but_preserves_identical_prefixes() {
     // A trusted snapshot is a complete authoritative prefix, not a delta. Once
     // its activation commits, reopening must retain enough canonical lineage
     // identity to recognize that same prefix on the next upstream connection.
     let base = schema();
     let snapshot = catalogue_snapshot_fixture();
     let (dir, mut receiver) = open_node_with_schema(node(0x3f), base.clone());
+    let runtime_before_transition = receiver.groove_runtime_token();
 
     receiver
         .apply_trusted_catalogue_snapshot(snapshot.clone())
         .unwrap();
     assert_eq!(receiver.active_catalogue_seq(), 1);
+    assert_ne!(
+        receiver.groove_runtime_token(),
+        runtime_before_transition,
+        "a v1-to-v2 catalogue transition reconstructs local IVM projections"
+    );
+
+    let evolved = catalogue_evolved_schema();
+    let shape = Query::from("todos").validate(&evolved).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let cached_view = crate::protocol::BindingViewKey::new(
+        shape.shape_id(),
+        binding.binding_id(),
+        Default::default(),
+    );
+    receiver
+        .query
+        .settled_result_sets
+        .insert(cached_view, BTreeSet::new());
+    let runtime_before_idempotent_replay = receiver.groove_runtime_token();
+    receiver
+        .apply_trusted_catalogue_snapshot(snapshot.clone())
+        .unwrap();
+    assert_eq!(receiver.groove_runtime_token(), runtime_before_idempotent_replay);
+    assert!(
+        receiver.query.settled_result_sets.contains_key(&cached_view),
+        "an identical trusted prefix must not clear maintained/query state"
+    );
     drop(receiver);
 
     let mut reopened = reopen_node_at(&dir, node(0x3f), base);
     assert_eq!(reopened.active_catalogue_seq(), 1);
+    let runtime_before_reopen_replay = reopened.groove_runtime_token();
     reopened.apply_trusted_catalogue_snapshot(snapshot).unwrap();
     assert_eq!(reopened.active_catalogue_seq(), 1);
+    assert_eq!(reopened.groove_runtime_token(), runtime_before_reopen_replay);
 }
 
 fn write_catalogue_record(
