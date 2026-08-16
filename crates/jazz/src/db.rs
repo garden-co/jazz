@@ -8587,6 +8587,16 @@ where
                 authority_scope_hydration_count,
                 serve_dirty,
             } => {
+                // A trusted backend subscriber is an edge's normal upstream
+                // link.  Unlike an application subscriber, it is entitled to
+                // the authority catalogue and has no application subscription
+                // that would otherwise cause a ViewUpdate to carry the
+                // snapshot.  Announce it eagerly (and again only when its
+                // fingerprint changes) so catalogue publication can propagate
+                // Core -> peer edge before any client work starts.
+                if ingest_context.trust == CommitUnitTrust::TrustedBackend {
+                    send_catalogue_snapshot_if_needed(&self.node, peer, self.transport.as_mut())?;
+                }
                 let repairs = next_branch_metadata_repairs(
                     pending_branch_metadata_repairs,
                     branch_metadata_repair_cursor,
@@ -10704,17 +10714,7 @@ fn send_with_sync_context<S>(
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
-    let snapshot = node.borrow().catalogue_snapshot()?;
-    let catalogue_fingerprint = *blake3::hash(
-        &serde_json::to_vec(&snapshot).expect("catalogue snapshot serialization is infallible"),
-    )
-    .as_bytes();
-    if peer.needs_catalogue_snapshot(catalogue_fingerprint) {
-        transport
-            .send(SyncMessage::CatalogueSnapshot(Box::new(snapshot)))
-            .map_err(transport_error)?;
-        peer.mark_catalogue_snapshot_announced(catalogue_fingerprint);
-    }
+    send_catalogue_snapshot_if_needed(node, peer, transport)?;
     let mut message = message;
     if let SyncMessage::ViewUpdate {
         subscription,
@@ -10731,6 +10731,31 @@ where
         summarize_sync_message(&message)
     ));
     send_sync_message_chunked(transport, message)
+}
+
+/// Send an authority catalogue snapshot exactly once per peer fingerprint.
+/// Trusted edge links have no application subscription during bootstrap, so
+/// catalogue propagation must not depend on a later ViewUpdate or fate.
+fn send_catalogue_snapshot_if_needed<S>(
+    node: &Rc<RefCell<NodeState<S>>>,
+    peer: &mut PeerState,
+    transport: &mut dyn Transport,
+) -> Result<(), Error>
+where
+    S: OrderedKvStorage + ReopenableStorage + 'static,
+{
+    let snapshot = node.borrow().catalogue_snapshot()?;
+    let catalogue_fingerprint = *blake3::hash(
+        &serde_json::to_vec(&snapshot).expect("catalogue snapshot serialization is infallible"),
+    )
+    .as_bytes();
+    if peer.needs_catalogue_snapshot(catalogue_fingerprint) {
+        transport
+            .send(SyncMessage::CatalogueSnapshot(Box::new(snapshot)))
+            .map_err(transport_error)?;
+        peer.mark_catalogue_snapshot_announced(catalogue_fingerprint);
+    }
+    Ok(())
 }
 
 fn send_sync_message_chunked(
