@@ -1017,14 +1017,6 @@ where
         self.branch_write_policy_allows(branch_id, identity)
     }
 
-    pub(super) fn branch_current_rows(
-        &mut self,
-        table: &str,
-        branch: &BranchRecord,
-    ) -> Result<Vec<CurrentRow>, Error> {
-        self.branch_current_rows_for_schema(table, branch, self.catalogue.current_schema_version_id)
-    }
-
     pub(super) fn branch_current_rows_for_schema(
         &mut self,
         table: &str,
@@ -1061,6 +1053,15 @@ where
         let mut rows = by_row.into_values().collect::<Vec<_>>();
         sort_current_rows(&mut rows);
         Ok(rows)
+    }
+
+    #[cfg(test)]
+    pub(super) fn branch_current_rows(
+        &mut self,
+        table: &str,
+        branch: &BranchRecord,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        self.branch_current_rows_for_schema(table, branch, self.catalogue.current_schema_version_id)
     }
 
     pub(super) fn branch_metadata_current_rows(&self) -> Result<Vec<CurrentRow>, Error> {
