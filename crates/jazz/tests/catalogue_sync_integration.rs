@@ -2437,7 +2437,6 @@ async fn table_rename_subscription_reacts_to_old_branch_updates_impl() {
 /// schema v2 where that table is named `people`; when Bob writes to `people`,
 /// Alice's old subscription receives the row through the table rename lens.
 #[tokio::test]
-#[ignore = "known red; tracked in TEST_BURNDOWN.md"]
 async fn table_rename_subscription_reacts_to_new_branch_updates_after_schema_evolution() {
     tokio::task::LocalSet::new()
         .run_until(

@@ -381,7 +381,7 @@ where
         Err(Error::InvalidCatalogueUpdate("lens chain is unknown"))
     }
 
-    fn policy_schema_for_table_name(&self, table: &str) -> SchemaVersionId {
+    pub(super) fn policy_schema_for_table_name(&self, table: &str) -> SchemaVersionId {
         let write_schema = self.catalogue.current_write_schema.schema;
         if self
             .table_in_schema(table, write_schema)
