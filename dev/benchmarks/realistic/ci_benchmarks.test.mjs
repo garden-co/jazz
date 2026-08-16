@@ -4,8 +4,10 @@ import { readFileSync } from "node:fs";
 
 import {
   ACTIVE_SKIP_MIN_OBSERVATIONS,
+  BROWSER_BENCHMARKS,
   JAZZ_SIM_BENCHMARKS,
   NATIVE_BENCHMARKS,
+  readSkipSet,
   skipIds,
 } from "./ci_benchmarks.mjs";
 import {
@@ -16,6 +18,216 @@ import {
   NATIVE_CRITERION_FEATURES_BY_ENGINE,
   NATIVE_EXAMPLE_FEATURES_BY_ENGINE,
 } from "./run_ci_benchmarks.mjs";
+
+function cargoTargetNames(manifest, kind) {
+  const text = readFileSync(new URL(manifest, import.meta.url), "utf8");
+  const section = new RegExp(`\\[\\[${kind}\\]\\]([\\s\\S]*?)(?=\\n\\[\\[|$)`, "g");
+  return new Set(
+    [...text.matchAll(section)].flatMap((match) => {
+      const name = match[1].match(/^name\s*=\s*"([^"]+)"/m)?.[1];
+      return name ? [name] : [];
+    }),
+  );
+}
+
+function withoutLineBlockComments(source) {
+  return source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+}
+
+function browserHarnessScenarioIds(
+  text = readFileSync(
+    new URL("../../../packages/jazz-tools/tests/browser/realistic-bench.test.ts", import.meta.url),
+    "utf8",
+  ),
+) {
+  const runners = text.match(/const runners = \[([\s\S]*?)\n\s*\];/)?.[1];
+  assert.ok(runners, "expected the realistic browser harness runner list");
+  const executableRunners = withoutLineBlockComments(runners);
+  return new Set([...executableRunners.matchAll(/id: "([A-Z][0-9]+)"/g)].map((match) => match[1]));
+}
+
+function realisticCriterionGroups(
+  text = readFileSync(
+    new URL("../../../crates/jazz/benches/realistic_phase1.rs", import.meta.url),
+    "utf8",
+  ),
+) {
+  const executableSource = withoutLineBlockComments(text);
+  return new Set(
+    [...executableSource.matchAll(/benchmark_group\("([^"]+)"\)/g)].map((match) => match[1]),
+  );
+}
+
+function nativeExampleScenario(path) {
+  return JSON.parse(readFileSync(new URL(`../../../${path}`, import.meta.url), "utf8"));
+}
+
+function nativeExampleDispatchModes(
+  text = readFileSync(
+    new URL("../../../crates/jazz/examples/realistic_bench.rs", import.meta.url),
+    "utf8",
+  ),
+) {
+  const executableSource = withoutLineBlockComments(text);
+  return new Set(
+    [...executableSource.matchAll(/ScenarioMode::(\w+)\s*=>/g)].map((match) => match[1]),
+  );
+}
+
+function assertScheduledNativeCriterionGroups(benchmarks, groups) {
+  for (const benchmark of benchmarks.filter((entry) => entry.kind === "criterion")) {
+    assert.ok(
+      groups.has(benchmark.criterion_filter),
+      `missing realistic Criterion group for ${benchmark.id}: ${benchmark.criterion_filter}`,
+    );
+  }
+}
+
+function assertScheduledNativeExampleInputs(benchmarks, dispatchModes) {
+  for (const benchmark of benchmarks.filter((entry) => entry.kind === "native-example")) {
+    const scenario = nativeExampleScenario(benchmark.scenario_path);
+    const profile = nativeExampleScenario(benchmark.profile_path);
+    assert.ok(
+      dispatchModes.has(
+        scenario.mode
+          .split("_")
+          .map((part) => part[0].toUpperCase() + part.slice(1))
+          .join(""),
+      ),
+      `native example does not dispatch ${scenario.id} (${scenario.mode})`,
+    );
+    assert.equal(typeof scenario.id, "string", `missing scenario id for ${benchmark.id}`);
+    assert.equal(typeof profile.id, "string", `missing profile id for ${benchmark.id}`);
+  }
+}
+
+function assertScheduledBrowserHarnessScenarios(benchmarks, scenarios) {
+  for (const benchmark of benchmarks) {
+    assert.ok(
+      scenarios.has(benchmark.scenario_id),
+      `missing browser harness scenario for ${benchmark.id}: ${benchmark.scenario_id}`,
+    );
+  }
+}
+
+test("scheduled benchmark manifest targets exist in Cargo and the browser harness", () => {
+  const jazzBenches = cargoTargetNames("../../../crates/jazz/Cargo.toml", "bench");
+  const jazzExamples = cargoTargetNames("../../../crates/jazz/Cargo.toml", "example");
+  const jazzSimBenches = cargoTargetNames("../../../crates/jazz-sim/Cargo.toml", "bench");
+  const browserScenarios = browserHarnessScenarioIds();
+
+  assert.ok(jazzBenches.has("realistic_phase1"));
+  assert.ok(jazzExamples.has("realistic_bench"));
+  for (const benchmark of NATIVE_BENCHMARKS) {
+    assert.ok(
+      benchmark.kind === "criterion"
+        ? jazzBenches.has("realistic_phase1")
+        : jazzExamples.has("realistic_bench"),
+      `native manifest target is missing for ${benchmark.id}`,
+    );
+  }
+  for (const benchmark of JAZZ_SIM_BENCHMARKS) {
+    assert.ok(jazzSimBenches.has(benchmark.bench), `missing jazz-sim bench for ${benchmark.id}`);
+  }
+  assertScheduledBrowserHarnessScenarios(BROWSER_BENCHMARKS, browserScenarios);
+});
+
+test("scheduled native filters and example inputs resolve to maintained source", () => {
+  assertScheduledNativeCriterionGroups(NATIVE_BENCHMARKS, realisticCriterionGroups());
+  assertScheduledNativeExampleInputs(NATIVE_BENCHMARKS, nativeExampleDispatchModes());
+
+  const scheduledScenarioIds = NATIVE_BENCHMARKS.filter((entry) => entry.kind === "native-example")
+    .map((entry) => nativeExampleScenario(entry.scenario_path).id)
+    .sort();
+  assert.deepEqual(scheduledScenarioIds, ["W1", "W1", "W4", "W4"]);
+
+  const nativeScenarioIds = [
+    nativeExampleScenario("dev/benchmarks/realistic/scenarios/w1_interactive.json"),
+    nativeExampleScenario("dev/benchmarks/realistic/scenarios/w3_offline_reconnect.json"),
+    nativeExampleScenario("dev/benchmarks/realistic/scenarios/w4_cold_start.json"),
+  ]
+    .map((scenario) => scenario.id)
+    .sort();
+  assert.deepEqual(nativeScenarioIds, ["W1", "W3", "W4"]);
+  assert.ok(nativeExampleDispatchModes().has("OfflineReconnect"));
+});
+
+test("native Criterion filter contract rejects a nonexistent group", () => {
+  assert.throws(
+    () =>
+      assertScheduledNativeCriterionGroups(
+        [
+          {
+            id: "native-criterion:rocksdb:planted",
+            kind: "criterion",
+            criterion_filter: "realistic_phase1/nonexistent_group",
+          },
+        ],
+        realisticCriterionGroups(),
+      ),
+    /missing realistic Criterion group.*nonexistent_group/,
+  );
+});
+
+test("Rust Criterion extractor ignores commented-out groups", () => {
+  const commentedCriterion = `
+    // c.benchmark_group("realistic_phase1/comment_only_group");
+    /* c.benchmark_group("realistic_phase1/block_comment_group"); */`;
+  assert.deepEqual([...realisticCriterionGroups(commentedCriterion)], []);
+  assert.throws(
+    () =>
+      assertScheduledNativeCriterionGroups(
+        [
+          {
+            id: "native-criterion:rocksdb:comment-only",
+            kind: "criterion",
+            criterion_filter: "realistic_phase1/comment_only_group",
+          },
+        ],
+        realisticCriterionGroups(commentedCriterion),
+      ),
+    /missing realistic Criterion group.*comment_only_group/,
+  );
+});
+
+test("Rust native example extractor ignores commented-out dispatch modes", () => {
+  const commentedMode = `
+    // ScenarioMode::Unsupported => unreachable!(),
+    /* ScenarioMode::BlockCommentOnly => unreachable!(), */`;
+  assert.deepEqual([...nativeExampleDispatchModes(commentedMode)], []);
+  assert.ok(!nativeExampleDispatchModes(commentedMode).has("Unsupported"));
+});
+
+test("browser harness contract ignores retired scenario ids in comments", () => {
+  const plantedHarness = `
+    const runners = [
+      { id: "B1", run: async () => {} },
+      // retired { id: "B8", run: async () => {} }
+    ];`;
+  const executableIds = browserHarnessScenarioIds(plantedHarness);
+  assert.deepEqual([...executableIds], ["B1"]);
+  assert.throws(
+    () =>
+      assertScheduledBrowserHarnessScenarios(
+        [{ id: "browser:b8", scenario_id: "B8" }],
+        executableIds,
+      ),
+    /missing browser harness scenario.*B8/,
+  );
+});
+
+test("every configured benchmark skip still names a scheduled benchmark", () => {
+  const scheduledIds = new Set(
+    [...NATIVE_BENCHMARKS, ...BROWSER_BENCHMARKS, ...JAZZ_SIM_BENCHMARKS].map(
+      (benchmark) => benchmark.id,
+    ),
+  );
+  const skipSet = readSkipSet(new URL("./ci_skip_set.json", import.meta.url));
+
+  for (const entry of skipSet.entries) {
+    assert.ok(scheduledIds.has(entry.id), `stale benchmark skip ${entry.id}`);
+  }
+});
 
 test("native benchmark catalog defines RocksDB and SQLite variants for each native scenario", () => {
   const ids = new Set(NATIVE_BENCHMARKS.map((entry) => entry.id));

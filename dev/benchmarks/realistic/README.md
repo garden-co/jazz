@@ -18,6 +18,16 @@ Shared benchmark definitions for the realistic, scenario-driven benchmark suite.
 - `scenarios/b6_server_hotspot_history.json`: deep-history hotspot updates + storage delta
 - `scenarios/r8_many_branches.json`: many linked branches on a single object
 
+### Scheduled coverage
+
+The self-hosted benchmark workflow schedules native `W1`/`W4`, browser
+`W1`/`W4`/`B1`–`B6`, and the catalogued core/simulation receipts. `W3` and
+browser `B7` are source-only scenarios: they remain runnable locally for
+investigation, but are not scheduled by the CI manifest. `W3` needs an
+explicit server endpoint; `B7` is intentionally excluded from the bounded
+browser suite. Add either to the manifest only with a maintained CI budget and
+artifact/history plan.
+
 ## Native Runner (RocksDB)
 
 Run from workspace root:
