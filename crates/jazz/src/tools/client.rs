@@ -1025,7 +1025,8 @@ impl ClientDb {
 
     async fn wait_for_batch(&self, batch_id: BatchId, tier: DurabilityTier) -> Result<()> {
         self.ensure_tick_driver_running()?;
-        ClientDbInner::handle_wait_for_batch(&self.inner, batch_id, tier).await
+        ClientDbInner::handle_wait_for_batch(&self.inner, batch_id, tier, Duration::from_secs(25))
+            .await
     }
 
     fn disconnect_upstream(&self) -> bool {
@@ -1473,9 +1474,10 @@ impl ClientDbInner {
         inner: &Rc<RefCell<Self>>,
         batch_id: BatchId,
         tier: DurabilityTier,
+        timeout: Duration,
     ) -> Result<()> {
         let desired = core_tier(tier);
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(25);
+        let deadline = tokio::time::Instant::now() + timeout;
         loop {
             inner.borrow().ensure_tick_driver_running()?;
             let tx_id = {
@@ -3166,6 +3168,18 @@ impl JazzClient {
 
     pub(crate) fn disconnect_upstream_for_test(&self) -> bool {
         self.db.disconnect_upstream()
+    }
+
+    /// Wait for a durability tier using an exact timeout rather than the
+    /// load-tolerant test multiplier.
+    pub async fn wait_for_batch_with_timeout_for_test(
+        &self,
+        batch_id: BatchId,
+        tier: DurabilityTier,
+        timeout: Duration,
+    ) -> Result<()> {
+        self.db.ensure_tick_driver_running()?;
+        ClientDbInner::handle_wait_for_batch(&self.db.inner, batch_id, tier, timeout).await
     }
 
     pub(crate) async fn reconnect_upstream_for_test(&self) -> Result<bool> {

@@ -2201,6 +2201,96 @@ fn active_history_projection_accepts_a_new_schema_variant_without_rebuild() {
     );
 }
 
+/// A cold runtime may rebuild its projection registry after pruning a dropped
+/// raw receiver, and the rebuilt registry must admit the new enum variant.
+///
+/// Actors: alice writes and drops a history stream; mallory then publishes an
+/// append-only enum case through the trusted catalogue lane.
+///
+/// ```text
+/// alice --drop history--> core --prune/rebuild--> v2 registry
+/// mallory --publish v2--------------------------> new v2 write
+/// ```
+#[test]
+fn dropped_history_receiver_allows_cold_registry_rebuild() {
+    let schema = |statuses: &[&str]| {
+        JazzSchema::new([TableSchema::new(
+            "items",
+            [
+                ColumnSchema::new("title", ColumnType::String),
+                ColumnSchema::new(
+                    "status",
+                    ColumnType::EnumTag(
+                        groove::records::ScalarEnumSchema::new(
+                            "status",
+                            statuses.iter().copied(),
+                        )
+                        .unwrap(),
+                    ),
+                ),
+            ],
+        )])
+    };
+    let base = schema(&["open"]);
+    let evolved = SchemaVersion::new(schema(&["open", "archived"]));
+    let evolved_id = evolved.id;
+    let (_dir, mut core) = open_node_with_schema(node(0x6c), base.clone());
+    core.commit_mergeable(
+        MergeableCommit::new("items", row(0x6c), 900).cells(BTreeMap::from([
+            ("title".to_owned(), Value::String("before".to_owned())),
+            ("status".to_owned(), Value::EnumTag(0)),
+        ])),
+    )
+    .unwrap();
+    let subscription = core.subscribe_history("items").unwrap();
+    assert_eq!(subscription.recv().unwrap().deltas.len(), 1);
+    drop(subscription);
+    assert_eq!(core.runtime_stats_for_test().active_subscriptions, 1);
+    let runtime = core.groove_runtime_token();
+
+    core.apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
+        author: AuthorId::SYSTEM,
+        catalogue_seq: 1,
+        publication: Box::new(SchemaLineagePublication::new(
+            evolved,
+            MigrationLens::new(
+                base.version_id(),
+                evolved_id,
+                vec![TableLens {
+                    source_table: "items".to_owned(),
+                    target_table: "items".to_owned(),
+                    ops: vec![LensOp::TransformColumn {
+                        column: "status".to_owned(),
+                        transform: "jazz.identity".to_owned(),
+                    }],
+                }],
+            ),
+            Vec::<String>::new(),
+            Vec::<String>::new(),
+        )),
+    })
+    .unwrap();
+
+    assert_eq!(core.runtime_stats_for_test().active_subscriptions, 0);
+    assert_ne!(core.groove_runtime_token(), runtime);
+    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+        author: AuthorId::SYSTEM,
+        pointer: CurrentWriteSchema {
+            revision: 1,
+            schema: evolved_id,
+        },
+    })
+    .unwrap();
+    core.commit_mergeable(
+        MergeableCommit::new("items", row(0x6d), 1_000).cells(BTreeMap::from([
+            ("title".to_owned(), Value::String("after".to_owned())),
+            ("status".to_owned(), Value::EnumTag(1)),
+        ])),
+    )
+    .unwrap();
+    assert_eq!(core.query_table_versions("items").unwrap().len(), 2);
+}
+
 #[test]
 fn table_and_column_rename_reuses_the_existing_physical_identities() {
     let base = schema();
