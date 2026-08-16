@@ -391,6 +391,82 @@ globally exactly-once branch import (`INV-BRANCH-29`).
 A branch-scoped subscription is identified by its `BranchId` in addition to the
 ordinary subscription identity (`INV-BRANCH-16`).
 
+#### v1 branch-current maintenance boundary (unlanded)
+
+The active `branch_claims_integration::explicit_branch_subscription_should_match_claims_select_query`
+quarantine is a product gap, not a narrow failing assertion: public branch read
+views are currently rejected before they can subscribe. The first implementation
+slice must make a branch read view a maintained **branch-current** input, rather
+than subscribe to root current state and filter it afterwards.
+
+For one parentless, global-only snapshot-base branch, branch-current resolution
+is overlay-first over the branch's frozen base: a row has either the current
+branch-overlay winner (including its deletion-register winner), or its current
+root winner at `base_global`, but never both. The maintained graph receives the
+same authoritative row, replacement, policy, coverage, and deletion-register
+facts as a root current view, keyed by the selected `BranchId`. An overlay write,
+delete, or restore therefore updates membership and payload from that resolver;
+later root writes do not alter the frozen base. This is the required place to
+produce an explicit deletion/restore witness: deleting a visible base or
+overlay row must remove it, while a subsequent restore may reveal its
+frozen-base predecessor, all without a full refresh (`INV-BRANCH-7`,
+`INV-BRANCH-38`).
+
+`BranchId` is an additional discriminator of the existing canonical program
+instance `(shape, resolved_read, policy, binding)` from §8.5; it does not
+replace any of those dimensions with the narrower tuple `(ShapeId, BindingId,
+BranchId)`. The selected branch is part of `resolved_read` and therefore flows
+through canonical `RegisterShapeOptions` into `ReadViewKey` on both the wire
+`SubscriptionKey` and canonical `BindingViewKey`. The canonical root read view
+remains distinct. Reuse still additionally respects the effective policy
+closure, authenticated reader/per-peer scope, and claim revision: a user-chosen
+usage-site `BindingId` is never an authorization identity, and equal
+`BindingId`s with different claims must never share results, facts, or
+known-state. No settled result set, known-state receipt, policy fact, or
+unsubscribe cleanup may cross the resulting branch/reader/policy boundary:
+siblings can have the same shape and bound values but different overlay winners
+(`INV-BRANCH-9`, `INV-BRANCH-16`).
+
+Branch authorization is evaluated at the resolver boundary. First require
+visibility of the branch metadata row; then evaluate ordinary table policy and
+all policy dependencies against that branch-current view. Dependency tables stay
+raw policy evidence under `INV-RLS-21`; they are not separately exposed or
+recursively policy-filtered. Prepared claim bindings remain per subscription
+binding, so a claim-authorized branch subscriber and a denied subscriber cannot
+share a materialized policy result.
+
+Transport must admit and durably store the branch record before it accepts a
+branch-target commit unit or publishes a branch `ViewUpdate`; a receiver that
+lacks the record parks the data and requests it. Edge/global coverage and
+settlement remain ordinary selected-upstream receipts: a branch update may be
+acknowledged only after the storage commit that made its branch-current facts
+durable, and a reconnect/edge switch invalidates the receipt until a fresh
+selected branch `ViewUpdate` arrives (`INV-BRANCH-36`, `INV-SYNC-30`). A server
+without this complete branch-current capability must continue to reject the
+subscription, rather than serving a root result under a branch identity.
+
+The bounded v1 acceptance ladder is deliberately black-boxed:
+
+1. The existing claims test first proves that a matching-claim branch one-shot
+   and subscription expose a branch-local row while root does not, and that a
+   nonmatching claim sees neither payload nor a subscription add.
+2. A two-sibling test subscribes to equal shapes/bindings on branches A and B;
+   an A overlay add/replace/delete/restore changes only A and resolves to A's
+   frozen base as appropriate. It proves both sibling isolation and deletion
+   witnesses without inspecting cache internals.
+3. A durable transport test delivers a branch-target commit before metadata,
+   verifies no client publication or settlement, then admits metadata and
+   verifies exactly one correct update after durable commit. Reconnect and edge
+   switch must require a fresh selected-upstream branch receipt.
+4. An unsubscribe/re-subscribe test proves that removing A's subscription does
+   not evict B's state or claims-scoped policy closure, and that replayed
+   known-state for A cannot suppress B's first update.
+
+This slice excludes branch-of-branch depth, in-branch time travel, and
+branch-exclusive transactions. Each needs a composed base/cut or authority
+contract beyond the parentless global-only resolver above; none may be silently
+treated as root-current support.
+
 There is no branch rebase operation. To incorporate a newer parent or another
 lineage, calculate and commit an ordinary merge transaction into the branch as
 defined in §11.5 (`INV-BRANCH-21`).
