@@ -342,6 +342,18 @@ impl ShellDb {
         }
     }
 
+    #[cfg(test)]
+    fn set_catalogue_activation_failpoint(
+        &self,
+        failpoint: crate::node::CatalogueActivationFailpoint,
+    ) {
+        match self {
+            Self::Memory(db) => db.set_catalogue_activation_failpoint(failpoint),
+            #[cfg(feature = "rocksdb")]
+            Self::Rocks(db) => db.set_catalogue_activation_failpoint(failpoint),
+        }
+    }
+
     fn trusted_current_catalogue_schema(&self) -> ShellResult<JazzSchema> {
         match self {
             Self::Memory(db) => db.trusted_current_catalogue_schema().map_err(Into::into),
@@ -757,6 +769,23 @@ impl InMemoryServerShell {
         &self,
     ) -> ShellResult<crate::protocol::CatalogueSnapshot> {
         self.db.trusted_catalogue_snapshot()
+    }
+
+    /// Apply the authenticated authority catalogue to an already-open edge.
+    /// The node-level adoption rebuilds physical projections before returning.
+    pub(crate) fn apply_trusted_catalogue_snapshot(
+        &self,
+        snapshot: crate::protocol::CatalogueSnapshot,
+    ) -> ShellResult<()> {
+        self.db.apply_trusted_catalogue_snapshot(snapshot)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_catalogue_activation_failpoint(
+        &self,
+        failpoint: crate::node::CatalogueActivationFailpoint,
+    ) {
+        self.db.set_catalogue_activation_failpoint(failpoint);
     }
 
     /// Encode the snapshot through the ordinary negotiated wire codec so

@@ -191,6 +191,8 @@ impl ServerBuilder {
             core_server_shell_storage_config.clone(),
             topology,
         )?;
+        let dynamic_edge_catalogue_ready =
+            topology != ServerTopology::Edge || core_server_shell.is_some();
         let core_server_shell_storage_config = core_server_shell_storage_config.ok();
 
         let state = Arc::new(ServerState {
@@ -204,7 +206,10 @@ impl ServerBuilder {
             http_client,
             core_server_shell: std::sync::RwLock::new(core_server_shell),
             core_server_shell_storage_config,
-            dynamic_edge_upstream_ready: AtomicBool::new(true),
+            // A validated durable catalogue remains usable while its core is
+            // offline. Blank edges have no such generation and stay behind
+            // RetryLater until authenticated bootstrap completes.
+            dynamic_edge_catalogue_ready: AtomicBool::new(dynamic_edge_catalogue_ready),
             shutdown: crate::tools::server::ShutdownController::new(self.shutdown_timeout),
         });
 
@@ -425,26 +430,36 @@ fn spawn_edge_upstream_connector(
                 admin_secret: Some(admin_secret.clone()),
                 ..Default::default()
             };
+            // Revalidate every reconnect, including a durable reopen. The
+            // regular sync socket can then carry application/fate traffic only
+            // after the exact authority catalogue and local IVM registry are
+            // complete for this process generation.
+            let snapshot = match WebSocketTransport::connect_catalogue_bootstrap(
+                &upstream_url,
+                app_id,
+                AuthorId::SYSTEM,
+                auth.clone(),
+            )
+            .await
+            {
+                Ok(snapshot) => snapshot,
+                Err(error) => {
+                    info!("edge catalogue bootstrap pending: {}", error);
+                    tokio::time::sleep(retry_delay).await;
+                    continue;
+                }
+            };
             let shell = match state.core_server_shell() {
-                Some(shell) => shell,
-                None => match WebSocketTransport::connect_catalogue_bootstrap(
-                    &upstream_url,
-                    app_id,
-                    AuthorId::SYSTEM,
-                    auth.clone(),
-                )
-                .await
-                {
-                    Ok(snapshot) => {
-                        match state.start_dynamic_edge_shell(snapshot, edge_cache_budget) {
-                            Ok(shell) => shell,
-                            Err(error) => {
-                                info!("edge catalogue bootstrap pending: {}", error);
-                                tokio::time::sleep(retry_delay).await;
-                                continue;
-                            }
-                        }
+                Some(shell) => match state.refresh_dynamic_edge_catalogue(&shell, snapshot).await {
+                    Ok(()) => shell,
+                    Err(error) => {
+                        info!("edge catalogue replay pending: {}", error);
+                        tokio::time::sleep(retry_delay).await;
+                        continue;
                     }
+                },
+                None => match state.start_dynamic_edge_shell(snapshot, edge_cache_budget) {
+                    Ok(shell) => shell,
                     Err(error) => {
                         info!("edge catalogue bootstrap pending: {}", error);
                         tokio::time::sleep(retry_delay).await;
@@ -477,7 +492,7 @@ fn spawn_edge_upstream_connector(
                         .await
                         .is_ok()
                     {
-                        state.mark_dynamic_edge_upstream_ready();
+                        state.mark_dynamic_edge_catalogue_ready();
                         shell.notify_activity();
                         return;
                     }
@@ -953,6 +968,133 @@ mod tests {
                 .await
                 .expect("read duplicate-ready shell"),
             "a duplicate bootstrap wake reuses the already-published shell"
+        );
+    }
+
+    #[tokio::test]
+    async fn durable_dynamic_edge_gates_failed_catalogue_refresh_until_install_succeeds() {
+        let app_id = AppId::from_name("dynamic-edge-refresh-install-failure");
+        let auth = AuthConfig {
+            admin_secret: Some("bootstrap-secret".to_owned()),
+            ..Default::default()
+        };
+        let schema = dynamic_bootstrap_schema();
+        let core = ServerBuilder::new(app_id)
+            .with_schema(schema.clone())
+            .with_auth_config(auth.clone())
+            .with_storage(StorageBackend::InMemory)
+            .build()
+            .await
+            .expect("build authority core");
+        let snapshot = core
+            .state
+            .core_server_shell()
+            .expect("core has shell")
+            .trusted_catalogue_snapshot_for_test()
+            .await
+            .expect("read authority snapshot");
+        let edge = ServerBuilder::new(app_id)
+            .with_schema(schema)
+            .with_auth_config(auth)
+            .with_storage(StorageBackend::InMemory)
+            .with_upstream_url("ws://127.0.0.1:9")
+            .build()
+            .await
+            .expect("build edge with a validated durable generation");
+        let shell = edge
+            .state
+            .core_server_shell()
+            .expect("edge has ready shell");
+        assert!(
+            edge.state.core_server_shell_for_client().is_some(),
+            "validated catalogue is usable while the upstream is offline"
+        );
+
+        let mut malformed = snapshot.clone();
+        malformed.schemas.push(
+            malformed
+                .schemas
+                .first()
+                .expect("authority has genesis")
+                .clone(),
+        );
+        assert!(
+            edge.state
+                .refresh_dynamic_edge_catalogue(&shell, malformed)
+                .await
+                .is_err()
+        );
+        assert!(
+            edge.state.core_server_shell_for_client().is_none(),
+            "failed validation/install must not advance the ready generation"
+        );
+
+        edge.state
+            .refresh_dynamic_edge_catalogue(&shell, snapshot.clone())
+            .await
+            .expect("later complete refresh installs successfully");
+        assert!(
+            edge.state.core_server_shell_for_client().is_some(),
+            "readiness advances only after the complete install returns"
+        );
+
+        let base = snapshot
+            .schemas
+            .first()
+            .expect("authority has genesis")
+            .clone();
+        let evolved = crate::protocol::SchemaVersion::new(crate::schema::JazzSchema::new([
+            crate::schema::TableSchema::new(
+                "notes",
+                [
+                    groove::schema::ColumnSchema::new("id", groove::schema::ColumnType::Uuid),
+                    groove::schema::ColumnSchema::new("body", groove::schema::ColumnType::String),
+                    groove::schema::ColumnSchema::new("extra", groove::schema::ColumnType::String),
+                ],
+            ),
+        ]));
+        let mut evolved_snapshot = snapshot;
+        evolved_snapshot.schemas.push(evolved.clone());
+        evolved_snapshot.lineages.push((
+            1,
+            crate::protocol::SchemaLineagePublication::new(
+                evolved.clone(),
+                crate::protocol::MigrationLens::new(
+                    base.id,
+                    evolved.id,
+                    vec![crate::protocol::TableLens {
+                        source_table: "notes".to_owned(),
+                        target_table: "notes".to_owned(),
+                        ops: vec![crate::protocol::LensOp::AddColumn {
+                            column: "extra".to_owned(),
+                            default: groove::records::Value::String(String::new()),
+                        }],
+                    }],
+                ),
+                Vec::<String>::new(),
+                Vec::<String>::new(),
+            ),
+        ));
+        evolved_snapshot.current_write_schema = crate::protocol::CurrentWriteSchema {
+            revision: 1,
+            schema: evolved.id,
+        };
+        shell
+            .set_catalogue_activation_failpoint(
+                crate::node::CatalogueActivationFailpoint::BeforeSnapshotActivationCommit,
+            )
+            .await
+            .expect("arm post-registry install failure");
+        assert!(
+            edge.state
+                .refresh_dynamic_edge_catalogue(&shell, evolved_snapshot)
+                .await
+                .is_err(),
+            "v1-to-v2 activation fails after registry reconstruction at the planted boundary"
+        );
+        assert!(
+            edge.state.core_server_shell_for_client().is_none(),
+            "a post-registry activation failure must not publish the new ready generation"
         );
     }
 

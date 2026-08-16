@@ -186,6 +186,34 @@ impl ServerShellHandle {
         .await
     }
 
+    /// Replace an already persisted edge's authority catalogue through the
+    /// same authenticated snapshot path used at first bootstrap. The snapshot
+    /// adoption rebuilds the local physical projection registry before this
+    /// call returns, so callers may safely make the edge externally ready.
+    pub(crate) async fn apply_trusted_catalogue_snapshot(
+        &self,
+        snapshot: crate::protocol::CatalogueSnapshot,
+    ) -> Result<(), String> {
+        self.run(move |shell| {
+            shell
+                .apply_trusted_catalogue_snapshot(snapshot)
+                .map_err(|error| error.to_string())
+        })
+        .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn set_catalogue_activation_failpoint(
+        &self,
+        failpoint: crate::node::CatalogueActivationFailpoint,
+    ) -> Result<(), String> {
+        self.run(move |shell| {
+            shell.set_catalogue_activation_failpoint(failpoint);
+            Ok(())
+        })
+        .await
+    }
+
     #[cfg(test)]
     pub(crate) async fn trusted_catalogue_snapshot_for_test(
         &self,

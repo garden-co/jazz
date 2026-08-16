@@ -2889,7 +2889,10 @@ where
     }
 
     #[cfg(test)]
-    fn set_catalogue_activation_failpoint(&mut self, failpoint: CatalogueActivationFailpoint) {
+    pub(crate) fn set_catalogue_activation_failpoint(
+        &mut self,
+        failpoint: CatalogueActivationFailpoint,
+    ) {
         self.catalogue_activation_failpoint = Some(failpoint);
     }
 
@@ -5993,7 +5996,7 @@ struct CatalogueBootstrapReady {
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum CatalogueActivationFailpoint {
+pub(crate) enum CatalogueActivationFailpoint {
     AfterStaged,
     AfterRegistration,
     BeforeSnapshotActivationCommit,

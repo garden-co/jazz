@@ -1031,6 +1031,17 @@ where
             .apply_trusted_catalogue_snapshot(snapshot)?)
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_catalogue_activation_failpoint(
+        &self,
+        failpoint: crate::node::CatalogueActivationFailpoint,
+    ) {
+        self.node
+            .node
+            .borrow_mut()
+            .set_catalogue_activation_failpoint(failpoint);
+    }
+
     /// Produce the authority's complete catalogue for the privileged
     /// snapshot-only transport exchange.
     pub(crate) fn trusted_catalogue_snapshot(

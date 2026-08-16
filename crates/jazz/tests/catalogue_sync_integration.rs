@@ -861,7 +861,6 @@ async fn edge_catalogue_publish_reaches_peer_edge_through_core_sync_impl() {
 /// edge(v1) --reconnect--> core --catalogue replay--> edge(v2) --> alice(v2)
 /// ```
 #[tokio::test]
-#[ignore = "known red; tracked in TEST_BURNDOWN.md"]
 async fn persisted_stale_edge_reconnect_replays_catalogue_before_client_work() {
     tokio::task::LocalSet::new()
         .run_until(persisted_stale_edge_reconnect_replays_catalogue_before_client_work_impl())
