@@ -373,38 +373,6 @@ fn assert_unsupported_subscription_include_deleted(error: Error) {
     );
 }
 
-fn assert_unsupported_branch_deletion_witness(error: Error) {
-    assert!(
-        matches!(error.code, ErrorCode::Query | ErrorCode::Protocol),
-        "unexpected error code for branch deletion witness gap: {:?}",
-        error.code
-    );
-    assert!(
-        error.message.contains("BranchOverlay"),
-        "unexpected error message: {}",
-        error.message
-    );
-}
-
-fn assert_subscribe_rejected_branch_overlay(
-    message: SyncMessage,
-    expected_subscription: SubscriptionKey,
-) {
-    match message {
-        SyncMessage::SubscribeRejected {
-            subscription,
-            reason: SubscribeRejectReason::UnsupportedShapeCapability { detail },
-        } => {
-            assert_eq!(subscription, expected_subscription);
-            assert!(
-                detail.contains("BranchOverlay"),
-                "unexpected rejection detail: {detail}"
-            );
-        }
-        other => panic!("expected SubscribeRejected, got {other:?}"),
-    }
-}
-
 fn assert_subscribe_rejected_unsupported_shape_capability_detail(
     message: SyncMessage,
     expected_subscription: SubscriptionKey,
@@ -1481,6 +1449,73 @@ fn row(byte: u8) -> RowUuid {
     RowUuid::from_bytes([byte; 16])
 }
 
+fn relation_snapshot_row(table: &str, row_uuid: RowUuid) -> CurrentRow {
+    let descriptor = RecordDescriptor::new([("row_uuid".to_owned(), ValueType::Uuid)]);
+    let raw = descriptor
+        .create(&[groove::records::Value::Uuid(row_uuid.0)])
+        .expect("encode relation snapshot row");
+    CurrentRow::new(table, OwnedRecord::new(raw, descriptor))
+}
+
+/// A reset may carry canonical relation provenance while the materialized
+/// related row is named by a newer read schema. Ordinary removal must use the
+/// same projected edge identity, retaining an unrelated same-UUID row.
+#[test]
+fn projected_relation_edge_removal_removes_only_its_renamed_related_row() {
+    let root = row(0x91);
+    let target = row(0x92);
+    let projected_edge = RelationEdge {
+        source_table: "posts".to_owned(),
+        source_row: root,
+        relation: "author".to_owned(),
+        target_table: "people".to_owned(),
+        target_row: target,
+    };
+    let mut snapshot = RelationSnapshot {
+        root_count: 1,
+        rows: vec![
+            relation_snapshot_row("posts", root),
+            relation_snapshot_row("people", target),
+            relation_snapshot_row("archived_people", target),
+        ],
+        edges: vec![projected_edge.clone()],
+    };
+    let mut index = RelationSnapshotIndex::from_snapshot(&snapshot);
+
+    let event = apply_maintained_update_to_snapshot(
+        &mut snapshot,
+        &mut index,
+        LocalMaintainedViewSubscriptionUpdate {
+            authoritative_membership_changed: false,
+            added: Vec::new(),
+            removed: Vec::new(),
+            added_edges: Vec::new(),
+            removed_edges: vec![projected_edge],
+            terminal_operations: Vec::new(),
+            terminal_layout: None,
+        },
+        DurabilityTier::Edge,
+        true,
+        false,
+    );
+
+    assert!(matches!(event, SubscriptionEvent::Delta { .. }));
+    assert!(snapshot.edges.is_empty());
+    assert_eq!(snapshot.rows.len(), 2);
+    assert!(
+        snapshot
+            .rows
+            .iter()
+            .any(|row| row.table() == "archived_people" && row.row_uuid() == target)
+    );
+    assert!(
+        !snapshot
+            .rows
+            .iter()
+            .any(|row| row.table() == "people" && row.row_uuid() == target)
+    );
+}
+
 #[test]
 fn view_update_is_not_empty_when_it_only_carries_program_facts() {
     let subscription = crate::protocol::SubscriptionKey {
@@ -2083,17 +2118,48 @@ fn single_branch_read_view_uses_query_engine_branch_source_for_one_shot_reads() 
     let rows = doctest_support::block_on(db.all(&prepared_query, opts.clone())).unwrap();
     assert_eq!(row_ids(&rows), vec![row(0x42)]);
 
+    db.node
+        .node
+        .borrow_mut()
+        .commit_mergeable_on_branch(
+            branch,
+            MergeableCommit::new("todos", row(0x42), 11).deletion(DeletionEvent::Deleted),
+        )
+        .expect("delete pending branch row");
+    let deleted = doctest_support::block_on(db.all(&prepared_query, opts.clone())).unwrap();
+    assert!(
+        deleted.is_empty(),
+        "Local branch reads apply pending deletion witnesses"
+    );
+
+    db.node
+        .node
+        .borrow_mut()
+        .commit_mergeable_on_branch(
+            branch,
+            MergeableCommit::new("todos", row(0x42), 12).deletion(DeletionEvent::Restored),
+        )
+        .expect("restore pending branch row");
+    let restored = doctest_support::block_on(db.all(&prepared_query, opts.clone())).unwrap();
+    assert_eq!(
+        row_ids(&restored),
+        vec![row(0x42)],
+        "Local branch reads apply pending restore witnesses"
+    );
+
     let local_subscription_opts = ReadOpts {
         propagation: Propagation::LocalOnly,
         ..opts.clone()
     };
-    assert_unsupported_branch_deletion_witness(expect_error(doctest_support::block_on(
-        db.subscribe(&prepared_query, local_subscription_opts),
-    )));
-
-    assert_unsupported_branch_deletion_witness(expect_error(doctest_support::block_on(
-        db.subscribe(&prepared_query, opts.clone()),
-    )));
+    let mut local_subscription =
+        doctest_support::block_on(db.subscribe(&prepared_query, local_subscription_opts))
+            .expect("subscribe to the locally reconstructed branch view");
+    assert_eq!(
+        row_ids(&opened_rows(
+            block_on(local_subscription.next_raw()).unwrap()
+        )),
+        vec![row(0x42)]
+    );
 
     let attachment = db
         .attach_query_with_opts(&prepared_query, opts.clone())
@@ -2107,6 +2173,529 @@ fn single_branch_read_view_uses_query_engine_branch_source_for_one_shot_reads() 
     let snapshot =
         doctest_support::block_on(db.all_relation_snapshot(&prepared_query, opts.clone())).unwrap();
     assert_eq!(row_ids(&snapshot.rows), vec![row(0x42)]);
+}
+
+#[test]
+fn client_local_branch_subscription_survives_sparse_first_write_delete_and_restore() {
+    let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
+    let branch = BranchId(uuid::Uuid::from_bytes([0x42; 16]));
+    db.node
+        .node
+        .borrow_mut()
+        .create_branch(branch)
+        .expect("create empty branch");
+    let query = db.table("todos");
+    let prepared_query = prepared(&db, &query);
+    let opts = ReadOpts {
+        propagation: Propagation::LocalOnly,
+        ..branch_read_opts()
+    };
+    let mut subscription = block_on(db.subscribe(&prepared_query, opts))
+        .expect("open ClientLocal subscription before sparse partition exists");
+    assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
+
+    db.node
+        .node
+        .borrow_mut()
+        .commit_mergeable_on_branch(
+            branch,
+            MergeableCommit::new("todos", row(0x42), 10)
+                .cells(doctest_support::todo_cells("first pending overlay", false)),
+        )
+        .expect("first pending branch write creates durable partition");
+    assert_eq!(db.refresh_subscriptions().unwrap(), 1);
+    let (added, updated, removed) = delta_rows(block_on(subscription.next_raw()).unwrap());
+    assert_eq!(row_ids(&added), vec![row(0x42)]);
+    assert!(updated.is_empty());
+    assert!(removed.is_empty());
+
+    db.node
+        .node
+        .borrow_mut()
+        .commit_mergeable_on_branch(
+            branch,
+            MergeableCommit::new("todos", row(0x42), 11).deletion(DeletionEvent::Deleted),
+        )
+        .expect("delete pending branch row");
+    assert_eq!(db.refresh_subscriptions().unwrap(), 1);
+    let (added, updated, removed) = delta_rows(block_on(subscription.next_raw()).unwrap());
+    assert!(added.is_empty());
+    assert!(updated.is_empty());
+    assert_eq!(
+        removed
+            .iter()
+            .map(|removed| removed.row_uuid)
+            .collect::<Vec<_>>(),
+        vec![row(0x42)]
+    );
+
+    db.node
+        .node
+        .borrow_mut()
+        .commit_mergeable_on_branch(
+            branch,
+            MergeableCommit::new("todos", row(0x42), 12).deletion(DeletionEvent::Restored),
+        )
+        .expect("restore pending branch row");
+    assert_eq!(db.refresh_subscriptions().unwrap(), 1);
+    let (added, updated, removed) = delta_rows(block_on(subscription.next_raw()).unwrap());
+    assert_eq!(row_ids(&added), vec![row(0x42)]);
+    assert!(updated.is_empty());
+    assert!(removed.is_empty());
+}
+
+#[test]
+fn denied_branch_subscription_does_not_allocate_sparse_source() {
+    let branch_policy = Query::from("jazz_branches").join_via(
+        "branch_access",
+        "branch_id",
+        [eq(col("user_id"), claim("sub"))],
+    );
+    let schema = JazzSchema::new([
+        TableSchema::new(
+            "todos",
+            [
+                ColumnSchema::new("title", ColumnType::String),
+                ColumnSchema::new("done", ColumnType::Bool),
+                ColumnSchema::new("owner_id", ColumnType::Uuid),
+            ],
+        ),
+        TableSchema::new(
+            "branch_access",
+            [
+                ColumnSchema::new("branch_id", ColumnType::Uuid),
+                ColumnSchema::new("user_id", ColumnType::Uuid),
+            ],
+        )
+        .with_reference("branch_id", "jazz_branches"),
+    ])
+    .with_branch_read_policy(branch_policy);
+    let denied = AuthorId::from_bytes([0xc1; 16]);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let branch = BranchId::from_bytes([0x42; 16]);
+    server
+        .node()
+        .borrow_mut()
+        .create_root_branch(branch)
+        .expect("create empty root branch");
+    assert!(
+        !server
+            .node()
+            .borrow()
+            .branch_subscription_source_exists_for_test("todos", schema.version_id(), branch,)
+    );
+
+    let (mut client_transport, server_transport) = duplex();
+    let subscriber = server.accept_subscriber(server_transport, denied);
+    let query = Query::from("todos");
+    let shape = query.validate(&schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let opts = RegisterShapeOptions {
+        tier: DurabilityTier::Global,
+        read_view: ReadViewSpec {
+            source: ReadViewSourceSpec::Branch { branch: branch.0 },
+            ..Default::default()
+        },
+        propagate_upstream: true,
+    };
+    let subscription = SubscriptionKey {
+        shape_id: shape.shape_id(),
+        binding_id: binding.binding_id(),
+        read_view: opts.read_view_key(),
+    };
+    client_transport
+        .send(SyncMessage::RegisterShape {
+            shape_id: shape.shape_id(),
+            ast: ShapeAst::from_validated(&shape),
+            opts,
+        })
+        .unwrap();
+    client_transport
+        .send(SyncMessage::Subscribe(Subscribe {
+            shape_id: shape.shape_id(),
+            subscription,
+            values: Vec::new(),
+            known_state: None,
+        }))
+        .unwrap();
+    subscriber.borrow_mut().tick().unwrap();
+    let update = try_recv_subscriber_payload(client_transport.as_mut())
+        .expect("denied branch subscription receives an empty view");
+    assert!(matches!(
+        update,
+        SyncMessage::ViewUpdate {
+            reset_result_set: true,
+            result_member_adds,
+            ..
+        } if result_member_adds.is_empty()
+    ));
+    assert!(
+        !server
+            .node()
+            .borrow()
+            .branch_subscription_source_exists_for_test("todos", schema.version_id(), branch,)
+    );
+
+    client_transport
+        .send(SyncMessage::Unsubscribe { subscription })
+        .unwrap();
+    subscriber.borrow_mut().tick().unwrap();
+    assert!(
+        !server
+            .node()
+            .borrow()
+            .branch_subscription_source_exists_for_test("todos", schema.version_id(), branch,)
+    );
+}
+
+#[test]
+fn branch_subscription_reconnects_and_re_settles_after_a_fresh_view_receipt() {
+    let schema = schema();
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let client = open_db(0xc1, client_author, &schema);
+    let branch = BranchId(uuid::Uuid::from_bytes([0x42; 16]));
+    server
+        .node()
+        .borrow_mut()
+        .create_branch_as(branch, client_author)
+        .expect("server creates matching branch metadata");
+    client
+        .create_branch_with_id(branch)
+        .expect("client creates matching branch metadata");
+    let branch_write = server
+        .node()
+        .borrow_mut()
+        .commit_mergeable_on_branch(
+            branch,
+            MergeableCommit::new("todos", row(0x42), 10).cells(cells(
+                "branch-only",
+                false,
+                client_author,
+            )),
+        )
+        .expect("commit accepted branch row");
+    server
+        .node()
+        .borrow_mut()
+        .apply_fate_update(
+            branch_write,
+            Fate::Accepted,
+            Some(GlobalSeq(1)),
+            Some(DurabilityTier::Global),
+        )
+        .expect("globally accept branch row");
+
+    let (first_client_transport, first_server_transport) = duplex();
+    let first_upstream = client.connect_upstream(first_client_transport);
+    let _first_subscriber = server.accept_subscriber(first_server_transport, client_author);
+    let query = Query::from("todos");
+    let branch_opts = ReadOpts {
+        tier: DurabilityTier::Global,
+        local_updates: LocalUpdates::Deferred,
+        propagation: Propagation::Full,
+        read_view: branch_read_opts().read_view,
+        ..ReadOpts::default()
+    };
+    let mut subscription = prepared_subscribe(&client, &query, branch_opts).unwrap();
+    assert!(!event_settled(&block_on(subscription.next_raw()).unwrap()));
+
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+    let settled = block_on(subscription.next_raw()).unwrap();
+    assert!(event_settled(&settled));
+    let (added, _, _) = delta_rows(settled);
+    assert!(
+        added.iter().any(|current| current.row_uuid() == row(0x42)),
+        "fresh branch coverage must deliver the selected overlay row"
+    );
+
+    assert!(client.detach_connection(&first_upstream));
+    let disconnected = subscription
+        .receiver
+        .try_recv()
+        .expect("disconnect must publish a branch settlement demotion");
+    assert!(
+        !event_settled(&disconnected),
+        "disconnect must demote a branch Edge/Global subscription"
+    );
+
+    let (reconnected_client_transport, reconnected_server_transport) = duplex();
+    let _reconnected_upstream = client.connect_upstream(reconnected_client_transport);
+    let _reconnected_subscriber =
+        server.accept_subscriber(reconnected_server_transport, client_author);
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+    let binding_view = BindingViewKey::new(
+        query.validate(&schema).unwrap().shape_id(),
+        query
+            .validate(&schema)
+            .unwrap()
+            .bind(BTreeMap::new())
+            .unwrap()
+            .binding_id(),
+        RegisterShapeOptions {
+            tier: DurabilityTier::Global,
+            read_view: branch_read_opts().read_view,
+            ..RegisterShapeOptions::default()
+        }
+        .read_view_key(),
+    );
+    let receipts = client.node.active_authority_view_receipts.borrow();
+    assert!(
+        receipts
+            .as_ref()
+            .is_some_and(|receipts| receipts.binding_views.contains(&binding_view)),
+        "reconnect did not install the branch binding receipt"
+    );
+    drop(receipts);
+    let node = client.node.node.borrow();
+    assert!(
+        client
+            .node
+            .node
+            .borrow()
+            .has_settled_result_set(binding_view),
+        "reconnect did not restore branch settled result membership"
+    );
+    assert!(
+        !node.opening_pending_for_binding_view(binding_view),
+        "reconnect left branch binding opening pending"
+    );
+    drop(node);
+    assert!(
+        subscription_is_settled(
+            &client.node.node.borrow(),
+            &client.node.active_authority_view_receipts,
+            &query.validate(&schema).unwrap(),
+            &query
+                .validate(&schema)
+                .unwrap()
+                .bind(BTreeMap::new())
+                .unwrap(),
+            DurabilityTier::Global,
+            branch_read_opts().read_view,
+            true,
+            true,
+        ),
+        "the recovered branch state should be settled before its stream refresh"
+    );
+    let replayed = block_on(subscription.next_raw()).unwrap();
+    assert!(
+        !event_settled(&replayed),
+        "reconnect must first publish the branch overlay replay as provisional"
+    );
+    let (added, _, _) = delta_rows(replayed);
+    assert!(
+        added.iter().any(|current| current.row_uuid() == row(0x42)),
+        "the provisional replay must retain the branch overlay row"
+    );
+    let resettled = block_on(subscription.next_raw()).unwrap();
+    assert!(
+        event_settled(&resettled),
+        "a fresh selected-authority branch view must re-settle after reconnect"
+    );
+    let (added, updated, removed) = delta_rows(resettled);
+    assert!(
+        added.iter().any(|current| current.row_uuid() == row(0x42)),
+        "the authoritative reset must retain the branch overlay row"
+    );
+    assert!(updated.is_empty());
+    assert!(removed.is_empty());
+}
+
+#[test]
+fn branch_one_shot_waits_for_metadata_and_keeps_sibling_result_identity() {
+    let schema = schema();
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let client = open_db(0xc1, client_author, &schema);
+    let branch_a = BranchId::from_bytes([0x42; 16]);
+    let branch_b = BranchId::from_bytes([0x43; 16]);
+    for (branch, row_id, title, seq) in [
+        (branch_a, row(0x44), "branch-a", GlobalSeq(1)),
+        (branch_b, row(0x45), "branch-b", GlobalSeq(2)),
+    ] {
+        server
+            .node()
+            .borrow_mut()
+            .create_branch_as(branch, client_author)
+            .expect("server creates visible branch metadata");
+        let tx = server
+            .node()
+            .borrow_mut()
+            .commit_mergeable_on_branch(
+                branch,
+                MergeableCommit::new("todos", row_id, 10).cells(cells(title, false, client_author)),
+            )
+            .expect("server writes branch overlay");
+        server
+            .node()
+            .borrow_mut()
+            .apply_fate_update(tx, Fate::Accepted, Some(seq), Some(DurabilityTier::Global))
+            .expect("server globally accepts branch overlay");
+    }
+
+    let (client_transport, server_transport) = duplex();
+    let _upstream = client.connect_upstream(client_transport);
+    let _subscriber = server.accept_subscriber(server_transport, client_author);
+    let query = Query::from("todos");
+    let prepared = prepared(&client, &query);
+    let opts_for = |branch: BranchId, tier| ReadOpts {
+        tier,
+        local_updates: LocalUpdates::Deferred,
+        propagation: Propagation::Full,
+        read_view: crate::protocol::ReadViewSpec {
+            source: crate::protocol::ReadViewSourceSpec::Branch { branch: branch.0 },
+            ..Default::default()
+        },
+        ..ReadOpts::default()
+    };
+
+    let read = |branch, tier, expected| {
+        let opts = opts_for(branch, tier);
+        let attachment = client
+            .attach_query_with_opts(&prepared, opts.clone())
+            .expect("attach branch one-shot coverage");
+        client.tick().unwrap();
+        server.tick().unwrap();
+        client.tick().unwrap();
+        assert!(
+            client.query_attachment_is_covered(&attachment),
+            "metadata and the authoritative branch snapshot arrive before publication"
+        );
+        let rows = block_on(client.all(&prepared, opts)).expect("read covered branch snapshot");
+        assert_eq!(row_ids(&rows), vec![expected]);
+        client.detach_query(attachment);
+    };
+
+    read(branch_a, DurabilityTier::Global, row(0x44));
+    client
+        .node
+        .node
+        .borrow_mut()
+        .commit_mergeable_on_branch(
+            branch_a,
+            MergeableCommit::new("todos", row(0x46), 20).cells(cells(
+                "unsent local pending",
+                false,
+                client_author,
+            )),
+        )
+        .expect("stage an unsent local branch overlay");
+    read(branch_a, DurabilityTier::Edge, row(0x44));
+    read(branch_a, DurabilityTier::Global, row(0x44));
+    read(branch_b, DurabilityTier::Global, row(0x45));
+}
+
+#[test]
+fn empty_branch_subscription_reconnects_with_a_settlement_only_refresh() {
+    let schema = schema();
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let client = open_db(0xc1, client_author, &schema);
+    let branch = BranchId(uuid::Uuid::from_bytes([0x42; 16]));
+    server
+        .node()
+        .borrow_mut()
+        .create_branch_as(branch, client_author)
+        .expect("server creates matching branch metadata");
+    client
+        .create_branch_with_id(branch)
+        .expect("client creates matching branch metadata");
+
+    let (first_client_transport, first_server_transport) = duplex();
+    let first_upstream = client.connect_upstream(first_client_transport);
+    let _first_subscriber = server.accept_subscriber(first_server_transport, client_author);
+    let query = Query::from("todos");
+    let branch_opts = ReadOpts {
+        tier: DurabilityTier::Global,
+        local_updates: LocalUpdates::Deferred,
+        propagation: Propagation::Full,
+        read_view: branch_read_opts().read_view,
+        ..ReadOpts::default()
+    };
+    let mut subscription = prepared_subscribe(&client, &query, branch_opts).unwrap();
+    assert!(!event_settled(&block_on(subscription.next_raw()).unwrap()));
+
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+    let settled = subscription
+        .receiver
+        .try_recv()
+        .expect("the initial branch receipt must publish a settlement-only refresh");
+    assert!(event_settled(&settled));
+    let (added, updated, removed) = delta_rows(settled);
+    assert!(added.is_empty());
+    assert!(updated.is_empty());
+    assert!(removed.is_empty());
+
+    assert!(client.detach_connection(&first_upstream));
+    let disconnected = subscription
+        .receiver
+        .try_recv()
+        .expect("disconnect must publish a branch settlement demotion");
+    assert!(
+        !event_settled(&disconnected),
+        "disconnect must demote a branch Edge/Global subscription"
+    );
+
+    let (reconnected_client_transport, reconnected_server_transport) = duplex();
+    let _reconnected_upstream = client.connect_upstream(reconnected_client_transport);
+    let _reconnected_subscriber =
+        server.accept_subscriber(reconnected_server_transport, client_author);
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+    let resettled = subscription
+        .receiver
+        .try_recv()
+        .expect("a fresh branch receipt must publish a settlement-only refresh");
+    assert!(event_settled(&resettled));
+    let (added, updated, removed) = delta_rows(resettled);
+    assert!(added.is_empty());
+    assert!(updated.is_empty());
+    assert!(removed.is_empty());
+}
+
+#[test]
+fn dropping_a_branch_subscription_releases_its_upstream_coverage() {
+    let schema = schema();
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let client = open_db(0xc1, client_author, &schema);
+    client
+        .create_branch_with_id(BranchId(uuid::Uuid::from_bytes([0x42; 16])))
+        .expect("client creates branch metadata");
+    let baseline = client.runtime_stats_for_test().active_subscriptions;
+    let query = Query::from("todos");
+    let opts = ReadOpts {
+        tier: DurabilityTier::Global,
+        local_updates: LocalUpdates::Deferred,
+        propagation: Propagation::Full,
+        read_view: branch_read_opts().read_view,
+        ..ReadOpts::default()
+    };
+
+    let mut subscription = prepared_subscribe(&client, &query, opts).unwrap();
+    let _ = block_on(subscription.next_raw()).unwrap();
+    assert_eq!(
+        client.runtime_stats_for_test().active_subscriptions,
+        baseline + 1
+    );
+    assert_eq!(pending_upstream_subscribe_count(&client), 1);
+
+    drop(subscription);
+    assert_eq!(
+        client.runtime_stats_for_test().active_subscriptions,
+        baseline
+    );
+    assert_eq!(pending_upstream_unsubscribe_count(&client), 1);
 }
 
 #[test]
@@ -2135,6 +2724,34 @@ fn branch_read_view_relation_snapshot_uses_query_engine_relation_edges() {
     let schema = relation_schema();
     let db = open_db(0xc1, AuthorId::from_bytes([0xc1; 16]), &schema);
     let branch = BranchId(uuid::Uuid::from_bytes([0x42; 16]));
+    let root_versions = [
+        MergeableCommit::new("users", row(0xa1), 10).cells(BTreeMap::from([(
+            "name".to_owned(),
+            Value::String("alice".to_owned()),
+        )])),
+        MergeableCommit::new("todos", row(0x11), 11).cells(BTreeMap::from([
+            ("title".to_owned(), Value::String("root todo".to_owned())),
+            ("owner_id".to_owned(), Value::Uuid(row(0xa1).0)),
+        ])),
+    ];
+    for (sequence, commit) in root_versions.into_iter().enumerate() {
+        let tx = db
+            .node
+            .node
+            .borrow_mut()
+            .commit_mergeable(commit)
+            .expect("commit root relation row");
+        db.node
+            .node
+            .borrow_mut()
+            .apply_fate_update(
+                tx,
+                Fate::Accepted,
+                Some(GlobalSeq(sequence as u64 + 1)),
+                Some(DurabilityTier::Global),
+            )
+            .expect("globally accept root relation row");
+    }
     db.node
         .node
         .borrow_mut()
@@ -2147,21 +2764,10 @@ fn branch_read_view_relation_snapshot_uses_query_engine_relation_edges() {
             branch,
             MergeableCommit::new("users", row(0xa1), 10).cells(BTreeMap::from([(
                 "name".to_owned(),
-                Value::String("alice".to_owned()),
+                Value::String("branch alice".to_owned()),
             )])),
         )
-        .expect("commit branch user");
-    db.node
-        .node
-        .borrow_mut()
-        .commit_mergeable_on_branch(
-            branch,
-            MergeableCommit::new("todos", row(0x11), 11).cells(BTreeMap::from([
-                ("title".to_owned(), Value::String("branch todo".to_owned())),
-                ("owner_id".to_owned(), Value::Uuid(row(0xa1).0)),
-            ])),
-        )
-        .expect("commit branch todo");
+        .expect("replace only the source row in the branch overlay");
 
     let query = Query::from("users").array_subquery(ArraySubquery::new(
         "todosViaOwner",
@@ -2178,7 +2784,28 @@ fn branch_read_view_relation_snapshot_uses_query_engine_relation_edges() {
     assert!(snapshot.edges.is_empty());
     assert_eq!(
         terminal_nested_text_values(&snapshot, row(0xa1), "todosViaOwner", "title"),
-        vec!["branch todo".to_owned()]
+        vec!["root todo".to_owned()]
+    );
+    let binding = prepared_query
+        .shape()
+        .bind(BTreeMap::new())
+        .expect("bind relation snapshot shape");
+    let discriminators = db
+        .node
+        .node
+        .borrow_mut()
+        .query_relation_branch_discriminators_for_test(
+            prepared_query.shape(),
+            &binding,
+            DurabilityTier::Local,
+            db.identity.author,
+            &branch_read_opts().read_view,
+        )
+        .expect("inspect production relation-edge witnesses");
+    assert_eq!(
+        discriminators,
+        vec![(Some(branch.0), None)],
+        "the overlay source keeps its branch witness while the frozen target retains root lineage"
     );
 }
 
@@ -11033,7 +11660,7 @@ fn trusted_backend_discards_branch_metadata_once_and_recovers_it() {
 }
 
 #[test]
-fn subscriber_connection_serves_single_branch_read_view_subscription() {
+fn subscriber_connection_serves_branch_subscription_with_known_state_and_unsubscribe() {
     let schema = schema();
     let client_author = AuthorId::from_bytes([0xc1; 16]);
     let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
@@ -11089,20 +11716,50 @@ fn subscriber_connection_serves_single_branch_read_view_subscription() {
         .unwrap();
 
     subscriber.borrow_mut().tick().unwrap();
-    assert_subscribe_rejected_branch_overlay(
-        try_recv_subscriber_payload(client_transport.as_mut())
-            .expect("expected subscription rejection"),
-        subscription,
-    );
+    let initial = loop {
+        match try_recv_subscriber_payload(client_transport.as_mut()) {
+            Some(SyncMessage::BranchMetadata(_)) => continue,
+            Some(message) => break message,
+            None => panic!("expected initial branch view update"),
+        }
+    };
+    assert_view_update_for_subscription(initial, subscription);
+    client_transport
+        .send(SyncMessage::Subscribe(Subscribe {
+            shape_id: shape.shape_id(),
+            subscription,
+            values: Vec::new(),
+            known_state: Some(KnownStateDeclaration::Fast {
+                completeness: KnownStateCompleteness::FastCurrentMembership,
+                position: GlobalSeq::default(),
+            }),
+        }))
+        .unwrap();
     subscriber.borrow_mut().tick().unwrap();
+    let known_state_update = loop {
+        match try_recv_subscriber_payload(client_transport.as_mut()) {
+            Some(SyncMessage::BranchMetadata(_)) => continue,
+            Some(message) => break message,
+            None => panic!("known-state branch resubscribe must remain served"),
+        }
+    };
+    assert_view_update_for_subscription(known_state_update, subscription);
     client_transport
         .send(SyncMessage::Unsubscribe { subscription })
         .unwrap();
     subscriber.borrow_mut().tick().unwrap();
+    let subscriber_ref = subscriber.borrow();
+    let ConnectionLink::Subscriber { served, .. } = &subscriber_ref.link else {
+        unreachable!("expected subscriber link")
+    };
+    assert!(
+        !served.contains_key(&subscription),
+        "unsubscribing must retire the branch maintained view"
+    );
 }
 
 #[test]
-fn subscriber_connection_rejects_one_gapped_subscription_and_keeps_serving_others() {
+fn subscriber_connection_serves_branch_subscription_alongside_root_subscription() {
     let schema = schema();
     let owner = AuthorId::from_bytes([0xa1; 16]);
     let client_author = AuthorId::from_bytes([0xc1; 16]);
@@ -11173,18 +11830,20 @@ fn subscriber_connection_rejects_one_gapped_subscription_and_keeps_serving_other
         }))
         .unwrap();
     subscriber.borrow_mut().tick().unwrap();
-    assert_subscribe_rejected_branch_overlay(
-        try_recv_subscriber_payload(client_transport.as_mut())
-            .expect("expected branch subscription rejection"),
-        branch_subscription,
-    );
-    subscriber.borrow_mut().tick().unwrap();
+    let branch_update = loop {
+        match try_recv_subscriber_payload(client_transport.as_mut()) {
+            Some(SyncMessage::BranchMetadata(_)) => continue,
+            Some(message) => break message,
+            None => panic!("expected initial branch view update"),
+        }
+    };
+    assert_view_update_for_subscription(branch_update, branch_subscription);
 
     seed(&server, "todos", cells("second", false, owner));
     subscriber.borrow_mut().tick().unwrap();
     assert_view_update_for_subscription(
         try_recv_subscriber_payload(client_transport.as_mut())
-            .expect("expected supported update after rejection"),
+            .expect("expected supported update after branch admission"),
         supported_subscription,
     );
 }
@@ -12782,6 +13441,88 @@ fn one_shot_propagated_query_attaches_fresh_usage_subscription_for_covered_bindi
     assert_eq!(prepared_read(&client, &query).len(), 2);
     client.detach_query(first_attachment);
     client.detach_query(second_attachment);
+}
+
+/// Ensures a dormant propagated query coverage group releases its maintained
+/// server runtime receiver before the same logical query opens again.
+///
+/// This is intentionally an internal lifecycle test: the public query API can
+/// observe the later re-open, but cannot expose the authority's receiver
+/// count. The count is the exact ownership boundary that prevents a dropped
+/// one-shot handle from retaining stale maintained source state.
+///
+/// ```text
+/// client ──open coverage──► server maintained receiver
+/// client ──drop last handle► server receiver removed
+/// client ──re-open────────► exactly one fresh receiver
+/// ```
+#[test]
+fn final_query_coverage_drop_releases_server_maintained_receiver_before_reopen() {
+    let schema = schema();
+    let owner = AuthorId::from_bytes([0xa1; 16]);
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let client = open_db(0xc1, client_author, &schema);
+    seed(&server, "todos", cells("initial", false, owner));
+
+    let (client_transport, server_transport) = duplex();
+    let _upstream = client.connect_upstream(client_transport);
+    let _subscriber = server.accept_subscriber(server_transport, client_author);
+    let query = Query::from("todos");
+    let prepared = prepared(&client, &query);
+    let baseline_receivers = server
+        .node()
+        .borrow()
+        .runtime_stats_for_test()
+        .active_subscriptions;
+
+    let attachment = client
+        .attach_query_with_opts(&prepared, global_subscribe_opts())
+        .expect("attach propagated one-shot coverage");
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+    assert!(client.query_attachment_is_covered(&attachment));
+    assert_eq!(
+        server
+            .node()
+            .borrow()
+            .runtime_stats_for_test()
+            .active_subscriptions,
+        baseline_receivers + 1,
+        "the server owns one maintained receiver while coverage is live"
+    );
+
+    client.detach_query(attachment);
+    client.tick().unwrap();
+    server.tick().unwrap();
+    assert_eq!(
+        server
+            .node()
+            .borrow()
+            .runtime_stats_for_test()
+            .active_subscriptions,
+        baseline_receivers,
+        "dropping the final coverage handle must unregister its server receiver"
+    );
+
+    let reopened = client
+        .attach_query_with_opts(&prepared, global_subscribe_opts())
+        .expect("re-open propagated one-shot coverage");
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+    assert!(client.query_attachment_is_covered(&reopened));
+    assert_eq!(
+        server
+            .node()
+            .borrow()
+            .runtime_stats_for_test()
+            .active_subscriptions,
+        baseline_receivers + 1,
+        "re-open installs exactly one fresh maintained receiver"
+    );
+    client.detach_query(reopened);
 }
 
 #[test]

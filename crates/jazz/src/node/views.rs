@@ -12,9 +12,9 @@ use super::*;
 use crate::ids::SchemaVersionId;
 use crate::node::maintained_subscription_view::MaintainedSubscriptionView;
 use crate::protocol::{
-    KnownStateDeclaration, PeerPayloadInventory, ProgramFactEntry, ResultMemberEntry,
-    RowVersionRef, VersionBundle, VersionBundleRef, VersionCarrier, VersionRecord,
-    build_version_carriers_from_singletons,
+    ContributingMembersEntry, KnownStateDeclaration, PeerPayloadInventory, ProgramFactEntry,
+    RealRowMemberEntry, ResultMemberEntry, ResultRowSource, RowVersionRef, VersionBundle,
+    VersionBundleRef, VersionCarrier, VersionRecord, build_version_carriers_from_singletons,
 };
 
 fn maintained_view_tx_versions_contain_winner(
@@ -157,6 +157,12 @@ pub(crate) struct MaintainedViewBundleInputs<'a> {
     /// use refreshed rows as a write base for later exclusive transactions.
     pub(crate) complete_exclusive_payloads: bool,
     pub(crate) previous_result_set: BTreeSet<TxId>,
+    /// Facts previously admitted on this subscription. Result-to-contributor
+    /// admissions are retired with their result member, rather than becoming
+    /// a durable general-history grant.
+    pub(crate) previous_program_facts: BTreeSet<ProgramFactEntry>,
+    /// Declared flat-join source table for each contributor position.
+    pub(crate) flat_tuple_source_tables: Vec<String>,
     pub(crate) result_member_adds: Vec<ResultMemberEntry>,
     pub(crate) result_member_removes: Vec<ResultMemberEntry>,
     pub(crate) program_fact_adds: Vec<ProgramFactEntry>,
@@ -332,6 +338,8 @@ where
             known_state: None,
             complete_exclusive_payloads: false,
             previous_result_set,
+            previous_program_facts: BTreeSet::new(),
+            flat_tuple_source_tables: Vec::new(),
             identity,
             tier,
             maintained_facts: &maintained,
@@ -354,13 +362,85 @@ where
             result_member_adds,
             result_member_removes,
             mut program_fact_adds,
-            program_fact_removes,
+            mut program_fact_removes,
+            previous_program_facts,
+            flat_tuple_source_tables,
             identity: _identity,
             tier: _tier,
             maintained_facts,
             allow_storage_witness_fallback,
         } = inputs;
         program_fact_adds.extend(maintained_facts.payload_facts_for_members(&result_member_adds));
+        let tuple_source_versions = maintained_facts.tuple_source_versions_for_members(
+            &maintained_facts.active_result_members(),
+            &flat_tuple_source_tables,
+        );
+        let mut desired_tuple_source_facts = BTreeMap::new();
+        for (result, source_index, maintained_version) in &tuple_source_versions {
+            let canonical =
+                self.canonical_history_version_for_maintained_witness(&maintained_version)?;
+            let tx = self.version_tx_id(&canonical)?;
+            let schema_version = self
+                .schema_version_for_alias(canonical.schema_version_alias())
+                .ok_or(Error::InvalidStoredValue(
+                    "flat tuple source witness schema version alias must exist",
+                ))?;
+            let stored_tx = self
+                .query_transaction(tx)?
+                .ok_or(Error::MissingTransaction(tx))?;
+            let mut contributor = RealRowMemberEntry::current_content((
+                canonical.table.clone(),
+                canonical.row_uuid(),
+                tx,
+            ));
+            contributor.schema_version = Some(schema_version);
+            if let BranchLineage::Branch(branch) = stored_tx.tx.target_lineage {
+                contributor.branch_or_prefix = Some(branch.to_bytes());
+                contributor.source = ResultRowSource::Branch { branch: branch.0 };
+            }
+            let fact = ProgramFactEntry::ContributingMembers(ContributingMembersEntry {
+                result: result.clone(),
+                contributor: contributor.into(),
+                batch: Some(tx),
+                role: Some(format!("flat_tuple_source:{source_index}")),
+            });
+            desired_tuple_source_facts.insert(fact, maintained_version.clone());
+        }
+        let previous_tuple_source_facts = previous_program_facts
+            .into_iter()
+            .filter(|fact| {
+                matches!(
+                    fact,
+                    ProgramFactEntry::ContributingMembers(contribution)
+                        if contribution
+                            .role
+                            .as_deref()
+                            .is_some_and(|role| role.starts_with("flat_tuple_source:"))
+                )
+            })
+            .collect::<BTreeSet<_>>();
+        let tuple_source_bundle_rows = desired_tuple_source_facts
+            .iter()
+            .filter(|(fact, _)| !previous_tuple_source_facts.contains(*fact))
+            .map(|(_, version)| {
+                Ok((
+                    version.table().to_owned(),
+                    version.row_uuid(),
+                    self.version_tx_id(version)?,
+                ))
+            })
+            .collect::<Result<BTreeSet<_>, Error>>()?;
+        program_fact_adds.extend(
+            desired_tuple_source_facts
+                .keys()
+                .filter(|fact| !previous_tuple_source_facts.contains(*fact))
+                .cloned(),
+        );
+        program_fact_removes.extend(
+            previous_tuple_source_facts
+                .into_iter()
+                .filter(|fact| !desired_tuple_source_facts.contains_key(fact)),
+        );
         let program_fact_adds = program_fact_adds
             .into_iter()
             .collect::<BTreeSet<_>>()
@@ -398,6 +478,26 @@ where
             )
             | None => BTreeSet::new(),
         };
+        // Exact-known declarations name canonical authored versions, while the
+        // maintained source index is keyed by its read-schema table label.
+        // Translate that declaration back to the source label used to select
+        // bundle bodies (e.g. canonical `users` -> maintained `people`).
+        let mut known_tuple_source_bundle_rows = BTreeSet::new();
+        for (_, _, maintained_version) in &tuple_source_versions {
+            let canonical =
+                self.canonical_history_version_for_maintained_witness(maintained_version)?;
+            let tx = self.version_tx_id(&canonical)?;
+            if known_state_exact_refs.contains(&RowVersionRef::new(
+                canonical.table().to_owned(),
+                canonical.row_uuid(),
+                tx,
+            )) {
+                known_tuple_source_bundle_rows.insert((
+                    maintained_version.table().to_owned(),
+                    maintained_version.row_uuid(),
+                ));
+            }
+        }
         let skipped_known_state_rows = result_member_adds
             .iter()
             .filter_map(|member| {
@@ -417,12 +517,18 @@ where
                 }
                 None
             })
+            .chain(known_tuple_source_bundle_rows)
             .collect::<BTreeSet<_>>();
         let relation_edge_add_rows = relation_edge_version_rows_for_bundle(&program_fact_adds);
         let wanted_add_rows_by_tx = row_result_adds
             .iter()
             .map(|(table, row_uuid, tx_id)| (table.to_string(), *row_uuid, *tx_id))
             .chain(relation_edge_add_rows)
+            // The contributor fact names canonical authored history; the
+            // maintained index is keyed by the source graph's read-schema
+            // label. Ship that exact retained witness and normalize it to
+            // canonical history only at the wire boundary below.
+            .chain(tuple_source_bundle_rows)
             .fold(
                 BTreeMap::<TxId, BTreeSet<(String, RowUuid)>>::new(),
                 |mut by_tx, (table, row_uuid, tx_id)| {
@@ -737,6 +843,29 @@ where
         }
         if self.initial_sync_flush_active && self.query.initial_hydration_binding_views.is_empty() {
             self.finish_initial_sync_flush_cadence()?;
+        }
+        Ok(())
+    }
+
+    /// Materialize sparse branch storage before a trusted receiver batch can
+    /// stage its branch-target versions. The branch metadata gate runs before
+    /// this path, so a receiver only provisions a partition for content it is
+    /// already allowed to name. Keeping this before the batch is essential:
+    /// the physical history table must be durable before a ViewUpdate can make
+    /// its version witness public to a maintained subscription.
+    pub(crate) fn prepare_view_update_branch_partitions(
+        &mut self,
+        updates: &[ViewUpdateParts],
+    ) -> Result<(), Error>
+    where
+        S: ReopenableStorage,
+    {
+        for update in updates {
+            for bundle in
+                version_bundle_refs_for_carriers(&update.version_bundles, &update.version_carriers)?
+            {
+                self.prepare_branch_target_partitions_if_ready(&bundle.tx, bundle.versions)?;
+            }
         }
         Ok(())
     }

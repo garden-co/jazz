@@ -404,6 +404,38 @@ impl MaintainedSubscriptionView {
         self.versions.versions_by_tx(tx_id)
     }
 
+    /// Source records whose row identities occur in visible flat tuples.
+    /// The caller resolves each maintained record back to its authored history
+    /// version before publishing the result-to-contributor admission fact.
+    pub(crate) fn tuple_source_versions_for_members(
+        &self,
+        members: &[ResultMemberEntry],
+        source_tables: &[String],
+    ) -> Vec<(ResultMemberEntry, usize, VersionRow)> {
+        let mut tuples = Vec::new();
+        for member in members {
+            let Some(occurrence) = member.output_occurrence_id() else {
+                continue;
+            };
+            for (source_index, source) in occurrence.joined_sources().iter().enumerate() {
+                let Some(source_table) = source_tables.get(source_index) else {
+                    continue;
+                };
+                let source_row = RowUuid(*source.uuid());
+                for weighted in self.versions.by_identity.values() {
+                    if weighted.weight > 0
+                        && weighted.row.deletion().is_none()
+                        && weighted.row.table() == source_table
+                        && weighted.row.row_uuid() == source_row
+                    {
+                        tuples.push((member.clone(), source_index, weighted.row.clone()));
+                    }
+                }
+            }
+        }
+        tuples
+    }
+
     pub(crate) fn replacement_for(
         &self,
         table: &str,
@@ -485,6 +517,17 @@ impl MaintainedSubscriptionView {
             .filter_map(|member| self.result_payloads.get(member))
             .cloned()
             .map(ProgramFactEntry::ResultPayload)
+            .collect()
+    }
+
+    /// Current positive result memberships, including unchanged members during
+    /// a non-reset rehydrate. Tuple-source admissions are a closure over this
+    /// set, not merely over the membership delta.
+    pub(crate) fn active_result_members(&self) -> Vec<ResultMemberEntry> {
+        self.result_weights
+            .iter()
+            .filter(|(_, weight)| **weight > 0)
+            .map(|(member, _)| member.clone())
             .collect()
     }
 
@@ -1313,12 +1356,32 @@ fn decode_relation_edge_version(
         .ok_or(super::Error::InvalidStoredValue(
             "relation edge tx node alias must exist",
         ))?;
+    let branch_or_prefix = schema
+        .branch_or_prefix_field
+        .as_deref()
+        .map(|field| match record.get_idx(field_idx(record, field)?)? {
+            Value::Uuid(value) => Ok(value.as_bytes().to_vec()),
+            Value::Bytes(value) => Ok(value),
+            Value::Nullable(Some(value)) => match *value {
+                Value::Uuid(value) => Ok(value.as_bytes().to_vec()),
+                Value::Bytes(value) => Ok(value),
+                _ => Err(super::Error::InvalidStoredValue(
+                    "relation edge branch discriminator must be UUID or bytes",
+                )),
+            },
+            Value::Nullable(None) => Ok(Vec::new()),
+            _ => Err(super::Error::InvalidStoredValue(
+                "relation edge branch discriminator must be UUID or bytes",
+            )),
+        })
+        .transpose()?
+        .filter(|bytes| !bytes.is_empty());
     Ok(Some(RowVersionRefEntry {
         tx: TxId::new(tx_time, tx_node),
         schema_version: None,
         layer: ResultRowLayer::Content,
         batch: None,
-        branch_or_prefix: None,
+        branch_or_prefix,
         row_digest: None,
     }))
 }
@@ -1979,6 +2042,121 @@ mod tests {
 
     fn aliases() -> BTreeMap<NodeUuid, NodeAlias> {
         BTreeMap::from([(node(1), NodeAlias(10)), (node(2), NodeAlias(20))])
+    }
+
+    /// Production-shaped typed relation facts retain branch identity through
+    /// decode, initial/reset installation, and ordinary removal.
+    #[test]
+    fn typed_branch_relation_edge_decodes_adds_and_removes_with_discriminator() {
+        use crate::node::query_engine::{ContentVersionFields, RowRefSchema};
+
+        let descriptor = RecordDescriptor::new([
+            ("source_table", ValueType::String),
+            ("source_row", ValueType::Uuid),
+            ("source_tx_time", ValueType::U64),
+            ("source_tx_node_id", ValueType::U64),
+            ("source_branch_or_prefix", ValueType::Uuid),
+            ("path", ValueType::String),
+            ("target_table", ValueType::String),
+            ("target_row", ValueType::Uuid),
+            ("target_tx_time", ValueType::U64),
+            ("target_tx_node_id", ValueType::U64),
+            ("target_branch_or_prefix", ValueType::Uuid),
+        ]);
+        let branch = uuid::Uuid::from_bytes([0xb1; 16]);
+        let raw = descriptor
+            .create(&[
+                Value::String("posts".to_owned()),
+                Value::Uuid(row(0xb2).0),
+                Value::U64(11),
+                Value::U64(10),
+                Value::Uuid(branch),
+                Value::String("author".to_owned()),
+                Value::String("users".to_owned()),
+                Value::Uuid(row(0xb3).0),
+                Value::U64(12),
+                Value::U64(10),
+                Value::Uuid(branch),
+            ])
+            .expect("encode typed branch relation edge");
+        let versioned = |prefix: &str| VersionedRowRefSchema {
+            row: RowRefSchema {
+                source_field: format!("{prefix}_source"),
+                table_field: format!("{prefix}_table"),
+                row_field: format!("{prefix}_row"),
+            },
+            version: Some(ResultMembershipVersionSchema::Content(
+                ContentVersionFields {
+                    tx_time_field: format!("{prefix}_tx_time"),
+                    tx_node_field: format!("{prefix}_tx_node_id"),
+                },
+            )),
+            branch_or_prefix_field: Some(format!("{prefix}_branch_or_prefix")),
+        };
+        let schema = RelationEdgeSchema {
+            source: versioned("source"),
+            path_field: "path".to_owned(),
+            target: versioned("target"),
+            kind_field: "kind".to_owned(),
+            depth_field: None,
+            edge_id_field: None,
+            branch_field: None,
+            role_field: None,
+            order_field: None,
+            hole_state_field: None,
+        };
+        let tables = BTreeMap::from([
+            (
+                "posts".to_owned(),
+                TableSchema::new("posts", [ColumnSchema::new("title", ColumnType::String)]),
+            ),
+            (
+                "users".to_owned(),
+                TableSchema::new("users", [ColumnSchema::new("name", ColumnType::String)]),
+            ),
+        ]);
+        let edge = decode_typed_relation_edge(
+            BorrowedRecord::new(&raw, &descriptor),
+            &schema,
+            &tables,
+            &aliases(),
+        )
+        .expect("decode production-shaped branch edge");
+        assert_eq!(
+            edge.target_version
+                .as_ref()
+                .and_then(|version| version.branch_or_prefix.as_deref()),
+            Some(branch.as_bytes().as_slice())
+        );
+
+        let fact = ProgramFactEntry::RelationEdge(edge);
+        let mut maintained = MaintainedSubscriptionView::default();
+        let reset = maintained
+            .apply_decoded_deltas(
+                [(
+                    DecodedMaintainedEvent::RelationEdge(match &fact {
+                        ProgramFactEntry::RelationEdge(edge) => edge.clone(),
+                        _ => unreachable!(),
+                    }),
+                    1,
+                )],
+                &aliases(),
+            )
+            .expect("install reset edge");
+        assert_eq!(reset.program_fact_adds, vec![fact.clone()]);
+        let remove = maintained
+            .apply_decoded_deltas(
+                [(
+                    DecodedMaintainedEvent::RelationEdge(match &fact {
+                        ProgramFactEntry::RelationEdge(edge) => edge.clone(),
+                        _ => unreachable!(),
+                    }),
+                    -1,
+                )],
+                &aliases(),
+            )
+            .expect("remove branch edge");
+        assert_eq!(remove.program_fact_removes, vec![fact]);
     }
 
     #[test]

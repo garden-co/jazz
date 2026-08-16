@@ -33,9 +33,9 @@ use crate::ids::{
 };
 use crate::protocol::{
     BindingViewKey, CurrentWriteSchema, LensOp, MigrationLens, ProgramFactEntry, ReadViewKey,
-    ResultMemberEntry, ResultRowEntry, RowVersionRef, SchemaLineagePublication, SchemaVersion,
-    ShapeAst, Subscribe, SubscriptionKey, SyncMessage, VersionBundle, VersionCarrier,
-    VersionRecord, ViewFactEntry, expand_version_carriers,
+    RealRowMemberEntry, ResultMemberEntry, ResultRowEntry, RowVersionRef, SchemaLineagePublication,
+    SchemaVersion, ShapeAst, Subscribe, SubscriptionKey, SyncMessage, VersionBundle,
+    VersionCarrier, VersionRecord, ViewFactEntry, expand_version_carriers,
 };
 use crate::query::{Binding, BindingId, QueryError, ShapeId, ValidatedQuery};
 use crate::schema::{
@@ -2925,6 +2925,7 @@ where
     }
 
     pub(crate) fn require_catalogue_ready(&self) -> Result<(), Error> {
+        self.database.ensure_usable()?;
         if self.catalogue_bootstrap_state == CatalogueBootstrapState::Uninitialized {
             return Err(Error::CatalogueUninitialized);
         }
@@ -5196,19 +5197,30 @@ where
         }
         for (table, row_uuid, tx_id) in program_fact_adds
             .iter()
-            .filter_map(|fact| match fact {
-                ProgramFactEntry::RelationEdge(edge) => Some(edge),
-                _ => None,
-            })
-            .flat_map(|edge| {
-                [
+            .flat_map(|fact| match fact {
+                ProgramFactEntry::RelationEdge(edge) => vec![
                     edge.source_version.as_ref().map(|version| {
                         (edge.source_table.to_string(), edge.source_row, version.tx)
                     }),
                     edge.target_version.as_ref().map(|version| {
                         (edge.target_table.to_string(), edge.target_row, version.tx)
                     }),
-                ]
+                ],
+                ProgramFactEntry::ContributingMembers(contribution)
+                    if contribution
+                        .role
+                        .as_deref()
+                        .is_some_and(|role| role.starts_with("flat_tuple_source:")) =>
+                {
+                    vec![
+                        contribution
+                            .contributor
+                            .as_real_row()
+                            .and_then(RealRowMemberEntry::row_projection)
+                            .map(|(table, row, tx)| (table.to_string(), row, tx)),
+                    ]
+                }
+                _ => Vec::new(),
             })
             .flatten()
         {
@@ -5249,7 +5261,34 @@ where
         // is carried by a registered subscription whose schema version makes
         // a reused logical table name unambiguous.
         let requested_table_id =
-            self.physical_table_id_for_schema(result_schema_version, &request.table)?;
+            match self.physical_table_id_for_schema(result_schema_version, &request.table) {
+                Ok(table_id) => table_id,
+                Err(Error::TableNotFound(_)) => {
+                    // Contributor facts deliberately name their authored table,
+                    // which may have been renamed out of the current result
+                    // schema. An inline body can cover it only when that old name
+                    // still has a unique physical lineage across the catalogue.
+                    let candidates = self
+                        .catalogue
+                        .physical_mappings
+                        .values()
+                        .filter_map(|mapping| {
+                            mapping
+                                .tables
+                                .get(request.table.as_str())
+                                .map(|table| table.table_id)
+                        })
+                        .collect::<BTreeSet<_>>();
+                    if candidates.is_empty() {
+                        return Err(Error::TableNotFound(request.table.to_string()));
+                    }
+                    if candidates.len() != 1 {
+                        return Ok(false);
+                    }
+                    *candidates.iter().next().expect("unique candidate")
+                }
+                Err(error) => return Err(error),
+            };
         Ok(incoming_versions.iter().any(|(incoming_tx, version)| {
             *incoming_tx == request.tx_id()
                 && version.row_uuid() == request.row_uuid

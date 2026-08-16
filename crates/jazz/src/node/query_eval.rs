@@ -36,7 +36,7 @@ use super::query_engine::{
     ReachableContribution, ReadView, RequestedReadSet, RequestedSourceStage, ResolvedSource,
     ResultId, ResultMembershipVersionSchema, ResultRowRef, RowIdRef, RowProjection,
     RowRefSchema as QueryEngineRowRefSchema, RowSetExpr, RowSetNodeId, RowSetOutputRequest,
-    RowSetProgramInput, RowVisibility, SchemaFamilySelection, SchemaProjection,
+    RowSetProgramInput, RowVisibility, SchemaFamilySelection, SchemaProjection, SettledBindingRows,
     SortDirection as NormalizedSortDirection, SourceAuthorizationRequest, SourceExpr, SourceGap,
     SourceId, SourceMetadataFields, SourceMetadataRequirement, SourcePath, SourceRequest,
     SourceRequirements, SourceResolutionError, SourceResolver, SourceRole, SourceRowShape,
@@ -50,8 +50,8 @@ use crate::protocol::{
     AuthorizationOperationKey, AuthorizationScopeOperation, AuthorizationSupportScopeKey,
     BindingViewKey, KnownStateCompleteness, KnownStateDeclaration, PermissionAdviceAction,
     ProgramFactEntry, ReadViewKey, ReadViewSourceSpec, ReadViewSpec, RegisterShapeOptions,
-    ResultMemberEntry, ResultMemberPayloadEntry, RowVersionRef, ShapeAst, ShapeBody, Subscribe,
-    SubscriptionKey, SyntheticReplacementToken,
+    RelationEdgeEntry, ResultMemberEntry, ResultMemberPayloadEntry, ResultRowLayer, RowVersionRef,
+    RowVersionRefEntry, ShapeAst, ShapeBody, Subscribe, SubscriptionKey, SyntheticReplacementToken,
 };
 use crate::protocol_limits::MAX_KNOWN_STATE_EXACT_REFS;
 use crate::query::{
@@ -706,6 +706,7 @@ fn row_ref_fields(schema: &QueryEngineRowRefSchema) -> Vec<String> {
 
 fn versioned_row_ref_fields(schema: &VersionedRowRefSchema) -> Vec<String> {
     let mut fields = row_ref_fields(&schema.row);
+    fields.extend(schema.branch_or_prefix_field.clone());
     if let Some(version) = &schema.version {
         fields.extend(result_membership_version_fields(version));
     }
@@ -773,6 +774,11 @@ enum CurrentQueryProgramOutput {
 struct CurrentQuerySourceResolver<'a, S> {
     node: &'a mut NodeState<S>,
     read_view: &'a ReadView<RequestedSourceStage>,
+    /// A maintained trusted subscription must remain connected when its first
+    /// branch write materializes a sparse partition.  It receives an empty
+    /// process-local source at compile time; the durable partition is still
+    /// published only by the first write.
+    prepare_branch_subscription_sources: bool,
     inline_sources: BTreeMap<SourceId, Vec<CurrentRow>>,
     access_paths: BTreeMap<SourceId, CurrentAccessPath>,
     /// Query-local enum boundary targets, keyed by logical source.  Defining
@@ -824,6 +830,7 @@ where
             SourceExpr::SettledBindingView {
                 projection,
                 binding_view,
+                rows,
             } => {
                 if request.visibility != RowVisibility::Visible {
                     return Err(source_resolution_error(request, SourceGap::Coverage));
@@ -841,6 +848,7 @@ where
                     &request.source.table,
                     self.read_view.read_schema,
                     *binding_view,
+                    *rows,
                 ) {
                     Ok(rows) => {
                         let table = self
@@ -1078,26 +1086,16 @@ where
                 .get(&branch_id)
                 .cloned()
                 .ok_or_else(|| source_resolution_error(request, SourceGap::Coverage))?;
-            let rows = self
-                .node
-                .branch_current_rows_for_schema(
-                    &request.source.table,
-                    &branch,
-                    self.read_view.read_schema,
-                )
-                .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
-            let schema_version_alias = self
-                .node
-                .ensure_schema_version_alias(self.read_view.read_schema)
-                .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
-            let (base, descriptor, metadata) = inline_branch_current_graph(
+            let source = self.branch_current_source_graph(
+                request,
                 &table,
-                rows,
-                schema_version_alias,
+                &branch,
                 branch_id,
-                &request.requirements,
-            )
-            .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
+                graph_tier.expect("branch-current source has a tier"),
+            )?;
+            let base = source.graph;
+            let descriptor = source.descriptor;
+            let metadata = source.metadata;
             let graph = match &authorization {
                 SourceAuthorizationRequest::System => base,
                 SourceAuthorizationRequest::PolicyFiltered {
@@ -1510,8 +1508,12 @@ where
         {
             return Err(source_resolution_error(request, SourceGap::Coverage));
         }
-        if branch_data.is_some() {
-            return Err(source_resolution_error(request, SourceGap::BranchOverlay));
+        if let Some(branch_id) = branch_data {
+            return Ok(Some(DeletionRegisterSource {
+                graph: self
+                    .branch_overlay_deletion_current_graph(request, table, branch_id, tier)?,
+                row_uuid_field: "row_uuid".to_owned(),
+            }));
         }
         if self.needs_projected_current_source(&request.source.table) {
             return Ok(Some(DeletionRegisterSource {
@@ -1559,7 +1561,12 @@ where
             return Err(source_resolution_error(request, SourceGap::Coverage));
         }
         if branch_data.is_some() {
-            return Err(source_resolution_error(request, SourceGap::BranchOverlay));
+            // The branch-current membership graph already carries the exact
+            // selected content witness (including its branch discriminator).
+            // Let the generic witness lowering consume that graph directly:
+            // a separate root-current sidecar would be both stale at the
+            // frozen base and capable of crossing branch identities.
+            return Ok(None);
         }
         if self.needs_projected_current_source(&request.source.table) {
             return Ok(Some(ContentVersionSource {
@@ -1602,6 +1609,265 @@ where
             .map_err(|_| source_resolution_error(request, SourceGap::HistoricalStorageCut))?;
         inline_current_graph(table, rows)
             .map_err(|_| source_resolution_error(request, SourceGap::HistoricalStorageCut))
+    }
+
+    /// Build the maintained input for one v1 branch-current source.
+    ///
+    /// The frozen root base is intentionally inline: no later root write may
+    /// move a branch's base.  The branch overlay, in contrast, stays wired to
+    /// its durable history and sparse deletion register so add/replace/delete/
+    /// restore events flow through the existing IVM subscription.  An overlay
+    /// content winner or a currently-deleted overlay row masks the frozen base;
+    /// a restored deletion without overlay content exposes that base again.
+    fn branch_current_source_graph(
+        &mut self,
+        request: &SourceRequest,
+        table: &TableSchema,
+        branch: &BranchRecord,
+        branch_id: BranchId,
+        tier: DurabilityTier,
+    ) -> Result<CurrentSourceGraph, SourceResolutionError> {
+        let base_rows = self
+            .node
+            .branch_base_rows_for_schema(&request.source.table, branch, self.read_view.read_schema)
+            .map_err(|_| source_resolution_error(request, SourceGap::BranchOverlay))?;
+        let base_rows = base_rows
+            .into_iter()
+            .map(|row| {
+                let tx_id = if let Some((time, alias)) = row.projected_tx_alias() {
+                    let node = self
+                        .node
+                        .node_aliases
+                        .iter()
+                        .find_map(|(node, candidate)| (*candidate == alias).then_some(*node))
+                        .ok_or_else(|| source_resolution_error(request, SourceGap::Coverage))?;
+                    TxId::new(time, node)
+                } else {
+                    let base = branch
+                        .base
+                        .as_ref()
+                        .ok_or_else(|| source_resolution_error(request, SourceGap::Coverage))?;
+                    self.node
+                        .historical_content_witness_at(
+                            &request.source.table,
+                            self.read_view.read_schema,
+                            row.row_uuid(),
+                            base.global_base,
+                        )
+                        .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?
+                        .ok_or_else(|| source_resolution_error(request, SourceGap::Coverage))?
+                };
+                let alias = self
+                    .node
+                    .node_aliases
+                    .get(&tx_id.node)
+                    .copied()
+                    .ok_or_else(|| source_resolution_error(request, SourceGap::Coverage))?;
+                Ok((row, tx_id.time, alias, None))
+            })
+            .collect::<Result<Vec<_>, SourceResolutionError>>()?;
+        let schema_version_alias = self
+            .node
+            .ensure_schema_version_alias(self.read_view.read_schema)
+            .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
+        let (frozen_base, descriptor, metadata) = inline_branch_current_graph(
+            table,
+            base_rows,
+            schema_version_alias,
+            &request.requirements,
+        )
+        .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
+
+        let table_id = self
+            .node
+            .physical_table_id_for_schema(self.read_view.read_schema, &request.source.table)
+            .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
+        if !self
+            .node
+            .branches
+            .branch_partitions
+            .contains(&(table_id, branch_id))
+            && self.prepare_branch_subscription_sources
+        {
+            self.node
+                .prepare_branch_subscription_source_partition(
+                    &request.source.table,
+                    self.read_view.read_schema,
+                    branch_id,
+                )
+                .map_err(|_| source_resolution_error(request, SourceGap::BranchOverlay))?;
+        }
+        // Metadata-only readers intentionally do not receive an empty source
+        // table: exposing only the frozen base until their first authorized
+        // witness avoids turning sparse partition existence into metadata.
+        if self
+            .node
+            .database
+            .table_schema(&physical_branch_history_table_name(table_id, branch_id))
+            .is_err()
+        {
+            return Ok(CurrentSourceGraph {
+                graph: frozen_base,
+                descriptor,
+                metadata,
+            });
+        }
+        let history_fields = maintained_view_history_storage_field_names(table);
+        let required_fields = self.current_projection_required_fields(request, table);
+        let projection_target = self
+            .node
+            .ensure_physical_branch_history_projection_for_enum_columns(
+                self.read_view.read_schema,
+                &request.source.table,
+                branch_id,
+                &required_fields,
+            )
+            .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
+        let overlay_content = GraphBuilder::arg_max_by(
+            tier_visible_branch_history_graph(
+                self.node
+                    .physical_branch_history_source_graph_with_projection_target(
+                        self.read_view.read_schema,
+                        &request.source.table,
+                        branch_id,
+                        projection_target,
+                    )
+                    .map_err(|_| source_resolution_error(request, SourceGap::BranchOverlay))?,
+                history_fields,
+                tier,
+            ),
+            ["row_uuid"],
+            ["tx_time", "tx_node_id"],
+        );
+        let overlay_deletion_winner =
+            self.branch_overlay_deletion_current_graph_for_table(table_id, branch_id, tier);
+        let deleted_overlay_rows = overlay_deletion_winner
+            .clone()
+            .filter(PredicateExpr::eq("_deletion", Value::EnumTag(0)))
+            .project(["row_uuid"]);
+        let overlay_visible = GraphBuilder::anti_join(
+            overlay_content.clone(),
+            deleted_overlay_rows.clone(),
+            ["row_uuid"],
+            ["row_uuid"],
+        );
+        let overlay_masks_base = GraphBuilder::union([
+            overlay_content.clone().project(["row_uuid"]),
+            deleted_overlay_rows,
+        ]);
+        let frozen_base =
+            GraphBuilder::anti_join(frozen_base, overlay_masks_base, ["row_uuid"], ["row_uuid"]);
+
+        // The durable content carrier uses storage names; normalize it to the
+        // same descriptor as the frozen-base records before their union.
+        let mut normalized = vec![ProjectField::named("row_uuid")];
+        normalized.extend(
+            table
+                .columns
+                .iter()
+                .map(|column| ProjectField::named(user_column_field(&column.name))),
+        );
+        normalized.extend([
+            ProjectField::renamed("created_by", "$createdBy"),
+            ProjectField::renamed("created_at", "$createdAt"),
+            ProjectField::renamed("updated_by", "$updatedBy"),
+            ProjectField::renamed("updated_at", "$updatedAt"),
+            ProjectField::named("tx_time"),
+            ProjectField::named("tx_node_id"),
+        ]);
+        if metadata.contains_key(&SourceMetadataRequirement::VersionWitnesses) {
+            normalized.extend([
+                ProjectField::literal("table", Value::String(table.name.clone())),
+                ProjectField::literal("layer", Value::String("content".to_owned())),
+                ProjectField::named("schema_version"),
+                ProjectField::named("parents"),
+                ProjectField::renamed("created_by", "created_by"),
+                ProjectField::renamed("created_at", "created_at"),
+                ProjectField::renamed("updated_by", "updated_by"),
+                ProjectField::renamed("updated_at", "updated_at"),
+                ProjectField::named("authored_columns"),
+                ProjectField::literal(
+                    "branch_id",
+                    Value::Nullable(Some(Box::new(Value::Uuid(branch_id.0)))),
+                ),
+            ]);
+        }
+        if metadata.contains_key(&SourceMetadataRequirement::Coverage) {
+            normalized.push(ProjectField::literal(
+                "coverage",
+                Value::String("branch-current".to_owned()),
+            ));
+        }
+        if metadata.contains_key(&SourceMetadataRequirement::SettlePosition) {
+            normalized.push(ProjectField::null_typed(
+                "settle_position",
+                ValueType::Nullable(Box::new(ValueType::U64)),
+            ));
+        }
+        // Keep this assertion close to the union: a metadata expansion must
+        // update both branches together instead of silently stripping a
+        // witness from live overlay rows.
+        debug_assert_eq!(
+            descriptor
+                .fields()
+                .iter()
+                .map(|field| field.name.as_deref())
+                .collect::<Vec<_>>(),
+            normalized
+                .iter()
+                .map(|field| Some(field.output_name.as_str()))
+                .collect::<Vec<_>>(),
+        );
+        let overlay_visible = overlay_visible.project_fields(normalized);
+        Ok(CurrentSourceGraph {
+            graph: GraphBuilder::union([frozen_base, overlay_visible]),
+            descriptor,
+            metadata,
+        })
+    }
+
+    fn branch_overlay_deletion_current_graph(
+        &mut self,
+        request: &SourceRequest,
+        table: &TableSchema,
+        branch_id: BranchId,
+        tier: DurabilityTier,
+    ) -> Result<GraphBuilder, SourceResolutionError> {
+        let table_id = self
+            .node
+            .physical_table_id_for_schema(self.read_view.read_schema, &request.source.table)
+            .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
+        let _ = table;
+        Ok(self.branch_overlay_deletion_current_graph_for_table(table_id, branch_id, tier))
+    }
+
+    fn branch_overlay_deletion_current_graph_for_table(
+        &self,
+        table_id: PhysicalTableId,
+        branch_id: BranchId,
+        tier: DurabilityTier,
+    ) -> GraphBuilder {
+        GraphBuilder::arg_max_by(
+            tier_visible_branch_history_graph(
+                GraphBuilder::table(SHARED_DELETION_HISTORY_TABLE).filter(
+                    PredicateExpr::And(vec![
+                        PredicateExpr::eq("branch_kind", Value::U8(1)),
+                        PredicateExpr::eq("branch_id", Value::Uuid(branch_id.0)),
+                        PredicateExpr::eq("physical_table_id", Value::U64(table_id.0)),
+                    ])
+                    .canonicalize(),
+                ),
+                register_storage_field_names(),
+                tier,
+            ),
+            ["row_uuid"],
+            ["tx_time", "tx_node_id"],
+        )
+        .project_fields(
+            register_storage_fields_for_query_engine("")
+                .into_iter()
+                .chain([ProjectField::literal("branch_id", Value::Uuid(branch_id.0))]),
+        )
     }
 
     fn projected_maintained_visible_current_source_graph(
@@ -1917,6 +2183,52 @@ fn edge_visible_ahead_current_source_graph(
                 ])
                 .canonicalize(),
             )
+            .project(["time", "node_id"]),
+        ["tx_time", "tx_node_id"],
+        ["time", "node_id"],
+    )
+    .project_fields(
+        fields
+            .into_iter()
+            .map(|field| ProjectField::renamed(left_field(&field), field)),
+    )
+}
+
+/// Select branch overlay history by the same fate/durability contract as a
+/// root current read before choosing the row winner. Branch partitions retain
+/// raw history after rejection, so winner selection over the unfiltered table
+/// would expose pending rows at Edge/Global and let a rejected latest version
+/// continue masking an earlier accepted winner.
+fn tier_visible_branch_history_graph(
+    source: GraphBuilder,
+    fields: Vec<String>,
+    tier: DurabilityTier,
+) -> GraphBuilder {
+    let eligible = match tier {
+        DurabilityTier::None | DurabilityTier::Local => PredicateExpr::Or(vec![
+            PredicateExpr::eq("fate", Value::EnumTag(FateTag::Pending as u8)),
+            PredicateExpr::eq("fate", Value::EnumTag(FateTag::Accepted as u8)),
+        ])
+        .canonicalize(),
+        DurabilityTier::Edge => PredicateExpr::And(vec![
+            PredicateExpr::eq("fate", Value::EnumTag(FateTag::Accepted as u8)),
+            PredicateExpr::Or(vec![
+                PredicateExpr::eq("durability", Value::EnumTag(2)),
+                PredicateExpr::eq("durability", Value::EnumTag(3)),
+            ])
+            .canonicalize(),
+        ])
+        .canonicalize(),
+        DurabilityTier::Global => PredicateExpr::And(vec![
+            PredicateExpr::eq("fate", Value::EnumTag(FateTag::Accepted as u8)),
+            PredicateExpr::eq("durability", Value::EnumTag(3)),
+        ])
+        .canonicalize(),
+    };
+    GraphBuilder::join(
+        source.project(fields.clone()),
+        GraphBuilder::table("jazz_transactions")
+            .filter(eligible)
             .project(["time", "node_id"]),
         ["tx_time", "tx_node_id"],
         ["time", "node_id"],
@@ -2567,7 +2879,10 @@ fn current_row_descriptor_with_hidden_source_fields(
             ..
         }) = metadata.get(&SourceMetadataRequirement::VersionWitnesses)
         {
-            fields.push((field.clone(), ValueType::Uuid));
+            fields.push((
+                field.clone(),
+                ValueType::Nullable(Box::new(ValueType::Uuid)),
+            ));
         }
     }
     if metadata.contains_key(&SourceMetadataRequirement::Coverage) {
@@ -5531,24 +5846,25 @@ where
             let ProgramFactEntry::RelationEdge(edge) = fact else {
                 continue;
             };
-            edges.push(RelationEdge {
-                source_table: edge.source_table.to_string(),
-                source_row: edge.source_row,
-                relation: edge.path.clone(),
-                target_table: edge.target_table.to_string(),
-                target_row: edge.target_row,
-            });
-            if row_keys.insert((edge.target_table.to_string(), edge.target_row))
+            // Program facts retain canonical authored identity.  The public
+            // relation snapshot, including its removal index, is keyed in the
+            // subscription read schema; project the edge identity alongside
+            // the row it references rather than mixing canonical `users`
+            // with a materialized `people` row.
+            let read_edge =
+                self.project_relation_edge_through_read_schema(&edge, shape.schema_version())?;
+            if row_keys.insert((read_edge.target_table.clone(), read_edge.target_row))
                 && let Some(version) = &edge.target_version
                 && let Some(row) = self.materialize_authoritative_reset_relation_edge_target(
                     shape.schema_version(),
                     edge.target_table.as_str(),
                     edge.target_row,
-                    version.tx,
+                    version,
                 )?
             {
                 rows.push(row);
             }
+            edges.push(read_edge);
         }
         Ok(Some(RelationSnapshot {
             root_count,
@@ -5683,28 +5999,197 @@ where
         read_schema: SchemaVersionId,
         target_table_name: &str,
         target_row: RowUuid,
-        tx_id: TxId,
+        version_ref: &RowVersionRefEntry,
     ) -> Result<Option<CurrentRow>, Error> {
-        let target_table = self
-            .table_in_schema(target_table_name, read_schema)?
+        let version =
+            self.resolve_relation_edge_version(target_table_name, target_row, version_ref)?;
+        // Relation-edge facts retain the canonical authored table name.  A
+        // read schema can have renamed that table, so resolving the edge name
+        // directly against the read descriptor would reject an otherwise
+        // complete canonical witness before the lens gets a chance to map it.
+        // Resolve and project the immutable version first, then select the
+        // projected table from the read schema.
+        let authored_schema = self
+            .schema_version_for_alias(version.schema_version_alias())
+            .ok_or(Error::InvalidStoredValue(
+                "relation edge witness schema version alias must exist",
+            ))?;
+        let authored_table = self
+            .table_in_schema(version.table(), authored_schema)?
             .clone();
-        let Some(tx_node_alias) = self.node_aliases.get(&tx_id.node).copied() else {
-            return Err(Error::MissingTransaction(tx_id));
-        };
-        let Some(version) = self.query_version_by_alias(
-            target_table_name,
-            target_row,
-            VersionLayer::Content,
-            tx_id.time,
-            tx_node_alias,
-        )?
+        let mut cells = self.materialized_cells_for_version(&authored_table, &version)?;
+        let Some(projected_table_name) =
+            self.translate_cells(authored_schema, read_schema, version.table(), &mut cells)?
         else {
-            if self.query_transaction(tx_id)?.is_some() {
-                return Ok(None);
-            }
-            return Err(Error::MissingTransaction(tx_id));
+            return Ok(None);
         };
-        self.projected_current_row_from_materialized_version(&target_table, read_schema, &version)
+        let projected_table = self
+            .table_in_schema(&projected_table_name, read_schema)?
+            .clone();
+        current_row_from_materialized_cells(&projected_table, &version, &cells).map(Some)
+    }
+
+    /// Project a canonical maintained relation fact into the public read
+    /// schema. The fact itself remains canonical in `program_facts`; this
+    /// derived identity is only for the materialized snapshot and its local
+    /// add/remove indexes.
+    fn project_relation_edge_through_read_schema(
+        &mut self,
+        edge: &RelationEdgeEntry,
+        read_schema: SchemaVersionId,
+    ) -> Result<RelationEdge, Error> {
+        Ok(RelationEdge {
+            source_table: self.project_relation_edge_table_through_read_schema(
+                edge.source_table.as_str(),
+                edge.source_row,
+                edge.source_version.as_ref(),
+                read_schema,
+            )?,
+            source_row: edge.source_row,
+            relation: edge.path.clone(),
+            target_table: self.project_relation_edge_table_through_read_schema(
+                edge.target_table.as_str(),
+                edge.target_row,
+                edge.target_version.as_ref(),
+                read_schema,
+            )?,
+            target_row: edge.target_row,
+        })
+    }
+
+    fn project_relation_edge_table_through_read_schema(
+        &mut self,
+        canonical_table: &str,
+        row_uuid: RowUuid,
+        version_ref: Option<&RowVersionRefEntry>,
+        read_schema: SchemaVersionId,
+    ) -> Result<String, Error> {
+        let Some(version_ref) = version_ref else {
+            // A fact without a concrete version is already required to name
+            // the read view. Never relabel it optimistically.
+            self.table_in_schema(canonical_table, read_schema)?;
+            return Ok(canonical_table.to_owned());
+        };
+        let version = self.resolve_relation_edge_version(canonical_table, row_uuid, version_ref)?;
+        let authored_schema = self
+            .schema_version_for_alias(version.schema_version_alias())
+            .ok_or(Error::InvalidStoredValue(
+                "relation edge witness schema version alias must exist",
+            ))?;
+        let mut cells = BTreeMap::new();
+        self.translate_cells(authored_schema, read_schema, version.table(), &mut cells)?
+            .ok_or(Error::InvalidStoredValue(
+                "relation edge witness does not project into the read schema",
+            ))
+    }
+
+    /// Resolve the immutable version named by a relation-edge witness. Branch
+    /// current-row scans are deliberately insufficient here: a later branch
+    /// winner must never replace the exact version named by an authority reset.
+    fn resolve_relation_edge_version(
+        &mut self,
+        canonical_table: &str,
+        row_uuid: RowUuid,
+        version_ref: &RowVersionRefEntry,
+    ) -> Result<VersionRow, Error> {
+        let version = if let Some(branch_id) = Self::relation_edge_branch_id(version_ref)? {
+            let stored_tx = self
+                .query_transaction(version_ref.tx)?
+                .ok_or(Error::MissingTransaction(version_ref.tx))?;
+            if stored_tx.tx.target_lineage != BranchLineage::Branch(branch_id) {
+                return Err(Error::InvalidStoredValue(
+                    "relation edge branch discriminator does not match its transaction",
+                ));
+            }
+            self.query_versions_for_tx(version_ref.tx)?
+                .into_iter()
+                .find(|version| {
+                    version.table() == canonical_table
+                        && version.row_uuid() == row_uuid
+                        && version.layer() == VersionLayer::Content
+                })
+                .ok_or(Error::MissingTransaction(version_ref.tx))?
+        } else {
+            let tx_node_alias = self
+                .node_aliases
+                .get(&version_ref.tx.node)
+                .copied()
+                .ok_or(Error::MissingTransaction(version_ref.tx))?;
+            self.query_version_by_alias(
+                canonical_table,
+                row_uuid,
+                VersionLayer::Content,
+                version_ref.tx.time,
+                tx_node_alias,
+            )?
+            .ok_or(Error::MissingTransaction(version_ref.tx))?
+        };
+        Ok(version)
+    }
+
+    /// Resolve a terminal relation witness whose table literal is already in
+    /// the read schema. The immutable stored version may still use an older
+    /// authored table name, so identify candidates by exact tx/row/layer and
+    /// use lens projection only to disambiguate the emitted table.
+    fn resolve_relation_terminal_version(
+        &mut self,
+        emitted_table: &str,
+        row_uuid: RowUuid,
+        version_ref: &RowVersionRefEntry,
+        read_schema: SchemaVersionId,
+    ) -> Result<VersionRow, Error> {
+        if let Some(branch_id) = Self::relation_edge_branch_id(version_ref)? {
+            let stored_tx = self
+                .query_transaction(version_ref.tx)?
+                .ok_or(Error::MissingTransaction(version_ref.tx))?;
+            if stored_tx.tx.target_lineage != BranchLineage::Branch(branch_id) {
+                return Err(Error::InvalidStoredValue(
+                    "relation edge branch discriminator does not match its transaction",
+                ));
+            }
+        }
+        let candidates = self
+            .query_versions_for_tx(version_ref.tx)?
+            .into_iter()
+            .filter(|version| {
+                version.row_uuid() == row_uuid && version.layer() == VersionLayer::Content
+            })
+            .collect::<Vec<_>>();
+        let mut matching = Vec::new();
+        for version in candidates {
+            let authored_schema = self
+                .schema_version_for_alias(version.schema_version_alias())
+                .ok_or(Error::InvalidStoredValue(
+                    "relation edge witness schema version alias must exist",
+                ))?;
+            let mut cells = BTreeMap::new();
+            if self.translate_cells(authored_schema, read_schema, version.table(), &mut cells)?
+                == Some(emitted_table.to_owned())
+            {
+                matching.push(version);
+            }
+        }
+        match matching.as_slice() {
+            [version] => Ok(version.clone()),
+            [] => Err(Error::InvalidStoredValue(
+                "relation edge terminal witness does not project to its emitted table",
+            )),
+            _ => Err(Error::InvalidStoredValue(
+                "relation edge terminal witness is ambiguous after projection",
+            )),
+        }
+    }
+
+    fn relation_edge_branch_id(
+        version_ref: &RowVersionRefEntry,
+    ) -> Result<Option<BranchId>, Error> {
+        let Some(bytes) = &version_ref.branch_or_prefix else {
+            return Ok(None);
+        };
+        let branch: [u8; 16] = bytes.as_slice().try_into().map_err(|_| {
+            Error::InvalidStoredValue("relation edge branch discriminator must be a UUID")
+        })?;
+        Ok(Some(BranchId::from_bytes(branch)))
     }
 
     pub(crate) fn settled_through_for_binding_view(
@@ -6464,9 +6949,29 @@ where
     ) -> Result<QueryProgram, Error> {
         let trace_request = capability_trace_enabled().then(|| request.clone());
         let read_view = request.reads.primary.clone();
+        let maintained_result_membership = request
+            .output
+            .facts
+            .contains(&ProgramFactKey::ResultMembership);
+        let client_local_branch_at_local = request.authorization_mode
+            == QueryAuthorizationMode::ClientLocal
+            && request.reads.primary.sources.values().any(|source| {
+                matches!(
+                    source,
+                    SourceExpr::VisibleCurrent {
+                        data: DataSource::Branch(_),
+                        tier: DurabilityTier::Local,
+                        ..
+                    }
+                )
+            });
+        let prepare_branch_subscription_sources = maintained_result_membership
+            && (request.authorization_mode == QueryAuthorizationMode::TrustedServing
+                || client_local_branch_at_local);
         let mut resolver = CurrentQuerySourceResolver {
             node: self,
             read_view: &read_view,
+            prepare_branch_subscription_sources,
             inline_sources,
             access_paths,
             current_projection_targets: BTreeMap::new(),
@@ -7591,6 +8096,30 @@ where
         )
     }
 
+    pub(crate) fn query_rows_for_client_read_view(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        tier: DurabilityTier,
+        read_view: &ReadViewSpec,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        let Some(binding_view) =
+            self.client_settled_binding_view_key_for_query(shape, binding, tier, read_view)
+        else {
+            return Ok(Vec::new());
+        };
+        let Some(snapshot) =
+            self.authoritative_reset_snapshot_for_binding_view(shape, binding_view)?
+        else {
+            return Ok(Vec::new());
+        };
+        Ok(snapshot
+            .rows
+            .into_iter()
+            .take(snapshot.root_count)
+            .collect())
+    }
+
     pub(crate) fn query_rows_local_preview(
         &mut self,
         shape: &ValidatedQuery,
@@ -7809,7 +8338,13 @@ where
         // public CurrentRow boundary: subscriptions use the public terminal
         // shape, and native/WASM consumers must see the same layout from both
         // read paths.
-        if shape.query().flat_join.is_none() {
+        // Tree collectors own relation fields such as `posts` in their public
+        // app-row descriptor.  Those fields are not columns of the root
+        // table, so normalizing a structured result against that table would
+        // silently discard the recursive payload before the client can read
+        // it.  Flat rows still need this boundary to remove materializer-only
+        // physical fields.
+        if shape.query().flat_join.is_none() && shape.query().array_subqueries.is_empty() {
             normalize_public_current_rows(&table_schema, &mut rows)?;
         }
         let query = shape.query();
@@ -8133,67 +8668,109 @@ where
         table: &str,
         read_schema: SchemaVersionId,
         binding_view: BindingViewKey,
+        rows: SettledBindingRows,
     ) -> Result<Vec<CurrentRow>, Error> {
         let Some(row_result_set) = self.query.settled_result_sets.get(&binding_view) else {
             return Ok(Vec::new());
         };
-        let mut row_entries = row_result_set
-            .iter()
-            .filter_map(ResultMemberEntry::as_row)
-            .filter(|(entry_table, _, _)| entry_table.as_str() == table)
-            .map(|(_, row_uuid, tx_id)| (row_uuid, tx_id))
-            .collect::<BTreeSet<_>>();
-        if let Some(program_facts) = self.query.settled_program_facts.get(&binding_view) {
+        let mut row_entries = matches!(rows, SettledBindingRows::ResultMembers)
+            .then(|| {
+                row_result_set
+                    .iter()
+                    .filter_map(ResultMemberEntry::as_row)
+                    .map(|(entry_table, row_uuid, tx_id)| {
+                        ((entry_table.to_string(), row_uuid, tx_id), None)
+                    })
+                    .collect::<BTreeMap<_, Option<RowVersionRefEntry>>>()
+            })
+            .unwrap_or_default();
+        if let Some(program_facts) = self.query.settled_program_facts.get(&binding_view)
+            && matches!(rows, SettledBindingRows::ResultMembers)
+        {
             row_entries.extend(program_facts.iter().filter_map(|fact| {
                 let ProgramFactEntry::RelationEdge(edge) = fact else {
                     return None;
                 };
-                (edge.target_table.as_str() == table)
-                    .then(|| {
-                        edge.target_version
-                            .as_ref()
-                            .map(|version| (edge.target_row, version.tx))
-                    })
-                    .flatten()
+                edge.target_version.as_ref().map(|version| {
+                    (
+                        (edge.target_table.to_string(), edge.target_row, version.tx),
+                        Some(version.clone()),
+                    )
+                })
             }));
         }
-        let read_table = self.table_in_schema(table, read_schema)?.clone();
+        if let Some(program_facts) = self.query.settled_program_facts.get(&binding_view)
+            && matches!(rows, SettledBindingRows::FlatTupleContributor { .. })
+        {
+            row_entries.extend(program_facts.iter().filter_map(|fact| {
+                let ProgramFactEntry::RelationEdge(edge) = fact else {
+                    return None;
+                };
+                edge.target_version.as_ref().map(|version| {
+                    (
+                        (edge.target_table.to_string(), edge.target_row, version.tx),
+                        Some(version.clone()),
+                    )
+                })
+            }));
+            row_entries.extend(program_facts.iter().filter_map(|fact| {
+                let ProgramFactEntry::ContributingMembers(contribution) = fact else {
+                    return None;
+                };
+                if !matches!(
+                    rows,
+                    SettledBindingRows::FlatTupleContributor { source_index }
+                        if contribution.role.as_deref()
+                            == Some(&format!("flat_tuple_source:{source_index}"))
+                ) || !row_result_set.contains(&contribution.result)
+                {
+                    return None;
+                }
+                contribution
+                    .contributor
+                    .as_real_row()
+                    .and_then(|contributor| {
+                        contributor.row_projection().map(|(table, row, tx)| {
+                            (
+                                (table.to_string(), row, tx),
+                                Some(RowVersionRefEntry {
+                                    tx,
+                                    schema_version: contributor.schema_version,
+                                    layer: contributor.layer,
+                                    batch: contributor.batch,
+                                    branch_or_prefix: contributor.branch_or_prefix.clone(),
+                                    row_digest: contributor.row_digest.clone(),
+                                }),
+                            )
+                        })
+                    })
+            }));
+        }
         let mut rows = Vec::with_capacity(row_entries.len());
-        for (row_uuid, tx_id) in row_entries {
-            let tx_node_alias = self
-                .node_aliases
-                .get(&tx_id.node)
-                .copied()
-                .ok_or(Error::MissingTransaction(tx_id))?;
-            let version = self
-                .query_version_by_alias(
-                    table,
+        for ((canonical_table, row_uuid, tx_id), relation_version) in row_entries {
+            let version = if let Some(version_ref) = relation_version {
+                self.resolve_relation_edge_version(&canonical_table, row_uuid, &version_ref)?
+            } else {
+                let tx_node_alias = self
+                    .node_aliases
+                    .get(&tx_id.node)
+                    .copied()
+                    .ok_or(Error::MissingTransaction(tx_id))?;
+                self.query_version_by_alias(
+                    &canonical_table,
                     row_uuid,
                     VersionLayer::Content,
                     tx_id.time,
                     tx_node_alias,
                 )?
-                .ok_or(Error::MissingTransaction(tx_id))?;
-            let authored_schema = self
-                .schema_version_for_alias(version.schema_version_alias())
-                .ok_or(Error::InvalidStoredValue(
-                    "settled view row schema version alias missing",
-                ))?;
-            let authored_table = self
-                .table_in_schema(version.table(), authored_schema)?
-                .clone();
-            let mut cells = self.materialized_cells_for_version(&authored_table, &version)?;
-            let Some(projected_table) =
-                self.translate_cells(authored_schema, read_schema, version.table(), &mut cells)?
-            else {
-                continue;
+                .ok_or(Error::MissingTransaction(tx_id))?
             };
-            if projected_table == table {
-                rows.push(current_row_from_materialized_cells(
-                    &read_table,
-                    &version,
-                    &cells,
-                )?);
+            if let Some(row) = self.projected_current_row_from_materialized_version_in_read_schema(
+                read_schema,
+                &version,
+            )? && row.table() == table
+            {
+                rows.push(row);
             }
         }
         Ok(rows)
@@ -8459,6 +9036,69 @@ where
         }
         sort_current_rows(&mut rows);
         Ok(rows)
+    }
+
+    fn historical_content_witness_at(
+        &mut self,
+        table: &str,
+        read_schema: SchemaVersionId,
+        row_uuid: RowUuid,
+        position: GlobalSeq,
+    ) -> Result<Option<TxId>, Error> {
+        let mut content = None::<(TxTime, NodeAlias)>;
+        let mut latest_event = None::<(TxTime, NodeAlias, Option<DeletionEvent>)>;
+        let table_id = self.physical_table_id_for_schema(read_schema, table)?;
+        let raw_records = if position.0 == u64::MAX {
+            self.database.index_scan_raw(
+                "jazz_global_changes",
+                "by_table_global_seq",
+                &[Value::U64(table_id.0)],
+            )?
+        } else {
+            self.database.index_scan_range_raw(
+                "jazz_global_changes",
+                "by_table_global_seq",
+                &[Value::U64(table_id.0), Value::U64(0)],
+                &[Value::U64(table_id.0), Value::U64(position.0 + 1)],
+            )?
+        };
+        for raw in raw_records {
+            let record = raw.record();
+            if RowUuid(record.get_uuid(GlobalChangeRowRecord::FIELD_ROW_UUID_IDX)?) != row_uuid {
+                continue;
+            }
+            let time = TxTime(record.get_u64(GlobalChangeRowRecord::FIELD_TX_TIME_IDX)?);
+            let alias = NodeAlias(record.get_u64(GlobalChangeRowRecord::FIELD_TX_NODE_ID_IDX)?);
+            if record.get_bytes(GlobalChangeRowRecord::FIELD_LAYER_IDX)?
+                == version_layer_string(VersionLayer::Content).as_bytes()
+                && content.is_none_or(|current| (time, alias) > current)
+            {
+                content = Some((time, alias));
+            }
+            let deletion = record
+                .get_nullable_enum(GlobalChangeRowRecord::FIELD__DELETION_IDX)?
+                .map(|value| deletion_event_from_value(Value::EnumTag(value)))
+                .transpose()?;
+            if latest_event.is_none_or(|(current_time, current_alias, _)| {
+                (time, alias) > (current_time, current_alias)
+            }) {
+                latest_event = Some((time, alias, deletion));
+            }
+        }
+        if latest_event.is_some_and(|(_, _, deletion)| deletion == Some(DeletionEvent::Deleted)) {
+            return Ok(None);
+        }
+        let Some((time, alias)) = content else {
+            return Ok(None);
+        };
+        let node = self
+            .node_aliases
+            .iter()
+            .find_map(|(node, candidate)| (*candidate == alias).then_some(*node))
+            .ok_or(Error::InvalidStoredValue(
+                "historical content witness node alias is missing",
+            ))?;
+        Ok(Some(TxId::new(time, node)))
     }
 
     pub(crate) fn open_maintained_view_subscription_in_authorization_mode(
@@ -9081,13 +9721,10 @@ where
                     && !structured_output
                     && let ProgramFactEntry::RelationEdge(edge) = fact
                 {
-                    removed_edges.push(RelationEdge {
-                        source_table: edge.source_table.to_string(),
-                        source_row: edge.source_row,
-                        relation: edge.path,
-                        target_table: edge.target_table.to_string(),
-                        target_row: edge.target_row,
-                    });
+                    removed_edges.push(self.project_relation_edge_through_read_schema(
+                        &edge,
+                        local.result_schema_version,
+                    )?);
                 }
             }
         }
@@ -9101,13 +9738,10 @@ where
             if local.program_facts.insert(fact)
                 && let Some(edge) = edge
             {
-                let relation_edge = RelationEdge {
-                    source_table: edge.source_table.to_string(),
-                    source_row: edge.source_row,
-                    relation: edge.path.clone(),
-                    target_table: edge.target_table.to_string(),
-                    target_row: edge.target_row,
-                };
+                let relation_edge = self.project_relation_edge_through_read_schema(
+                    &edge,
+                    local.result_schema_version,
+                )?;
                 let row = if let Some(version) = &edge.target_version {
                     self.materialize_local_maintained_view_relation_edge_row(
                         local,
@@ -9233,14 +9867,9 @@ where
             let ProgramFactEntry::RelationEdge(edge) = fact else {
                 continue;
             };
-            edges.push(RelationEdge {
-                source_table: edge.source_table.to_string(),
-                source_row: edge.source_row,
-                relation: edge.path.clone(),
-                target_table: edge.target_table.to_string(),
-                target_row: edge.target_row,
-            });
-            if row_keys.insert((edge.target_table.to_string(), edge.target_row))
+            let read_edge =
+                self.project_relation_edge_through_read_schema(edge, local.result_schema_version)?;
+            if row_keys.insert((read_edge.target_table.clone(), read_edge.target_row))
                 && let Some(version) = &edge.target_version
                 && let Some(row) = self
                     .materialize_local_maintained_view_relation_edge_row_with_cache(
@@ -9253,6 +9882,7 @@ where
             {
                 rows.push(row);
             }
+            edges.push(read_edge);
         }
         Ok(LocalMaintainedRelationSnapshot {
             snapshot: RelationSnapshot {
@@ -9304,17 +9934,13 @@ where
         row_uuid: RowUuid,
         tx_id: TxId,
     ) -> Result<Option<CurrentRow>, Error> {
-        let table = self
-            .table_in_schema(table_name, local.result_schema_version)?
-            .clone();
         let tx_versions = local.maintained.versions_by_tx(tx_id);
         let Some(version) =
             local_maintained_view_content_witness(&tx_versions, table_name, row_uuid)
         else {
             return Ok(None);
         };
-        self.projected_current_row_from_materialized_version(
-            &table,
+        self.projected_current_row_from_materialized_version_in_read_schema(
             local.result_schema_version,
             version,
         )
@@ -9328,9 +9954,6 @@ where
         tx_id: TxId,
         cache: &mut LocalMaintainedMaterializationCache,
     ) -> Result<Option<CurrentRow>, Error> {
-        let table = self
-            .table_in_schema(table_name, local.result_schema_version)?
-            .clone();
         let tx_versions = self.local_maintained_tx_versions(local, tx_id, cache);
         let Some(version) =
             local_maintained_view_content_witness(tx_versions, table_name, row_uuid)
@@ -9338,8 +9961,7 @@ where
             return Ok(None);
         };
         let version = version.clone();
-        self.projected_current_row_from_materialized_version(
-            &table,
+        self.projected_current_row_from_materialized_version_in_read_schema(
             local.result_schema_version,
             &version,
         )
@@ -9370,7 +9992,11 @@ where
                 "local maintained subscription cannot materialize non-row result member yet",
             ));
         };
-        let table = self.table(entry.0.as_str())?.clone();
+        // Result-member entries retain the canonical authored table so the
+        // membership witness continues to identify the exact immutable
+        // version across a rename.  Payloads and application rows, however,
+        // are interpreted in this subscription's read schema.
+        let table = self.table(local.result_table.as_str())?.clone();
         if local.result_query.flat_join.is_some() {
             let payload = local
                 .result_payloads
@@ -9395,7 +10021,7 @@ where
         let version = if let Some(version) = self.maintained_witness_for_result_member(
             &tx_versions,
             local.result_schema_version,
-            entry.0.as_str(),
+            local.result_table.as_str(),
             entry.1,
         )? {
             version.clone()
@@ -9421,7 +10047,7 @@ where
                 let Some(version) = self.maintained_witness_for_result_member(
                     &tx_versions,
                     local.result_schema_version,
-                    entry.0.as_str(),
+                    local.result_table.as_str(),
                     entry.1,
                 )?
                 else {
@@ -9430,7 +10056,14 @@ where
                 version.clone()
             }
         };
-        let mut row = self.current_row_from_materialized_version(&table, &version)?;
+        let mut row = self
+            .projected_current_row_from_materialized_version_in_read_schema(
+                local.result_schema_version,
+                &version,
+            )?
+            .ok_or(Error::InvalidStoredValue(
+                "maintained result witness does not project into the read schema",
+            ))?;
         if let Some(columns) = &local.result_select {
             row = row.project(&table, columns)?;
         }
@@ -9463,7 +10096,9 @@ where
                 "local maintained subscription cannot materialize non-row result member yet",
             ));
         };
-        let table = self.table(entry.0.as_str())?.clone();
+        // See the non-cached path above: the entry label is canonical while
+        // the materialized row belongs to the subscription read schema.
+        let table = self.table(local.result_table.as_str())?.clone();
         if local.result_query.flat_join.is_some() {
             let payload = local
                 .result_payloads
@@ -9481,7 +10116,7 @@ where
         let version = if let Some(version) = self.maintained_witness_for_result_member(
             &tx_versions,
             local.result_schema_version,
-            entry.0.as_str(),
+            local.result_table.as_str(),
             entry.1,
         )? {
             version.clone()
@@ -9490,7 +10125,7 @@ where
             let Some(version) = self.maintained_witness_for_result_member(
                 &tx_versions,
                 local.result_schema_version,
-                entry.0.as_str(),
+                local.result_table.as_str(),
                 entry.1,
             )?
             else {
@@ -9498,10 +10133,11 @@ where
             };
             version.clone()
         };
-        self.current_row_from_materialized_version_with_materialization_cache(
-            &table, &version, cache,
+        let _ = cache;
+        self.projected_current_row_from_materialized_version_in_read_schema(
+            local.result_schema_version,
+            &version,
         )
-        .map(Some)
     }
 
     pub(crate) fn maintained_witness_for_result_member<'a>(
@@ -9629,15 +10265,6 @@ where
         Ok(())
     }
 
-    fn current_row_from_materialized_version_with_materialization_cache(
-        &mut self,
-        table: &TableSchema,
-        version: &VersionRow,
-        _cache: &mut LocalMaintainedMaterializationCache,
-    ) -> Result<CurrentRow, Error> {
-        current_row_from_version_projection(table, version)
-    }
-
     /// Render a maintained relation witness through the subscription's read
     /// schema before exposing it as an application row.
     ///
@@ -9648,9 +10275,11 @@ where
     /// after that version.  The source graph has already established both
     /// source-read authorization and the exact witness; this is solely the
     /// read-view projection boundary for that selected witness.
-    fn projected_current_row_from_materialized_version(
+    /// Resolve the destination table only after applying the complete lens
+    /// path. Canonical witnesses may name a table that no longer exists in the
+    /// subscription's read schema.
+    fn projected_current_row_from_materialized_version_in_read_schema(
         &mut self,
-        read_table: &TableSchema,
         read_schema: SchemaVersionId,
         version: &VersionRow,
     ) -> Result<Option<CurrentRow>, Error> {
@@ -9668,10 +10297,8 @@ where
         else {
             return Ok(None);
         };
-        if projected_table != read_table.name {
-            return Ok(None);
-        }
-        current_row_from_materialized_cells(read_table, version, &cells).map(Some)
+        let read_table = self.table_in_schema(&projected_table, read_schema)?.clone();
+        current_row_from_materialized_cells(&read_table, version, &cells).map(Some)
     }
 
     fn current_row_from_aggregate_result_payload(
@@ -9989,6 +10616,60 @@ where
         )
     }
 
+    #[cfg(test)]
+    pub(crate) fn query_relation_branch_discriminators_for_test(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        tier: DurabilityTier,
+        identity: AuthorId,
+        read_view: &ReadViewSpec,
+    ) -> Result<Vec<(Option<uuid::Uuid>, Option<uuid::Uuid>)>, Error> {
+        let program = self.compile_current_query_program_for_read_view_in_authorization_mode(
+            shape,
+            binding,
+            tier,
+            identity,
+            CurrentQueryProgramOutput::RelationSnapshot,
+            read_view,
+            QueryAuthorizationMode::ClientLocal,
+        )?;
+        let snapshots = self
+            .database
+            .query_graphs(lowered_program_sinks(&program))
+            .map_err(Error::Groove)?;
+        let Some(edges) = snapshots.get("maintained.relation_edges") else {
+            return Ok(Vec::new());
+        };
+        let decode =
+            |record: &BorrowedRecord<'_>, field: &str| -> Result<Option<uuid::Uuid>, Error> {
+                let index = required_field_idx(&edges.descriptor, field)?;
+                match record.get_idx(index)? {
+                    Value::Uuid(value) => Ok(Some(value)),
+                    Value::Nullable(Some(value)) => match *value {
+                        Value::Uuid(value) => Ok(Some(value)),
+                        _ => Err(Error::InvalidStoredValue(
+                            "branch discriminator must be UUID",
+                        )),
+                    },
+                    Value::Nullable(None) => Ok(None),
+                    _ => Err(Error::InvalidStoredValue(
+                        "branch discriminator must be UUID",
+                    )),
+                }
+            };
+        edges
+            .iter()
+            .filter(|(_, weight)| *weight > 0)
+            .map(|(record, _)| {
+                Ok((
+                    decode(&record, "source_branch_or_prefix")?,
+                    decode(&record, "target_branch_or_prefix")?,
+                ))
+            })
+            .collect()
+    }
+
     fn query_relation_snapshot_in_authorization_mode(
         &mut self,
         shape: &ValidatedQuery,
@@ -10048,6 +10729,7 @@ where
         #[derive(Clone)]
         struct RelationEdgeCandidate {
             edge: RelationEdge,
+            canonical_target_table: String,
             target_tx_time: TxTime,
             target_tx_node: NodeAlias,
         }
@@ -10056,11 +10738,21 @@ where
         let descriptor = &edges.descriptor;
         let source_table_idx = required_field_idx(descriptor, "source_table")?;
         let source_row_idx = required_field_idx(descriptor, "source_row")?;
+        let source_tx_time_idx = required_field_idx(descriptor, "source_tx_time")?;
+        let source_tx_node_idx = required_field_idx(descriptor, "source_tx_node_id")?;
+        let source_branch_idx = descriptor
+            .fields()
+            .iter()
+            .position(|field| field.name.as_deref() == Some("source_branch_or_prefix"));
         let relation_idx = required_field_idx(descriptor, "path")?;
         let target_table_idx = required_field_idx(descriptor, "target_table")?;
         let target_row_idx = required_field_idx(descriptor, "target_row")?;
         let target_tx_time_idx = required_field_idx(descriptor, "target_tx_time")?;
         let target_tx_node_idx = required_field_idx(descriptor, "target_tx_node_id")?;
+        let target_branch_idx = descriptor
+            .fields()
+            .iter()
+            .position(|field| field.name.as_deref() == Some("target_branch_or_prefix"));
         let mut candidates = Vec::new();
         for (record, weight) in edges.iter() {
             if weight <= 0 {
@@ -10068,19 +10760,94 @@ where
             }
             let source_table = record.get_str(source_table_idx)?.to_owned();
             let source_row = RowUuid(record.get_uuid(source_row_idx)?);
+            let source_tx_time = TxTime(record.get_u64(source_tx_time_idx)?);
+            let source_tx_node = NodeAlias(record.get_u64(source_tx_node_idx)?);
             let relation = record.get_str(relation_idx)?.to_owned();
             let target_table_name = record.get_str(target_table_idx)?.to_owned();
             let target_row = RowUuid(record.get_uuid(target_row_idx)?);
             let target_tx_time = TxTime(record.get_u64(target_tx_time_idx)?);
             let target_tx_node = NodeAlias(record.get_u64(target_tx_node_idx)?);
+            let branch_discriminator = |idx| -> Result<Option<Vec<u8>>, Error> {
+                let Some(idx) = idx else {
+                    return Ok(None);
+                };
+                match record.get_idx(idx)? {
+                    Value::Uuid(value) => Ok(Some(value.as_bytes().to_vec())),
+                    Value::Bytes(value) => Ok(Some(value)),
+                    Value::Nullable(Some(value)) => match *value {
+                        Value::Uuid(value) => Ok(Some(value.as_bytes().to_vec())),
+                        Value::Bytes(value) => Ok(Some(value)),
+                        _ => Err(Error::InvalidStoredValue(
+                            "relation edge branch discriminator must be UUID or bytes",
+                        )),
+                    },
+                    Value::Nullable(None) => Ok(None),
+                    _ => Err(Error::InvalidStoredValue(
+                        "relation edge branch discriminator must be UUID or bytes",
+                    )),
+                }
+            };
+            let version_ref =
+                |time, alias, branch_or_prefix| -> Result<RowVersionRefEntry, Error> {
+                    let node = self
+                        .node_aliases
+                        .iter()
+                        .find_map(|(node, candidate)| (*candidate == alias).then_some(*node))
+                        .ok_or(Error::InvalidStoredValue(
+                            "relation edge node alias is missing",
+                        ))?;
+                    Ok(RowVersionRefEntry {
+                        tx: TxId::new(time, node),
+                        schema_version: None,
+                        layer: ResultRowLayer::Content,
+                        batch: None,
+                        branch_or_prefix,
+                        row_digest: None,
+                    })
+                };
+            let source_version = version_ref(
+                source_tx_time,
+                source_tx_node,
+                branch_discriminator(source_branch_idx)?,
+            )?;
+            let target_version = version_ref(
+                target_tx_time,
+                target_tx_node,
+                branch_discriminator(target_branch_idx)?,
+            )?;
+            let canonical_source_version = self.resolve_relation_terminal_version(
+                &source_table,
+                source_row,
+                &source_version,
+                shape.schema_version(),
+            )?;
+            let canonical_target_version = self.resolve_relation_terminal_version(
+                &target_table_name,
+                target_row,
+                &target_version,
+                shape.schema_version(),
+            )?;
+            let projected_source_table = self.project_relation_edge_table_through_read_schema(
+                canonical_source_version.table(),
+                source_row,
+                Some(&source_version),
+                shape.schema_version(),
+            )?;
+            let projected_target_table = self.project_relation_edge_table_through_read_schema(
+                canonical_target_version.table(),
+                target_row,
+                Some(&target_version),
+                shape.schema_version(),
+            )?;
             candidates.push(RelationEdgeCandidate {
                 edge: RelationEdge {
-                    source_table,
+                    source_table: projected_source_table,
                     source_row,
                     relation,
-                    target_table: target_table_name,
+                    target_table: projected_target_table,
                     target_row,
                 },
+                canonical_target_table: canonical_target_version.table().to_owned(),
                 target_tx_time,
                 target_tx_node,
             });
@@ -10100,7 +10867,6 @@ where
                 ))
         });
         let mut counts = BTreeMap::<(String, RowUuid, String), usize>::new();
-        let mut target_tables = BTreeMap::<String, TableSchema>::new();
         for candidate in candidates {
             let group = (
                 candidate.edge.source_table.clone(),
@@ -10124,20 +10890,10 @@ where
                 candidate.edge.target_table.clone(),
                 candidate.edge.target_row,
             )) {
-                if !target_tables.contains_key(&candidate.edge.target_table) {
-                    let target_table = self
-                        .table_in_schema(&candidate.edge.target_table, shape.schema_version())?
-                        .clone();
-                    target_tables.insert(candidate.edge.target_table.clone(), target_table);
-                }
-                let target_table = target_tables
-                    .get(&candidate.edge.target_table)
-                    .expect("target table was inserted");
                 let row = self.materialize_relation_edge_target_row(
                     read_view,
                     shape.schema_version(),
-                    target_table,
-                    &candidate.edge.target_table,
+                    &candidate.canonical_target_table,
                     candidate.edge.target_row,
                     candidate.target_tx_time,
                     candidate.target_tx_node,
@@ -10153,7 +10909,6 @@ where
         &mut self,
         read_view: &ReadViewSpec,
         read_schema: SchemaVersionId,
-        target_table: &TableSchema,
         target_table_name: &str,
         target_row: RowUuid,
         target_tx_time: TxTime,
@@ -10167,8 +10922,7 @@ where
             target_tx_node,
         )? {
             return self
-                .projected_current_row_from_materialized_version(
-                    target_table,
+                .projected_current_row_from_materialized_version_in_read_schema(
                     read_schema,
                     &version,
                 )?
@@ -10181,19 +10935,36 @@ where
                 "relation edge target version is missing",
             ));
         };
-        let branch = self
-            .branches
-            .branches
-            .get(&BranchId(branch))
-            .cloned()
+        let target_node = self
+            .node_aliases
+            .iter()
+            .find_map(|(node, alias)| (*alias == target_tx_node).then_some(*node))
             .ok_or(Error::InvalidStoredValue(
-                "relation edge target branch is missing",
+                "relation edge target node alias is missing",
             ))?;
-        self.branch_current_rows_for_schema(target_table_name, &branch, read_schema)?
+        let tx_id = TxId::new(target_tx_time, target_node);
+        let stored_tx = self
+            .query_transaction(tx_id)?
+            .ok_or(Error::MissingTransaction(tx_id))?;
+        if stored_tx.tx.target_lineage != BranchLineage::Branch(BranchId(branch)) {
+            return Err(Error::InvalidStoredValue(
+                "relation edge target branch does not match its transaction",
+            ));
+        }
+        let version = self
+            .query_versions_for_tx(tx_id)?
             .into_iter()
-            .find(|row| row.row_uuid() == target_row)
+            .find(|version| {
+                version.table() == target_table_name
+                    && version.row_uuid() == target_row
+                    && version.layer() == VersionLayer::Content
+            })
             .ok_or(Error::InvalidStoredValue(
-                "relation edge target branch row is missing",
+                "relation edge target branch version is missing",
+            ))?;
+        self.projected_current_row_from_materialized_version_in_read_schema(read_schema, &version)?
+            .ok_or(Error::InvalidStoredValue(
+                "relation edge target version does not project into the read schema",
             ))
     }
 
@@ -13973,9 +14744,8 @@ fn inline_include_deleted_current_graph(
 
 fn inline_branch_current_graph(
     table: &TableSchema,
-    rows: Vec<CurrentRow>,
+    rows: Vec<(CurrentRow, TxTime, NodeAlias, Option<BranchId>)>,
     schema_version_alias: SchemaVersionAlias,
-    branch_id: BranchId,
     requirements: &SourceRequirements,
 ) -> Result<
     (
@@ -14035,8 +14805,15 @@ fn inline_branch_current_graph(
     let descriptor = current_row_descriptor_with_hidden_source_fields(table, &metadata);
     let records = rows
         .iter()
-        .map(|row| {
-            inline_branch_current_record(table, &descriptor, row, schema_version_alias, branch_id)
+        .map(|(row, tx_time, tx_node, branch)| {
+            inline_branch_current_record(
+                table,
+                &descriptor,
+                row,
+                schema_version_alias,
+                (*tx_time, *tx_node),
+                *branch,
+            )
         })
         .collect::<Result<Vec<_>, _>>()?;
     Ok((
@@ -14051,7 +14828,8 @@ fn inline_branch_current_record(
     descriptor: &RecordDescriptor,
     row: &CurrentRow,
     schema_version_alias: SchemaVersionAlias,
-    branch_id: BranchId,
+    witness: (TxTime, NodeAlias),
+    branch_id: Option<BranchId>,
 ) -> Result<Vec<u8>, Error> {
     let mut values = Vec::new();
     values.push(Value::Uuid(row.row_uuid().0));
@@ -14070,9 +14848,7 @@ fn inline_branch_current_record(
         Value::Uuid(provenance.updated_by.0),
         Value::U64(provenance.updated_at.0),
     ]);
-    let (tx_time, tx_node_alias) = row
-        .projected_tx_alias()
-        .unwrap_or((TxTime(0), NodeAlias(0)));
+    let (tx_time, tx_node_alias) = witness;
     values.extend([Value::U64(tx_time.0), Value::U64(tx_node_alias.0)]);
     if descriptor.field_index("table").is_some() {
         values.extend([
@@ -14087,7 +14863,9 @@ fn inline_branch_current_record(
             Value::Nullable(None),
         ]);
         if descriptor.field_index("branch_id").is_some() {
-            values.push(Value::Uuid(branch_id.0));
+            values.push(Value::Nullable(
+                branch_id.map(|branch| Box::new(Value::Uuid(branch.0))),
+            ));
         }
     }
     if descriptor.field_index("coverage").is_some() {
@@ -14423,16 +15201,114 @@ mod tests {
     use crate::node::{MergeableCommit, NodeState};
     use crate::peer::PeerState;
     use crate::protocol::{
-        CurrentWriteSchema, MigrationLens, ReadViewSourceSpec, ReadViewSpec, RegisterShapeOptions,
-        SchemaVersion, ShapeAst, Subscribe, SyncMessage, TableLens,
+        CurrentWriteSchema, MigrationLens, ReadViewSourceSpec, ReadViewSpec, RealRowMemberEntry,
+        RegisterShapeOptions, RelationEdgeEntry, ResultRowLayer, RowVersionRefEntry, SchemaVersion,
+        ShapeAst, Subscribe, SyncMessage, TableLens,
     };
     use crate::query::{
-        Aggregate, ArraySubquery, JoinSourceLookup, OrderDirection, PolicyBranch, Query, claim,
-        col, contains, eq, gt, in_list, lit, lte, param,
+        Aggregate, ArraySubquery, FlatJoin, FlatJoinOn, FlatJoinSource, JoinSourceLookup,
+        OrderDirection, PolicyBranch, Query, claim, col, contains, eq, gt, in_list, lit, lte,
+        param,
     };
     use crate::schema::{JazzSchema, Policy, TableSchema};
 
     use super::*;
+
+    #[test]
+    fn prepared_relation_terminal_keeps_branch_discriminator_in_public_payload() {
+        // Prepared subscriptions wrap each production terminal in a routed
+        // projection. `versioned_row_ref_fields` is the public payload list
+        // supplied to that projection; omitting this field makes lowering look
+        // correct while the decoder receives no branch witness.
+        let versioned_ref = |prefix: &str| {
+            let branch_field = format!("{prefix}_branch_or_prefix");
+            VersionedRowRefSchema {
+                row: super::super::query_engine::RowRefSchema {
+                    source_field: format!("{prefix}_source"),
+                    table_field: format!("{prefix}_table"),
+                    row_field: format!("{prefix}_row"),
+                },
+                version: Some(ResultMembershipVersionSchema::Content(
+                    super::super::query_engine::ContentVersionFields {
+                        tx_time_field: format!("{prefix}_tx_time"),
+                        tx_node_field: format!("{prefix}_tx_node"),
+                    },
+                )),
+                branch_or_prefix_field: Some(branch_field),
+            }
+        };
+        let schema = super::super::query_engine::ProgramFactSchema::RelationEdges(
+            super::super::query_engine::RelationEdgeSchema {
+                source: versioned_ref("source"),
+                path_field: "path".to_owned(),
+                target: versioned_ref("target"),
+                kind_field: "kind".to_owned(),
+                depth_field: None,
+                edge_id_field: None,
+                branch_field: None,
+                role_field: None,
+                order_field: None,
+                hole_state_field: None,
+            },
+        );
+        let public_payload = fact_public_fields(&schema).expect("relation facts are routable");
+        for prefix in ["source", "target"] {
+            let branch_field = format!("{prefix}_branch_or_prefix");
+            assert!(
+                public_payload.contains(&branch_field),
+                "prepared routed {prefix} payload must retain its branch discriminator"
+            );
+        }
+    }
+
+    #[test]
+    fn branch_source_witness_discriminator_tracks_each_row_lineage() {
+        let table = TableSchema::new("users", [ColumnSchema::new("name", ColumnType::String)]);
+        let row = current_row_from_cells(
+            &table,
+            row(0xf3),
+            &BTreeMap::from([("name".to_owned(), Value::String("alice".to_owned()))]),
+        )
+        .expect("build projected row");
+        let metadata = BTreeMap::from([(
+            SourceMetadataRequirement::VersionWitnesses,
+            SourceMetadataFields::VersionWitnesses {
+                schema_version_field: "schema_version".to_owned(),
+                tx_time_field: "tx_time".to_owned(),
+                tx_node_field: "tx_node_id".to_owned(),
+                branch_or_prefix_field: Some("branch_id".to_owned()),
+            },
+        )]);
+        let descriptor = current_row_descriptor_with_hidden_source_fields(&table, &metadata);
+        let branch = BranchId::from_bytes([0xf4; 16]);
+        let root_record = inline_branch_current_record(
+            &table,
+            &descriptor,
+            &row,
+            SchemaVersionAlias(1),
+            (TxTime(1), NodeAlias(1)),
+            None,
+        )
+        .expect("encode root/base row in branch view");
+        let overlay_record = inline_branch_current_record(
+            &table,
+            &descriptor,
+            &row,
+            SchemaVersionAlias(1),
+            (TxTime(2), NodeAlias(1)),
+            Some(branch),
+        )
+        .expect("encode branch overlay row");
+        let branch_idx = descriptor.field_index("branch_id").expect("branch field");
+        assert!(matches!(
+            BorrowedRecord::new(&root_record, &descriptor).get_idx(branch_idx),
+            Ok(Value::Nullable(None))
+        ));
+        assert!(matches!(
+            BorrowedRecord::new(&overlay_record, &descriptor).get_idx(branch_idx),
+            Ok(Value::Nullable(Some(value))) if matches!(*value, Value::Uuid(id) if id == branch.0)
+        ));
+    }
 
     /// A coalesced authority re-entry for Alice's document must replace only
     /// that exact member; Bob's ordinary content update in the same batch must
@@ -15049,6 +15925,7 @@ mod tests {
         let mut resolver = CurrentQuerySourceResolver {
             node: &mut node,
             read_view: &read_view,
+            prepare_branch_subscription_sources: false,
             inline_sources: BTreeMap::new(),
             access_paths: BTreeMap::new(),
             current_projection_targets: BTreeMap::new(),
@@ -16129,6 +17006,15 @@ mod tests {
         shape: &ValidatedQuery,
         binding: &Binding,
     ) {
+        subscribe_query_binding_with_opts(node, shape, binding, RegisterShapeOptions::default());
+    }
+
+    fn subscribe_query_binding_with_opts(
+        node: &mut NodeState<RocksDbStorage>,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        opts: RegisterShapeOptions,
+    ) {
         let values = shape
             .params()
             .keys()
@@ -16139,7 +17025,7 @@ mod tests {
             subscription: SubscriptionKey {
                 shape_id: shape.shape_id(),
                 binding_id: binding.binding_id(),
-                read_view: Default::default(),
+                read_view: opts.read_view_key(),
             },
             values,
             known_state: None,
@@ -16470,7 +17356,6 @@ mod tests {
             .materialize_relation_edge_target_row(
                 &ReadViewSpec::default(),
                 node.catalogue.current_schema_version_id,
-                &table,
                 "todos",
                 todo,
                 tx_id.time,
@@ -16559,7 +17444,6 @@ mod tests {
             .materialize_relation_edge_target_row(
                 &ReadViewSpec::default(),
                 evolved.id,
-                &evolved_table,
                 "todos",
                 todo,
                 tx_id.time,
@@ -16640,8 +17524,23 @@ mod tests {
         })
         .expect("publish people lens");
 
+        let target_version = RowVersionRefEntry {
+            tx: tx_id,
+            schema_version: None,
+            layer: ResultRowLayer::Content,
+            batch: None,
+            branch_or_prefix: None,
+            row_digest: None,
+        };
         let row = node
-            .materialize_authoritative_reset_relation_edge_target(evolved.id, "people", user, tx_id)
+            // The wire fact names the canonical authored table.  The receiver
+            // must lens it to the v2 read table before materializing it.
+            .materialize_authoritative_reset_relation_edge_target(
+                evolved.id,
+                "users",
+                user,
+                &target_version,
+            )
             .expect("render authority relation target")
             .expect("authority has stored target witness");
         assert_eq!(row.table(), "people");
@@ -16653,6 +17552,946 @@ mod tests {
             row.cell(&people, "label"),
             Some(Value::String("migrated".to_owned()))
         );
+
+        let canonical_edge = RelationEdgeEntry {
+            path: "author".to_owned(),
+            // The root is already expressed in Bob's result schema; only the
+            // related witness needs the lineage translation here.
+            source_table: groove::Intern::new("people".to_owned()),
+            source_row: user,
+            target_table: groove::Intern::new("users".to_owned()),
+            target_row: user,
+            kind: None,
+            source_version: None,
+            target_version: Some(target_version),
+            depth: None,
+            edge_id: None,
+            branch: None,
+            role: None,
+            order: None,
+            hole_state: None,
+        };
+        let read_edge = node
+            .project_relation_edge_through_read_schema(&canonical_edge, evolved.id)
+            .expect("project canonical edge identity for reset index");
+        assert_eq!(canonical_edge.target_table.as_str(), "users");
+        assert_eq!(read_edge.target_table, "people");
+        assert_eq!(read_edge.target_row, user);
+    }
+
+    #[test]
+    fn authoritative_reset_relation_target_projects_two_hop_canonical_witness() {
+        let v1 = JazzSchema::new([TableSchema::new(
+            "users",
+            [ColumnSchema::new("name", ColumnType::String)],
+        )]);
+        let (_dir, mut node) = open_node_with_uuid(NodeUuid::from_bytes([0xf0; 16]), v1.clone());
+        let user = row(0xf1);
+        let tx_id = node
+            .commit_mergeable(
+                MergeableCommit::new("users", user, 0xf2).cells(BTreeMap::from([(
+                    "name".to_owned(),
+                    Value::String("alice".to_owned()),
+                )])),
+            )
+            .expect("commit v1 user");
+
+        let v2 = SchemaVersion::new(JazzSchema::new([TableSchema::new(
+            "people",
+            [ColumnSchema::new("name", ColumnType::String)],
+        )]));
+        node.apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
+            author: AuthorId::SYSTEM,
+            catalogue_seq: 1,
+            publication: Box::new(SchemaLineagePublication::new(
+                v2.clone(),
+                MigrationLens::new(
+                    v1.version_id(),
+                    v2.id,
+                    vec![TableLens {
+                        source_table: "users".to_owned(),
+                        target_table: "people".to_owned(),
+                        ops: vec![LensOp::RenameTable {
+                            from: "users".to_owned(),
+                            to: "people".to_owned(),
+                        }],
+                    }],
+                ),
+                Vec::<String>::new(),
+                Vec::<String>::new(),
+            )),
+        })
+        .expect("publish v2 rename");
+
+        let members = TableSchema::new(
+            "members",
+            [
+                ColumnSchema::new("display_name", ColumnType::String),
+                ColumnSchema::new("origin", ColumnType::String),
+            ],
+        );
+        let v3 = SchemaVersion::new(JazzSchema::new([members.clone()]));
+        node.apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
+            author: AuthorId::SYSTEM,
+            catalogue_seq: 2,
+            publication: Box::new(SchemaLineagePublication::new(
+                v3.clone(),
+                MigrationLens::new(
+                    v2.id,
+                    v3.id,
+                    vec![TableLens {
+                        source_table: "people".to_owned(),
+                        target_table: "members".to_owned(),
+                        ops: vec![
+                            LensOp::RenameTable {
+                                from: "people".to_owned(),
+                                to: "members".to_owned(),
+                            },
+                            LensOp::RenameColumn {
+                                from: "name".to_owned(),
+                                to: "display_name".to_owned(),
+                            },
+                            LensOp::AddColumn {
+                                column: "origin".to_owned(),
+                                default: Value::String("v1".to_owned()),
+                            },
+                        ],
+                    }],
+                ),
+                Vec::<String>::new(),
+                Vec::<String>::new(),
+            )),
+        })
+        .expect("publish v3 rename");
+
+        let target_version = RowVersionRefEntry {
+            tx: tx_id,
+            schema_version: Some(v1.version_id()),
+            layer: ResultRowLayer::Content,
+            batch: None,
+            branch_or_prefix: None,
+            row_digest: None,
+        };
+        let edge = RelationEdgeEntry {
+            path: "author".to_owned(),
+            source_table: groove::Intern::new("members".to_owned()),
+            source_row: user,
+            target_table: groove::Intern::new("users".to_owned()),
+            target_row: user,
+            kind: None,
+            source_version: None,
+            target_version: Some(target_version.clone()),
+            depth: None,
+            edge_id: None,
+            branch: None,
+            role: None,
+            order: None,
+            hole_state: None,
+        };
+        let projected_edge = node
+            .project_relation_edge_through_read_schema(&edge, v3.id)
+            .expect("project canonical edge through both lenses");
+        assert_eq!(projected_edge.target_table, "members");
+
+        let query = Query::from("members")
+            .validate(&v3.schema)
+            .expect("validate v3 members query");
+        let binding = query.bind(BTreeMap::new()).expect("bind members query");
+        let binding_view = BindingViewKey {
+            shape_id: query.shape_id(),
+            binding_id: binding.binding_id(),
+            read_view: Default::default(),
+        };
+        node.query
+            .settled_result_sets
+            .insert(binding_view, BTreeSet::new());
+        node.query.settled_program_facts.insert(
+            binding_view,
+            BTreeSet::from([ProgramFactEntry::RelationEdge(edge.clone())]),
+        );
+        let settled_rows = node
+            .settled_binding_view_source_rows(
+                "members",
+                v3.id,
+                binding_view,
+                SettledBindingRows::ResultMembers,
+            )
+            .expect("project canonical settled relation source through both lenses");
+        assert_eq!(settled_rows.len(), 1);
+        assert_eq!(settled_rows[0].table(), "members");
+
+        let row = node
+            .materialize_authoritative_reset_relation_edge_target(
+                v3.id,
+                "users",
+                user,
+                &target_version,
+            )
+            .expect("render canonical relation witness through v3")
+            .expect("stored target witness");
+        assert_eq!(row.table(), "members");
+        assert_eq!(
+            row.cell(&members, "display_name"),
+            Some(Value::String("alice".to_owned()))
+        );
+        assert_eq!(
+            row.cell(&members, "origin"),
+            Some(Value::String("v1".to_owned()))
+        );
+    }
+
+    /// A v2 flat join must correlate the lens-projected v1 post and author
+    /// cells, rather than only materializing each source independently.
+    ///
+    /// alice ──v1 users/posts──► node ──users→people lens──► v2 flat join
+    #[test]
+    fn flat_join_correlates_projected_v1_sources_across_table_rename() {
+        let v1 = JazzSchema::new([
+            TableSchema::new(
+                "users",
+                [
+                    ColumnSchema::new("id", ColumnType::Uuid),
+                    ColumnSchema::new("name", ColumnType::String),
+                ],
+            ),
+            TableSchema::new(
+                "posts",
+                [
+                    ColumnSchema::new("id", ColumnType::Uuid),
+                    ColumnSchema::new("author_id", ColumnType::Uuid),
+                    ColumnSchema::new("title", ColumnType::String),
+                ],
+            ),
+        ]);
+        let people = TableSchema::new(
+            "people",
+            [
+                ColumnSchema::new("id", ColumnType::Uuid),
+                ColumnSchema::new("name", ColumnType::String),
+            ],
+        );
+        let v2 = SchemaVersion::new(JazzSchema::new([
+            people,
+            TableSchema::new(
+                "posts",
+                [
+                    ColumnSchema::new("id", ColumnType::Uuid),
+                    ColumnSchema::new("author_id", ColumnType::Uuid),
+                    ColumnSchema::new("title", ColumnType::String),
+                ],
+            ),
+        ]));
+        let (_dir, mut node) = open_node_with_uuid(NodeUuid::from_bytes([0xf6; 16]), v1.clone());
+        let (_client_dir, mut client) =
+            open_node_with_uuid(NodeUuid::from_bytes([0xf9; 16]), v1.clone());
+        let author = row(0xf7);
+        let post = row(0xf8);
+        let mismatched_author_row = row(0xf9);
+        let mismatched_author_id = row(0xfa);
+        let mismatched_post = row(0xfb);
+        let author_tx = node
+            .commit_mergeable(
+                MergeableCommit::new("users", author, 1).cells(BTreeMap::from([
+                    ("id".to_owned(), Value::Uuid(author.0)),
+                    ("name".to_owned(), Value::String("alice".to_owned())),
+                ])),
+            )
+            .expect("commit v1 author");
+        node.apply_fate_update(
+            author_tx,
+            Fate::Accepted,
+            Some(GlobalSeq(1)),
+            Some(DurabilityTier::Global),
+        )
+        .expect("settle v1 author");
+        let post_tx = node
+            .commit_mergeable(
+                MergeableCommit::new("posts", post, 2).cells(BTreeMap::from([
+                    ("id".to_owned(), Value::Uuid(post.0)),
+                    ("author_id".to_owned(), Value::Uuid(author.0)),
+                    ("title".to_owned(), Value::String("hello".to_owned())),
+                ])),
+            )
+            .expect("commit v1 post");
+        node.apply_fate_update(
+            post_tx,
+            Fate::Accepted,
+            Some(GlobalSeq(2)),
+            Some(DurabilityTier::Global),
+        )
+        .expect("settle v1 post");
+        let mismatched_author_tx = node
+            .commit_mergeable(
+                MergeableCommit::new("users", mismatched_author_row, 3).cells(BTreeMap::from([
+                    ("id".to_owned(), Value::Uuid(mismatched_author_id.0)),
+                    ("name".to_owned(), Value::String("unmatched".to_owned())),
+                ])),
+            )
+            .expect("commit v1 author with distinct row identity");
+        node.apply_fate_update(
+            mismatched_author_tx,
+            Fate::Accepted,
+            Some(GlobalSeq(3)),
+            Some(DurabilityTier::Global),
+        )
+        .expect("settle mismatched v1 author");
+        let mismatched_post_tx = node
+            .commit_mergeable(MergeableCommit::new("posts", mismatched_post, 4).cells(
+                BTreeMap::from([
+                    ("id".to_owned(), Value::Uuid(mismatched_post.0)),
+                    ("author_id".to_owned(), Value::Uuid(mismatched_author_id.0)),
+                    (
+                        "title".to_owned(),
+                        Value::String("must not join".to_owned()),
+                    ),
+                ]),
+            ))
+            .expect("commit v1 post whose foreign key is not the author row identity");
+        node.apply_fate_update(
+            mismatched_post_tx,
+            Fate::Accepted,
+            Some(GlobalSeq(4)),
+            Some(DurabilityTier::Global),
+        )
+        .expect("settle mismatched v1 post");
+        node.apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
+            author: AuthorId::SYSTEM,
+            catalogue_seq: 1,
+            publication: Box::new(SchemaLineagePublication::new(
+                v2.clone(),
+                MigrationLens::new(
+                    v1.version_id(),
+                    v2.id,
+                    vec![
+                        TableLens {
+                            source_table: "users".to_owned(),
+                            target_table: "people".to_owned(),
+                            ops: vec![LensOp::RenameTable {
+                                from: "users".to_owned(),
+                                to: "people".to_owned(),
+                            }],
+                        },
+                        TableLens {
+                            source_table: "posts".to_owned(),
+                            target_table: "posts".to_owned(),
+                            ops: Vec::new(),
+                        },
+                    ],
+                ),
+                Vec::<String>::new(),
+                Vec::<String>::new(),
+            )),
+        })
+        .expect("publish users to people lens");
+        client
+            .apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
+                author: AuthorId::SYSTEM,
+                catalogue_seq: 1,
+                publication: Box::new(SchemaLineagePublication::new(
+                    v2.clone(),
+                    MigrationLens::new(
+                        v1.version_id(),
+                        v2.id,
+                        vec![
+                            TableLens {
+                                source_table: "users".to_owned(),
+                                target_table: "people".to_owned(),
+                                ops: vec![LensOp::RenameTable {
+                                    from: "users".to_owned(),
+                                    to: "people".to_owned(),
+                                }],
+                            },
+                            TableLens {
+                                source_table: "posts".to_owned(),
+                                target_table: "posts".to_owned(),
+                                ops: Vec::new(),
+                            },
+                        ],
+                    ),
+                    Vec::<String>::new(),
+                    Vec::<String>::new(),
+                )),
+            })
+            .expect("publish users to people lens to client");
+        node.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+            author: AuthorId::SYSTEM,
+            pointer: CurrentWriteSchema {
+                revision: 1,
+                schema: v2.id,
+            },
+        })
+        .expect("activate v2 read schema");
+        client
+            .apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+                author: AuthorId::SYSTEM,
+                pointer: CurrentWriteSchema {
+                    revision: 1,
+                    schema: v2.id,
+                },
+            })
+            .expect("activate v2 client read schema");
+
+        for table in ["people", "posts"] {
+            let shape = Query::from(table)
+                .validate(&v2.schema)
+                .expect("validate source");
+            let binding = shape.bind(BTreeMap::new()).expect("bind source");
+            assert_eq!(
+                node.query_rows_at(&shape, &binding, GlobalSeq(4))
+                    .expect("read projected source")
+                    .len(),
+                2,
+                "{table} must independently project its v1 row"
+            );
+        }
+        let mut query = Query::from("posts");
+        query.flat_join = Some(FlatJoin {
+            root_alias: None,
+            sources: vec![FlatJoinSource {
+                table: "people".to_owned(),
+                alias: None,
+                on: FlatJoinOn {
+                    left: "posts.author_id".to_owned(),
+                    right: "people.id".to_owned(),
+                },
+            }],
+        });
+        let shape = query.validate(&v2.schema).expect("validate v2 flat join");
+        let binding = shape.bind(BTreeMap::new()).expect("bind v2 flat join");
+        let rows = node
+            .query_rows_at(&shape, &binding, GlobalSeq(4))
+            .expect("evaluate v2 flat join");
+        assert_eq!(
+            rows.len(),
+            1,
+            "flat joins must use the source row identity for `id`, not an arbitrary stored id cell"
+        );
+
+        let opts = RegisterShapeOptions {
+            tier: DurabilityTier::Global,
+            ..RegisterShapeOptions::default()
+        };
+        register_query_shape(&mut node, &shape, opts.clone());
+        subscribe_query_binding_with_opts(&mut node, &shape, &binding, opts.clone());
+        register_query_shape(&mut client, &shape, opts.clone());
+        subscribe_query_binding_with_opts(&mut client, &shape, &binding, opts.clone());
+        let binding_view =
+            BindingViewKey::new(shape.shape_id(), binding.binding_id(), opts.read_view_key());
+        let subscription = SubscriptionKey {
+            shape_id: shape.shape_id(),
+            binding_id: binding.binding_id(),
+            read_view: opts.read_view_key(),
+        };
+        let mut peer = PeerState::edge_client(AuthorId::SYSTEM);
+        let known_author = RowVersionRef::new("users", author, author_tx);
+        peer.declare_known_state(
+            subscription,
+            Some(KnownStateDeclaration::ExactVersionSet {
+                versions: vec![known_author.clone()],
+            }),
+        );
+        let update = peer
+            .rehydrate_query_with_opts(&mut node, &shape, &binding, opts.clone())
+            .expect("rehydrate maintained v2 flat join");
+        let missing = client
+            .missing_known_state_row_version_refs(&update)
+            .expect("detect omitted canonical contributor body");
+        assert_eq!(missing, vec![known_author]);
+        let repair = peer
+            .handle_row_versions_fetch(
+                &mut node,
+                SyncMessage::FetchRowVersions {
+                    requests: missing.clone(),
+                },
+            )
+            .expect("serve canonical contributor repair");
+        let [SyncMessage::RowVersionPayloads { version_bundles }] = repair.as_slice() else {
+            panic!("known contributor repair must carry row-version payloads");
+        };
+        client
+            .apply_row_version_payloads_for_requests(&missing, version_bundles.clone())
+            .expect("apply canonical contributor repair");
+        client
+            .apply_sync_message(update.clone())
+            .expect("apply maintained v2 flat join on client");
+        let SyncMessage::ViewUpdate {
+            reset_result_set,
+            result_member_adds,
+            ..
+        } = update
+        else {
+            panic!("flat join rehydrate must emit a view update");
+        };
+        assert!(reset_result_set);
+        assert_eq!(
+            result_member_adds.len(),
+            1,
+            "maintained v2 flat join must retain the projected source tuple"
+        );
+        let snapshot = client
+            .authoritative_reset_snapshot_for_binding_view(&shape, binding_view)
+            .expect("materialize applied flat-join authority snapshot")
+            .expect("applied flat-join authority snapshot");
+        assert_eq!(snapshot.root_count, 1);
+        // The authority payload can render this tuple, but the receiver's
+        // local IVM must instead rebuild it from canonical source versions.
+        assert_eq!(
+            client
+                .query_rows_for_client(&shape, &binding, DurabilityTier::Global, AuthorId::SYSTEM)
+                .expect("read applied v2 flat join on client")
+                .len(),
+            1,
+            "the client must retain the authority-maintained flat join tuple"
+        );
+
+        let updated_author_tx = node
+            .commit_mergeable(
+                MergeableCommit::new("people", author, 5).cells(BTreeMap::from([
+                    ("id".to_owned(), Value::Uuid(author.0)),
+                    ("name".to_owned(), Value::String("alice".to_owned())),
+                ])),
+            )
+            .expect("update renamed author");
+        node.apply_fate_update(
+            updated_author_tx,
+            Fate::Accepted,
+            Some(GlobalSeq(5)),
+            Some(DurabilityTier::Global),
+        )
+        .expect("settle renamed author update");
+        let replacement = peer
+            .query_update_for_subscription_with_opts(
+                &mut node,
+                subscription,
+                &shape,
+                &binding,
+                opts.clone(),
+            )
+            .expect("publish flat tuple replacement");
+        let SyncMessage::ViewUpdate {
+            reset_result_set,
+            version_carriers,
+            version_bundles,
+            result_member_adds,
+            result_member_removes,
+            program_fact_adds,
+            program_fact_removes,
+            ..
+        } = &replacement
+        else {
+            panic!("flat tuple replacement must emit a view update");
+        };
+        assert!(
+            !reset_result_set,
+            "unchanged result membership must take the non-reset rehydrate path"
+        );
+        assert!(
+            result_member_adds.is_empty() && result_member_removes.is_empty(),
+            "a no-op source version must retain the same result member"
+        );
+        let outgoing_contributor_adds = program_fact_adds
+            .iter()
+            .filter(|fact| {
+                matches!(
+                    fact,
+                    ProgramFactEntry::ContributingMembers(contribution)
+                        if contribution
+                            .role
+                            .as_deref()
+                            .is_some_and(|role| role.starts_with("flat_tuple_source:"))
+                )
+            })
+            .count();
+        let outgoing_contributor_removes = program_fact_removes
+            .iter()
+            .filter(|fact| {
+                matches!(
+                    fact,
+                    ProgramFactEntry::ContributingMembers(contribution)
+                        if contribution
+                            .role
+                            .as_deref()
+                            .is_some_and(|role| role.starts_with("flat_tuple_source:"))
+                )
+            })
+            .count();
+        assert_eq!(outgoing_contributor_adds, 1);
+        assert_eq!(outgoing_contributor_removes, 1);
+        let mut replacement_bundles = version_bundles.clone();
+        replacement_bundles.extend(
+            crate::protocol::expand_version_carriers(version_carriers)
+                .expect("expand replacement contributor bundles"),
+        );
+        assert_eq!(
+            replacement_bundles
+                .iter()
+                .filter(|bundle| bundle.tx.tx_id == updated_author_tx)
+                .flat_map(|bundle| &bundle.versions)
+                .count(),
+            1,
+            "the changed canonical contributor must ship exactly one body"
+        );
+        assert!(program_fact_removes.iter().any(|fact| {
+            matches!(
+                fact,
+                ProgramFactEntry::ContributingMembers(contribution)
+                    if contribution
+                        .role
+                        .as_deref()
+                        .is_some_and(|role| role.starts_with("flat_tuple_source:"))
+                        && contribution
+                            .contributor
+                            .as_real_row()
+                            .and_then(RealRowMemberEntry::row_projection)
+                            .is_some_and(|(table, row, tx)| table.to_string() == "users" && row == author && tx == author_tx)
+            )
+        }));
+        assert!(program_fact_adds.iter().any(|fact| {
+            matches!(
+                fact,
+                ProgramFactEntry::ContributingMembers(contribution)
+                    if contribution
+                        .role
+                        .as_deref()
+                        .is_some_and(|role| role.starts_with("flat_tuple_source:"))
+                        && contribution
+                            .contributor
+                            .as_real_row()
+                            .and_then(RealRowMemberEntry::row_projection)
+                            .is_some_and(|(table, row, tx)| table.to_string() == "people" && row == author && tx == updated_author_tx)
+            )
+        }));
+        client
+            .apply_sync_message(replacement)
+            .expect("apply flat tuple replacement");
+        let active_contributors = client
+            .query
+            .settled_program_facts
+            .get(&binding_view)
+            .expect("flat tuple facts remain scoped to the binding view")
+            .iter()
+            .filter(|fact| {
+                matches!(
+                    fact,
+                    ProgramFactEntry::ContributingMembers(contribution)
+                        if contribution
+                            .role
+                            .as_deref()
+                            .is_some_and(|role| role.starts_with("flat_tuple_source:"))
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(active_contributors.len(), 1);
+        assert!(matches!(
+            active_contributors[0],
+            ProgramFactEntry::ContributingMembers(contribution)
+                if contribution
+                    .contributor
+                    .as_real_row()
+                    .and_then(RealRowMemberEntry::row_projection)
+                    .is_some_and(|(table, row, tx)| table.to_string() == "people" && row == author && tx == updated_author_tx)
+        ));
+        assert_eq!(
+            client
+                .query_rows_for_client(&shape, &binding, DurabilityTier::Global, AuthorId::SYSTEM)
+                .expect("read retained flat tuple after no-op source version")
+                .len(),
+            1
+        );
+    }
+
+    /// A canonical relation witness can name a branch-only v1 row. Projection
+    /// and reset materialization must honor its branch discriminator, lens the
+    /// old `users` table to `people`, and never substitute root history.
+    #[test]
+    fn branch_relation_target_projects_old_renamed_witness() {
+        let base = JazzSchema::new([TableSchema::new(
+            "users",
+            [ColumnSchema::new("name", ColumnType::String)],
+        )]);
+        let (_dir, mut node) = open_node_with_uuid(NodeUuid::from_bytes([0xea; 16]), base.clone());
+        let branch = BranchId::from_bytes([0xeb; 16]);
+        node.create_branch(branch).expect("create branch");
+        let user = row(0xec);
+        let tx_id = node
+            .commit_mergeable_on_branch(
+                branch,
+                MergeableCommit::new("users", user, 0xed).cells(BTreeMap::from([(
+                    "name".to_owned(),
+                    Value::String("branch-alice".to_owned()),
+                )])),
+            )
+            .expect("commit branch-only v1 user");
+
+        let people = TableSchema::new("people", [ColumnSchema::new("name", ColumnType::String)]);
+        let evolved = SchemaVersion::new(JazzSchema::new([people.clone()]));
+        node.apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
+            author: AuthorId::SYSTEM,
+            catalogue_seq: 1,
+            publication: Box::new(SchemaLineagePublication::new(
+                evolved.clone(),
+                MigrationLens::new(
+                    base.version_id(),
+                    evolved.id,
+                    vec![TableLens {
+                        source_table: "users".to_owned(),
+                        target_table: "people".to_owned(),
+                        ops: vec![LensOp::RenameTable {
+                            from: "users".to_owned(),
+                            to: "people".to_owned(),
+                        }],
+                    }],
+                ),
+                Vec::<String>::new(),
+                Vec::<String>::new(),
+            )),
+        })
+        .expect("publish people lens");
+        node.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+            author: AuthorId::SYSTEM,
+            pointer: CurrentWriteSchema {
+                revision: 1,
+                schema: evolved.id,
+            },
+        })
+        .expect("activate people schema");
+
+        let alias = *node.node_aliases.get(&tx_id.node).expect("node alias");
+        assert!(
+            node.query_version_by_alias("users", user, VersionLayer::Content, tx_id.time, alias,)
+                .expect("query root history")
+                .is_none(),
+            "branch-only relation witness must not be found through root history"
+        );
+        let branch_version = RowVersionRefEntry {
+            tx: tx_id,
+            schema_version: Some(base.version_id()),
+            layer: ResultRowLayer::Content,
+            batch: None,
+            branch_or_prefix: Some(branch.to_bytes()),
+            row_digest: None,
+        };
+        let canonical_edge = RelationEdgeEntry {
+            path: "author".to_owned(),
+            source_table: groove::Intern::new("people".to_owned()),
+            source_row: user,
+            target_table: groove::Intern::new("users".to_owned()),
+            target_row: user,
+            kind: None,
+            source_version: None,
+            target_version: Some(branch_version.clone()),
+            depth: None,
+            edge_id: None,
+            branch: None,
+            role: None,
+            order: None,
+            hole_state: None,
+        };
+        let projected = node
+            .project_relation_edge_through_read_schema(&canonical_edge, evolved.id)
+            .expect("project branch edge identity");
+        assert_eq!(projected.target_table, "people");
+
+        node.commit_mergeable_on_branch(
+            branch,
+            MergeableCommit::new("people", user, 0xee)
+                .parents(vec![tx_id])
+                .cells(BTreeMap::from([(
+                    "name".to_owned(),
+                    Value::String("branch-bob".to_owned()),
+                )])),
+        )
+        .expect("commit a later branch winner");
+
+        let row = node
+            .materialize_authoritative_reset_relation_edge_target(
+                evolved.id,
+                "users",
+                user,
+                &branch_version,
+            )
+            .expect("materialize branch relation target")
+            .expect("branch target row exists");
+        assert_eq!(row.table(), "people");
+        assert_eq!(
+            row.cell(&people, "name"),
+            Some(Value::String("branch-alice".to_owned())),
+            "the authority reset must render its exact v1 witness, not the later branch winner"
+        );
+    }
+
+    #[test]
+    fn renamed_branch_terminal_resolves_root_target_from_emitted_read_table() {
+        let issue = row(0xf8);
+        let v1 = JazzSchema::new([
+            TableSchema::new(
+                "issues",
+                [
+                    ColumnSchema::new("assignee", ColumnType::Uuid),
+                    ColumnSchema::new("key", ColumnType::Uuid),
+                ],
+            ),
+            TableSchema::new(
+                "users",
+                [
+                    ColumnSchema::new("name", ColumnType::String),
+                    ColumnSchema::new("issue", ColumnType::Uuid),
+                ],
+            ),
+        ]);
+        let (_dir, mut node) = open_node_with_uuid(NodeUuid::from_bytes([0xf5; 16]), v1.clone());
+        let user = row(0xf6);
+        let user_tx = node
+            .commit_mergeable(
+                MergeableCommit::new("users", user, 1).cells(BTreeMap::from([
+                    ("name".to_owned(), Value::String("root-alice".to_owned())),
+                    ("issue".to_owned(), Value::Uuid(issue.0)),
+                ])),
+            )
+            .expect("commit root user");
+        node.apply_fate_update(
+            user_tx,
+            Fate::Accepted,
+            Some(GlobalSeq(1)),
+            Some(DurabilityTier::Global),
+        )
+        .expect("settle root user before branch snapshot");
+
+        let issues = TableSchema::new(
+            "issues",
+            [
+                ColumnSchema::new("assignee", ColumnType::Uuid),
+                ColumnSchema::new("key", ColumnType::Uuid),
+            ],
+        );
+        let people = TableSchema::new(
+            "people",
+            [
+                ColumnSchema::new("name", ColumnType::String),
+                ColumnSchema::new("issue", ColumnType::Uuid),
+            ],
+        );
+        let v2 = SchemaVersion::new(JazzSchema::new([issues, people]));
+        node.apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
+            author: AuthorId::SYSTEM,
+            catalogue_seq: 1,
+            publication: Box::new(SchemaLineagePublication::new(
+                v2.clone(),
+                MigrationLens::new(
+                    v1.version_id(),
+                    v2.id,
+                    vec![
+                        TableLens {
+                            source_table: "issues".to_owned(),
+                            target_table: "issues".to_owned(),
+                            ops: Vec::new(),
+                        },
+                        TableLens {
+                            source_table: "users".to_owned(),
+                            target_table: "people".to_owned(),
+                            ops: vec![LensOp::RenameTable {
+                                from: "users".to_owned(),
+                                to: "people".to_owned(),
+                            }],
+                        },
+                    ],
+                ),
+                Vec::<String>::new(),
+                Vec::<String>::new(),
+            )),
+        })
+        .expect("publish users to people lens");
+        node.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+            author: AuthorId::SYSTEM,
+            pointer: CurrentWriteSchema {
+                revision: 1,
+                schema: v2.id,
+            },
+        })
+        .expect("activate v2");
+
+        let branch = BranchId::from_bytes([0xf7; 16]);
+        node.create_branch(branch).expect("create branch");
+        node.commit_mergeable_on_branch(
+            branch,
+            MergeableCommit::new("issues", issue, 2).cells(BTreeMap::from([
+                ("assignee".to_owned(), Value::Uuid(user.0)),
+                ("key".to_owned(), Value::Uuid(issue.0)),
+            ])),
+        )
+        .expect("commit branch issue referencing root user");
+        let branch_state = node
+            .branches
+            .branches
+            .get(&branch)
+            .cloned()
+            .expect("branch");
+        let branch_people = node
+            .branch_current_rows_for_schema("people", &branch_state, v2.id)
+            .expect("project root users into branch people view");
+        assert_eq!(branch_people.len(), 1);
+        assert_eq!(
+            node.historical_content_witness_at(
+                "people",
+                v2.id,
+                user,
+                branch_state.base.as_ref().expect("branch base").global_base,
+            )
+            .expect("recover frozen root witness"),
+            Some(user_tx)
+        );
+
+        let people_shape = Query::from("people")
+            .validate(&v2.schema)
+            .expect("validate branch people query");
+        let people_binding = people_shape
+            .bind(BTreeMap::new())
+            .expect("bind branch people query");
+        assert_eq!(
+            node.query_rows_on_branch_query_engine(
+                branch,
+                &people_shape,
+                &people_binding,
+                AuthorId::SYSTEM,
+            )
+            .expect("query frozen root people through branch engine")
+            .len(),
+            1
+        );
+        let issue_shape = Query::from("issues")
+            .validate(&v2.schema)
+            .expect("validate branch issues query");
+        let issue_binding = issue_shape
+            .bind(BTreeMap::new())
+            .expect("bind branch issues query");
+        let issue_rows = node
+            .query_rows_on_branch_query_engine(
+                branch,
+                &issue_shape,
+                &issue_binding,
+                AuthorId::SYSTEM,
+            )
+            .expect("query branch issues");
+        assert_eq!(issue_rows.len(), 1);
+        assert_eq!(
+            issue_rows[0].cell(
+                &node.table_in_schema("issues", v2.id).expect("issues table"),
+                "assignee",
+            ),
+            Some(Value::Uuid(user.0))
+        );
+        let root_terminal_ref = RowVersionRefEntry {
+            tx: user_tx,
+            schema_version: None,
+            layer: ResultRowLayer::Content,
+            batch: None,
+            branch_or_prefix: None,
+            row_digest: None,
+        };
+        let canonical = node
+            .resolve_relation_terminal_version("people", user, &root_terminal_ref, v2.id)
+            .expect("resolve emitted people literal to exact authored root witness");
+        assert_eq!(canonical.table(), "users");
     }
 
     fn recursive_schema() -> JazzSchema {
@@ -17368,10 +19207,10 @@ mod tests {
     }
 
     #[test]
-    fn branch_program_maintained_view_requires_branch_deletion_witness_source() {
-        // Internal compiler-boundary coverage: the public DB tests assert the
-        // user-visible subscription rejection, while this pins which output
-        // profile needs branch deletion witness metadata.
+    fn branch_program_maintained_view_provides_branch_deletion_witness_source() {
+        // A maintained branch source carries both the overlay content and its
+        // deletion witness, so replacement, delete, and restore can remain
+        // live without falling back to a one-shot branch read.
         let (_dir, mut node) = open_node();
         let branch_id = BranchId::from_bytes([0x42; 16]);
         node.create_branch(branch_id).unwrap();
@@ -17401,22 +19240,902 @@ mod tests {
             vec![row(1)]
         );
 
-        let error = node
-            .compile_branch_query_program_in_authorization_mode(
-                branch_id,
+        node.compile_branch_query_program_in_authorization_mode(
+            branch_id,
+            &shape,
+            &binding,
+            AuthorId::SYSTEM,
+            CurrentQueryProgramOutput::MaintainedView,
+            QueryAuthorizationMode::TrustedServing,
+        )
+        .expect("maintained branch compilation must provide deletion witnesses");
+    }
+
+    /// A branch read renders a frozen root together with an overlay relation
+    /// through Groove's structured terminal, while its internal relation fact
+    /// retains the mixed canonical provenance needed for future deltas.
+    ///
+    /// alice --accept issue--> core --freeze branch base--> branch view
+    /// branch --write user----► branch view --array correlation--> issue.assigneeRows
+    ///
+    /// The public array payload is deliberately not assembled from
+    /// `RelationSnapshot::edges`: structured app rows are its sole owner. The
+    /// separate discriminator assertion pins the internal relation terminal so
+    /// a base root and overlay target cannot silently lose their correlation
+    /// witness while still returning an empty array.
+    #[test]
+    fn branch_relation_array_uses_frozen_root_and_overlay_target() {
+        let (_dir, mut node) = open_node();
+        let issue = row(0x71);
+        let overlay_user = author(0x72);
+        commit_global_issue(&mut node, 0x71, "open", overlay_user, 1);
+        let branch_id = BranchId::from_bytes([0x73; 16]);
+        node.create_branch(branch_id).expect("freeze branch base");
+        let live_root_update = node
+            .commit_mergeable(
+                MergeableCommit::new("issues", issue, 2_500)
+                    .made_by(AuthorId::SYSTEM)
+                    .cells(BTreeMap::from([
+                        (
+                            "title".to_owned(),
+                            Value::String("must not leak past branch base".to_owned()),
+                        ),
+                        ("state".to_owned(), Value::String("closed".to_owned())),
+                        ("assignee".to_owned(), Value::Uuid(overlay_user.0)),
+                        ("priority".to_owned(), Value::U64(0x71)),
+                    ])),
+            )
+            .expect("write post-branch global root update");
+        node.apply_fate_update(
+            live_root_update,
+            Fate::Accepted,
+            Some(GlobalSeq(2)),
+            Some(DurabilityTier::Global),
+        )
+        .expect("accept post-branch global root update");
+        node.commit_mergeable_on_branch(
+            branch_id,
+            MergeableCommit::new("users", RowUuid(overlay_user.0), 2_000).cells(BTreeMap::from([
+                ("name".to_owned(), Value::String("overlay user".to_owned())),
+            ])),
+        )
+        .expect("write overlay target");
+
+        let shape = Query::from("issues")
+            .filter(eq(col("id"), lit(Value::Uuid(issue.0))))
+            .array_subquery(ArraySubquery::new(
+                "assigneeRows",
+                "users",
+                "id",
+                "assignee",
+            ))
+            .validate(&node.catalogue.schema)
+            .expect("validate correlated branch query");
+        let binding = shape.bind(BTreeMap::new()).expect("bind query");
+        let read_view = ReadViewSpec {
+            source: ReadViewSourceSpec::Branch {
+                branch: branch_id.0,
+            },
+            ..ReadViewSpec::default()
+        };
+
+        let snapshot = node
+            .query_relation_snapshot_for_serving_in_read_view(
+                &shape,
+                &binding,
+                DurabilityTier::Local,
+                AuthorId::SYSTEM,
+                &read_view,
+            )
+            .expect("render branch relation snapshot");
+        assert_eq!(snapshot.root_count, 1);
+        assert_eq!(snapshot.rows.len(), 1);
+        let issue_table = node.table("issues").expect("issues table");
+        assert_eq!(
+            snapshot.rows[0].cell(issue_table, "title"),
+            Some(Value::String("issue-113".to_owned())),
+            "branch root must remain at the frozen base rather than leak the later global winner"
+        );
+        assert!(
+            snapshot.edges.is_empty(),
+            "structured rows own public arrays"
+        );
+        let (descriptor, raw) = snapshot.rows[0].encoded_record();
+        let Value::Array(assignees) = descriptor.bind(raw).get("assigneeRows").unwrap() else {
+            panic!("expected structured assignee array")
+        };
+        assert_eq!(assignees.len(), 1, "one overlay target must correlate");
+        let Value::Record(assignee) = &assignees[0] else {
+            panic!("expected structured assignee record")
+        };
+        assert_eq!(assignee.get("row_uuid"), Ok(Value::Uuid(overlay_user.0)));
+
+        assert_eq!(
+            node.query_relation_branch_discriminators_for_test(
+                &shape,
+                &binding,
+                DurabilityTier::Local,
+                AuthorId::SYSTEM,
+                &read_view,
+            )
+            .expect("relation terminal keeps mixed branch witnesses"),
+            vec![(None, Some(branch_id.0))],
+            "the frozen issue and overlay user must keep distinct canonical provenance"
+        );
+    }
+
+    #[test]
+    fn branch_program_maintained_view_tracks_local_overlay_replacement() {
+        let (_dir, mut node) = open_node();
+        let branch_id = BranchId::from_bytes([0x43; 16]);
+        node.create_branch(branch_id).unwrap();
+        let issue = row(7);
+        node.commit_mergeable_on_branch(
+            branch_id,
+            MergeableCommit::new("issues", issue, 1_000).cells(BTreeMap::from([
+                ("title".to_owned(), Value::String("first title".to_owned())),
+                ("state".to_owned(), Value::String("open".to_owned())),
+                ("assignee".to_owned(), Value::Uuid(author(0xa1).0)),
+                ("priority".to_owned(), Value::U64(1)),
+            ])),
+        )
+        .unwrap();
+        let shape = Query::from("issues")
+            .validate(&node.catalogue.schema)
+            .unwrap();
+        let binding = shape.bind(BTreeMap::new()).unwrap();
+        let read_view = ReadViewSpec {
+            source: ReadViewSourceSpec::Branch {
+                branch: branch_id.0,
+            },
+            ..ReadViewSpec::default()
+        };
+        let (mut local, initial) = node
+            .open_maintained_view_subscription_in_authorization_mode(
                 &shape,
                 &binding,
                 AuthorId::SYSTEM,
-                CurrentQueryProgramOutput::MaintainedView,
+                DurabilityTier::Local,
+                &read_view,
+                None,
                 QueryAuthorizationMode::TrustedServing,
             )
-            .unwrap_err();
-        let Error::QueryCapability(report) = error else {
-            panic!("expected branch witness capability gap, got {error:?}");
-        };
+            .unwrap();
+        assert_eq!(initial.root_count, 1);
+
+        node.commit_mergeable_on_branch(
+            branch_id,
+            MergeableCommit::new("issues", issue, 2_000).cells(BTreeMap::from([
+                ("title".to_owned(), Value::String("second title".to_owned())),
+                ("state".to_owned(), Value::String("open".to_owned())),
+                ("assignee".to_owned(), Value::Uuid(author(0xa1).0)),
+                ("priority".to_owned(), Value::U64(1)),
+            ])),
+        )
+        .unwrap();
+        let update = node
+            .drain_local_maintained_view_subscription(&mut local, None)
+            .unwrap()
+            .expect("branch overlay replacement must reach the maintained terminal");
         assert!(
-            report.contains("BranchOverlay"),
-            "unexpected capability report: {report}"
+            update.added.iter().any(|(_, row)| row.row_uuid() == issue),
+            "replacement must leave a current row in the maintained result"
+        );
+
+        node.commit_mergeable_on_branch(
+            branch_id,
+            MergeableCommit::new("issues", issue, 3_000).deletion(DeletionEvent::Deleted),
+        )
+        .unwrap();
+        let deletion = node
+            .drain_local_maintained_view_subscription(&mut local, None)
+            .unwrap()
+            .expect("branch deletion must reach the maintained terminal");
+        assert!(
+            deletion.removed.iter().any(|occurrence| {
+                *occurrence
+                    == crate::tools::OutputOccurrenceId::single_source(
+                        crate::tools::ObjectId::from_uuid(issue.0),
+                    )
+            }),
+            "branch deletion must retract the overlay row"
+        );
+
+        node.commit_mergeable_on_branch(
+            branch_id,
+            MergeableCommit::new("issues", issue, 4_000).deletion(DeletionEvent::Restored),
+        )
+        .unwrap();
+        let restoration = node
+            .drain_local_maintained_view_subscription(&mut local, None)
+            .unwrap()
+            .expect("branch restoration must reach the maintained terminal");
+        assert!(
+            restoration
+                .added
+                .iter()
+                .any(|(_, row)| row.row_uuid() == issue),
+            "branch restoration must reintroduce the overlay row"
+        );
+    }
+
+    #[test]
+    fn branch_program_maintained_view_survives_first_overlay_partition_write() {
+        let (_dir, mut node) = open_node();
+        let branch_id = BranchId::from_bytes([0x44; 16]);
+        let issue = row(7);
+        commit_global_issue(&mut node, 7, "open", author(0xa1), 1);
+        node.create_branch(branch_id).unwrap();
+        let table_id = node
+            .physical_table_id_for_schema(node.catalogue.current_schema_version_id, "issues")
+            .unwrap();
+        assert!(
+            !node
+                .branches
+                .branch_partitions
+                .contains(&(table_id, branch_id)),
+            "the durable sparse partition must not exist before the first overlay write"
+        );
+
+        let shape = Query::from("issues")
+            .validate(&node.catalogue.schema)
+            .unwrap();
+        let binding = shape.bind(BTreeMap::new()).unwrap();
+        let read_view = ReadViewSpec {
+            source: ReadViewSourceSpec::Branch {
+                branch: branch_id.0,
+            },
+            ..ReadViewSpec::default()
+        };
+        let (mut subscription, initial) = node
+            .open_maintained_view_subscription_in_authorization_mode(
+                &shape,
+                &binding,
+                AuthorId::SYSTEM,
+                DurabilityTier::Edge,
+                &read_view,
+                None,
+                QueryAuthorizationMode::TrustedServing,
+            )
+            .unwrap();
+        assert_eq!(
+            initial.root_count, 1,
+            "frozen base is available before overlay"
+        );
+        assert!(
+            !node
+                .branches
+                .branch_partitions
+                .contains(&(table_id, branch_id)),
+            "opening the maintained view must not publish a branch partition"
+        );
+
+        let first_overlay = node
+            .commit_mergeable_on_branch(
+                branch_id,
+                MergeableCommit::new("issues", issue, 2_000).cells(BTreeMap::from([
+                    (
+                        "title".to_owned(),
+                        Value::String("first overlay".to_owned()),
+                    ),
+                    ("state".to_owned(), Value::String("open".to_owned())),
+                    ("assignee".to_owned(), Value::Uuid(author(0xa1).0)),
+                    ("priority".to_owned(), Value::U64(7)),
+                ])),
+            )
+            .unwrap();
+        node.apply_fate_update(
+            first_overlay,
+            Fate::Accepted,
+            None,
+            Some(DurabilityTier::Edge),
+        )
+        .unwrap();
+        assert!(
+            node.branches
+                .branch_partitions
+                .contains(&(table_id, branch_id)),
+            "the first accepted overlay write must durably publish its partition"
+        );
+        let update = node
+            .drain_local_maintained_view_subscription(&mut subscription, None)
+            .unwrap()
+            .expect("first overlay write must keep the pre-existing subscription live");
+        assert!(
+            update.added.iter().any(|(_, row)| {
+                row.row_uuid() == issue
+                    && row.cell(node.table("issues").unwrap(), "title")
+                        == Some(Value::String("first overlay".to_owned()))
+            }),
+            "the first accepted overlay write must produce its exact replacement delta"
+        );
+    }
+
+    #[test]
+    fn branch_program_maintained_views_isolate_sibling_first_writes() {
+        let (_dir, mut node) = open_node();
+        let first_branch = BranchId::from_bytes([0x45; 16]);
+        let sibling_branch = BranchId::from_bytes([0x46; 16]);
+        let issue = row(7);
+        commit_global_issue(&mut node, 7, "open", author(0xa1), 1);
+        node.create_branch(first_branch).unwrap();
+        node.create_branch(sibling_branch).unwrap();
+
+        let shape = Query::from("issues")
+            .validate(&node.catalogue.schema)
+            .unwrap();
+        let binding = shape.bind(BTreeMap::new()).unwrap();
+        let first_view = ReadViewSpec {
+            source: ReadViewSourceSpec::Branch {
+                branch: first_branch.0,
+            },
+            ..ReadViewSpec::default()
+        };
+        let sibling_view = ReadViewSpec {
+            source: ReadViewSourceSpec::Branch {
+                branch: sibling_branch.0,
+            },
+            ..ReadViewSpec::default()
+        };
+        let (mut first_subscription, first_initial) = node
+            .open_maintained_view_subscription_in_authorization_mode(
+                &shape,
+                &binding,
+                AuthorId::SYSTEM,
+                DurabilityTier::Edge,
+                &first_view,
+                None,
+                QueryAuthorizationMode::TrustedServing,
+            )
+            .unwrap();
+        let (mut sibling_subscription, sibling_initial) = node
+            .open_maintained_view_subscription_in_authorization_mode(
+                &shape,
+                &binding,
+                AuthorId::SYSTEM,
+                DurabilityTier::Edge,
+                &sibling_view,
+                None,
+                QueryAuthorizationMode::TrustedServing,
+            )
+            .unwrap();
+        assert_eq!(first_initial.root_count, 1);
+        assert_eq!(sibling_initial.root_count, 1);
+
+        let first_write = node
+            .commit_mergeable_on_branch(
+                first_branch,
+                MergeableCommit::new("issues", issue, 2_000).cells(BTreeMap::from([
+                    ("title".to_owned(), Value::String("first branch".to_owned())),
+                    ("state".to_owned(), Value::String("open".to_owned())),
+                    ("assignee".to_owned(), Value::Uuid(author(0xa1).0)),
+                    ("priority".to_owned(), Value::U64(7)),
+                ])),
+            )
+            .unwrap();
+        node.apply_fate_update(
+            first_write,
+            Fate::Accepted,
+            None,
+            Some(DurabilityTier::Edge),
+        )
+        .unwrap();
+        let first_update = node
+            .drain_local_maintained_view_subscription(&mut first_subscription, None)
+            .unwrap()
+            .expect("first branch must receive its own accepted overlay update");
+        assert!(
+            first_update
+                .added
+                .iter()
+                .any(|(_, row)| row.row_uuid() == issue)
+        );
+        assert!(
+            node.drain_local_maintained_view_subscription(&mut sibling_subscription, None)
+                .unwrap()
+                .is_none(),
+            "a sibling branch subscription must not receive first branch deltas"
+        );
+    }
+
+    #[test]
+    fn branch_program_maintained_view_settles_overlay_fates_at_every_tier() {
+        for (tier, acceptance) in [
+            (DurabilityTier::Local, (None, DurabilityTier::Edge)),
+            (DurabilityTier::Edge, (None, DurabilityTier::Edge)),
+            (
+                DurabilityTier::Global,
+                (Some(GlobalSeq(4)), DurabilityTier::Global),
+            ),
+        ] {
+            let (_dir, mut node) = open_node();
+            let branch_id = BranchId::from_bytes([tier as u8 + 0x50; 16]);
+            let issue = row(7);
+            let frozen_only_issue = row(8);
+            commit_global_issue(&mut node, 7, "open", author(0xa1), 1);
+            commit_global_issue(&mut node, 8, "open", author(0xa1), 2);
+            node.create_branch(branch_id).unwrap();
+            let initial_overlay = node
+                .commit_mergeable_on_branch(
+                    branch_id,
+                    MergeableCommit::new("issues", issue, 2_500).cells(BTreeMap::from([
+                        (
+                            "title".to_owned(),
+                            Value::String("initial overlay".to_owned()),
+                        ),
+                        ("state".to_owned(), Value::String("open".to_owned())),
+                        ("assignee".to_owned(), Value::Uuid(author(0xa1).0)),
+                        ("priority".to_owned(), Value::U64(7)),
+                    ])),
+                )
+                .unwrap();
+            node.apply_fate_update(
+                initial_overlay,
+                Fate::Accepted,
+                Some(GlobalSeq(3)),
+                Some(DurabilityTier::Global),
+            )
+            .unwrap();
+
+            let shape = Query::from("issues")
+                .validate(&node.catalogue.schema)
+                .unwrap();
+            let binding = shape.bind(BTreeMap::new()).unwrap();
+            let read_view = ReadViewSpec {
+                source: ReadViewSourceSpec::Branch {
+                    branch: branch_id.0,
+                },
+                ..ReadViewSpec::default()
+            };
+            let (mut subscription, initial) = node
+                .open_maintained_view_subscription_in_authorization_mode(
+                    &shape,
+                    &binding,
+                    AuthorId::SYSTEM,
+                    tier,
+                    &read_view,
+                    None,
+                    QueryAuthorizationMode::TrustedServing,
+                )
+                .unwrap();
+            assert_eq!(
+                initial.root_count, 2,
+                "{tier:?} subscription must include the frozen base"
+            );
+
+            let replacement = node
+                .commit_mergeable_on_branch(
+                    branch_id,
+                    MergeableCommit::new("issues", issue, 3_000).cells(BTreeMap::from([
+                        (
+                            "title".to_owned(),
+                            Value::String("overlay title".to_owned()),
+                        ),
+                        ("state".to_owned(), Value::String("open".to_owned())),
+                        ("assignee".to_owned(), Value::Uuid(author(0xa1).0)),
+                        ("priority".to_owned(), Value::U64(7)),
+                    ])),
+                )
+                .unwrap();
+            if tier == DurabilityTier::Local {
+                assert!(
+                    node.drain_local_maintained_view_subscription(&mut subscription, None)
+                        .unwrap()
+                        .is_some(),
+                    "Local subscriptions must see pending branch writes"
+                );
+            } else {
+                assert!(
+                    node.drain_local_maintained_view_subscription(&mut subscription, None)
+                        .unwrap()
+                        .is_none(),
+                    "{tier:?} subscriptions must not expose pending branch writes"
+                );
+            }
+            node.apply_fate_update(
+                replacement,
+                Fate::Accepted,
+                acceptance.0,
+                Some(acceptance.1),
+            )
+            .unwrap();
+            if tier >= DurabilityTier::Edge {
+                let update = node
+                    .drain_local_maintained_view_subscription(&mut subscription, None)
+                    .unwrap()
+                    .expect("accepted branch replacement must reach the requested tier");
+                assert!(update.added.iter().any(|(_, row)| row.row_uuid() == issue));
+            }
+
+            let deletion = node
+                .commit_mergeable_on_branch(
+                    branch_id,
+                    MergeableCommit::new("issues", frozen_only_issue, 4_000)
+                        .deletion(DeletionEvent::Deleted),
+                )
+                .unwrap();
+            let deletion_acceptance = match tier {
+                DurabilityTier::Global => (Some(GlobalSeq(5)), DurabilityTier::Global),
+                _ => (None, DurabilityTier::Edge),
+            };
+            if tier == DurabilityTier::Local {
+                let pending_deletion = node
+                    .drain_local_maintained_view_subscription(&mut subscription, None)
+                    .unwrap()
+                    .expect("Local branch deletion must publish while pending");
+                assert!(pending_deletion.removed.iter().any(|occurrence| {
+                    *occurrence
+                        == crate::tools::OutputOccurrenceId::single_source(
+                            crate::tools::ObjectId::from_uuid(frozen_only_issue.0),
+                        )
+                }));
+            } else {
+                assert!(
+                    node.drain_local_maintained_view_subscription(&mut subscription, None)
+                        .unwrap()
+                        .is_none(),
+                    "{tier:?} subscriptions must not expose pending branch deletion"
+                );
+            }
+            node.apply_fate_update(
+                deletion,
+                Fate::Accepted,
+                deletion_acceptance.0,
+                Some(deletion_acceptance.1),
+            )
+            .unwrap();
+            if tier >= DurabilityTier::Edge {
+                let deletion_update = node
+                    .drain_local_maintained_view_subscription(&mut subscription, None)
+                    .unwrap()
+                    .expect("accepted branch deletion must reach the requested tier");
+                assert!(
+                    deletion_update.removed.iter().any(|occurrence| {
+                        *occurrence
+                            == crate::tools::OutputOccurrenceId::single_source(
+                                crate::tools::ObjectId::from_uuid(frozen_only_issue.0),
+                            )
+                    }),
+                    "{tier:?} branch deletion must mask frozen-base membership"
+                );
+            }
+
+            let restoration = node
+                .commit_mergeable_on_branch(
+                    branch_id,
+                    MergeableCommit::new("issues", frozen_only_issue, 5_000)
+                        .deletion(DeletionEvent::Restored),
+                )
+                .unwrap();
+            let restoration_acceptance = match tier {
+                DurabilityTier::Global => (Some(GlobalSeq(6)), DurabilityTier::Global),
+                _ => (None, DurabilityTier::Edge),
+            };
+            if tier == DurabilityTier::Local {
+                let pending_restoration = node
+                    .drain_local_maintained_view_subscription(&mut subscription, None)
+                    .unwrap()
+                    .expect("Local branch restore must publish while pending");
+                assert!(
+                    pending_restoration
+                        .added
+                        .iter()
+                        .any(|(_, row)| row.row_uuid() == frozen_only_issue)
+                );
+            } else {
+                assert!(
+                    node.drain_local_maintained_view_subscription(&mut subscription, None)
+                        .unwrap()
+                        .is_none(),
+                    "{tier:?} subscriptions must not expose pending branch restore"
+                );
+            }
+            node.apply_fate_update(
+                restoration,
+                Fate::Accepted,
+                restoration_acceptance.0,
+                Some(restoration_acceptance.1),
+            )
+            .unwrap();
+            if tier >= DurabilityTier::Edge {
+                let restoration_update = node
+                    .drain_local_maintained_view_subscription(&mut subscription, None)
+                    .unwrap()
+                    .expect("accepted branch restore must reach the requested tier");
+                assert!(
+                    restoration_update
+                        .added
+                        .iter()
+                        .any(|(_, row)| row.row_uuid() == frozen_only_issue),
+                    "{tier:?} branch restore must re-expose the frozen base"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn branch_program_maintained_view_retracts_rejected_pending_overlay_versions() {
+        for tier in [
+            DurabilityTier::Local,
+            DurabilityTier::Edge,
+            DurabilityTier::Global,
+        ] {
+            let (_dir, mut node) = open_node();
+            let branch_id = BranchId::from_bytes([tier as u8 + 0x60; 16]);
+            let issue = row(7);
+            let rejected_only = row(9);
+            commit_global_issue(&mut node, 7, "open", author(0xa1), 1);
+            node.create_branch(branch_id).unwrap();
+            let accepted = node
+                .commit_mergeable_on_branch(
+                    branch_id,
+                    MergeableCommit::new("issues", issue, 2_500).cells(BTreeMap::from([
+                        (
+                            "title".to_owned(),
+                            Value::String("accepted overlay".to_owned()),
+                        ),
+                        ("state".to_owned(), Value::String("open".to_owned())),
+                        ("assignee".to_owned(), Value::Uuid(author(0xa1).0)),
+                        ("priority".to_owned(), Value::U64(7)),
+                    ])),
+                )
+                .unwrap();
+            node.apply_fate_update(
+                accepted,
+                Fate::Accepted,
+                Some(GlobalSeq(3)),
+                Some(DurabilityTier::Global),
+            )
+            .unwrap();
+
+            let shape = Query::from("issues")
+                .validate(&node.catalogue.schema)
+                .unwrap();
+            let binding = shape.bind(BTreeMap::new()).unwrap();
+            let read_view = ReadViewSpec {
+                source: ReadViewSourceSpec::Branch {
+                    branch: branch_id.0,
+                },
+                ..ReadViewSpec::default()
+            };
+            let (mut subscription, initial) = node
+                .open_maintained_view_subscription_in_authorization_mode(
+                    &shape,
+                    &binding,
+                    AuthorId::SYSTEM,
+                    tier,
+                    &read_view,
+                    None,
+                    QueryAuthorizationMode::TrustedServing,
+                )
+                .unwrap();
+            assert!(initial.rows.iter().any(|current| {
+                current.row_uuid() == issue
+                    && current.cell(node.table("issues").unwrap(), "title")
+                        == Some(Value::String("accepted overlay".to_owned()))
+            }));
+
+            let rejected_replacement = node
+                .commit_mergeable_on_branch(
+                    branch_id,
+                    MergeableCommit::new("issues", issue, 3_000).cells(BTreeMap::from([
+                        (
+                            "title".to_owned(),
+                            Value::String("rejected replacement".to_owned()),
+                        ),
+                        ("state".to_owned(), Value::String("open".to_owned())),
+                        ("assignee".to_owned(), Value::Uuid(author(0xa1).0)),
+                        ("priority".to_owned(), Value::U64(8)),
+                    ])),
+                )
+                .unwrap();
+            if tier == DurabilityTier::Local {
+                let pending = node
+                    .drain_local_maintained_view_subscription(&mut subscription, None)
+                    .unwrap()
+                    .expect("Local must expose a pending replacement");
+                assert!(pending.added.iter().any(|(_, current)| {
+                    current.row_uuid() == issue
+                        && current.cell(node.table("issues").unwrap(), "title")
+                            == Some(Value::String("rejected replacement".to_owned()))
+                }));
+            } else {
+                assert!(
+                    node.drain_local_maintained_view_subscription(&mut subscription, None)
+                        .unwrap()
+                        .is_none(),
+                    "{tier:?} must not expose a pending replacement"
+                );
+            }
+            node.apply_fate_update(
+                rejected_replacement,
+                Fate::Rejected(crate::tx::RejectionReason::AuthorizationDenied),
+                None,
+                None,
+            )
+            .unwrap();
+            if tier == DurabilityTier::Local {
+                let retracted = node
+                    .drain_local_maintained_view_subscription(&mut subscription, None)
+                    .unwrap()
+                    .expect("rejecting a pending replacement must restore the accepted winner");
+                assert!(retracted.added.iter().any(|(_, current)| {
+                    current.row_uuid() == issue
+                        && current.cell(node.table("issues").unwrap(), "title")
+                            == Some(Value::String("accepted overlay".to_owned()))
+                }));
+            } else {
+                assert!(
+                    node.drain_local_maintained_view_subscription(&mut subscription, None)
+                        .unwrap()
+                        .is_none(),
+                    "a rejected replacement must never perturb {tier:?}"
+                );
+            }
+
+            let rejected_insert = node
+                .commit_mergeable_on_branch(
+                    branch_id,
+                    MergeableCommit::new("issues", rejected_only, 4_000).cells(BTreeMap::from([
+                        (
+                            "title".to_owned(),
+                            Value::String("rejected insert".to_owned()),
+                        ),
+                        ("state".to_owned(), Value::String("open".to_owned())),
+                        ("assignee".to_owned(), Value::Uuid(author(0xa1).0)),
+                        ("priority".to_owned(), Value::U64(9)),
+                    ])),
+                )
+                .unwrap();
+            if tier == DurabilityTier::Local {
+                let pending = node
+                    .drain_local_maintained_view_subscription(&mut subscription, None)
+                    .unwrap()
+                    .expect("Local must expose a pending insert");
+                assert!(
+                    pending
+                        .added
+                        .iter()
+                        .any(|(_, current)| current.row_uuid() == rejected_only)
+                );
+            } else {
+                assert!(
+                    node.drain_local_maintained_view_subscription(&mut subscription, None)
+                        .unwrap()
+                        .is_none(),
+                    "{tier:?} must not expose a pending insert"
+                );
+            }
+            node.apply_fate_update(
+                rejected_insert,
+                Fate::Rejected(crate::tx::RejectionReason::AuthorizationDenied),
+                None,
+                None,
+            )
+            .unwrap();
+            if tier == DurabilityTier::Local {
+                let retracted = node
+                    .drain_local_maintained_view_subscription(&mut subscription, None)
+                    .unwrap()
+                    .expect("rejecting a pending insert must retract it");
+                assert!(retracted.removed.iter().any(|occurrence| {
+                    *occurrence
+                        == crate::tools::OutputOccurrenceId::single_source(
+                            crate::tools::ObjectId::from_uuid(rejected_only.0),
+                        )
+                }));
+            } else {
+                assert!(
+                    node.drain_local_maintained_view_subscription(&mut subscription, None)
+                        .unwrap()
+                        .is_none(),
+                    "a rejected insert must never perturb {tier:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn branch_program_tier_filter_preserves_claim_policy_fields() {
+        let schema = JazzSchema::new([TableSchema::new(
+            "rooms",
+            [
+                ColumnSchema::new("name", ColumnType::String),
+                ColumnSchema::new("join_code", ColumnType::String),
+            ],
+        )
+        .with_read_policy(Policy::shape(
+            Query::from("rooms").filter(eq(col("join_code"), claim("join_code"))),
+        ))
+        .with_write_policy(Policy::public())]);
+        let (_dir, mut node) =
+            open_node_with_uuid(NodeUuid::from_bytes([0x71; 16]), schema.clone());
+        let identity = author(0x72);
+        node.set_session_claims(
+            identity,
+            BTreeMap::from([(
+                "join_code".to_owned(),
+                Value::String("branch-secret".to_owned()),
+            )]),
+        );
+        let branch_id = BranchId::from_bytes([0x73; 16]);
+        node.create_branch(branch_id).unwrap();
+        let room = row(7);
+        let tx_id = node
+            .commit_mergeable_on_branch(
+                branch_id,
+                MergeableCommit::new("rooms", room, 1_000).cells(BTreeMap::from([
+                    ("name".to_owned(), Value::String("branch room".to_owned())),
+                    (
+                        "join_code".to_owned(),
+                        Value::String("branch-secret".to_owned()),
+                    ),
+                ])),
+            )
+            .unwrap();
+        node.apply_fate_update(
+            tx_id,
+            Fate::Accepted,
+            Some(GlobalSeq(1)),
+            Some(DurabilityTier::Global),
+        )
+        .unwrap();
+        let shape = Query::from("rooms").validate(&schema).unwrap();
+        let binding = shape.bind(BTreeMap::new()).unwrap();
+        let rows = node
+            .query_rows_on_branch_query_engine(branch_id, &shape, &binding, identity)
+            .unwrap();
+        assert_eq!(
+            rows.iter().map(CurrentRow::row_uuid).collect::<Vec<_>>(),
+            vec![room]
+        );
+        let (_, snapshot) = node
+            .open_maintained_view_subscription_in_authorization_mode(
+                &shape,
+                &binding,
+                identity,
+                DurabilityTier::Global,
+                &ReadViewSpec {
+                    source: ReadViewSourceSpec::Branch {
+                        branch: branch_id.0,
+                    },
+                    ..ReadViewSpec::default()
+                },
+                None,
+                QueryAuthorizationMode::TrustedServing,
+            )
+            .unwrap();
+        assert_eq!(
+            snapshot
+                .rows
+                .iter()
+                .map(CurrentRow::row_uuid)
+                .collect::<Vec<_>>(),
+            vec![room]
+        );
+        let (_, local_snapshot) = node
+            .open_maintained_view_subscription_in_authorization_mode(
+                &shape,
+                &binding,
+                identity,
+                DurabilityTier::Global,
+                &ReadViewSpec {
+                    source: ReadViewSourceSpec::Branch {
+                        branch: branch_id.0,
+                    },
+                    ..ReadViewSpec::default()
+                },
+                None,
+                QueryAuthorizationMode::ClientLocal,
+            )
+            .unwrap();
+        assert_eq!(
+            local_snapshot
+                .rows
+                .iter()
+                .map(CurrentRow::row_uuid)
+                .collect::<Vec<_>>(),
+            vec![room]
         );
     }
 

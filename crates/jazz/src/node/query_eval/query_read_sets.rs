@@ -24,6 +24,7 @@ pub(super) fn current_query_read_set(
                     SourceExpr::SettledBindingView {
                         projection: projection.clone(),
                         binding_view,
+                        rows: SettledBindingRows::ResultMembers,
                     }
                 } else {
                     SourceExpr::VisibleCurrent {
@@ -37,11 +38,19 @@ pub(super) fn current_query_read_set(
         })
         .collect::<BTreeMap<_, _>>();
     for source in &shape.auxiliary_sources {
-        // Auxiliary closure sources are not result members of the settled binding
-        // view. Keep the result/root source pinned to the settled view, but read
-        // implicit reference targets from current storage so serving can resolve
-        // their rows instead of treating missing result-set entries as coverage
-        // gaps.
+        if let Some(binding_view) = settled_binding_view
+            && let Some(source_index) = flat_tuple_source_index(source)
+        {
+            sources.insert(
+                source.clone(),
+                SourceExpr::SettledBindingView {
+                    projection: projection.clone(),
+                    binding_view,
+                    rows: SettledBindingRows::FlatTupleContributor { source_index },
+                },
+            );
+            continue;
+        }
         sources.insert(
             source.clone(),
             SourceExpr::VisibleCurrent {
@@ -56,6 +65,18 @@ pub(super) fn current_query_read_set(
         policy_schema,
         sources,
     })
+}
+
+fn flat_tuple_source_index(source: &SourceId) -> Option<usize> {
+    let [SourceRole::Alias(alias)] = source.path.components.as_slice() else {
+        return None;
+    };
+    alias
+        .strip_prefix("flat_join:")?
+        .split_once(':')?
+        .0
+        .parse()
+        .ok()
 }
 
 pub(super) fn historical_query_read_set(
@@ -178,6 +199,22 @@ pub(super) fn query_read_set_for_read_view(
     // the public row. Its authoritative result is materialized directly by
     // the subscription facade instead.
     let settled_binding_view = (!aggregate_query).then_some(settled_binding_view).flatten();
+    // Branch-current v1 deliberately remains an overlay-first source graph at
+    // every peer. A selected result may belong to a detached usage site,
+    // whereas durable branch history must continue to drive live writes,
+    // deletion, and restoration. BranchId remains in the binding/read-view
+    // key; this only chooses its live data source.
+    if let ReadViewSourceSpec::Branch { branch } = &read_view.source
+        && read_view.schema == Default::default()
+        && read_view.overlays.is_empty()
+    {
+        return Ok(branch_query_read_set(
+            shape,
+            read_schema,
+            tier,
+            BranchId(*branch),
+        ));
+    }
     if settled_binding_view.is_some() {
         if !read_view.is_default() {
             return Err(Error::QueryCapability(

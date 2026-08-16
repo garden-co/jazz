@@ -1331,6 +1331,7 @@ where
                 .made_by(made_by)
                 .cells(cells),
         )?;
+        node.finalize_local_mergeable_commit(tx_id)?;
         drop(node);
         self.refresh_subscriptions()?;
         self.node.mark_subscriber_connections_dirty();
@@ -1697,12 +1698,26 @@ where
                             author,
                         )
                         .map_err(Into::into),
-                    QueryAuthorizationMode::ClientLocal => node
+                    QueryAuthorizationMode::ClientLocal if tier < DurabilityTier::Edge => node
                         .query_rows_on_branch_for_client(
                             crate::ids::BranchId(*branch),
                             &prepared.shape,
                             &prepared.binding,
                             author,
+                        )
+                        .map_err(Into::into),
+                    QueryAuthorizationMode::ClientLocal => node
+                        .query_rows_for_client_read_view(
+                            &prepared.shape,
+                            &prepared.binding,
+                            self.node
+                                .upstream_register_shape_options(
+                                    tier,
+                                    opts.read_view.clone(),
+                                    opts.propagation == Propagation::Full,
+                                )
+                                .tier,
+                            &opts.read_view,
                         )
                         .map_err(Into::into),
                 };
@@ -6430,7 +6445,7 @@ where
             retained.push(Rc::downgrade(&state));
             continue;
         }
-        let (snapshot, snapshot_source, settled, snapshot_tier, force_reset_event) = {
+        let (mut snapshot, mut snapshot_source, settled, snapshot_tier, force_reset_event) = {
             let mut state_ref = state.borrow_mut();
             let local_snapshot_is_empty =
                 state_ref.snapshot.root_count == 0 && state_ref.snapshot.edges.is_empty();
@@ -7047,7 +7062,44 @@ where
                 }
             }
         };
-        let previous = state.borrow().snapshot.clone();
+        let (previous, previous_source, has_maintained_subscription) = {
+            let state = state.borrow();
+            (
+                state.snapshot.clone(),
+                state.snapshot_source,
+                matches!(
+                    &state.kind,
+                    SubscriptionKind::Prepared {
+                        maintained_subscription: Some(_),
+                        ..
+                    }
+                ),
+            )
+        };
+        // A link snapshot is a relation facade without the terminal's flat
+        // tuple occurrence sidecar. Once a maintained terminal owns this
+        // stream, replace it from the terminal rather than installing an
+        // unaddressable facade snapshot.
+        if !force_reset_event
+            && has_maintained_subscription
+            && previous_source == SubscriptionSnapshotSource::LocalMaintained
+            && snapshot_source == SubscriptionSnapshotSource::LinkSnapshot
+        {
+            let materialized = {
+                let state = state.borrow();
+                let SubscriptionKind::Prepared {
+                    maintained_subscription: Some(maintained),
+                    ..
+                } = &state.kind
+                else {
+                    unreachable!("checked maintained subscription above");
+                };
+                node.borrow_mut()
+                    .materialize_local_maintained_relation_snapshot_with_occurrences(maintained)?
+            };
+            snapshot = materialized.snapshot;
+            snapshot_source = SubscriptionSnapshotSource::LocalMaintained;
+        }
         if force_reset_event || snapshot != previous || settled != previous_settled {
             let mut state = state.borrow_mut();
             let event = if force_reset_event {
@@ -7069,7 +7121,11 @@ where
                 )
             };
             state.snapshot = relation_snapshot_with_delta_slack(&snapshot);
-            state.snapshot_index = RelationSnapshotIndex::from_snapshot(&state.snapshot);
+            state.snapshot_index = maintained_snapshot_index_or_row_index(
+                &mut node.borrow_mut(),
+                &state.kind,
+                &state.snapshot,
+            )?;
             state.snapshot_source = snapshot_source;
             state.settled = settled;
             if state.sender.unbounded_send(event).is_ok() {
@@ -8866,7 +8922,17 @@ where
                                 }
                             };
                             if let Some(shape) = &shape {
-                                if shape.params().is_empty() {
+                                // Branch compilation may install an empty
+                                // process-local sparse source. Defer that
+                                // side-effecting preflight until Subscribe,
+                                // where the authenticated branch gate is
+                                // available.
+                                if shape.params().is_empty()
+                                    && !matches!(
+                                        opts.read_view.source,
+                                        ReadViewSourceSpec::Branch { .. }
+                                    )
+                                {
                                     let binding = shape.bind(BTreeMap::new()).map_err(Error::from);
                                     let binding = match binding {
                                         Ok(binding) => binding,
@@ -9107,6 +9173,34 @@ where
                                 && existing != purpose
                             {
                                 drop_peer_request(&self.node);
+                                continue;
+                            }
+                            if let ReadViewSourceSpec::Branch { branch } = &opts.read_view.source
+                                && !self.node.borrow_mut().branch_metadata_visible_to(
+                                    crate::ids::BranchId(*branch),
+                                    peer.link_identity(),
+                                )?
+                            {
+                                let update = SyncMessage::ViewUpdate {
+                                    subscription,
+                                    settled_through: self.node.borrow().applied_global_watermark(),
+                                    reset_result_set: true,
+                                    version_carriers: Vec::new(),
+                                    version_bundles: Vec::new(),
+                                    peer_payload_inventory:
+                                        crate::protocol::PeerPayloadInventory::default(),
+                                    result_member_adds: Vec::new(),
+                                    result_member_removes: Vec::new(),
+                                    terminal_operations: Vec::new(),
+                                    program_fact_adds: Vec::new(),
+                                    program_fact_removes: Vec::new(),
+                                };
+                                send_with_sync_context(
+                                    &self.node,
+                                    peer,
+                                    self.transport.as_mut(),
+                                    update,
+                                )?;
                                 continue;
                             }
                             let supported = self
@@ -9406,7 +9500,17 @@ where
                                             binding_id: coverage.binding_id,
                                             read_view: coverage.opts.read_view_key(),
                                         };
-                                        peer.forget_subscription(group_subscription);
+                                        // A coverage group owns a maintained Groove receiver.
+                                        // Forgetting only the peer-side cursor leaves that
+                                        // receiver dormant in the shared runtime; a later
+                                        // re-open of the same logical coverage then races a
+                                        // stale source subscription instead of observing the
+                                        // current authority membership. Tear down both pieces
+                                        // together when the final usage site goes away.
+                                        peer.forget_subscription_with_node(
+                                            &mut self.node.borrow_mut(),
+                                            group_subscription,
+                                        );
                                         coverage_groups.remove(&coverage);
                                         if propagated_upstream {
                                             upstream_subscriptions.borrow_mut().push(
@@ -10105,13 +10209,16 @@ where
             }
         }
     }
+    let updates = std::mem::take(pending)
+        .into_iter()
+        .map(|update| update.parts)
+        .collect::<Vec<_>>();
     let mut node_ref = node.borrow_mut();
-    node_ref.apply_view_updates_in_batch(
-        std::mem::take(pending)
-            .into_iter()
-            .map(|update| update.parts)
-            .collect(),
-    )?;
+    // Branch view payloads carry branch-target version witnesses. Provision
+    // their sparse physical partitions before staging the receiver batch, so
+    // a durable table exists before the selected result becomes observable.
+    node_ref.prepare_view_update_branch_partitions(&updates)?;
+    node_ref.apply_view_updates_in_batch(updates)?;
     drop(node_ref);
     if let Some(receipts) = active_authority_view_receipts.borrow_mut().as_mut()
         && receipts.connection_epoch == connection_epoch
@@ -13088,6 +13195,36 @@ fn relation_snapshot_index_with_root_occurrences(
         ));
     }
     Ok(index)
+}
+
+/// Flat tuple identity is carried by the maintained terminal sidecar, not the
+/// public row: an external reset may omit hidden joined-row fields. Preserve
+/// that sidecar whenever its materialized snapshot is the replacement being
+/// installed; ordinary link-only snapshots retain row-derived indexing.
+fn maintained_snapshot_index_or_row_index<S>(
+    node: &mut NodeState<S>,
+    kind: &SubscriptionKind,
+    snapshot: &RelationSnapshot,
+) -> Result<RelationSnapshotIndex, Error>
+where
+    S: OrderedKvStorage,
+{
+    let SubscriptionKind::Prepared {
+        maintained_subscription: Some(maintained),
+        ..
+    } = kind
+    else {
+        return Ok(RelationSnapshotIndex::from_snapshot(snapshot));
+    };
+    let materialized =
+        node.materialize_local_maintained_relation_snapshot_with_occurrences(maintained)?;
+    if materialized.snapshot.root_count == snapshot.root_count {
+        return relation_snapshot_index_with_root_occurrences(
+            snapshot,
+            &materialized.root_occurrence_ids,
+        );
+    }
+    Ok(RelationSnapshotIndex::from_snapshot(snapshot))
 }
 
 fn relation_snapshot_with_delta_slack(snapshot: &RelationSnapshot) -> RelationSnapshot {

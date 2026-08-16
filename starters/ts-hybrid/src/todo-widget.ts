@@ -58,12 +58,28 @@ export function mountTodoWidget(
         <input type="text" name="title" placeholder="Add a task" aria-label="New todo" />
         <button type="submit">Add</button>
       </form>
+      <p role="status" aria-live="polite">Ready to save locally</p>
       <ul></ul>
     </section>
   `;
   const form = parent.querySelector<HTMLFormElement>("form")!;
   const input = form.querySelector<HTMLInputElement>("input[name='title']")!;
   const list = parent.querySelector<HTMLUListElement>("ul")!;
+  const localSaveStatus = parent.querySelector<HTMLElement>("[role='status']")!;
+  let latestSaveGeneration = 0;
+  let pendingLocalSaveCount = 0;
+  let latestLocalSaveState: "saving" | "saved" | "failed" | "sync-failed" = "saved";
+
+  function renderLocalSaveState() {
+    localSaveStatus.textContent =
+      latestLocalSaveState === "failed"
+        ? "Save failed locally"
+        : latestLocalSaveState === "sync-failed"
+          ? "Saved locally; sync failed"
+          : pendingLocalSaveCount > 0
+            ? "Saving locally…"
+            : "Saved locally";
+  }
 
   function renderTodos(todos: Todo[]) {
     list.replaceChildren(...todos.map(renderRow));
@@ -73,9 +89,32 @@ export function mountTodoWidget(
     event.preventDefault();
     const title = input.value.trim();
     if (!title) return;
-    const write = await db.insert(app.todos, { title, done: false });
-    await write.wait({ tier: "edge" });
-    form.reset();
+    const generation = ++latestSaveGeneration;
+    pendingLocalSaveCount += 1;
+    latestLocalSaveState = "saving";
+    renderLocalSaveState();
+    let savedLocally = false;
+    try {
+      const write = await db.insert(app.todos, { title, done: false });
+      await write.wait({ tier: "local" });
+      savedLocally = true;
+      if (generation === latestSaveGeneration) latestLocalSaveState = "saved";
+      pendingLocalSaveCount -= 1;
+      renderLocalSaveState();
+      await write.wait({ tier: "edge" });
+      if (generation === latestSaveGeneration) form.reset();
+    } catch {
+      if (generation === latestSaveGeneration) {
+        latestLocalSaveState = savedLocally ? "sync-failed" : "failed";
+        renderLocalSaveState();
+      }
+    } finally {
+      if (!savedLocally) {
+        pendingLocalSaveCount -= 1;
+        if (generation === latestSaveGeneration) latestLocalSaveState = "failed";
+        renderLocalSaveState();
+      }
+    }
   });
 
   list.addEventListener("click", (event) => {

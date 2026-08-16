@@ -581,6 +581,7 @@ fn sync_facts() -> BTreeSet<ProgramFactKey> {
 #[derive(Default)]
 struct FakeSourceResolver {
     requests: Vec<SourceRequest>,
+    branch_witnesses: bool,
 }
 
 impl SourceResolver for FakeSourceResolver {
@@ -615,7 +616,7 @@ impl SourceResolver for FakeSourceResolver {
                     schema_version_field: "schema_version".to_owned(),
                     tx_time_field: "tx_time".to_owned(),
                     tx_node_field: "tx_node_id".to_owned(),
-                    branch_or_prefix_field: None,
+                    branch_or_prefix_field: self.branch_witnesses.then(|| "branch_id".to_owned()),
                 },
             ),
             (
@@ -635,6 +636,21 @@ impl SourceResolver for FakeSourceResolver {
                 },
             );
         }
+        let mut descriptor_fields = vec![
+            ("table", ValueType::String),
+            ("row_uuid", ValueType::Uuid),
+            ("user_title", ValueType::String),
+            ("user_todo", ValueType::Nullable(Box::new(ValueType::Uuid))),
+            ("user_tag", ValueType::Nullable(Box::new(ValueType::String))),
+            ("tx_time", ValueType::U64),
+            ("tx_node_id", ValueType::U64),
+            ("schema_version", ValueType::Uuid),
+            ("coverage", ValueType::String),
+            ("layer", ValueType::String),
+        ];
+        if self.branch_witnesses {
+            descriptor_fields.push(("branch_id", ValueType::Uuid));
+        }
         Ok(ResolvedSource {
             table_schema: TableSchema::new(
                 request.source.table.clone(),
@@ -643,18 +659,7 @@ impl SourceResolver for FakeSourceResolver {
             graph: GraphBuilder::table(format!("resolved_{}", request.source.table)),
             row_shape: SourceRowShape {
                 source: request.source.clone(),
-                descriptor: RecordDescriptor::new([
-                    ("table", ValueType::String),
-                    ("row_uuid", ValueType::Uuid),
-                    ("user_title", ValueType::String),
-                    ("user_todo", ValueType::Nullable(Box::new(ValueType::Uuid))),
-                    ("user_tag", ValueType::Nullable(Box::new(ValueType::String))),
-                    ("tx_time", ValueType::U64),
-                    ("tx_node_id", ValueType::U64),
-                    ("schema_version", ValueType::Uuid),
-                    ("coverage", ValueType::String),
-                    ("layer", ValueType::String),
-                ]),
+                descriptor: RecordDescriptor::new(descriptor_fields),
                 row_uuid_field: "row_uuid".to_owned(),
                 metadata,
             },
@@ -3042,6 +3047,40 @@ fn correlated_path_app_rows_and_relation_facts_lower_to_sibling_sinks() {
             })
         )
     }));
+}
+
+#[test]
+fn branch_relation_edges_lower_concrete_branch_witness_fields() {
+    let request = correlated_path_request(
+        CorrelationRequirement::Optional,
+        row_set_output(BTreeSet::from([ProgramFactKey::RelationEdges])),
+    );
+    let mut resolver = FakeSourceResolver {
+        branch_witnesses: true,
+        ..Default::default()
+    };
+    let program = lower_query_program(request, &mut resolver).expect("branch relation lowers");
+    let relation = program
+        .lowered
+        .terminals
+        .iter()
+        .find(|terminal| terminal.sink == "maintained.relation_edges")
+        .expect("relation terminal");
+    assert!(matches!(
+        &relation.graph,
+        GraphBuilder::Project { fields, .. }
+            if fields.iter().any(|field| field.output_name == "source_branch_or_prefix")
+                && fields.iter().any(|field| field.output_name == "target_branch_or_prefix")
+    ));
+    let ProgramOutputSchemas::RowSet(outputs) = &program.lowered.output;
+    assert!(outputs.iter().any(|output| matches!(
+        output,
+        OutputTerminalSchema::Fact(ProgramFactOutput {
+            schema: ProgramFactSchema::RelationEdges(RelationEdgeSchema { source, target, .. }),
+            ..
+        }) if source.branch_or_prefix_field.as_deref() == Some("source_branch_or_prefix")
+            && target.branch_or_prefix_field.as_deref() == Some("target_branch_or_prefix")
+    )));
 }
 
 #[test]

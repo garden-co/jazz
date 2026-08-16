@@ -171,6 +171,8 @@ pub(crate) struct VersionedRowRefSchema {
     pub(crate) row: RowRefSchema,
     /// Version fields, when the fact needs a concrete visible version.
     pub(crate) version: Option<ResultMembershipVersionSchema>,
+    /// Branch/prefix identity carried by the concrete version source.
+    pub(crate) branch_or_prefix_field: Option<String>,
 }
 
 /// Version identity carried by a result membership row.

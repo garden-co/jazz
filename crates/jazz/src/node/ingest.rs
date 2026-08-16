@@ -992,7 +992,7 @@ where
     /// Prepare physical branch storage only after bounded structural checks and
     /// catalogue dependencies are known to be satisfiable. Missing catalogue
     /// schemas are left for the ordinary parking path.
-    fn prepare_branch_target_partitions_if_ready(
+    pub(super) fn prepare_branch_target_partitions_if_ready(
         &mut self,
         tx: &Transaction,
         versions: &[VersionRecord],
@@ -3743,13 +3743,32 @@ where
     }
 
     #[cfg(test)]
+    fn physical_table_id_for_authored_test_table(
+        &self,
+        table: &str,
+    ) -> Result<PhysicalTableId, Error> {
+        let candidates = self
+            .catalogue
+            .physical_mappings
+            .values()
+            .filter_map(|mapping| mapping.tables.get(table).map(|table| table.table_id))
+            .collect::<BTreeSet<_>>();
+        match candidates.iter().copied().collect::<Vec<_>>().as_slice() {
+            [table_id] => Ok(*table_id),
+            [] => Err(Error::TableNotFound(table.to_owned())),
+            _ => Err(Error::InvalidStoredValue(
+                "authored test table name maps to multiple physical lineages",
+            )),
+        }
+    }
+
+    #[cfg(test)]
     fn recomputed_merge_heads_from_history_for_test(
         &mut self,
         table: &str,
         row_uuid: RowUuid,
     ) -> Result<BTreeSet<TxId>, Error> {
-        let table_id =
-            self.physical_table_id_for_schema(self.catalogue.current_write_schema.schema, table)?;
+        let table_id = self.physical_table_id_for_authored_test_table(table)?;
         let versions = self.query_physical_content_row_versions(table_id, table, row_uuid)?;
         let mut candidate_indices = Vec::new();
         for (idx, version) in versions.iter().enumerate() {
@@ -3779,8 +3798,7 @@ where
         row_uuid: RowUuid,
     ) -> Result<(), Error> {
         let heads = self.recomputed_merge_heads_from_history_for_test(table, row_uuid)?;
-        let table_id =
-            self.physical_table_id_for_schema(self.catalogue.current_write_schema.schema, table)?;
+        let table_id = self.physical_table_id_for_authored_test_table(table)?;
         let mut batch = self.database.open_batch();
         Self::write_merge_heads(&mut batch, table_id, row_uuid, &heads)?;
         self.database.commit_batch(batch)?;
@@ -3794,8 +3812,7 @@ where
         row_uuid: RowUuid,
     ) -> Result<(), Error> {
         let expected = self.recomputed_merge_heads_from_history_for_test(table, row_uuid)?;
-        let table_id =
-            self.physical_table_id_for_schema(self.catalogue.current_write_schema.schema, table)?;
+        let table_id = self.physical_table_id_for_authored_test_table(table)?;
         let actual = self.require_merge_heads(table_id, row_uuid)?;
         if actual != expected {
             let versions = self
@@ -4372,31 +4389,44 @@ where
         update_current_indexes: bool,
     ) -> Result<(), Error> {
         let tx_id = tx.tx_id;
-        let mut batch = self.database.open_batch();
-        self.stage_transaction_and_versions_with_current_indexes(
-            &mut batch,
-            tx,
-            versions,
-            fate.clone(),
-            global_seq,
-            durability,
-            update_current_indexes,
-        )?;
-        self.database.commit_batch(batch)?;
-        let mut staged_global_seqs = Vec::new();
-        let mut cleanup_batch = self.database.open_batch();
-        self.finalize_staged_transaction_ingest(
-            &mut cleanup_batch,
-            tx_id,
-            fate,
-            global_seq,
-            &mut staged_global_seqs,
-        )?;
-        if !cleanup_batch.is_empty() {
-            self.database.commit_batch(cleanup_batch)?;
-            self.persist_storage_consistency_marker_through(tx_id.time)?;
+        let publication_scope = self.database.begin_durable_publication_scope()?;
+        let result = (|| {
+            let mut batch = self.database.open_batch();
+            self.stage_transaction_and_versions_with_current_indexes(
+                &mut batch,
+                tx,
+                versions,
+                fate.clone(),
+                global_seq,
+                durability,
+                update_current_indexes,
+            )?;
+            self.database.commit_batch(batch)?;
+            let mut staged_global_seqs = Vec::new();
+            let mut cleanup_batch = self.database.open_batch();
+            self.finalize_staged_transaction_ingest(
+                &mut cleanup_batch,
+                tx_id,
+                fate,
+                global_seq,
+                &mut staged_global_seqs,
+            )?;
+            if !cleanup_batch.is_empty() {
+                self.database.commit_batch(cleanup_batch)?;
+                self.persist_storage_consistency_marker_through(tx_id.time)?;
+            }
+            Ok(())
+        })();
+        match result {
+            Ok(()) => {
+                publication_scope.finish(&mut self.database);
+                Ok(())
+            }
+            Err(error) => {
+                publication_scope.abort(&mut self.database);
+                Err(error)
+            }
         }
-        Ok(())
     }
 
     fn stage_transaction_and_versions_with_current_indexes(

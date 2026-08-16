@@ -411,6 +411,14 @@ impl ShellDb {
         }
     }
 
+    fn create_branch_for_test(&self, branch: BranchId) -> ShellResult<()> {
+        match self {
+            Self::Memory(db) => db.create_branch_with_id(branch).map_err(Into::into),
+            #[cfg(feature = "rocksdb")]
+            Self::Rocks(db) => db.create_branch_with_id(branch).map_err(Into::into),
+        }
+    }
+
     fn set_edge_cache_budget(&self, budget: Option<EdgeCacheBudget>) {
         match self {
             Self::Memory(db) => db.set_edge_cache_budget(budget),
@@ -1342,6 +1350,12 @@ impl InMemoryServerShell {
         cells: RowCells,
     ) -> ShellResult<()> {
         self.db.seed_branch_row(branch, table.into(), row_id, cells)
+    }
+
+    /// Create an empty branch for a public integration test without creating a
+    /// sparse overlay partition. Production creation uses the same DB path.
+    pub fn create_branch_for_test(&mut self, branch: BranchId) -> ShellResult<()> {
+        self.db.create_branch_for_test(branch)
     }
 
     fn is_draining(&self) -> bool {

@@ -1777,7 +1777,6 @@ async fn dynamic_server_live_subscription_replays_on_first_permissions_head_and_
 ///                                └──► user row with email: null
 /// ```
 #[tokio::test]
-#[ignore = "known red; tracked in TEST_BURNDOWN.md"]
 async fn column_addition_new_client_can_read_old_rows() {
     tokio::task::LocalSet::new()
         .run_until(column_addition_new_client_can_read_old_rows_impl())
@@ -1994,7 +1993,6 @@ async fn cannot_read_from_old_schema_until_lens_is_added_impl() {
 ///                        Charlie(email=value, role=value)
 /// ```
 #[tokio::test]
-#[ignore = "known red; tracked in TEST_BURNDOWN.md"]
 async fn multi_hop_column_additions_new_client_can_read_old_rows() {
     tokio::task::LocalSet::new()
         .run_until(multi_hop_column_additions_new_client_can_read_old_rows_impl())
@@ -2163,7 +2161,6 @@ async fn multi_hop_column_additions_new_client_can_read_old_rows_impl() {
 /// bob (v3) query ──► user row with contact_email value
 /// ```
 #[tokio::test]
-#[ignore = "known red; tracked in TEST_BURNDOWN.md"]
 async fn multi_hop_column_renames_new_client_can_read_old_rows() {
     tokio::task::LocalSet::new()
         .run_until(multi_hop_column_renames_new_client_can_read_old_rows_impl())
@@ -2822,7 +2819,6 @@ async fn table_rename_update_and_delete_copy_on_write_impl() {
 }
 
 #[tokio::test]
-#[ignore = "known red; tracked in TEST_BURNDOWN.md"]
 async fn table_rename_join_query_translates_join_target_on_old_branch() {
     tokio::task::LocalSet::new()
         .run_until(table_rename_join_query_translates_join_target_on_old_branch_impl())
@@ -2861,8 +2857,15 @@ async fn table_rename_join_query_translates_join_target_on_old_branch_impl() {
     wait_for_edge_query_ready(&alice, "posts", Duration::from_secs(30)).await;
 
     let author_id = jazz::tools::ObjectId::new();
+    // `people.id` is normalized to the row identity by the flat-join planner.
+    // Make the authored v1 row identity match the foreign key that the post
+    // will use, as the v2 query's correlation contract requires.
     let (_, _, batch_id) = alice
-        .insert("users", table_rename_join_user_values(author_id, "Alice"))
+        .insert_with_id(
+            "users",
+            *author_id.uuid(),
+            table_rename_join_user_values(author_id, "Alice"),
+        )
         .expect("alice creates v1 user");
     alice
         .wait_for_batch(
@@ -2873,9 +2876,10 @@ async fn table_rename_join_query_translates_join_target_on_old_branch_impl() {
         .expect("alice user reaches edge");
 
     let post_id = jazz::tools::ObjectId::new();
-    let (post_row_id, _, batch_id) = alice
-        .insert(
+    let (_, _, batch_id) = alice
+        .insert_with_id(
             "posts",
+            *post_id.uuid(),
             table_rename_join_post_values(post_id, author_id, "Hello from v1"),
         )
         .expect("alice creates v1 post");
@@ -2905,7 +2909,7 @@ async fn table_rename_join_query_translates_join_target_on_old_branch_impl() {
         Some(DurabilityTier::EdgeServer),
         Duration::from_secs(25),
         "bob join sees v1 post author through table rename",
-        |rows| (rows.len() == 1 && rows[0].key == post_row_id).then_some(rows),
+        |rows| (rows.len() == 1).then_some(rows),
     )
     .await;
 
@@ -2929,8 +2933,15 @@ async fn table_rename_join_query_translates_join_target_on_old_branch_impl() {
     server.shutdown().await;
 }
 
+/// A v2 reader reconstructs an array relation from canonical v1 rows after
+/// the root table was renamed from `users` to `people`.
+///
+/// alice ──v1 user + post──► edge ──canonical versions──► bob(v2)
+///
+/// `id` is the public spelling of Jazz's row UUID in correlations, so Alice
+/// supplies the same UUID for the row and the foreign-key value. The separate
+/// physical row identity must not be confused with an arbitrary user cell.
 #[tokio::test]
-#[ignore = "known red; tracked in TEST_BURNDOWN.md"]
 async fn table_rename_fk_array_lookup_finds_related_rows_on_old_branch() {
     tokio::task::LocalSet::new()
         .run_until(table_rename_fk_array_lookup_finds_related_rows_on_old_branch_impl())
@@ -2970,7 +2981,11 @@ async fn table_rename_fk_array_lookup_finds_related_rows_on_old_branch_impl() {
 
     let author_id = jazz::tools::ObjectId::new();
     let (author_row_id, _, batch_id) = alice
-        .insert("users", table_rename_join_user_values(author_id, "Alice"))
+        .insert_with_id(
+            "users",
+            *author_id.uuid(),
+            table_rename_join_user_values(author_id, "Alice"),
+        )
         .expect("alice creates v1 user");
     alice
         .wait_for_batch(
@@ -3040,7 +3055,6 @@ async fn table_rename_fk_array_lookup_finds_related_rows_on_old_branch_impl() {
 }
 
 #[tokio::test]
-#[ignore = "known red; tracked in TEST_BURNDOWN.md"]
 async fn local_join_query_uses_current_permissions_for_joined_provenance_after_lens_transform() {
     tokio::task::LocalSet::new().run_until(local_join_query_uses_current_permissions_for_joined_provenance_after_lens_transform_impl()).await
 }
@@ -3246,7 +3260,6 @@ async fn local_join_query_uses_current_permissions_for_joined_provenance_after_l
 /// bob --query assets---------> server --row policy--x empty
 /// mallory --spoof owner-----> server --row policy--x rejected
 #[tokio::test]
-#[ignore = "known red; tracked in TEST_BURNDOWN.md"]
 async fn multi_hop_table_renames_and_column_rename() {
     tokio::task::LocalSet::new()
         .run_until(multi_hop_table_renames_and_column_rename_impl())

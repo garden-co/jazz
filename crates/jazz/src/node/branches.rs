@@ -359,7 +359,9 @@ where
             .clone();
         let known_source_dots = self.validated_target_source_dots(source, target)?;
         for table in write_schema.tables.clone() {
-            let table_schema = self.table_in_schema(&table.name, write_schema_version)?;
+            let table_schema = self
+                .table_in_schema(&table.name, write_schema_version)?
+                .clone();
             let overlay_rows = self.lineage_row_ids(&table.name, source)?;
             if identity != AuthorId::SYSTEM && !overlay_rows.is_empty() {
                 let shape = crate::query::Query::from(table.name.as_str())
@@ -379,6 +381,63 @@ where
                 .into_iter()
                 .map(|row| row.row_uuid())
                 .collect::<BTreeSet<_>>();
+                let mut readable = readable;
+                if let Some(branch) = &source_branch {
+                    let unread = overlay_rows
+                        .difference(&readable)
+                        .copied()
+                        .collect::<Vec<_>>();
+                    for row_uuid in unread {
+                        let deleted = self
+                            .branch_overlay_layer_winner_for_schema(
+                                &table.name,
+                                row_uuid,
+                                VersionLayer::Deletion,
+                                branch.branch_id,
+                                write_schema_version,
+                            )?
+                            .is_some_and(|winner| {
+                                winner.deletion() == Some(DeletionEvent::Deleted)
+                            });
+                        if !deleted {
+                            continue;
+                        }
+                        let Some(subject) = self.branch_selected_content_witness(
+                            branch,
+                            &table_schema,
+                            row_uuid,
+                            write_schema_version,
+                        )?
+                        else {
+                            continue;
+                        };
+                        let allowed = if let Some(policy) = &table_schema.read_policy {
+                            let cells = table_schema
+                                .columns
+                                .iter()
+                                .filter_map(|column| {
+                                    subject
+                                        .cell(&table_schema, &column.name)
+                                        .map(|value| (column.name.clone(), value))
+                                })
+                                .collect();
+                            self.branch_write_policy_query_allows_candidate(
+                                branch.branch_id,
+                                &table_schema,
+                                policy,
+                                row_uuid,
+                                &cells,
+                                identity,
+                                false,
+                            )?
+                        } else {
+                            true
+                        };
+                        if allowed {
+                            readable.insert(row_uuid);
+                        }
+                    }
+                }
                 if !overlay_rows.is_subset(&readable) {
                     return Err(Error::AuthorizationDenied);
                 }
@@ -1043,6 +1102,45 @@ where
         Ok(None)
     }
 
+    fn branch_selected_content_witness(
+        &mut self,
+        branch: &BranchRecord,
+        table: &TableSchema,
+        row_uuid: RowUuid,
+        read_schema_version: SchemaVersionId,
+    ) -> Result<Option<CurrentRow>, Error> {
+        if let Some(content) = self.branch_overlay_layer_winner_for_schema(
+            &table.name,
+            row_uuid,
+            VersionLayer::Content,
+            branch.branch_id,
+            read_schema_version,
+        )? {
+            let source_schema = self
+                .schema_version_for_alias(content.schema_version_alias())
+                .ok_or(Error::InvalidStoredValue(
+                    "branch content witness schema version alias missing",
+                ))?;
+            let source_table = self
+                .table_in_schema(content.table(), source_schema)?
+                .clone();
+            let mut cells = self.materialized_cells_for_version(&source_table, &content)?;
+            let projected = self.translate_cells(
+                source_schema,
+                read_schema_version,
+                content.table(),
+                &mut cells,
+            )?;
+            if projected.as_deref() == Some(table.name.as_str()) {
+                return current_row_from_materialized_cells(table, &content, &cells).map(Some);
+            }
+        }
+        Ok(self
+            .branch_base_rows_for_schema(&table.name, branch, read_schema_version)?
+            .into_iter()
+            .find(|row| row.row_uuid() == row_uuid))
+    }
+
     #[cfg(test)]
     pub(crate) fn evaluate_branch_metadata_write_policy_for_test(
         &mut self,
@@ -1088,6 +1186,34 @@ where
         let mut rows = by_row.into_values().collect::<Vec<_>>();
         sort_current_rows(&mut rows);
         Ok(rows)
+    }
+
+    /// Resolve only the frozen root contribution of a parentless snapshot-base
+    /// branch.  Maintained branch-current reads keep this portion immutable
+    /// while an IVM graph follows the branch overlay in front of it.
+    pub(super) fn branch_base_rows_for_schema(
+        &mut self,
+        table: &str,
+        branch: &BranchRecord,
+        read_schema_version: SchemaVersionId,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        if branch.parent.is_some() {
+            return Err(Error::QueryCapability(
+                "branch-current subscriptions support only parentless snapshot-base branches"
+                    .to_owned(),
+            ));
+        }
+        let Some(base) = branch.base.as_ref() else {
+            // A root branch is defined without a frozen parent snapshot. Its
+            // immutable contribution is therefore the empty relation; the
+            // maintained overlay source supplies all branch-current rows.
+            return Ok(Vec::new());
+        };
+        if read_schema_version == self.catalogue.current_schema_version_id {
+            self.current_rows_at(table, base.global_base)
+        } else {
+            self.projected_historical_current_rows(table, read_schema_version, base.global_base)
+        }
     }
 
     #[cfg(test)]
@@ -1890,10 +2016,7 @@ where
         table: String,
         schema_version: SchemaVersionId,
         branch_id: BranchId,
-    ) -> Result<(), Error>
-    where
-        S: ReopenableStorage,
-    {
+    ) -> Result<(), Error> {
         let table_id = self.physical_table_id_for_schema(schema_version, &table)?;
         if !self
             .branches
@@ -1908,7 +2031,7 @@ where
             vec![Value::U64(table_id.0), Value::Uuid(branch_id.0)],
         );
         self.database.commit_batch(batch)?;
-        if let Err(rebuild_error) = self.rebuild_database_slot() {
+        if let Err(sync_error) = self.synchronize_physical_version_tables() {
             self.branches
                 .branch_partitions
                 .remove(&(table_id, branch_id));
@@ -1921,20 +2044,61 @@ where
                 ]),
             );
             self.database.commit_batch(rollback)?;
-            self.rebuild_database_slot()?;
-            return Err(rebuild_error);
+            return Err(sync_error);
         }
         Ok(())
+    }
+
+    /// Install an empty, process-local branch history source for an already
+    /// authorized maintained subscription.  The durable partition record stays
+    /// absent until its first branch write, but the IVM graph can subscribe to
+    /// a real empty table and therefore survives that first write without a
+    /// database rebuild or a source-shaped metadata oracle.
+    pub(super) fn prepare_branch_subscription_source_partition(
+        &mut self,
+        table: &str,
+        schema_version: SchemaVersionId,
+        branch_id: BranchId,
+    ) -> Result<(), Error> {
+        let table_id = self.physical_table_id_for_schema(schema_version, table)?;
+        if self
+            .branches
+            .branch_partitions
+            .contains(&(table_id, branch_id))
+        {
+            return Ok(());
+        }
+        self.branches
+            .branch_partitions
+            .insert((table_id, branch_id));
+        let result = self.synchronize_physical_version_tables();
+        self.branches
+            .branch_partitions
+            .remove(&(table_id, branch_id));
+        result
+    }
+
+    #[cfg(test)]
+    pub(crate) fn branch_subscription_source_exists_for_test(
+        &self,
+        table: &str,
+        schema_version: SchemaVersionId,
+        branch_id: BranchId,
+    ) -> bool {
+        self.physical_table_id_for_schema(schema_version, table)
+            .ok()
+            .is_some_and(|table_id| {
+                self.database
+                    .table_schema(&physical_branch_history_table_name(table_id, branch_id))
+                    .is_ok()
+            })
     }
 
     pub(super) fn ensure_branch_target_partitions(
         &mut self,
         branch_id: BranchId,
         versions: &[VersionRecord],
-    ) -> Result<(), Error>
-    where
-        S: ReopenableStorage,
-    {
+    ) -> Result<(), Error> {
         self.ensure_branch_open(branch_id)?;
         let partitions = versions
             .iter()

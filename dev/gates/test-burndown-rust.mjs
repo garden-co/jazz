@@ -67,10 +67,14 @@ function verifyMarkers(active) {
     if (matches.length !== 1) fail("active marker must bind exactly once: " + row.test);
     markerLocations.add(row.path + ":" + matches[0].index);
   }
-  const files = execFileSync("rg", ["-l", marker, "crates", "--glob", "*.rs"], { encoding: "utf8" })
-    .trim()
-    .split("\n")
-    .filter(Boolean);
+  const files = active.length
+    ? execFileSync("rg", ["-l", marker, "crates", "--glob", "*.rs"], {
+        encoding: "utf8",
+      })
+        .trim()
+        .split("\n")
+        .filter(Boolean)
+    : [];
   let total = 0;
   for (const file of files) total += fs.readFileSync(file, "utf8").split(marker).length - 1;
   if (total !== markerLocations.size || total !== active.length)
@@ -105,8 +109,8 @@ if (process.argv.includes("--self-test")) {
 }
 const doc = fs.readFileSync("TEST_BURNDOWN.md", "utf8");
 const { active, dormant, documented } = parse(doc);
-if (active.length !== 9 || dormant.length !== 9) fail("expected 9 active + 9 dormant rows");
+if (active.length !== 0 || dormant.length !== 10) fail("expected 0 active + 10 dormant rows");
 const ignored = compiledIgnored();
 if (!same(ignored, documented)) fail("compiled ignored set differs from documented set");
 verifyMarkers(active);
-console.log("Rust burndown: exact 9 active + 9 dormant identity bijection.");
+console.log("Rust burndown: exact 0 active + 10 dormant identity bijection.");

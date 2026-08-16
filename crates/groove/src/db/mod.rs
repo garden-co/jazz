@@ -12,6 +12,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::str;
+use std::sync::{Arc, Mutex};
 
 use web_time::{Duration, Instant};
 
@@ -49,7 +50,73 @@ pub struct Database<S> {
     last_commit_metrics: Option<CommitMetrics>,
     last_tick_metrics: Option<TickMetrics>,
     storage_read_metrics: RefCell<StorageReadMetrics>,
+    /// Host-owned transactions may span several Groove storage commits while
+    /// remaining one externally atomic publication. Notifications stay queued
+    /// until the outermost host scope completes.
+    durable_publication_state: Arc<Mutex<DurablePublicationState>>,
     poisoned: bool,
+}
+
+/// Capability token for one host-owned durable publication scope.
+///
+/// This is an internal cross-crate seam used by Jazz. The token is consumed by
+/// exactly one finish or abort operation, preventing double-finalization; the
+/// database tracks nesting so an inner abort makes every enclosing completion
+/// discard rather than publish.
+#[doc(hidden)]
+#[must_use = "a durable publication scope must be finished or aborted"]
+pub struct DurablePublicationScope {
+    state: Arc<Mutex<DurablePublicationState>>,
+    resolved: bool,
+}
+
+#[derive(Default)]
+struct DurablePublicationState {
+    depth: usize,
+    aborted: bool,
+}
+
+impl DurablePublicationScope {
+    /// Successfully complete this scope. Publication occurs only when this is
+    /// the outermost scope and no nested scope aborted.
+    #[doc(hidden)]
+    pub fn finish<S: OrderedKvStorage>(mut self, database: &mut Database<S>) {
+        assert!(
+            Arc::ptr_eq(&self.state, &database.durable_publication_state),
+            "durable publication scope belongs to a different database"
+        );
+        self.resolve(false);
+        database.settle_durable_publication_scopes();
+    }
+
+    /// Abort this scope and poison its whole nested publication unit.
+    #[doc(hidden)]
+    pub fn abort<S: OrderedKvStorage>(mut self, database: &mut Database<S>) {
+        assert!(
+            Arc::ptr_eq(&self.state, &database.durable_publication_state),
+            "durable publication scope belongs to a different database"
+        );
+        self.resolve(true);
+        database.settle_durable_publication_scopes();
+    }
+
+    fn resolve(&mut self, aborted: bool) {
+        let mut state = self
+            .state
+            .lock()
+            .expect("durable publication state mutex poisoned");
+        state.depth = state.depth.saturating_sub(1);
+        state.aborted |= aborted;
+        self.resolved = true;
+    }
+}
+
+impl Drop for DurablePublicationScope {
+    fn drop(&mut self) {
+        if !self.resolved {
+            self.resolve(true);
+        }
+    }
 }
 
 fn validate_durable_key_schema(schema: &DatabaseSchema) -> Result<(), Error> {
@@ -199,8 +266,55 @@ where
             last_commit_metrics: None,
             last_tick_metrics: None,
             storage_read_metrics: RefCell::new(StorageReadMetrics::default()),
+            durable_publication_state: Arc::new(Mutex::new(DurablePublicationState::default())),
             poisoned: false,
         })
+    }
+
+    /// Begin a host transaction whose subscription publication boundary spans
+    /// one or more calls to [`Database::commit_batch`].
+    ///
+    /// Jazz uses this for durable finalization that writes canonical state and
+    /// cleanup/consistency metadata in separate storage batches. Nested scopes
+    /// are supported; only the outermost successful completion publishes.
+    #[doc(hidden)]
+    pub fn begin_durable_publication_scope(&mut self) -> Result<DurablePublicationScope, Error> {
+        self.ensure_not_poisoned()?;
+        let mut state = self
+            .durable_publication_state
+            .lock()
+            .expect("durable publication state mutex poisoned");
+        state.depth = state
+            .depth
+            .checked_add(1)
+            .expect("durable publication scope depth exhausted");
+        drop(state);
+        Ok(DurablePublicationScope {
+            state: Arc::clone(&self.durable_publication_state),
+            resolved: false,
+        })
+    }
+
+    /// Reject any host operation after an ambiguous durable finalization.
+    #[doc(hidden)]
+    pub fn ensure_usable(&self) -> Result<(), Error> {
+        self.ensure_not_poisoned()
+    }
+
+    fn settle_durable_publication_scopes(&mut self) {
+        let state = self
+            .durable_publication_state
+            .lock()
+            .expect("durable publication state mutex poisoned");
+        let depth = state.depth;
+        let aborted = state.aborted;
+        drop(state);
+        if aborted {
+            self.ivm_runtime.discard_staged_subscription_notifications();
+            self.poisoned = true;
+        } else if depth == 0 {
+            self.ivm_runtime.publish_staged_subscription_notifications();
+        }
     }
 
     /// Return approximate live bytes for one backing class/column family when
@@ -225,6 +339,7 @@ where
 
     /// Complete the current storage durability boundary.
     pub fn flush_write_boundary(&self) -> Result<(), Error> {
+        self.ensure_not_poisoned()?;
         Ok(self.storage.flush_write_boundary()?)
     }
 
@@ -703,6 +818,7 @@ where
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     pub fn subscribe_one_sink(&mut self, graph: GraphBuilder) -> Result<Subscription, Error> {
+        self.ensure_not_poisoned()?;
         let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
         self.ivm_runtime
             .subscribe_one_sink(graph, &storage)
@@ -718,6 +834,7 @@ where
         I: IntoIterator<Item = (K, GraphBuilder)>,
         K: Into<String>,
     {
+        self.ensure_not_poisoned()?;
         let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
         self.ivm_runtime
             .subscribe(sinks, &storage)
@@ -800,6 +917,7 @@ where
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     pub fn prepare_query(&mut self, query: Query) -> Result<PreparedShape, Error> {
+        self.ensure_not_poisoned()?;
         let planned = plan_prepared_shape(&query, self.ivm_runtime.schema())?;
         let output = RecordDescriptor::new(
             planned
@@ -860,6 +978,7 @@ where
         prepared: &PreparedShape,
         bindings: &[(&str, Value)],
     ) -> Result<Subscription, Error> {
+        self.ensure_not_poisoned()?;
         let mut values = Vec::with_capacity(prepared.parameters.len());
         for parameter in &prepared.parameters {
             let matching = bindings
@@ -902,6 +1021,7 @@ where
         binding_descriptor: RecordDescriptor,
         output_key_fields: impl IntoIterator<Item = impl Into<String>>,
     ) -> Result<crate::ivm::PreparedShape, Error> {
+        self.ensure_not_poisoned()?;
         let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
         self.ivm_runtime
             .prepare_one_sink(
@@ -930,6 +1050,7 @@ where
         binding_descriptor: RecordDescriptor,
         routing_key_fields: impl IntoIterator<Item = impl Into<String>>,
     ) -> Result<crate::ivm::PreparedShape, Error> {
+        self.ensure_not_poisoned()?;
         let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
         self.ivm_runtime
             .prepare_one_sink_with_routing(
@@ -955,6 +1076,7 @@ where
         binding_source_shape: impl Into<String>,
         binding_descriptor: RecordDescriptor,
     ) -> Result<crate::ivm::PreparedShape, Error> {
+        self.ensure_not_poisoned()?;
         let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
         self.ivm_runtime
             .prepare(
@@ -1008,6 +1130,7 @@ where
         shape: PreparedShapeId,
         binding_values: &[Value],
     ) -> Result<Subscription, Error> {
+        self.ensure_not_poisoned()?;
         let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
         self.ivm_runtime
             .bind_shape_one_sink(shape, binding_values, &storage)
@@ -1027,6 +1150,7 @@ where
         binding_values: &[Value],
         public_output: RecordDescriptor,
     ) -> Result<Subscription, Error> {
+        self.ensure_not_poisoned()?;
         let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
         self.ivm_runtime
             .bind_shape_one_sink_with_output(shape, binding_values, public_output, &storage)
@@ -1039,6 +1163,7 @@ where
         shape: PreparedShapeId,
         binding_values: &[Value],
     ) -> Result<MultisinkSubscription, Error> {
+        self.ensure_not_poisoned()?;
         let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
         self.ivm_runtime
             .bind_shape(shape, binding_values, &storage)
@@ -1114,6 +1239,7 @@ where
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     pub fn query_graph(&mut self, graph: GraphBuilder) -> Result<RecordDeltas, Error> {
+        self.ensure_not_poisoned()?;
         let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
         self.ivm_runtime
             .query_snapshot(graph, &storage)
@@ -1127,6 +1253,7 @@ where
         I: IntoIterator<Item = (K, GraphBuilder)>,
         K: Into<String>,
     {
+        self.ensure_not_poisoned()?;
         let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
         self.ivm_runtime
             .query_snapshots(sinks, &storage)
@@ -1877,6 +2004,7 @@ where
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     pub fn flush(&mut self) -> Result<(), Error> {
+        self.ensure_not_poisoned()?;
         let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
         let tick = self
             .ivm_runtime
@@ -2010,8 +2138,18 @@ where
             // The runtime has already advanced in memory by this point. The v0
             // policy is to make the Database instance fatal on final commit
             // failure rather than serve possibly torn in-memory state.
+            self.ivm_runtime.discard_staged_subscription_notifications();
             self.poisoned = true;
             return Err(Error::from(error));
+        }
+        if self
+            .durable_publication_state
+            .lock()
+            .expect("durable publication state mutex poisoned")
+            .depth
+            == 0
+        {
+            self.ivm_runtime.publish_staged_subscription_notifications();
         }
         let storage_write_time = storage_start.elapsed();
         self.last_tick_metrics = Some(tick.clone());
@@ -2165,7 +2303,13 @@ where
     }
 
     fn ensure_not_poisoned(&self) -> Result<(), Error> {
-        if self.poisoned {
+        if self.poisoned
+            || self
+                .durable_publication_state
+                .lock()
+                .expect("durable publication state mutex poisoned")
+                .aborted
+        {
             Err(Error::DatabasePoisoned)
         } else {
             Ok(())

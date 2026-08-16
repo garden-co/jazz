@@ -2969,15 +2969,19 @@ impl JazzClient {
                         author,
                     )?
                 } else {
+                    let opts = Self::core_read_opts(&query, durability_tier)?;
+                    let requires_branch_coverage =
+                        matches!(opts.read_view.source, CoreReadViewSourceSpec::Branch { .. });
                     self.db
                         .query_rows(
                             core_query,
-                            Self::core_read_opts(&query, durability_tier)?,
+                            opts,
                             table,
-                            matches!(
-                                durability_tier,
-                                Some(DurabilityTier::EdgeServer | DurabilityTier::GlobalServer)
-                            ),
+                            requires_branch_coverage
+                                || matches!(
+                                    durability_tier,
+                                    Some(DurabilityTier::EdgeServer | DurabilityTier::GlobalServer)
+                                ),
                         )
                         .await?
                 };
