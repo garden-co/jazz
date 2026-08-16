@@ -1083,7 +1083,16 @@ fn prepared_binding_reprepares_claim_routing_after_schema_change() {
 
 #[cfg(feature = "testing")]
 #[test]
-#[ignore = "known red; tracked in TEST_BURNDOWN.md"]
+/// A rebuilt subscription releases only its own replacement runtime handle.
+///
+/// Alice and Bob hold distinct prepared, claim-scoped subscriptions. After a
+/// catalogue rebuild, Alice drops her stream; Bob's rebuilt stream must retain
+/// its handle and deliver both its already-pending update and a later insert.
+///
+/// ```text
+/// alice ──subscribe──► rebuilt runtime ◄──subscribe── bob
+/// alice ──drop───────► release Alice only ──write──► Bob receives row
+/// ```
 fn rebuilt_subscription_drop_releases_rehydrated_handle_without_touching_peer() {
     let db = open_db_with_schema_as(schema(), AuthorId::SYSTEM);
     let team_a = row(0x11);
@@ -1159,8 +1168,22 @@ fn rebuilt_subscription_drop_releases_rehydrated_handle_without_touching_peer() 
         BTreeMap::from([("updated_at".to_owned(), Value::U64(21))]),
     )
     .expect("trigger B subscription rehydration");
-    stream_a.try_next_event().expect("A rehydration reset");
-    stream_b.try_next_event().expect("B rehydration reset");
+    assert!(matches!(
+        stream_a.try_next_event(),
+        Some(SubscriptionEvent::Delta { reset: true, .. })
+    ));
+    assert!(matches!(
+        stream_b.try_next_event(),
+        Some(SubscriptionEvent::Delta { reset: true, .. })
+    ));
+    // The second trigger updates Bob's pre-existing row after the shared
+    // catalogue rebuild. It is a real FIFO delta, not evidence that the later
+    // insert was lost.
+    assert!(matches!(
+        stream_b.try_next_event(),
+        Some(SubscriptionEvent::Delta { updated, .. })
+            if updated.iter().any(|output| output.row_uuid() == row(0x42))
+    ));
     assert_eq!(db.active_groove_subscriptions_for_test(), 2);
 
     drop(stream_a);
