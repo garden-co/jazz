@@ -83,6 +83,20 @@ where
             self.table_in_schema(table, self.catalogue.current_schema_version_id)?;
             self.catalogue.current_schema_version_id
         };
+        self.query_global_layer_winner_in_schema(schema_version, table, row_uuid, layer)
+    }
+
+    /// Read the global winner through a specified schema's physical lineage.
+    /// Incoming historical versions retain their authored table literal, which
+    /// need not exist in the currently selected write/read schema after a
+    /// rename.
+    pub(super) fn query_global_layer_winner_in_schema(
+        &mut self,
+        schema_version: SchemaVersionId,
+        table: &str,
+        row_uuid: RowUuid,
+        layer: VersionLayer,
+    ) -> Result<Option<VersionRow>, Error> {
         let current_table = self.physical_current_table_for_schema(
             schema_version,
             table,
@@ -99,7 +113,14 @@ where
         let tx_time = TxTime(record.get_u64(GlobalCurrentRowRecord::FIELD_TX_TIME_IDX)?);
         let tx_node_alias =
             NodeAlias(record.get_u64(GlobalCurrentRowRecord::FIELD_TX_NODE_ID_IDX)?);
-        self.query_version_by_alias(table, row_uuid, layer, tx_time, tx_node_alias)
+        self.query_version_by_alias_in_schema(
+            schema_version,
+            table,
+            row_uuid,
+            layer,
+            tx_time,
+            tx_node_alias,
+        )
     }
 
     pub(super) fn query_layer_winner_from_pk(
@@ -393,6 +414,16 @@ where
         } else {
             self.catalogue.current_schema_version_id
         };
+        self.deletion_storage_prefix_in_schema(schema_version, table, lineage, row_uuid)
+    }
+
+    pub(super) fn deletion_storage_prefix_in_schema(
+        &self,
+        schema_version: SchemaVersionId,
+        table: &str,
+        lineage: BranchLineage,
+        row_uuid: Option<RowUuid>,
+    ) -> Result<Vec<Value>, Error> {
         let table_id = self.physical_table_id_for_schema(schema_version, table)?;
         let (branch_kind, branch_id) = shared_deletion_lineage_values(lineage);
         let mut prefix = vec![
@@ -783,6 +814,35 @@ where
         Ok(None)
     }
 
+    /// Resolve an exact historical witness through the schema that authored
+    /// its table literal. Shared deletion history is keyed by physical table,
+    /// so an old `todos` witness must not construct its prefix via renamed
+    /// current `tasks` schema state.
+    pub(super) fn query_version_by_alias_in_schema(
+        &mut self,
+        schema_version: SchemaVersionId,
+        table: &str,
+        row_uuid: RowUuid,
+        layer: VersionLayer,
+        tx_time: TxTime,
+        tx_node_alias: NodeAlias,
+    ) -> Result<Option<VersionRow>, Error> {
+        let storage_table = match layer {
+            VersionLayer::Content => physical_history_table_name(
+                self.physical_table_id_for_schema(schema_version, table)?,
+            ),
+            VersionLayer::Deletion => SHARED_DELETION_HISTORY_TABLE.to_owned(),
+        };
+        self.query_version_by_alias_with_storage_in_schema(
+            schema_version,
+            table,
+            &storage_table,
+            row_uuid,
+            tx_time,
+            tx_node_alias,
+        )
+    }
+
     pub(super) fn query_version_by_alias_with_storage(
         &mut self,
         table: &str,
@@ -791,9 +851,40 @@ where
         tx_time: TxTime,
         tx_node_alias: NodeAlias,
     ) -> Result<Option<VersionRow>, Error> {
+        let schema_version = if self
+            .table_in_schema(table, self.catalogue.current_write_schema.schema)
+            .is_ok()
+        {
+            self.catalogue.current_write_schema.schema
+        } else {
+            self.catalogue.current_schema_version_id
+        };
+        self.query_version_by_alias_with_storage_in_schema(
+            schema_version,
+            table,
+            storage_table,
+            row_uuid,
+            tx_time,
+            tx_node_alias,
+        )
+    }
+
+    fn query_version_by_alias_with_storage_in_schema(
+        &mut self,
+        schema_version: SchemaVersionId,
+        table: &str,
+        storage_table: &str,
+        row_uuid: RowUuid,
+        tx_time: TxTime,
+        tx_node_alias: NodeAlias,
+    ) -> Result<Option<VersionRow>, Error> {
         let key = if storage_table == SHARED_DELETION_HISTORY_TABLE {
-            let mut key =
-                self.deletion_storage_prefix(table, BranchLineage::Root, Some(row_uuid))?;
+            let mut key = self.deletion_storage_prefix_in_schema(
+                schema_version,
+                table,
+                BranchLineage::Root,
+                Some(row_uuid),
+            )?;
             key.extend([Value::U64(tx_time.0), Value::U64(tx_node_alias.0)]);
             key
         } else {
@@ -810,7 +901,16 @@ where
         let Some(record) = raw else {
             return Ok(None);
         };
-        self.decode_history_owned_record(table, storage_table, record)
+        // The lookup prefix is selected from the authored schema. For the
+        // shared deletion table, decode the record under its stored schema as
+        // well: the current winner may be a later `tasks` deletion occupying
+        // the same physical lineage as this v1 `todos` probe.
+        let requested_table = if storage_table != SHARED_DELETION_HISTORY_TABLE {
+            table
+        } else {
+            ""
+        };
+        self.decode_history_owned_record(requested_table, storage_table, record)
             .map(Some)
     }
 }

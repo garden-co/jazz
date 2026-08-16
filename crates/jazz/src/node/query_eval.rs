@@ -9919,7 +9919,11 @@ where
                 "local maintained subscription cannot materialize non-row result member yet",
             ));
         };
-        let table = self.table(entry.0.as_str())?.clone();
+        // Result-member entries retain the canonical authored table so the
+        // membership witness continues to identify the exact immutable
+        // version across a rename.  Payloads and application rows, however,
+        // are interpreted in this subscription's read schema.
+        let table = self.table(local.result_table.as_str())?.clone();
         if local.result_query.flat_join.is_some() {
             let payload = local
                 .result_payloads
@@ -9944,7 +9948,7 @@ where
         let version = if let Some(version) = self.maintained_witness_for_result_member(
             &tx_versions,
             local.result_schema_version,
-            entry.0.as_str(),
+            local.result_table.as_str(),
             entry.1,
         )? {
             version.clone()
@@ -9970,7 +9974,7 @@ where
                 let Some(version) = self.maintained_witness_for_result_member(
                     &tx_versions,
                     local.result_schema_version,
-                    entry.0.as_str(),
+                    local.result_table.as_str(),
                     entry.1,
                 )?
                 else {
@@ -9979,7 +9983,14 @@ where
                 version.clone()
             }
         };
-        let mut row = self.current_row_from_materialized_version(&table, &version)?;
+        let mut row = self
+            .projected_current_row_from_materialized_version_in_read_schema(
+                local.result_schema_version,
+                &version,
+            )?
+            .ok_or(Error::InvalidStoredValue(
+                "maintained result witness does not project into the read schema",
+            ))?;
         if let Some(columns) = &local.result_select {
             row = row.project(&table, columns)?;
         }
@@ -10012,7 +10023,9 @@ where
                 "local maintained subscription cannot materialize non-row result member yet",
             ));
         };
-        let table = self.table(entry.0.as_str())?.clone();
+        // See the non-cached path above: the entry label is canonical while
+        // the materialized row belongs to the subscription read schema.
+        let table = self.table(local.result_table.as_str())?.clone();
         if local.result_query.flat_join.is_some() {
             let payload = local
                 .result_payloads
@@ -10030,7 +10043,7 @@ where
         let version = if let Some(version) = self.maintained_witness_for_result_member(
             &tx_versions,
             local.result_schema_version,
-            entry.0.as_str(),
+            local.result_table.as_str(),
             entry.1,
         )? {
             version.clone()
@@ -10039,7 +10052,7 @@ where
             let Some(version) = self.maintained_witness_for_result_member(
                 &tx_versions,
                 local.result_schema_version,
-                entry.0.as_str(),
+                local.result_table.as_str(),
                 entry.1,
             )?
             else {
@@ -10047,10 +10060,11 @@ where
             };
             version.clone()
         };
-        self.current_row_from_materialized_version_with_materialization_cache(
-            &table, &version, cache,
+        let _ = cache;
+        self.projected_current_row_from_materialized_version_in_read_schema(
+            local.result_schema_version,
+            &version,
         )
-        .map(Some)
     }
 
     pub(crate) fn maintained_witness_for_result_member<'a>(
@@ -10176,15 +10190,6 @@ where
             });
         }
         Ok(())
-    }
-
-    fn current_row_from_materialized_version_with_materialization_cache(
-        &mut self,
-        table: &TableSchema,
-        version: &VersionRow,
-        _cache: &mut LocalMaintainedMaterializationCache,
-    ) -> Result<CurrentRow, Error> {
-        current_row_from_version_projection(table, version)
     }
 
     /// Render a maintained relation witness through the subscription's read

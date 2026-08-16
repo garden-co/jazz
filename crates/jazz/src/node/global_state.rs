@@ -152,7 +152,13 @@ where
             .transaction_made_at(tx_id)?
             .ok_or(Error::MissingTransaction(tx_id))?;
         for version in versions {
-            let previous_current = self.query_global_layer_winner(
+            let authored_schema = self
+                .schema_version_for_alias(version.schema_version_alias())
+                .ok_or(Error::InvalidStoredValue(
+                    "global version schema alias must exist",
+                ))?;
+            let previous_current = self.query_global_layer_winner_in_schema(
+                authored_schema,
                 &version.table,
                 version.row_uuid(),
                 version.layer(),

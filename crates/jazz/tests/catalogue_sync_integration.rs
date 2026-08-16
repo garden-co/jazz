@@ -3243,7 +3243,6 @@ async fn local_join_query_uses_current_permissions_for_joined_provenance_after_l
 /// bob --query assets---------> server --row policy--x empty
 /// mallory --spoof owner-----> server --row policy--x rejected
 #[tokio::test]
-#[ignore = "known red; tracked in TEST_BURNDOWN.md"]
 async fn multi_hop_table_renames_and_column_rename() {
     tokio::task::LocalSet::new()
         .run_until(multi_hop_table_renames_and_column_rename_impl())

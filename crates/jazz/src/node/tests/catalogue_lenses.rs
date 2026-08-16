@@ -2595,6 +2595,99 @@ fn physical_deletion_register_spans_renamed_schemas_and_reopens() {
     );
 }
 
+/// A late fate for a v1 deletion must inspect the shared physical deletion
+/// register through the v1 prefix, while preserving a newer v2 winner that
+/// already occupies that lineage. Looking the historical `todos` witness up
+/// through ambient v2 `tasks` state used to reject the bundle before the
+/// currency comparison could retain the v2 deletion.
+#[test]
+fn late_renamed_deletion_fate_uses_authored_prefix_and_keeps_newer_winner() {
+    let base = schema();
+    let renamed_schema = JazzSchema::new([TableSchema::new(
+        "tasks",
+        [ColumnSchema::new("name", ColumnType::String)],
+    )]);
+    let renamed = SchemaVersion::new(renamed_schema.clone());
+    let (_dir, mut core) = open_node_with_schema(node(0x6d), base.clone());
+    let row_uuid = row(0x6e);
+
+    let old_delete = core
+        .commit_mergeable(
+            MergeableCommit::new("todos", row_uuid, 10).deletion(DeletionEvent::Deleted),
+        )
+        .expect("stage v1 deletion before its fate");
+    publish_schema_lineage(
+        &mut core,
+        renamed.clone(),
+        MigrationLens::new(
+            base.version_id(),
+            renamed.id,
+            vec![TableLens {
+                source_table: "todos".to_owned(),
+                target_table: "tasks".to_owned(),
+                ops: vec![
+                    LensOp::RenameTable {
+                        from: "todos".to_owned(),
+                        to: "tasks".to_owned(),
+                    },
+                    LensOp::RenameColumn {
+                        from: "title".to_owned(),
+                        to: "name".to_owned(),
+                    },
+                ],
+            }],
+        ),
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    )
+    .expect("publish rename");
+    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+        author: AuthorId::SYSTEM,
+        pointer: CurrentWriteSchema {
+            revision: 1,
+            schema: renamed.id,
+        },
+    })
+    .expect("activate v2 tasks");
+    // Match a v2 receiver: its ambient application schema no longer names
+    // the authored v1 `todos` literal carried by the late authority bundle.
+    core.catalogue.current_schema_version_id = renamed.id;
+    core.catalogue.schema = renamed_schema;
+
+    let new_delete = core
+        .commit_mergeable(
+            MergeableCommit::new("tasks", row_uuid, 20).deletion(DeletionEvent::Deleted),
+        )
+        .expect("stage newer v2 deletion");
+    core.apply_fate_update(
+        new_delete,
+        Fate::Accepted,
+        Some(GlobalSeq(2)),
+        Some(DurabilityTier::Global),
+    )
+    .expect("settle v2 deletion first");
+
+    core.apply_fate_update(
+        old_delete,
+        Fate::Accepted,
+        Some(GlobalSeq(1)),
+        Some(DurabilityTier::Global),
+    )
+    .expect("late v1 fate must compare through its authored deletion prefix");
+
+    let winner = core
+        .query_global_layer_winner_in_schema(
+            renamed.id,
+            "tasks",
+            row_uuid,
+            VersionLayer::Deletion,
+        )
+        .expect("read v2 deletion winner")
+        .expect("v2 deletion remains current");
+    assert_eq!(winner.table(), "tasks");
+    assert_eq!(core.version_tx_id(&winner).expect("winner transaction"), new_delete);
+}
+
 #[test]
 fn shared_deletion_history_keeps_same_row_uuid_table_scoped() {
     let schema = JazzSchema::new([
