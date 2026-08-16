@@ -43,7 +43,6 @@ fn ranked_todo_schema() -> Schema {
 }
 
 #[tokio::test(flavor = "current_thread")]
-#[ignore = "known red; tracked in TEST_BURNDOWN.md"]
 async fn subscription_orders_by_unprojected_field() {
     tokio::task::LocalSet::new()
         .run_until(async {
@@ -97,6 +96,36 @@ async fn subscription_orders_by_unprojected_field() {
                 vec![ids[1], ids[2], ids[0]],
                 "subscription reset must follow rank even when rank is not projected"
             );
+
+            let batch = client
+                .update(ids[0], vec![("rank".to_owned(), Value::Integer(0))])
+                .expect("change only the unprojected ordering field");
+            client
+                .wait_for_batch(
+                    batch.expect("ordinary mutation commits immediately"),
+                    DurabilityTier::EdgeServer,
+                )
+                .await
+                .expect("rank-only reorder settles at edge");
+
+            let mut updates = Vec::new();
+            wait_for_subscription_update(
+                &mut stream,
+                &mut updates,
+                Duration::from_secs(10),
+                "rank-only reorder emits a positional update without inventing a payload",
+                |deltas| {
+                    deltas.iter().any(|delta| {
+                        delta.updated.iter().any(|update| {
+                            update.id == ids[0]
+                                && update.old_index == 2
+                                && update.new_index == 0
+                                && update.row.is_none()
+                        })
+                    })
+                },
+            )
+            .await;
 
             client.shutdown().await.expect("shutdown test client");
             server.shutdown().await;

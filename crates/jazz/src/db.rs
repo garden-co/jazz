@@ -2270,7 +2270,12 @@ where
             }
         }));
         let mut maintained_subscription = Some(subscription);
-        let terminal_rows = !local_shape.query().array_subqueries.is_empty();
+        // A projected ordered root needs terminal patches even without nested
+        // arrays: an unprojected sort-key mutation can move a visible row
+        // without changing the projected payload. Unprojected roots retain
+        // ordinary row deltas, including scope re-entry membership changes.
+        let terminal_rows = !local_shape.query().array_subqueries.is_empty()
+            || (local_shape.query().select.is_some() && !local_shape.query().order_by.is_empty());
         let mut state_shape = local_shape;
         let mut state_binding = local_binding;
         let mut remote_read_tier = None;
@@ -6711,11 +6716,13 @@ where
                                         "structured subscription lost its Groove terminal",
                                     ));
                                 };
-                                let snapshot = node
+                                let materialized = node
                                     .borrow_mut()
-                                    .materialize_local_maintained_relation_snapshot(maintained)?;
-                                let current_root_occurrences =
-                                    maintained.root_occurrence_ids().to_vec();
+                                    .materialize_local_maintained_relation_snapshot_with_occurrences(
+                                        maintained,
+                                    )?;
+                                let snapshot = materialized.snapshot;
+                                let current_root_occurrences = materialized.root_occurrence_ids;
                                 let settled = subscription_is_settled(
                                     &node.borrow(),
                                     active_authority_view_receipts,

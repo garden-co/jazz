@@ -121,6 +121,10 @@ pub(crate) struct ResultTransitions {
     /// Membership was reconciled from a newly advanced remote authority view,
     /// rather than emitted by this local Groove subscription.
     pub(crate) authoritative_membership_changed: bool,
+    /// Exact members admitted by the newly advanced authority view. These
+    /// may replace a stale internal member with the same public occurrence;
+    /// unrelated local adds coalesced into the same batch must not.
+    pub(crate) authoritative_member_adds: BTreeSet<ResultMemberEntry>,
     pub(crate) adds: Vec<ResultMemberEntry>,
     pub(crate) removes: Vec<ResultMemberEntry>,
     pub(crate) result_payload_adds: Vec<(ResultMemberEntry, ResultMemberPayloadEntry)>,
