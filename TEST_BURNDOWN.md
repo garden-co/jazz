@@ -27,11 +27,7 @@ Focused browser receipts are produced with `pnpm --filter jazz-tools test:browse
 
 A future fix must remove both the matching visible skip marker and this entry, then include a focused green receipt. Never delete or weaken the test. New known reds require both a source annotation and one row. Executable gates enforce the active annotation/entry bijection.
 
-## Active Rust quarantine (1)
-
-| Test                                                                                             | Definition                                        | Status        | Category              | Theory                                                   | Owner  |
-| ------------------------------------------------------------------------------------------------ | ------------------------------------------------- | ------------- | --------------------- | -------------------------------------------------------- | ------ |
-| `jazz::catalogue_sync_integration::table_rename_join_query_translates_join_target_on_old_branch` | `crates/jazz/tests/catalogue_sync_integration.rs` | TIMEOUT (60s) | Schema/lens evolution | Lens translation or historical coverage is non-settling. | Anselm |
+## Active Rust quarantine (0)
 
 ## Pre-existing/dormant Rust ignores (10; separately registered)
 

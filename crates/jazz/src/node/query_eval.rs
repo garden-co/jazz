@@ -17786,6 +17786,9 @@ mod tests {
             open_node_with_uuid(NodeUuid::from_bytes([0xf9; 16]), v1.clone());
         let author = row(0xf7);
         let post = row(0xf8);
+        let mismatched_author_row = row(0xf9);
+        let mismatched_author_id = row(0xfa);
+        let mismatched_post = row(0xfb);
         let author_tx = node
             .commit_mergeable(
                 MergeableCommit::new("users", author, 1).cells(BTreeMap::from([
@@ -17817,6 +17820,40 @@ mod tests {
             Some(DurabilityTier::Global),
         )
         .expect("settle v1 post");
+        let mismatched_author_tx = node
+            .commit_mergeable(
+                MergeableCommit::new("users", mismatched_author_row, 3).cells(BTreeMap::from([
+                    ("id".to_owned(), Value::Uuid(mismatched_author_id.0)),
+                    ("name".to_owned(), Value::String("unmatched".to_owned())),
+                ])),
+            )
+            .expect("commit v1 author with distinct row identity");
+        node.apply_fate_update(
+            mismatched_author_tx,
+            Fate::Accepted,
+            Some(GlobalSeq(3)),
+            Some(DurabilityTier::Global),
+        )
+        .expect("settle mismatched v1 author");
+        let mismatched_post_tx = node
+            .commit_mergeable(MergeableCommit::new("posts", mismatched_post, 4).cells(
+                BTreeMap::from([
+                    ("id".to_owned(), Value::Uuid(mismatched_post.0)),
+                    ("author_id".to_owned(), Value::Uuid(mismatched_author_id.0)),
+                    (
+                        "title".to_owned(),
+                        Value::String("must not join".to_owned()),
+                    ),
+                ]),
+            ))
+            .expect("commit v1 post whose foreign key is not the author row identity");
+        node.apply_fate_update(
+            mismatched_post_tx,
+            Fate::Accepted,
+            Some(GlobalSeq(4)),
+            Some(DurabilityTier::Global),
+        )
+        .expect("settle mismatched v1 post");
         node.apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
             author: AuthorId::SYSTEM,
             catalogue_seq: 1,
@@ -17900,10 +17937,10 @@ mod tests {
                 .expect("validate source");
             let binding = shape.bind(BTreeMap::new()).expect("bind source");
             assert_eq!(
-                node.query_rows_at(&shape, &binding, GlobalSeq(2))
+                node.query_rows_at(&shape, &binding, GlobalSeq(4))
                     .expect("read projected source")
                     .len(),
-                1,
+                2,
                 "{table} must independently project its v1 row"
             );
         }
@@ -17922,9 +17959,13 @@ mod tests {
         let shape = query.validate(&v2.schema).expect("validate v2 flat join");
         let binding = shape.bind(BTreeMap::new()).expect("bind v2 flat join");
         let rows = node
-            .query_rows_at(&shape, &binding, GlobalSeq(2))
+            .query_rows_at(&shape, &binding, GlobalSeq(4))
             .expect("evaluate v2 flat join");
-        assert_eq!(rows.len(), 1, "projected v1 sources must still correlate");
+        assert_eq!(
+            rows.len(),
+            1,
+            "flat joins must use the source row identity for `id`, not an arbitrary stored id cell"
+        );
 
         let opts = RegisterShapeOptions {
             tier: DurabilityTier::Global,
@@ -18005,7 +18046,7 @@ mod tests {
 
         let updated_author_tx = node
             .commit_mergeable(
-                MergeableCommit::new("people", author, 3).cells(BTreeMap::from([
+                MergeableCommit::new("people", author, 5).cells(BTreeMap::from([
                     ("id".to_owned(), Value::Uuid(author.0)),
                     ("name".to_owned(), Value::String("alice".to_owned())),
                 ])),
@@ -18014,7 +18055,7 @@ mod tests {
         node.apply_fate_update(
             updated_author_tx,
             Fate::Accepted,
-            Some(GlobalSeq(3)),
+            Some(GlobalSeq(5)),
             Some(DurabilityTier::Global),
         )
         .expect("settle renamed author update");

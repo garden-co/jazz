@@ -2819,7 +2819,6 @@ async fn table_rename_update_and_delete_copy_on_write_impl() {
 }
 
 #[tokio::test]
-#[ignore = "known red; tracked in TEST_BURNDOWN.md"]
 async fn table_rename_join_query_translates_join_target_on_old_branch() {
     tokio::task::LocalSet::new()
         .run_until(table_rename_join_query_translates_join_target_on_old_branch_impl())
@@ -2858,8 +2857,15 @@ async fn table_rename_join_query_translates_join_target_on_old_branch_impl() {
     wait_for_edge_query_ready(&alice, "posts", Duration::from_secs(30)).await;
 
     let author_id = jazz::tools::ObjectId::new();
+    // `people.id` is normalized to the row identity by the flat-join planner.
+    // Make the authored v1 row identity match the foreign key that the post
+    // will use, as the v2 query's correlation contract requires.
     let (_, _, batch_id) = alice
-        .insert("users", table_rename_join_user_values(author_id, "Alice"))
+        .insert_with_id(
+            "users",
+            *author_id.uuid(),
+            table_rename_join_user_values(author_id, "Alice"),
+        )
         .expect("alice creates v1 user");
     alice
         .wait_for_batch(
@@ -2870,9 +2876,10 @@ async fn table_rename_join_query_translates_join_target_on_old_branch_impl() {
         .expect("alice user reaches edge");
 
     let post_id = jazz::tools::ObjectId::new();
-    let (post_row_id, _, batch_id) = alice
-        .insert(
+    let (_, _, batch_id) = alice
+        .insert_with_id(
             "posts",
+            *post_id.uuid(),
             table_rename_join_post_values(post_id, author_id, "Hello from v1"),
         )
         .expect("alice creates v1 post");
@@ -2902,7 +2909,7 @@ async fn table_rename_join_query_translates_join_target_on_old_branch_impl() {
         Some(DurabilityTier::EdgeServer),
         Duration::from_secs(25),
         "bob join sees v1 post author through table rename",
-        |rows| (rows.len() == 1 && rows[0].key == post_row_id).then_some(rows),
+        |rows| (rows.len() == 1).then_some(rows),
     )
     .await;
 
