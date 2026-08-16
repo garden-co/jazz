@@ -40,6 +40,7 @@ Invariant digest:
 - `INV-TX-21`: Accepted global transactions MUST maintain per-layer global-current tables/change stream.
 - `INV-TX-22`: Downstream incomplete exclusive bundles MUST be stored but remain invisible for subscription views whose required exclusive payload is incomplete; they MAY become visible for a maintained subscription view once that view's required exclusive versions are present, even before all `n_total_writes` versions are known.
 - `INV-TX-24`: A caller-generated `OpenBatchId` MUST name mutable work unchanged across local and worker runtimes, MUST be terminal after commit or rollback, and MUST never be accepted by an API requiring the post-commit `BatchId`; only successful commit transitions `OpenBatchId` to `BatchId`.
+- `INV-TX-25`: A `CommitUnit` is one durable-publication boundary: canonical transaction/history rows, current/maintained-view inputs, fate/durability metadata, and recovery markers MUST become observable together. A failed or ambiguous persistence finalization MUST emit no `FateUpdate`, view/subscription update, or edge broadcast; reopen MUST either recover the entire unit or suppress it.
 
 ## Details
 
@@ -101,6 +102,24 @@ delivered commit unit is idempotent when its payload matches a previous
 delivery, in which case the known fate is returned. If the same unit is
 redelivered with a different payload, it fails as `ConflictingCommitUnit`
 (`INV-TX-4`).
+
+### 3.2.1 Durable publication boundary
+
+`CommitUnit { tx, versions }` is the one atomic boundary for both storage and
+publication (`INV-TX-25`). The store may internally stage canonical history,
+currency/index state, IVM durable terminals, fate metadata, and recovery
+markers, but neither an acknowledgement nor a derived/subscription payload may
+escape until the required durable boundary completes. This also applies to edge
+relays: a returned `FateUpdate`, a `ViewUpdate`, and an edge-forwarded unit are
+publication, not speculative progress.
+
+If a process stops after an implementation's first durable stage and before its
+final marker/cleanup stage, recovery must inspect that state before serving it.
+It may complete a coherent unit or suppress it, but it must never serve a
+mixture such as history without currency, fate without versions, or a derived
+row that cannot be recreated from the recovered canonical state. This is the
+sync-core contract that the future asynchronous persistent instance preserves;
+an async completion/ack is not a second semantic commit.
 
 ### 3.3 Durability is not fate
 

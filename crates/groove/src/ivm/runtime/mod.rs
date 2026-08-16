@@ -158,6 +158,11 @@ pub struct IvmRuntime {
     variant_projections: HashMap<VariantProjectionKey, VariantProjection>,
     graph: IvmGraph,
     multisink_subscriptions: HashMap<SubscriptionId, MultisinkSubscriptionState>,
+    /// Output from a staged durable tick.  `Database::commit_batch` releases
+    /// this only after its storage transaction commits, so a failed write can
+    /// never leak a speculative subscription delta.
+    staged_subscription_notifications: Vec<(SubscriptionId, QueuedMultisinkDeltas)>,
+    defer_subscription_notifications: bool,
     prepared_shapes: HashMap<PreparedShapeId, RoutedMultisinkShapeState>,
     auto_direct_families: HashMap<AutoDirectFamilyKey, PreparedShapeId>,
     binding_sources: HashMap<String, BindingSourceState>,
@@ -207,6 +212,8 @@ impl IvmRuntime {
             variant_projections: HashMap::default(),
             graph: IvmGraph::new(),
             multisink_subscriptions: HashMap::default(),
+            staged_subscription_notifications: Vec::new(),
+            defer_subscription_notifications: false,
             operator_states: HashMap::default(),
             arrangement_states: HashMap::default(),
             eval_memo: HashMap::default(),
@@ -1050,11 +1057,46 @@ impl IvmRuntime {
     where
         S: OrderedKvStorage,
     {
+        debug_assert!(
+            !self.defer_subscription_notifications,
+            "a durable tick must not nest while computing subscription output"
+        );
         let staged_overlay = RefCell::new(StagedWriteState::from(std::mem::take(staged_writes)));
         let overlay = StagedWriteOverlay::new(storage, &staged_overlay);
+        self.defer_subscription_notifications = true;
         let tick = self.tick_with_params(table_deltas, Vec::new(), &overlay);
+        self.defer_subscription_notifications = false;
         overlay.drain_into(staged_writes);
+        if tick.is_err() {
+            self.staged_subscription_notifications.clear();
+        }
         tick
+    }
+
+    /// Release subscription output computed by the preceding staged durable
+    /// tick.  This is deliberately separate from `tick_staged`: callers must
+    /// invoke it only after the matching storage transaction commits.
+    pub(crate) fn publish_staged_subscription_notifications(&mut self) {
+        let pending = std::mem::take(&mut self.staged_subscription_notifications);
+        let mut dropped = Vec::new();
+        for (subscription_id, queued) in pending {
+            let Some(subscription) = self.multisink_subscriptions.get(&subscription_id) else {
+                continue;
+            };
+            if subscription.sender.send(queued).is_err() {
+                dropped.push(subscription_id);
+            }
+        }
+        for subscription_id in dropped {
+            self.unsubscribe(subscription_id);
+        }
+    }
+
+    /// Forget output from a failed staged storage transaction.  The runtime is
+    /// generally poisoned by its caller after that failure, but clearing this
+    /// queue makes the no-publication boundary explicit and robust to teardown.
+    pub(crate) fn discard_staged_subscription_notifications(&mut self) {
+        self.staged_subscription_notifications.clear();
     }
 
     fn tick_with_params<S>(
@@ -1079,6 +1121,7 @@ impl IvmRuntime {
             .sum::<usize>();
         self.tick_durable_nodes(&table_deltas, current_tick, storage)?;
         let mut dropped_subscriptions = Vec::new();
+        let mut deferred_notifications = Vec::new();
         let mut metrics = TickMetrics {
             tick: current_tick,
             table_delta_records,
@@ -1202,10 +1245,16 @@ impl IvmRuntime {
                     multisink_deltas_encoded_bytes(&records);
             }
             let queued = QueuedMultisinkDeltas::new(records);
-            if !queued.deltas.is_empty() && subscription.sender.send(queued).is_err() {
-                dropped_subscriptions.push(*subscription_id);
+            if !queued.deltas.is_empty() {
+                if self.defer_subscription_notifications {
+                    deferred_notifications.push((*subscription_id, queued));
+                } else if subscription.sender.send(queued).is_err() {
+                    dropped_subscriptions.push(*subscription_id);
+                }
             }
         }
+        self.staged_subscription_notifications
+            .extend(deferred_notifications);
         // Retained roots are background maintenance. Active subscriptions must
         // see the tick's deltas before retained-only roots can advance shared
         // recursive/operator state.
@@ -4066,7 +4115,7 @@ pub struct MultisinkDeltas {
     pub terminal_sinks: BTreeMap<String, TerminalDeltas>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct QueuedMultisinkDeltas {
     // Explicit fragment-output drain channel: once a tick or hydration computes
     // subscription output, this queue owns delivery until the receiver drains

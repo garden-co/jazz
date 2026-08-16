@@ -4372,31 +4372,44 @@ where
         update_current_indexes: bool,
     ) -> Result<(), Error> {
         let tx_id = tx.tx_id;
-        let mut batch = self.database.open_batch();
-        self.stage_transaction_and_versions_with_current_indexes(
-            &mut batch,
-            tx,
-            versions,
-            fate.clone(),
-            global_seq,
-            durability,
-            update_current_indexes,
-        )?;
-        self.database.commit_batch(batch)?;
-        let mut staged_global_seqs = Vec::new();
-        let mut cleanup_batch = self.database.open_batch();
-        self.finalize_staged_transaction_ingest(
-            &mut cleanup_batch,
-            tx_id,
-            fate,
-            global_seq,
-            &mut staged_global_seqs,
-        )?;
-        if !cleanup_batch.is_empty() {
-            self.database.commit_batch(cleanup_batch)?;
-            self.persist_storage_consistency_marker_through(tx_id.time)?;
+        let publication_scope = self.database.begin_durable_publication_scope()?;
+        let result = (|| {
+            let mut batch = self.database.open_batch();
+            self.stage_transaction_and_versions_with_current_indexes(
+                &mut batch,
+                tx,
+                versions,
+                fate.clone(),
+                global_seq,
+                durability,
+                update_current_indexes,
+            )?;
+            self.database.commit_batch(batch)?;
+            let mut staged_global_seqs = Vec::new();
+            let mut cleanup_batch = self.database.open_batch();
+            self.finalize_staged_transaction_ingest(
+                &mut cleanup_batch,
+                tx_id,
+                fate,
+                global_seq,
+                &mut staged_global_seqs,
+            )?;
+            if !cleanup_batch.is_empty() {
+                self.database.commit_batch(cleanup_batch)?;
+                self.persist_storage_consistency_marker_through(tx_id.time)?;
+            }
+            Ok(())
+        })();
+        match result {
+            Ok(()) => {
+                publication_scope.finish(&mut self.database);
+                Ok(())
+            }
+            Err(error) => {
+                publication_scope.abort(&mut self.database);
+                Err(error)
+            }
         }
-        Ok(())
     }
 
     fn stage_transaction_and_versions_with_current_indexes(

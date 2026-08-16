@@ -2925,6 +2925,7 @@ where
     }
 
     pub(crate) fn require_catalogue_ready(&self) -> Result<(), Error> {
+        self.database.ensure_usable()?;
         if self.catalogue_bootstrap_state == CatalogueBootstrapState::Uninitialized {
             return Err(Error::CatalogueUninitialized);
         }

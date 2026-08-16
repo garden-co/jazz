@@ -35,6 +35,7 @@ include!("queries.rs");
 include!("exclusive_transactions.rs");
 include!("mergeable_open_transactions.rs");
 include!("policies_rls.rs");
+include!("persistence_contracts.rs");
 include!("write_policy_lowering.rs");
 include!("sync.rs");
 include!("m3_differential.rs");
