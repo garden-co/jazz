@@ -8,7 +8,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use hdrhistogram::Histogram;
-use jazz::db::{Db, DbConfig, DbIdentity, ReadOpts, SeededRowIdSource, SubscriptionEvent};
+use jazz::db::{
+    Db, DbConfig, DbIdentity, Propagation, ReadOpts, SeededRowIdSource, SubscriptionEvent,
+};
 use jazz::groove::records::{ScalarEnumSchema, Value};
 use jazz::groove::schema::{ColumnSchema, ColumnType};
 use jazz::groove::storage::{Durability, RocksDbStorage};
@@ -1803,9 +1805,16 @@ fn run_db_surface(config: &Config, coalesced: bool) -> DbSurfaceSummary {
 
     let query = db_canvas_query(canvas);
     let prepared_query = db.prepare_query(&query).expect("db prepare query");
+    // This direct-Db benchmark is intentionally local-only: it has no
+    // authority peer whose receipt could settle a Full-propagation opening.
+    let local_subscription_opts = ReadOpts {
+        propagation: Propagation::LocalOnly,
+        ..ReadOpts::default()
+    };
     let mut watches = (0..(config.active + config.passive))
         .map(|_| {
-            block_on(db.subscribe(&prepared_query, ReadOpts::default())).expect("db subscribe")
+            block_on(db.subscribe(&prepared_query, local_subscription_opts.clone()))
+                .expect("db subscribe")
         })
         .collect::<Vec<_>>();
     let mut watch_rows = Vec::with_capacity(watches.len());
@@ -1821,7 +1830,7 @@ fn run_db_surface(config: &Config, coalesced: bool) -> DbSurfaceSummary {
     let spy_query = db_canvas_query(row(99_999));
     let prepared_spy_query = db.prepare_query(&spy_query).expect("db prepare spy query");
     let mut spy_watch =
-        block_on(db.subscribe(&prepared_spy_query, ReadOpts::default())).expect("db spy watch");
+        block_on(db.subscribe(&prepared_spy_query, local_subscription_opts)).expect("db spy watch");
     let mut spy_rows = BTreeMap::new();
     apply_db_subscription_event(
         &mut spy_rows,

@@ -2650,7 +2650,17 @@ fn relation_query_subscription_multi_hop_scalar_fk_uses_nested_join_path() {
     let schema = relation_hop_schema();
     let db = open_db(0xc1, AuthorId::from_bytes([0xc1; 16]), &schema);
     let query = users_to_orgs_relation_query();
-    let mut stream = block_on(db.subscribe_relation_query(&query, ReadOpts::default())).unwrap();
+    // This fixture exercises only the local maintained-query program. It does
+    // not model an authority receipt, so request the immediate local terminal
+    // explicitly rather than relying on a provisional Full-propagation empty.
+    let mut stream = block_on(db.subscribe_relation_query(
+        &query,
+        ReadOpts {
+            propagation: Propagation::LocalOnly,
+            ..ReadOpts::default()
+        },
+    ))
+    .unwrap();
     assert!(opened_rows(stream.try_next_event().expect("opened event")).is_empty());
 
     db.insert_with_id(
@@ -2769,7 +2779,17 @@ fn relation_query_gather_uses_unified_reachable_lowering_for_reads_and_subscript
     .with_write_policy(Policy::public())]);
     let db = open_db(0xc1, AuthorId::from_bytes([0xc1; 16]), &schema);
     let query = teams_gather_relation_query();
-    let mut stream = block_on(db.subscribe_relation_query(&query, ReadOpts::default())).unwrap();
+    // This fixture exercises only the local maintained-query program. It does
+    // not model an authority receipt, so request the immediate local terminal
+    // explicitly rather than relying on a provisional Full-propagation empty.
+    let mut stream = block_on(db.subscribe_relation_query(
+        &query,
+        ReadOpts {
+            propagation: Propagation::LocalOnly,
+            ..ReadOpts::default()
+        },
+    ))
+    .unwrap();
     assert!(opened_rows(stream.try_next_event().expect("opened event")).is_empty());
 
     let root = row(0x01);

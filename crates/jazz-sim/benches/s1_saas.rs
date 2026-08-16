@@ -6,8 +6,8 @@ use std::time::Instant;
 
 use hdrhistogram::Histogram;
 use jazz::db::{
-    Db, DbConfig, DbIdentity, ReadOpts, RowCells, SeededRowIdSource, SubscriptionEvent,
-    SubscriptionStream,
+    Db, DbConfig, DbIdentity, Propagation, ReadOpts, RowCells, SeededRowIdSource,
+    SubscriptionEvent, SubscriptionStream,
 };
 use jazz::groove::records::Value;
 use jazz::groove::schema::{ColumnSchema, ColumnType};
@@ -224,10 +224,18 @@ pub fn db_surface_smoke() {
     let query2 = db_query2(&plan);
     let prepared_query1 = db.prepare_query(&query1).expect("db prepare q1");
     let prepared_query2 = db.prepare_query(&query2).expect("db prepare q2");
+    // The database-surface fixture has no authority peer. Its opening state is
+    // intentionally the immediately observable local terminal, not a remote
+    // Full-propagation request awaiting an authority receipt.
+    let local_subscription_opts = ReadOpts {
+        propagation: Propagation::LocalOnly,
+        ..ReadOpts::default()
+    };
     let mut subscription1 =
-        block_on(db.subscribe(&prepared_query1, ReadOpts::default())).expect("db subscribe q1");
+        block_on(db.subscribe(&prepared_query1, local_subscription_opts.clone()))
+            .expect("db subscribe q1");
     let mut subscription2 =
-        block_on(db.subscribe(&prepared_query2, ReadOpts::default())).expect("db subscribe q2");
+        block_on(db.subscribe(&prepared_query2, local_subscription_opts)).expect("db subscribe q2");
     let mut subscription1_rows = subscription_snapshot_row_set(&mut subscription1);
     let mut subscription2_rows = subscription_snapshot_row_set(&mut subscription2);
     assert!(subscription1_rows.is_empty());

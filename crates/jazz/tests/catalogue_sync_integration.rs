@@ -1682,24 +1682,11 @@ async fn dynamic_server_live_subscription_replays_on_first_permissions_head_and_
         .subscribe(query.clone())
         .await
         .expect("subscribe reader before permissions");
+    // A Full-propagation subscription must not publish a local empty opening
+    // before the authority has evaluated it. The first observable update below
+    // is therefore deliberately awaited only after the permissions head and
+    // the matching authority-side write have settled.
     let mut log = Vec::new();
-
-    wait_for_subscription_update(
-        &mut stream,
-        &mut log,
-        Duration::from_secs(10),
-        "initial empty local subscription snapshot before permissions",
-        |updates| !updates.is_empty(),
-    )
-    .await;
-    assert!(
-        log[0].is_empty(),
-        "plain local subscription should fail closed as an empty local delta before permissions"
-    );
-    assert!(
-        log[0].pending,
-        "the fail-closed opening snapshot must remain visibly provisional before permissions"
-    );
 
     let allow_head = publish_allow_all_permissions(
         &server.base_url(),
