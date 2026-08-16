@@ -11,6 +11,10 @@ on:
         description: Run only the TypeScript/browser workload after building the image
         type: boolean
         default: false
+      oidc_probe:
+        description: Only diagnose the Vercel Turbo cache OIDC exchange
+        type: boolean
+        default: false
 
 concurrency:
   group: blacksmith-image-experiment-${{ github.ref }}
@@ -24,8 +28,68 @@ env:
   SCCACHE_S3_KEY_PREFIX: jazz-ci/v1/experiments/blacksmith-v1
 
 jobs:
+  oidc-probe:
+    if: inputs.oidc_probe == true
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Inspect identity claims and Vercel exchange result
+        shell: bash
+        env:
+          AUDIENCE: https://github.com/garden-co
+          POLICY_ID: pol_22c7de99-4e8a-4661-81d5-ad38a9a49d70
+          TURBO_APP_ID: cl_kyUx2zVvA4MGptBohkmtYHJly2XltXzD
+          TURBO_TEAM: ${{ vars.TURBO_TEAM }}
+        run: |
+          set -euo pipefail
+
+          oidc_response=$(curl -sS -f -G \
+            --retry 3 --retry-connrefused --max-time 30 \
+            -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            --data-urlencode "audience=${AUDIENCE}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}")
+          oidc_token=$(jq -er '.value' <<<"${oidc_response}")
+          echo "::add-mask::${oidc_token}"
+
+          payload=$(cut -d. -f2 <<<"${oidc_token}")
+          payload="${payload//-/+}"
+          payload="${payload//_/\/}"
+          while (( ${#payload} % 4 != 0 )); do payload+="="; done
+          printf '%s' "${payload}" | base64 --decode | jq '{
+            iss, aud, sub, repository, repository_id, repository_owner,
+            ref, ref_type, workflow, workflow_ref, job_workflow_ref,
+            event_name, actor
+          }'
+
+          response_file=$(mktemp)
+          trap 'rm -f "${response_file}"' EXIT
+          status=$(curl -sS -o "${response_file}" -w '%{http_code}' \
+            -X POST https://api.vercel.com/login/oauth/token \
+            --retry 3 --retry-connrefused --max-time 30 \
+            --data "grant_type=urn:ietf:params:oauth:grant-type:token-exchange" \
+            --data "client_id=${TURBO_APP_ID}" \
+            --data "subject_token_type=urn:ietf:params:oauth:token-type:id_token" \
+            --data "requested_token_type=urn:ietf:params:oauth:token-type:access_token" \
+            --data-urlencode "team_id_or_slug=${TURBO_TEAM}" \
+            --data-urlencode "policy_id=${POLICY_ID}" \
+            --data-urlencode "subject_token=${oidc_token}")
+
+          if [[ "${status}" =~ ^2 ]]; then
+            access_token=$(jq -er '.access_token' "${response_file}")
+            echo "::add-mask::${access_token}"
+            jq '{token_type, expires_in, scope}' "${response_file}"
+            echo "Vercel OIDC exchange succeeded"
+          else
+            echo "Vercel OIDC exchange failed with HTTP ${status}"
+            jq '{error, error_description, code, message}' "${response_file}"
+            exit 1
+          fi
+
   build-image:
-    if: inputs.probe_only != true
+    if: inputs.probe_only != true && inputs.oidc_probe != true
     runs-on: blacksmith-4vcpu-ubuntu-2404
     permissions:
       contents: read
