@@ -2,8 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use jazz::block_on;
 use jazz::db::{
-    Db, DbConfig, DbIdentity, ErrorCode, LocalUpdates, Propagation, ReadOpts, SeededRowIdSource,
-    SubscriptionEvent, SubscriptionStream,
+    Db, DbConfig, DbIdentity, ErrorCode, LocalUpdates, MergeableTxOps, Propagation, ReadOpts,
+    SeededRowIdSource, SubscriptionEvent, SubscriptionStream,
 };
 use jazz::groove::records::Value;
 use jazz::groove::schema::{ColumnSchema, ColumnType};
@@ -184,6 +184,41 @@ fn exact_delta(stream: &mut SubscriptionStream) -> (BTreeSet<RowUuid>, BTreeSet<
     (
         added.into_iter().map(|row| row.row_uuid()).collect(),
         removed.into_iter().map(|row| row.row_uuid).collect(),
+    )
+}
+
+fn exact_mixed_reentry_delta(
+    stream: &mut SubscriptionStream,
+) -> (
+    BTreeSet<RowUuid>,
+    BTreeSet<RowUuid>,
+    BTreeMap<RowUuid, Value>,
+) {
+    let event = stream.try_next_event().expect("mixed subscription delta");
+    let SubscriptionEvent::Delta {
+        reset,
+        added,
+        updated,
+        removed,
+        ..
+    } = event
+    else {
+        panic!("expected subscription delta, got {event:?}");
+    };
+    assert!(!reset);
+    assert!(stream.try_next_event().is_none());
+    (
+        added.into_iter().map(|row| row.row_uuid()).collect(),
+        removed.into_iter().map(|row| row.row_uuid).collect(),
+        updated
+            .into_iter()
+            .map(|row| {
+                (
+                    row.row_uuid(),
+                    row.cell_at(1).expect("updated document rank payload"),
+                )
+            })
+            .collect(),
     )
 }
 
@@ -370,18 +405,32 @@ fn maintained_authorization_restores_an_ordered_page_after_scope_reentry() {
         "WRITER must still not read documents after the move out of scope"
     );
 
-    db.update_for_identity(
-        MAINTAINER,
-        DOCUMENTS,
-        winner,
-        BTreeMap::from([("team".to_owned(), Value::Uuid(authorized_team.0))]),
-    )
-    .expect("reader-authorized principal moves winning document back into scope");
+    db.transaction_for_identity(MAINTAINER, |tx| {
+        tx.update(
+            DOCUMENTS,
+            winner,
+            BTreeMap::from([("team".to_owned(), Value::Uuid(authorized_team.0))]),
+        )?;
+        // The authority re-entry and this ordinary content update share one
+        // committed transition batch. Only `winner` owns replacement
+        // provenance; `second` must remain an ordinary payload update.
+        tx.update(
+            DOCUMENTS,
+            second,
+            BTreeMap::from([("rank".to_owned(), Value::U64(21))]),
+        )?;
+        Ok(())
+    })
+    .expect("commit mixed scope re-entry and retained-row update");
     assert_eq!(reader_page(), vec![winner, second]);
-    let move_back_delta = exact_delta(&mut stream);
+    let move_back_delta = exact_mixed_reentry_delta(&mut stream);
     assert_eq!(
         move_back_delta,
-        (BTreeSet::from([winner]), BTreeSet::from([refill]))
+        (
+            BTreeSet::from([winner]),
+            BTreeSet::from([refill]),
+            BTreeMap::from([(second, Value::U64(21))]),
+        )
     );
     maintained.remove(&refill);
     maintained.insert(winner);

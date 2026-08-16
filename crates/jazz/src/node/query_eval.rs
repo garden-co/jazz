@@ -121,6 +121,42 @@ fn is_public_aggregate_result_member(
     aggregate_query && matches!(member, ResultMemberEntry::Synthetic { .. })
 }
 
+fn replace_stale_authoritative_occurrence_member(
+    result_set: &mut BTreeSet<ResultMemberEntry>,
+    result_payloads: &mut BTreeMap<ResultMemberEntry, ResultMemberPayloadEntry>,
+    authoritative_member_adds: &BTreeSet<ResultMemberEntry>,
+    member: &ResultMemberEntry,
+    result_table: &str,
+    aggregate_query: bool,
+) -> Result<(), Error> {
+    if !authoritative_member_adds.contains(member) {
+        return Ok(());
+    }
+    let Some(occurrence_id) =
+        public_result_member_occurrence_id(member, result_table, aggregate_query)?
+    else {
+        return Ok(());
+    };
+    let replaced = result_set
+        .iter()
+        .filter(|candidate| *candidate != member)
+        .filter_map(|candidate| {
+            public_result_member_occurrence_id(candidate, result_table, aggregate_query)
+                .transpose()
+                .map(|result| result.map(|candidate_id| (candidate, candidate_id)))
+        })
+        .collect::<Result<Vec<_>, Error>>()?
+        .into_iter()
+        .filter(|(_, candidate_id)| *candidate_id == occurrence_id)
+        .map(|(candidate, _)| candidate.clone())
+        .collect::<Vec<_>>();
+    for replaced in replaced {
+        result_set.remove(&replaced);
+        result_payloads.remove(&replaced);
+    }
+    Ok(())
+}
+
 fn is_public_result_member(
     member: &ResultMemberEntry,
     result_table: &str,
@@ -5419,6 +5455,7 @@ where
         Ok(Some(
             super::maintained_subscription_view::ResultTransitions {
                 authoritative_membership_changed: false,
+                authoritative_member_adds: BTreeSet::new(),
                 adds: current.difference(&previous).cloned().collect(),
                 removes: previous.difference(&current).cloned().collect(),
                 result_payload_adds,
@@ -8664,6 +8701,7 @@ where
         let mut structured_app_row_changes = BTreeSet::new();
         let mut terminal_operations = Vec::new();
         let mut authoritative_membership_changed = false;
+        let mut authoritative_member_adds = BTreeSet::new();
         if let Some(binding_view) = authoritative_binding_view {
             let authoritative_generation = self.applied_view_update_generation(binding_view);
             // Local optimistic changes can advance the maintained graph
@@ -8721,6 +8759,7 @@ where
                             continue;
                         }
                         authoritative_membership_changed = true;
+                        authoritative_member_adds.insert(entry.clone());
                         states.insert(entry.clone(), (false, true));
                         if let Some(payload) = remote_payloads.get(entry) {
                             payload_states.insert(
@@ -8823,6 +8862,7 @@ where
         }
         let mut transitions = super::maintained_subscription_view::ResultTransitions {
             authoritative_membership_changed,
+            authoritative_member_adds,
             structured_app_row_changes,
             terminal_operations,
             ..Default::default()
@@ -8895,6 +8935,7 @@ where
     ) -> Result<LocalMaintainedViewSubscriptionUpdate, Error> {
         let structured_output = !local.result_query.array_subqueries.is_empty();
         let authoritative_membership_changed = transitions.authoritative_membership_changed;
+        let authoritative_member_adds = transitions.authoritative_member_adds;
         let structured_app_row_changes = transitions.structured_app_row_changes.clone();
         let terminal_operations = transitions.terminal_operations.clone();
         let terminal_layout = (!terminal_operations.is_empty())
@@ -8936,34 +8977,20 @@ where
             ) {
                 continue;
             }
-            if let Some(occurrence_id) = public_result_member_occurrence_id(
+            // Authority-scope re-entry can surface a new internal result
+            // member for an occurrence the public facade already tracks. In
+            // that case replace the stale member so the current scope wins.
+            // Ordinary content updates keep their member identity: replacing
+            // them here turns an update into a duplicate add and leaves the
+            // public subscription with the old payload.
+            replace_stale_authoritative_occurrence_member(
+                &mut local.result_set,
+                &mut local.result_payloads,
+                &authoritative_member_adds,
                 &member,
                 local.result_table.as_str(),
                 local.result_query.aggregate.is_some(),
-            )? {
-                let replaced = local
-                    .result_set
-                    .iter()
-                    .filter(|candidate| **candidate != member)
-                    .filter_map(|candidate| {
-                        public_result_member_occurrence_id(
-                            candidate,
-                            local.result_table.as_str(),
-                            local.result_query.aggregate.is_some(),
-                        )
-                        .transpose()
-                        .map(|result| result.map(|candidate_id| (candidate, candidate_id)))
-                    })
-                    .collect::<Result<Vec<_>, Error>>()?
-                    .into_iter()
-                    .filter(|(_, candidate_id)| *candidate_id == occurrence_id)
-                    .map(|(candidate, _)| candidate.clone())
-                    .collect::<Vec<_>>();
-                for replaced in replaced {
-                    local.result_set.remove(&replaced);
-                    local.result_payloads.remove(&replaced);
-                }
-            }
+            )?;
             if local.result_set.insert(member.clone()) && materialize_update && !structured_output {
                 if let Some(row) =
                     self.materialize_local_maintained_view_result_member(local, &member)?
@@ -14286,6 +14313,156 @@ mod tests {
     use crate::schema::{JazzSchema, Policy, TableSchema};
 
     use super::*;
+
+    /// A coalesced authority re-entry for Alice's document must replace only
+    /// that exact member; Bob's ordinary content update in the same batch must
+    /// retain update semantics.
+    ///
+    /// authority ──re-admit alice──► replacement set
+    /// bob ──content update─────────► ordinary add (not replacement)
+    #[test]
+    fn authoritative_replacement_provenance_is_member_specific_in_a_mixed_batch() {
+        let member = |row_byte, time| {
+            ResultMemberEntry::row((
+                groove::Intern::from("documents".to_owned()),
+                RowUuid::from_bytes([row_byte; 16]),
+                TxId::new(
+                    crate::time::TxTime::from(time),
+                    NodeUuid::from_bytes([0x91; 16]),
+                ),
+            ))
+        };
+        let stale_authority_member = member(0x11, 1);
+        let authority_reentry = member(0x11, 2);
+        let stable_ordinary_member = member(0x22, 3);
+        let ordinary_content_update = member(0x22, 4);
+        let provenance = BTreeSet::from([authority_reentry.clone()]);
+        let mut result_set = BTreeSet::from([
+            stale_authority_member.clone(),
+            stable_ordinary_member.clone(),
+        ]);
+        let mut payloads = BTreeMap::new();
+
+        for added in [&authority_reentry, &ordinary_content_update] {
+            replace_stale_authoritative_occurrence_member(
+                &mut result_set,
+                &mut payloads,
+                &provenance,
+                added,
+                "documents",
+                false,
+            )
+            .expect("reduce mixed authoritative and ordinary additions");
+            result_set.insert(added.clone());
+        }
+
+        assert!(!result_set.contains(&stale_authority_member));
+        assert!(result_set.contains(&authority_reentry));
+        assert!(result_set.contains(&stable_ordinary_member));
+        assert!(result_set.contains(&ordinary_content_update));
+    }
+
+    /// A real settled Edge ViewUpdate seeds the client's authority membership;
+    /// a later local content version of that occurrence remains an update when
+    /// the ClientLocal maintained graph drains.
+    ///
+    /// server ──ViewUpdate(issue v1)──► client authority
+    /// client ──title v2──────────────► one maintained drain
+    #[test]
+    fn settled_edge_authority_preserves_an_ordinary_local_content_update() {
+        let (_server_dir, mut server) = open_node();
+        let (_client_dir, mut client) = open_node();
+        let issue = row(0);
+        let shape = Query::from("issues")
+            .select(["title", "state", "assignee", "priority"])
+            .order_by("title", OrderDirection::Asc)
+            .validate(&schema())
+            .expect("validate issues query");
+        let binding = shape.bind(BTreeMap::new()).expect("bind issues query");
+        let opts = RegisterShapeOptions {
+            tier: DurabilityTier::Edge,
+            ..RegisterShapeOptions::default()
+        };
+        register_query_shape(&mut server, &shape, opts.clone());
+        subscribe_query_binding(&mut server, &shape, &binding);
+        register_query_shape(&mut client, &shape, opts.clone());
+        subscribe_query_binding(&mut client, &shape, &binding);
+
+        let initial_tx = commit_global_issue(&mut server, 0, "open", AuthorId::SYSTEM, 1);
+        let mut peer = PeerState::edge_client(AuthorId::SYSTEM);
+        let initial = peer
+            .rehydrate_query_with_opts(&mut server, &shape, &binding, opts.clone())
+            .expect("serve initial settled issues view");
+        client
+            .apply_sync_message(initial)
+            .expect("apply initial settled issues view");
+        let binding_view = *client
+            .query
+            .settled_result_sets
+            .keys()
+            .find(|key| key.shape_id == shape.shape_id() && key.binding_id == binding.binding_id())
+            .expect("applied ViewUpdate registers a settled binding view");
+        assert!(client.has_settled_result_set(binding_view));
+
+        let (local_shape, local_binding, local_plan) = client
+            .prepare_query_binding_for_link_in_authorization_mode(
+                &shape,
+                &binding,
+                DurabilityTier::Local,
+                AuthorId::SYSTEM,
+                QueryAuthorizationMode::ClientLocal,
+            )
+            .expect("prepare client-local maintained issues query");
+        let (mut local, initial_snapshot) = client
+            .open_maintained_view_subscription_in_authorization_mode(
+                &local_shape,
+                &local_binding,
+                AuthorId::SYSTEM,
+                DurabilityTier::Local,
+                &ReadViewSpec::default(),
+                Some(local_plan),
+                QueryAuthorizationMode::ClientLocal,
+            )
+            .expect("open client-local maintained issues query");
+        assert_eq!(initial_snapshot.root_count, 1);
+        client.seed_local_maintained_authoritative_result_membership(&mut local, binding_view);
+
+        let updated_tx = client
+            .commit_mergeable(
+                MergeableCommit::new("issues", issue, 2_000)
+                    .made_by(AuthorId::SYSTEM)
+                    .parents(vec![initial_tx])
+                    .cells(BTreeMap::from([
+                        (
+                            "title".to_owned(),
+                            Value::String("updated title".to_owned()),
+                        ),
+                        ("state".to_owned(), Value::String("open".to_owned())),
+                        ("assignee".to_owned(), Value::Uuid(AuthorId::SYSTEM.0)),
+                        ("priority".to_owned(), Value::U64(0)),
+                    ])),
+            )
+            .expect("commit ordinary local issue update");
+        let _ = updated_tx;
+
+        let update = client
+            .drain_local_maintained_view_subscription(&mut local, Some(binding_view))
+            .expect("drain client-local maintained update")
+            .expect("ordinary content update produces a delta");
+        assert!(!update.authoritative_membership_changed);
+        let issue_occurrence = OutputOccurrenceId::single_source(ObjectId::from_uuid(issue.0));
+        assert!(update.added.iter().any(|(id, _)| id == &issue_occurrence));
+        assert!(update.removed.iter().any(|id| id == &issue_occurrence));
+        let updated = update
+            .added
+            .iter()
+            .find(|(id, _)| id == &issue_occurrence)
+            .expect("updated issue is paired as an add/remove update");
+        assert_eq!(
+            updated.1.cell(client.table("issues").unwrap(), "title"),
+            Some(Value::String("updated title".to_owned()))
+        );
+    }
 
     #[test]
     fn required_cell_guard_resolves_a_later_projected_column_by_name() {
