@@ -333,7 +333,7 @@ struct PendingBranchViewUpdate {
 }
 
 struct EdgeFateRoute {
-    authority: AuthorityContext,
+    authority: Option<AuthorityContext>,
     queue: Weak<RefCell<Vec<SyncMessage>>>,
 }
 type EdgeFateRoutes = Rc<RefCell<BTreeMap<TxId, Vec<EdgeFateRoute>>>>;
@@ -453,9 +453,10 @@ where
     Ok(())
 }
 
-/// A parked fate belongs to one admitted upstream epoch.  Drop routes for
-/// departed/replaced sessions (and dead subscriber queues) eagerly: retaining
-/// a weak queue alone would let arbitrary uploads grow this registry forever.
+/// A parked fate either awaits its first admitted upstream or belongs to one
+/// admitted upstream epoch. Drop routes for departed/replaced sessions (and
+/// dead subscriber queues) eagerly: retaining a weak queue alone would let
+/// arbitrary uploads grow this registry forever.
 fn prune_edge_fate_routes(
     routes: &mut BTreeMap<TxId, Vec<EdgeFateRoute>>,
     admitted: Option<AuthorityContext>,
@@ -463,7 +464,11 @@ fn prune_edge_fate_routes(
     routes.retain(|_, pending| {
         pending.retain(|route| {
             route.queue.upgrade().is_some()
-                && admitted.is_some_and(|ctx| ctx.same_admitted_link(route.authority))
+                && match (route.authority, admitted) {
+                    (None, _) => true,
+                    (Some(route), Some(admitted)) => admitted.same_admitted_link(route),
+                    (Some(_), None) => false,
+                }
         });
         !pending.is_empty()
     });
@@ -5625,7 +5630,7 @@ where
                 let routed_txs = routes.keys().copied().collect::<Vec<_>>();
                 for pending in routes.values_mut() {
                     for route in pending.iter_mut() {
-                        route.authority = context;
+                        route.authority = Some(context);
                     }
                 }
                 drop(routes);
@@ -5722,7 +5727,6 @@ where
             permission_advice_waiters: Rc::clone(&self.permission_advice_waiters),
             edge_fate_routes: Rc::clone(&self.edge_fate_routes),
             local_fate_routes: Rc::clone(&self.local_fate_routes),
-            admitted_upstream_authorities: Rc::clone(&self.admitted_upstream_authorities),
             admitted_upstream_authority: Rc::clone(&self.admitted_upstream_authority),
             downstream_fates: Rc::new(RefCell::new(Vec::new())),
             mutation_errors: Rc::clone(&self.mutation_errors),
@@ -5942,7 +5946,6 @@ where
             permission_advice_waiters: Rc::clone(&self.permission_advice_waiters),
             edge_fate_routes: Rc::clone(&self.edge_fate_routes),
             local_fate_routes: Rc::clone(&self.local_fate_routes),
-            admitted_upstream_authorities: Rc::clone(&self.admitted_upstream_authorities),
             admitted_upstream_authority: Rc::clone(&self.admitted_upstream_authority),
             downstream_fates,
             mutation_errors: Rc::clone(&self.mutation_errors),
@@ -6056,8 +6059,8 @@ where
                     routes.retain(|_, pending| {
                         pending.retain(|route| route.queue.upgrade().is_some());
                         for route in pending.iter_mut() {
-                            if route.authority == authority {
-                                route.authority = handoff;
+                            if route.authority == Some(authority) {
+                                route.authority = Some(handoff);
                             }
                         }
                         !pending.is_empty()
@@ -6099,6 +6102,11 @@ where
                     // after an Edge acceptance would strand the caller.
                     routes.retain(|_, pending| {
                         pending.retain(|route| route.queue.upgrade().is_some());
+                        for route in pending.iter_mut() {
+                            if route.authority == Some(authority) {
+                                route.authority = None;
+                            }
+                        }
                         !pending.is_empty()
                     });
                     self.schedule_tick(TickUrgency::Immediate);
@@ -6125,10 +6133,15 @@ where
             stats.remote_sync_applied += next.remote_sync_applied;
             remote_sync_applied |= next.remote_sync_applied > 0;
         }
-        if remote_sync_applied || self.subscriber_dirty_epoch.get() != subscriber_dirty_epoch_before
-        {
+        let subscriber_state_changed =
+            self.subscriber_dirty_epoch.get() != subscriber_dirty_epoch_before;
+        if remote_sync_applied || subscriber_state_changed {
             for connection in self.connections.borrow().iter() {
-                if connection.borrow_mut().mark_subscriber_dirty() {
+                let should_tick = {
+                    let mut connection = connection.borrow_mut();
+                    connection.mark_subscriber_dirty() || subscriber_state_changed
+                };
+                if should_tick {
                     let next = connection.borrow_mut().tick()?;
                     stats.subscription_events += next.subscription_events;
                     stats.remote_sync_applied += next.remote_sync_applied;
@@ -7212,7 +7225,6 @@ where
     permission_advice_waiters: PermissionAdviceWaiters,
     edge_fate_routes: EdgeFateRoutes,
     local_fate_routes: LocalFateRoutes,
-    admitted_upstream_authorities: AdmittedUpstreamAuthorities,
     admitted_upstream_authority: Rc<RefCell<Option<AuthorityContext>>>,
     downstream_fates: PendingDownstreamFates,
     mutation_errors: SharedMutationErrors,
@@ -8585,10 +8597,14 @@ where
                                 if let Some(pending) = routes.get_mut(&tx_id) {
                                     let mut remaining = Vec::new();
                                     for route in std::mem::take(pending) {
-                                        if authority.is_some_and(|authority| {
-                                            route.authority.same_admitted_link(authority)
-                                        }) {
-                                            if let Some(queue) = route.queue.upgrade() {
+                                        let authority_matches = matches!(
+                                            (route.authority, authority),
+                                            (Some(route), Some(authority))
+                                                if route.same_admitted_link(authority)
+                                        );
+                                        let queue = route.queue.upgrade();
+                                        if authority_matches {
+                                            if let Some(queue) = queue {
                                                 queue.borrow_mut().push(fate.clone());
                                             }
                                         } else {
@@ -9575,15 +9591,16 @@ where
                                             let pending = routes.get(&tx_id);
                                             let already_routed = pending.is_some_and(|pending| {
                                                 pending.iter().any(|route| {
-                                                    route.authority.same_admitted_link(authority)
-                                                        && route.queue.upgrade().is_some_and(
-                                                            |queue| {
-                                                                Rc::ptr_eq(
-                                                                    &queue,
-                                                                    &self.downstream_fates,
-                                                                )
-                                                            },
-                                                        )
+                                                    route.authority.is_some_and(|route| {
+                                                        route.same_admitted_link(authority)
+                                                    }) && route.queue.upgrade().is_some_and(
+                                                        |queue| {
+                                                            Rc::ptr_eq(
+                                                                &queue,
+                                                                &self.downstream_fates,
+                                                            )
+                                                        },
+                                                    )
                                                 })
                                             });
                                             if already_routed {
@@ -9592,7 +9609,7 @@ where
                                                 let pending = routes.entry(tx_id).or_default();
                                                 if pending.len() < MAX_EDGE_FATE_ROUTES_PER_TX {
                                                     pending.push(EdgeFateRoute {
-                                                        authority,
+                                                        authority: Some(authority),
                                                         queue: Rc::downgrade(
                                                             &self.downstream_fates,
                                                         ),
@@ -9605,14 +9622,44 @@ where
                                                 false
                                             }
                                         } else {
-                                            false
+                                            let mut routes = self.edge_fate_routes.borrow_mut();
+                                            prune_edge_fate_routes(&mut routes, None);
+                                            let already_routed =
+                                                routes.get(&tx_id).is_some_and(|pending| {
+                                                    pending.iter().any(|route| {
+                                                        route.authority.is_none()
+                                                            && route.queue.upgrade().is_some_and(
+                                                                |queue| {
+                                                                    Rc::ptr_eq(
+                                                                        &queue,
+                                                                        &self.downstream_fates,
+                                                                    )
+                                                                },
+                                                            )
+                                                    })
+                                                });
+                                            let route_count =
+                                                routes.values().map(Vec::len).sum::<usize>();
+                                            if already_routed {
+                                                true
+                                            } else if route_count >= MAX_EDGE_FATE_ROUTES {
+                                                false
+                                            } else {
+                                                let pending = routes.entry(tx_id).or_default();
+                                                if pending.len() >= MAX_EDGE_FATE_ROUTES_PER_TX {
+                                                    false
+                                                } else {
+                                                    pending.push(EdgeFateRoute {
+                                                        authority: None,
+                                                        queue: Rc::downgrade(
+                                                            &self.downstream_fates,
+                                                        ),
+                                                    });
+                                                    true
+                                                }
+                                            }
                                         };
-                                        let legacy_park = !route_registered
-                                            && self
-                                                .admitted_upstream_authorities
-                                                .borrow()
-                                                .is_empty();
-                                        if !route_registered && !legacy_park {
+                                        if !route_registered {
                                             // Do not claim Edge durability for
                                             // a write that lacks exactly one
                                             // authority route; otherwise its

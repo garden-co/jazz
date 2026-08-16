@@ -15,7 +15,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::{
-    Arc,
+    Arc, Weak,
     mpsc::{self, Receiver, RecvError, Sender, TryRecvError},
 };
 
@@ -1583,6 +1583,7 @@ impl IvmRuntime {
         }
         let subscription_id = self.next_subscription_id();
         let (sender, receiver) = mpsc::channel();
+        let receiver_liveness = Arc::new(());
         for output in outputs.values() {
             self.retain_as_subscription(subscription_id, output.node);
         }
@@ -1590,6 +1591,7 @@ impl IvmRuntime {
             subscription_id,
             MultisinkSubscriptionState {
                 sender,
+                receiver_liveness: Arc::downgrade(&receiver_liveness),
                 outputs: outputs.clone(),
                 target: MultisinkSubscriptionTarget::Direct,
             },
@@ -1612,6 +1614,7 @@ impl IvmRuntime {
         Ok(MultisinkSubscription {
             id: subscription_id,
             receiver,
+            _receiver_liveness: receiver_liveness,
         })
     }
 
@@ -1774,10 +1777,12 @@ impl IvmRuntime {
             return Err(error);
         }
         let (sender, receiver) = mpsc::channel();
+        let receiver_liveness = Arc::new(());
         self.multisink_subscriptions.insert(
             subscription_id,
             MultisinkSubscriptionState {
                 sender,
+                receiver_liveness: Arc::downgrade(&receiver_liveness),
                 outputs: outputs.clone(),
                 target: MultisinkSubscriptionTarget::RoutedShape {
                     shape_id,
@@ -1803,6 +1808,7 @@ impl IvmRuntime {
         Ok(MultisinkSubscription {
             id: subscription_id,
             receiver,
+            _receiver_liveness: receiver_liveness,
         })
     }
 
@@ -1962,6 +1968,24 @@ impl IvmRuntime {
         }
 
         Ok(false)
+    }
+
+    pub(crate) fn prune_dropped_subscriptions_with_storage<S>(
+        &mut self,
+        storage: &S,
+    ) -> Result<usize, IvmRuntimeError>
+    where
+        S: OrderedKvStorage,
+    {
+        let dropped = self
+            .multisink_subscriptions
+            .iter()
+            .filter_map(|(id, state)| state.receiver_liveness.upgrade().is_none().then_some(*id))
+            .collect::<Vec<_>>();
+        for id in &dropped {
+            self.unsubscribe_with_storage(*id, storage)?;
+        }
+        Ok(dropped.len())
     }
 
     pub fn add_dedup_schema_indices(&mut self) -> Result<(), IvmRuntimeError> {
@@ -4072,6 +4096,7 @@ impl MultisinkDeltas {
 pub struct MultisinkSubscription {
     id: SubscriptionId,
     receiver: Receiver<QueuedMultisinkDeltas>,
+    _receiver_liveness: Arc<()>,
 }
 
 impl MultisinkSubscription {
@@ -4193,6 +4218,7 @@ impl RecordDelta {
 #[derive(Clone, Debug)]
 struct MultisinkSubscriptionState {
     sender: Sender<QueuedMultisinkDeltas>,
+    receiver_liveness: Weak<()>,
     outputs: BTreeMap<String, CompiledNode>,
     target: MultisinkSubscriptionTarget,
 }

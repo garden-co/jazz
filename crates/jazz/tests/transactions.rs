@@ -717,7 +717,11 @@ async fn wait_for_batch_errors_for_unattainable_durability_tier() {
 
     assert!(
         client
-            .wait_for_batch(batch_id.expect("ordinary mutation commits immediately"), DurabilityTier::GlobalServer)
+            .wait_for_batch_with_timeout_for_test(
+                batch_id.expect("ordinary mutation commits immediately"),
+                DurabilityTier::GlobalServer,
+                Duration::from_millis(100),
+            )
             .await
             .is_err(),
         "serverless test client cannot reach GlobalServer durability"

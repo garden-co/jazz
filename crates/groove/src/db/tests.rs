@@ -2999,6 +2999,23 @@ fn dropping_subscription_receiver_unsubscribes_on_next_message() {
 }
 
 #[test]
+fn dropped_subscription_receiver_can_be_pruned_without_a_later_message() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let storage = RocksDbStorage::open(temp_dir.path(), &["albums"]).unwrap();
+    let mut database = Database::new(albums_schema(), storage).unwrap();
+    let subscription = database
+        .subscribe_one_sink(GraphBuilder::table("albums"))
+        .unwrap();
+    let subscription_id = subscription.id();
+    assert_eq!(database.runtime_stats().active_subscriptions, 1);
+    drop(subscription);
+
+    assert_eq!(database.prune_dropped_subscriptions().unwrap(), 1);
+    assert_eq!(database.runtime_stats().active_subscriptions, 0);
+    assert!(!database.unsubscribe(subscription_id));
+}
+
+#[test]
 fn subscribe_returns_current_rows_as_initial_message_then_future_deltas() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = RocksDbStorage::open(temp_dir.path(), &["albums"]).unwrap();

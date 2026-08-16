@@ -6272,6 +6272,31 @@ fn duplex_with_server_outbound_tap() -> (
     )
 }
 
+/// In-memory transport pair with a read-only tap on client-to-server frames.
+/// The tap lets an Edge test inspect an upstream upload before Core applies it.
+fn duplex_with_client_outbound_tap() -> (
+    Box<dyn Transport>,
+    Box<dyn Transport>,
+    Rc<RefCell<std::collections::VecDeque<SyncMessage>>>,
+) {
+    use std::collections::VecDeque;
+    let client_to_server = Rc::new(RefCell::new(VecDeque::new()));
+    let server_to_client = Rc::new(RefCell::new(VecDeque::new()));
+    (
+        Box::new(DuplexTransport {
+            outbound: Rc::clone(&client_to_server),
+            inbound: Rc::clone(&server_to_client),
+            session_context: None,
+        }),
+        Box::new(DuplexTransport {
+            outbound: server_to_client,
+            inbound: Rc::clone(&client_to_server),
+            session_context: None,
+        }),
+        client_to_server,
+    )
+}
+
 /// In-memory handshake pairing needs an internal test because it verifies the
 /// transport/admission boundary before any user-visible sync payload exists.
 fn duplex_with_admitted_session_context(
@@ -6784,7 +6809,7 @@ fn concurrent_upstreams_keep_selected_owner_until_detach_handoff() {
     edge.server.edge_fate_routes.borrow_mut().insert(
         tx_id,
         vec![EdgeFateRoute {
-            authority: first.unwrap(),
+            authority: Some(first.unwrap()),
             queue: Rc::downgrade(&queue),
         }],
     );
@@ -6797,7 +6822,7 @@ fn concurrent_upstreams_keep_selected_owner_until_detach_handoff() {
     let handoff = edge.server.admitted_upstream_authority.borrow().unwrap();
     assert_eq!(
         edge.server.edge_fate_routes.borrow()[&tx_id][0].authority,
-        handoff,
+        Some(handoff),
         "an Edge-Accepted caller route must follow the selected handoff rather than vanish"
     );
 }
@@ -6846,7 +6871,7 @@ fn edge_route_capacity_rejects_instead_of_reporting_edge_acceptance() {
         write.mergeable_tx_id(),
         (0..MAX_EDGE_FATE_ROUTES_PER_TX)
             .map(|_| EdgeFateRoute {
-                authority: selected,
+                authority: Some(selected),
                 queue: Rc::downgrade(&queue),
             })
             .collect(),
@@ -6927,7 +6952,7 @@ fn admitted_edge_session_routes_selected_authority_fate_to_uploading_client() {
     let routes = edge.server.edge_fate_routes.borrow();
     let routes_for_tx = routes.get(&tx_id).expect("edge must park the upload route");
     assert_eq!(routes_for_tx.len(), 1);
-    assert_eq!(routes_for_tx[0].authority, expected_authority);
+    assert_eq!(routes_for_tx[0].authority, Some(expected_authority));
     drop(routes);
 
     // Scope receipts advance authorization metadata on the same physical
@@ -7096,7 +7121,7 @@ fn stale_upstream_epoch_cannot_settle_routed_local_fate_before_selected_epoch() 
     edge.server.edge_fate_routes.borrow_mut().insert(
         tx_id,
         vec![EdgeFateRoute {
-            authority: selected,
+            authority: Some(selected),
             queue: Rc::downgrade(&downstream),
         }],
     );
@@ -7332,6 +7357,11 @@ fn edge_parks_downstream_fate_until_a_later_authority_connects() {
 
     assert!(edge.server.detach_connection(&edge_a));
     assert_eq!(edge.server.edge_fate_routes.borrow().len(), 1);
+    assert_eq!(
+        edge.server.edge_fate_routes.borrow()[&write.mergeable_tx_id()][0].authority,
+        None,
+        "a route whose authority disconnected remains parked without stale authority claims"
+    );
 
     let authority_c = open_core(0xc2, AuthorId::SYSTEM, &schema);
     let (edge_c_transport, c_transport) = duplex_with_admitted_session_context(
@@ -7355,20 +7385,19 @@ fn edge_parks_downstream_fate_until_a_later_authority_connects() {
     assert!(edge.server.edge_fate_routes.borrow().is_empty());
 }
 
-/// The raw Edge ingestion path records no fate route when a client writes
+/// An offline-ready Edge retains a client's fate route when a write arrives
 /// before normal upstream admission.
 ///
-/// This is an internal lifecycle-boundary test: a public websocket race only
-/// exposes the symptom (a Global wait that never resolves), while the decisive
-/// contract is that Ready publication happens after this route can be bound;
-/// the dynamic-shell admission test enforces that boundary externally.
+/// A validated durable Edge may serve while its Core is offline. Its local
+/// acceptance therefore has to retain an unbound downstream obligation, bind
+/// it to the first authenticated authority, and redrive the canonical unit.
 ///
 /// ```text
 /// alice --write--> edge (no upstream yet) --later attach--> core
-///                    \-- no route is available for alice yet
+///                    \-- park(tx, alice) --bind(core)--> global fate
 /// ```
 #[test]
-fn edge_write_before_upstream_admission_has_no_fate_route() {
+fn edge_write_before_upstream_admission_binds_and_redrives_fate_route() {
     let schema = schema();
     let alice = AuthorId::from_bytes([0xa1; 16]);
     let edge_node = NodeUuid::from_bytes([0xe0; 16]);
@@ -7382,7 +7411,7 @@ fn edge_write_before_upstream_admission_has_no_fate_route() {
         edge_node,
         13,
     );
-    let _client_upstream = client.connect_upstream(client_transport);
+    let client_upstream = client.connect_upstream(client_transport);
     let edge_client = edge.server.accept_edge_authority_subscriber_with_claims(
         edge_transport,
         alice,
@@ -7390,10 +7419,7 @@ fn edge_write_before_upstream_admission_has_no_fate_route() {
     );
 
     let write = client
-        .insert(
-            "todos",
-            BTreeMap::from([("title".to_owned(), Value::String("startup race".to_owned()))]),
-        )
+        .insert("todos", cells("startup race", false, alice))
         .unwrap();
     let tx_id = write.mergeable_tx_id();
     client.tick().unwrap();
@@ -7403,27 +7429,68 @@ fn edge_write_before_upstream_admission_has_no_fate_route() {
         write.write_state().unwrap().durability,
         DurabilityTier::Edge
     );
-    assert!(
-        !edge.server.edge_fate_routes.borrow().contains_key(&tx_id),
-        "a shell published before upstream admission currently parks no authority route"
+    assert_eq!(
+        edge.server.edge_fate_routes.borrow()[&tx_id][0].authority,
+        None,
+        "an offline-ready edge retains the downstream obligation without inventing authority"
+    );
+    client_upstream
+        .borrow_mut()
+        .transport
+        .send(
+            client
+                .node
+                .node
+                .borrow_mut()
+                .commit_unit_for(tx_id)
+                .unwrap(),
+        )
+        .unwrap();
+    edge.tick().unwrap();
+    assert_eq!(
+        edge.server.edge_fate_routes.borrow()[&tx_id].len(),
+        1,
+        "a retransmitted pre-admission unit must reuse the same downstream route"
     );
 
     let (edge_upstream_transport, core_transport) =
         duplex_with_admitted_session_context(AuthorId::SYSTEM, edge_node, 41, core_node, 97);
     let _edge_upstream = edge.server.connect_upstream(edge_upstream_transport);
+    assert!(
+        edge.server.edge_fate_routes.borrow()[&tx_id][0]
+            .authority
+            .is_some(),
+        "the first authenticated authority binds the parked route"
+    );
     let core = open_core(0xc0, AuthorId::SYSTEM, &schema);
-    let _core_session = core.accept_subscriber(core_transport, AuthorId::SYSTEM);
+    let core_session = core.accept_subscriber(core_transport, AuthorId::SYSTEM);
     edge.tick().unwrap();
-    core.tick().unwrap();
+    let uploaded = std::iter::from_fn(|| core_session.borrow_mut().transport.try_recv())
+        .any(|message| matches!(message, SyncMessage::CommitUnit { tx, .. } if tx.tx_id == tx_id));
+    assert!(
+        uploaded,
+        "binding the first authority redrives the parked unit"
+    );
+    core_session
+        .borrow_mut()
+        .transport
+        .send(SyncMessage::FateUpdate {
+            tx_id,
+            fate: Fate::Accepted,
+            global_seq: Some(GlobalSeq(1)),
+            durability: Some(DurabilityTier::Global),
+        })
+        .unwrap();
     edge.tick().unwrap();
     edge_client.borrow_mut().tick().unwrap();
     client.tick().unwrap();
 
     assert_eq!(
         write.write_state().unwrap().durability,
-        DurabilityTier::Edge,
-        "a late Core fate cannot reach a client whose write was accepted before route admission"
+        DurabilityTier::Global,
+        "the late Core fate must discharge the offline client's parked route"
     );
+    assert!(edge.server.edge_fate_routes.borrow().is_empty());
 }
 
 #[test]
@@ -7484,7 +7551,7 @@ fn stale_same_authority_session_cannot_settle_or_forward_a_routed_fate() {
         .borrow_mut()
         .get_mut(&write.mergeable_tx_id())
         .expect("routed edge write")[0]
-        .authority = current_context;
+        .authority = Some(current_context);
     old.borrow_mut()
         .transport
         .send(SyncMessage::FateUpdate {
@@ -9795,6 +9862,64 @@ fn core_later_client_upload_refreshes_earlier_peer_subscription_in_same_tick() {
     assert!(
         core_to_peer.borrow().is_empty(),
         "a post-cascade idle tick emits no unchanged peer update"
+    );
+}
+
+/// An Edge immediately flushes an upload queued by a later client connection
+/// through the upstream connection that was already visited in the same pass.
+///
+/// The upstream connection is deliberately installed first. One client tick
+/// places the commit on the Edge subscriber transport; one Edge tick must both
+/// ingest it and emit the corresponding Core-bound `CommitUnit`.
+#[test]
+fn edge_later_client_upload_flushes_earlier_upstream_in_same_tick() {
+    let schema = schema();
+    let alice = AuthorId::from_bytes([0xa1; 16]);
+    let edge = open_db(0xd1, AuthorId::SYSTEM, &schema);
+    let client = open_db(0xd2, alice, &schema);
+
+    let (edge_transport, _core_transport, edge_to_core) = duplex_with_client_outbound_tap();
+    let _edge_upstream = edge.connect_upstream(edge_transport);
+
+    let (client_transport, edge_client_transport) = duplex();
+    let _client_upstream = client.connect_upstream(client_transport);
+    let _edge_client = edge.accept_subscriber(edge_client_transport, alice);
+
+    let write = client
+        .insert_with_id("todos", row(0xd3), cells("later upload", false, alice))
+        .unwrap();
+    client.tick().unwrap();
+    edge.tick().unwrap();
+
+    let uploads = edge_to_core
+        .borrow()
+        .iter()
+        .filter(|message| {
+            matches!(
+                message,
+                SyncMessage::CommitUnit { tx, .. } if tx.tx_id == write.tx_id
+            )
+        })
+        .count();
+    assert_eq!(
+        uploads, 1,
+        "one Edge service pass flushes the later client upload through the earlier upstream link"
+    );
+
+    edge.tick().unwrap();
+    assert_eq!(
+        edge_to_core
+            .borrow()
+            .iter()
+            .filter(|message| {
+                matches!(
+                    message,
+                    SyncMessage::CommitUnit { tx, .. } if tx.tx_id == write.tx_id
+                )
+            })
+            .count(),
+        1,
+        "a quiet follow-up tick does not replay the same upload"
     );
 }
 

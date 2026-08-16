@@ -1842,6 +1842,16 @@ where
             .unwrap_or(false)
     }
 
+    /// Retire subscriptions whose receiving handles have already been
+    /// dropped, even when no later data delta exists to discover the closed
+    /// notification channel.
+    pub fn prune_dropped_subscriptions(&mut self) -> Result<usize, Error> {
+        self.ensure_not_poisoned()?;
+        self.ivm_runtime
+            .prune_dropped_subscriptions_with_storage(&self.storage)
+            .map_err(Error::IvmRuntime)
+    }
+
     /// Run one IVM tick without base-table writes.
     ///
     /// Commiting a batch ticks automatically; `flush` is useful after creating

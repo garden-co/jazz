@@ -464,14 +464,37 @@ where
 
             self.install_staged_schema_lineage_in_memory(&staged);
             // A widened lineage adds new variant cases to existing physical
-            // current tables. Reopening the database installs those cases in
-            // Groove's projection registry; incremental table evolution only
-            // updates the stored table definitions, leaving a stale process
-            // unable to project a just-admitted v2 commit.
-            if self.rebuild_database_slot().is_err() {
+            // current tables. Install those cases in the live registry rather
+            // than reopening the database: a reopen drops active history and
+            // maintained-subscription receivers even when their output shape
+            // remains compatible.
+            if self.synchronize_physical_version_tables().is_err() {
                 self.remove_staged_schema_lineage_from_memory(&staged);
                 self.catalogue_activation_failed = true;
                 return Err(Error::CatalogueActivationFailed);
+            }
+            // Closed raw receivers can otherwise make a cold server look live
+            // until a later non-empty notification. Prune them explicitly;
+            // then rebuild only when no observable subscription handle would
+            // be disconnected. Live handles use the in-place cases above.
+            if self.database.prune_dropped_subscriptions().is_err() {
+                self.remove_staged_schema_lineage_from_memory(&staged);
+                self.catalogue_activation_failed = true;
+                return Err(Error::CatalogueActivationFailed);
+            }
+            let rebuild_cold_runtime = self.database.runtime_stats().active_subscriptions == 0;
+            if rebuild_cold_runtime && self.rebuild_database_slot().is_err() {
+                self.remove_staged_schema_lineage_from_memory(&staged);
+                self.catalogue_activation_failed = true;
+                return Err(Error::CatalogueActivationFailed);
+            }
+            if widens_shared_current_descriptor && !rebuild_cold_runtime {
+                // Peer-serving and maintained caches are compiled against the
+                // shared current-row descriptor too. Retire those handles now;
+                // their owners rebuild from the new runtime token below. Raw
+                // history subscriptions remain attached to the live Groove
+                // registry and keep receiving compatible projected rows.
+                self.invalidate_runtime_handles_after_database_rebuild();
             }
             #[cfg(test)]
             if self.catalogue_activation_failpoint
