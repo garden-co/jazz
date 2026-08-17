@@ -15,6 +15,9 @@ use groove::{
     schema::{ColumnSchema, ColumnType, DatabaseSchema, IntegerKeyType, PrimaryKey, TableSchema},
     storage::MemoryStorage,
 };
+use jazz::db::doctest_support;
+use jazz::db::{LocalUpdates, Propagation, ReadOpts, SubscriptionEvent};
+use jazz::tx::DurabilityTier;
 use opfs_btree::BTreeError;
 use opfs_btree::async_db::{AsyncPageBTree, AsyncPageBTreeOptions};
 use opfs_btree::async_page_store::{
@@ -437,5 +440,95 @@ pub async fn verify_indexeddb_groove_visibility(page_store: JsValue) -> Result<J
     }
     Ok(JsValue::from_str(
         "Groove local visibility preceded IndexedDB durability",
+    ))
+}
+
+/// Exercise the application-facing Jazz invariant while the same write's
+/// captured Groove batches are persisted by real IndexedDB.
+#[wasm_bindgen]
+pub async fn verify_indexeddb_jazz_visibility(page_store: JsValue) -> Result<JsValue, JsValue> {
+    let db = doctest_support::open_todos_db()
+        .await
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    db.enable_async_persistence_capture();
+    let prepared = db
+        .prepare_query(&db.table("todos"))
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    let opts = ReadOpts {
+        tier: DurabilityTier::None,
+        local_updates: LocalUpdates::Immediate,
+        propagation: Propagation::LocalOnly,
+        include_deleted: false,
+        ..ReadOpts::default()
+    };
+    let mut subscription = db
+        .subscribe(&prepared, opts.clone())
+        .await
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    subscription
+        .next_event()
+        .await
+        .ok_or_else(|| JsValue::from_str("Jazz subscription closed during opening"))?;
+
+    let write = db
+        .insert(
+            "todos",
+            doctest_support::todo_cells("controlled input", false),
+        )
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    let Some(SubscriptionEvent::Delta { added, .. }) = subscription.try_next_event() else {
+        return Err(JsValue::from_str(
+            "Jazz immediate subscription delta was not queued inside insert",
+        ));
+    };
+    let rows = db
+        .all(&prepared, opts)
+        .await
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    if added.len() != 1 || rows.len() != 1 || rows[0].row_uuid() != write.row_uuid() {
+        return Err(JsValue::from_str(
+            "Jazz immediate one-shot did not observe the local write",
+        ));
+    }
+    if write.wait(DurabilityTier::Local).await.is_ok() {
+        return Err(JsValue::from_str(
+            "Jazz Local durability resolved before IndexedDB persistence",
+        ));
+    }
+
+    let batches = db.take_pending_persistence_batches();
+    if batches.is_empty() {
+        return Err(JsValue::from_str("Jazz emitted no persistence batches"));
+    }
+    let mut persistence = IndexedDbOrderedStorage::open(page_store.clone(), 4096, 32)
+        .await
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    for batch in batches {
+        let request =
+            OwnedStorageRequest::new(OwnedStorageOperation::Commit(batch.into_operations()));
+        complete_request(&mut persistence, &request).await?;
+    }
+    drop(persistence);
+
+    let mut reopened = IndexedDbOrderedStorage::open(page_store, 4096, 32)
+        .await
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    let transaction_scan = OwnedStorageRequest::new(OwnedStorageOperation::Scan(
+        OwnedScanRequest::prefix("jazz_transactions", Vec::new()),
+    ));
+    let OwnedStorageResponse::Rows(transactions) =
+        complete_request(&mut reopened, &transaction_scan).await?
+    else {
+        return Err(JsValue::from_str(
+            "Jazz durable scan returned wrong response",
+        ));
+    };
+    if transactions.is_empty() {
+        return Err(JsValue::from_str(
+            "Jazz canonical transaction did not survive IndexedDB reopen",
+        ));
+    }
+    Ok(JsValue::from_str(
+        "Jazz immediate visibility preceded IndexedDB durability",
     ))
 }

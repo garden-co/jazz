@@ -6,6 +6,27 @@ impl<S> Db<S>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
+    /// Route later node commits into owned persistence batches and mark this
+    /// facade as a non-durable optimistic client until its host acknowledges
+    /// those batches.
+    #[doc(hidden)]
+    pub fn enable_async_persistence_capture(&self) {
+        self.node.set_non_durable_client();
+        self.node
+            .node
+            .borrow_mut()
+            .enable_async_persistence_capture();
+    }
+
+    /// Drain exact captured Groove batches in node commit order.
+    #[doc(hidden)]
+    pub fn take_pending_persistence_batches(&self) -> Vec<groove::db::PendingPersistenceBatch> {
+        self.node
+            .node
+            .borrow_mut()
+            .take_pending_persistence_batches()
+    }
+
     /// Open a database over the supplied storage and recover local state.
     ///
     /// ```rust

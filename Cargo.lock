@@ -2084,10 +2084,14 @@ name = "jazz-storage-indexeddb"
 version = "0.1.0"
 dependencies = [
  "futures",
+ "getrandom 0.2.17",
+ "getrandom 0.3.4",
  "groove",
+ "jazz",
  "js-sys",
  "opfs-btree",
  "serde-wasm-bindgen",
+ "uuid",
  "wasm-bindgen",
  "wasm-bindgen-futures",
 ]

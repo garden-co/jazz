@@ -21,7 +21,7 @@ async function main() {
     "async-page-stores.js",
   );
   const worker = `
-    import init, { verify_indexeddb_groove_visibility, verify_indexeddb_ordered_storage } from "/pkg/jazz_storage_indexeddb.js";
+    import init, { verify_indexeddb_groove_visibility, verify_indexeddb_jazz_visibility, verify_indexeddb_ordered_storage } from "/pkg/jazz_storage_indexeddb.js";
     import { IndexedDbPageStore } from "/async-page-stores.js";
     self.onmessage = async () => {
       const name = "jazz-ordered-idb-" + Date.now() + "-" + Math.random();
@@ -37,7 +37,12 @@ async function main() {
         const grooveReceipt = await verify_indexeddb_groove_visibility(store);
         store.close();
         await IndexedDbPageStore.destroy(grooveName);
-        self.postMessage({ receipt, grooveReceipt });
+        const jazzName = name + "-jazz";
+        store = await IndexedDbPageStore.open(jazzName);
+        const jazzReceipt = await verify_indexeddb_jazz_visibility(store);
+        store.close();
+        await IndexedDbPageStore.destroy(jazzName);
+        self.postMessage({ receipt, grooveReceipt, jazzReceipt });
       } catch (error) {
         if (store) store.close();
         self.postMessage({ error: error.stack || error.message || String(error) });
@@ -83,8 +88,12 @@ async function main() {
     if (result.grooveReceipt !== "Groove local visibility preceded IndexedDB durability") {
       throw new Error(JSON.stringify(result));
     }
+    if (result.jazzReceipt !== "Jazz immediate visibility preceded IndexedDB durability") {
+      throw new Error(JSON.stringify(result));
+    }
     console.log(result.receipt);
     console.log(result.grooveReceipt);
+    console.log(result.jazzReceipt);
   } finally {
     await browser.close();
     await new Promise((resolve) => server.close(resolve));
