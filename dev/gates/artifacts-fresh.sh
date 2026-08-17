@@ -75,10 +75,10 @@ check_layer \
   "pnpm --filter jazz-tools build" \
   packages/jazz-tools/dist
 
-source_roots=(crates/jazz/src crates/groove/src crates/jazz/Cargo.toml crates/groove/Cargo.toml Cargo.toml Cargo.lock)
+source_roots=(crates/jazz-cli/src crates/jazz-cli/Cargo.toml crates/jazz/src crates/groove/src crates/jazz/Cargo.toml crates/groove/Cargo.toml Cargo.toml Cargo.lock)
 check_layer \
   "target/debug/jazz-tools" \
-  "cargo build -p jazz --bin jazz-tools --features cli" \
+  "cargo build -p jazz-cli --bin jazz-tools" \
   target/debug/jazz-tools
 
 # index.js and index.d.ts are outputs of napi build, not inputs.

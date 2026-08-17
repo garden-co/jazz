@@ -18,6 +18,7 @@ use clap::{Parser, Subcommand};
 use jazz::tools::middleware::AuthConfig;
 #[cfg(feature = "otel")]
 use jazz::tools::otel;
+use jazz_cli::commands;
 
 const DEFAULT_SHUTDOWN_TIMEOUT_SECS: u64 = 30;
 const MAX_SHUTDOWN_TIMEOUT_SECS: u64 = 60 * 60;
@@ -189,7 +190,7 @@ async fn main() {
     match cli.command {
         Commands::Create { resource } => match resource {
             CreateResource::App { name } => {
-                jazz::tools::commands::create::app(name);
+                commands::create::app(name);
             }
         },
         Commands::Server {
@@ -243,7 +244,7 @@ async fn main() {
                 ..Default::default()
             };
             let edge_cache_budget = edge_cache_budget_bytes.map(jazz::node::EdgeCacheBudget::new);
-            if let Err(e) = jazz::tools::commands::server::run(
+            if let Err(e) = commands::server::run(
                 &app_id,
                 port,
                 &data_dir,

@@ -4,6 +4,7 @@ members = [
   "crates/benchmark-guard",
   "crates/groove",
   "crates/jazz",
+  "crates/jazz-cli",
   "crates/jazz-sim",
   "crates/opfs-btree",
   "crates/jazz-wasm",

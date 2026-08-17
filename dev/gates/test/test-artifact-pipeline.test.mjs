@@ -486,7 +486,7 @@ test("Turbo invalidates each native artifact only for its Cargo closure", () => 
     ],
     [
       cli,
-      ["jazz", "groove", "opfs-btree"].flatMap((crate) => [
+      ["jazz-cli", "jazz", "groove", "opfs-btree"].flatMap((crate) => [
         `$TURBO_ROOT$/crates/${crate}/Cargo.toml`,
         `$TURBO_ROOT$/crates/${crate}/src/**/*.rs`,
       ]),
