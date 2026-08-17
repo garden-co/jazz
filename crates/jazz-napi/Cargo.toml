@@ -12,6 +12,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 jazz = { path = "../jazz", default-features = false, features = ["test-utils"] }
+jazz-native-transport = { path = "../jazz-native-transport" }
 jazz-otel.workspace = true
 tokio = { version = "1", features = ["rt", "rt-multi-thread"] }
 base64 = "0.22"

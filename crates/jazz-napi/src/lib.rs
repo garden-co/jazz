@@ -2852,7 +2852,11 @@ impl JazzServer {
             opts.data_dir.unwrap_or_else(|| "./data".to_string())
         };
 
-        let mut server_builder = ServerBuilder::new(app_id).with_auth_config(auth_config);
+        let mut server_builder = ServerBuilder::new(app_id)
+            .with_auth_config(auth_config)
+            .with_native_transport_connector(std::sync::Arc::new(
+                jazz_native_transport::NativeWebSocketConnector,
+            ));
         if let Some(schema) = core_server_shell_schema {
             server_builder = server_builder.with_core_server_shell_schema(schema);
         }

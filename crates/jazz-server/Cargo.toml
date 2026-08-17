@@ -9,6 +9,7 @@ otel = ["dep:jazz-otel", "dep:opentelemetry"]
 
 [dependencies]
 jazz = { workspace = true, default-features = false, features = ["server"] }
+jazz-native-transport = { path = "../jazz-native-transport" }
 jazz-otel = { workspace = true, optional = true }
 axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio"] }
 opentelemetry = { version = "0.31", optional = true }

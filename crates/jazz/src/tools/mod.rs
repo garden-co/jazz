@@ -8,6 +8,8 @@ pub mod metadata;
 pub mod middleware;
 /// Target-shell factory boundary for native peer transports.
 pub mod native_transport_connector;
+/// Deprecated native compatibility adapter. New native shells use the
+/// `jazz-native-transport` package and inject its connector explicitly.
 #[cfg(any(feature = "client", feature = "server"))]
 pub mod native_websocket_transport;
 mod object;

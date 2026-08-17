@@ -214,7 +214,7 @@ impl ServerShellHandle {
         .await
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test"))]
     pub(crate) async fn trusted_catalogue_snapshot_for_test(
         &self,
     ) -> Result<crate::protocol::CatalogueSnapshot, String> {

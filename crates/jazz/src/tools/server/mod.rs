@@ -13,6 +13,10 @@ mod catalogue_entry;
 mod catalogue_storage;
 mod core_server_shell;
 /// Backward-compatible path for the native WebSocket client adapter.
+///
+/// Native process shells should use `jazz-native-transport` and inject its
+/// connector explicitly. This path remains during the client-shell migration.
+#[cfg(any(feature = "client", feature = "server"))]
 pub mod core_websocket_transport {
     pub use crate::tools::native_websocket_transport::*;
 }
@@ -141,6 +145,45 @@ fn client_shell_snapshot<T: Clone>(
 }
 
 impl ServerState {
+    /// Test-only observation of whether an edge has installed a runtime shell.
+    #[cfg(feature = "test")]
+    #[doc(hidden)]
+    pub fn has_core_server_shell_for_test(&self) -> bool {
+        self.core_server_shell().is_some()
+    }
+
+    /// Test-only observation of whether an edge is ready for downstream clients.
+    #[cfg(feature = "test")]
+    #[doc(hidden)]
+    pub fn has_core_server_shell_for_client_for_test(&self) -> bool {
+        self.core_server_shell_for_client().is_some()
+    }
+
+    /// Test-only adoption hook for exercising the interval between catalogue
+    /// installation and normal upstream-peer admission with a real server.
+    #[cfg(feature = "test")]
+    #[doc(hidden)]
+    pub fn start_dynamic_edge_shell_for_test(
+        &self,
+        snapshot: crate::protocol::CatalogueSnapshot,
+        edge_cache_budget: Option<crate::node::EdgeCacheBudget>,
+    ) -> Result<(), String> {
+        self.start_dynamic_edge_shell(snapshot, edge_cache_budget)
+            .map(|_| ())
+    }
+
+    /// Test-only readback of the installed authority catalogue.
+    #[cfg(feature = "test")]
+    #[doc(hidden)]
+    pub async fn trusted_catalogue_snapshot_for_test(
+        &self,
+    ) -> Result<crate::protocol::CatalogueSnapshot, String> {
+        self.core_server_shell()
+            .ok_or_else(|| "server has no runtime shell".to_owned())?
+            .trusted_catalogue_snapshot_for_test()
+            .await
+    }
+
     pub(crate) fn core_server_shell(&self) -> Option<core_server_shell::ServerShellHandle> {
         self.core_server_shell.read().unwrap().clone()
     }

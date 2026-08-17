@@ -2,29 +2,27 @@ use std::fmt;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crate::db::{ConnectionSessionContext, WireTransportAdapter};
-use crate::ids::{AuthorId, NodeUuid};
-use crate::protocol_limits::{
-    MAX_WIRE_BATCH_FRAMES, MAX_WIRE_FRAME_BYTES, validate_wire_frame_len,
-};
-use crate::wire::{
+use futures::{SinkExt as _, StreamExt as _};
+use jazz::db::{ConnectionSessionContext, WireTransportAdapter};
+use jazz::ids::{AuthorId, NodeUuid};
+use jazz::protocol_limits::{MAX_WIRE_BATCH_FRAMES, MAX_WIRE_FRAME_BYTES, validate_wire_frame_len};
+use jazz::wire::{
     FEATURE_SYNC_MESSAGE_PAYLOAD, TransportError, WIRE_PROTOCOL_VERSION, WireAuthorityEndpoint,
     WireError, WireFrame, WireHello, WirePeerRole, WireTransport, current_wire_features,
     decode_frame, encode_frame, negotiate_wire,
 };
-use futures::{SinkExt as _, StreamExt as _};
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{Notify, Semaphore, mpsc};
 use tokio_tungstenite::connect_async_with_config;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 
-use crate::tools::AppId;
-use crate::tools::native_transport_connector::{
+use jazz::tools::AppId;
+use jazz::tools::native_transport_connector::{
     ConnectedNativeTransport, NativeCatalogueBootstrapFuture, NativeTransportConnector,
     NativeTransportFuture, NativeTransportRequest,
 };
-use crate::tools::websocket_prelude_auth::AuthConfig;
+use jazz::tools::websocket_prelude_auth::AuthConfig;
 
 const WS_CLIENT_REQUIRED_FEATURES: u64 = FEATURE_SYNC_MESSAGE_PAYLOAD;
 const WS_CLIENT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -94,15 +92,12 @@ pub struct WebSocketTransport {
     session_context: Option<ConnectionSessionContext>,
 }
 
-/// Compatibility connector retained for `JazzClient::connect` while native
-/// callers migrate to explicit `jazz-native-transport` composition.
-#[deprecated(
-    note = "use jazz_native_transport::NativeWebSocketConnector at the native composition boundary"
-)]
+/// Tokio/TLS WebSocket implementation selected by native process and binding
+/// shells.  Core code receives this through `NativeTransportConnector` and
+/// never names this adapter crate.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct NativeWebSocketConnector;
 
-#[allow(deprecated)]
 impl NativeTransportConnector for NativeWebSocketConnector {
     fn connect(&self, request: NativeTransportRequest) -> NativeTransportFuture {
         Box::pin(async move {
@@ -115,7 +110,7 @@ impl NativeTransportConnector for NativeWebSocketConnector {
             )
             .await
             .map_err(|error| {
-                crate::tools::native_transport_connector::NativeTransportError(error.to_string())
+                jazz::tools::native_transport_connector::NativeTransportError(error.to_string())
             })?;
             let (protocol_version, features, session_context) =
                 transport.negotiated_transport_metadata();
@@ -141,7 +136,7 @@ impl NativeTransportConnector for NativeWebSocketConnector {
             )
             .await
             .map_err(|error| {
-                crate::tools::native_transport_connector::NativeTransportError(error.to_string())
+                jazz::tools::native_transport_connector::NativeTransportError(error.to_string())
             })
         })
     }
@@ -188,12 +183,12 @@ impl WebSocketTransport {
     /// Open the authenticated snapshot-only bootstrap exchange.  The returned
     /// transport is deliberately short-lived: after adoption the edge opens a
     /// fresh ordinary peer connection against the now-ready runtime.
-    pub(crate) async fn connect_catalogue_bootstrap(
+    pub async fn connect_catalogue_bootstrap(
         base_url: impl AsRef<str>,
         app_id: AppId,
         peer_identity: AuthorId,
         auth: AuthConfig,
-    ) -> Result<crate::protocol::CatalogueSnapshot, WebSocketClientError> {
+    ) -> Result<jazz::protocol::CatalogueSnapshot, WebSocketClientError> {
         validate_catalogue_bootstrap_upstream_url(base_url.as_ref(), app_id)
             .map_err(WebSocketClientError::ServerRejected)?;
         let transport = Self::connect_with_wake_and_bootstrap(
@@ -222,7 +217,7 @@ impl WebSocketTransport {
             match wire.try_recv_strict() {
                 Ok(Some(message)) => {
                     return match message {
-                        crate::protocol::SyncMessage::CatalogueSnapshot(snapshot) => Ok(*snapshot),
+                        jazz::protocol::SyncMessage::CatalogueSnapshot(snapshot) => Ok(*snapshot),
                         _ => Err(WebSocketClientError::ServerRejected(
                             "bootstrap peer sent application traffic instead of a catalogue snapshot"
                                 .to_owned(),
@@ -262,12 +257,7 @@ impl WebSocketTransport {
             .await
             .map_err(WebSocketClientError::Connect)?;
 
-        let prelude = serde_json::to_vec(&WebSocketClientPrelude {
-            peer_identity: hex::encode(peer_identity.as_bytes()),
-            auth,
-            bootstrap_catalogue,
-        })
-        .map_err(WebSocketClientError::EncodePrelude)?;
+        let prelude = encode_prelude(peer_identity, auth, bootstrap_catalogue)?;
         ws.send(Message::Binary(prelude.into()))
             .await
             .map_err(WebSocketClientError::Send)?;
@@ -301,8 +291,8 @@ impl WebSocketTransport {
         // Receipt semantics require an admitted authority endpoint, not merely
         // a feature bit from a legacy hello.
         if server_hello.authority.is_none() {
-            negotiated.features &= !(crate::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
-                | crate::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS);
+            negotiated.features &= !(jazz::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
+                | jazz::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS);
         }
         if negotiated.features & WS_CLIENT_REQUIRED_FEATURES != WS_CLIENT_REQUIRED_FEATURES {
             return Err(WebSocketClientError::ServerRejected(
@@ -310,8 +300,8 @@ impl WebSocketTransport {
             ));
         }
         let session_context = if negotiated.features
-            & (crate::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
-                | crate::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS)
+            & (jazz::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
+                | jazz::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS)
             != 0
         {
             server_hello
@@ -356,9 +346,7 @@ impl WebSocketTransport {
     }
 
     /// Negotiated metadata authenticated during the websocket handshake.
-    pub(crate) fn negotiated_transport_metadata(
-        &self,
-    ) -> (u16, u64, Option<ConnectionSessionContext>) {
+    pub fn negotiated_transport_metadata(&self) -> (u16, u64, Option<ConnectionSessionContext>) {
         (self.protocol_version, self.features, self.session_context)
     }
 }
@@ -371,11 +359,6 @@ impl Drop for WebSocketTransport {
 
 impl WireTransport for WebSocketTransport {
     fn send_frame(&mut self, frame: Vec<u8>) -> Result<(), TransportError> {
-        #[cfg(feature = "sync-autopsy")]
-        crate::db::sync_autopsy::record(format!(
-            "client websocket queue outbound frame bytes={}",
-            frame.len()
-        ));
         self.outbound
             .send(frame)
             .map_err(|_| TransportError::Failed("websocket pump is closed".to_owned()))?;
@@ -391,13 +374,6 @@ impl WireTransport for WebSocketTransport {
     fn try_recv_frame(&mut self) -> Option<Vec<u8>> {
         let mut inbound = self.inbound.lock().ok()?;
         let frame = inbound.try_recv().ok();
-        #[cfg(feature = "sync-autopsy")]
-        if let Some(frame) = &frame {
-            crate::db::sync_autopsy::record(format!(
-                "client websocket pop inbound bytes={}",
-                frame.bytes.len()
-            ));
-        }
         frame.map(|frame| frame.bytes)
     }
 }
@@ -412,6 +388,19 @@ struct WebSocketClientPrelude {
 
 fn is_false(value: &bool) -> bool {
     !*value
+}
+
+fn encode_prelude(
+    peer_identity: AuthorId,
+    auth: AuthConfig,
+    bootstrap_catalogue: bool,
+) -> Result<Vec<u8>, WebSocketClientError> {
+    serde_json::to_vec(&WebSocketClientPrelude {
+        peer_identity: hex::encode(peer_identity.as_bytes()),
+        auth,
+        bootstrap_catalogue,
+    })
+    .map_err(WebSocketClientError::EncodePrelude)
 }
 
 fn ws_url(base_url: &str, app_id: AppId) -> String {
@@ -517,6 +506,7 @@ async fn receive_server_hello(
     Ok(hello)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_ws_pump(
     mut ws: tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
@@ -548,12 +538,6 @@ async fn run_ws_pump(
                         let Ok(bytes) = postcard::to_allocvec(&batch) else {
                             return;
                         };
-                        #[cfg(feature = "sync-autopsy")]
-                        crate::db::sync_autopsy::record(format!(
-                            "client websocket send batch frames={} bytes={}",
-                            batch.len(),
-                            bytes.len()
-                        ));
                         if ws.send(Message::Binary(bytes.into())).await.is_err() {
                             return;
                         }
@@ -566,12 +550,6 @@ async fn run_ws_pump(
                 let Ok(bytes) = postcard::to_allocvec(&batch) else {
                     return;
                 };
-                #[cfg(feature = "sync-autopsy")]
-                crate::db::sync_autopsy::record(format!(
-                    "client websocket send batch frames={} bytes={}",
-                    batch.len(),
-                    bytes.len()
-                ));
                 if ws.send(Message::Binary(bytes.into())).await.is_err() {
                     return;
                 }
@@ -601,8 +579,6 @@ async fn run_ws_pump(
                         return;
                     }
                 };
-                #[cfg(feature = "sync-autopsy")]
-                let frame_count = frames.len();
                 for frame in frames {
                     if let Err(error) = validate_wire_frame_len(frame.len()) {
                         fail_inbound(&inbound_error, &inbound_notify, error);
@@ -622,11 +598,6 @@ async fn run_ws_pump(
                     inbound_notify.notify_one();
                     wake();
                 }
-                #[cfg(feature = "sync-autopsy")]
-                crate::db::sync_autopsy::record(format!(
-                    "client websocket received batch frames={frame_count} bytes={}",
-                    bytes.len()
-                ));
             }
         }
     }
@@ -649,7 +620,7 @@ fn decode_inbound_batch(bytes: &[u8], bootstrap_catalogue: bool) -> Result<Vec<V
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::Transport;
+    use jazz::db::Transport;
     use std::collections::{BTreeMap, VecDeque};
 
     #[derive(Clone)]
@@ -669,17 +640,17 @@ mod tests {
     fn valid_fragmented_wire_message_larger_than_ingress_budget() -> Vec<Vec<u8>> {
         let frames = Arc::new(Mutex::new(VecDeque::new()));
         let sink = FrameSink(Arc::clone(&frames));
-        let features = FEATURE_SYNC_MESSAGE_PAYLOAD | crate::wire::FEATURE_MESSAGE_FRAGMENTATION;
+        let features = FEATURE_SYNC_MESSAGE_PAYLOAD | jazz::wire::FEATURE_MESSAGE_FRAGMENTATION;
         let mut sender = WireTransportAdapter::new(sink, WIRE_PROTOCOL_VERSION, features, None);
         let body = (0..(WS_CLIENT_MAX_QUEUED_BYTES + 1))
             .map(|index| char::from((index % 251) as u8))
             .collect::<String>();
         sender
-            .send(crate::protocol::SyncMessage::SessionClaims {
+            .send(jazz::protocol::SyncMessage::SessionClaims {
                 identity: AuthorId::SYSTEM,
                 claims: BTreeMap::from([(
                     "catalogue_fixture".to_owned(),
-                    crate::groove::records::Value::String(body),
+                    jazz::groove::records::Value::String(body),
                 )]),
             })
             .expect("encode valid fragmented logical message");
@@ -770,6 +741,19 @@ mod tests {
             decode_inbound_batch(&flood, false)
                 .expect_err("count flood must be rejected before channel staging")
                 .contains("frame-count limit")
+        );
+    }
+
+    #[test]
+    fn snapshot_bootstrap_prelude_explicitly_marks_the_snapshot_only_exchange() {
+        let bytes = encode_prelude(AuthorId::SYSTEM, AuthConfig::default(), true)
+            .expect("encode snapshot bootstrap prelude");
+        let prelude: serde_json::Value =
+            serde_json::from_slice(&bytes).expect("decode snapshot bootstrap prelude");
+        assert_eq!(
+            prelude.get("bootstrap_catalogue"),
+            Some(&serde_json::Value::Bool(true)),
+            "bootstrap callers must opt into the snapshot-only server exchange"
         );
     }
 

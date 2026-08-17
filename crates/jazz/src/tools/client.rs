@@ -24,7 +24,7 @@ use crate::protocol::{
     ReadViewSourceSpec as CoreReadViewSourceSpec, ReadViewSpec as CoreReadViewSpec,
 };
 use crate::tools::OpenBatchId;
-use crate::tools::native_websocket_transport::WebSocketTransport;
+use crate::tools::native_transport_connector::{NativeTransportConnector, NativeTransportRequest};
 use crate::tools::public_api::query::{
     Condition as PublicCondition, SortDirection as PublicSortDirection,
 };
@@ -221,6 +221,7 @@ struct ConnectConfig {
     server_url: String,
     app_id: crate::tools::AppId,
     auth: WsAuthConfig,
+    connector: Arc<dyn NativeTransportConnector>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -685,6 +686,7 @@ impl ClientDb {
         server_url: Option<String>,
         app_id: crate::tools::AppId,
         auth: Option<WsAuthConfig>,
+        connector: Option<Arc<dyn NativeTransportConnector>>,
     ) -> Result<Rc<Self>> {
         let scheduler = Rc::new(TickSchedulerImpl::default());
         let has_upstream = server_url.is_some();
@@ -695,6 +697,7 @@ impl ClientDb {
             server_url,
             app_id,
             auth,
+            connector,
             Rc::clone(&scheduler),
         )
         .await?;
@@ -1121,6 +1124,7 @@ impl ClientDbInner {
         server_url: Option<String>,
         app_id: crate::tools::AppId,
         auth: Option<WsAuthConfig>,
+        connector: Option<Arc<dyn NativeTransportConnector>>,
         scheduler: Rc<TickSchedulerImpl>,
     ) -> Result<Self> {
         let db = Backend::open(schema, storage, identity).await?;
@@ -1133,6 +1137,11 @@ impl ClientDbInner {
                 server_url,
                 app_id,
                 auth,
+                connector: connector.ok_or_else(|| {
+                    JazzError::Connection(
+                        "server connection missing native transport connector".to_owned(),
+                    )
+                })?,
             })
         } else {
             None
@@ -1200,27 +1209,27 @@ impl ClientDbInner {
         config: ConnectConfig,
     ) -> Result<BackendConnection> {
         let wake = scheduler.wake_handle();
-        let transport = WebSocketTransport::connect_with_wake(
-            &config.server_url,
-            config.app_id,
-            identity.author,
-            config.auth,
-            Arc::new(move || {
-                wake.immediate.store(true, Ordering::Release);
-                wake.notify.notify_one();
-            }),
-        )
-        .await
-        .map_err(|error| JazzError::Connection(error.to_string()))?;
-        let (protocol_version, features, session_context) =
-            transport.negotiated_transport_metadata();
+        let connected = config
+            .connector
+            .connect(NativeTransportRequest {
+                server_url: config.server_url,
+                app_id: config.app_id,
+                peer_identity: identity.author,
+                auth: config.auth,
+                wake: Arc::new(move || {
+                    wake.immediate.store(true, Ordering::Release);
+                    wake.notify.notify_one();
+                }),
+            })
+            .await
+            .map_err(|error| JazzError::Connection(error.to_string()))?;
         Ok(
             db.connect_upstream(Box::new(WireTransportAdapter::new_with_session_context(
-                transport,
-                protocol_version,
-                features,
+                connected.transport,
+                connected.protocol_version,
+                connected.features,
                 None,
-                session_context,
+                connected.session_context,
             ))),
         )
     }
@@ -2848,11 +2857,27 @@ impl JazzClient {
             .collect()
     }
     /// Connect to Jazz with the given configuration.
+    #[allow(deprecated)]
     pub async fn connect(context: AppContext) -> Result<Self> {
-        Self::connect_inner(context).await
+        let connector = (!context.server_url.is_empty()).then(|| {
+            Arc::new(crate::tools::native_websocket_transport::NativeWebSocketConnector)
+                as Arc<dyn NativeTransportConnector>
+        });
+        Self::connect_inner(context, connector).await
     }
 
-    async fn connect_inner(context: AppContext) -> Result<Self> {
+    /// Connect using a transport selected at a native composition point.
+    pub async fn connect_with_native_transport(
+        context: AppContext,
+        connector: Arc<dyn NativeTransportConnector>,
+    ) -> Result<Self> {
+        Self::connect_inner(context, Some(connector)).await
+    }
+
+    async fn connect_inner(
+        context: AppContext,
+        connector: Option<Arc<dyn NativeTransportConnector>>,
+    ) -> Result<Self> {
         let default_session = default_session_from_context(&context);
         let has_server = !context.server_url.is_empty();
         {
@@ -2877,6 +2902,7 @@ impl JazzClient {
                 has_server.then(|| context.server_url.clone()),
                 context.app_id,
                 auth,
+                connector,
             )
             .await
             .map_err(|error| JazzError::Connection(error.to_string()))?;

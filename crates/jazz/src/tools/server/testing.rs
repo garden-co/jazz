@@ -297,7 +297,15 @@ impl JazzServer {
             ..Default::default()
         };
 
-        let mut server_builder = ServerBuilder::new(app_id).with_auth_config(auth_config);
+        // Keep the in-crate integration harness on the deprecated adapter
+        // until its online clients move to the outward native-transport test
+        // package. Production shells inject their adapter explicitly.
+        #[allow(deprecated)]
+        let mut server_builder = ServerBuilder::new(app_id)
+            .with_auth_config(auth_config)
+            .with_native_transport_connector(Arc::new(
+                crate::tools::native_websocket_transport::NativeWebSocketConnector,
+            ));
         if let Some(upstream_url) = upstream_url {
             server_builder = server_builder.with_upstream_url(upstream_url);
         }

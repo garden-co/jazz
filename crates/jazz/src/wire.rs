@@ -701,6 +701,16 @@ pub trait WireTransport {
     fn try_recv_frame(&mut self) -> Option<Vec<u8>>;
 }
 
+impl WireTransport for Box<dyn WireTransport + Send> {
+    fn send_frame(&mut self, frame: Vec<u8>) -> Result<(), TransportError> {
+        (**self).send_frame(frame)
+    }
+
+    fn try_recv_frame(&mut self) -> Option<Vec<u8>> {
+        (**self).try_recv_frame()
+    }
+}
+
 /// Fallible local transport result.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TransportError {

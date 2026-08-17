@@ -13,6 +13,7 @@ use jazz::node::EdgeCacheBudget;
 use jazz::tools::AppId;
 use jazz::tools::middleware::AuthConfig;
 use jazz::tools::server::{ServerBuilder, ShutdownController, ShutdownPhase, StorageBackend};
+use jazz_native_transport::NativeWebSocketConnector;
 use tokio::task::JoinHandle;
 use tracing::info;
 
@@ -42,7 +43,8 @@ pub async fn run(
     }
     let builder = ServerBuilder::new(app_id)
         .with_auth_config(auth_config)
-        .with_shutdown_timeout(shutdown_timeout);
+        .with_shutdown_timeout(shutdown_timeout)
+        .with_native_transport_connector(std::sync::Arc::new(NativeWebSocketConnector));
     let builder = match upstream_url {
         Some(url) => builder.with_upstream_url(url),
         None => builder,
