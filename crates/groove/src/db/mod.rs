@@ -57,6 +57,28 @@ pub struct Database<S> {
     poisoned: bool,
 }
 
+/// Owned durable-storage work produced by a synchronously visible local commit.
+///
+/// This is an internal migration seam for hosts whose durable
+/// [`OrderedKvStorage`] adapter may suspend. Applying a batch to the resident
+/// database still advances the IVM and publishes local subscription deltas in
+/// the caller's stack. The host then owns this receipt until the corresponding
+/// durable commit succeeds or poisons the database on failure.
+#[doc(hidden)]
+#[derive(Clone, Debug)]
+#[must_use = "the pending persistence batch must be committed or failed"]
+pub struct PendingPersistenceBatch {
+    operations: Vec<OwnedWriteOperation>,
+}
+
+impl PendingPersistenceBatch {
+    /// Consume the receipt into the exact owned storage operations.
+    #[doc(hidden)]
+    pub fn into_operations(self) -> Vec<OwnedWriteOperation> {
+        self.operations
+    }
+}
+
 /// Capability token for one host-owned durable publication scope.
 ///
 /// This is an internal cross-crate seam used by Jazz. The token is consumed by

@@ -16,6 +16,7 @@
 mod key_codec;
 mod memory;
 mod opfs;
+pub mod pollable;
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};

@@ -89,7 +89,27 @@ where
     /// ```
     pub fn commit_batch(&mut self, batch: DatabaseBatch) -> Result<(), Error> {
         let pending_writes = self.pending_writes_from_batch(batch)?;
-        self.commit_pending_writes(pending_writes)
+        self.commit_pending_writes(pending_writes, false).map(drop)
+    }
+
+    /// Apply a batch to resident state and synchronously publish its IVM
+    /// effects, returning the identical owned operations for later durable
+    /// persistence by an async-capable host.
+    #[doc(hidden)]
+    pub fn commit_batch_for_async_persistence(
+        &mut self,
+        batch: DatabaseBatch,
+    ) -> Result<PendingPersistenceBatch, Error> {
+        let pending_writes = self.pending_writes_from_batch(batch)?;
+        self.commit_pending_writes(pending_writes, true)
+            .map(|receipt| receipt.expect("async persistence requested a receipt"))
+    }
+
+    /// Fail closed after a resident commit could not be durably persisted.
+    #[doc(hidden)]
+    pub fn mark_async_persistence_failed(&mut self) {
+        self.ivm_runtime.discard_staged_subscription_notifications();
+        self.poisoned = true;
     }
 
     pub fn update_raw(
@@ -103,13 +123,14 @@ where
             key,
             record: record.into(),
         })?;
-        self.commit_pending_writes(vec![pending])
+        self.commit_pending_writes(vec![pending], false).map(drop)
     }
 
     pub(super) fn commit_pending_writes(
         &mut self,
         pending_writes: Vec<PendingTableWrite>,
-    ) -> Result<(), Error> {
+        retain_persistence_batch: bool,
+    ) -> Result<Option<PendingPersistenceBatch>, Error> {
         let descriptors = pending_writes
             .iter()
             .map(PendingTableWrite::descriptor)
@@ -155,6 +176,9 @@ where
         let storage_writes = StorageWriteMetrics::from_operations(&operations);
         let storage_write_count = storage_writes.total.count;
         let storage_write_bytes = storage_writes.total.bytes;
+        let persistence_batch = retain_persistence_batch.then(|| PendingPersistenceBatch {
+            operations: staged_operations.clone(),
+        });
         let storage_start = Instant::now();
         let txn = self.storage.begin_txn();
         drop(operations);
@@ -186,7 +210,7 @@ where
             storage_writes,
             tick,
         });
-        Ok(())
+        Ok(persistence_batch)
     }
 
     pub(super) fn pending_writes_from_batch(
