@@ -177,7 +177,9 @@ pub use storage_helpers::{
     StorageWriteMetrics,
 };
 #[doc(hidden)]
-pub use storage_runtime::{PersistenceQueue, PersistenceUnitId, PollableDatabase};
+pub use storage_runtime::{
+    PersistenceQueue, PersistenceUnitId, PollableDatabase, PollableDatabaseOpen,
+};
 
 #[derive(Debug, Error)]
 pub enum Error {
