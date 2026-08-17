@@ -8,4 +8,5 @@ mod common;
 // Enable the copied suites one at a time as each public-API migration lands.
 mod joins;
 mod pagination;
+mod subqueries;
 mod subscriptions;
