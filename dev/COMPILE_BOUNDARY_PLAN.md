@@ -78,6 +78,13 @@ access is valuable.
 - Define uncompressed semantic framing plus a codec seam in core.
 - Let shells select zstd, lz4, or ruzstd without recompiling semantic core.
 
+Progress: codec implementations and their native/pure-Rust dependencies now
+live in featureless-by-default `jazz-compression`. Jazz retains wire feature
+negotiation, envelope semantics, and logical message limits; its compatibility
+features forward codec selection to the adapter crate. This is the first half
+of the boundary: shells still select the established Jazz features until codec
+choice can be injected without weakening wire negotiation.
+
 ### Telemetry
 
 Core depends only on lightweight instrumentation vocabulary such as `tracing`.

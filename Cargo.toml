@@ -4,6 +4,7 @@ members = [
   "crates/benchmark-guard",
   "crates/groove",
   "crates/jazz",
+  "crates/jazz-compression",
   "crates/jazz-native-transport",
   "crates/jazz-cli",
   "crates/jazz-server",
@@ -30,6 +31,7 @@ exclude = ["examples/todo-server-rs", "examples/docs/todo-server-rs"]
 [workspace.dependencies]
 groove = { path = "crates/groove", default-features = false }
 jazz = { path = "crates/jazz", default-features = false }
+jazz-compression = { path = "crates/jazz-compression", default-features = false }
 jazz-otel = { path = "crates/jazz-otel" }
 rustc-hash = "2.1.1"
 

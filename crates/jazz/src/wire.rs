@@ -6,12 +6,6 @@
 //! server shells can adopt the envelope before the full [`crate::protocol::SyncMessage`]
 //! encoder is frozen.
 
-#[cfg(all(
-    not(feature = "transport-compression-zstd"),
-    feature = "transport-compression-ruzstd"
-))]
-use ruzstd::io::Read;
-
 use postcard::{from_bytes, to_allocvec};
 use serde::{Deserialize, Serialize};
 
@@ -528,80 +522,20 @@ pub fn decompress_sync_payload(
     }
 }
 
-#[cfg(feature = "transport-compression-lz4")]
 fn compress_lz4(payload: &[u8]) -> Result<Vec<u8>, String> {
-    Ok(lz4_flex::compress_prepend_size(payload))
+    jazz_compression::compress_lz4(payload)
 }
 
-#[cfg(not(feature = "transport-compression-lz4"))]
-fn compress_lz4(_payload: &[u8]) -> Result<Vec<u8>, String> {
-    Err("lz4 transport compression feature is not compiled in".to_owned())
-}
-
-#[cfg(feature = "transport-compression-lz4")]
 fn decompress_lz4(payload: &[u8]) -> Result<Vec<u8>, String> {
-    let advertised = payload
-        .get(..4)
-        .and_then(|bytes| bytes.try_into().ok())
-        .map(u32::from_le_bytes)
-        .ok_or_else(|| "lz4 payload is missing its decoded-length prefix".to_owned())?
-        as usize;
-    validate_logical_message_len(advertised)?;
-    let decoded = lz4_flex::decompress_size_prepended(payload)
-        .map_err(|error| format!("failed to decompress lz4 payload: {error}"))?;
-    validate_logical_message_len(decoded.len())?;
-    Ok(decoded)
+    jazz_compression::decompress_lz4(payload, crate::protocol_limits::MAX_LOGICAL_MESSAGE_BYTES)
 }
 
-#[cfg(not(feature = "transport-compression-lz4"))]
-fn decompress_lz4(_payload: &[u8]) -> Result<Vec<u8>, String> {
-    Err("lz4 transport compression feature is not compiled in".to_owned())
-}
-
-#[cfg(feature = "transport-compression-zstd")]
 fn compress_zstd(payload: &[u8]) -> Result<Vec<u8>, String> {
-    zstd::bulk::compress(payload, 3)
-        .map_err(|error| format!("failed to compress zstd payload: {error}"))
+    jazz_compression::compress_zstd(payload)
 }
 
-#[cfg(not(feature = "transport-compression-zstd"))]
-fn compress_zstd(_payload: &[u8]) -> Result<Vec<u8>, String> {
-    Err("zstd transport compression feature is not compiled in".to_owned())
-}
-
-#[cfg(any(
-    feature = "transport-compression-zstd",
-    feature = "transport-compression-ruzstd"
-))]
 fn decompress_zstd(payload: &[u8]) -> Result<Vec<u8>, String> {
-    #[cfg(feature = "transport-compression-zstd")]
-    {
-        zstd::bulk::decompress(payload, crate::protocol_limits::MAX_LOGICAL_MESSAGE_BYTES)
-            .map_err(|error| format!("failed to decompress zstd payload: {error}"))
-    }
-    #[cfg(all(
-        not(feature = "transport-compression-zstd"),
-        feature = "transport-compression-ruzstd"
-    ))]
-    {
-        let decoder = ruzstd::decoding::StreamingDecoder::new(payload)
-            .map_err(|error| format!("failed to initialize ruzstd payload: {error}"))?;
-        let mut output = Vec::new();
-        decoder
-            .take((crate::protocol_limits::MAX_LOGICAL_MESSAGE_BYTES + 1) as u64)
-            .read_to_end(&mut output)
-            .map_err(|error| format!("failed to decompress ruzstd payload: {error}"))?;
-        validate_logical_message_len(output.len())?;
-        Ok(output)
-    }
-}
-
-#[cfg(not(any(
-    feature = "transport-compression-zstd",
-    feature = "transport-compression-ruzstd"
-)))]
-fn decompress_zstd(_payload: &[u8]) -> Result<Vec<u8>, String> {
-    Err("zstd transport compression feature is not compiled in".to_owned())
+    jazz_compression::decompress_zstd(payload, crate::protocol_limits::MAX_LOGICAL_MESSAGE_BYTES)
 }
 
 /// Negotiated per-message compression for sync payloads.
@@ -1232,6 +1166,7 @@ mod tests {
                     result_member_removes: Vec::new(),
                     program_fact_adds: Vec::new(),
                     program_fact_removes: Vec::new(),
+                    terminal_operations: Vec::new(),
                 }
             })
             .collect::<Vec<_>>();

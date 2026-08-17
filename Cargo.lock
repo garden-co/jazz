@@ -1913,18 +1913,17 @@ dependencies = [
  "insta",
  "internment",
  "jazz-benchmark-guard",
+ "jazz-compression",
  "jazz-testkit",
  "jsonschema",
  "jsonwebtoken",
  "libc",
- "lz4_flex 0.11.6",
  "postcard",
  "rand 0.8.5",
  "rcgen",
  "reqwest",
  "rusqlite",
  "rust-rocksdb",
- "ruzstd",
  "serde",
  "serde_bytes",
  "serde_json",
@@ -1941,7 +1940,6 @@ dependencies = [
  "tungstenite",
  "uuid",
  "web-time",
- "zstd",
 ]
 
 [[package]]
@@ -1974,6 +1972,15 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "tungstenite",
+]
+
+[[package]]
+name = "jazz-compression"
+version = "0.1.0"
+dependencies = [
+ "lz4_flex 0.11.6",
+ "ruzstd",
+ "zstd",
 ]
 
 [[package]]
