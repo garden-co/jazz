@@ -1,0 +1,18 @@
+[package]
+name = "jazz-storage-indexeddb"
+version = "0.1.0"
+edition = "2024"
+description = "IndexedDB page-backed ordered storage adapter for Jazz"
+license = "MIT OR Apache-2.0"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+futures = "0.3"
+groove = { workspace = true }
+js-sys = "0.3"
+opfs-btree = { path = "../opfs-btree" }
+serde-wasm-bindgen = "0.6"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"

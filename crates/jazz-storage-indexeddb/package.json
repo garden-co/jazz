@@ -1,0 +1,12 @@
+{
+  "name": "@jazz/storage-indexeddb",
+  "private": true,
+  "scripts": {
+    "build:test": "wasm-pack build --target web --out-dir test/pkg --release",
+    "test:browser": "node test/indexeddb.test.cjs"
+  },
+  "devDependencies": {
+    "playwright": "^1.58.2",
+    "wasm-pack": "^0.14.0"
+  }
+}

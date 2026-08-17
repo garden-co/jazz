@@ -2080,6 +2080,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "jazz-storage-indexeddb"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "groove",
+ "js-sys",
+ "opfs-btree",
+ "serde-wasm-bindgen",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+]
+
+[[package]]
 name = "jazz-storage-rocksdb"
 version = "0.1.0"
 dependencies = [
@@ -2851,6 +2864,7 @@ name = "opfs-btree"
 version = "0.1.0"
 dependencies = [
  "criterion",
+ "futures",
  "jazz-benchmark-guard",
  "js-sys",
  "rustc-hash",

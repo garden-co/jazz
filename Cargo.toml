@@ -9,6 +9,7 @@ members = [
   "crates/jazz-cli",
   "crates/jazz-server",
   "crates/jazz-storage-rocksdb",
+  "crates/jazz-storage-indexeddb",
   "crates/jazz-testkit",
   "crates/jazz-otel",
   "crates/jazz-sim",
