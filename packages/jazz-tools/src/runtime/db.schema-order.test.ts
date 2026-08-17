@@ -362,17 +362,18 @@ describe("Db runtime schema order", () => {
       { title: string; done: boolean }
     >;
 
-    expect(db.upsert(table, { title: "Buy milk", done: false }, { id: externalId })).toMatchObject({
+    expect(db.upsert(table, externalId, { title: "Buy milk", done: false })).toMatchObject({
       batchId: Promise.resolve("transaction-upsert" as BatchId),
     });
 
     expect(upsert).toHaveBeenCalledWith(
       "todos",
+      externalId,
       {
         title: { type: "Text", value: "Buy milk" },
         done: { type: "Boolean", value: false },
       },
-      { id: externalId },
+      undefined,
       undefined,
       undefined,
     );
@@ -426,7 +427,7 @@ describe("Db runtime schema order", () => {
 
     db.insert(table, { title: "Buy milk", done: false }, { updatedAt });
     db.update(table, "todo-1", { done: true }, { updatedAt });
-    db.upsert(table, { done: true }, { id: "todo-1", updatedAt });
+    db.upsert(table, "todo-1", { done: true }, { updatedAt });
 
     expect(insert).toHaveBeenCalledWith(
       "todos",
@@ -450,10 +451,11 @@ describe("Db runtime schema order", () => {
     );
     expect(upsert).toHaveBeenCalledWith(
       "todos",
+      "todo-1",
       {
         done: { type: "Boolean", value: true },
       },
-      { id: "todo-1", updatedAt },
+      { updatedAt },
       undefined,
       undefined,
     );
@@ -501,7 +503,7 @@ describe("Db runtime schema order", () => {
 
     db.insert(table, { title: "Buy milk", done: false }, { updatedAt });
     db.update(table, "todo-1", { done: true }, { updatedAt });
-    db.upsert(table, { done: true }, { id: "todo-1", updatedAt });
+    db.upsert(table, "todo-1", { done: true }, { updatedAt });
 
     expect(insert).toHaveBeenCalledWith(
       "todos",
@@ -525,10 +527,11 @@ describe("Db runtime schema order", () => {
     );
     expect(upsert).toHaveBeenCalledWith(
       "todos",
+      "todo-1",
       {
         done: { type: "Boolean", value: true },
       },
-      { id: "todo-1", updatedAt },
+      { updatedAt },
       undefined,
       undefined,
     );
