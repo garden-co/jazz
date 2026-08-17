@@ -1957,6 +1957,7 @@ dependencies = [
  "futures-util",
  "jazz",
  "jazz-otel",
+ "jazz-server",
  "jsonwebtoken",
  "libc",
  "mimalloc",
@@ -2013,6 +2014,18 @@ dependencies = [
  "tracing-opentelemetry",
  "tracing-subscriber",
  "uuid",
+]
+
+[[package]]
+name = "jazz-server"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "jazz",
+ "jazz-otel",
+ "opentelemetry",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

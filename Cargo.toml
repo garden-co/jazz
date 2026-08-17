@@ -5,6 +5,7 @@ members = [
   "crates/groove",
   "crates/jazz",
   "crates/jazz-cli",
+  "crates/jazz-server",
   "crates/jazz-otel",
   "crates/jazz-sim",
   "crates/opfs-btree",
