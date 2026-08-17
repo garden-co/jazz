@@ -57,6 +57,23 @@ where
             .map_err(Error::from)
     }
 
+    /// Stage a typed direct-store value in the same atomic database batch as
+    /// ordinary table/IVM writes.
+    #[doc(hidden)]
+    pub fn stage_set(
+        &self,
+        batch: &mut DatabaseBatch,
+        key: &[Value],
+        value: &[Value],
+    ) -> Result<(), Error> {
+        batch.push_direct_operation(OwnedWriteOperation::Set {
+            cf: self.name.clone(),
+            key: self.key_bytes(key)?,
+            value: self.value.create(value)?,
+        });
+        Ok(())
+    }
+
     pub fn get(&self, key: &[Value]) -> Result<Option<Record<'_>>, Error> {
         let key = self.key_bytes(key)?;
         Ok(self

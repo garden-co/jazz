@@ -957,7 +957,7 @@ where
         if self.query_transaction(tx.tx_id)?.is_some() {
             return self.ingest_known_transaction(tx, versions, fate, global_seq, durability);
         }
-        self.stage_transaction_and_versions_with_current_indexes(
+        let stored_versions = self.stage_transaction_and_versions_with_current_indexes(
             batch,
             tx.clone(),
             versions,
@@ -969,6 +969,7 @@ where
         self.finalize_staged_transaction_ingest(
             batch,
             tx.tx_id,
+            &stored_versions,
             fate,
             global_seq,
             staged_global_seqs,

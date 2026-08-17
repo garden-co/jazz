@@ -195,7 +195,11 @@ fn async_authority_ingest_owns_complete_persistence_before_fate_publication() {
         Fate::Accepted
     );
     let (batches, responses, _poison) = pending.into_parts();
-    assert!(batches.len() >= 2, "ingest and finalization form one unit");
+    assert_eq!(
+        batches.len(),
+        1,
+        "authority canonical state, cleanup, checkpoint, and marker are one owned batch"
+    );
     assert!(batches.iter().any(|batch| {
         batch.clone().into_operations().iter().any(|operation| {
             matches!(
@@ -1004,112 +1008,45 @@ fn authority_storage_failure_returns_no_fate_ack_or_partial_transaction() {
     assert!(reopened.query_table_versions("todos").unwrap().is_empty());
 }
 
-/// The synchronous implementation currently has a deliberate recovery window
-/// between durable ingest and cleanup/consistency-marker finalization. A
-/// failure in that second boundary may return no acknowledgement, but reopening
-/// must recover one coherent accepted unit before any later view can serve it.
+/// Canonical history, currency cleanup, checkpoint, and consistency marker are
+/// one storage transaction. There is no intermediate finalization state:
+/// failure leaves the durable node exactly before the authority unit.
 #[test]
-fn restart_after_finalization_boundary_failure_recovers_one_coherent_transaction() {
+fn atomic_authority_ingest_failure_persists_and_publishes_nothing() {
     let (mut writer, _) = fail_write_many_node();
     let (tx_id, unit) = writer
         .commit_mergeable_unit(
-            MergeableCommit::new("todos", row(0xd4), 10).cells(title_cells("recovered")),
+            MergeableCommit::new("todos", row(0xd6), 10).cells(title_cells("atomic failure")),
         )
         .unwrap();
 
     let (mut core, storage) = fail_write_many_node();
     let history = core.subscribe_history("todos").unwrap();
     assert!(history.recv().unwrap().is_empty());
-    // Ingest writes canonical transaction/history/current first, then removes
-    // obsolete ahead-current rows in a second batch. Interrupt that latter
-    // write to exercise the exact crash-recovery seam.
-    storage.fail_nth_following_write_many(2);
+    storage.fail_nth_following_write_many(1);
     let SyncMessage::CommitUnit { tx, versions } = unit else {
         panic!("local write must produce a commit unit")
     };
     core.ingest_commit_unit(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
-        .expect_err("interrupted finalization must not acknowledge the unit");
-    assert!(
-        matches!(history.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty)),
-        "durable ingest must not publish before cleanup/finalization succeeds"
-    );
-    assert_poisoned_node_exposes_nothing(&mut core);
-
-    drop(core);
-    let mut reopened = NodeState::new(node(0xd1), schema(), storage).unwrap();
-    let stored = reopened
-        .transaction_record(tx_id)
-        .expect("restart must recover the canonical transaction");
-    assert_eq!(stored.fate, Fate::Accepted);
-    assert_eq!(stored.global_seq, Some(GlobalSeq(1)));
-    assert_eq!(stored.durability, DurabilityTier::Global);
-    assert_eq!(
-        reopened
-            .current_rows("todos", DurabilityTier::Global)
-            .unwrap()
-            .into_iter()
-            .map(current_row_pair)
-            .collect::<BTreeMap<_, _>>(),
-        BTreeMap::from([(row(0xd4), title_cells("recovered"))]),
-        "recovery must expose either the whole accepted transaction or none of it"
-    );
-    assert_currency_tables_match_storage(&mut reopened, "todos");
-}
-
-/// The consistency marker is part of the same publication boundary as both
-/// database batches. If only the marker write fails, fate/IVM output still must
-/// remain private until reopen proves the stored unit coherent.
-#[test]
-fn marker_failure_publishes_no_history_or_fate_and_reopens_coherently() {
-    let (mut writer, _) = fail_write_many_node();
-    let (tx_id, unit) = writer
-        .commit_mergeable_unit(
-            MergeableCommit::new("todos", row(0xd6), 10).cells(title_cells("marker recovery")),
-        )
-        .unwrap();
-
-    let (mut core, storage) = fail_write_many_node();
-    let history = core.subscribe_history("todos").unwrap();
-    assert!(history.recv().unwrap().is_empty());
-    storage.fail_nth_following_write_many(3);
-    let SyncMessage::CommitUnit { tx, versions } = unit else {
-        panic!("local write must produce a commit unit")
-    };
-    core.ingest_commit_unit(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
-        .expect_err("failed consistency marker must not acknowledge the unit");
+        .expect_err("failed atomic authority ingest must not acknowledge the unit");
     assert!(
         matches!(
             history.try_recv(),
             Err(std::sync::mpsc::TryRecvError::Empty)
         ),
-        "marker failure must discard canonical and cleanup tick notifications"
+        "atomic failure must discard its staged IVM notifications"
     );
     assert_poisoned_node_exposes_nothing(&mut core);
 
     drop(core);
     let mut reopened = NodeState::new(node(0xd1), schema(), storage).unwrap();
-    let stored = reopened
-        .transaction_record(tx_id)
-        .expect("restart must recover the accepted transaction before serving it");
-    assert_eq!(stored.fate, Fate::Accepted);
-    assert_eq!(stored.global_seq, Some(GlobalSeq(1)));
-    assert_eq!(stored.durability, DurabilityTier::Global);
-    assert_eq!(
-        reopened
-            .current_rows("todos", DurabilityTier::Global)
-            .unwrap()
-            .into_iter()
-            .map(current_row_pair)
-            .collect::<BTreeMap<_, _>>(),
-        BTreeMap::from([(row(0xd6), title_cells("marker recovery"))])
-    );
-    assert_currency_tables_match_storage(&mut reopened, "todos");
+    assert!(reopened.transaction_record(tx_id).is_none());
 }
 
-/// The successful control proves the same multi-batch authority path releases
-/// exactly one subscription tick, and only after both storage commits complete.
+/// The successful control proves one atomic authority batch releases exactly
+/// one subscription tick after its single storage commit completes.
 #[test]
-fn successful_authority_finalization_publishes_after_every_storage_batch() {
+fn successful_authority_finalization_is_one_storage_batch() {
     let (mut writer, _) = fail_write_many_node();
     let (_tx_id, unit) = writer
         .commit_mergeable_unit(
@@ -1130,8 +1067,8 @@ fn successful_authority_finalization_publishes_after_every_storage_batch() {
 
     assert_eq!(
         storage.write_many_call_count() - writes_before,
-        3,
-        "authority ingest must finish canonical persistence, cleanup, and its marker before returning fate"
+        1,
+        "canonical persistence, cleanup, checkpoint, and marker must share one storage batch"
     );
     assert!(matches!(
         updates.as_slice(),
@@ -1171,7 +1108,7 @@ fn nested_inner_failure_makes_outer_finish_safe_and_publishes_nothing() {
     let history = core.subscribe_history("todos").unwrap();
     assert!(history.recv().unwrap().is_empty());
     let outer = core.database.begin_durable_publication_scope().unwrap();
-    storage.fail_nth_following_write_many(2);
+    storage.fail_nth_following_write_many(1);
     let SyncMessage::CommitUnit { tx, versions } = unit else {
         panic!("local write must produce a commit unit")
     };

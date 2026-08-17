@@ -81,6 +81,7 @@ pub struct PendingPersistenceBatch {
 #[must_use = "a prepared database batch must be published or discarded"]
 pub struct PreparedDatabaseBatch {
     pending_writes: Vec<PendingTableWrite>,
+    direct_operations: Vec<OwnedWriteOperation>,
 }
 
 /// Cloneable fail-closed capability attached to externally owned persistence.

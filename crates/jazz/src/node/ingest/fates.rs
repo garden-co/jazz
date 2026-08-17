@@ -3,7 +3,6 @@ pub(crate) struct PreparedFateUpdate {
     stored: StoredTransaction,
     next_clock: Clock,
     batch: groove::db::PreparedDatabaseBatch,
-    consistency_marker: PreparedStorageConsistencyMarker,
     rejected_payload: Option<RejectedTransaction>,
     #[cfg(test)]
     content_versions: Vec<VersionRow>,
@@ -193,24 +192,19 @@ where
             self.query_row_versions(table, row_uuid)?;
         }
         self.stage_recovery_checkpoint_for_clock(&mut batch, self.clock.tx_time, &next_clock);
+        if matches!(stored.fate, Fate::Rejected(_)) || stored.global_seq.is_some() {
+            self.stage_storage_consistency_marker_through(&mut batch, tx_id.time)?;
+        }
         let batch = if acquire_tick_storage {
             self.database.prepare_batch_storage_inputs(&batch)?
         } else {
             self.database.prepare_resident_batch(&batch)?
-        };
-        let consistency_marker = if matches!(stored.fate, Fate::Rejected(_))
-            || stored.global_seq.is_some()
-        {
-            self.prepare_storage_consistency_marker_through(tx_id.time)?
-        } else {
-            PreparedStorageConsistencyMarker::Unchanged
         };
         Ok(PreparedFateUpdate {
             tx_id,
             stored,
             next_clock,
             batch,
-            consistency_marker,
             rejected_payload,
             #[cfg(test)]
             content_versions,
@@ -228,7 +222,6 @@ where
             stored,
             next_clock,
             batch,
-            consistency_marker,
             rejected_payload,
             #[cfg(test)]
             content_versions,
@@ -237,7 +230,6 @@ where
         } = prepared;
         self.publish_prepared_database_batch(batch)?;
         self.clock = next_clock;
-        self.publish_storage_consistency_marker(consistency_marker)?;
         if !matches!(stored.fate, Fate::Pending) {
             self.open_tx.local_permission_subjects.remove(&tx_id);
         }

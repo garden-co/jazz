@@ -676,6 +676,60 @@ fn direct_record_store_stores_ordered_records_independent_of_tables() {
     );
 }
 
+#[test]
+fn database_batch_commits_table_and_direct_store_records_atomically() {
+    let schema = albums_schema().with_direct_record_store(DirectRecordStoreSchema::new(
+        "publication_markers",
+        RecordDescriptor::new([("name", ValueType::String)]),
+        RecordDescriptor::new([("through", ValueType::U64)]),
+    ));
+    let column_families = schema
+        .column_families()
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let refs = column_families
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let mut database = Database::new(schema, MemoryStorage::new(&refs)).unwrap();
+    let mut batch = database.open_batch();
+    batch.insert(
+        "albums",
+        vec![Value::U64(1), Value::String("Kind of Blue".into())],
+    );
+    database
+        .direct_record_store("publication_markers")
+        .unwrap()
+        .stage_set(
+            &mut batch,
+            &[Value::String("catalogue".into())],
+            &[Value::U64(7)],
+        )
+        .unwrap();
+
+    database.commit_batch(batch).unwrap();
+
+    assert_eq!(
+        database
+            .primary_key_scan("albums", &[Value::U64(1)])
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        database
+            .direct_record_store("publication_markers")
+            .unwrap()
+            .get(&[Value::String("catalogue".into())])
+            .unwrap()
+            .unwrap()
+            .get("through")
+            .unwrap(),
+        Value::U64(7)
+    );
+}
+
 fn assert_direct_record_store_round_trips_array_of_record_values() {
     let child = RecordDescriptor::new([("id", ValueType::U64), ("title", ValueType::String)]);
     let schema = DatabaseSchema::new([]).with_direct_record_store(DirectRecordStoreSchema::new(

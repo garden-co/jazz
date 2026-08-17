@@ -98,13 +98,15 @@ where
 #[derive(Clone, Debug, Default)]
 pub struct DatabaseBatch {
     pub(super) operations: Vec<BatchOperation>,
+    pub(super) direct_operations: Vec<OwnedWriteOperation>,
     pub(super) txn_operations: RefCell<StagedWriteState>,
     pub(super) txn_indexed_operations: Cell<usize>,
+    pub(super) txn_indexed_direct_operations: Cell<usize>,
 }
 
 impl PartialEq for DatabaseBatch {
     fn eq(&self, other: &Self) -> bool {
-        self.operations == other.operations
+        self.operations == other.operations && self.direct_operations == other.direct_operations
     }
 }
 
@@ -179,11 +181,15 @@ impl DatabaseBatch {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.operations.is_empty()
+        self.operations.is_empty() && self.direct_operations.is_empty()
     }
 
     pub(super) fn push_operation(&mut self, operation: BatchOperation) {
         self.operations.push(operation);
+    }
+
+    pub(super) fn push_direct_operation(&mut self, operation: OwnedWriteOperation) {
+        self.direct_operations.push(operation);
     }
 }
 

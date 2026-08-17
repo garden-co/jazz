@@ -88,8 +88,9 @@ where
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     pub fn commit_batch(&mut self, batch: DatabaseBatch) -> Result<(), Error> {
-        let pending_writes = self.pending_writes_from_batch(batch)?;
-        self.commit_pending_writes(pending_writes, false).map(drop)
+        let prepared = self.prepare_resident_batch(&batch)?;
+        self.commit_pending_writes(prepared.pending_writes, prepared.direct_operations, false)
+            .map(drop)
     }
 
     /// Apply a batch to resident state and synchronously publish its IVM
@@ -100,8 +101,8 @@ where
         &mut self,
         batch: DatabaseBatch,
     ) -> Result<PendingPersistenceBatch, Error> {
-        let pending_writes = self.pending_writes_from_batch(batch)?;
-        self.commit_pending_writes(pending_writes, true)
+        let prepared = self.prepare_resident_batch(&batch)?;
+        self.commit_pending_writes(prepared.pending_writes, prepared.direct_operations, true)
             .map(|receipt| receipt.expect("async persistence requested a receipt"))
     }
 
@@ -111,7 +112,7 @@ where
         &mut self,
         prepared: PreparedDatabaseBatch,
     ) -> Result<PendingPersistenceBatch, Error> {
-        self.commit_pending_writes(prepared.pending_writes, true)
+        self.commit_pending_writes(prepared.pending_writes, prepared.direct_operations, true)
             .map(|receipt| receipt.expect("async persistence requested a receipt"))
     }
 
@@ -150,6 +151,7 @@ where
         self.ensure_not_poisoned()?;
         Ok(PreparedDatabaseBatch {
             pending_writes: self.pending_writes_from_operations(&batch.operations)?,
+            direct_operations: batch.direct_operations.clone(),
         })
     }
 
@@ -171,12 +173,14 @@ where
             key,
             record: record.into(),
         })?;
-        self.commit_pending_writes(vec![pending], false).map(drop)
+        self.commit_pending_writes(vec![pending], Vec::new(), false)
+            .map(drop)
     }
 
     pub(super) fn commit_pending_writes(
         &mut self,
         pending_writes: Vec<PendingTableWrite>,
+        direct_operations: Vec<OwnedWriteOperation>,
         retain_persistence_batch: bool,
     ) -> Result<Option<PendingPersistenceBatch>, Error> {
         let descriptors = pending_writes
@@ -210,6 +214,7 @@ where
                 },
             })
             .collect::<Vec<_>>();
+        staged_operations.extend(direct_operations);
         let tick_start = Instant::now();
         let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
         let tick = self
@@ -261,13 +266,6 @@ where
         Ok(persistence_batch)
     }
 
-    pub(super) fn pending_writes_from_batch(
-        &self,
-        batch: DatabaseBatch,
-    ) -> Result<Vec<PendingTableWrite>, Error> {
-        self.pending_writes_from_operations(&batch.operations)
-    }
-
     pub(super) fn pending_writes_from_operations(
         &self,
         operations: &[BatchOperation],
@@ -290,6 +288,13 @@ where
             batch
                 .txn_indexed_operations
                 .set(batch.txn_indexed_operations.get() + 1);
+        }
+        while batch.txn_indexed_direct_operations.get() < batch.direct_operations.len() {
+            txn_operations
+                .stage(batch.direct_operations[batch.txn_indexed_direct_operations.get()].clone());
+            batch
+                .txn_indexed_direct_operations
+                .set(batch.txn_indexed_direct_operations.get() + 1);
         }
         Ok(())
     }
