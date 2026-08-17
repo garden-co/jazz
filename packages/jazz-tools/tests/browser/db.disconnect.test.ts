@@ -3,7 +3,14 @@ import { schema as s } from "../../src/";
 import { createDb, Db, type QueryBuilder } from "../../src/runtime/db.js";
 import { generateAuthSecret } from "../../src/runtime/auth-secret-store.js";
 import { deploy } from "../../src/dev/catalogue.js";
-import { TestCleanup, sleep, uniqueDbName, waitForQuery, withTimeout } from "./support.js";
+import {
+  TestCleanup,
+  sleep,
+  uniqueDbName,
+  waitForCondition,
+  waitForQuery,
+  withTimeout,
+} from "./support.js";
 import { getJazzServerInfo, type JazzServerInfo } from "./testing-server.js";
 
 const schema = {
@@ -53,7 +60,317 @@ describe("Db disconnect/reconnect", () => {
     await ctx.cleanup();
   });
 
-  describe("direct server connection", () => {
+  describe("server-backed subscriptions", () => {
+    it("preserves an unresolved local write while the edge subscription hydrates", async () => {
+      const { db, peer } = await createDbPair(ctx, createWorkerDb, createDirectDb);
+      const serverTitle = "existing server row";
+      await withTimeout(
+        peer.insert(todos, { title: serverTitle, done: true }).wait({ tier: "edge" }),
+        SYNC_OPERATION_TIMEOUT_MS,
+        "server row did not reach edge",
+      );
+      await waitForTodos(
+        db,
+        (rows) => rows.some((row) => row.title === serverTitle),
+        "db did not receive the existing server row",
+        SYNC_OPERATION_TIMEOUT_MS,
+        "edge",
+      );
+      await db.disconnect();
+
+      const title = "pending optimistic write";
+      const snapshots: Array<{
+        rows: Todo[];
+        edgeSettled: boolean;
+        afterReconnect: boolean;
+      }> = [];
+      let edgeSettled = false;
+      let reconnectRequested = false;
+      const unsubscribe = ctx.trackSubscription(
+        db.subscribeAll(
+          app.todos,
+          (delta) => {
+            if (delta.all === undefined) return;
+            snapshots.push({
+              rows: [...delta.all],
+              edgeSettled,
+              afterReconnect: reconnectRequested,
+            });
+          },
+          { tier: "edge", localUpdates: "immediate" },
+        ),
+      );
+
+      const write = db.insert(todos, { title, done: false });
+      const edgeWait = write.wait({ tier: "edge" }).then(() => {
+        edgeSettled = true;
+      });
+      await withTimeout(
+        write.wait({ tier: "local" }),
+        LOCAL_OPERATION_TIMEOUT_MS,
+        "local write did not become visible",
+      );
+      await waitForCondition(
+        async () => snapshots.some(({ rows }) => rows.some((row) => row.title === title)),
+        LOCAL_OPERATION_TIMEOUT_MS,
+        "edge subscription did not publish the immediate local write",
+      );
+
+      const firstVisibleSnapshot = snapshots.findIndex(({ rows }) =>
+        rows.some((row) => row.title === title),
+      );
+      await expectStillPending(
+        write.wait({ tier: "edge" }),
+        PENDING_ASSERTION_MS,
+        "write settled before the delayed server snapshot was allowed to arrive",
+      );
+      const snapshotsBeforeReconnect = snapshots.length;
+      reconnectRequested = true;
+      await db.reconnect();
+      await waitForCondition(
+        async () =>
+          snapshots
+            .slice(snapshotsBeforeReconnect)
+            .some(({ afterReconnect, edgeSettled }) => afterReconnect && !edgeSettled),
+        LOCAL_OPERATION_TIMEOUT_MS,
+        "edge hydration did not publish a follow-up subscription result",
+      );
+      const beforeAcceptance = snapshots.at(-1)!.rows;
+      await withTimeout(
+        edgeWait,
+        SYNC_OPERATION_TIMEOUT_MS,
+        "local write did not settle at edge after reconnect",
+      );
+
+      expect(snapshots.at(-1)!.rows).toEqual(beforeAcceptance);
+      expect(
+        snapshots
+          .slice(firstVisibleSnapshot)
+          .every(({ rows }) => rows.some((row) => row.title === title)),
+      ).toBe(true);
+      unsubscribe();
+    }, 60_000);
+
+    it("preserves an unresolved local update while the edge subscription hydrates", async () => {
+      const { db, peer } = await createDbPair(ctx, createWorkerDb, createDirectDb);
+      const title = "pending optimistic update";
+      const serverRow = await withTimeout(
+        peer.insert(todos, { title, done: false }).wait({ tier: "edge" }),
+        SYNC_OPERATION_TIMEOUT_MS,
+        "server row did not reach edge",
+      );
+      await waitForTodos(
+        db,
+        (rows) => rows.some((row) => row.id === serverRow.id),
+        "db did not receive the row to update",
+        SYNC_OPERATION_TIMEOUT_MS,
+        "edge",
+      );
+      await db.disconnect();
+
+      const snapshots: Array<{
+        rows: Todo[];
+        edgeSettled: boolean;
+        afterReconnect: boolean;
+      }> = [];
+      let edgeSettled = false;
+      let reconnectRequested = false;
+      const unsubscribe = ctx.trackSubscription(
+        db.subscribeAll(
+          todoByTitle(title),
+          (delta) => {
+            if (delta.all === undefined) return;
+            snapshots.push({
+              rows: [...delta.all],
+              edgeSettled,
+              afterReconnect: reconnectRequested,
+            });
+          },
+          { tier: "edge", localUpdates: "immediate" },
+        ),
+      );
+
+      const update = db.update(todos, serverRow.id, { done: true });
+      const edgeWait = update.wait({ tier: "edge" }).then(() => {
+        edgeSettled = true;
+      });
+      await withTimeout(
+        update.wait({ tier: "local" }),
+        LOCAL_OPERATION_TIMEOUT_MS,
+        "local update did not become visible",
+      );
+      await waitForCondition(
+        async () => snapshots.some(({ rows }) => rows.some((row) => row.done)),
+        LOCAL_OPERATION_TIMEOUT_MS,
+        "edge subscription did not publish the immediate local update",
+      );
+
+      const firstUpdatedSnapshot = snapshots.findIndex(({ rows }) => rows.some((row) => row.done));
+      await expectStillPending(
+        update.wait({ tier: "edge" }),
+        PENDING_ASSERTION_MS,
+        "update settled before the delayed server snapshot was allowed to arrive",
+      );
+      const snapshotsBeforeReconnect = snapshots.length;
+      reconnectRequested = true;
+      await db.reconnect();
+      await waitForCondition(
+        async () =>
+          snapshots
+            .slice(snapshotsBeforeReconnect)
+            .some(({ afterReconnect, edgeSettled }) => afterReconnect && !edgeSettled),
+        LOCAL_OPERATION_TIMEOUT_MS,
+        "edge hydration did not publish a follow-up subscription result",
+      );
+      const beforeAcceptance = snapshots.at(-1)!.rows;
+      await withTimeout(
+        edgeWait,
+        SYNC_OPERATION_TIMEOUT_MS,
+        "local update did not settle at edge after reconnect",
+      );
+
+      expect(snapshots.at(-1)!.rows).toEqual(beforeAcceptance);
+      expect(
+        snapshots
+          .slice(firstUpdatedSnapshot)
+          .every(({ rows }) => rows.some((row) => row.id === serverRow.id && row.done)),
+      ).toBe(true);
+      unsubscribe();
+    }, 60_000);
+
+    it("preserves an unresolved local delete while the edge subscription hydrates", async () => {
+      const { db, peer } = await createDbPair(ctx, createWorkerDb, createDirectDb);
+      const title = "pending optimistic delete";
+      const serverRow = await withTimeout(
+        peer.insert(todos, { title, done: false }).wait({ tier: "edge" }),
+        SYNC_OPERATION_TIMEOUT_MS,
+        "server row did not reach edge",
+      );
+      await waitForTodos(
+        db,
+        (rows) => rows.some((row) => row.id === serverRow.id),
+        "db did not receive the row to delete",
+        SYNC_OPERATION_TIMEOUT_MS,
+        "edge",
+      );
+      await db.disconnect();
+
+      const deletion = db.delete(todos, serverRow.id);
+      await withTimeout(
+        deletion.wait({ tier: "local" }),
+        LOCAL_OPERATION_TIMEOUT_MS,
+        "local delete did not become visible",
+      );
+      const localRows = await withTimeout(
+        db.all(todoByTitle(title), {
+          tier: "local",
+          localUpdates: "immediate",
+          propagation: "local-only",
+        }),
+        LOCAL_OPERATION_TIMEOUT_MS,
+        "local read did not reflect the delete",
+      );
+      expect(localRows).toEqual([]);
+
+      const snapshots: Array<{
+        rows: Todo[];
+        edgeSettled: boolean;
+        afterReconnect: boolean;
+      }> = [];
+      let edgeSettled = false;
+      let reconnectRequested = false;
+      const edgeWait = deletion.wait({ tier: "edge" }).then(() => {
+        edgeSettled = true;
+      });
+      const unsubscribe = ctx.trackSubscription(
+        db.subscribeAll(
+          todoByTitle(title),
+          (delta) => {
+            if (delta.all === undefined) return;
+            snapshots.push({
+              rows: [...delta.all],
+              edgeSettled,
+              afterReconnect: reconnectRequested,
+            });
+          },
+          { tier: "edge", localUpdates: "immediate" },
+        ),
+      );
+      await waitForCondition(
+        async () => snapshots.some(({ rows }) => rows.length === 0),
+        LOCAL_OPERATION_TIMEOUT_MS,
+        "edge subscription did not publish the immediate local delete",
+      );
+
+      const firstDeletedSnapshot = snapshots.findIndex(({ rows }) => rows.length === 0);
+      await expectStillPending(
+        deletion.wait({ tier: "edge" }),
+        PENDING_ASSERTION_MS,
+        "delete settled before the delayed server snapshot was allowed to arrive",
+      );
+      const snapshotsBeforeReconnect = snapshots.length;
+      reconnectRequested = true;
+      await db.reconnect();
+      await waitForCondition(
+        async () =>
+          snapshots
+            .slice(snapshotsBeforeReconnect)
+            .some(({ afterReconnect, edgeSettled }) => afterReconnect && !edgeSettled),
+        LOCAL_OPERATION_TIMEOUT_MS,
+        "edge hydration did not publish a follow-up subscription result",
+      );
+      const beforeAcceptance = snapshots.at(-1)!.rows;
+      await withTimeout(
+        edgeWait,
+        SYNC_OPERATION_TIMEOUT_MS,
+        "local delete did not settle at edge after reconnect",
+      );
+
+      expect(snapshots.at(-1)!.rows).toEqual(beforeAcceptance);
+      expect(snapshots.slice(firstDeletedSnapshot).every(({ rows }) => rows.length === 0)).toBe(
+        true,
+      );
+      unsubscribe();
+    }, 60_000);
+
+    it("publishes server deletions through an edge subscription", async () => {
+      const { db, peer } = await createDbPair(ctx, createDirectDb);
+      const deletedTitle = "server row deleted live";
+      const serverRow = await withTimeout(
+        peer.insert(todos, { title: deletedTitle, done: false }).wait({ tier: "edge" }),
+        SYNC_OPERATION_TIMEOUT_MS,
+        "server row did not reach edge",
+      );
+      const snapshots: Todo[][] = [];
+      const unsubscribe = ctx.trackSubscription(
+        db.subscribeAll(
+          todoByTitle(deletedTitle),
+          (delta) => {
+            if (delta.all === undefined) return;
+            snapshots.push([...delta.all]);
+          },
+          { tier: "edge", localUpdates: "immediate" },
+        ),
+      );
+
+      await waitForCondition(
+        async () => snapshots.some((rows) => rows.some((row) => row.title === deletedTitle)),
+        SYNC_OPERATION_TIMEOUT_MS,
+        "edge subscription did not show the server row",
+      );
+      await withTimeout(
+        peer.delete(todos, serverRow.id).wait({ tier: "edge" }),
+        SYNC_OPERATION_TIMEOUT_MS,
+        "server deletion did not reach edge",
+      );
+      await waitForCondition(
+        async () => snapshots.some((rows) => rows.length === 0),
+        SYNC_OPERATION_TIMEOUT_MS,
+        "edge subscription did not publish the server deletion",
+      );
+      unsubscribe();
+    }, 60_000);
+
     it("syncs writes made while disconnected after reconnect", async () => {
       const { db, peer } = await createDbPair(ctx, createDirectDb);
 
@@ -389,12 +706,16 @@ async function createWorkerDb(
   );
 }
 
-async function createDbPair(ctx: TestCleanup, createDbForMode: DbFactory): Promise<ConnectedPair> {
+async function createDbPair(
+  ctx: TestCleanup,
+  createDbForMode: DbFactory,
+  createPeerDb: DbFactory = createDbForMode,
+): Promise<ConnectedPair> {
   const label = uniqueDbName("db-disconnect-pair");
   const server = await publishSyncServerSchemaAndPermissions(label);
   const sharedSecret = generateAuthSecret();
   const db = await createDbForMode(ctx, `${label}-a`, sharedSecret, server);
-  const peer = await createDbForMode(ctx, `${label}-peer`, sharedSecret, server);
+  const peer = await createPeerDb(ctx, `${label}-peer`, sharedSecret, server);
 
   return { db, peer };
 }
