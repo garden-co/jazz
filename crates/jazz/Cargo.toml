@@ -102,7 +102,7 @@ reqwest = { version = "0.12", default-features = false, features = [
 
 [dev-dependencies]
 jazz-benchmark-guard = { path = "../benchmark-guard" }
-jazz-testkit = { path = "../jazz-testkit" }
+jazz-testkit = { path = "../jazz-testkit", default-features = false }
 hdrhistogram = "7.5.4"
 tempfile = "3.27.0"
 libc = "0.2"
