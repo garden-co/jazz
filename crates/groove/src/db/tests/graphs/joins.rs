@@ -1,0 +1,1270 @@
+//! Union, projection, join, semi-join, and anti-join maintenance.
+
+use super::*;
+
+#[test]
+fn duplicate_table_subscriptions_share_graph_nodes_and_gc_eagerly() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let storage = RocksDbStorage::open(temp_dir.path(), &["albums"]).unwrap();
+    let mut database = Database::new(albums_schema(), storage).unwrap();
+
+    let first = database
+        .subscribe_one_sink(GraphBuilder::table("albums"))
+        .unwrap();
+    let second = database
+        .subscribe_one_sink(GraphBuilder::table("albums"))
+        .unwrap();
+    let first_output = database
+        .ivm_runtime
+        .subscription_output_node(first.id())
+        .unwrap();
+    let second_output = database
+        .ivm_runtime
+        .subscription_output_node(second.id())
+        .unwrap();
+
+    assert_eq!(first_output, second_output);
+    assert_eq!(database.ivm_runtime.retained_node_ids().len(), 1);
+
+    assert!(database.unsubscribe(first.id()));
+    assert!(database.ivm_runtime.graph().node(first_output).is_some());
+
+    assert!(database.unsubscribe(second.id()));
+    assert!(database.ivm_runtime.graph().node(first_output).is_none());
+    assert!(database.ivm_runtime.retained_node_ids().is_empty());
+}
+
+#[test]
+fn union_subscriptions_receive_deltas_from_multiple_tables() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let storage = RocksDbStorage::open(temp_dir.path(), &["albums", "archived_albums"]).unwrap();
+    let mut database = Database::new(two_album_tables_schema(), storage).unwrap();
+    let subscription_id = database
+        .subscribe_one_sink(GraphBuilder::union([
+            GraphBuilder::table("albums"),
+            GraphBuilder::table("archived_albums"),
+        ]))
+        .unwrap();
+
+    let mut batch = database.open_batch();
+    batch.insert(
+        "albums",
+        vec![Value::U64(1), Value::String("Blue Train".to_owned())],
+    );
+    batch.insert(
+        "archived_albums",
+        vec![Value::U64(2), Value::String("Out to Lunch".to_owned())],
+    );
+    database.commit_batch(batch).unwrap();
+
+    assert_eq!(
+        expect_recv_vals(&subscription_id)
+            .into_iter()
+            .map(|(values, _)| values)
+            .collect::<Vec<_>>(),
+        [
+            vec![1_u64.into(), "Blue Train".into()],
+            vec![2_u64.into(), "Out to Lunch".into()]
+        ]
+    );
+}
+
+#[test]
+fn union_all_subscriptions_preserve_duplicate_derivations() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let storage = RocksDbStorage::open(temp_dir.path(), &["albums"]).unwrap();
+    let mut database = Database::new(albums_schema(), storage).unwrap();
+    let album_titles = GraphBuilder::table("albums").project(["title"]);
+    let subscription_id = database
+        .subscribe_one_sink(GraphBuilder::union([album_titles.clone(), album_titles]))
+        .unwrap();
+
+    let mut batch = database.open_batch();
+    batch.insert(
+        "albums",
+        vec![Value::U64(1), Value::String("Blue Train".to_owned())],
+    );
+    database.commit_batch(batch).unwrap();
+
+    assert_eq!(
+        expect_recv_vals(&subscription_id),
+        [
+            (vec!["Blue Train".into()], 1),
+            (vec!["Blue Train".into()], 1)
+        ]
+    );
+}
+
+#[test]
+fn filter_subscriptions_emit_only_matching_rows() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let storage = RocksDbStorage::open(temp_dir.path(), &["albums"]).unwrap();
+    let mut database = Database::new(albums_schema(), storage).unwrap();
+    let subscription_id = database
+        .subscribe_one_sink(
+            GraphBuilder::table("albums").filter(PredicateExpr::gt("id", Value::U64(10))),
+        )
+        .unwrap();
+
+    let mut batch = database.open_batch();
+    batch.insert(
+        "albums",
+        vec![Value::U64(7), Value::String("Blue Train".to_owned())],
+    );
+    batch.insert(
+        "albums",
+        vec![Value::U64(11), Value::String("Giant Steps".to_owned())],
+    );
+    database.commit_batch(batch).unwrap();
+
+    assert_eq!(
+        expect_recv_vals(&subscription_id),
+        [(vec![11_u64.into(), "Giant Steps".into()], 1)]
+    );
+}
+
+#[test]
+fn project_subscriptions_emit_projected_records() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let storage = RocksDbStorage::open(temp_dir.path(), &["albums"]).unwrap();
+    let mut database = Database::new(albums_schema(), storage).unwrap();
+    let subscription_id = database
+        .subscribe_one_sink(GraphBuilder::table("albums").project(["title"]))
+        .unwrap();
+
+    let mut batch = database.open_batch();
+    batch.insert(
+        "albums",
+        vec![Value::U64(7), Value::String("Blue Train".to_owned())],
+    );
+    database.commit_batch(batch).unwrap();
+    assert_eq!(
+        expect_recv_vals(&subscription_id),
+        [(vec!["Blue Train".into()], 1)]
+    );
+}
+
+#[test]
+fn duplicate_projected_subscriptions_share_graph_nodes_and_gc_eagerly() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let storage = RocksDbStorage::open(temp_dir.path(), &["albums"]).unwrap();
+    let mut database = Database::new(albums_schema(), storage).unwrap();
+    let graph = GraphBuilder::table("albums")
+        .filter(PredicateExpr::eq(
+            "title",
+            Value::String("Blue Train".to_owned()),
+        ))
+        .project(["title"]);
+
+    let first = database.subscribe_one_sink(graph.clone()).unwrap();
+    let second = database.subscribe_one_sink(graph).unwrap();
+    let first_output = database
+        .ivm_runtime
+        .subscription_output_node(first.id())
+        .unwrap();
+    let second_output = database
+        .ivm_runtime
+        .subscription_output_node(second.id())
+        .unwrap();
+
+    assert_eq!(first_output, second_output);
+    assert!(
+        database
+            .ivm_runtime
+            .retained_node_ids()
+            .contains(&first_output)
+    );
+
+    assert!(database.unsubscribe(first.id()));
+    assert!(database.ivm_runtime.graph().node(first_output).is_some());
+
+    assert!(database.unsubscribe(second.id()));
+    assert!(database.ivm_runtime.graph().node(first_output).is_none());
+    assert!(database.ivm_runtime.retained_node_ids().is_empty());
+}
+
+#[test]
+fn join_subscriptions_match_left_deltas_against_maintained_right_state() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let storage = RocksDbStorage::open(temp_dir.path(), &["albums", "artists"]).unwrap();
+    let mut database = Database::new(albums_artists_schema(), storage).unwrap();
+    let subscription_id = database
+        .subscribe_one_sink(GraphBuilder::join(
+            GraphBuilder::table("albums"),
+            GraphBuilder::table("artists"),
+            ["artist_id"],
+            ["id"],
+        ))
+        .unwrap();
+
+    let mut batch = database.open_batch();
+    batch.insert(
+        "artists",
+        vec![Value::U64(11), Value::String("John Coltrane".to_owned())],
+    );
+    database.commit_batch(batch).unwrap();
+    assert!(subscription_id.recv().unwrap().is_empty());
+
+    let mut batch = database.open_batch();
+    batch.insert(
+        "albums",
+        vec![
+            Value::U64(7),
+            Value::U64(11),
+            Value::String("Blue Train".to_owned()),
+        ],
+    );
+    database.commit_batch(batch).unwrap();
+
+    assert_eq!(
+        expect_recv_vals(&subscription_id),
+        [(
+            vec![
+                7_u64.into(),
+                11_u64.into(),
+                "Blue Train".into(),
+                11_u64.into(),
+                "John Coltrane".into(),
+            ],
+            1
+        )]
+    );
+}
+
+#[test]
+fn join_subscriptions_match_array_key_elements() {
+    let storage = MemoryStorage::new(&["files", "file_parts"]);
+    let mut database = Database::new(files_parts_schema(), storage).unwrap();
+    let subscription_id = database
+        .subscribe_one_sink(GraphBuilder::join(
+            GraphBuilder::table("files"),
+            GraphBuilder::table("file_parts"),
+            ["part_ids"],
+            ["part_uuid"],
+        ))
+        .unwrap();
+
+    let part_a = uuid(0xa);
+    let part_b = uuid(0xb);
+    let part_c = uuid(0xc);
+
+    let mut batch = database.open_batch();
+    batch.insert(
+        "files",
+        vec![
+            Value::U64(1),
+            Value::Array(vec![Value::Uuid(part_a), Value::Uuid(part_b)]),
+        ],
+    );
+    batch.insert(
+        "file_parts",
+        vec![
+            Value::U64(10),
+            Value::Uuid(part_b),
+            Value::Bytes(b"b".to_vec()),
+        ],
+    );
+    batch.insert(
+        "file_parts",
+        vec![
+            Value::U64(11),
+            Value::Uuid(part_c),
+            Value::Bytes(b"c".to_vec()),
+        ],
+    );
+    database.commit_batch(batch).unwrap();
+
+    assert_eq!(
+        expect_recv_vals(&subscription_id),
+        [(
+            vec![
+                Value::U64(1),
+                Value::Array(vec![Value::Uuid(part_a), Value::Uuid(part_b)]),
+                Value::U64(10),
+                Value::Uuid(part_b),
+                Value::Bytes(b"b".to_vec()),
+            ],
+            1
+        )]
+    );
+}
+
+#[test]
+fn unnest_subscription_emits_one_row_per_array_element() {
+    let storage = MemoryStorage::new(&["files", "file_parts"]);
+    let mut database = Database::new(files_parts_schema(), storage).unwrap();
+    let subscription = database
+        .subscribe_one_sink(
+            GraphBuilder::table("files")
+                .unnest("part_ids", "part_id")
+                .project(["id", "part_id"]),
+        )
+        .unwrap();
+
+    let part_a = uuid(0xa);
+    let part_b = uuid(0xb);
+    let part_c = uuid(0xc);
+
+    let mut batch = database.open_batch();
+    batch.insert(
+        "files",
+        vec![
+            Value::U64(1),
+            Value::Array(vec![Value::Uuid(part_a), Value::Uuid(part_b)]),
+        ],
+    );
+    database.commit_batch(batch).unwrap();
+
+    assert_eq!(
+        expect_recv_vals(&subscription),
+        [
+            (vec![Value::U64(1), Value::Uuid(part_a)], 1),
+            (vec![Value::U64(1), Value::Uuid(part_b)], 1),
+        ]
+    );
+
+    let mut batch = database.open_batch();
+    batch.delete("files", PrimaryKeyValue::U64(1));
+    batch.insert(
+        "files",
+        vec![
+            Value::U64(1),
+            Value::Array(vec![Value::Uuid(part_b), Value::Uuid(part_c)]),
+        ],
+    );
+    database.commit_batch(batch).unwrap();
+
+    assert_eq!(
+        expect_recv_vals(&subscription),
+        [
+            (vec![Value::U64(1), Value::Uuid(part_a)], -1),
+            (vec![Value::U64(1), Value::Uuid(part_b)], -1),
+            (vec![Value::U64(1), Value::Uuid(part_b)], 1),
+            (vec![Value::U64(1), Value::Uuid(part_c)], 1),
+        ]
+    );
+}
+
+#[test]
+fn join_subscriptions_match_persisted_array_key_elements() {
+    let storage = MemoryStorage::new(&["files", "file_parts"]);
+    let mut database = Database::new(files_parts_schema(), storage).unwrap();
+    let subscription_id = database
+        .subscribe_one_sink(GraphBuilder::join(
+            GraphBuilder::table("files"),
+            GraphBuilder::table("file_parts"),
+            ["part_ids"],
+            ["part_uuid"],
+        ))
+        .unwrap();
+
+    let part_a = uuid(0xa);
+    let part_b = uuid(0xb);
+    let part_c = uuid(0xc);
+
+    let mut batch = database.open_batch();
+    batch.insert(
+        "files",
+        vec![
+            Value::U64(1),
+            Value::Array(vec![
+                Value::Uuid(part_b),
+                Value::Uuid(part_b),
+                Value::Uuid(part_a),
+            ]),
+        ],
+    );
+    batch.insert("files", vec![Value::U64(2), Value::Array(vec![])]);
+    database.commit_batch(batch).unwrap();
+    assert!(subscription_id.recv().unwrap().is_empty());
+
+    let mut batch = database.open_batch();
+    batch.insert(
+        "file_parts",
+        vec![
+            Value::U64(10),
+            Value::Uuid(part_b),
+            Value::Bytes(b"b".to_vec()),
+        ],
+    );
+    batch.insert(
+        "file_parts",
+        vec![
+            Value::U64(11),
+            Value::Uuid(part_a),
+            Value::Bytes(b"a".to_vec()),
+        ],
+    );
+    batch.insert(
+        "file_parts",
+        vec![
+            Value::U64(12),
+            Value::Uuid(part_c),
+            Value::Bytes(b"c".to_vec()),
+        ],
+    );
+    database.commit_batch(batch).unwrap();
+
+    assert_eq!(
+        expect_recv_vals(&subscription_id),
+        [
+            (
+                vec![
+                    Value::U64(1),
+                    Value::Array(vec![
+                        Value::Uuid(part_b),
+                        Value::Uuid(part_b),
+                        Value::Uuid(part_a),
+                    ]),
+                    Value::U64(10),
+                    Value::Uuid(part_b),
+                    Value::Bytes(b"b".to_vec()),
+                ],
+                1,
+            ),
+            (
+                vec![
+                    Value::U64(1),
+                    Value::Array(vec![
+                        Value::Uuid(part_b),
+                        Value::Uuid(part_b),
+                        Value::Uuid(part_a),
+                    ]),
+                    Value::U64(11),
+                    Value::Uuid(part_a),
+                    Value::Bytes(b"a".to_vec()),
+                ],
+                1,
+            ),
+        ]
+    );
+}
+
+#[test]
+fn join_subscriptions_match_nullable_array_key_elements() {
+    let storage = MemoryStorage::new(&["files", "file_parts"]);
+    let mut database = Database::new(nullable_files_parts_schema(), storage).unwrap();
+    let subscription_id = database
+        .subscribe_one_sink(GraphBuilder::join(
+            GraphBuilder::table("files"),
+            GraphBuilder::table("file_parts"),
+            ["part_ids"],
+            ["part_uuid"],
+        ))
+        .unwrap();
+
+    let part_a = uuid(0xa);
+    let part_b = uuid(0xb);
+
+    let mut batch = database.open_batch();
+    batch.insert(
+        "files",
+        vec![
+            Value::U64(1),
+            Value::Nullable(Some(Box::new(Value::Array(vec![
+                Value::Uuid(part_a),
+                Value::Uuid(part_b),
+            ])))),
+        ],
+    );
+    batch.insert(
+        "file_parts",
+        vec![
+            Value::U64(10),
+            Value::Nullable(Some(Box::new(Value::Uuid(part_b)))),
+            Value::Bytes(b"b".to_vec()),
+        ],
+    );
+    database.commit_batch(batch).unwrap();
+
+    assert_eq!(
+        expect_recv_vals(&subscription_id),
+        [(
+            vec![
+                Value::U64(1),
+                Value::Nullable(Some(Box::new(Value::Array(vec![
+                    Value::Uuid(part_a),
+                    Value::Uuid(part_b),
+                ])))),
+                Value::U64(10),
+                Value::Nullable(Some(Box::new(Value::Uuid(part_b)))),
+                Value::Bytes(b"b".to_vec()),
+            ],
+            1
+        )]
+    );
+}
+
+#[test]
+fn index_subscriptions_expand_array_key_elements() {
+    let storage = MemoryStorage::new(&["files", "indices"]);
+    let mut database = Database::new(indexed_files_schema(), storage).unwrap();
+    let subscription = database
+        .subscribe_one_sink(GraphBuilder::index("files", "files_by_part_ids"))
+        .unwrap();
+
+    let part_a = uuid(0xa);
+    let part_b = uuid(0xb);
+    let mut batch = database.open_batch();
+    batch.insert(
+        "files",
+        vec![
+            Value::U64(1),
+            Value::Array(vec![Value::Uuid(part_b), Value::Uuid(part_a)]),
+        ],
+    );
+    database.commit_batch(batch).unwrap();
+
+    assert_eq!(
+        expect_recv_vals(&subscription),
+        [
+            (
+                vec![
+                    encoded_uuid_index_key(part_a, 1).into(),
+                    Vec::<u8>::new().into(),
+                ],
+                1,
+            ),
+            (
+                vec![
+                    encoded_uuid_index_key(part_b, 1).into(),
+                    Vec::<u8>::new().into(),
+                ],
+                1,
+            ),
+        ]
+    );
+}
+
+#[test]
+fn query_graph_joins_related_tables_through_database_facade() {
+    let storage = MemoryStorage::new(&["albums", "artists"]);
+    let mut database = Database::new(albums_artists_schema(), storage).unwrap();
+
+    let mut batch = database.open_batch();
+    batch.insert(
+        "artists",
+        vec![Value::U64(1), Value::String("John Coltrane".to_owned())],
+    );
+    batch.insert(
+        "artists",
+        vec![Value::U64(2), Value::String("Miles Davis".to_owned())],
+    );
+    batch.insert(
+        "albums",
+        vec![
+            Value::U64(10),
+            Value::U64(1),
+            Value::String("Blue Train".to_owned()),
+        ],
+    );
+    batch.insert(
+        "albums",
+        vec![
+            Value::U64(11),
+            Value::U64(2),
+            Value::String("Kind of Blue".to_owned()),
+        ],
+    );
+    batch.insert(
+        "albums",
+        vec![
+            Value::U64(12),
+            Value::U64(1),
+            Value::String("Giant Steps".to_owned()),
+        ],
+    );
+    database.commit_batch(batch).unwrap();
+
+    let rows = database
+        .query_graph(
+            GraphBuilder::join(
+                GraphBuilder::table("albums"),
+                GraphBuilder::table("artists"),
+                ["artist_id"],
+                ["id"],
+            )
+            .project_fields([
+                ProjectField::renamed("right.name", "artist"),
+                ProjectField::renamed("left.title", "album"),
+            ]),
+        )
+        .unwrap();
+
+    let mut values = rows.to_values().unwrap();
+    values.sort_by(|left, right| format!("{left:?}").cmp(&format!("{right:?}")));
+    assert_eq!(
+        values,
+        [
+            (
+                vec![
+                    Value::String("John Coltrane".to_owned()),
+                    Value::String("Blue Train".to_owned()),
+                ],
+                1,
+            ),
+            (
+                vec![
+                    Value::String("John Coltrane".to_owned()),
+                    Value::String("Giant Steps".to_owned()),
+                ],
+                1,
+            ),
+            (
+                vec![
+                    Value::String("Miles Davis".to_owned()),
+                    Value::String("Kind of Blue".to_owned()),
+                ],
+                1,
+            ),
+        ]
+    );
+}
+
+#[test]
+fn join_subscriptions_match_right_deltas_against_maintained_left_state() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let storage = RocksDbStorage::open(temp_dir.path(), &["albums", "artists"]).unwrap();
+    let mut database = Database::new(albums_artists_schema(), storage).unwrap();
+    let subscription_id = database
+        .subscribe_one_sink(GraphBuilder::join(
+            GraphBuilder::table("albums"),
+            GraphBuilder::table("artists"),
+            ["artist_id"],
+            ["id"],
+        ))
+        .unwrap();
+
+    let mut batch = database.open_batch();
+    batch.insert(
+        "albums",
+        vec![
+            Value::U64(7),
+            Value::U64(11),
+            Value::String("Blue Train".to_owned()),
+        ],
+    );
+    database.commit_batch(batch).unwrap();
+    assert!(subscription_id.recv().unwrap().is_empty());
+
+    let mut batch = database.open_batch();
+    batch.insert(
+        "artists",
+        vec![Value::U64(11), Value::String("John Coltrane".to_owned())],
+    );
+    database.commit_batch(batch).unwrap();
+
+    assert_eq!(
+        expect_recv_vals(&subscription_id),
+        [(
+            vec![
+                7_u64.into(),
+                11_u64.into(),
+                "Blue Train".into(),
+                11_u64.into(),
+                "John Coltrane".into(),
+            ],
+            1
+        )]
+    );
+}
+
+#[test]
+fn join_subscriptions_emit_update_and_delete_deltas_from_maintained_state() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let storage = RocksDbStorage::open(temp_dir.path(), &["albums", "artists"]).unwrap();
+    let mut database = Database::new(albums_artists_schema(), storage).unwrap();
+    let subscription_id = database
+        .subscribe_one_sink(GraphBuilder::join(
+            GraphBuilder::table("albums"),
+            GraphBuilder::table("artists"),
+            ["artist_id"],
+            ["id"],
+        ))
+        .unwrap();
+
+    let mut batch = database.open_batch();
+    batch.insert(
+        "artists",
+        vec![Value::U64(11), Value::String("John Coltrane".to_owned())],
+    );
+    batch.insert(
+        "albums",
+        vec![
+            Value::U64(7),
+            Value::U64(11),
+            Value::String("Blue Train".to_owned()),
+        ],
+    );
+    database.commit_batch(batch).unwrap();
+    let _initial_join = expect_recv_vals(&subscription_id);
+
+    let mut batch = database.open_batch();
+    batch.update(
+        "albums",
+        vec![
+            Value::U64(7),
+            Value::U64(11),
+            Value::String("Giant Steps".to_owned()),
+        ],
+    );
+    database.commit_batch(batch).unwrap();
+
+    let deltas = expect_recv_vals(&subscription_id);
+    assert_eq!(deltas.len(), 2);
+    assert!(deltas.contains(&(
+        vec![
+            7_u64.into(),
+            11_u64.into(),
+            "Blue Train".into(),
+            11_u64.into(),
+            "John Coltrane".into(),
+        ],
+        -1
+    )));
+    assert!(deltas.contains(&(
+        vec![
+            7_u64.into(),
+            11_u64.into(),
+            "Giant Steps".into(),
+            11_u64.into(),
+            "John Coltrane".into(),
+        ],
+        1
+    )));
+
+    let mut batch = database.open_batch();
+    batch.delete("artists", PrimaryKeyValue::U64(11));
+    database.commit_batch(batch).unwrap();
+    assert_eq!(
+        expect_recv_vals(&subscription_id),
+        [(
+            vec![
+                7_u64.into(),
+                11_u64.into(),
+                "Giant Steps".into(),
+                11_u64.into(),
+                "John Coltrane".into(),
+            ],
+            -1
+        )]
+    );
+}
+
+#[test]
+fn anti_join_subscriptions_emit_left_rows_without_right_matches() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let storage = RocksDbStorage::open(temp_dir.path(), &["albums", "artists"]).unwrap();
+    let mut database = Database::new(albums_artists_schema(), storage).unwrap();
+    let subscription = database
+        .subscribe_one_sink(GraphBuilder::anti_join(
+            GraphBuilder::table("albums"),
+            GraphBuilder::table("artists"),
+            ["artist_id"],
+            ["id"],
+        ))
+        .unwrap();
+
+    let mut batch = database.open_batch();
+    batch.insert(
+        "albums",
+        vec![
+            Value::U64(7),
+            Value::U64(11),
+            Value::String("Blue Train".to_owned()),
+        ],
+    );
+    database.commit_batch(batch).unwrap();
+
+    assert_eq!(
+        expect_recv_vals(&subscription),
+        [(vec![7_u64.into(), 11_u64.into(), "Blue Train".into()], 1)]
+    );
+}
+
+#[test]
+fn semi_join_subscriptions_emit_left_rows_with_right_matches() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let storage = RocksDbStorage::open(temp_dir.path(), &["albums", "artists"]).unwrap();
+    let mut database = Database::new(albums_artists_schema(), storage).unwrap();
+    let subscription = database
+        .subscribe_one_sink(GraphBuilder::semi_join(
+            GraphBuilder::table("albums"),
+            GraphBuilder::table("artists"),
+            ["artist_id"],
+            ["id"],
+        ))
+        .unwrap();
+    assert!(subscription.recv().unwrap().is_empty());
+
+    let mut batch = database.open_batch();
+    batch.insert(
+        "albums",
+        vec![
+            Value::U64(7),
+            Value::U64(11),
+            Value::String("Blue Train".to_owned()),
+        ],
+    );
+    database.commit_batch(batch).unwrap();
+    assert!(subscription.try_recv().is_err());
+
+    let mut batch = database.open_batch();
+    batch.insert(
+        "artists",
+        vec![Value::U64(11), Value::String("John Coltrane".to_owned())],
+    );
+    database.commit_batch(batch).unwrap();
+
+    assert_eq!(
+        expect_recv_vals(&subscription),
+        [(vec![7_u64.into(), 11_u64.into(), "Blue Train".into()], 1)]
+    );
+}
+
+#[test]
+fn semi_join_retracts_and_restores_on_right_threshold_transitions() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let storage = RocksDbStorage::open(temp_dir.path(), &["albums", "artists"]).unwrap();
+    let mut database = Database::new(albums_artists_schema(), storage).unwrap();
+    let subscription = database
+        .subscribe_one_sink(GraphBuilder::semi_join(
+            GraphBuilder::table("albums"),
+            GraphBuilder::table("artists"),
+            ["artist_id"],
+            ["id"],
+        ))
+        .unwrap();
+    assert!(subscription.recv().unwrap().is_empty());
+
+    let mut batch = database.open_batch();
+    batch.insert(
+        "artists",
+        vec![Value::U64(11), Value::String("John Coltrane".to_owned())],
+    );
+    database.commit_batch(batch).unwrap();
+    assert!(subscription.try_recv().is_err());
+
+    let mut batch = database.open_batch();
+    batch.insert(
+        "albums",
+        vec![
+            Value::U64(7),
+            Value::U64(11),
+            Value::String("Blue Train".to_owned()),
+        ],
+    );
+    database.commit_batch(batch).unwrap();
+    assert_eq!(
+        expect_recv_vals(&subscription),
+        [(vec![7_u64.into(), 11_u64.into(), "Blue Train".into()], 1)]
+    );
+
+    let mut batch = database.open_batch();
+    batch.delete("artists", PrimaryKeyValue::U64(11));
+    database.commit_batch(batch).unwrap();
+    assert_eq!(
+        expect_recv_vals(&subscription),
+        [(vec![7_u64.into(), 11_u64.into(), "Blue Train".into()], -1)]
+    );
+}
+
+#[test]
+fn semi_join_hydration_snapshot_filters_missing_right_matches() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let storage = RocksDbStorage::open(temp_dir.path(), &["albums", "artists"]).unwrap();
+    let mut database = Database::new(albums_artists_schema(), storage).unwrap();
+    let mut batch = database.open_batch();
+    batch.insert(
+        "albums",
+        vec![
+            Value::U64(7),
+            Value::U64(11),
+            Value::String("Blue Train".to_owned()),
+        ],
+    );
+    batch.insert(
+        "albums",
+        vec![
+            Value::U64(8),
+            Value::U64(12),
+            Value::String("Unknown Session".to_owned()),
+        ],
+    );
+    batch.insert(
+        "artists",
+        vec![Value::U64(11), Value::String("John Coltrane".to_owned())],
+    );
+    database.commit_batch(batch).unwrap();
+
+    let subscription = database
+        .subscribe_one_sink(GraphBuilder::semi_join(
+            GraphBuilder::table("albums"),
+            GraphBuilder::table("artists"),
+            ["artist_id"],
+            ["id"],
+        ))
+        .unwrap();
+
+    assert_eq!(
+        expect_recv_vals(&subscription),
+        [(vec![7_u64.into(), 11_u64.into(), "Blue Train".into()], 1)]
+    );
+}
+
+#[test]
+fn anti_join_retracts_and_restores_on_right_threshold_transitions() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let storage = RocksDbStorage::open(temp_dir.path(), &["albums", "artists"]).unwrap();
+    let mut database = Database::new(albums_artists_schema(), storage).unwrap();
+    let subscription = database
+        .subscribe_one_sink(GraphBuilder::anti_join(
+            GraphBuilder::table("albums"),
+            GraphBuilder::table("artists"),
+            ["artist_id"],
+            ["id"],
+        ))
+        .unwrap();
+
+    let mut batch = database.open_batch();
+    batch.insert(
+        "albums",
+        vec![
+            Value::U64(7),
+            Value::U64(11),
+            Value::String("Blue Train".to_owned()),
+        ],
+    );
+    database.commit_batch(batch).unwrap();
+    assert_eq!(expect_recv_vals(&subscription)[0].1, 1);
+
+    let mut batch = database.open_batch();
+    batch.insert(
+        "artists",
+        vec![Value::U64(11), Value::String("John Coltrane".to_owned())],
+    );
+    database.commit_batch(batch).unwrap();
+    assert_eq!(
+        expect_recv_vals(&subscription),
+        [(vec![7_u64.into(), 11_u64.into(), "Blue Train".into()], -1)]
+    );
+
+    let mut batch = database.open_batch();
+    batch.delete("artists", PrimaryKeyValue::U64(11));
+    database.commit_batch(batch).unwrap();
+    assert_eq!(
+        expect_recv_vals(&subscription),
+        [(vec![7_u64.into(), 11_u64.into(), "Blue Train".into()], 1)]
+    );
+}
+
+#[test]
+fn anti_join_only_changes_when_right_count_crosses_zero() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let storage = RocksDbStorage::open(temp_dir.path(), &["albums", "blocks"]).unwrap();
+    let mut database = Database::new(albums_blockers_schema(), storage).unwrap();
+    let subscription = database
+        .subscribe_one_sink(GraphBuilder::anti_join(
+            GraphBuilder::table("albums"),
+            GraphBuilder::table("blocks"),
+            ["artist_id"],
+            ["artist_id"],
+        ))
+        .unwrap();
+
+    let mut batch = database.open_batch();
+    batch.insert(
+        "albums",
+        vec![
+            Value::U64(7),
+            Value::U64(11),
+            Value::String("Blue Train".to_owned()),
+        ],
+    );
+    database.commit_batch(batch).unwrap();
+    assert_eq!(expect_recv_vals(&subscription)[0].1, 1);
+
+    let mut batch = database.open_batch();
+    batch.insert("blocks", vec![Value::U64(1), Value::U64(11)]);
+    batch.insert("blocks", vec![Value::U64(2), Value::U64(11)]);
+    database.commit_batch(batch).unwrap();
+    assert_eq!(
+        expect_recv_vals(&subscription),
+        [(vec![7_u64.into(), 11_u64.into(), "Blue Train".into()], -1)]
+    );
+
+    let mut batch = database.open_batch();
+    batch.delete("blocks", PrimaryKeyValue::U64(1));
+    database.commit_batch(batch).unwrap();
+    assert!(subscription.try_recv().is_err());
+
+    let mut batch = database.open_batch();
+    batch.delete("blocks", PrimaryKeyValue::U64(2));
+    database.commit_batch(batch).unwrap();
+    assert_eq!(
+        expect_recv_vals(&subscription),
+        [(vec![7_u64.into(), 11_u64.into(), "Blue Train".into()], 1)]
+    );
+}
+
+#[test]
+fn anti_join_hydration_snapshot_filters_existing_right_matches() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let storage = RocksDbStorage::open(temp_dir.path(), &["albums", "artists"]).unwrap();
+    let mut database = Database::new(albums_artists_schema(), storage).unwrap();
+    let mut batch = database.open_batch();
+    batch.insert(
+        "albums",
+        vec![
+            Value::U64(7),
+            Value::U64(11),
+            Value::String("Blue Train".to_owned()),
+        ],
+    );
+    batch.insert(
+        "albums",
+        vec![
+            Value::U64(8),
+            Value::U64(12),
+            Value::String("Unknown Session".to_owned()),
+        ],
+    );
+    batch.insert(
+        "artists",
+        vec![Value::U64(11), Value::String("John Coltrane".to_owned())],
+    );
+    database.commit_batch(batch).unwrap();
+
+    let subscription = database
+        .subscribe_one_sink(GraphBuilder::anti_join(
+            GraphBuilder::table("albums"),
+            GraphBuilder::table("artists"),
+            ["artist_id"],
+            ["id"],
+        ))
+        .unwrap();
+
+    assert_eq!(
+        expect_recv_vals(&subscription),
+        [(
+            vec![8_u64.into(), 12_u64.into(), "Unknown Session".into()],
+            1
+        )]
+    );
+}
+
+#[test]
+fn anti_join_filters_identical_descriptors_before_projection() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let storage = RocksDbStorage::open(temp_dir.path(), &["edges", "blockers"]).unwrap();
+    let mut database = Database::new(edges_blockers_schema(), storage).unwrap();
+
+    let mut batch = database.open_batch();
+    batch.insert("edges", vec![Value::U64(1), Value::U64(4), Value::U64(3)]);
+    batch.insert(
+        "blockers",
+        vec![Value::U64(5), Value::U64(4), Value::U64(3)],
+    );
+    batch.insert("edges", vec![Value::U64(2), Value::U64(8), Value::U64(4)]);
+    database.commit_batch(batch).unwrap();
+
+    let subscription = database
+        .subscribe_one_sink(unblocked_edges_graph())
+        .unwrap();
+    assert_eq!(
+        expect_recv_vals(&subscription),
+        [(vec![Value::U64(8), Value::U64(4)], 1)]
+    );
+}
+
+#[test]
+fn anti_join_hydration_snapshot_filters_many_existing_identical_descriptor_blockers() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let storage = RocksDbStorage::open(temp_dir.path(), &["edges", "blockers"]).unwrap();
+    let mut database = Database::new(edges_blockers_schema(), storage).unwrap();
+
+    let edges = [
+        (1, 8, 4),
+        (3, 2, 5),
+        (4, 4, 3),
+        (9, 4, 7),
+        (10, 6, 2),
+        (11, 4, 8),
+        (18, 6, 3),
+        (19, 8, 1),
+        (20, 7, 6),
+    ];
+    let blockers = [
+        (5, 4, 3),
+        (6, 6, 3),
+        (7, 2, 3),
+        (9, 3, 3),
+        (13, 8, 1),
+        (17, 1, 2),
+        (21, 7, 1),
+        (22, 2, 2),
+    ];
+    let mut batch = database.open_batch();
+    for (id, src, dst) in edges {
+        batch.insert(
+            "edges",
+            vec![Value::U64(id), Value::U64(src), Value::U64(dst)],
+        );
+    }
+    for (id, src, dst) in blockers {
+        batch.insert(
+            "blockers",
+            vec![Value::U64(id), Value::U64(src), Value::U64(dst)],
+        );
+    }
+    database.commit_batch(batch).unwrap();
+
+    let subscription = database
+        .subscribe_one_sink(unblocked_edges_graph())
+        .unwrap();
+    assert_eq!(
+        expect_recv_vals(&subscription),
+        [
+            (vec![Value::U64(2), Value::U64(5)], 1),
+            (vec![Value::U64(4), Value::U64(7)], 1),
+            (vec![Value::U64(4), Value::U64(8)], 1),
+            (vec![Value::U64(6), Value::U64(2)], 1),
+            (vec![Value::U64(7), Value::U64(6)], 1),
+            (vec![Value::U64(8), Value::U64(4)], 1),
+        ]
+    );
+}
+
+#[test]
+fn anti_join_retracts_identical_descriptor_projection_when_blocker_arrives() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let storage = RocksDbStorage::open(temp_dir.path(), &["edges", "blockers"]).unwrap();
+    let mut database = Database::new(edges_blockers_schema(), storage).unwrap();
+
+    let mut batch = database.open_batch();
+    batch.insert("edges", vec![Value::U64(1), Value::U64(4), Value::U64(3)]);
+    database.commit_batch(batch).unwrap();
+
+    let subscription = database
+        .subscribe_one_sink(unblocked_edges_graph())
+        .unwrap();
+    assert_eq!(
+        expect_recv_vals(&subscription),
+        [(vec![Value::U64(4), Value::U64(3)], 1)]
+    );
+
+    let mut batch = database.open_batch();
+    batch.insert(
+        "blockers",
+        vec![Value::U64(5), Value::U64(4), Value::U64(3)],
+    );
+    database.commit_batch(batch).unwrap();
+
+    assert_eq!(
+        expect_recv_vals(&subscription),
+        [(vec![Value::U64(4), Value::U64(3)], -1)]
+    );
+}
+
+#[test]
+fn anti_join_remembers_blocker_inserted_before_matching_left_key_exists() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let storage = RocksDbStorage::open(temp_dir.path(), &["edges", "blockers"]).unwrap();
+    let mut database = Database::new(edges_blockers_schema(), storage).unwrap();
+
+    let mut batch = database.open_batch();
+    batch.insert("edges", vec![Value::U64(1), Value::U64(8), Value::U64(4)]);
+    database.commit_batch(batch).unwrap();
+
+    let subscription = database
+        .subscribe_one_sink(unblocked_edges_graph())
+        .unwrap();
+    assert_eq!(
+        expect_recv_vals(&subscription),
+        [(vec![Value::U64(8), Value::U64(4)], 1)]
+    );
+
+    let mut batch = database.open_batch();
+    batch.insert(
+        "blockers",
+        vec![Value::U64(5), Value::U64(4), Value::U64(3)],
+    );
+    database.commit_batch(batch).unwrap();
+    assert!(subscription.try_recv().is_err());
+
+    let mut batch = database.open_batch();
+    batch.update("edges", vec![Value::U64(1), Value::U64(4), Value::U64(3)]);
+    database.commit_batch(batch).unwrap();
+
+    assert_eq!(
+        expect_recv_vals(&subscription),
+        [(vec![Value::U64(8), Value::U64(4)], -1)]
+    );
+}
+
+#[test]
+fn anti_join_retracts_when_right_update_moves_onto_left_key() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let storage = RocksDbStorage::open(temp_dir.path(), &["edges", "blockers"]).unwrap();
+    let mut database = Database::new(edges_blockers_schema(), storage).unwrap();
+
+    let mut batch = database.open_batch();
+    batch.insert("edges", vec![Value::U64(4), Value::U64(4), Value::U64(3)]);
+    batch.insert(
+        "blockers",
+        vec![Value::U64(5), Value::U64(6), Value::U64(8)],
+    );
+    database.commit_batch(batch).unwrap();
+
+    let subscription = database
+        .subscribe_one_sink(unblocked_edges_graph())
+        .unwrap();
+    assert_eq!(
+        expect_recv_vals(&subscription),
+        [(vec![Value::U64(4), Value::U64(3)], 1)]
+    );
+
+    let mut batch = database.open_batch();
+    batch.update(
+        "blockers",
+        vec![Value::U64(5), Value::U64(4), Value::U64(3)],
+    );
+    database.commit_batch(batch).unwrap();
+
+    assert_eq!(
+        expect_recv_vals(&subscription),
+        [(vec![Value::U64(4), Value::U64(3)], -1)]
+    );
+}
+
+#[test]
+fn anti_join_resubscribe_hydrates_from_storage_after_unretained_changes() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let storage = RocksDbStorage::open(temp_dir.path(), &["edges", "blockers"]).unwrap();
+    let mut database = Database::new(edges_blockers_schema(), storage).unwrap();
+
+    let mut batch = database.open_batch();
+    batch.insert("edges", vec![Value::U64(1), Value::U64(4), Value::U64(3)]);
+    database.commit_batch(batch).unwrap();
+
+    let subscription = database
+        .subscribe_one_sink(unblocked_edges_graph())
+        .unwrap();
+    assert_eq!(
+        expect_recv_vals(&subscription),
+        [(vec![Value::U64(4), Value::U64(3)], 1)]
+    );
+    assert!(database.unsubscribe(subscription.id()));
+
+    let mut batch = database.open_batch();
+    batch.insert(
+        "blockers",
+        vec![Value::U64(5), Value::U64(4), Value::U64(3)],
+    );
+    database.commit_batch(batch).unwrap();
+
+    let subscription = database
+        .subscribe_one_sink(unblocked_edges_graph())
+        .unwrap();
+    assert!(subscription.recv().unwrap().is_empty());
+}
