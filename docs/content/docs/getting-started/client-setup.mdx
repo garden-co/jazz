@@ -10,7 +10,7 @@ import CreateJazzClientReference from "../../partials/create-jazz-client-referen
 
 ## Zero-config client setup
 
-Every client needs an `appId` and a `secret` for [local-first auth](/docs/auth/local-first-auth). Without `secret`, the client runs in anonymous mode and every write is rejected with `AnonymousWriteDeniedError`. Add a `serverUrl` to enable sync. For the full auth matrix (anonymous, local-first, external JWT), see [Authentication](/docs/auth/authentication).
+Every client needs an `appId`. Local-first auth also needs a device secret, which the framework integrations below load or generate. Without local-first credentials, the client runs in anonymous mode and every write is rejected with `AnonymousWriteDeniedError`. Add a `serverUrl` to enable sync. For the full auth matrix (anonymous, local-first, external JWT), see [Authentication](/docs/auth/authentication).
 
 <Tabs
   groupId="jazz-framework"
@@ -23,7 +23,7 @@ Every client needs an `appId` and a `secret` for [local-first auth](/docs/auth/l
       ../examples/docs/todo-client-localfirst-react/src/auth-snippets.tsx#auth-localfirst-react
     </include>
 
-    `useLocalFirstAuth()` from `jazz-tools/react` loads the device secret (or generates one on first run) and exposes `login` / `signOut` for switching identity.
+    `auth="local-first"` tells `JazzProvider` to load the device secret, or generate one on first run. Descendants can use `useLocalFirstAuth()` for backup, restore, and sign-out flows using that same identity.
 
   </Tab>
   <Tab value="Vue">
