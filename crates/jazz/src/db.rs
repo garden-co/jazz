@@ -1099,6 +1099,21 @@ fn effective_read_tier(opts: &ReadOpts) -> DurabilityTier {
     }
 }
 
+fn supports_pending_overlay_reconciliation(query: &Query) -> bool {
+    // ponytail: row-key reconciliation currently covers flat root results;
+    // add contributor provenance before enabling structured or aggregate shapes.
+    query.aggregate.is_none()
+        && query.flat_join.is_none()
+        && query.array_subqueries.is_empty()
+        && query.includes.is_empty()
+        && query.joins.is_empty()
+        && query.policy_branches.is_empty()
+        && query.inherits.is_empty()
+        && query.reachable.is_empty()
+        && query.limit.is_none()
+        && query.offset == 0
+}
+
 fn upstream_register_shape_options(
     tier: DurabilityTier,
     read_view: ReadViewSpec,
