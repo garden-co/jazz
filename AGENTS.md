@@ -36,6 +36,9 @@ For ordinary Rust/core work, the full gate set is:
   tests. The binary names are stable, but their Cargo package is `jazz-cli`;
   build them with `cargo build -p jazz-cli --bin jazz-tools` or
   `cargo build -p jazz-cli --bin jazz-server`.
+- `cargo test -p jazz-otel` covers exporter/provider construction. Its ignored
+  `sync_telemetry_otel` target is a manual receipt because it does not
+  programmatically assert collector delivery.
 - `cargo check -p jazz-sim --benches` (always; it is cheap enough and catches bench API rot)
 - `dev/gates/ts-wire-codec.sh` for TypeScript/native-runtime wire-codec coverage
   (Anselm-approved 2026-07-07)

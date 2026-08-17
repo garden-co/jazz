@@ -97,7 +97,7 @@ pub async fn run(
         .then(|| {
             let meter = opentelemetry::global::meter("jazz-server");
             let shutdown = state.shutdown.clone();
-            jazz::tools::otel::register_active_websockets_gauge(&meter, move || {
+            jazz_otel::register_active_websockets_gauge(&meter, move || {
                 shutdown.active_websockets() as u64
             })
         });

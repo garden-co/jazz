@@ -32,15 +32,6 @@ transport-compression-zstd = ["dep:zstd"]
 transport-compression-ruzstd = ["dep:ruzstd"]
 test-utils = ["server", "client", "sqlite", "sync-autopsy"]
 test = ["test-utils", "transport-compression-zstd"]
-otel-core = [
-  "server",
-  "dep:opentelemetry",
-  "dep:opentelemetry_sdk",
-  "dep:opentelemetry-otlp",
-  "dep:opentelemetry-stdout",
-  "dep:opentelemetry-appender-tracing",
-  "dep:tracing-opentelemetry",
-]
 
 [dependencies]
 futures-core = "0.3.31"
@@ -104,28 +95,11 @@ reqwest = { version = "0.12", default-features = false, features = [
   "json",
   "rustls-tls",
 ], optional = true }
-opentelemetry = { version = "0.31", optional = true }
-opentelemetry_sdk = { version = "0.31", features = [
-  "rt-tokio",
-  "logs",
-  "metrics",
-], optional = true }
-opentelemetry-otlp = { version = "0.31", features = [
-  "grpc-tonic",
-  "http-json",
-  "reqwest-blocking-client",
-  "logs",
-  "metrics",
-], optional = true }
-opentelemetry-stdout = { version = "0.31", optional = true }
-opentelemetry-appender-tracing = { version = "0.31", optional = true }
-tracing-opentelemetry = { version = "0.32", optional = true }
 
 [dev-dependencies]
 jazz-benchmark-guard = { path = "../benchmark-guard" }
 hdrhistogram = "7.5.4"
 tempfile = "3.27.0"
-opentelemetry_sdk = { version = "0.31", features = ["testing"] }
 libc = "0.2"
 criterion = "0.5"
 insta = "1"
@@ -291,10 +265,6 @@ required-features = ["test"]
 [[test]]
 name = "claims_merge_integration"
 required-features = ["test"]
-
-[[test]]
-name = "sync_telemetry_otel"
-required-features = ["test", "otel-core"]
 
 [[example]]
 name = "realistic_bench"

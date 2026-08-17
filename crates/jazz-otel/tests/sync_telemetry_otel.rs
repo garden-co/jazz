@@ -1,15 +1,14 @@
-#![cfg(all(feature = "test", feature = "otel-core"))]
-
+#[path = "../../jazz/tests/support/mod.rs"]
 mod support;
 
 use std::collections::HashMap;
 use std::time::Duration;
 
-use jazz::tools::otel;
 use jazz::tools::server::JazzServer;
 use jazz::tools::{
     ColumnType, DurabilityTier, QueryBuilder, Schema, SchemaBuilder, TableSchema, Value,
 };
+use jazz_otel as otel;
 use support::{TestingClient, has_row, wait_for_query};
 use tracing_subscriber::{EnvFilter, prelude::*};
 

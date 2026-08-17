@@ -82,7 +82,7 @@ check_layer \
   target/debug/jazz-tools
 
 # index.js and index.d.ts are outputs of napi build, not inputs.
-source_roots=(crates/jazz-napi/src crates/jazz-napi/build.rs crates/jazz-napi/Cargo.toml crates/jazz-napi/package.json crates/jazz-napi/scripts crates/jazz/src crates/groove/src crates/jazz/Cargo.toml crates/groove/Cargo.toml Cargo.toml Cargo.lock)
+source_roots=(crates/jazz-napi/src crates/jazz-napi/build.rs crates/jazz-napi/Cargo.toml crates/jazz-napi/package.json crates/jazz-napi/scripts crates/jazz-otel/src crates/jazz-otel/Cargo.toml crates/jazz/src crates/groove/src crates/jazz/Cargo.toml crates/groove/Cargo.toml Cargo.toml Cargo.lock)
 shopt -s nullglob
 napi_artifacts=(crates/jazz-napi/*.node)
 shopt -u nullglob
