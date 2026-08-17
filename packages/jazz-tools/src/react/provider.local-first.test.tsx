@@ -12,8 +12,6 @@ vi.mock("./create-jazz-client.js", () => ({
   createJazzClient: mock.createJazzClient,
 }));
 
-vi.mock("jazz-tools/_dev/schema-hash", () => ({}), { virtual: true });
-
 import { JazzProvider, useDb, useSession } from "./provider.js";
 import { useLocalFirstAuth } from "./use-local-first-auth.js";
 
