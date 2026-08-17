@@ -17,6 +17,9 @@ use groove::{
 };
 use jazz::db::doctest_support;
 use jazz::db::{LocalUpdates, Propagation, ReadOpts, SubscriptionEvent};
+use jazz::ids::{NodeUuid, RowUuid};
+use jazz::node::{AuthorityPersistenceScheduler, MergeableCommit, NodeState};
+use jazz::protocol::SyncMessage;
 use jazz::tx::DurabilityTier;
 use opfs_btree::BTreeError;
 use opfs_btree::async_db::{AsyncPageBTree, AsyncPageBTreeOptions};
@@ -530,5 +533,93 @@ pub async fn verify_indexeddb_jazz_visibility(page_store: JsValue) -> Result<JsV
     }
     Ok(JsValue::from_str(
         "Jazz immediate visibility preceded IndexedDB durability",
+    ))
+}
+
+/// Prove that an authority Fate remains quarantined through a genuinely
+/// pending IndexedDB commit and is released after the complete durable unit.
+#[wasm_bindgen]
+pub async fn verify_indexeddb_authority_publication(
+    page_store: JsValue,
+) -> Result<JsValue, JsValue> {
+    let schema = doctest_support::schema();
+    let column_families = schema.column_families();
+    let refs = column_families
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let mut writer = NodeState::new(
+        NodeUuid::from_bytes([0x31; 16]),
+        schema.clone(),
+        MemoryStorage::new(&refs),
+    )
+    .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    let (_, unit) = writer
+        .commit_mergeable_unit(
+            MergeableCommit::new("todos", RowUuid::from_bytes([0x32; 16]), 10)
+                .cells(doctest_support::todo_cells("authority", false)),
+        )
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    let SyncMessage::CommitUnit { tx, versions } = unit else {
+        return Err(JsValue::from_str("writer did not produce a commit unit"));
+    };
+    let tx_id = tx.tx_id;
+    let mut authority = NodeState::new(
+        NodeUuid::from_bytes([0x33; 16]),
+        schema,
+        MemoryStorage::new(&refs),
+    )
+    .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    let pending = authority
+        .ingest_commit_unit_for_async_persistence(tx, versions, u64::MAX - 60_000, None)
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    let persistence = IndexedDbOrderedStorage::open(page_store.clone(), 4096, 32)
+        .await
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    let mut scheduler = AuthorityPersistenceScheduler::new(Box::new(persistence));
+    scheduler.enqueue(pending);
+    let mut context = Context::from_waker(Waker::noop());
+    if !scheduler.poll(&mut context).is_pending() {
+        return Err(JsValue::from_str(
+            "authority Fate escaped before IndexedDB suspended",
+        ));
+    }
+    let responses = futures::future::poll_fn(|context| scheduler.poll(context))
+        .await
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    if !matches!(
+        responses.as_slice(),
+        [SyncMessage::FateUpdate {
+            tx_id: response_tx,
+            durability: Some(DurabilityTier::Global),
+            ..
+        }] if *response_tx == tx_id
+    ) {
+        return Err(JsValue::from_str(
+            "authority did not release the exact durable Fate",
+        ));
+    }
+    drop(scheduler);
+
+    let mut reopened = IndexedDbOrderedStorage::open(page_store, 4096, 32)
+        .await
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    let transaction_scan = OwnedStorageRequest::new(OwnedStorageOperation::Scan(
+        OwnedScanRequest::prefix("jazz_transactions", Vec::new()),
+    ));
+    let OwnedStorageResponse::Rows(transactions) =
+        complete_request(&mut reopened, &transaction_scan).await?
+    else {
+        return Err(JsValue::from_str(
+            "authority durable scan returned wrong response",
+        ));
+    };
+    if transactions.is_empty() {
+        return Err(JsValue::from_str(
+            "authority Fate was released without durable transaction state",
+        ));
+    }
+    Ok(JsValue::from_str(
+        "Jazz authority Fate followed IndexedDB durability",
     ))
 }
