@@ -12,7 +12,7 @@ use groove::storage::pollable::{
 };
 use groove::storage::{Error, MemoryStorage, OwnedWriteOperation};
 use groove::{
-    db::{Database, GraphBuilder, PollableDatabase},
+    db::{Database, GraphBuilder, PersistenceQueue, PollableDatabase},
     records::Value,
     schema::{ColumnSchema, ColumnType, DatabaseSchema, IntegerKeyType, PrimaryKey, TableSchema},
 };
@@ -412,5 +412,45 @@ fn cancelling_after_local_publication_poisons_instead_of_rolling_back() {
     assert!(matches!(
         database.resident().primary_key_scan("rows", &[]),
         Err(groove::db::Error::DatabasePoisoned)
+    ));
+}
+
+#[test]
+fn multi_batch_unit_completes_only_after_its_final_durable_batch() {
+    let schema = DatabaseSchema::new([TableSchema::new(
+        "rows",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("value", ColumnType::String),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+    let mut resident = Database::new(schema, MemoryStorage::new(&["rows", "indices"])).unwrap();
+    let mut receipts = Vec::new();
+    for id in [1, 2] {
+        let mut batch = resident.open_batch();
+        batch.insert(
+            "rows",
+            vec![Value::U64(id), Value::String(format!("row {id}"))],
+        );
+        receipts.push(resident.commit_batch_for_async_persistence(batch).unwrap());
+    }
+
+    let (storage, permitted, _) = OrderedControlledStorage::new(&["rows", "indices"]);
+    let mut queue = PersistenceQueue::new(Box::new(storage));
+    let unit = queue.enqueue_unit(receipts);
+    let waker = Waker::from(Arc::new(NoopWake));
+    let mut context = Context::from_waker(&waker);
+
+    assert!(queue.poll(&mut context).is_pending());
+    permitted.set(1);
+    assert!(
+        queue.poll(&mut context).is_pending(),
+        "the first durable batch cannot complete the containing unit"
+    );
+    permitted.set(2);
+    assert!(matches!(
+        queue.poll(&mut context),
+        Poll::Ready(Ok(completed)) if completed == vec![unit]
     ));
 }
