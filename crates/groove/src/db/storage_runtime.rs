@@ -135,6 +135,83 @@ where
     persistence: PersistenceQueue,
 }
 
+/// Query-driven database over a synchronous resident working set and a
+/// pollable durable source.
+///
+/// Reads run normally until the cache reports one exact missing input. The
+/// same operation then owns that request across suspension, admits its result,
+/// and retries evaluation. No startup-wide scan is performed.
+#[doc(hidden)]
+pub struct DemandDrivenDatabase {
+    database: Database<crate::storage::DemandLoadedStorage>,
+    cache: crate::storage::DemandLoadedStorage,
+    persistence: Box<dyn PollableOrderedKvStorage>,
+    pending_read: Option<OwnedStorageRequest>,
+}
+
+impl DemandDrivenDatabase {
+    #[doc(hidden)]
+    pub fn new(
+        schema: crate::schema::DatabaseSchema,
+        persistence: Box<dyn PollableOrderedKvStorage>,
+    ) -> Result<Self, Error> {
+        let column_families = schema.column_families();
+        let cache = crate::storage::DemandLoadedStorage::new(&column_families);
+        let database = Database::new(schema, cache.clone())?;
+        Ok(Self {
+            database,
+            cache,
+            persistence,
+            pending_read: None,
+        })
+    }
+
+    /// Poll a retryable read. The closure may execute more than once but must
+    /// not mutate external state.
+    #[doc(hidden)]
+    pub fn poll_read<T>(
+        &mut self,
+        context: &mut Context<'_>,
+        mut read: impl FnMut(&Database<crate::storage::DemandLoadedStorage>) -> Result<T, Error>,
+    ) -> Poll<Result<T, Error>> {
+        loop {
+            if let Some(request) = self.pending_read.as_ref() {
+                match self.persistence.poll_request(request, context) {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(Ok(response)) => {
+                        let request = self
+                            .pending_read
+                            .take()
+                            .expect("polled read request remains pending");
+                        self.cache.admit(request.operation().clone(), response)?;
+                    }
+                    Poll::Ready(Err(error)) => return Poll::Ready(Err(error.into())),
+                }
+            }
+            match read(&self.database) {
+                Ok(value) => return Poll::Ready(Ok(value)),
+                Err(Error::Storage(error)) => match *error {
+                    crate::storage::Error::NotResident { request } => {
+                        self.pending_read = Some(OwnedStorageRequest::new(*request));
+                    }
+                    error => return Poll::Ready(Err(error.into())),
+                },
+                Err(error) => return Poll::Ready(Err(error)),
+            }
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn resident(&self) -> &Database<crate::storage::DemandLoadedStorage> {
+        &self.database
+    }
+
+    #[doc(hidden)]
+    pub fn resident_mut(&mut self) -> &mut Database<crate::storage::DemandLoadedStorage> {
+        &mut self.database
+    }
+}
+
 impl<S> PollableDatabase<S>
 where
     S: OrderedKvStorage,

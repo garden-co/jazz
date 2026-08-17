@@ -17,6 +17,7 @@ mod key_codec;
 mod memory;
 mod opfs;
 pub mod pollable;
+mod resident_cache;
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -26,6 +27,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub use memory::MemoryStorage;
+pub use resident_cache::DemandLoadedStorage;
 #[cfg(test)]
 pub type TestStorage = NativeBtreeStorage;
 #[cfg(target_arch = "wasm32")]
@@ -1656,6 +1658,10 @@ impl<'a> WriteOperation<'a> {
 
 #[derive(Debug, Error)]
 pub enum Error {
+    #[error("ordered storage input is not resident: {request:?}")]
+    NotResident {
+        request: Box<pollable::OwnedStorageOperation>,
+    },
     #[error("column family not found: {0}")]
     ColumnFamilyNotFound(String),
     #[error("invalid storage layout: {0}")]
