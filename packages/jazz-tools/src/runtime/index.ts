@@ -16,7 +16,6 @@ export {
   type RestoreOptions,
   type SubscriptionCallback,
   type UpdateOptions,
-  type UpsertOptions,
   type WasmModule,
   type WriteResult,
   type WriteHandle,

@@ -29,7 +29,6 @@ import {
   type CreateOptions,
   type RestoreOptions,
   type UpdateOptions,
-  type UpsertOptions,
   type DurabilityTier,
   type QueryExecutionOptions,
   type QueryPropagation,
@@ -759,7 +758,12 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
    * The upsert is scoped to this transaction, and will only be globally visible
    * once it's committed.
    */
-  upsert<T, Init>(table: TableProxy<T, Init>, data: Partial<Init>, options: UpsertOptions): void {
+  upsert<T, Init>(
+    table: TableProxy<T, Init>,
+    id: string,
+    data: Partial<Init>,
+    options?: UpdateOptions,
+  ): void {
     this.bindTable(table);
     const transformedData = transformInputColumns(table, data);
     const values = toWriteRecordForOperation(
@@ -770,7 +774,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     );
     const client = this.resolveClient(table._schema);
     const { openBatchId, session, attribution } = this.requireBinding("upsert");
-    client.upsertInternal(table._table, values, options, session, attribution, openBatchId);
+    client.upsertInternal(table._table, id, values, options, session, attribution, openBatchId);
   }
 
   /**
@@ -1282,8 +1286,9 @@ export class Db {
    */
   upsert<T, Init>(
     table: TableProxy<T, Init>,
+    id: string,
     data: Partial<Init>,
-    options: UpsertOptions,
+    options?: UpdateOptions,
   ): WriteHandle {
     const client = this.getClient(table._schema);
     const transformedData = transformInputColumns(table, data);
@@ -1295,7 +1300,7 @@ export class Db {
     );
     const context = this.getRuntimeOperationContext();
     return this.wrapWriteWait(
-      client.upsert(table._table, values, options, context?.session, context?.attribution),
+      client.upsert(table._table, id, values, options, context?.session, context?.attribution),
     );
   }
 

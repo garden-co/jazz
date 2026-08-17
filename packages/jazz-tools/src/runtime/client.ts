@@ -286,10 +286,6 @@ export interface CreateOptions extends TimestampOverrideOptions {
   id?: string;
 }
 
-export interface UpsertOptions extends TimestampOverrideOptions {
-  id: string;
-}
-
 export interface UpdateOptions extends TimestampOverrideOptions {}
 
 export interface DeleteOptions extends TimestampOverrideOptions {}
@@ -866,12 +862,13 @@ export class JazzClient {
    */
   upsert(
     table: string,
+    objectId: string,
     values: InsertValues,
-    options: UpsertOptions,
+    options?: UpdateOptions,
     session?: Session,
     attribution?: string,
   ): WriteHandle {
-    const result = this.upsertInternal(table, values, options, session, attribution);
+    const result = this.upsertInternal(table, objectId, values, options, session, attribution);
     return new WriteHandle(committedBatchId(result), this);
   }
 
@@ -880,8 +877,9 @@ export class JazzClient {
    */
   upsertInternal(
     table: string,
+    objectId: string,
     values: InsertValues,
-    options: UpsertOptions,
+    options?: UpdateOptions,
     session?: Session,
     attribution?: string,
     openBatchId?: OpenBatchId,
@@ -891,9 +889,9 @@ export class JazzClient {
       effectiveSession,
       attribution,
       openBatchId,
-      options.updatedAt,
+      options?.updatedAt,
     );
-    return this.runtime.upsert(table, options.id, values, writeContext);
+    return this.runtime.upsert(table, objectId, values, writeContext);
   }
 
   /**
