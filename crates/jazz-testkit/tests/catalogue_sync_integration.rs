@@ -1,5 +1,3 @@
-#![allow(dead_code, clippy::redundant_pattern_matching)]
-
 //! E2E catalogue sync integration test.
 //!
 //! Verifies that schema+lens catalogue objects propagate through the full

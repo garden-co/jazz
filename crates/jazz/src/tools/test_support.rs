@@ -10,6 +10,8 @@ use crate::tools::public_api::types::Value;
 use crate::tools::{DurabilityTier, JazzClient};
 
 #[cfg(feature = "testing")]
+pub use crate::tools::admin_catalogue_row_format::decode_row;
+
 pub type QueryRows = Vec<(ObjectId, Vec<Value>)>;
 
 #[cfg(feature = "testing")]
