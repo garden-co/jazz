@@ -22,6 +22,7 @@ client = ["native-websocket-transport"]
 server = [
   "native-websocket-transport",
   "dep:axum",
+  "dep:jsonwebtoken",
   "dep:tracing-subscriber",
   "dep:tower-http",
   "dep:async-stream",
@@ -92,7 +93,10 @@ tokio-tungstenite = { version = "0.29", default-features = false, features = [
 tungstenite = { version = "0.29", default-features = false, features = [
   "handshake",
 ], optional = true }
-jsonwebtoken = { version = "10.4", default-features = false, features = ["rust_crypto", "use_pem"] }
+jsonwebtoken = { version = "10.4", default-features = false, features = [
+  "rust_crypto",
+  "use_pem",
+], optional = true }
 base64 = "0.22"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 reqwest = { version = "0.12", default-features = false, features = [
