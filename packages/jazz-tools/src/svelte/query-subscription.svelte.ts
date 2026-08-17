@@ -24,7 +24,7 @@ function resolve<T>(value: MaybeGetter<T>): T {
  *   const todos = new QuerySubscription(app.todos.where({ done: false }), { tier: "edge" });
  * </script>
  *
- * {#if todos.loading}
+ * {#if todos.isLoading}
  *   <p>Loading...</p>
  * {:else if todos.error}
  *   <p>Error: {todos.error.message}</p>
@@ -37,7 +37,7 @@ function resolve<T>(value: MaybeGetter<T>): T {
  */
 class QuerySubscriptionBase<T extends { id: string }, Result> {
   current: Result | undefined = $state();
-  loading: boolean = $state(true);
+  isLoading: boolean = $state(true);
   error: Error | null = $state(null);
 
   protected constructor(
@@ -51,7 +51,7 @@ class QuerySubscriptionBase<T extends { id: string }, Result> {
       const resolvedQuery = resolve(query);
       if (!resolvedQuery) {
         this.current = undefined;
-        this.loading = false;
+        this.isLoading = false;
         this.error = null;
         return;
       }
@@ -62,7 +62,7 @@ class QuerySubscriptionBase<T extends { id: string }, Result> {
       const resolvedOptions = resolve(options);
       const subscriptionQuery = mode === "one" ? limitQueryToOne(resolvedQuery) : resolvedQuery;
 
-      this.loading = true;
+      this.isLoading = true;
       this.error = null;
 
       // Capture the unsubscribe in a local and return it directly, so the
@@ -79,13 +79,13 @@ class QuerySubscriptionBase<T extends { id: string }, Result> {
           this.current = (
             mode === "one" ? (entry.state.data[0] ?? null) : entry.state.data
           ) as Result;
-          this.loading = false;
+          this.isLoading = false;
         }
 
         unsubscribe = entry.subscribe({
           onfulfilled: (data: T[]) => {
             this.current = (mode === "one" ? (data[0] ?? null) : data) as Result;
-            this.loading = false;
+            this.isLoading = false;
             this.error = null;
           },
           onDelta: (delta: SubscriptionDelta<T>) => {
@@ -105,17 +105,17 @@ class QuerySubscriptionBase<T extends { id: string }, Result> {
           onError: (error: unknown) => {
             this.error = error instanceof Error ? error : new Error(String(error));
             this.current = undefined;
-            this.loading = false;
+            this.isLoading = false;
           },
           onReset: () => {
             this.current = undefined;
             this.error = null;
-            this.loading = true;
+            this.isLoading = true;
           },
         });
       } catch (e) {
         this.error = e instanceof Error ? e : new Error(String(e));
-        this.loading = false;
+        this.isLoading = false;
       }
 
       return () => {
