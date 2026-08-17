@@ -10,7 +10,7 @@ use groove::storage::pollable::{
 };
 use groove::storage::{Error, OwnedWriteOperation, apply_storage_delta};
 use groove::{
-    db::{Database, GraphBuilder, PollableDatabase},
+    db::{Database, DemandDrivenDatabase, GraphBuilder, PollableDatabase},
     records::Value,
     schema::{ColumnSchema, ColumnType, DatabaseSchema, IntegerKeyType, PrimaryKey, TableSchema},
     storage::MemoryStorage,
@@ -621,5 +621,137 @@ pub async fn verify_indexeddb_authority_publication(
     }
     Ok(JsValue::from_str(
         "Jazz authority Fate followed IndexedDB durability",
+    ))
+}
+
+/// Exercise query-driven IndexedDB acquisition followed by a synchronous
+/// resident write and asynchronously durable persistence of that write.
+#[wasm_bindgen]
+pub async fn verify_indexeddb_demand_loading(page_store: JsValue) -> Result<JsValue, JsValue> {
+    let schema = DatabaseSchema::new([TableSchema::new(
+        "rows",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("value", ColumnType::String),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+    let mut seed = Database::new(schema.clone(), MemoryStorage::new(&["rows", "indices"]))
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    let mut seed_batch = seed.open_batch();
+    seed_batch.insert(
+        "rows",
+        vec![Value::U64(1), Value::String("durable seed".into())],
+    );
+    let seed_persistence = seed
+        .commit_batch_for_async_persistence(seed_batch)
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    let mut durable = IndexedDbOrderedStorage::open(page_store.clone(), 4096, 8)
+        .await
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    let seed_request = OwnedStorageRequest::new(OwnedStorageOperation::Commit(
+        seed_persistence.into_operations(),
+    ));
+    complete_request(&mut durable, &seed_request).await?;
+    drop(durable);
+
+    let durable = IndexedDbOrderedStorage::open(page_store.clone(), 4096, 8)
+        .await
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    let mut database = DemandDrivenDatabase::new(schema, Box::new(durable))
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    let mut context = Context::from_waker(Waker::noop());
+    if !database
+        .poll_read(&mut context, |database| {
+            database.primary_key_scan("rows", &[])
+        })
+        .is_pending()
+    {
+        return Err(JsValue::from_str(
+            "cold query-driven IndexedDB read did not suspend",
+        ));
+    }
+    let rows = futures::future::poll_fn(|context| {
+        database.poll_read(context, |database| database.primary_key_scan("rows", &[]))
+    })
+    .await
+    .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    if rows.len() != 1 {
+        return Err(JsValue::from_str("demand-loaded query missed durable seed"));
+    }
+    let subscription = database
+        .resident_mut()
+        .subscribe_one_sink(GraphBuilder::table("rows"))
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    if subscription
+        .recv()
+        .map_err(|error| JsValue::from_str(&error.to_string()))?
+        .to_values()
+        .map_err(|error| JsValue::from_str(&error.to_string()))?
+        .len()
+        != 1
+    {
+        return Err(JsValue::from_str(
+            "opened subscription did not use resident query state",
+        ));
+    }
+
+    let mut batch = Some(database.resident().open_batch());
+    batch.as_mut().unwrap().insert(
+        "rows",
+        vec![Value::U64(2), Value::String("local input".into())],
+    );
+    let Poll::Ready(Ok(persistence)) = database.poll_commit_batch(&mut context, &mut batch) else {
+        return Err(JsValue::from_str(
+            "opened working set did not make local write first-poll ready",
+        ));
+    };
+    let delta = subscription
+        .recv()
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    if delta
+        .to_values()
+        .map_err(|error| JsValue::from_str(&error.to_string()))?
+        .len()
+        != 1
+        || database
+            .resident()
+            .primary_key_scan("rows", &[Value::U64(2)])
+            .map_err(|error| JsValue::from_str(&error.to_string()))?
+            .len()
+            != 1
+    {
+        return Err(JsValue::from_str(
+            "resident callback and one-shot were not synchronous",
+        ));
+    }
+    database.enqueue_persistence(persistence);
+    if !database.poll_persistence(&mut context).is_pending() {
+        return Err(JsValue::from_str(
+            "real IndexedDB write unexpectedly completed in its first poll",
+        ));
+    }
+    futures::future::poll_fn(|context| database.poll_persistence(context))
+        .await
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    drop(database);
+
+    let mut reopened = IndexedDbOrderedStorage::open(page_store, 4096, 8)
+        .await
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    let scan = OwnedStorageRequest::new(OwnedStorageOperation::Scan(OwnedScanRequest::prefix(
+        "rows",
+        Vec::new(),
+    )));
+    let OwnedStorageResponse::Rows(rows) = complete_request(&mut reopened, &scan).await? else {
+        return Err(JsValue::from_str("reopen returned wrong response"));
+    };
+    if rows.len() != 2 {
+        return Err(JsValue::from_str(
+            "resident write did not survive IndexedDB persistence",
+        ));
+    }
+    Ok(JsValue::from_str(
+        "IndexedDB demand loading preserved synchronous resident writes",
     ))
 }
