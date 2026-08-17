@@ -115,6 +115,7 @@ impl JazzServerBuilder {
         self
     }
 
+    #[cfg(feature = "test-utils")]
     pub fn with_auth_clock(mut self, clock: crate::tools::middleware::auth::TestClock) -> Self {
         self.auth_clock = Some(clock.into());
         self

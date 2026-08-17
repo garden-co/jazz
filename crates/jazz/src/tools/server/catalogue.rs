@@ -157,7 +157,7 @@ impl StoredCatalogue {
         store
     }
 
-    #[cfg(any(test, feature = "test-utils"))]
+    #[cfg(any(test, feature = "embedded-server"))]
     #[allow(dead_code)]
     pub(crate) fn add_known_schema(&self, schema: Schema) -> Result<(), CatalogueError> {
         let mut index = self.index.lock().map_err(|_| CatalogueError::LockError)?;

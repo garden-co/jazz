@@ -205,10 +205,10 @@ async fn recover_tick_driver_error(
 
     if class == TickDriverErrorClass::Reconnect {
         inner.borrow_mut().disconnect_upstream();
-        if let Err(reconnect_error) = ClientDbInner::reconnect_upstream(inner).await {
+        if let Err(_reconnect_error) = ClientDbInner::reconnect_upstream(inner).await {
             #[cfg(feature = "sync-autopsy")]
             crate::db::sync_autopsy::record(format!(
-                "client tick driver reconnect attempt {attempts} failed: {reconnect_error}"
+                "client tick driver reconnect attempt {attempts} failed: {_reconnect_error}"
             ));
         }
     }
@@ -1036,6 +1036,7 @@ impl ClientDb {
         self.inner.borrow_mut().disconnect_upstream()
     }
 
+    #[cfg(feature = "test-utils")]
     async fn reconnect_upstream(&self) -> Result<bool> {
         ClientDbInner::reconnect_upstream(&self.inner).await
     }
