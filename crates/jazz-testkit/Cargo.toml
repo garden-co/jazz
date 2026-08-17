@@ -5,17 +5,32 @@ edition = "2024"
 
 [features]
 default = ["scenarios", "rocksdb", "transport-compression-zstd"]
-scenarios = ["jazz/test-utils"]
+scenarios = [
+  "jazz/test-utils",
+  "dep:jsonwebtoken",
+  "dep:reqwest",
+  "dep:serde",
+  "dep:serde_json",
+  "dep:tempfile",
+  "dep:tokio",
+  "dep:uuid",
+]
 rocksdb = ["scenarios", "jazz/rocksdb"]
-transport-compression-zstd = ["jazz/transport-compression-zstd"]
+transport-compression-zstd = ["jazz/transport-compression-zstd", "dep:zstd"]
 
 [dependencies]
 jazz.workspace = true
-jsonwebtoken = { version = "10.4", default-features = false, features = ["rust_crypto", "use_pem"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-tempfile = "3.27.0"
-tokio = { version = "1", features = ["time"] }
-uuid = { version = "1", features = ["v5"] }
-zstd = "0.13.3"
+jsonwebtoken = { version = "10.4", default-features = false, features = [
+  "rust_crypto",
+  "use_pem",
+], optional = true }
+reqwest = { version = "0.12", default-features = false, features = [
+  "json",
+  "rustls-tls",
+], optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
+tempfile = { version = "3.27.0", optional = true }
+tokio = { version = "1", features = ["time"], optional = true }
+uuid = { version = "1", features = ["v5"], optional = true }
+zstd = { version = "0.13.3", optional = true }

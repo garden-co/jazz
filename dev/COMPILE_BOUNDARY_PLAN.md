@@ -106,7 +106,8 @@ public client/server scenarios and their native adapters. Direct testkit runs
 default to the full scenario harness, RocksDB, and zstd as before, while Jazz's
 white-box dev-dependency disables those defaults. Its retained engine tests can
 use the duplex transport without re-enabling server, client, SQLite, RocksDB,
-or compression through feature unification.
+compression, HTTP/JWT, async-runtime, or fixture dependencies through feature
+unification. Those dependencies are optional and selected by `scenarios`.
 
 ### Tests
 
