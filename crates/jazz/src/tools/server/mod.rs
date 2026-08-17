@@ -23,7 +23,7 @@ pub mod core_websocket_transport {
 pub mod routes;
 pub(crate) mod runtime_catalogue;
 mod shutdown;
-#[cfg(feature = "test-utils")]
+#[cfg(feature = "embedded-server")]
 mod testing;
 
 pub use builder::{BuiltServer, ServerBuilder, StorageBackend};
@@ -34,7 +34,7 @@ pub(crate) use catalogue_storage::CatalogueRocksDbStorage;
 pub(crate) use catalogue_storage::CatalogueStorage;
 pub(crate) use catalogue_storage::{CatalogueMemoryStorage, DynCatalogueStorage};
 pub use shutdown::{ShutdownController, ShutdownPhase};
-#[cfg(feature = "test-utils")]
+#[cfg(feature = "embedded-server")]
 pub use testing::{JazzServer, JazzServerBuilder, ServerDataDir, TestJwtIssuer, TestJwtOptions};
 
 /// Cap on concurrent connections sharing a single `client_id`. When a new

@@ -89,6 +89,11 @@ tracer-provider lifetime ownership to `jazz-otel`; it no longer depends
 directly on `opentelemetry_sdk` or `tracing-subscriber`. Shell-specific default
 filter directives remain explicit inputs to the adapter boundary.
 
+The NAPI shell also selects the narrowly named `embedded-server` capability
+instead of Jazz's integration-test umbrella. This keeps the embedded native
+server/client/SQLite surface it actually exposes without compiling sync-autopsy
+instrumentation into the production binding artifact.
+
 ### Tests
 
 - Move `TestingClient`, `TestJwtIssuer`, reusable fixtures, simulation helpers,
