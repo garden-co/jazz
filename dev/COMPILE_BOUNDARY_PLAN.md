@@ -280,8 +280,11 @@ Do not publish compatibility-forwarding or duplicated-implementation steps.
      first-party storage injection, and removal of RocksDB from Jazz/Groove.
 2. `refactor: complete native transport composition`
    - Base: RocksDB extraction PR.
-   - Migrates all native callers and deletes Jazz's compatibility WebSocket
-     implementation and transport features.
+   - Migrates all native callers and the HTTP integration-test harness to
+     explicit connector injection, then deletes Jazz's compatibility WebSocket
+     implementation, re-export, and transport feature/dependencies. The test
+     harness must not be used as a reason to retain a second socket adapter in
+     the semantic crate.
 3. `refactor: define server runtime facade`
    - Base: native transport PR.
    - Introduces only the narrow semantic operations required by an outward
