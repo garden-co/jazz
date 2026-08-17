@@ -332,7 +332,7 @@ describe("vue/useAll", () => {
     const result = await scope.run(() => useAllSuspense(makeQuery()))!;
 
     expect(result.data.value).toEqual([alice]);
-    expect("loading" in result).toBe(false);
+    expect("isLoading" in result).toBe(false);
 
     scope.stop();
   });
