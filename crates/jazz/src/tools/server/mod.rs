@@ -12,8 +12,10 @@ mod catalogue;
 mod catalogue_entry;
 mod catalogue_storage;
 mod core_server_shell;
-pub mod core_websocket_transport;
-pub(crate) mod public_schema_convert;
+/// Backward-compatible path for the native WebSocket client adapter.
+pub mod core_websocket_transport {
+    pub use crate::tools::native_websocket_transport::*;
+}
 pub mod routes;
 pub(crate) mod runtime_catalogue;
 mod shutdown;

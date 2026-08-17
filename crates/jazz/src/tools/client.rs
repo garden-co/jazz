@@ -24,6 +24,7 @@ use crate::protocol::{
     ReadViewSourceSpec as CoreReadViewSourceSpec, ReadViewSpec as CoreReadViewSpec,
 };
 use crate::tools::OpenBatchId;
+use crate::tools::native_websocket_transport::WebSocketTransport;
 use crate::tools::public_api::query::{
     Condition as PublicCondition, SortDirection as PublicSortDirection,
 };
@@ -34,8 +35,7 @@ use crate::tools::public_schema::TableName;
 use crate::tools::public_schema::{ColumnType, Query, Session, TableSchema, Value, WriteContext};
 use crate::tools::public_schema::{OrderedRowDelta, QueryResult, Row};
 use crate::tools::public_schema::{Schema, validate_json_value};
-use crate::tools::server::core_websocket_transport::WebSocketTransport;
-use crate::tools::server::public_schema_convert::convert_public_schema;
+use crate::tools::public_schema_convert::convert_public_schema;
 #[cfg(feature = "test-utils")]
 use crate::tools::sync::ClientId;
 use crate::tools::sync::DurabilityTier;

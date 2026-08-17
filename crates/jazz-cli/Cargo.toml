@@ -12,11 +12,12 @@ sqlite = ["jazz/sqlite"]
 transport-compression-lz4 = ["jazz/transport-compression-lz4"]
 transport-compression-zstd = ["jazz/transport-compression-zstd"]
 transport-compression-ruzstd = ["jazz/transport-compression-ruzstd"]
-otel = ["jazz/otel-core", "dep:opentelemetry", "dep:opentelemetry_sdk"]
+otel = ["dep:jazz-otel", "dep:opentelemetry", "dep:opentelemetry_sdk"]
 test = ["jazz/test"]
 
 [dependencies]
 jazz = { workspace = true, default-features = false, features = ["server"] }
+jazz-otel = { workspace = true, optional = true }
 axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "tokio"] }
 clap = { version = "4", features = ["derive", "env"] }
 mimalloc = { version = "0.1", default-features = false }

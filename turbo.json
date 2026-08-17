@@ -40,6 +40,7 @@
         "$TURBO_ROOT$/crates/jazz-napi/build.rs",
         "$TURBO_ROOT$/crates/jazz-napi/scripts/**",
         "$TURBO_ROOT$/crates/jazz-napi/src/**/*.rs",
+        "$TURBO_ROOT$/crates/jazz-otel/**",
         "$TURBO_ROOT$/crates/jazz/**",
         "$TURBO_ROOT$/crates/groove/**",
         "$TURBO_ROOT$/crates/opfs-btree/**",

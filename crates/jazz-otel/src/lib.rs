@@ -1,4 +1,4 @@
-//! OpenTelemetry tracer initialization.
+//! OpenTelemetry exporter and runtime integration for Jazz process shells.
 //!
 //! Activated by the `otel` feature + `OTEL_EXPORTER_OTLP_ENDPOINT` being set
 //! at runtime in the CLI, or by explicit dev-server telemetry configuration

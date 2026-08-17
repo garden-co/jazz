@@ -587,7 +587,7 @@ pub(super) async fn publish_schema_handler(
 
     if (state.core_server_shell().is_some() || state.core_server_shell_storage_config.is_some())
         && let Err(err) =
-            crate::tools::server::public_schema_convert::convert_public_schema(&request.schema)
+            crate::tools::public_schema_convert::convert_public_schema(&request.schema)
     {
         return (
             StatusCode::BAD_REQUEST,
@@ -860,9 +860,8 @@ pub(super) async fn publish_permissions_handler(
     }
 
     if (state.core_server_shell().is_some() || state.core_server_shell_storage_config.is_some())
-        && let Err(err) = crate::tools::server::public_schema_convert::convert_public_schema(
-            &schema_with_permissions,
-        )
+        && let Err(err) =
+            crate::tools::public_schema_convert::convert_public_schema(&schema_with_permissions)
     {
         return (
             StatusCode::BAD_REQUEST,

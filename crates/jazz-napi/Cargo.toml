@@ -11,7 +11,8 @@ rocksdb = ["jazz/rocksdb"]
 crate-type = ["cdylib"]
 
 [dependencies]
-jazz = { path = "../jazz", default-features = false, features = ["test-utils", "otel-core"] }
+jazz = { path = "../jazz", default-features = false, features = ["test-utils"] }
+jazz-otel.workspace = true
 tokio = { version = "1", features = ["rt", "rt-multi-thread"] }
 base64 = "0.22"
 napi = { version = "3", features = ["napi6", "serde-json", "async"] }

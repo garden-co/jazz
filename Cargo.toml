@@ -5,6 +5,7 @@ members = [
   "crates/groove",
   "crates/jazz",
   "crates/jazz-cli",
+  "crates/jazz-otel",
   "crates/jazz-sim",
   "crates/opfs-btree",
   "crates/jazz-wasm",
@@ -26,6 +27,7 @@ exclude = ["examples/todo-server-rs", "examples/docs/todo-server-rs"]
 [workspace.dependencies]
 groove = { path = "crates/groove", default-features = false }
 jazz = { path = "crates/jazz", default-features = false }
+jazz-otel = { path = "crates/jazz-otel" }
 rustc-hash = "2.1.1"
 
 [patch.crates-io]

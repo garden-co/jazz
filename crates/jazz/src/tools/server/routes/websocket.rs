@@ -1014,8 +1014,8 @@ mod tests {
 
     use crate::tools::AppId;
     use crate::tools::middleware::AuthConfig;
+    use crate::tools::native_websocket_transport::WebSocketTransport;
     use crate::tools::public_schema::Schema;
-    use crate::tools::server::core_websocket_transport::WebSocketTransport;
     use crate::tools::server::{ServerBuilder, StorageBackend};
 
     const WS_STORM_SIZE: usize = 24;

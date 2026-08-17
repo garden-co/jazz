@@ -88,7 +88,9 @@ integration. Executable and binding shells opt into it.
 
 - Move `TestingClient`, `TestJwtIssuer`, reusable fixtures, simulation helpers,
   and the semantic oracle to `jazz-testkit`.
-- Stop enabling `test-utils` and `otel-core` as NAPI production features.
+- Make NAPI depend directly on `jazz-otel`; stop enabling telemetry support in
+  the semantic crate. Its remaining `test-utils` dependency belongs to the
+  later testkit slice.
 - Keep focused private white-box tests in `jazz`.
 - Move large public/scenario harnesses to `jazz-testkit` or dedicated integration
   packages so a focused core unit test does not compile every scenario fixture.
@@ -127,8 +129,9 @@ rocksdb = ["jazz-storage-rocksdb"]
 otel = ["jazz-otel"]
 ```
 
-Remove the umbrella `test`, `test-utils`, `client`, `server`, `cli`,
-`otel-core`, and `testing` features from semantic core after callers migrate.
+Remove the remaining umbrella `test`, `test-utils`, `client`, `server`, and
+`testing` features from semantic core after callers migrate. The executable
+and telemetry slices remove `cli` and `otel-core` first.
 
 ## Canonical build matrix
 
