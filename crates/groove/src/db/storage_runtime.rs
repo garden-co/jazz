@@ -146,8 +146,65 @@ pub struct DemandDrivenDatabase {
     database: Database<crate::storage::DemandLoadedStorage>,
     cache: crate::storage::DemandLoadedStorage,
     persistence: Box<dyn PollableOrderedKvStorage>,
-    pending_read: Option<OwnedStorageRequest>,
+    acquisition: StorageAcquisition,
     pending_persistence: VecDeque<OwnedStorageRequest>,
+}
+
+/// Owns the one durable input request that prevents a resident core operation
+/// from making progress. The evaluator remains synchronous; this driver
+/// admits the missing input and reruns the operation from its explicit
+/// pre-publication boundary.
+#[derive(Default)]
+struct StorageAcquisition {
+    pending: Option<OwnedStorageRequest>,
+}
+
+impl StorageAcquisition {
+    fn poll<T>(
+        &mut self,
+        persistence: &mut dyn PollableOrderedKvStorage,
+        cache: &crate::storage::DemandLoadedStorage,
+        context: &mut Context<'_>,
+        mut attempt: impl FnMut() -> Result<T, Error>,
+    ) -> Poll<Result<T, Error>> {
+        loop {
+            if let Some(request) = self.pending.as_ref() {
+                match persistence.poll_request(request, context) {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(Ok(response)) => {
+                        let request = self
+                            .pending
+                            .take()
+                            .expect("polled acquisition request remains pending");
+                        cache.admit(request.operation().clone(), response)?;
+                    }
+                    Poll::Ready(Err(error)) => return Poll::Ready(Err(error.into())),
+                }
+            }
+            match attempt() {
+                Ok(value) => return Poll::Ready(Ok(value)),
+                Err(error) => match missing_storage_input(error) {
+                    Ok(request) => {
+                        self.pending = Some(OwnedStorageRequest::new(request));
+                    }
+                    Err(error) => return Poll::Ready(Err(error)),
+                },
+            }
+        }
+    }
+}
+
+fn missing_storage_input(error: Error) -> Result<OwnedStorageOperation, Error> {
+    match error {
+        Error::Storage(error) => match *error {
+            crate::storage::Error::NotResident { request } => Ok(*request),
+            error => Err(error.into()),
+        },
+        Error::IvmRuntime(crate::ivm::IvmRuntimeError::Storage(
+            crate::storage::Error::NotResident { request },
+        )) => Ok(*request),
+        error => Err(error),
+    }
 }
 
 impl DemandDrivenDatabase {
@@ -163,7 +220,7 @@ impl DemandDrivenDatabase {
             database,
             cache,
             persistence,
-            pending_read: None,
+            acquisition: StorageAcquisition::default(),
             pending_persistence: VecDeque::new(),
         })
     }
@@ -176,36 +233,10 @@ impl DemandDrivenDatabase {
         context: &mut Context<'_>,
         mut read: impl FnMut(&Database<crate::storage::DemandLoadedStorage>) -> Result<T, Error>,
     ) -> Poll<Result<T, Error>> {
-        loop {
-            if let Some(request) = self.pending_read.as_ref() {
-                match self.persistence.poll_request(request, context) {
-                    Poll::Pending => return Poll::Pending,
-                    Poll::Ready(Ok(response)) => {
-                        let request = self
-                            .pending_read
-                            .take()
-                            .expect("polled read request remains pending");
-                        self.cache.admit(request.operation().clone(), response)?;
-                    }
-                    Poll::Ready(Err(error)) => return Poll::Ready(Err(error.into())),
-                }
-            }
-            match read(&self.database) {
-                Ok(value) => return Poll::Ready(Ok(value)),
-                Err(Error::Storage(error)) => match *error {
-                    crate::storage::Error::NotResident { request } => {
-                        self.pending_read = Some(OwnedStorageRequest::new(*request));
-                    }
-                    error => return Poll::Ready(Err(error.into())),
-                },
-                Err(Error::IvmRuntime(crate::ivm::IvmRuntimeError::Storage(
-                    crate::storage::Error::NotResident { request },
-                ))) => {
-                    self.pending_read = Some(OwnedStorageRequest::new(*request));
-                }
-                Err(error) => return Poll::Ready(Err(error)),
-            }
-        }
+        self.acquisition
+            .poll(self.persistence.as_mut(), &self.cache, context, || {
+                read(&self.database)
+            })
     }
 
     /// Poll prerequisite durable reads, then execute exactly one real resident
@@ -218,40 +249,19 @@ impl DemandDrivenDatabase {
         context: &mut Context<'_>,
         batch: &mut Option<DatabaseBatch>,
     ) -> Poll<Result<PendingPersistenceBatch, Error>> {
-        loop {
-            if let Some(request) = self.pending_read.as_ref() {
-                match self.persistence.poll_request(request, context) {
-                    Poll::Pending => return Poll::Pending,
-                    Poll::Ready(Ok(response)) => {
-                        let request = self
-                            .pending_read
-                            .take()
-                            .expect("polled commit input remains pending");
-                        self.cache.admit(request.operation().clone(), response)?;
-                    }
-                    Poll::Ready(Err(error)) => return Poll::Ready(Err(error.into())),
-                }
-            }
-            let pending_batch = batch
-                .as_ref()
-                .expect("commit batch is consumed exactly once after Ready");
-            match self.database.preflight_batch_storage_inputs(pending_batch) {
-                Ok(()) => {
-                    let batch = batch.take().expect("preflight retains commit batch");
-                    return Poll::Ready(self.database.commit_batch_for_async_persistence(batch));
-                }
-                Err(Error::Storage(error)) => match *error {
-                    crate::storage::Error::NotResident { request } => {
-                        self.pending_read = Some(OwnedStorageRequest::new(*request));
-                    }
-                    error => return Poll::Ready(Err(error.into())),
-                },
-                Err(Error::IvmRuntime(crate::ivm::IvmRuntimeError::Storage(
-                    crate::storage::Error::NotResident { request },
-                ))) => {
-                    self.pending_read = Some(OwnedStorageRequest::new(*request));
-                }
-                Err(error) => return Poll::Ready(Err(error)),
+        let pending_batch = batch
+            .as_ref()
+            .expect("commit batch is consumed exactly once after Ready");
+        match self
+            .acquisition
+            .poll(self.persistence.as_mut(), &self.cache, context, || {
+                self.database.preflight_batch_storage_inputs(pending_batch)
+            }) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
+            Poll::Ready(Ok(())) => {
+                let batch = batch.take().expect("preflight retains commit batch");
+                Poll::Ready(self.database.commit_batch_for_async_persistence(batch))
             }
         }
     }
@@ -264,43 +274,21 @@ impl DemandDrivenDatabase {
         context: &mut Context<'_>,
         graph: &mut Option<GraphBuilder>,
     ) -> Poll<Result<Subscription, Error>> {
-        loop {
-            if let Some(request) = self.pending_read.as_ref() {
-                match self.persistence.poll_request(request, context) {
-                    Poll::Pending => return Poll::Pending,
-                    Poll::Ready(Ok(response)) => {
-                        let request = self
-                            .pending_read
-                            .take()
-                            .expect("polled subscription input remains pending");
-                        self.cache.admit(request.operation().clone(), response)?;
-                    }
-                    Poll::Ready(Err(error)) => return Poll::Ready(Err(error.into())),
-                }
-            }
-            let pending_graph = graph
-                .as_ref()
-                .expect("subscription graph is consumed exactly once after Ready");
-            match self
-                .database
-                .preflight_subscription_storage_inputs(pending_graph)
-            {
-                Ok(()) => {
-                    let graph = graph.take().expect("preflight retains subscription graph");
-                    return Poll::Ready(self.database.subscribe_one_sink(graph));
-                }
-                Err(Error::Storage(error)) => match *error {
-                    crate::storage::Error::NotResident { request } => {
-                        self.pending_read = Some(OwnedStorageRequest::new(*request));
-                    }
-                    error => return Poll::Ready(Err(error.into())),
-                },
-                Err(Error::IvmRuntime(crate::ivm::IvmRuntimeError::Storage(
-                    crate::storage::Error::NotResident { request },
-                ))) => {
-                    self.pending_read = Some(OwnedStorageRequest::new(*request));
-                }
-                Err(error) => return Poll::Ready(Err(error)),
+        let pending_graph = graph
+            .as_ref()
+            .expect("subscription graph is consumed exactly once after Ready");
+        match self
+            .acquisition
+            .poll(self.persistence.as_mut(), &self.cache, context, || {
+                self.database.subscribe_one_sink(pending_graph.clone())
+            }) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
+            Poll::Ready(Ok(subscription)) => {
+                graph
+                    .take()
+                    .expect("subscription graph remains owned until opening succeeds");
+                Poll::Ready(Ok(subscription))
             }
         }
     }

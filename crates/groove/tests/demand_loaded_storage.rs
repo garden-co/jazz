@@ -230,6 +230,7 @@ fn opened_subscription_inherits_synchronous_write_visibility_over_async_storage(
     let mut database = DemandDrivenDatabase::new(schema, Box::new(durable)).unwrap();
     let mut context = Context::from_waker(Waker::noop());
     let mut graph = Some(GraphBuilder::table("rows"));
+    let graph_nodes_before_open = database.resident().runtime_stats().graph_nodes;
     assert!(
         database
             .poll_subscribe_one_sink(&mut context, &mut graph)
@@ -239,6 +240,11 @@ fn opened_subscription_inherits_synchronous_write_visibility_over_async_storage(
         database.resident().runtime_stats().active_subscriptions,
         0,
         "a cold preflight must not partially register the real subscription"
+    );
+    assert_eq!(
+        database.resident().runtime_stats().graph_nodes,
+        graph_nodes_before_open,
+        "a suspended opening must release every staged graph node"
     );
     released.set(true);
     let Poll::Ready(Ok(subscription)) = database.poll_subscribe_one_sink(&mut context, &mut graph)
