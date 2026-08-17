@@ -1,5 +1,3 @@
-#![cfg(feature = "test")]
-
 use jazz_testkit as support;
 
 use std::time::Duration;
@@ -197,7 +195,7 @@ async fn publish_schema(server: &JazzServer, schema: &jazz::tools::Schema) {
         server.app_id(),
         "dev",
         "main",
-        &[schema.clone()],
+        std::slice::from_ref(schema),
         &[],
     )
     .await
@@ -741,7 +739,7 @@ async fn inherited_update_policy_allows_update_through_parent() {
                 server.app_id(),
                 "dev",
                 "main",
-                &[schema.clone()],
+                std::slice::from_ref(&schema),
                 &[],
             )
             .await
@@ -874,7 +872,7 @@ async fn inherited_update_policy_allows_multi_hop_update_chain() {
                 server.app_id(),
                 "dev",
                 "main",
-                &[schema.clone()],
+                std::slice::from_ref(&schema),
                 &[],
             )
             .await
@@ -992,7 +990,7 @@ async fn inherited_update_policy_allows_reparenting_when_old_and_new_parents_gra
                 server.app_id(),
                 "dev",
                 "main",
-                &[schema.clone()],
+                std::slice::from_ref(&schema),
                 &[],
             )
             .await

@@ -1,5 +1,3 @@
-#![cfg(feature = "test")]
-
 //! Integration test for ephemeral payload claims merging into the server session.
 //!
 //! Verifies the fix from 094a5626: when a JWT-authenticated client supplies

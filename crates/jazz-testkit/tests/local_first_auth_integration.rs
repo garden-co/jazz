@@ -1,5 +1,3 @@
-#![cfg(feature = "test")]
-
 //! End-to-end integration coverage for local-first (Ed25519 seed) auth.
 //!
 //! These tests prove that a `JazzClient` carrying an Ed25519-minted Bearer

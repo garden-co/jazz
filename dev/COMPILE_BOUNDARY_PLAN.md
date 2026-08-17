@@ -100,7 +100,10 @@ Progress: reusable scenario-client, JWT, permissions-publication, query-wait,
 and in-memory duplex helpers now live in `jazz-testkit`. Existing Jazz
 integration targets consume that package through a dev-dependency, so helper
 changes compile as one independently cached unit while the scenario targets
-are migrated outward incrementally.
+are migrated outward incrementally. The first outward cluster covers public
+claims, inherited policies, policy-aware branches, authorization across schema
+renames, scope revocation, and local-first authentication; these seven binaries
+now compile and run under `jazz-testkit` rather than Jazz's core test inventory.
 
 ## Proposed feature model
 
