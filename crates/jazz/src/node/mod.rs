@@ -736,6 +736,8 @@ struct QueryServing {
         BTreeMap<BindingViewKey, BTreeMap<ResultRowMembershipKey, ResultMemberEntry>>,
     /// Subscriber-side settled non-row facts by canonical query binding/view.
     settled_program_facts: BTreeMap<BindingViewKey, BTreeSet<ViewFactEntry>>,
+    /// Durable binding views admitted into the process-local settled caches.
+    known_state_loaded_binding_views: BTreeSet<BindingViewKey>,
     /// Server-stamped settled-through cursor for each canonical binding view.
     settled_through_by_binding_view: BTreeMap<BindingViewKey, GlobalSeq>,
     /// Server-stamped authorization generation paired with settled fast state.
@@ -1628,28 +1630,6 @@ fn settled_program_fact_key(
         Error::InvalidStoredValue("settled program fact must encode")
     })?));
     Ok(key)
-}
-
-fn binding_view_key_from_store_key(
-    key: &[Value],
-    context: &'static str,
-) -> Result<BindingViewKey, Error> {
-    if key.len() < 3 {
-        return Err(Error::InvalidStoredValue(context));
-    }
-    let shape_id = match &key[0] {
-        Value::Uuid(uuid) => ShapeId(*uuid),
-        _ => return Err(Error::InvalidStoredValue(context)),
-    };
-    let binding_id = match &key[1] {
-        Value::Uuid(uuid) => BindingId(*uuid),
-        _ => return Err(Error::InvalidStoredValue(context)),
-    };
-    let read_view = match &key[2] {
-        Value::Uuid(uuid) => ReadViewKey { id: *uuid },
-        _ => return Err(Error::InvalidStoredValue(context)),
-    };
-    Ok(BindingViewKey::new(shape_id, binding_id, read_view))
 }
 
 /// Details of a persisted current row that could not be decoded at the point of use.

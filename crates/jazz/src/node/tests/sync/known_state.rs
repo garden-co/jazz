@@ -1100,6 +1100,12 @@ fn fast_known_state_fact_survives_storage_reopen() {
     drop(reader);
 
     let mut reopened = open_node_at(&reader_dir, schema());
+    assert!(
+        reopened.query.settled_result_sets.is_empty()
+            && reopened.query.settled_program_facts.is_empty()
+            && reopened.query.settled_through_by_binding_view.is_empty(),
+        "node open must not hydrate every persisted binding view"
+    );
     let declaration = reopened
         .known_state_declaration_for_subscription(
             &shape,
@@ -1115,6 +1121,11 @@ fn fast_known_state_fact_survives_storage_reopen() {
             completeness: crate::protocol::KnownStateCompleteness::FastCurrentMembership,
             position: GlobalSeq(1),
         })
+    );
+    assert_eq!(
+        reopened.query.known_state_loaded_binding_views.len(),
+        1,
+        "the requested binding alone is admitted on demand"
     );
 }
 
@@ -1176,4 +1187,3 @@ fn known_state_declaration_never_skips_unfated_edge_members() {
     assert_eq!(version_bundles[0].tx.tx_id, tx_id);
     assert_eq!(version_bundles[0].versions.len(), 1);
 }
-

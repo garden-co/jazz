@@ -163,6 +163,9 @@ where
             self.query
                 .known_state_declared_binding_views
                 .remove(&binding_view_key);
+            self.query
+                .known_state_loaded_binding_views
+                .remove(&binding_view_key);
         }
         self.query
             .registered_bindings
@@ -435,6 +438,7 @@ where
         shape: &ValidatedQuery,
         binding_view_key: BindingViewKey,
     ) -> Result<Option<RelationSnapshot>, Error> {
+        self.load_known_state_fact(binding_view_key)?;
         let Some(result_members) = self
             .query
             .settled_result_sets
@@ -547,7 +551,9 @@ where
             // rows the serving peer has not observed yet; truncating that to an
             // exact set would silently overclaim and can make stale rehydrate
             // responses suppress local live state.
-            return Ok(None);
+            if !self.has_settled_result_set(binding_view_key) {
+                return Ok(None);
+            }
         }
         if let Some(position) = self.settled_through_for_binding_view(binding_view_key) {
             let authorization_progress = self

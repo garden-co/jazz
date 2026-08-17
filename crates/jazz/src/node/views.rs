@@ -936,6 +936,9 @@ where
             }
             Err(error) => return Err(error),
         };
+        if !reset_result_set {
+            self.load_known_state_fact(binding_view_key)?;
+        }
         if reset_result_set {
             self.query
                 .pending_terminal_operations_by_binding_view

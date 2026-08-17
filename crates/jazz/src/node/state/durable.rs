@@ -217,6 +217,7 @@ where
             DurabilityTier::Global => {
                 let binding_view_key =
                     BindingViewKey::from_canonical_subscription_key(subscription);
+                self.load_known_state_fact(binding_view_key)?;
                 let Some(row_result_set) = self.query.settled_result_sets.get(&binding_view_key)
                 else {
                     return Ok(Vec::new());
@@ -409,29 +410,90 @@ where
         &mut self,
         binding_view_key: BindingViewKey,
     ) -> Result<Option<GlobalSeq>, Error> {
-        let store = self.database.direct_record_store(KNOWN_STATE_FACTS_STORE)?;
-        let Some(record) = store.get(&known_state_fact_key(binding_view_key))? else {
-            return Ok(None);
-        };
-        let settled_through = match record.get_idx(0)? {
-            Value::U64(value) => GlobalSeq(value),
-            _ => {
-                return Err(Error::InvalidStoredValue(
-                    "known-state settled-through must be u64",
-                ));
-            }
-        };
-        self.query
-            .settled_through_by_binding_view
-            .insert(binding_view_key, settled_through);
-        if let Value::U64(progress) = record.get_idx(1)?
-            && progress != u64::MAX
+        if self
+            .query
+            .known_state_loaded_binding_views
+            .contains(&binding_view_key)
         {
-            self.query
-                .authorization_progress_by_binding_view
-                .insert(binding_view_key, progress);
+            return Ok(self
+                .query
+                .settled_through_by_binding_view
+                .get(&binding_view_key)
+                .copied());
         }
-        Ok(Some(settled_through))
+        let store = self.database.direct_record_store(KNOWN_STATE_FACTS_STORE)?;
+        let settled_through = store
+            .get(&known_state_fact_key(binding_view_key))?
+            .map(|record| {
+                let settled_through = match record.get_idx(0)? {
+                    Value::U64(value) => GlobalSeq(value),
+                    _ => {
+                        return Err(Error::InvalidStoredValue(
+                            "known-state settled-through must be u64",
+                        ));
+                    }
+                };
+                self.query
+                    .settled_through_by_binding_view
+                    .insert(binding_view_key, settled_through);
+                if let Value::U64(progress) = record.get_idx(1)?
+                    && progress != u64::MAX
+                {
+                    self.query
+                        .authorization_progress_by_binding_view
+                        .insert(binding_view_key, progress);
+                }
+                Ok(settled_through)
+            })
+            .transpose()?;
+
+        let prefix = binding_view_store_prefix(binding_view_key);
+        let store = self
+            .database
+            .direct_record_store(SETTLED_RESULT_MEMBERS_STORE)?;
+        let members = store
+            .prefix_entries(&prefix)?
+            .into_iter()
+            .map(|entry| match entry.key.get(3) {
+                Some(Value::Bytes(bytes)) if entry.key.len() == 4 => Ok(bytes.clone()),
+                _ => Err(Error::InvalidStoredValue(
+                    "settled result member payload must be bytes",
+                )),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(store);
+        for member_bytes in members {
+            let member = postcard::from_bytes::<ResultMemberEntry>(&member_bytes).map_err(|_| {
+                Error::InvalidStoredValue("settled result member payload must decode")
+            })?;
+            self.insert_settled_result_member_indexed(binding_view_key, member);
+        }
+
+        let store = self
+            .database
+            .direct_record_store(SETTLED_PROGRAM_FACTS_STORE)?;
+        for entry in store.prefix_entries(&prefix)? {
+            let fact_bytes = match entry.key.get(3) {
+                Some(Value::Bytes(bytes)) if entry.key.len() == 4 => bytes,
+                _ => {
+                    return Err(Error::InvalidStoredValue(
+                        "settled program fact payload must be bytes",
+                    ));
+                }
+            };
+            let fact = postcard::from_bytes::<ViewFactEntry>(fact_bytes).map_err(|_| {
+                Error::InvalidStoredValue("settled program fact payload must decode")
+            })?;
+            self.query
+                .settled_program_facts
+                .entry(binding_view_key)
+                .or_default()
+                .insert(fact);
+        }
+        self.query
+            .known_state_loaded_binding_views
+            .insert(binding_view_key);
+        Ok(settled_through)
     }
 
     pub(crate) fn clear_all_known_state_facts(&mut self) -> Result<(), Error> {
@@ -446,6 +508,7 @@ where
         }
         self.query.settled_through_by_binding_view.clear();
         self.query.authorization_progress_by_binding_view.clear();
+        self.query.known_state_loaded_binding_views.clear();
         self.clear_all_settled_result_state()?;
         Ok(())
     }
@@ -618,134 +681,6 @@ where
         self.database.flush()?;
         self.persist_clean_close_marker()?;
         self.database.close()?;
-        Ok(())
-    }
-
-    fn recover_known_state_facts(&mut self) -> Result<(), Error> {
-        self.query.settled_through_by_binding_view.clear();
-        self.query.authorization_progress_by_binding_view.clear();
-        self.query.settled_result_sets.clear();
-        self.query.settled_result_row_index.clear();
-        self.query.settled_program_facts.clear();
-        let store = self.database.direct_record_store(KNOWN_STATE_FACTS_STORE)?;
-        for entry in store.prefix_entries(&[])? {
-            if entry.key.len() != 3 {
-                return Err(Error::InvalidStoredValue(
-                    "known-state fact key must have three columns",
-                ));
-            }
-            let shape_id = match &entry.key[0] {
-                Value::Uuid(uuid) => ShapeId(*uuid),
-                _ => {
-                    return Err(Error::InvalidStoredValue(
-                        "known-state shape id must be uuid",
-                    ));
-                }
-            };
-            let binding_id = match &entry.key[1] {
-                Value::Uuid(uuid) => BindingId(*uuid),
-                _ => {
-                    return Err(Error::InvalidStoredValue(
-                        "known-state binding id must be uuid",
-                    ));
-                }
-            };
-            let read_view = match &entry.key[2] {
-                Value::Uuid(uuid) => ReadViewKey { id: *uuid },
-                _ => {
-                    return Err(Error::InvalidStoredValue(
-                        "known-state read view must be uuid",
-                    ));
-                }
-            };
-            let settled_through = match entry.value.get_idx(0)? {
-                Value::U64(value) => GlobalSeq(value),
-                _ => {
-                    return Err(Error::InvalidStoredValue(
-                        "known-state settled-through must be u64",
-                    ));
-                }
-            };
-            let binding_view_key = BindingViewKey::new(shape_id, binding_id, read_view);
-            self.query
-                .settled_through_by_binding_view
-                .insert(binding_view_key, settled_through);
-            match entry.value.get_idx(1)? {
-                Value::U64(progress) if progress != u64::MAX => {
-                    self.query
-                        .authorization_progress_by_binding_view
-                        .insert(binding_view_key, progress);
-                }
-                Value::U64(_) => {}
-                _ => {
-                    return Err(Error::InvalidStoredValue(
-                        "known-state authorization progress must be u64",
-                    ));
-                }
-            }
-        }
-        let store = self
-            .database
-            .direct_record_store(SETTLED_RESULT_MEMBERS_STORE)?;
-        let mut recovered_members = Vec::new();
-        for entry in store.prefix_entries(&[])? {
-            if entry.key.len() != 4 {
-                return Err(Error::InvalidStoredValue(
-                    "settled result member key must have four columns",
-                ));
-            }
-            let binding_view_key = binding_view_key_from_store_key(
-                &entry.key,
-                "settled result member binding key must be valid",
-            )?;
-            let member_bytes = match &entry.key[3] {
-                Value::Bytes(bytes) => bytes,
-                _ => {
-                    return Err(Error::InvalidStoredValue(
-                        "settled result member payload must be bytes",
-                    ));
-                }
-            };
-            let member = postcard::from_bytes::<ResultMemberEntry>(member_bytes).map_err(|_| {
-                Error::InvalidStoredValue("settled result member payload must decode")
-            })?;
-            recovered_members.push((binding_view_key, member));
-        }
-        drop(store);
-        for (binding_view_key, member) in recovered_members {
-            self.insert_settled_result_member_indexed(binding_view_key, member);
-        }
-
-        let store = self
-            .database
-            .direct_record_store(SETTLED_PROGRAM_FACTS_STORE)?;
-        for entry in store.prefix_entries(&[])? {
-            if entry.key.len() != 4 {
-                return Err(Error::InvalidStoredValue(
-                    "settled program fact key must have four columns",
-                ));
-            }
-            let binding_view_key = binding_view_key_from_store_key(
-                &entry.key,
-                "settled program fact binding key must be valid",
-            )?;
-            let fact_bytes = match &entry.key[3] {
-                Value::Bytes(bytes) => bytes,
-                _ => {
-                    return Err(Error::InvalidStoredValue(
-                        "settled program fact payload must be bytes",
-                    ));
-                }
-            };
-            let fact = postcard::from_bytes::<ViewFactEntry>(fact_bytes).map_err(|_| {
-                Error::InvalidStoredValue("settled program fact payload must decode")
-            })?;
-            self.query
-                .settled_program_facts
-                .entry(binding_view_key)
-                .or_default()
-                .insert(fact);
-        }
         Ok(())
     }
 

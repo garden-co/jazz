@@ -534,6 +534,7 @@ where
                 settled_result_sets: BTreeMap::new(),
                 settled_result_row_index: BTreeMap::new(),
                 settled_program_facts: BTreeMap::new(),
+                known_state_loaded_binding_views: BTreeSet::new(),
                 settled_through_by_binding_view: BTreeMap::new(),
                 authorization_progress_by_binding_view: BTreeMap::new(),
                 known_state_declared_binding_views: BTreeSet::new(),
@@ -594,13 +595,6 @@ where
         }
         #[cfg(not(feature = "testing"))]
         node.recover_from_storage()?;
-        #[cfg(feature = "testing")]
-        let started = receipt.as_ref().map(|_| Instant::now());
-        node.recover_known_state_facts()?;
-        #[cfg(feature = "testing")]
-        if let (Some(receipt), Some(started)) = (&mut receipt, started) {
-            receipt.recover_known_state = started.elapsed();
-        }
         #[cfg(feature = "testing")]
         let started = receipt.as_ref().map(|_| Instant::now());
         let self_node_alias = node.ensure_node_alias(node_uuid)?;
@@ -745,6 +739,7 @@ where
         self.query.settled_result_sets.clear();
         self.query.settled_result_row_index.clear();
         self.query.settled_program_facts.clear();
+        self.query.known_state_loaded_binding_views.clear();
         self.query.settled_through_by_binding_view.clear();
         self.query.authorization_progress_by_binding_view.clear();
         self.query.known_state_declared_binding_views.clear();
