@@ -2,13 +2,15 @@
 
 ## Objective
 
-Reduce representative Jazz development, binding, and test build times by at
-least 50% by creating one featureless semantic core and thin runtime, target,
-and test shells. Do not split crates merely because source files are large.
+Create one featureless semantic core with thin runtime, target, and test shells.
+The resulting package graph should make ownership and supported build
+configurations obvious while reducing redundant compilation as a consequence.
+Do not split crates merely because source files are large.
 
 This plan starts only after the semantic file-structure stack through the Node
-runtime refactor has landed. Every proposed crate boundary must earn its cost
-with measurements.
+runtime refactor has landed. A proposed crate boundary earns its cost by making
+dependency direction, target ownership, or feature selection materially
+clearer; measurements are useful feedback, not a prerequisite.
 
 ## Why this shape
 
@@ -143,10 +145,10 @@ Remove the umbrella `test`, `test-utils`, `client`, `server`, `cli`,
 Representative commands should become explicit and stable instead of relying
 on large additive feature bundles.
 
-## Measurement and acceptance gate
+## Verification and performance feedback
 
-Before changing package boundaries, record clean and one-line incremental Cargo
-timings for:
+As the package boundaries settle, record representative clean and incremental
+Cargo timings for:
 
 1. featureless Jazz core check;
 2. Jazz core unit-test compilation;
@@ -159,21 +161,25 @@ timings for:
 Record rustc frontend, LLVM/codegen, native dependency, linker,
 test-enumeration, and artifact-packaging time separately where possible.
 
-Accept a vertical slice only when it:
+Accept a vertical slice when it:
 
-- improves at least two representative workflows by 50% or more;
-- does not materially slow the full canonical CI matrix;
-- reduces, rather than multiplies, distinct Jazz feature artifacts;
+- makes semantic, target, adapter, or test ownership materially clearer;
+- does not materially regress the full canonical CI matrix;
+- reduces, or provides a direct path to reducing, distinct Jazz feature artifacts;
 - preserves public API and wire/storage compatibility;
-- leaves a useful boundary even if later slices are rejected.
+- leaves a useful boundary independent of later performance work.
+
+Timing improvements remain an expected outcome and should guide later tuning,
+but an otherwise sound architectural boundary does not need to prove a fixed
+percentage improvement before landing.
 
 ## Execution lanes
 
-### Lane 1: measurement and cache inventory
+### Lane 1: executable shells
 
-Add reproducible timing commands and report current feature/artifact variants.
-Measure shared-target contention and evaluate `sccache` separately from package
-restructuring.
+Extract process entry points, command parsing, signals, allocator selection,
+and presentation dependencies from the semantic crate without changing binary
+names or behavior.
 
 ### Lane 2: testkit vertical slice
 
@@ -198,7 +204,7 @@ demonstrate an additional 50% win.
 
 ## Stop conditions
 
-Stop when a slice misses the 50% threshold, creates more feature variants than
-it removes, requires broad visibility expansion, or makes compatibility
-ownership less clear. Retain independent improvements such as testkit
-separation, cache normalization, or server/CLI boundaries when useful alone.
+Stop when a slice creates more feature variants than it removes, requires broad
+visibility expansion, or makes compatibility ownership less clear. Retain
+independent improvements such as testkit separation, cache normalization, or
+server/CLI boundaries when useful alone.

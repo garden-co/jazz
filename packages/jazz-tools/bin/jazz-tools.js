@@ -180,7 +180,7 @@ if (!command || command === "--help" || command === "-h") {
       lines.push("This package may be corrupted or published without target artifacts.");
     }
     lines.push("No local Cargo build was found in target/debug or target/release.");
-    lines.push("Run `cargo build -p jazz-tools --bin jazz-tools --features cli` to build locally.");
+    lines.push("Run `cargo build -p jazz-cli --bin jazz-tools` to build locally.");
     fail(lines.join("\n"));
   }
 

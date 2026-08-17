@@ -151,7 +151,7 @@ Milestone: **integrators can adopt jazz incrementally without bespoke glue.**
    WebSocket/byte-transport listener, publish health/metrics, and drain
    connections on shutdown while all product behavior still flows through the
    client API and shared sync protocol. The current `jazz-server` surface has
-   three canaries: `cargo run -p jazz --bin jazz-server -- dry-run`, which validates the
+   three canaries: `cargo run -p jazz-cli --bin jazz-server -- dry-run`, which validates the
    default local shell plan without opening sockets;
    `jazz_server::loopback_http::LoopbackHttpServer`, which starts a
    loopback-only HTTP bridge around `InMemoryServerShell` for health, metrics,

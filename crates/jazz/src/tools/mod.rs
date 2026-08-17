@@ -2,11 +2,9 @@
 pub(crate) mod admin_catalogue_payload_codec;
 pub(crate) mod admin_catalogue_row_format;
 pub mod app_id;
-#[cfg(feature = "cli")]
-pub mod commands;
 pub mod identity;
 pub mod metadata;
-#[cfg(any(feature = "cli", feature = "server"))]
+#[cfg(feature = "server")]
 pub mod middleware;
 mod object;
 #[cfg(feature = "otel-core")]
@@ -15,7 +13,7 @@ pub mod policy_claims;
 pub(crate) mod public_api;
 pub mod public_schema;
 pub mod schema_lens;
-#[cfg(any(feature = "cli", feature = "server"))]
+#[cfg(feature = "server")]
 pub mod server;
 pub mod sync;
 #[cfg(feature = "test-utils")]

@@ -1,0 +1,59 @@
+[package]
+name = "jazz-cli"
+version = "0.1.0"
+edition = "2024"
+autobins = false
+autotests = true
+
+[features]
+default = ["rocksdb", "transport-compression-zstd"]
+rocksdb = ["jazz/rocksdb"]
+sqlite = ["jazz/sqlite"]
+transport-compression-lz4 = ["jazz/transport-compression-lz4"]
+transport-compression-zstd = ["jazz/transport-compression-zstd"]
+transport-compression-ruzstd = ["jazz/transport-compression-ruzstd"]
+otel = ["jazz/otel-core", "dep:opentelemetry", "dep:opentelemetry_sdk"]
+test = ["jazz/test"]
+
+[dependencies]
+jazz = { workspace = true, default-features = false, features = ["server"] }
+axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "tokio"] }
+clap = { version = "4", features = ["derive", "env"] }
+mimalloc = { version = "0.1", default-features = false }
+opentelemetry = { version = "0.31", optional = true }
+opentelemetry_sdk = { version = "0.31", features = ["logs", "metrics"], optional = true }
+postcard = { version = "1.1.3", features = ["alloc"] }
+tokio = { version = "1", features = [
+  "macros",
+  "net",
+  "rt",
+  "rt-multi-thread",
+  "signal",
+  "sync",
+  "time",
+] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+base64 = "0.22"
+futures-util = "0.3"
+jsonwebtoken = { version = "10.4", default-features = false, features = ["rust_crypto", "use_pem"] }
+libc = "0.2"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
+tempfile = "3.27.0"
+tungstenite = { version = "0.29", default-features = false, features = ["handshake"] }
+
+[[bin]]
+name = "jazz-tools"
+path = "src/bin/jazz-tools.rs"
+
+[[bin]]
+name = "jazz-server"
+path = "src/bin/jazz-server.rs"
+
+[[test]]
+name = "client_restart_integration"
+required-features = ["test"]

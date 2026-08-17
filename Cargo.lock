@@ -1940,7 +1940,6 @@ dependencies = [
  "base64 0.22.1",
  "blake3",
  "bytes",
- "clap",
  "criterion",
  "ed25519-dalek",
  "futures",
@@ -1957,7 +1956,6 @@ dependencies = [
  "jsonwebtoken",
  "libc",
  "lz4_flex 0.11.6",
- "mimalloc",
  "opentelemetry",
  "opentelemetry-appender-tracing",
  "opentelemetry-otlp",
@@ -1993,6 +1991,31 @@ dependencies = [
 [[package]]
 name = "jazz-benchmark-guard"
 version = "0.1.0"
+
+[[package]]
+name = "jazz-cli"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "base64 0.22.1",
+ "clap",
+ "futures-util",
+ "jazz",
+ "jsonwebtoken",
+ "libc",
+ "mimalloc",
+ "opentelemetry",
+ "opentelemetry_sdk",
+ "postcard",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "tungstenite",
+]
 
 [[package]]
 name = "jazz-napi"

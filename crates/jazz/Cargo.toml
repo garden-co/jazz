@@ -21,7 +21,6 @@ server = [
   "dep:tokio-tungstenite",
   "dep:tungstenite",
 ]
-cli = ["server", "rocksdb", "dep:clap", "dep:mimalloc", "tokio/rt-multi-thread", "tokio/signal"]
 sync-autopsy = []
 # Disabled-by-default counters for the cold-settle attribution bench. They do
 # not alter protocol behavior or production measurement paths.
@@ -32,7 +31,7 @@ transport-compression-lz4 = ["dep:lz4_flex"]
 transport-compression-zstd = ["dep:zstd"]
 transport-compression-ruzstd = ["dep:ruzstd"]
 test-utils = ["server", "client", "sqlite", "sync-autopsy"]
-test = ["test-utils", "cli", "transport-compression-zstd"]
+test = ["test-utils", "transport-compression-zstd"]
 otel-core = [
   "server",
   "dep:opentelemetry",
@@ -42,7 +41,6 @@ otel-core = [
   "dep:opentelemetry-appender-tracing",
   "dep:tracing-opentelemetry",
 ]
-otel = ["cli", "otel-core"]
 
 [dependencies]
 futures-core = "0.3.31"
@@ -93,7 +91,6 @@ tungstenite = { version = "0.29", default-features = false, features = [
   "handshake",
 ], optional = true }
 bytes = { version = "1", optional = true }
-clap = { version = "4", features = ["derive", "env"], optional = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
 tower-http = { version = "0.6.8", default-features = false, features = [
   "cors",
@@ -103,7 +100,6 @@ async-stream = { version = "0.3", optional = true }
 jsonwebtoken = { version = "10.4", default-features = false, features = ["rust_crypto", "use_pem"] }
 base64 = "0.22"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
-mimalloc = { version = "0.1", default-features = false, optional = true }
 reqwest = { version = "0.12", default-features = false, features = [
   "json",
   "rustls-tls",
@@ -149,16 +145,6 @@ tokio = { version = "1", features = [
 ] }
 tower = { version = "0.5", features = ["util"] }
 rcgen = { version = "0.13", default-features = false, features = ["ring"] }
-
-[[bin]]
-name = "jazz-tools"
-path = "src/bin/jazz-tools.rs"
-required-features = ["cli"]
-
-[[bin]]
-name = "jazz-server"
-path = "src/bin/jazz-server.rs"
-required-features = ["server"]
 
 [[bench]]
 name = "validation"
@@ -292,10 +278,6 @@ required-features = ["test"]
 
 [[test]]
 name = "clients_sync"
-required-features = ["test"]
-
-[[test]]
-name = "client_restart_integration"
 required-features = ["test"]
 
 [[test]]

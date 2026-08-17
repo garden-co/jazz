@@ -2100,16 +2100,22 @@ mod tests {
 
         let mut frames_sent_to_server = 0;
         let mut frames_received_from_server = 0;
+        let expected_titles = vec!["route sync".to_owned()];
+        let mut titles = Vec::new();
         let start = tokio::time::Instant::now();
-        while !client_b.edge_attachment_is_covered(&client_b_todos_attachment)
-            && start.elapsed() < WS_PUMP_DEADLINE
-        {
+        while start.elapsed() < WS_PUMP_DEADLINE {
             let (sent, received) = pump_core_websocket_transport_once(&client_a, &mut ws_a).await;
             frames_sent_to_server += sent;
             frames_received_from_server += received;
             let (sent, received) = pump_core_websocket_transport_once(&client_b, &mut ws_b).await;
             frames_sent_to_server += sent;
             frames_received_from_server += received;
+            titles = client_b.edge_todo_titles(&client_b_todos).await;
+            if client_b.edge_attachment_is_covered(&client_b_todos_attachment)
+                && titles == expected_titles
+            {
+                break;
+            }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
 
@@ -2121,11 +2127,9 @@ mod tests {
             frames_received_from_server > 0,
             "the server must return WireFrame batches through the websocket route"
         );
-        let titles = client_b.edge_todo_titles(&client_b_todos).await;
         client_b.detach_query(client_b_todos_attachment);
         assert_eq!(
-            titles,
-            vec!["route sync".to_owned()],
+            titles, expected_titles,
             "the receiving client must materialize the row through the websocket route"
         );
     }
