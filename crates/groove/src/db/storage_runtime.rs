@@ -279,7 +279,7 @@ impl DemandDrivenDatabase {
             self.persistence.as_mut(),
             &self.cache,
             context,
-            || self.database.preflight_batch_storage_inputs(pending_batch),
+            || self.database.ensure_batch_storage_inputs(pending_batch),
             missing_storage_input,
         ) {
             Poll::Pending => Poll::Pending,

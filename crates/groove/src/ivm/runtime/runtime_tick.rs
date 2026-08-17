@@ -3,6 +3,49 @@
 use super::*;
 
 impl IvmRuntime {
+    /// Prove that a subsequent live tick cannot suspend on durable operator
+    /// state.
+    ///
+    /// Ordinary table and index sources consume `table_deltas` during a tick;
+    /// they do not reread their snapshots. Durable persist operators may
+    /// inspect their existing keyspace for uniqueness, and recursive
+    /// retractions may rebuild from source snapshots. Those are the only
+    /// storage-backed tick inputs and are acquired here without evaluating or
+    /// mutating the runtime.
+    pub(crate) fn ensure_tick_storage_inputs<S>(&self, storage: &S) -> Result<(), IvmRuntimeError>
+    where
+        S: ResidentStorage,
+    {
+        let retained = self.retained_node_ids();
+        let mut recursive_roots = Vec::new();
+        let mut persist_prefixes = HashSet::<(String, Vec<u8>)>::new();
+
+        for node in retained {
+            let graph_node = self
+                .graph
+                .node(node)
+                .ok_or(IvmRuntimeError::GraphNodeNotFound(node))?;
+            match &graph_node.descriptor.operator {
+                OpType::Persist(persist) => {
+                    persist_prefixes.insert((
+                        persist.storage.column_family.clone(),
+                        persist.storage.key_prefix.clone(),
+                    ));
+                }
+                OpType::Recursive(_) => recursive_roots.push(node),
+                _ => {}
+            }
+        }
+
+        for (column_family, prefix) in persist_prefixes {
+            storage.scan_prefix(&column_family, &prefix, &mut |_, _| Ok(()))?;
+        }
+        for root in recursive_roots {
+            snapshot_table_deltas(&self.schema, &self.graph, storage, root)?;
+        }
+        Ok(())
+    }
+
     pub fn tick<S>(
         &mut self,
         table_deltas: Vec<TableDelta>,

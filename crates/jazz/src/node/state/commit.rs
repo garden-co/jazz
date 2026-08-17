@@ -304,7 +304,7 @@ where
             }
         }
         self.stage_recovery_checkpoint(&mut batch, made_at);
-        self.database.preflight_batch_storage_inputs(&batch)?;
+        self.database.ensure_batch_storage_inputs(&batch)?;
         Ok(PreparedMergeableCommit {
             tx_id,
             batch,

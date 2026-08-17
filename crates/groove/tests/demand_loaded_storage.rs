@@ -171,7 +171,7 @@ fn pollable_query_fetches_on_demand_and_then_reads_resident_state() {
 }
 
 #[test]
-fn write_preflight_loads_inputs_before_the_single_real_ivm_tick() {
+fn write_preparation_loads_inputs_before_the_single_real_ivm_tick() {
     let schema = schema();
     let cache = DemandLoadedStorage::new(&["rows", "indices"]);
     cache
@@ -194,7 +194,7 @@ fn write_preflight_loads_inputs_before_the_single_real_ivm_tick() {
     let mut context = Context::from_waker(Waker::noop());
 
     loop {
-        match database.preflight_batch_storage_inputs(&batch) {
+        match database.ensure_batch_storage_inputs(&batch) {
             Ok(()) => break,
             Err(groove::db::Error::Storage(error)) => {
                 let groove::storage::Error::NotResident { request } = *error else {

@@ -267,6 +267,16 @@ and an asynchronous implementation mode:
    state and the IVM without suspension, then hands its complete journal to the
    ordered persistence queue.
 
+Preparation must not clone the IVM into a disposable runtime or evaluate the
+same graph once to discover storage inputs and again to publish. Storage
+acquisition and IVM evaluation are separate boundaries: acquisition resolves
+the durable inputs named by the operation and retained graph, then Groove
+builds one transactional IVM transition against the real runtime. A failed
+preparation discards only that transition; a successful transition is applied
+exactly once during resident publish. The transaction should journal or stage
+only state touched by the tick, not copy the graph, subscriptions, and unrelated
+operator state.
+
 `DemandDrivenNode::poll_local_operation` is the orchestration seam;
 operation-specific entry points such as `poll_mergeable_commit` own their
 typed preparation. With Memory/RocksDB, acquisition completes in the first
