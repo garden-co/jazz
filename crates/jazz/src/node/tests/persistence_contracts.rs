@@ -166,6 +166,57 @@ fn jazz_commit_emits_owned_persistence_batches_after_local_visibility() {
     assert!(writer.transaction_record(tx_id).is_some());
 }
 
+#[test]
+fn async_authority_ingest_owns_complete_persistence_before_fate_publication() {
+    let (mut writer, _) = fail_write_many_node();
+    let (tx_id, unit) = writer
+        .commit_mergeable_unit(
+            MergeableCommit::new("todos", row(0xce), 10).cells(title_cells("quarantined")),
+        )
+        .unwrap();
+    let SyncMessage::CommitUnit { tx, versions } = unit else {
+        panic!("local write must produce a commit unit")
+    };
+
+    let (mut authority, _) = fail_write_many_node();
+    let pending = authority
+        .ingest_commit_unit_for_async_persistence(
+            tx,
+            versions,
+            u64::MAX - SKEW_TOLERANCE_MS,
+            None,
+        )
+        .unwrap();
+
+    // Resident evaluation has completed, but the only externally publishable
+    // fate is still owned by `pending` rather than returned independently.
+    assert_eq!(
+        authority.transaction_record(tx_id).unwrap().fate,
+        Fate::Accepted
+    );
+    let (batches, responses) = pending.into_parts();
+    assert!(batches.len() >= 2, "ingest and finalization form one unit");
+    assert!(batches.iter().any(|batch| {
+        batch.clone().into_operations().iter().any(|operation| {
+            matches!(
+                operation,
+                groove::storage::OwnedWriteOperation::Set { cf, .. }
+                    if cf == "jazz_transactions"
+            )
+        })
+    }));
+    assert_eq!(responses.len(), 1);
+    assert!(matches!(
+        &responses[0],
+        SyncMessage::FateUpdate {
+            tx_id: response_tx,
+            fate: Fate::Accepted,
+            durability: Some(DurabilityTier::Global),
+            ..
+        } if *response_tx == tx_id
+    ));
+}
+
 /// INV-TX-25: one commit unit is one durable publication boundary. If the
 /// storage batch that contains a multi-row local write fails, neither a subset
 /// of the transaction nor a derived history subscription delta may escape.

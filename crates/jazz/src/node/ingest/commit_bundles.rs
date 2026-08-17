@@ -2,6 +2,44 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
+    /// Apply an authority commit to resident state while retaining both its
+    /// complete durable closure and its externally observable responses.
+    ///
+    /// The caller must persist every returned batch, in order, before sending
+    /// any response. Immediate backends naturally complete that work in the
+    /// same poll; suspending backends retain this owned value across wakeups.
+    #[doc(hidden)]
+    pub fn ingest_commit_unit_for_async_persistence(
+        &mut self,
+        tx: Transaction,
+        versions: Vec<VersionRecord>,
+        now_ms: u64,
+        ingest_context: Option<CommitUnitIngestContext>,
+    ) -> Result<PendingAuthorityPublication, Error>
+    where
+        S: ReopenableStorage,
+    {
+        self.require_catalogue_ready()?;
+        let was_capturing = self.capture_persistence_batches;
+        self.capture_persistence_batches = true;
+        let mark = self.begin_persistence_unit();
+        let result = self.ingest_commit_unit_with_context(tx, versions, now_ms, ingest_context);
+        self.capture_persistence_batches = was_capturing;
+        match result {
+            Ok(responses) => Ok(PendingAuthorityPublication {
+                persistence: self.finish_persistence_unit(mark),
+                responses,
+            }),
+            Err(error) => {
+                // The Groove durable-publication scope has already poisoned a
+                // partially applied resident operation. Its captured writes
+                // must never be submitted after that failure.
+                let _ = self.finish_persistence_unit(mark);
+                Err(error)
+            }
+        }
+    }
+
     /// Ingest a commit unit as fate authority.
     pub fn ingest_commit_unit(
         &mut self,

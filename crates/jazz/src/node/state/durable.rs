@@ -32,6 +32,27 @@ where
         self.pending_persistence_batches.drain(..).collect()
     }
 
+    /// Mark the start of one node operation's durable closure.
+    ///
+    /// Node mutation is single-threaded behind `&mut self`, so a queue offset
+    /// precisely identifies every Groove batch emitted by the operation even
+    /// when the operation spans canonical data, cleanup, and consistency
+    /// marker commits.
+    pub(super) fn begin_persistence_unit(&self) -> usize {
+        self.pending_persistence_batches.len()
+    }
+
+    /// Detach the batches emitted since `mark` as one indivisible durable unit.
+    pub(super) fn finish_persistence_unit(
+        &mut self,
+        mark: usize,
+    ) -> Vec<PendingPersistenceBatch> {
+        self.pending_persistence_batches
+            .split_off(mark)
+            .into_iter()
+            .collect()
+    }
+
     /// Return local synchronization counters.
     pub fn sync_metrics(&self) -> &SyncMetrics {
         &self.sync_metrics
