@@ -1,6 +1,6 @@
 #![cfg(feature = "test")]
 
-mod support;
+use jazz_testkit as support;
 
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};

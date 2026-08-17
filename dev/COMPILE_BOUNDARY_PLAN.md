@@ -96,6 +96,12 @@ integration. Executable and binding shells opt into it.
   packages so a focused core unit test does not compile every scenario fixture.
 - Prefer package selection over production feature mutation for test behavior.
 
+Progress: reusable scenario-client, JWT, permissions-publication, query-wait,
+and in-memory duplex helpers now live in `jazz-testkit`. Existing Jazz
+integration targets consume that package through a dev-dependency, so helper
+changes compile as one independently cached unit while the scenario targets
+are migrated outward incrementally.
+
 ## Proposed feature model
 
 The common core should approach:

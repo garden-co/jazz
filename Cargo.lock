@@ -1913,6 +1913,7 @@ dependencies = [
  "insta",
  "internment",
  "jazz-benchmark-guard",
+ "jazz-testkit",
  "jsonschema",
  "jsonwebtoken",
  "libc",
@@ -1958,6 +1959,7 @@ dependencies = [
  "jazz",
  "jazz-otel",
  "jazz-server",
+ "jazz-testkit",
  "jsonwebtoken",
  "libc",
  "mimalloc",
@@ -2017,6 +2019,7 @@ name = "jazz-otel"
 version = "0.1.0"
 dependencies = [
  "jazz",
+ "jazz-testkit",
  "jsonwebtoken",
  "opentelemetry",
  "opentelemetry-appender-tracing",
@@ -2071,6 +2074,19 @@ name = "jazz-storage-bench-core"
 version = "0.0.0"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "jazz-testkit"
+version = "0.1.0"
+dependencies = [
+ "jazz",
+ "jsonwebtoken",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]

@@ -1,5 +1,4 @@
-#[path = "../../jazz/tests/support/mod.rs"]
-mod support;
+use jazz_testkit as support;
 
 use std::collections::HashMap;
 use std::time::Duration;

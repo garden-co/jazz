@@ -5,7 +5,7 @@
 //! Verifies that schema+lens catalogue objects propagate through the full
 //! SyncManager pipeline (not via direct `process_catalogue_update()` calls).
 
-mod support;
+use jazz_testkit as support;
 
 use std::collections::{BTreeSet, HashMap};
 use std::time::Duration;

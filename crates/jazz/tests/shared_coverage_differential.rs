@@ -3,10 +3,6 @@ use std::future::Future;
 use std::pin::pin;
 use std::task::{Context, Poll, Waker};
 
-#[path = "support/duplex_transport.rs"]
-mod duplex_transport;
-
-use duplex_transport::duplex;
 use jazz::db::{
     Db, DbConfig, DbIdentity, LocalUpdates, Propagation, ReadOpts, SeededRowIdSource,
     SubscriptionEvent,
@@ -18,6 +14,7 @@ use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::query::Query;
 use jazz::schema::{JazzSchema, Policy, TableSchema};
 use jazz::tx::DurabilityTier;
+use jazz_testkit::duplex_transport::duplex;
 
 #[derive(Clone, Copy, Debug)]
 enum CoverageMode {

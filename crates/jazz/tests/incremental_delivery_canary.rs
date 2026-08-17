@@ -3,8 +3,7 @@ use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
-#[path = "support/duplex_transport.rs"]
-mod duplex_transport;
+use jazz_testkit::duplex_transport;
 
 use jazz::block_on;
 use jazz::db::{

@@ -2,10 +2,6 @@ use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
-#[path = "support/duplex_transport.rs"]
-mod duplex_transport;
-
-use duplex_transport::duplex;
 use jazz::db::{Db, DbConfig, DbIdentity, Propagation, ReadOpts, SubscriptionEvent, block_on};
 use jazz::groove::records::Value;
 use jazz::groove::schema::{ColumnSchema, ColumnType};
@@ -16,6 +12,7 @@ use jazz::ids::{AuthorId, NodeUuid};
 use jazz::query::{OrderDirection, Query, col, eq, lit};
 use jazz::schema::{JazzSchema, TableSchema};
 use jazz::tx::{DurabilityTier, Fate};
+use jazz_testkit::duplex_transport::duplex;
 
 fn schema() -> JazzSchema {
     JazzSchema::new([TableSchema::new(

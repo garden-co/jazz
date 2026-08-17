@@ -2,8 +2,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
 use std::rc::Rc;
 
-#[path = "support/duplex_transport.rs"]
-mod duplex_transport;
+use jazz_testkit::duplex_transport;
 
 use jazz::db::{
     Db, DbConfig, DbIdentity, LocalUpdates, Propagation, ReadOpts, WireTransportAdapter, block_on,

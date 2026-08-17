@@ -23,7 +23,7 @@
 //!   4. Carol connects with no claims at all
 //!      → she cannot see the room
 
-mod support;
+use jazz_testkit as support;
 
 use std::collections::HashMap;
 use std::time::Duration;
