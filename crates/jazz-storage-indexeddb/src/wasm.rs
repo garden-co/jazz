@@ -784,7 +784,7 @@ pub async fn verify_indexeddb_node_lifecycle(page_store: JsValue) -> Result<JsVa
 
     let row = RowUuid::from_bytes([0xd6; 16]);
     runtime
-        .run_local(|node| {
+        .commit_local(|node| {
             node.commit_mergeable_unit(MergeableCommit::new("todos", row, 10).cells(
                 BTreeMap::from([(
                     "title".to_owned(),
@@ -819,7 +819,7 @@ pub async fn verify_indexeddb_node_lifecycle(page_store: JsValue) -> Result<JsVa
         .await
         .map_err(|error| JsValue::from_str(&error.to_string()))?;
     let rows = futures::future::poll_fn(|context| {
-        reopened.poll_resident(context, |node| {
+        reopened.poll_query(context, |node| {
             node.current_rows("todos", DurabilityTier::None)
         })
     })
@@ -827,7 +827,7 @@ pub async fn verify_indexeddb_node_lifecycle(page_store: JsValue) -> Result<JsVa
     .map_err(|error| JsValue::from_str(&error.to_string()))?;
     if rows.len() != 1 || rows[0].row_uuid() != row {
         let history = futures::future::poll_fn(|context| {
-            reopened.poll_resident(context, |node| node.row_history("todos", row))
+            reopened.poll_query(context, |node| node.row_history("todos", row))
         })
         .await
         .map_err(|error| JsValue::from_str(&error.to_string()))?;

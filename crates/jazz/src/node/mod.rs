@@ -855,6 +855,7 @@ impl PendingAuthorityPublication {
     }
 }
 
+include!("state/async_runtime.rs");
 include!("state/lifecycle.rs");
 include!("state/commit.rs");
 include!("state/durable.rs");

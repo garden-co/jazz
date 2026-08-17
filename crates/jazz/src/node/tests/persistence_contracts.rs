@@ -308,11 +308,12 @@ fn pollable_node_open_acquires_inputs_then_durably_finalizes_once() {
     let std::task::Poll::Ready(Ok(mut opened)) = opening.poll(&mut context) else {
         panic!("released node opening must acquire, construct, and finalize")
     };
-    assert!(
-        opened
-            .run_local(|node| node.current_rows("todos", DurabilityTier::None))
-            .is_ok()
-    );
+    assert!(matches!(
+        opened.poll_query(&mut context, |node| {
+            node.current_rows("todos", DurabilityTier::None)
+        }),
+        std::task::Poll::Ready(Ok(_))
+    ));
     drop(opened);
 
     NodeState::new(node(0xd2), node_schema, durable)
@@ -392,7 +393,7 @@ fn demand_driven_node_publishes_locally_before_one_atomic_durable_unit() {
     released.set(false);
 
     runtime
-        .run_local(|node| {
+        .commit_local(|node| {
             node.commit_mergeable_unit(
                 MergeableCommit::new("todos", row(0xd5), 10).cells(title_cells("resident")),
             )?;
@@ -446,7 +447,7 @@ fn demand_driven_node_poisoned_after_durable_commit_failure() {
         panic!("immediate backend must open in its first poll")
     };
     runtime
-        .run_local(|node| {
+        .commit_local(|node| {
             node.commit_mergeable_unit(
                 MergeableCommit::new("todos", row(0xd6), 10).cells(title_cells("ambiguous")),
             )?;
@@ -460,8 +461,12 @@ fn demand_driven_node_poisoned_after_durable_commit_failure() {
         std::task::Poll::Ready(Err(Error::Storage(_)))
     ));
     assert!(matches!(
-        runtime.run_local(|node| node.current_rows("todos", DurabilityTier::None)),
-        Err(Error::Groove(groove::db::Error::DatabasePoisoned))
+        runtime.poll_query(&mut context, |node| {
+            node.current_rows("todos", DurabilityTier::None)
+        }),
+        std::task::Poll::Ready(Err(Error::Groove(
+            groove::db::Error::DatabasePoisoned
+        )))
     ));
 }
 
