@@ -18,7 +18,7 @@ use groove::{
 use jazz::db::doctest_support;
 use jazz::db::{LocalUpdates, Propagation, ReadOpts, SubscriptionEvent};
 use jazz::ids::{NodeUuid, RowUuid};
-use jazz::node::{AuthorityPersistenceScheduler, MergeableCommit, NodeState};
+use jazz::node::{AuthorityPersistenceScheduler, MergeableCommit, NodeState, PollableNodeOpen};
 use jazz::protocol::SyncMessage;
 use jazz::tx::DurabilityTier;
 use opfs_btree::BTreeError;
@@ -754,5 +754,90 @@ pub async fn verify_indexeddb_demand_loading(page_store: JsValue) -> Result<JsVa
     }
     Ok(JsValue::from_str(
         "IndexedDB demand loading preserved synchronous resident writes",
+    ))
+}
+
+/// Open the full Jazz node over IndexedDB, preserve synchronous resident
+/// visibility, and reopen the durably committed row through the same pollable
+/// node lifecycle.
+#[wasm_bindgen]
+pub async fn verify_indexeddb_node_lifecycle(page_store: JsValue) -> Result<JsValue, JsValue> {
+    let schema = doctest_support::schema();
+    let durable = IndexedDbOrderedStorage::open(page_store.clone(), 4096, 8)
+        .await
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    let mut opening = PollableNodeOpen::new(
+        NodeUuid::from_bytes([0xd5; 16]),
+        schema.clone(),
+        Box::new(durable),
+    );
+    let mut context = Context::from_waker(Waker::noop());
+    if !opening.poll(&mut context).is_pending() {
+        return Err(JsValue::from_str(
+            "cold IndexedDB Jazz node opening did not suspend",
+        ));
+    }
+    let mut runtime = futures::future::poll_fn(|context| opening.poll(context))
+        .await
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    drop(opening);
+
+    let row = RowUuid::from_bytes([0xd6; 16]);
+    runtime
+        .run_local(|node| {
+            node.commit_mergeable_unit(MergeableCommit::new("todos", row, 10).cells(
+                BTreeMap::from([(
+                    "title".to_owned(),
+                    Value::String("resident IndexedDB input".to_owned()),
+                )]),
+            ))?;
+            let rows = node.current_rows("todos", DurabilityTier::None)?;
+            if rows.len() != 1 || rows[0].row_uuid() != row {
+                return Err(jazz::node::Error::InvalidStoredValue(
+                    "resident node did not expose its local write synchronously",
+                ));
+            }
+            Ok(())
+        })
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    if !runtime.poll_persistence(&mut context).is_pending() {
+        return Err(JsValue::from_str(
+            "real IndexedDB node commit unexpectedly completed on its first poll",
+        ));
+    }
+    futures::future::poll_fn(|context| runtime.poll_persistence(context))
+        .await
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    drop(runtime);
+
+    let durable = IndexedDbOrderedStorage::open(page_store, 4096, 8)
+        .await
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    let mut reopening =
+        PollableNodeOpen::new(NodeUuid::from_bytes([0xd5; 16]), schema, Box::new(durable));
+    let mut reopened = futures::future::poll_fn(|context| reopening.poll(context))
+        .await
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    let rows = futures::future::poll_fn(|context| {
+        reopened.poll_resident(context, |node| {
+            node.current_rows("todos", DurabilityTier::None)
+        })
+    })
+    .await
+    .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    if rows.len() != 1 || rows[0].row_uuid() != row {
+        let history = futures::future::poll_fn(|context| {
+            reopened.poll_resident(context, |node| node.row_history("todos", row))
+        })
+        .await
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        return Err(JsValue::from_str(&format!(
+            "pollable Jazz node did not reconstruct its IndexedDB row (current={}, history={})",
+            rows.len(),
+            history.len()
+        )));
+    }
+    Ok(JsValue::from_str(
+        "IndexedDB node open/write/reopen preserved resident visibility",
     ))
 }

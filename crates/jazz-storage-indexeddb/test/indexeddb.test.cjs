@@ -21,7 +21,7 @@ async function main() {
     "async-page-stores.js",
   );
   const worker = `
-    import init, { verify_indexeddb_authority_publication, verify_indexeddb_demand_loading, verify_indexeddb_groove_visibility, verify_indexeddb_jazz_visibility, verify_indexeddb_ordered_storage } from "/pkg/jazz_storage_indexeddb.js";
+    import init, { verify_indexeddb_authority_publication, verify_indexeddb_demand_loading, verify_indexeddb_groove_visibility, verify_indexeddb_jazz_visibility, verify_indexeddb_node_lifecycle, verify_indexeddb_ordered_storage } from "/pkg/jazz_storage_indexeddb.js";
     import { IndexedDbPageStore } from "/async-page-stores.js";
     self.onmessage = async () => {
       const name = "jazz-ordered-idb-" + Date.now() + "-" + Math.random();
@@ -52,7 +52,12 @@ async function main() {
         const demandReceipt = await verify_indexeddb_demand_loading(store);
         store.close();
         await IndexedDbPageStore.destroy(demandName);
-        self.postMessage({ receipt, grooveReceipt, jazzReceipt, authorityReceipt, demandReceipt });
+        const nodeName = name + "-node";
+        store = await IndexedDbPageStore.open(nodeName);
+        const nodeReceipt = await verify_indexeddb_node_lifecycle(store);
+        store.close();
+        await IndexedDbPageStore.destroy(nodeName);
+        self.postMessage({ receipt, grooveReceipt, jazzReceipt, authorityReceipt, demandReceipt, nodeReceipt });
       } catch (error) {
         if (store) store.close();
         self.postMessage({ error: error.stack || error.message || String(error) });
@@ -110,11 +115,18 @@ async function main() {
     ) {
       throw new Error(JSON.stringify(result));
     }
+    if (
+      result.nodeReceipt !==
+      "IndexedDB node open/write/reopen preserved resident visibility"
+    ) {
+      throw new Error(JSON.stringify(result));
+    }
     console.log(result.receipt);
     console.log(result.grooveReceipt);
     console.log(result.jazzReceipt);
     console.log(result.authorityReceipt);
     console.log(result.demandReceipt);
+    console.log(result.nodeReceipt);
   } finally {
     await browser.close();
     await new Promise((resolve) => server.close(resolve));

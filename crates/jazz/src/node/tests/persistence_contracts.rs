@@ -221,6 +221,8 @@ struct GatedAuthorityStorage {
     inner: MemoryStorage,
     released: std::rc::Rc<std::cell::Cell<bool>>,
     cancellations: std::rc::Rc<std::cell::Cell<usize>>,
+    committed_units: std::rc::Rc<std::cell::RefCell<Vec<usize>>>,
+    fail_commits: std::rc::Rc<std::cell::Cell<bool>>,
 }
 
 impl groove::storage::pollable::PollableOrderedKvStorage for GatedAuthorityStorage {
@@ -233,6 +235,29 @@ impl groove::storage::pollable::PollableOrderedKvStorage for GatedAuthorityStora
     > {
         if !self.released.get() {
             return std::task::Poll::Pending;
+        }
+        if let groove::storage::pollable::OwnedStorageOperation::Commit(operations) =
+            request.operation()
+        {
+            if self.fail_commits.get() {
+                return std::task::Poll::Ready(Err(groove::storage::Error::Backend {
+                    backend: "gated-authority-test",
+                    message: "injected commit failure".to_owned(),
+                }));
+            }
+            self.committed_units.borrow_mut().push(operations.len());
+            let families = operations
+                .iter()
+                .map(|operation| match operation {
+                    groove::storage::OwnedWriteOperation::Set { cf, .. }
+                    | groove::storage::OwnedWriteOperation::Delete { cf, .. }
+                    | groove::storage::OwnedWriteOperation::Delta { cf, .. } => cf.clone(),
+                })
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>();
+            let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+            self.inner = self.inner.clone().reopen(&refs)?;
         }
         groove::storage::pollable::PollableOrderedKvStorage::poll_request(
             &mut self.inner,
@@ -271,6 +296,8 @@ fn pollable_node_open_acquires_inputs_then_durably_finalizes_once() {
         inner: durable.clone(),
         released: std::rc::Rc::clone(&released),
         cancellations: std::rc::Rc::new(std::cell::Cell::new(0)),
+        committed_units: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
+        fail_commits: std::rc::Rc::new(std::cell::Cell::new(false)),
     };
     let mut opening = PollableNodeOpen::new(node(0xd2), node_schema.clone(), Box::new(backend));
     let waker = std::sync::Arc::new(PersistenceTestWake).into();
@@ -281,7 +308,11 @@ fn pollable_node_open_acquires_inputs_then_durably_finalizes_once() {
     let std::task::Poll::Ready(Ok(mut opened)) = opening.poll(&mut context) else {
         panic!("released node opening must acquire, construct, and finalize")
     };
-    assert!(opened.current_rows("todos", DurabilityTier::Local).is_ok());
+    assert!(
+        opened
+            .run_local(|node| node.current_rows("todos", DurabilityTier::None))
+            .is_ok()
+    );
     drop(opened);
 
     NodeState::new(node(0xd2), node_schema, durable)
@@ -301,6 +332,8 @@ fn dropping_pollable_node_open_cancels_its_exact_pending_input() {
         inner: MemoryStorage::new(&refs),
         released: std::rc::Rc::new(std::cell::Cell::new(false)),
         cancellations: std::rc::Rc::clone(&cancellations),
+        committed_units: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
+        fail_commits: std::rc::Rc::new(std::cell::Cell::new(false)),
     };
     let mut opening = PollableNodeOpen::new(node(0xd4), node_schema, Box::new(backend));
     let waker = std::sync::Arc::new(PersistenceTestWake).into();
@@ -328,6 +361,108 @@ fn immediate_storage_inherits_first_poll_node_readiness() {
     let mut context = std::task::Context::from_waker(&waker);
 
     assert!(matches!(opening.poll(&mut context), std::task::Poll::Ready(Ok(_))));
+}
+
+#[test]
+fn demand_driven_node_publishes_locally_before_one_atomic_durable_unit() {
+    let node_schema = schema();
+    let column_families = node_schema.column_families();
+    let refs = column_families
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let durable = MemoryStorage::new(&refs);
+    let released = std::rc::Rc::new(std::cell::Cell::new(true));
+    let committed_units = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let backend = GatedAuthorityStorage {
+        inner: durable.clone(),
+        released: std::rc::Rc::clone(&released),
+        cancellations: std::rc::Rc::new(std::cell::Cell::new(0)),
+        committed_units: std::rc::Rc::clone(&committed_units),
+        fail_commits: std::rc::Rc::new(std::cell::Cell::new(false)),
+    };
+    let mut opening =
+        PollableNodeOpen::new(node(0xd5), node_schema.clone(), Box::new(backend));
+    let waker = std::sync::Arc::new(PersistenceTestWake).into();
+    let mut context = std::task::Context::from_waker(&waker);
+    let std::task::Poll::Ready(Ok(mut runtime)) = opening.poll(&mut context) else {
+        panic!("immediate backend must open in its first poll")
+    };
+    committed_units.borrow_mut().clear();
+    released.set(false);
+
+    runtime
+        .run_local(|node| {
+            node.commit_mergeable_unit(
+                MergeableCommit::new("todos", row(0xd5), 10).cells(title_cells("resident")),
+            )?;
+            assert_eq!(node.current_rows("todos", DurabilityTier::None)?.len(), 1);
+            Ok(())
+        })
+        .unwrap();
+    assert!(committed_units.borrow().is_empty());
+    assert!(runtime.poll_persistence(&mut context).is_pending());
+    assert!(committed_units.borrow().is_empty());
+
+    released.set(true);
+    let outcome = runtime.poll_persistence(&mut context);
+    assert!(
+        matches!(outcome, std::task::Poll::Ready(Ok(()))),
+        "released immediate persistence returned {outcome:?}"
+    );
+    assert_eq!(committed_units.borrow().len(), 1);
+    assert!(!committed_units.borrow()[0].eq(&0));
+    drop(runtime);
+    let mut reopened = NodeState::new(node(0xd5), node_schema, durable).unwrap();
+    assert_eq!(
+        reopened
+            .current_rows("todos", DurabilityTier::None)
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn demand_driven_node_poisoned_after_durable_commit_failure() {
+    let node_schema = schema();
+    let column_families = node_schema.column_families();
+    let refs = column_families
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let fail_commits = std::rc::Rc::new(std::cell::Cell::new(false));
+    let backend = GatedAuthorityStorage {
+        inner: MemoryStorage::new(&refs),
+        released: std::rc::Rc::new(std::cell::Cell::new(true)),
+        cancellations: std::rc::Rc::new(std::cell::Cell::new(0)),
+        committed_units: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
+        fail_commits: std::rc::Rc::clone(&fail_commits),
+    };
+    let mut opening = PollableNodeOpen::new(node(0xd6), node_schema, Box::new(backend));
+    let waker = std::sync::Arc::new(PersistenceTestWake).into();
+    let mut context = std::task::Context::from_waker(&waker);
+    let std::task::Poll::Ready(Ok(mut runtime)) = opening.poll(&mut context) else {
+        panic!("immediate backend must open in its first poll")
+    };
+    runtime
+        .run_local(|node| {
+            node.commit_mergeable_unit(
+                MergeableCommit::new("todos", row(0xd6), 10).cells(title_cells("ambiguous")),
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+    fail_commits.set(true);
+    assert!(matches!(
+        runtime.poll_persistence(&mut context),
+        std::task::Poll::Ready(Err(Error::Storage(_)))
+    ));
+    assert!(matches!(
+        runtime.run_local(|node| node.current_rows("todos", DurabilityTier::None)),
+        Err(Error::Groove(groove::db::Error::DatabasePoisoned))
+    ));
 }
 
 fn persistence_storage_for(pending: &PendingAuthorityPublication) -> MemoryStorage {
@@ -376,6 +511,8 @@ fn authority_scheduler_releases_fate_only_after_async_storage_completion() {
         inner: persistence_storage_for(&pending),
         released: std::rc::Rc::clone(&released),
         cancellations: std::rc::Rc::new(std::cell::Cell::new(0)),
+        committed_units: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
+        fail_commits: std::rc::Rc::new(std::cell::Cell::new(false)),
     };
     let mut scheduler = AuthorityPersistenceScheduler::new(Box::new(storage));
     scheduler.enqueue(pending);

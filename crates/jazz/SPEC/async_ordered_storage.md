@@ -208,6 +208,18 @@ snapshot the resident store; a copy-on-write overlay is an optimization behind
 the same boundary. Immediate storage inherits first-poll readiness because all
 requested inputs and the final commit complete in that poll.
 
+The ready value owns the resident `NodeState`, admitted cache, durable storage
+session, acquisition state, and ordered persistence queue together. Returning a
+bare resident node and dropping the backend after opening is invalid: later cold
+reads would have no acquisition owner, and later writes could not preserve their
+durable ordering. The resident storage transaction journals every actual
+base/index/IVM set or delete made by one successful Jazz operation and emits that
+complete journal as one atomic durable unit; a separate higher-level batch list
+must not become a partial second source of truth. Immediate backends drain all
+queued units in the same poll; pending backends retain the oldest request and
+never let a later unit overtake it. A failed unit poisons the owner and releases
+no later durable work until clean reopen.
+
 ## Resident current-state requirement
 
 An overlay containing only the newest row is insufficient for an immediate new
