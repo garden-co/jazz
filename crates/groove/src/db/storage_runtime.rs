@@ -146,6 +146,7 @@ pub struct PollableDatabaseOpen {
     schema: Option<crate::schema::DatabaseSchema>,
     persistence: Option<Box<dyn PollableOrderedKvStorage>>,
     resident: MemoryStorage,
+    storage_layout: StorageLayout,
     column_families: Vec<String>,
     next_family: usize,
     request: Option<OwnedStorageRequest>,
@@ -157,11 +158,17 @@ impl PollableDatabaseOpen {
         schema: crate::schema::DatabaseSchema,
         persistence: Box<dyn PollableOrderedKvStorage>,
     ) -> Self {
-        let column_families = schema
-            .column_families()
-            .into_iter()
-            .map(str::to_owned)
-            .collect::<Vec<_>>();
+        Self::new_with_storage_layout(schema, persistence, StorageLayout::Identity)
+    }
+
+    #[doc(hidden)]
+    pub fn new_with_storage_layout(
+        schema: crate::schema::DatabaseSchema,
+        persistence: Box<dyn PollableOrderedKvStorage>,
+        storage_layout: StorageLayout,
+    ) -> Self {
+        let logical_column_families = schema.column_families();
+        let column_families = storage_layout.physical_column_families(logical_column_families);
         let refs = column_families
             .iter()
             .map(String::as_str)
@@ -170,6 +177,7 @@ impl PollableDatabaseOpen {
             schema: Some(schema),
             persistence: Some(persistence),
             resident: MemoryStorage::new(&refs),
+            storage_layout,
             column_families,
             next_family: 0,
             request: None,
@@ -188,7 +196,11 @@ impl PollableDatabaseOpen {
                     .persistence
                     .take()
                     .expect("database open retains persistence until completion");
-                let resident = Database::new(schema, self.resident.clone())?;
+                let resident = Database::new_with_storage_layout(
+                    schema,
+                    self.resident.clone(),
+                    self.storage_layout.clone(),
+                )?;
                 return Poll::Ready(Ok(PollableDatabase::new(resident, persistence)));
             };
             let request = self.request.get_or_insert_with(|| {

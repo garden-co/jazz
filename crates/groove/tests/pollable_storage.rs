@@ -10,7 +10,7 @@ use groove::storage::pollable::{
     OwnedScanRequest, OwnedStorageOperation, OwnedStorageRequest, OwnedStorageResponse,
     PollableOrderedKvStorage, ScanDirection, StorageRequestId,
 };
-use groove::storage::{Error, MemoryStorage, OwnedWriteOperation};
+use groove::storage::{Error, MemoryStorage, OwnedWriteOperation, StorageLayout};
 use groove::{
     db::{Database, GraphBuilder, PersistenceQueue, PollableDatabase, PollableDatabaseOpen},
     records::Value,
@@ -496,5 +496,51 @@ fn initial_hydration_may_pend_but_open_database_reads_are_resident() {
             .get("value")
             .unwrap(),
         Value::String("hydrated".into())
+    );
+}
+
+#[test]
+fn pollable_hydration_preserves_class_mapped_physical_storage() {
+    let schema = DatabaseSchema::new([TableSchema::new(
+        "jazz_rows_history",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("value", ColumnType::String),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+    let layout = StorageLayout::jazz_class_v1();
+    let physical = layout.physical_column_families(schema.column_families());
+    let refs = physical.iter().map(String::as_str).collect::<Vec<_>>();
+    let mut seeded = Database::new_with_storage_layout(
+        schema.clone(),
+        MemoryStorage::new(&refs),
+        layout.clone(),
+    )
+    .unwrap();
+    let mut batch = seeded.open_batch();
+    batch.insert(
+        "jazz_rows_history",
+        vec![Value::U64(9), Value::String("class hydrated".into())],
+    );
+    seeded.commit_batch(batch).unwrap();
+    let mut opening = PollableDatabaseOpen::new_with_storage_layout(
+        schema,
+        Box::new(seeded.into_storage()),
+        layout,
+    );
+    let waker = Waker::from(Arc::new(NoopWake));
+    let mut context = Context::from_waker(&waker);
+    let Poll::Ready(Ok(database)) = opening.poll_open(&mut context) else {
+        panic!("immediate class storage must hydrate in its first poll")
+    };
+    assert_eq!(
+        database
+            .resident()
+            .primary_key_scan("jazz_rows_history", &[Value::U64(9)])
+            .unwrap()[0]
+            .get("value")
+            .unwrap(),
+        Value::String("class hydrated".into())
     );
 }
