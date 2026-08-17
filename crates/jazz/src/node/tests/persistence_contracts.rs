@@ -217,6 +217,148 @@ fn async_authority_ingest_owns_complete_persistence_before_fate_publication() {
     ));
 }
 
+struct GatedAuthorityStorage {
+    inner: MemoryStorage,
+    released: std::rc::Rc<std::cell::Cell<bool>>,
+}
+
+impl groove::storage::pollable::PollableOrderedKvStorage for GatedAuthorityStorage {
+    fn poll_request(
+        &mut self,
+        request: &groove::storage::pollable::OwnedStorageRequest,
+        context: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<
+        Result<groove::storage::pollable::OwnedStorageResponse, groove::storage::Error>,
+    > {
+        if !self.released.get() {
+            return std::task::Poll::Pending;
+        }
+        groove::storage::pollable::PollableOrderedKvStorage::poll_request(
+            &mut self.inner,
+            request,
+            context,
+        )
+    }
+
+    fn cancel_request(
+        &mut self,
+        _request: groove::storage::pollable::StorageRequestId,
+    ) -> Result<(), groove::storage::Error> {
+        Ok(())
+    }
+}
+
+struct PersistenceTestWake;
+
+impl std::task::Wake for PersistenceTestWake {
+    fn wake(self: std::sync::Arc<Self>) {}
+}
+
+fn persistence_storage_for(pending: &PendingAuthorityPublication) -> MemoryStorage {
+    let column_families = pending
+        .persistence
+        .iter()
+        .flat_map(|batch| batch.clone().into_operations())
+        .map(|operation| match operation {
+            groove::storage::OwnedWriteOperation::Set { cf, .. }
+            | groove::storage::OwnedWriteOperation::Delete { cf, .. }
+            | groove::storage::OwnedWriteOperation::Delta { cf, .. } => cf,
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let refs = column_families
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    MemoryStorage::new(&refs)
+}
+
+#[test]
+fn authority_scheduler_releases_fate_only_after_async_storage_completion() {
+    let (mut writer, _) = fail_write_many_node();
+    let (tx_id, unit) = writer
+        .commit_mergeable_unit(
+            MergeableCommit::new("todos", row(0xcd), 10).cells(title_cells("scheduled")),
+        )
+        .unwrap();
+    let SyncMessage::CommitUnit { tx, versions } = unit else {
+        panic!("local write must produce a commit unit")
+    };
+    let (mut authority, _) = fail_write_many_node();
+    let pending = authority
+        .ingest_commit_unit_for_async_persistence(
+            tx,
+            versions,
+            u64::MAX - SKEW_TOLERANCE_MS,
+            None,
+        )
+        .unwrap();
+
+    let released = std::rc::Rc::new(std::cell::Cell::new(false));
+    let storage = GatedAuthorityStorage {
+        inner: persistence_storage_for(&pending),
+        released: std::rc::Rc::clone(&released),
+    };
+    let mut scheduler = AuthorityPersistenceScheduler::new(Box::new(storage));
+    scheduler.enqueue(pending);
+    let waker = std::task::Waker::from(std::sync::Arc::new(PersistenceTestWake));
+    let mut context = std::task::Context::from_waker(&waker);
+
+    assert!(scheduler.poll(&mut context).is_pending());
+    assert!(scheduler.has_pending());
+    released.set(true);
+    let outcome = scheduler.poll(&mut context);
+    let std::task::Poll::Ready(Ok(responses)) = outcome else {
+        panic!("released persistence unit must complete: {outcome:?}")
+    };
+    assert!(!scheduler.has_pending());
+    assert!(matches!(
+        responses.as_slice(),
+        [SyncMessage::FateUpdate {
+            tx_id: response_tx,
+            fate: Fate::Accepted,
+            durability: Some(DurabilityTier::Global),
+            ..
+        }] if *response_tx == tx_id
+    ));
+}
+
+#[test]
+fn authority_scheduler_uses_same_first_poll_path_for_immediate_storage() {
+    let (mut writer, _) = fail_write_many_node();
+    let (tx_id, unit) = writer
+        .commit_mergeable_unit(
+            MergeableCommit::new("todos", row(0xcc), 10).cells(title_cells("immediate")),
+        )
+        .unwrap();
+    let SyncMessage::CommitUnit { tx, versions } = unit else {
+        panic!("local write must produce a commit unit")
+    };
+    let (mut authority, _) = fail_write_many_node();
+    let pending = authority
+        .ingest_commit_unit_for_async_persistence(
+            tx,
+            versions,
+            u64::MAX - SKEW_TOLERANCE_MS,
+            None,
+        )
+        .unwrap();
+    let durable = persistence_storage_for(&pending);
+    let mut scheduler = AuthorityPersistenceScheduler::new(Box::new(durable));
+    scheduler.enqueue(pending);
+    let waker = std::task::Waker::from(std::sync::Arc::new(PersistenceTestWake));
+    let mut context = std::task::Context::from_waker(&waker);
+    let outcome = scheduler.poll(&mut context);
+    let std::task::Poll::Ready(Ok(responses)) = outcome else {
+        panic!("immediate storage must complete through its first scheduler poll: {outcome:?}")
+    };
+    assert!(matches!(
+        responses.as_slice(),
+        [SyncMessage::FateUpdate { tx_id: response_tx, .. }] if *response_tx == tx_id
+    ));
+}
+
 /// INV-TX-25: one commit unit is one durable publication boundary. If the
 /// storage batch that contains a multi-row local write fails, neither a subset
 /// of the transaction nor a derived history subscription delta may escape.

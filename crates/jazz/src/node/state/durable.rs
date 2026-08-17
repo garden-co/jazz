@@ -961,3 +961,73 @@ where
     }
 
 }
+
+/// Drives authority durability and releases protocol responses only for whole
+/// completed persistence units.
+#[doc(hidden)]
+pub struct AuthorityPersistenceScheduler {
+    persistence: groove::db::PersistenceQueue,
+    responses: BTreeMap<groove::db::PersistenceUnitId, Vec<SyncMessage>>,
+}
+
+impl AuthorityPersistenceScheduler {
+    #[doc(hidden)]
+    pub fn new(persistence: Box<dyn groove::storage::pollable::PollableOrderedKvStorage>) -> Self {
+        Self {
+            persistence: groove::db::PersistenceQueue::new(persistence),
+            responses: BTreeMap::new(),
+        }
+    }
+
+    /// Enqueue a resident-complete authority operation without exposing its
+    /// responses to the transport.
+    #[doc(hidden)]
+    pub fn enqueue(&mut self, pending: PendingAuthorityPublication) {
+        let (batches, responses) = pending.into_parts();
+        let unit = self.persistence.enqueue_unit(batches);
+        assert!(
+            self.responses.insert(unit, responses).is_none(),
+            "persistence unit ids are unique"
+        );
+    }
+
+    /// Poll persistence and return only responses whose complete durable unit
+    /// succeeded during this call.
+    #[doc(hidden)]
+    pub fn poll(
+        &mut self,
+        context: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<Vec<SyncMessage>, Error>> {
+        match self.persistence.poll(context) {
+            std::task::Poll::Pending => std::task::Poll::Pending,
+            std::task::Poll::Ready(Ok(completed)) => {
+                let mut publish = Vec::new();
+                for unit in completed {
+                    publish.extend(
+                        self.responses
+                            .remove(&unit)
+                            .expect("completed persistence unit has quarantined responses"),
+                    );
+                }
+                std::task::Poll::Ready(Ok(publish))
+            }
+            std::task::Poll::Ready(Err(error)) => {
+                self.responses.clear();
+                std::task::Poll::Ready(Err(error.into()))
+            }
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn has_pending(&self) -> bool {
+        !self.responses.is_empty()
+    }
+
+    /// Cancel retained work. No quarantined response can be released after
+    /// cancellation, including when a backend reports ambiguous completion.
+    #[doc(hidden)]
+    pub fn cancel_all(&mut self) -> Result<(), Error> {
+        self.responses.clear();
+        self.persistence.cancel_all().map_err(Error::from)
+    }
+}
