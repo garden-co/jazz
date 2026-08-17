@@ -90,13 +90,13 @@ impl fmt::Debug for AuthClock {
     }
 }
 
-#[cfg(feature = "test-utils")]
+#[cfg(feature = "test")]
 #[derive(Clone, Debug)]
 pub struct TestClock {
     now_seconds: Arc<AtomicU64>,
 }
 
-#[cfg(feature = "test-utils")]
+#[cfg(feature = "test")]
 impl TestClock {
     pub fn new(now_seconds: u64) -> Self {
         Self {
@@ -118,7 +118,7 @@ impl TestClock {
     }
 }
 
-#[cfg(feature = "test-utils")]
+#[cfg(feature = "test")]
 impl From<TestClock> for AuthClock {
     fn from(clock: TestClock) -> Self {
         Self {
@@ -1534,7 +1534,7 @@ mod tests {
         assert!(result.is_err());
     }
 
-    #[cfg(feature = "test-utils")]
+    #[cfg(feature = "test")]
     #[tokio::test]
     async fn local_first_auth_expiry_uses_configured_test_clock() {
         let app_id = test_app_id();
@@ -1590,7 +1590,7 @@ mod tests {
         assert!(result.is_err());
     }
 
-    #[cfg(feature = "test-utils")]
+    #[cfg(feature = "test")]
     #[tokio::test]
     async fn anonymous_session_has_auth_mode_anonymous() {
         let app_id = AppId::from_name("test-app");

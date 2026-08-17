@@ -30,7 +30,7 @@ For ordinary Rust/core work, the full gate set is:
 
 1. `cargo test -p jazz`
 2. `cargo test -p groove`
-3. `cargo test -p jazz --no-default-features --features test`
+3. `cargo test -p jazz --no-default-features --features testing,transport-compression-zstd`
 4. `cargo check -p jazz-sim --benches`
 5. `dev/gates/ts-wire-codec.sh`
 6. `JAZZ_SEED_COUNT=300 cargo test -p jazz m3_maintained_one_shot_differential_oracle`

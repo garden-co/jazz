@@ -19,9 +19,12 @@ tracing-opentelemetry = "0.32"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
-jazz = { workspace = true, default-features = false, features = ["test"] }
+jazz = { workspace = true, default-features = false, features = [
+  "testing",
+  "transport-compression-zstd",
+] }
 jazz-testkit = { path = "../jazz-testkit" }
-jazz-server = { path = "../jazz-server", features = ["test-utils"] }
+jazz-server = { path = "../jazz-server", features = ["test"] }
 jsonwebtoken = { version = "10.4", default-features = false, features = ["rust_crypto", "use_pem"] }
 opentelemetry_sdk = { version = "0.31", features = ["testing"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

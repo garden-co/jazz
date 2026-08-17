@@ -125,12 +125,12 @@ pub mod query;
 pub mod result_tree;
 /// Jazz schema and storage lowering.
 pub mod schema;
-/// Operational server-shell APIs formerly provided by jazz-server.
-#[cfg(feature = "server")]
+/// Platform-neutral client and server runtime APIs used by target shells.
+#[cfg(feature = "runtime")]
 pub mod serving;
 /// Logical time and sequence counters.
 pub mod time;
-/// Public client, server, and CLI support APIs formerly provided by jazz-tools.
+/// Public runtime and data-model support APIs formerly provided by jazz-tools.
 // The tools API was a separate crate before consolidation and intentionally
 // retains its existing documentation policy.
 #[allow(missing_docs)]

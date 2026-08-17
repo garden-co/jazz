@@ -235,7 +235,7 @@ impl ServerRuntimeHandle {
         .await
     }
 
-    #[cfg(any(test, feature = "test"))]
+    #[cfg(any(test, feature = "testing"))]
     #[doc(hidden)]
     pub async fn set_catalogue_activation_failpoint(
         &self,
@@ -259,7 +259,7 @@ impl ServerRuntimeHandle {
         })
         .await
     }
-    #[cfg(any(test, feature = "test"))]
+    #[cfg(any(test, feature = "testing"))]
     #[doc(hidden)]
     pub async fn runtime_catalogue_contains(
         &self,

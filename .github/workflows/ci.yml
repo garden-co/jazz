@@ -93,7 +93,7 @@ jobs:
         with:
           sccache-s3: ${{ (github.event_name == 'pull_request' && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != '') || (github.event_name != 'pull_request' && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != '') }}
       - name: Workspace Rust tests (bounded, sharded, receipted)
-        run: node dev/gates/run-rust-tests.mjs --timeout-seconds 780 --nextest-profile jazz-ci -- --workspace --lib --bins --tests --features test
+        run: node dev/gates/run-rust-tests.mjs --timeout-seconds 780 --nextest-profile jazz-ci -- --workspace --lib --bins --tests --features jazz/testing,jazz/transport-compression-zstd,jazz-server/test,jazz-cli/test
       - name: Verify Nextest partition coverage
         run: node --test dev/gates/test/nextest-partitions.test.mjs
       - name: Upload Rust test receipt
@@ -150,7 +150,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test_binary="$(cargo test -p jazz --lib --features test --no-run --message-format=json | node -e '
+          test_binary="$(cargo test -p jazz --lib --features testing,transport-compression-zstd --no-run --message-format=json | node -e '
             const readline = require("node:readline");
             let executable;
             const lines = readline.createInterface({ input: process.stdin });

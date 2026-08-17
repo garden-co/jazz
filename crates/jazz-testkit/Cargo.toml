@@ -6,7 +6,7 @@ edition = "2024"
 [features]
 default = ["scenarios", "rocksdb", "transport-compression-zstd"]
 scenarios = [
-  "jazz/test-utils",
+  "jazz/testing",
   "dep:jsonwebtoken",
   "dep:jazz-native-transport",
   "dep:jazz-server",
@@ -25,7 +25,7 @@ groove.workspace = true
 jazz.workspace = true
 jazz-storage-rocksdb = { workspace = true, optional = true }
 jazz-native-transport = { workspace = true, optional = true }
-jazz-server = { path = "../jazz-server", features = ["test-utils"], optional = true }
+jazz-server = { path = "../jazz-server", features = ["test"], optional = true }
 jsonwebtoken = { version = "10.4", default-features = false, features = [
   "rust_crypto",
   "use_pem",

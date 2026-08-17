@@ -4,7 +4,7 @@
 
 #[path = "../src/client_worker.rs"]
 mod client_worker;
-#[path = "../../../crates/jazz/tests/support/permissions.rs"]
+#[path = "../../../crates/jazz-testkit/src/permissions.rs"]
 mod permissions_support;
 
 use std::convert::Infallible;

@@ -101,16 +101,16 @@ tracer-provider lifetime ownership to `jazz-otel`; it no longer depends
 directly on `opentelemetry_sdk` or `tracing-subscriber`. Shell-specific default
 filter directives remain explicit inputs to the adapter boundary.
 
-The NAPI shell also selects the narrowly named `embedded-server` capability
-instead of Jazz's integration-test umbrella. This keeps the embedded native
-server/client/SQLite surface it actually exposes without compiling sync-autopsy
-instrumentation into the production binding artifact.
+The NAPI shell selects `jazz-server/embedded-server` for its hosted server and
+the same `jazz/runtime` semantic artifact as the other native shells. It no
+longer enables a Jazz integration-test umbrella or sync-autopsy instrumentation
+in the production binding artifact.
 
 `jazz-testkit` now distinguishes its featureless duplex-transport base from
 public client/server scenarios and their native adapters. Direct testkit runs
 default to the full scenario harness, RocksDB, and zstd as before, while Jazz's
 white-box dev-dependency disables those defaults. Its retained engine tests can
-use the duplex transport without re-enabling server, client, SQLite, RocksDB,
+use the duplex transport without re-enabling the semantic runtime, RocksDB,
 compression, HTTP/JWT, async-runtime, or fixture dependencies through feature
 unification. Those dependencies are optional and selected by `scenarios`.
 
@@ -119,8 +119,8 @@ unification. Those dependencies are optional and selected by `scenarios`.
 - Move `TestingClient`, `TestJwtIssuer`, reusable fixtures, simulation helpers,
   and the semantic oracle to `jazz-testkit`.
 - Make NAPI depend directly on `jazz-otel`; stop enabling telemetry support in
-  the semantic crate. Its remaining `test-utils` dependency belongs to the
-  later testkit slice.
+  the semantic crate. Test-only helpers are selected by `jazz/testing` from the
+  separate testkit package.
 - Keep focused private white-box tests in `jazz`.
 - Move large public/scenario harnesses to `jazz-testkit` or dedicated integration
   packages so a focused core unit test does not compile every scenario fixture.
@@ -141,11 +141,13 @@ remain under Jazz even when Cargo represents them as integration binaries.
 
 ## Proposed feature model
 
-The common core should approach:
+The common core now uses:
 
 ```toml
 [features]
 default = []
+runtime = ["dep:tokio", "dep:jsonwebtoken"]
+testing = ["runtime"]
 sync-autopsy = []
 cold-settle-attribution = []
 ```
@@ -172,9 +174,11 @@ rocksdb = ["jazz-storage-rocksdb"]
 otel = ["jazz-otel"]
 ```
 
-Remove the remaining umbrella `test`, `test-utils`, `client`, `server`, and
-`testing` features from semantic core after callers migrate. The executable
-and telemetry slices remove `cli` and `otel-core` first.
+The former `client`, `server`, `embedded-server`, `test-utils`, and `test`
+feature combinations have been removed. Native shells now share one `runtime`
+configuration; test and benchmark packages add the single `testing` capability
+plus an explicit wire codec. `sync-autopsy` and attribution counters remain
+deliberately separate diagnostics.
 
 ## Canonical build matrix
 
@@ -239,14 +243,14 @@ Separate Axum/server, native client networking, and CLI dependencies. Remove the
 
 Progress: executable binaries now live in `jazz-cli`, native client networking
 no longer selects the server module, and `jazz` is featureless by default.
-Actual shells select storage, compression, client, and server capabilities
-explicitly. The Axum routes, WebSocket serving, external JWT/JWK verification,
+Actual shells select storage, compression, and one shared semantic runtime
+capability explicitly. The Axum routes, WebSocket serving, external JWT/JWK verification,
 catalogue HTTP orchestration, server state/builder, embedded server harness,
 and legacy loopback listeners now live in `jazz-server`. Jazz exposes an opaque
 semantic runtime handle plus schema-conversion vocabulary; it no longer has
-normal dependencies on Axum, reqwest, tower-http, or tungstenite. The final
-lane step is collapsing the temporary semantic `client`/`server` feature
-selection left inside Jazz.
+normal dependencies on Axum, reqwest, tower-http, or tungstenite. Jazz's former
+client/server/embedded/test umbrella features are gone; target shells share the
+same `runtime` core artifact and test packages opt into `testing` explicitly.
 
 Groove is also featureless by default. Canonical tests and native Jazz shells
 select its existing RocksDB adapter explicitly, so checking the semantic

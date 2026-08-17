@@ -573,7 +573,7 @@ pub struct NodeState<S> {
     /// must reopen and deterministically resume activation before serving more
     /// protocol traffic.
     catalogue_activation_failed: bool,
-    #[cfg(any(test, feature = "test"))]
+    #[cfg(any(test, feature = "testing"))]
     catalogue_activation_failpoint: Option<CatalogueActivationFailpoint>,
     /// Client-only write cadence selected for the first snapshot hydration.
     initial_sync_flush_cadence: Option<usize>,
@@ -1519,7 +1519,7 @@ struct CatalogueBootstrapReady {
     active_catalogue_seq: u64,
 }
 
-#[cfg(any(test, feature = "test"))]
+#[cfg(any(test, feature = "testing"))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[doc(hidden)]
 pub enum CatalogueActivationFailpoint {

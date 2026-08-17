@@ -8,26 +8,18 @@ autotests = true
 
 [features]
 # Jazz is the common semantic library. Process and target shells select
-# storage, transport, compression, and server capabilities explicitly.
+# storage, transport, compression, and runtime capabilities explicitly.
 default = []
-sqlite = []
-client = ["dep:tokio"]
-server = [
-  "dep:jsonwebtoken",
-  "dep:tokio",
-]
+runtime = ["dep:jsonwebtoken", "dep:tokio"]
 sync-autopsy = []
 # Disabled-by-default counters for the cold-settle attribution bench. They do
 # not alter protocol behavior or production measurement paths.
 cold-settle-attribution = ["groove/cold-settle-attribution"]
 r3-open-attribution = ["testing"]
-testing = []
-embedded-server = ["server", "client", "sqlite"]
+testing = ["runtime"]
 transport-compression-lz4 = ["jazz-compression/lz4"]
 transport-compression-zstd = ["jazz-compression/zstd"]
 transport-compression-ruzstd = ["jazz-compression/ruzstd"]
-test-utils = ["embedded-server", "sync-autopsy"]
-test = ["test-utils", "transport-compression-zstd"]
 
 [dependencies]
 futures-core = "0.3.31"
@@ -151,8 +143,8 @@ required-features = ["testing"]
 
 [[test]]
 name = "parameterized_subscription_routing"
-required-features = ["test"]
+required-features = ["testing"]
 
 [[test]]
 name = "authorization_scope_reentry"
-required-features = ["test"]
+required-features = ["testing"]

@@ -2,7 +2,7 @@
 
 Always prefer black-boxed integration tests that exercise public APIs over unit tests or white-box tests.
 
-- Canonical crate gate: `cargo test -p jazz --no-default-features --features test`, with a `-j`
+- Canonical crate gate: `cargo test -p jazz --no-default-features --features testing,transport-compression-zstd`, with a `-j`
   appropriate for the box (see `AGENTS.md`; the former fixed `-j 2` was a
   laptop-specific linker-OOM workaround, not a property of the build).
   This runs integration tests with Rust's default per-binary parallelism; fixtures

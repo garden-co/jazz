@@ -8,15 +8,15 @@ autotests = true
 [features]
 default = ["rocksdb", "transport-compression-zstd"]
 rocksdb = ["dep:jazz-storage-rocksdb"]
-sqlite = ["jazz/sqlite"]
+sqlite = []
 transport-compression-lz4 = ["jazz/transport-compression-lz4"]
 transport-compression-zstd = ["jazz/transport-compression-zstd"]
 transport-compression-ruzstd = ["jazz/transport-compression-ruzstd"]
 otel = ["dep:jazz-otel", "dep:opentelemetry", "dep:opentelemetry_sdk", "jazz-server/otel"]
-test = ["jazz/test"]
+test = ["jazz/testing", "jazz-server/test"]
 
 [dependencies]
-jazz = { workspace = true, default-features = false, features = ["server"] }
+jazz = { workspace = true, default-features = false, features = ["runtime"] }
 jazz-server = { path = "../jazz-server" }
 jazz-native-transport.workspace = true
 jazz-storage-rocksdb = { workspace = true, optional = true }

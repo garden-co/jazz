@@ -34,7 +34,7 @@ use crate::tools::public_schema::{ColumnType, Query, Session, TableSchema, Value
 use crate::tools::public_schema::{OrderedRowDelta, QueryResult, Row};
 use crate::tools::public_schema::{Schema, validate_json_value};
 use crate::tools::public_schema_convert::convert_public_schema;
-#[cfg(feature = "test-utils")]
+#[cfg(feature = "testing")]
 use crate::tools::sync::ClientId;
 use crate::tools::sync::DurabilityTier;
 use crate::tools::transaction::BatchId;
@@ -868,7 +868,7 @@ impl ClientDb {
         self.inner.borrow_mut().disconnect_upstream()
     }
 
-    #[cfg(feature = "test-utils")]
+    #[cfg(feature = "testing")]
     async fn reconnect_upstream(&self) -> Result<bool> {
         ClientDbInner::reconnect_upstream(&self.inner).await
     }
@@ -3010,7 +3010,7 @@ impl JazzClient {
     }
 }
 
-#[cfg(feature = "test-utils")]
+#[cfg(feature = "testing")]
 impl JazzClient {
     pub fn client_id(&self) -> Option<ClientId> {
         None
@@ -3044,7 +3044,7 @@ impl JazzClient {
     }
 }
 
-#[cfg(any(test, feature = "test-utils"))]
+#[cfg(any(test, feature = "testing"))]
 impl Drop for JazzClient {
     /// This is a simplified and synchronous implementation of `JazzClient.shutdown`
     /// that is good-enough for tests (so that we don't require an explicit

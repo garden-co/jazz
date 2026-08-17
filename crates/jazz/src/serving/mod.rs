@@ -362,7 +362,7 @@ impl ShellDb {
         }
     }
 
-    #[cfg(any(test, feature = "test"))]
+    #[cfg(any(test, feature = "testing"))]
     fn set_catalogue_activation_failpoint(
         &self,
         failpoint: crate::node::CatalogueActivationFailpoint,
@@ -795,7 +795,7 @@ impl InMemoryServerShell {
         self.db.apply_trusted_catalogue_snapshot(snapshot)
     }
 
-    #[cfg(any(test, feature = "test"))]
+    #[cfg(any(test, feature = "testing"))]
     pub(crate) fn set_catalogue_activation_failpoint(
         &self,
         failpoint: crate::node::CatalogueActivationFailpoint,
@@ -842,7 +842,7 @@ impl InMemoryServerShell {
         self.runtime_schema_state.current_write_revision
     }
 
-    #[cfg(any(test, feature = "test"))]
+    #[cfg(any(test, feature = "testing"))]
     pub(crate) fn runtime_catalogue_contains(
         &self,
         schema: SchemaVersionId,

@@ -1,41 +1,41 @@
-#[cfg(feature = "test-utils")]
+#[cfg(feature = "testing")]
 use std::time::Duration;
 
 use crate::tools::object::ObjectId;
-#[cfg(feature = "test-utils")]
+#[cfg(feature = "testing")]
 use crate::tools::public_api::query::Query;
-#[cfg(feature = "test-utils")]
+#[cfg(feature = "testing")]
 use crate::tools::public_api::types::Value;
-#[cfg(feature = "test-utils")]
+#[cfg(feature = "testing")]
 use crate::tools::{DurabilityTier, JazzClient};
 
-#[cfg(feature = "test-utils")]
+#[cfg(feature = "testing")]
 pub type QueryRows = Vec<(ObjectId, Vec<Value>)>;
 
-#[cfg(feature = "test-utils")]
+#[cfg(feature = "testing")]
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
-#[cfg(feature = "test-utils")]
+#[cfg(feature = "testing")]
 const DEFAULT_QUERY_TIMEOUT: Duration = Duration::from_secs(8);
 
-#[cfg(feature = "test-utils")]
+#[cfg(feature = "testing")]
 const DEFAULT_WAIT_TIMEOUT_MULTIPLIER: u32 = 8;
 
 /// Sanctioned test-support reconnect control: mirrors the public client's
 /// upstream detach without clearing local known-state or pending writes.
-#[cfg(feature = "test-utils")]
+#[cfg(feature = "testing")]
 pub fn disconnect_client(client: &JazzClient) -> bool {
     client.disconnect_upstream_for_test()
 }
 
 /// Sanctioned test-support reconnect control: reattaches the preserved client
 /// state to the original upstream transport.
-#[cfg(feature = "test-utils")]
+#[cfg(feature = "testing")]
 pub async fn reconnect_client(client: &JazzClient) -> crate::tools::Result<bool> {
     client.reconnect_upstream_for_test().await
 }
 
-#[cfg(feature = "test-utils")]
+#[cfg(feature = "testing")]
 fn load_tolerant_wait_timeout(timeout: Duration) -> Duration {
     let multiplier = std::env::var("JAZZ_TOOLS_TEST_WAIT_TIMEOUT_MULTIPLIER")
         .ok()
@@ -50,7 +50,7 @@ fn load_tolerant_wait_timeout(timeout: Duration) -> Duration {
 ///
 /// Per-attempt query timeouts and transient query errors are retried until the
 /// outer deadline is reached.
-#[cfg(feature = "test-utils")]
+#[cfg(feature = "testing")]
 pub async fn wait_for_query<T, F>(
     client: &JazzClient,
     query: Query,
@@ -109,7 +109,7 @@ where
 }
 
 /// Re-runs an identity-bearing query until its ResultKey rows satisfy the matcher.
-#[cfg(feature = "test-utils")]
+#[cfg(feature = "testing")]
 pub async fn wait_for_query_results<T, F>(
     client: &JazzClient,
     query: Query,
