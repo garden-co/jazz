@@ -433,12 +433,12 @@ pub(super) fn snapshot_table_deltas(
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-struct TableSnapshotSource {
-    table: String,
-    scan: Option<StaticScanSpec>,
+pub(super) struct TableSnapshotSource {
+    pub(super) table: String,
+    pub(super) scan: Option<StaticScanSpec>,
 }
 
-fn collect_table_sources(
+pub(super) fn collect_table_sources(
     graph: &IvmGraph,
     node: NodeId,
     tables: &mut std::collections::HashSet<TableSnapshotSource>,

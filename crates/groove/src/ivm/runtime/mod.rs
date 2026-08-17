@@ -53,8 +53,8 @@ use aggregate::{aggregate_row_from_records, records_before_from_deltas, resolve_
 use join::{AntiJoinState, ArrangementState, JoinState, touched_join_keys};
 use persist::apply_persist_delta;
 use recursion::{
-    RecursiveState, hydrate_recursive_arrangements, recompute_recursive, recursive_delta,
-    recursive_read_tables, snapshot_table_deltas,
+    RecursiveState, collect_table_sources, hydrate_recursive_arrangements, recompute_recursive,
+    recursive_delta, recursive_read_tables, snapshot_table_deltas,
 };
 use state::{
     ArrangementKey, ArrangementUpdateMode, AsOf, EvalContext, EvalMemoEntry, EvalMemoKey, EvalMode,
@@ -270,6 +270,7 @@ mod compilation;
 mod graph_lifecycle;
 mod runtime_tick;
 mod schema;
+mod storage_requirements;
 mod subscriptions;
 pub use subscriptions::*;
 mod operator_updates;

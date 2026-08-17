@@ -5,7 +5,7 @@ use std::task::{Context, Poll, Waker};
 use groove::db::{Database, DemandDrivenDatabase, GraphBuilder};
 use groove::records::Value;
 use groove::schema::{
-    ColumnSchema, ColumnType, DatabaseSchema, IntegerKeyType, PrimaryKey, TableSchema,
+    ColumnSchema, ColumnType, DatabaseSchema, IndexSchema, IntegerKeyType, PrimaryKey, TableSchema,
 };
 use groove::storage::async_ordered::{
     ImmediateStorage, OrderedKvStorage, OwnedStorageOperation, OwnedStorageRequest,
@@ -69,6 +69,18 @@ fn referencing_schema() -> DatabaseSchema {
         )
         .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64)),
     ])
+}
+
+fn indexed_schema() -> DatabaseSchema {
+    DatabaseSchema::new([TableSchema::new(
+        "rows",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("value", ColumnType::String),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
+    .with_index(IndexSchema::new("rows_by_value", ["value"]).unique())])
 }
 
 #[test]
@@ -217,6 +229,47 @@ fn write_preparation_loads_inputs_before_the_single_real_ivm_tick() {
         .commit_prepared_batch_for_async_persistence(prepared)
         .unwrap();
     assert_eq!(subscription.recv().unwrap().to_values().unwrap().len(), 1);
+}
+
+#[test]
+fn write_preparation_declares_durable_index_inputs_without_ticking() {
+    let cache = DemandLoadedStorage::new(&["rows", "indices"]);
+    cache
+        .admit(
+            OwnedStorageOperation::Scan(groove::storage::async_ordered::OwnedScanRequest::prefix(
+                "rows",
+                Vec::new(),
+            )),
+            OwnedStorageResponse::Rows(Vec::new()),
+        )
+        .unwrap();
+    let database = Database::new(indexed_schema(), cache.clone()).unwrap();
+    let mut batch = database.open_batch();
+    batch.insert("rows", vec![Value::U64(1), Value::String("one".into())]);
+
+    let Err(error) = database.prepare_batch_storage_inputs(&batch) else {
+        panic!("a cold durable index must be acquired before the live tick")
+    };
+    let groove::db::Error::IvmRuntime(groove::ivm::IvmRuntimeError::Storage(
+        groove::storage::Error::NotResident { request },
+    )) = error
+    else {
+        panic!("preparation must report the exact missing durable index input")
+    };
+    let OwnedStorageOperation::Scan(scan) = request.as_ref() else {
+        panic!("a durable index closure must be acquired as an ordered scan")
+    };
+    assert_eq!(scan.column_family, "indices");
+    assert!(
+        database.last_tick_metrics().is_none(),
+        "declaring the index closure must not evaluate a disposable or live IVM"
+    );
+
+    cache
+        .admit(*request, OwnedStorageResponse::Rows(Vec::new()))
+        .unwrap();
+    let _prepared = database.prepare_batch_storage_inputs(&batch).unwrap();
+    assert!(database.last_tick_metrics().is_none());
 }
 
 #[test]

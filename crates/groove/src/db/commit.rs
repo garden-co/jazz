@@ -128,7 +128,8 @@ where
         let pending_writes = self.pending_writes_from_operations(&batch.operations)?;
         let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
         self.ivm_runtime
-            .ensure_tick_storage_inputs(&storage)
+            .tick_storage_requirements()
+            .and_then(|requirements| requirements.ensure_resident(&storage))
             .map_err(Error::IvmRuntime)?;
         // Keep the operation conversion in preparation: Delta writes can read
         // the resident value while being converted to an owned durable write.
