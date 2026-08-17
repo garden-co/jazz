@@ -228,7 +228,7 @@ where
         Ok(heads.into_iter().collect())
     }
 
-    fn read_merge_heads(
+    pub(super) fn read_merge_heads(
         &mut self,
         table_id: PhysicalTableId,
         row_uuid: RowUuid,
@@ -1067,6 +1067,27 @@ where
                 global_seq,
             ),
         );
+        Ok(())
+    }
+
+    pub(super) fn preload_global_change_slot(
+        &mut self,
+        schema_version: SchemaVersionId,
+        table: &str,
+        row_uuid: RowUuid,
+        layer: VersionLayer,
+        global_seq: GlobalSeq,
+    ) -> Result<(), Error> {
+        let table_id = self.physical_table_id_for_schema(schema_version, table)?;
+        let _ = self.database.primary_key_get_raw(
+            "jazz_global_changes",
+            &[
+                Value::U64(table_id.0),
+                Value::Uuid(row_uuid.0),
+                Value::Bytes(version_layer_string(layer).into_bytes()),
+                Value::U64(global_seq.0),
+            ],
+        )?;
         Ok(())
     }
 

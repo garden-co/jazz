@@ -84,20 +84,6 @@ pub struct PreparedDatabaseBatch {
     direct_operations: Vec<OwnedWriteOperation>,
 }
 
-/// Cloneable fail-closed capability attached to externally owned persistence.
-#[doc(hidden)]
-#[derive(Clone)]
-pub struct AsyncPersistencePoison {
-    poisoned: Arc<AtomicBool>,
-}
-
-impl AsyncPersistencePoison {
-    #[doc(hidden)]
-    pub fn poison(&self) {
-        self.poisoned.store(true, Ordering::Release);
-    }
-}
-
 impl PendingPersistenceBatch {
     /// Consume the receipt into the exact owned storage operations.
     #[doc(hidden)]

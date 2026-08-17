@@ -617,6 +617,28 @@ where
         self.missing_parent_refs_memo(versions, &mut memo)
     }
 
+    /// Admit the exact durable child-edge closure that a rejection may walk
+    /// during its non-suspending publication phase.
+    pub(super) fn prepare_rejection_cascade_inputs(&mut self, root: TxId) -> Result<(), Error> {
+        let mut pending = VecDeque::from([root]);
+        let mut visited = BTreeSet::new();
+        while let Some(parent) = pending.pop_front() {
+            if !visited.insert(parent) {
+                continue;
+            }
+            self.ensure_child_edge_closure_loaded(parent)?;
+            pending.extend(
+                self.rejections
+                    .child_txs_by_parent
+                    .get(&parent)
+                    .into_iter()
+                    .flatten()
+                    .copied(),
+            );
+        }
+        Ok(())
+    }
+
     pub(super) fn missing_parent_refs_memo(
         &mut self,
         versions: &[VersionRecord],

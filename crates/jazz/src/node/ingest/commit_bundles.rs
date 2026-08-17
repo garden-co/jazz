@@ -1,44 +1,148 @@
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct AuthorityCommitRequest {
+    pub(super) tx: Transaction,
+    pub(super) versions: Vec<VersionRecord>,
+    pub(super) now_ms: u64,
+    pub(super) ingest_context: Option<CommitUnitIngestContext>,
+}
+
+pub(crate) struct PreparedAuthorityCommit {
+    request: AuthorityCommitRequest,
+}
+
 impl<S> NodeState<S>
 where
     S: ResidentStorage,
 {
-    /// Apply an authority commit to resident state while retaining both its
-    /// complete durable closure and its externally observable responses.
+    /// Acquire the durable-backed inputs that can affect authority validation.
     ///
-    /// The caller must persist every returned batch, in order, before sending
-    /// any response. Immediate backends naturally complete that work in the
-    /// same poll; suspending backends retain this owned value across wakeups.
-    #[doc(hidden)]
-    pub fn ingest_commit_unit_for_async_persistence(
+    /// This phase may populate read/query caches, but it cannot advance a
+    /// transaction, clock, IVM frontier, parking queue, or durable journal.
+    /// Publication treats any later cold miss as an invariant violation.
+    pub(crate) fn prepare_authority_commit(
         &mut self,
         tx: Transaction,
         versions: Vec<VersionRecord>,
         now_ms: u64,
         ingest_context: Option<CommitUnitIngestContext>,
-    ) -> Result<PendingAuthorityPublication, Error>
+    ) -> Result<PreparedAuthorityCommit, Error>
     where
         S: ReopenableStorage,
     {
         self.require_catalogue_ready()?;
-        let was_capturing = self.capture_persistence_batches;
-        self.capture_persistence_batches = true;
-        let mark = self.begin_persistence_unit();
-        let result = self.ingest_commit_unit_with_context(tx, versions, now_ms, ingest_context);
-        self.capture_persistence_batches = was_capturing;
-        match result {
-            Ok(responses) => Ok(PendingAuthorityPublication {
-                persistence: self.finish_persistence_unit(mark),
-                responses,
-                poison: self.database.async_persistence_poison(),
-            }),
-            Err(error) => {
-                // The Groove durable-publication scope has already poisoned a
-                // partially applied resident operation. Its captured writes
-                // must never be submitted after that failure.
-                let _ = self.finish_persistence_unit(mark);
-                Err(error)
+        let versions = canonical_versions(versions);
+        let tx_node_alias = self.prepare_node_alias(tx.tx_id.node)?;
+        let mut will_reject = commit_unit_limit_violation(&versions).is_some()
+            || !commit_unit_write_count_matches(&tx, versions.len())
+            || self.malformed_authored_version_reason(&versions).is_some();
+        if let Some(existing) = self.query_transaction(tx.tx_id)? {
+            let _ = existing;
+            let _ = self.query_versions_for_tx(tx.tx_id)?;
+        }
+        if commit_unit_limit_violation(&versions).is_none()
+            && commit_unit_write_count_matches(&tx, versions.len())
+            && self.malformed_authored_version_reason(&versions).is_none()
+            && !matches!(
+                tx.target_lineage,
+                crate::tx::BranchLineage::Branch(branch_id)
+                    if !self.branches.branches.contains_key(&branch_id)
+            )
+            && versions.iter().all(|version| {
+                self.catalogue
+                    .catalogue_schemas
+                    .contains_key(&version.schema_version())
+            })
+        {
+            let mut memo = IngestMemo::default();
+            if self.missing_parent_refs_memo(&versions, &mut memo)?.is_empty() {
+                will_reject |=
+                    !self.commit_unit_satisfies_clock_condition(&tx, &versions, &mut memo)?;
+                will_reject |=
+                    tx.tx_id.time.physical_ms() > now_ms.saturating_add(SKEW_TOLERANCE_MS);
+                will_reject |= self.cascade_root_for_versions(&versions).is_some();
+                will_reject |= !self.commit_unit_satisfies_write_policies(
+                    &tx,
+                    &versions,
+                    ingest_context,
+                )?;
+                if tx.kind == TxKind::Exclusive {
+                    will_reject |= !self.validate_exclusive_commit_unit(&tx, &versions)?;
+                }
+                if tx.target_lineage == crate::tx::BranchLineage::Root {
+                    let _ = self.merge_rows_for_versions(&versions)?;
+                }
+                for version in &versions {
+                    let table = self.table_in_schema(version.table(), version.schema_version())?;
+                    let layer = VersionLayer::for_record(version);
+                    let _ = self.query_local_layer_winner(
+                        &table.name,
+                        version.row_uuid(),
+                        layer,
+                    )?;
+                    let _ = self.query_global_layer_winner_in_schema(
+                        version.schema_version(),
+                        &table.name,
+                        version.row_uuid(),
+                        layer,
+                    )?;
+                    self.preload_global_change_slot(
+                        version.schema_version(),
+                        &table.name,
+                        version.row_uuid(),
+                        layer,
+                        self.clock.next_global_seq,
+                    )?;
+                    if layer == VersionLayer::Content {
+                        let table_id = self.physical_table_id_for_schema(
+                            version.schema_version(),
+                            &table.name,
+                        )?;
+                        let _ = self.read_merge_heads(table_id, version.row_uuid())?;
+                    }
+                    let ahead_table = self.physical_current_table_for_schema(
+                        version.schema_version(),
+                        &table.name,
+                        layer,
+                        PhysicalCurrentClass::Ahead,
+                    )?;
+                    let _ = self.database.primary_key_get_raw(
+                        &ahead_table,
+                        &[
+                            Value::Uuid(version.row_uuid().0),
+                            Value::U64(tx.tx_id.time.0),
+                            Value::U64(tx_node_alias.0),
+                        ],
+                    )?;
+                }
             }
         }
+        if will_reject {
+            self.prepare_rejection_cascade_inputs(tx.tx_id)?;
+        }
+        Ok(PreparedAuthorityCommit {
+            request: AuthorityCommitRequest {
+                tx,
+                versions,
+                now_ms,
+                ingest_context,
+            },
+        })
+    }
+
+    pub(crate) fn publish_prepared_authority_commit(
+        &mut self,
+        prepared: PreparedAuthorityCommit,
+    ) -> Result<Vec<SyncMessage>, Error>
+    where
+        S: ReopenableStorage,
+    {
+        let AuthorityCommitRequest {
+            tx,
+            versions,
+            now_ms,
+            ingest_context,
+        } = prepared.request;
+        self.ingest_commit_unit_with_context(tx, versions, now_ms, ingest_context)
     }
 
     /// Ingest a commit unit as fate authority.

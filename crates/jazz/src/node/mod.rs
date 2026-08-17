@@ -877,31 +877,6 @@ pub enum CommitUnitTrust {
     TrustedBackend,
 }
 
-/// Authority work whose resident evaluation is complete but whose durable
-/// and protocol publication boundary is still owned by the runtime.
-#[doc(hidden)]
-#[must_use = "persist the complete unit before publishing its responses"]
-pub struct PendingAuthorityPublication {
-    persistence: Vec<PendingPersistenceBatch>,
-    responses: Vec<SyncMessage>,
-    poison: groove::db::AsyncPersistencePoison,
-}
-
-impl PendingAuthorityPublication {
-    /// Consume the unit into its ordered durable batches and quarantined wire
-    /// responses. Responses may be sent only after every batch succeeds.
-    #[doc(hidden)]
-    pub fn into_parts(
-        self,
-    ) -> (
-        Vec<PendingPersistenceBatch>,
-        Vec<SyncMessage>,
-        groove::db::AsyncPersistencePoison,
-    ) {
-        (self.persistence, self.responses, self.poison)
-    }
-}
-
 include!("state/async_runtime.rs");
 include!("state/lifecycle.rs");
 include!("state/commit.rs");

@@ -42,12 +42,19 @@ pub struct DemandDrivenNode {
     pending_persistence:
         std::collections::VecDeque<groove::storage::async_ordered::OwnedStorageRequest>,
     pending_fate: Option<PendingFateApplication>,
+    pending_authority: Option<PendingAuthorityApplication>,
     persistence_failed: bool,
 }
 
 struct PendingFateApplication {
     root: ingest::FateUpdateRequest,
     steps: std::collections::VecDeque<ingest::FateUpdateRequest>,
+}
+
+struct PendingAuthorityApplication {
+    request: ingest::AuthorityCommitRequest,
+    responses: Vec<SyncMessage>,
+    publication: groove::db::DurablePublicationScope,
 }
 
 impl DemandDrivenNode {
@@ -78,6 +85,9 @@ impl DemandDrivenNode {
         ) -> Result<T, Error>,
     ) -> std::task::Poll<Result<T, Error>> {
         if let Err(error) = self.ensure_persistence_usable() {
+            return std::task::Poll::Ready(Err(error));
+        }
+        if let Err(error) = self.ensure_authority_publication_idle() {
             return std::task::Poll::Ready(Err(error));
         }
         let prepared = match self.acquisition.poll(
@@ -135,6 +145,105 @@ impl DemandDrivenNode {
         )
     }
 
+    /// Ingest one authority commit and release its fate only after the exact
+    /// resident transition is durably committed.
+    ///
+    /// Preparation may suspend for cold validation inputs. The publishing
+    /// poll advances the real runtime once, but a retained Groove publication
+    /// scope quarantines subscription callbacks and all other operations are
+    /// withheld until storage commits. Immediate storage completes all phases
+    /// in this same call.
+    pub fn poll_ingest_commit_unit(
+        &mut self,
+        context: &mut std::task::Context<'_>,
+        tx: Transaction,
+        versions: Vec<VersionRecord>,
+        now_ms: u64,
+        ingest_context: Option<CommitUnitIngestContext>,
+    ) -> std::task::Poll<Result<Vec<SyncMessage>, Error>> {
+        if let Err(error) = self.ensure_persistence_usable() {
+            return std::task::Poll::Ready(Err(error));
+        }
+        let request = ingest::AuthorityCommitRequest {
+            tx,
+            versions,
+            now_ms,
+            ingest_context,
+        };
+        match &self.pending_authority {
+            Some(pending) if pending.request != request => {
+                return std::task::Poll::Ready(Err(Error::InvalidStoredValue(
+                    "a different authority commit was polled while one is pending",
+                )));
+            }
+            None => {
+                let prepared = match self.acquisition.poll(
+                    self.persistence.as_mut(),
+                    &self.cache,
+                    context,
+                    || {
+                        self.node.prepare_authority_commit(
+                            request.tx.clone(),
+                            request.versions.clone(),
+                            request.now_ms,
+                            request.ingest_context,
+                        )
+                    },
+                    missing_node_open_input,
+                ) {
+                    std::task::Poll::Pending => return std::task::Poll::Pending,
+                    std::task::Poll::Ready(Err(error)) => {
+                        self.discard_failed_operation_writes();
+                        return std::task::Poll::Ready(Err(error));
+                    }
+                    std::task::Poll::Ready(Ok(prepared)) => prepared,
+                };
+                let publication = match self.node.database.begin_durable_publication_scope() {
+                    Ok(publication) => publication,
+                    Err(error) => return std::task::Poll::Ready(Err(error.into())),
+                };
+                let responses = match self.node.publish_prepared_authority_commit(prepared) {
+                    Ok(responses) => responses,
+                    Err(error) => {
+                        publication.abort(&mut self.node.database);
+                        if is_not_resident(&error) {
+                            self.fail_persistence();
+                        } else {
+                            self.discard_failed_operation_writes();
+                        }
+                        return std::task::Poll::Ready(Err(error));
+                    }
+                };
+                self.collect_persistence_unit();
+                self.pending_authority = Some(PendingAuthorityApplication {
+                    request: request.clone(),
+                    responses,
+                    publication,
+                });
+            }
+            Some(_) => {}
+        }
+        match self.poll_persistence_queue(context) {
+            std::task::Poll::Pending => std::task::Poll::Pending,
+            std::task::Poll::Ready(Ok(())) => {
+                let pending = self
+                    .pending_authority
+                    .take()
+                    .expect("completed authority commit retains publication state");
+                pending.publication.finish(&mut self.node.database);
+                std::task::Poll::Ready(Ok(pending.responses))
+            }
+            std::task::Poll::Ready(Err(error)) => {
+                let pending = self
+                    .pending_authority
+                    .take()
+                    .expect("failed authority commit retains publication state");
+                pending.publication.abort(&mut self.node.database);
+                std::task::Poll::Ready(Err(error))
+            }
+        }
+    }
+
     /// Apply one authority fate, including any causally rejected descendants.
     ///
     /// Each step acquires its cold inputs before publication. Cascade steps are
@@ -150,6 +259,9 @@ impl DemandDrivenNode {
         durability: Option<DurabilityTier>,
     ) -> std::task::Poll<Result<(), Error>> {
         if let Err(error) = self.ensure_persistence_usable() {
+            return std::task::Poll::Ready(Err(error));
+        }
+        if let Err(error) = self.ensure_authority_publication_idle() {
             return std::task::Poll::Ready(Err(error));
         }
         let root = ingest::FateUpdateRequest {
@@ -234,6 +346,9 @@ impl DemandDrivenNode {
         if let Err(error) = self.ensure_persistence_usable() {
             return std::task::Poll::Ready(Err(error));
         }
+        if let Err(error) = self.ensure_authority_publication_idle() {
+            return std::task::Poll::Ready(Err(error));
+        }
         let result = self.acquisition.poll(
             self.persistence.as_mut(),
             &self.cache,
@@ -283,6 +398,18 @@ impl DemandDrivenNode {
 
     /// Poll the oldest durable batch. Later batches cannot overtake it.
     pub fn poll_persistence(
+        &mut self,
+        context: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Error>> {
+        if self.pending_authority.is_some() {
+            return std::task::Poll::Ready(Err(Error::InvalidStoredValue(
+                "authority persistence must be polled through poll_ingest_commit_unit",
+            )));
+        }
+        self.poll_persistence_queue(context)
+    }
+
+    fn poll_persistence_queue(
         &mut self,
         context: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Result<(), Error>> {
@@ -357,6 +484,16 @@ impl DemandDrivenNode {
         }
     }
 
+    fn ensure_authority_publication_idle(&self) -> Result<(), Error> {
+        if self.pending_authority.is_some() {
+            Err(Error::InvalidStoredValue(
+                "an authority publication is awaiting durable completion",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
     fn fail_persistence(&mut self) {
         self.persistence_failed = true;
         for request in self.pending_persistence.drain(..) {
@@ -411,6 +548,7 @@ impl PollableNodeOpen {
             acquisition: groove::db::StorageAcquisition::default(),
             pending_persistence: std::collections::VecDeque::new(),
             pending_fate: None,
+            pending_authority: None,
             persistence_failed: false,
         }
     }

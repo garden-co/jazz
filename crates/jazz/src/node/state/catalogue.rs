@@ -863,6 +863,51 @@ where
         Ok(alias)
     }
 
+    /// Resolve the stable alias for a node without changing resident or
+    /// durable state. A missing alias is allocated deterministically from the
+    /// admitted node catalogue and may later be installed in an operation's
+    /// own atomic batch.
+    pub(super) fn prepare_node_alias(&mut self, node_uuid: NodeUuid) -> Result<NodeAlias, Error> {
+        if let Some(alias) = self.node_aliases.get(&node_uuid) {
+            return Ok(*alias);
+        }
+        let mut max_alias = self
+            .node_aliases
+            .values()
+            .map(|alias| alias.0)
+            .max()
+            .unwrap_or(0);
+        for raw in self.database.primary_key_scan_raw("jazz_nodes", &[])? {
+            let record = raw.record();
+            let alias = NodeAlias(record.get_u64(NodeAliasRowRecord::FIELD_ID_IDX)?);
+            max_alias = max_alias.max(alias.0);
+            if record.get_uuid(NodeAliasRowRecord::FIELD_UUID_IDX)? == node_uuid.0 {
+                return Ok(alias);
+            }
+        }
+        Ok(NodeAlias(max_alias + 1))
+    }
+
+    pub(super) fn ensure_node_alias_in_batch(
+        &mut self,
+        batch: &mut DatabaseBatch,
+        node_uuid: NodeUuid,
+    ) -> Result<NodeAlias, Error> {
+        if let Some(alias) = self.node_aliases.get(&node_uuid).copied() {
+            return Ok(alias);
+        }
+        let alias = self.prepare_node_alias(node_uuid)?;
+        self.node_aliases.insert(node_uuid, alias);
+        if node_uuid == self.node_uuid {
+            self.self_node_alias = Some(alias);
+        }
+        batch.insert(
+            "jazz_nodes",
+            vec![Value::U64(alias.0), Value::Uuid(node_uuid.0)],
+        );
+        Ok(alias)
+    }
+
     fn ensure_schema_version_alias(
         &mut self,
         schema_version_id: SchemaVersionId,

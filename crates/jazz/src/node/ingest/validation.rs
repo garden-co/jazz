@@ -77,7 +77,7 @@ where
         self.merge_tx_time(tx.tx_id.time);
         let update_current_indexes =
             update_current_indexes && tx.target_lineage == crate::tx::BranchLineage::Root;
-        let tx_node_alias = self.ensure_node_alias(tx.tx_id.node)?;
+        let tx_node_alias = self.ensure_node_alias_in_batch(batch, tx.tx_id.node)?;
         let tx_already_known = self.query_transaction(tx.tx_id)?.is_some();
         let tx_values =
             transaction_values(tx_node_alias, &tx, fate.clone(), global_seq, durability);

@@ -18,7 +18,7 @@ use groove::{
 use jazz::db::doctest_support;
 use jazz::db::{LocalUpdates, Propagation, ReadOpts, SubscriptionEvent};
 use jazz::ids::{NodeUuid, RowUuid};
-use jazz::node::{AuthorityPersistenceScheduler, MergeableCommit, NodeState, PollableNodeOpen};
+use jazz::node::{MergeableCommit, NodeState, PollableNodeOpen};
 use jazz::protocol::SyncMessage;
 use jazz::tx::DurabilityTier;
 use opfs_btree::BTreeError;
@@ -575,29 +575,43 @@ pub async fn verify_indexeddb_authority_publication(
         return Err(JsValue::from_str("writer did not produce a commit unit"));
     };
     let tx_id = tx.tx_id;
-    let mut authority = NodeState::new(
-        NodeUuid::from_bytes([0x33; 16]),
-        schema,
-        MemoryStorage::new(&refs),
-    )
-    .map_err(|error| JsValue::from_str(&error.to_string()))?;
-    let pending = authority
-        .ingest_commit_unit_for_async_persistence(tx, versions, u64::MAX - 60_000, None)
-        .map_err(|error| JsValue::from_str(&error.to_string()))?;
     let persistence = IndexedDbOrderedStorage::open(page_store.clone(), 4096, 32)
         .await
         .map_err(|error| JsValue::from_str(&error.to_string()))?;
-    let mut scheduler = AuthorityPersistenceScheduler::new(Box::new(persistence));
-    scheduler.enqueue(pending);
+    let mut opening = PollableNodeOpen::new(
+        NodeUuid::from_bytes([0x33; 16]),
+        schema,
+        Box::new(persistence),
+    );
+    let mut authority = futures::future::poll_fn(|context| opening.poll(context))
+        .await
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
     let mut context = Context::from_waker(Waker::noop());
-    if !scheduler.poll(&mut context).is_pending() {
+    if !authority
+        .poll_ingest_commit_unit(
+            &mut context,
+            tx.clone(),
+            versions.clone(),
+            u64::MAX - 60_000,
+            None,
+        )
+        .is_pending()
+    {
         return Err(JsValue::from_str(
             "authority Fate escaped before IndexedDB suspended",
         ));
     }
-    let responses = futures::future::poll_fn(|context| scheduler.poll(context))
-        .await
-        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    let responses = futures::future::poll_fn(|context| {
+        authority.poll_ingest_commit_unit(
+            context,
+            tx.clone(),
+            versions.clone(),
+            u64::MAX - 60_000,
+            None,
+        )
+    })
+    .await
+    .map_err(|error| JsValue::from_str(&error.to_string()))?;
     if !matches!(
         responses.as_slice(),
         [SyncMessage::FateUpdate {
@@ -610,7 +624,7 @@ pub async fn verify_indexeddb_authority_publication(
             "authority did not release the exact durable Fate",
         ));
     }
-    drop(scheduler);
+    drop(authority);
 
     let mut reopened = IndexedDbOrderedStorage::open(page_store, 4096, 32)
         .await

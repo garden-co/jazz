@@ -89,13 +89,6 @@ where
 
     /// Return a capability that poisons this database after externally owned
     /// asynchronous persistence fails or becomes ambiguous.
-    #[doc(hidden)]
-    pub fn async_persistence_poison(&self) -> AsyncPersistencePoison {
-        AsyncPersistencePoison {
-            poisoned: Arc::clone(&self.poisoned),
-        }
-    }
-
     pub(super) fn settle_durable_publication_scopes(&mut self) {
         let state = self
             .durable_publication_state

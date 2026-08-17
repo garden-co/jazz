@@ -83,27 +83,6 @@ where
         self.pending_persistence_batches.drain(..).collect()
     }
 
-    /// Mark the start of one node operation's durable closure.
-    ///
-    /// Node mutation is single-threaded behind `&mut self`, so a queue offset
-    /// precisely identifies every Groove batch emitted by the operation even
-    /// when the operation spans canonical data, cleanup, and consistency
-    /// marker commits.
-    pub(super) fn begin_persistence_unit(&self) -> usize {
-        self.pending_persistence_batches.len()
-    }
-
-    /// Detach the batches emitted since `mark` as one indivisible durable unit.
-    pub(super) fn finish_persistence_unit(
-        &mut self,
-        mark: usize,
-    ) -> Vec<PendingPersistenceBatch> {
-        self.pending_persistence_batches
-            .split_off(mark)
-            .into_iter()
-            .collect()
-    }
-
     /// Return local synchronization counters.
     pub fn sync_metrics(&self) -> &SyncMetrics {
         &self.sync_metrics
@@ -953,81 +932,4 @@ fn encode_global_sequences(sequences: &BTreeSet<GlobalSeq>) -> Vec<u8> {
         .iter()
         .flat_map(|sequence| sequence.0.to_le_bytes())
         .collect()
-}
-
-/// Drives authority durability and releases protocol responses only for whole
-/// completed persistence units.
-#[doc(hidden)]
-pub struct AuthorityPersistenceScheduler {
-    persistence: groove::db::PersistenceQueue,
-    responses: BTreeMap<
-        groove::db::PersistenceUnitId,
-        (Vec<SyncMessage>, groove::db::AsyncPersistencePoison),
-    >,
-}
-
-impl AuthorityPersistenceScheduler {
-    #[doc(hidden)]
-    pub fn new(persistence: Box<dyn groove::storage::async_ordered::OrderedKvStorage>) -> Self {
-        Self {
-            persistence: groove::db::PersistenceQueue::new(persistence),
-            responses: BTreeMap::new(),
-        }
-    }
-
-    /// Enqueue a resident-complete authority operation without exposing its
-    /// responses to the transport.
-    #[doc(hidden)]
-    pub fn enqueue(&mut self, pending: PendingAuthorityPublication) {
-        let (batches, responses, poison) = pending.into_parts();
-        let unit = self.persistence.enqueue_unit(batches);
-        assert!(
-            self.responses.insert(unit, (responses, poison)).is_none(),
-            "persistence unit ids are unique"
-        );
-    }
-
-    /// Poll persistence and return only responses whose complete durable unit
-    /// succeeded during this call.
-    #[doc(hidden)]
-    pub fn poll(
-        &mut self,
-        context: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Result<Vec<SyncMessage>, Error>> {
-        match self.persistence.poll(context) {
-            std::task::Poll::Pending => std::task::Poll::Pending,
-            std::task::Poll::Ready(Ok(completed)) => {
-                let mut publish = Vec::new();
-                for unit in completed {
-                    let (responses, _poison) = self
-                        .responses
-                        .remove(&unit)
-                        .expect("completed persistence unit has quarantined responses");
-                    publish.extend(responses);
-                }
-                std::task::Poll::Ready(Ok(publish))
-            }
-            std::task::Poll::Ready(Err(error)) => {
-                for (_, poison) in std::mem::take(&mut self.responses).into_values() {
-                    poison.poison();
-                }
-                std::task::Poll::Ready(Err(error.into()))
-            }
-        }
-    }
-
-    #[doc(hidden)]
-    pub fn has_pending(&self) -> bool {
-        !self.responses.is_empty()
-    }
-
-    /// Cancel retained work. No quarantined response can be released after
-    /// cancellation, including when a backend reports ambiguous completion.
-    #[doc(hidden)]
-    pub fn cancel_all(&mut self) -> Result<(), Error> {
-        for (_, poison) in std::mem::take(&mut self.responses).into_values() {
-            poison.poison();
-        }
-        self.persistence.cancel_all().map_err(Error::from)
-    }
 }
