@@ -17,8 +17,7 @@ export {
   type SubscriptionCallback,
   type UpdateOptions,
   type WasmModule,
-  type WriteResult,
-  type WriteHandle,
+  type MutationResult,
 } from "./client.js";
 export type { AppContext, RuntimeSourcesConfig, Session } from "./context.js";
 export {

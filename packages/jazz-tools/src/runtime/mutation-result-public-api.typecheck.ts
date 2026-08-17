@@ -31,7 +31,7 @@ async function assertMutationResultContract() {
 
   const callbackResult: MutationResult<string> = await db.transaction((tx) => {
     const row: Todo = tx.insert(todos, { title: "todo", done: false });
-    const voidUpdate: void = tx.update(todos, row.id, { done: true });
+    const _voidUpdate: void = tx.update(todos, row.id, { done: true });
     return row.id;
   });
   callbackResult.wait({ tier: "edge" });
