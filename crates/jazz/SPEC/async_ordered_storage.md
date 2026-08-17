@@ -208,6 +208,21 @@ same atomic unit as the transaction. Existing stores may perform an explicit,
 versioned one-time migration before becoming ready; that migration is not the
 steady-state open contract.
 
+The compact node checkpoint is authoritative for the clock and admitted global
+sequence frontier, and is keyed by node identity. It contains no application
+rows or query results. Every Jazz-owned durable batch updates it atomically with
+the records whose clocks or sequence admission it summarizes. A current store
+therefore opens with one exact checkpoint read; only a legacy store without the
+checkpoint scans transaction/history indexes and installs the checkpoint on its
+next Jazz-owned batch.
+
+Removing those scans also removes their accidental role as a full-history
+integrity audit. Current write paths validate records before committing them,
+checkpoint decoding validates its own structure and monotonic frontier, and
+individual historical records are validated when demand-loaded. Out-of-band
+storage inspection belongs in an explicit integrity/audit operation rather
+than making every ordinary node open proportional to all durable history.
+
 Node opening itself is a pollable state machine built from restartable resident
 storage transactions. An attempt sees one admitted working set, isolates every
 write it makes, and either:

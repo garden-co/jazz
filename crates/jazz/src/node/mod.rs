@@ -395,6 +395,9 @@ pub use eviction::{EdgeCacheBudget, EdgeCacheBudgetReport, EdgeCacheClass, Evict
 #[cfg(feature = "testing")]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct NodeOpenReceipt {
+    /// Whether startup restored the compact node clock/sequence checkpoint
+    /// instead of scanning transaction and physical-history indexes.
+    pub clock_checkpoint_loaded: bool,
     /// Catalogue-record decoding and activation preparation.
     pub catalogue_open: Duration,
     /// Groove database construction from recovered physical layouts.

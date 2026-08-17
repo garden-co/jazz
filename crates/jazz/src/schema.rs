@@ -193,6 +193,7 @@ impl JazzSchema {
             catalogue_pointer_table(),
             branch_partitions_table(),
             branches_table(),
+            node_recovery_state_table(),
             transactions_table(),
             rejected_transactions_table(),
             pending_edges_table(),
@@ -212,6 +213,7 @@ impl JazzSchema {
             catalogue_pointer_table(),
             branch_partitions_table(),
             branches_table(),
+            node_recovery_state_table(),
         ]
     }
 
@@ -1077,6 +1079,22 @@ fn nodes_table() -> GrooveTableSchema {
         ],
     )
     .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
+}
+
+fn node_recovery_state_table() -> GrooveTableSchema {
+    GrooveTableSchema::new(
+        "jazz_node_recovery_state",
+        [
+            column("node", GrooveColumnType::Uuid),
+            column("version", GrooveColumnType::U64),
+            column("tx_time", GrooveColumnType::U64),
+            column("next_global_seq", GrooveColumnType::U64),
+            column("global_seq_exhausted", GrooveColumnType::U64),
+            column("applied_global_watermark", GrooveColumnType::U64),
+            column("applied_global_above_watermark", GrooveColumnType::Bytes),
+        ],
+    )
+    .with_primary_key(PrimaryKey::composite([PrimaryKeyColumn::uuid("node")]))
 }
 
 fn transactions_table() -> GrooveTableSchema {

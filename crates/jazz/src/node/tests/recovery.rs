@@ -71,6 +71,11 @@ fn open_receipt_counts_physical_recovery_scans_exactly() {
     )
     .unwrap();
 
+    assert!(
+        receipt.clock_checkpoint_loaded,
+        "a current store must restore its compact clock checkpoint"
+    );
+
     // The nullable global-sequence index is the actual physical access path:
     // local pending transactions remain in its `None` bucket and must not be
     // decoded by bounded `Some`-range recovery.
@@ -462,6 +467,12 @@ where
     );
     node.write_global_current_update(&mut batch, &version, global_seq)
         .unwrap();
+    // This helper deliberately simulates a legacy/out-of-band durable state,
+    // so remove the current checkpoint and exercise the migration scan.
+    batch.delete(
+        "jazz_node_recovery_state",
+        groove::db::PrimaryKeyValue::Uuid(node.node_uuid().0),
+    );
     node.database.commit_batch(batch).unwrap();
 }
 
@@ -605,6 +616,16 @@ fn reopen_refuses_preexisting_sequenced_non_global_transaction() {
                 Some(GlobalSeq(7)),
                 DurabilityTier::Edge,
             ),
+        );
+        node.database.commit_batch(batch).unwrap();
+        // This fixture models malformed history written by a legacy receiver,
+        // before the compact checkpoint existed. Current Jazz writes validate
+        // the transaction before atomically committing it with the checkpoint;
+        // direct out-of-band storage mutation is instead detected when read.
+        let mut batch = node.database.open_batch();
+        batch.delete(
+            "jazz_node_recovery_state",
+            groove::db::PrimaryKeyValue::Uuid(node.node_uuid().0),
         );
         node.database.commit_batch(batch).unwrap();
     }

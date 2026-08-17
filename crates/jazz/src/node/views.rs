@@ -819,14 +819,14 @@ where
             }
         }
         if !receiver_batch.is_empty() {
+            for global_seq in &receiver_batch_global_seqs {
+                self.record_applied_global_seq(*global_seq);
+            }
             self.sync_metrics.receiver_bulk_ingest_commits += 1;
             self.sync_metrics.receiver_bulk_bundle_ingests += receiver_batch_bundle_count;
             self.commit_database_batch(receiver_batch)?;
             for tx_id in &receiver_batch_tx_ids {
                 self.invalidate_tx_version_tables_cache(*tx_id);
-            }
-            for global_seq in receiver_batch_global_seqs {
-                self.record_applied_global_seq(global_seq);
             }
             if let Some(tx_time) = receiver_batch_tx_ids.iter().map(|tx_id| tx_id.time).max() {
                 self.persist_storage_consistency_marker_through(tx_time)?;

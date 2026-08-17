@@ -10,8 +10,22 @@ where
     /// separate decision at the Db facade.
     pub(super) fn commit_database_batch(
         &mut self,
-        batch: DatabaseBatch,
+        mut batch: DatabaseBatch,
     ) -> Result<(), GrooveDbError> {
+        batch.update(
+            "jazz_node_recovery_state",
+            vec![
+                Value::Uuid(self.node_uuid.0),
+                Value::U64(1),
+                Value::U64(self.clock.tx_time.0),
+                Value::U64(self.clock.next_global_seq.0),
+                Value::U64(u64::from(self.clock.global_seq_exhausted)),
+                Value::U64(self.clock.applied_global_watermark.0),
+                Value::Bytes(encode_global_sequences(
+                    &self.clock.applied_global_above_watermark,
+                )),
+            ],
+        );
         let persistence = self.database.commit_batch_for_async_persistence(batch)?;
         if self.capture_persistence_batches {
             self.pending_persistence_batches.push_back(persistence);
@@ -895,6 +909,13 @@ where
         self.database.take_storage_read_metrics()
     }
 
+}
+
+fn encode_global_sequences(sequences: &BTreeSet<GlobalSeq>) -> Vec<u8> {
+    sequences
+        .iter()
+        .flat_map(|sequence| sequence.0.to_le_bytes())
+        .collect()
 }
 
 /// Drives authority durability and releases protocol responses only for whole

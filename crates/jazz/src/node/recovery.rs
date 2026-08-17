@@ -108,6 +108,55 @@ where
         }
     }
 
+    fn recover_clock_checkpoint(&mut self) -> Result<bool, Error> {
+        let Some(raw) = self
+            .database
+            .primary_key_get_raw("jazz_node_recovery_state", &[Value::Uuid(self.node_uuid.0)])?
+        else {
+            return Ok(false);
+        };
+        let record = raw.record();
+        if record.get_u64(1)? != 1 {
+            return Err(Error::InvalidStoredValue(
+                "node recovery checkpoint version is unsupported",
+            ));
+        }
+        let bytes = record.get_bytes(6)?;
+        if bytes.len() % std::mem::size_of::<u64>() != 0 {
+            return Err(Error::InvalidStoredValue(
+                "node recovery checkpoint global sequence set is malformed",
+            ));
+        }
+        let above = bytes
+            .chunks_exact(std::mem::size_of::<u64>())
+            .map(|bytes| {
+                GlobalSeq(u64::from_le_bytes(
+                    bytes.try_into().expect("u64 chunk has exact length"),
+                ))
+            })
+            .collect::<BTreeSet<_>>();
+        let watermark = GlobalSeq(record.get_u64(5)?);
+        if above.iter().any(|sequence| *sequence <= watermark) {
+            return Err(Error::InvalidStoredValue(
+                "node recovery checkpoint contains a sequence below its watermark",
+            ));
+        }
+        self.clock.tx_time = TxTime(record.get_u64(2)?);
+        self.clock.next_global_seq = GlobalSeq(record.get_u64(3)?);
+        self.clock.global_seq_exhausted = match record.get_u64(4)? {
+            0 => false,
+            1 => true,
+            _ => {
+                return Err(Error::InvalidStoredValue(
+                    "node recovery checkpoint exhausted flag is malformed",
+                ));
+            }
+        };
+        self.clock.applied_global_watermark = watermark;
+        self.clock.applied_global_above_watermark = above;
+        Ok(true)
+    }
+
     pub(super) fn rejected_versions_for(
         &mut self,
         alias: NodeAlias,
@@ -208,39 +257,46 @@ where
             .map(|(node, alias)| (*alias, *node))
             .collect::<BTreeMap<_, _>>();
 
-        if let Some(raw) = self
-            .database
-            .primary_key_last_raw("jazz_transactions", &[])?
-        {
-            self.merge_tx_time(TxTime(
-                raw.record().get_u64(TransactionRowRecord::FIELD_TIME_IDX)?,
-            ));
+        let recovered_clock = self.recover_clock_checkpoint()?;
+        #[cfg(feature = "testing")]
+        if let Some(receipt) = &mut receipt {
+            receipt.clock_checkpoint_loaded = recovered_clock;
         }
-        let physical_table_ids = self
-            .catalogue
-            .physical_mappings
-            .values()
-            .flat_map(|mapping| mapping.tables.values().map(|table| table.table_id))
-            .collect::<BTreeSet<_>>();
-        for table_id in physical_table_ids {
-            if let Some(raw) = self.database.index_last_raw(
-                &physical_history_table_name(table_id),
-                "by_tx",
-                &[],
-            )? {
+        if !recovered_clock {
+            if let Some(raw) = self
+                .database
+                .primary_key_last_raw("jazz_transactions", &[])?
+            {
                 self.merge_tx_time(TxTime(
-                    raw.record().get_u64(HistoryRowRecord::FIELD_TX_TIME_IDX)?,
+                    raw.record().get_u64(TransactionRowRecord::FIELD_TIME_IDX)?,
                 ));
             }
-        }
-        if let Some(raw) =
-            self.database
-                .index_last_raw(SHARED_DELETION_HISTORY_TABLE, "by_tx", &[])?
-        {
-            self.merge_tx_time(TxTime(
-                raw.record()
-                    .get_u64(SharedDeletionHistoryRowRecord::FIELD_TX_TIME_IDX)?,
-            ));
+            let physical_table_ids = self
+                .catalogue
+                .physical_mappings
+                .values()
+                .flat_map(|mapping| mapping.tables.values().map(|table| table.table_id))
+                .collect::<BTreeSet<_>>();
+            for table_id in physical_table_ids {
+                if let Some(raw) = self.database.index_last_raw(
+                    &physical_history_table_name(table_id),
+                    "by_tx",
+                    &[],
+                )? {
+                    self.merge_tx_time(TxTime(
+                        raw.record().get_u64(HistoryRowRecord::FIELD_TX_TIME_IDX)?,
+                    ));
+                }
+            }
+            if let Some(raw) =
+                self.database
+                    .index_last_raw(SHARED_DELETION_HISTORY_TABLE, "by_tx", &[])?
+            {
+                self.merge_tx_time(TxTime(
+                    raw.record()
+                        .get_u64(SharedDeletionHistoryRowRecord::FIELD_TX_TIME_IDX)?,
+                ));
+            }
         }
         #[cfg(feature = "testing")]
         if let (Some(receipt), Some(started)) = (&mut receipt, started) {
@@ -255,19 +311,24 @@ where
         // `Some` bucket so local pending/rejected transactions cannot make
         // recovery O(total transactions). The range end is exclusive, hence
         // the separate exact lookup preserves the prior u64::MAX behavior.
-        let first_global_seq = Value::Nullable(Some(Box::new(Value::U64(0))));
-        let last_global_seq = Value::Nullable(Some(Box::new(Value::U64(u64::MAX))));
-        let mut sequenced_transactions = self.database.index_scan_range_raw(
-            "jazz_transactions",
-            "by_global_seq",
-            std::slice::from_ref(&first_global_seq),
-            std::slice::from_ref(&last_global_seq),
-        )?;
-        sequenced_transactions.extend(self.database.index_scan_raw(
-            "jazz_transactions",
-            "by_global_seq",
-            std::slice::from_ref(&last_global_seq),
-        )?);
+        let sequenced_transactions = if recovered_clock {
+            Vec::new()
+        } else {
+            let first_global_seq = Value::Nullable(Some(Box::new(Value::U64(0))));
+            let last_global_seq = Value::Nullable(Some(Box::new(Value::U64(u64::MAX))));
+            let mut transactions = self.database.index_scan_range_raw(
+                "jazz_transactions",
+                "by_global_seq",
+                std::slice::from_ref(&first_global_seq),
+                std::slice::from_ref(&last_global_seq),
+            )?;
+            transactions.extend(self.database.index_scan_raw(
+                "jazz_transactions",
+                "by_global_seq",
+                std::slice::from_ref(&last_global_seq),
+            )?);
+            transactions
+        };
         for raw in sequenced_transactions {
             #[cfg(feature = "testing")]
             {
