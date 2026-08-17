@@ -16,7 +16,7 @@ use web_time::Instant;
 
 use groove::db::{
     CommitMetrics, Database, DatabaseBatch, DirectRecordStoreWrite, Error as GrooveDbError,
-    GraphBuilder, PredicateExpr, PrimaryKeyValue, Subscription,
+    GraphBuilder, PendingPersistenceBatch, PredicateExpr, PrimaryKeyValue, Subscription,
 };
 use groove::ivm::PreparedShapeId;
 use groove::ivm::ProjectField;
@@ -540,6 +540,11 @@ pub struct NodeState<S> {
     rejections: RejectionTracking,
     /// Groove database slot over this node's storage.
     database: DatabaseSlot<S>,
+    /// Exact Groove batches emitted at the node persistence seam. This queue is
+    /// enabled only while an outer runtime owns asynchronous durability; the
+    /// evaluator and commit path are otherwise identical.
+    capture_persistence_batches: bool,
+    pending_persistence_batches: VecDeque<PendingPersistenceBatch>,
     /// Process-local identity for runtime-local Groove handles such as prepared shape ids.
     groove_runtime_token: u64,
     /// Whether this node has complete settled history for historical reads.

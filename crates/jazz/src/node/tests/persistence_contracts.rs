@@ -132,6 +132,40 @@ fn assert_poisoned_node_exposes_nothing(core: &mut NodeState<FailWriteManyMemory
     ));
 }
 
+#[test]
+fn jazz_commit_emits_owned_persistence_batches_after_local_visibility() {
+    let (mut writer, _) = fail_write_many_node();
+    writer.enable_async_persistence_capture();
+    let tx_id = writer
+        .commit_mergeable(
+            MergeableCommit::new("todos", row(0xcf), 10).cells(title_cells("resident")),
+        )
+        .unwrap();
+
+    assert_eq!(
+        writer
+            .current_rows("todos", DurabilityTier::None)
+            .unwrap()
+            .len(),
+        1,
+        "the Jazz local frontier must advance before durability is driven"
+    );
+    let batches = writer.take_pending_persistence_batches();
+    assert!(!batches.is_empty());
+    assert!(
+        batches
+            .into_iter()
+            .flat_map(|batch| batch.into_operations())
+            .any(|operation| matches!(
+                operation,
+                groove::storage::OwnedWriteOperation::Set { ref cf, .. }
+                    if cf == "jazz_transactions"
+            )),
+        "the captured closure must include the canonical transaction"
+    );
+    assert!(writer.transaction_record(tx_id).is_some());
+}
+
 /// INV-TX-25: one commit unit is one durable publication boundary. If the
 /// storage batch that contains a multi-row local write fails, neither a subset
 /// of the transaction nor a derived history subscription delta may escape.
