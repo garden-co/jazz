@@ -129,6 +129,7 @@ pub mod result_tree;
 /// Jazz schema and storage lowering.
 pub mod schema;
 /// Operational server-shell APIs formerly provided by jazz-server.
+#[cfg(feature = "server")]
 pub mod serving;
 /// Logical time and sequence counters.
 pub mod time;

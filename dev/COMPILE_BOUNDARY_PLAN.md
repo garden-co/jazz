@@ -194,6 +194,12 @@ Measure focused core-test compilation and NAPI checks before and after.
 Separate Axum/server, native client networking, and CLI dependencies. Remove the
 `client -> server` edge. Measure minimal core, NAPI, and WASM builds.
 
+Progress: executable binaries now live in `jazz-cli`, native client networking
+no longer selects the server module, and `jazz` is featureless by default.
+Actual shells select storage, compression, client, and server capabilities
+explicitly; the remaining work is extracting the Axum/server implementation
+without widening its private state into a public compatibility API.
+
 ### Lane 4: storage, compression, and telemetry adapters
 
 Move RocksDB, compression implementations, and OTLP exporters to shell-selected

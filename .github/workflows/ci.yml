@@ -150,7 +150,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test_binary="$(cargo test -p jazz --lib --no-run --message-format=json | node -e '
+          test_binary="$(cargo test -p jazz --lib --features test --no-run --message-format=json | node -e '
             const readline = require("node:readline");
             let executable;
             const lines = readline.createInterface({ input: process.stdin });

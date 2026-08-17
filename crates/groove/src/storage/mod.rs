@@ -90,6 +90,7 @@ impl StorageDelta {
     }
 }
 
+#[cfg(feature = "rocksdb")]
 pub(crate) fn compact_storage_delta_operand(
     template_operand: &[u8],
     merged_record: Vec<u8>,

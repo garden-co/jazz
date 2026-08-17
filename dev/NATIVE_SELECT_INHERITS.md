@@ -28,6 +28,6 @@
 | `cargo test -p jazz --test incremental_delivery_canary -j 2`                             | 0         |
 | `cargo fmt -p jazz-tools --check`                                                        | 0         |
 | `cargo check -p jazz-sim --benches -j 2`                                                 | 0         |
-| `cargo build --release -p jazz-tools --bin jazz-tools --features cli -j 2`               | 0         |
+| `cargo build --release -p jazz-cli --bin jazz-tools -j 2`                                | 0         |
 
 Release binary: `target/release/jazz-tools`.

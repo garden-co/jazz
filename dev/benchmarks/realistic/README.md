@@ -33,7 +33,7 @@ artifact/history plan.
 Run from workspace root:
 
 ```bash
-RUST_LOG=warn cargo run -p jazz --features client,rocksdb --example realistic_bench -- \
+RUST_LOG=warn cargo run -p jazz --features client,rocksdb,transport-compression-zstd --example realistic_bench -- \
   --profile dev/benchmarks/realistic/profiles/s.json \
   --scenario dev/benchmarks/realistic/scenarios/w1_interactive.json
 ```
@@ -41,7 +41,7 @@ RUST_LOG=warn cargo run -p jazz --features client,rocksdb --example realistic_be
 `W3` requires a running server and `--server-url`:
 
 ```bash
-RUST_LOG=warn cargo run -p jazz --features client,rocksdb --example realistic_bench -- \
+RUST_LOG=warn cargo run -p jazz --features client,rocksdb,transport-compression-zstd --example realistic_bench -- \
   --profile dev/benchmarks/realistic/profiles/s.json \
   --scenario dev/benchmarks/realistic/scenarios/w3_offline_reconnect.json \
   --server-url http://127.0.0.1:1625
