@@ -172,7 +172,7 @@ impl<'a> TestingClient<'a> {
         let deadline = tokio::time::Instant::now() + timeout;
 
         let client = loop {
-            match JazzClient::connect(context.clone()).await {
+            match crate::connect(context.clone()).await {
                 Ok(client) => break client,
                 Err(error)
                     if error.to_string().contains("bootstrapping")
@@ -207,7 +207,7 @@ impl<'a> TestingClient<'a> {
         let ready_timeout = self.ready_timeout;
         let context = self.build_context();
 
-        let client = JazzClient::connect(context.clone())
+        let client = crate::connect(context.clone())
             .await
             .expect("connect test client");
 

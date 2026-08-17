@@ -2684,14 +2684,13 @@ impl JazzClient {
             })
             .collect()
     }
-    /// Connect to Jazz with the given configuration.
-    #[allow(deprecated)]
+    /// Open a local client with no target-specific network adapter.
+    ///
+    /// An empty `server_url` is an offline client. Native online applications
+    /// use [`Self::connect_with_native_transport`] from their process or
+    /// binding composition crate.
     pub async fn connect(context: AppContext) -> Result<Self> {
-        let connector = (!context.server_url.is_empty()).then(|| {
-            Arc::new(crate::tools::native_websocket_transport::NativeWebSocketConnector)
-                as Arc<dyn NativeTransportConnector>
-        });
-        Self::connect_inner(context, connector).await
+        Self::connect_inner(context, None).await
     }
 
     /// Connect using a transport selected at a native composition point.

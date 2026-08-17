@@ -87,6 +87,15 @@ impl std::error::Error for NativeTransportError {}
 /// globally. CLI/server/NAPI therefore choose an adapter explicitly, and tests
 /// can use an in-memory transport without compiling Tokio or TLS into core.
 pub trait NativeTransportConnector: Send + Sync {
+    /// Validate an edge bootstrap URL using adapter-specific transport rules.
+    fn validate_catalogue_bootstrap_url(
+        &self,
+        _server_url: &str,
+        _app_id: AppId,
+    ) -> Result<(), NativeTransportError> {
+        Ok(())
+    }
+
     fn connect(&self, request: NativeTransportRequest) -> NativeTransportFuture;
 
     /// Fetch the authenticated, snapshot-only catalogue exchange used before

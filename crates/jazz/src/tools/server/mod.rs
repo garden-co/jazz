@@ -12,14 +12,6 @@ mod catalogue;
 mod catalogue_entry;
 mod catalogue_storage;
 mod core_server_shell;
-/// Backward-compatible path for the native WebSocket client adapter.
-///
-/// Native process shells should use `jazz-native-transport` and inject its
-/// connector explicitly. This path remains during the client-shell migration.
-#[cfg(any(feature = "client", feature = "server"))]
-pub mod core_websocket_transport {
-    pub use crate::tools::native_websocket_transport::*;
-}
 pub mod routes;
 pub(crate) mod runtime_catalogue;
 mod shutdown;

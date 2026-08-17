@@ -231,7 +231,7 @@ async fn connect_ready_user(
     user_id: &str,
     ready_table: &str,
 ) -> JazzClient {
-    let client = JazzClient::connect(user_context(server, schema, user_id))
+    let client = jazz_testkit::connect(user_context(server, schema, user_id))
         .await
         .expect("connect user");
     wait_for_edge_query_ready(&client, ready_table, Duration::from_secs(30)).await;
@@ -763,7 +763,7 @@ async fn inherited_update_policy_allows_update_through_parent() {
             let mut context = server.make_client_context_for_user(schema.clone(), &alice_user_id);
             context.backend_secret = None;
 
-            let alice = JazzClient::connect(context).await.expect("connect alice");
+            let alice = jazz_testkit::connect(context).await.expect("connect alice");
             wait_for_edge_query_ready(&alice, "children", Duration::from_secs(30)).await;
 
             let alice_session = alice.for_session(Session::new(alice_user_id));
@@ -896,7 +896,7 @@ async fn inherited_update_policy_allows_multi_hop_update_chain() {
             let mut context = server.make_client_context_for_user(schema.clone(), &alice_user_id);
             context.backend_secret = None;
 
-            let alice = JazzClient::connect(context).await.expect("connect alice");
+            let alice = jazz_testkit::connect(context).await.expect("connect alice");
             wait_for_edge_query_ready(&alice, "children", Duration::from_secs(30)).await;
 
             let alice_session = alice.for_session(Session::new(alice_user_id));
@@ -1014,7 +1014,7 @@ async fn inherited_update_policy_allows_reparenting_when_old_and_new_parents_gra
             let mut context = server.make_client_context_for_user(schema.clone(), &alice_user_id);
             context.backend_secret = None;
 
-            let alice = JazzClient::connect(context).await.expect("connect alice");
+            let alice = jazz_testkit::connect(context).await.expect("connect alice");
             wait_for_edge_query_ready(&alice, "children", Duration::from_secs(30)).await;
 
             let alice_session = alice.for_session(Session::new(alice_user_id));

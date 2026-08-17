@@ -25,6 +25,14 @@ use jazz::tools::{
     AppContext, AppId, ClientStorage, ColumnType, DurabilityTier, JazzClient, SchemaBuilder,
     TableSchema,
 };
+
+async fn connect_native(context: AppContext) -> jazz::tools::Result<JazzClient> {
+    JazzClient::connect_with_native_transport(
+        context,
+        std::sync::Arc::new(jazz_native_transport::NativeWebSocketConnector),
+    )
+    .await
+}
 use serde::{Deserialize, Serialize};
 use tempfile::TempDir;
 use tokio::sync::broadcast;
@@ -467,7 +475,7 @@ async fn test_local_persistence() {
             backend_secret: None,
             admin_secret: None,
         };
-        let client = JazzClient::connect(context).await.unwrap();
+        let client = connect_native(context).await.unwrap();
 
         // Create a todo
         let values = todo_values("Persist me", "");
@@ -500,7 +508,7 @@ async fn test_local_persistence() {
             backend_secret: None,
             admin_secret: None,
         };
-        let client = JazzClient::connect(context).await.unwrap();
+        let client = connect_native(context).await.unwrap();
 
         // Query todos - should have the one we created
         let query = QueryBuilder::new("todos").build();
@@ -785,7 +793,7 @@ async fn test_server_resync() {
             backend_secret: None,
             admin_secret: None,
         };
-        let client = JazzClient::connect(context).await.unwrap();
+        let client = connect_native(context).await.unwrap();
         let permissions_schema = test_schema();
         publish_test_schema(&server.base_url(), test_app_id).await;
         permissions_support::publish_allow_all_permissions(
@@ -848,7 +856,7 @@ async fn test_server_resync() {
             backend_secret: None,
             admin_secret: None, // Intentionally no admin - server already has schema
         };
-        let client = JazzClient::connect(context).await.unwrap();
+        let client = connect_native(context).await.unwrap();
 
         // One-shot query with EdgeServer settled tier — waits for the server's
         // QuerySettled response before resolving, ensuring synced data arrives.

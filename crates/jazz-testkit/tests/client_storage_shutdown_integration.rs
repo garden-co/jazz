@@ -2,7 +2,7 @@
 //! storage when it shuts down.
 
 use jazz::tools::server::JazzServer;
-use jazz::tools::{ClientStorage, ColumnType, JazzClient, SchemaBuilder, TableSchema};
+use jazz::tools::{ClientStorage, ColumnType, SchemaBuilder, TableSchema};
 use tempfile::TempDir;
 
 fn test_schema() -> jazz::tools::Schema {
@@ -28,14 +28,14 @@ async fn shutdown_releases_persistent_storage_for_reopen_impl() {
     ));
     context.data_dir = data_dir.path().to_path_buf();
 
-    JazzClient::connect(context.clone())
+    jazz_testkit::connect(context.clone())
         .await
         .expect("connect persistent client")
         .shutdown()
         .await
         .expect("shutdown persistent client");
 
-    JazzClient::connect(context)
+    jazz_testkit::connect(context)
         .await
         .expect("reopen the same persistent client directory")
         .shutdown()

@@ -8,6 +8,7 @@ default = ["scenarios", "rocksdb", "transport-compression-zstd"]
 scenarios = [
   "jazz/test-utils",
   "dep:jsonwebtoken",
+  "dep:jazz-native-transport",
   "dep:reqwest",
   "dep:serde",
   "dep:serde_json",
@@ -19,8 +20,10 @@ rocksdb = ["scenarios", "dep:jazz-storage-rocksdb"]
 transport-compression-zstd = ["jazz/transport-compression-zstd", "dep:zstd"]
 
 [dependencies]
+groove.workspace = true
 jazz.workspace = true
 jazz-storage-rocksdb = { workspace = true, optional = true }
+jazz-native-transport = { workspace = true, optional = true }
 jsonwebtoken = { version = "10.4", default-features = false, features = [
   "rust_crypto",
   "use_pem",

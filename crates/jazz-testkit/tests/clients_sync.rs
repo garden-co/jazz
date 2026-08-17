@@ -100,7 +100,7 @@ async fn fresh_client_resolves_object_with_deep_update_history_impl() {
     let schema = test_schema();
     let server = JazzServer::start_with_schema(schema.clone()).await;
     let writer =
-        JazzClient::connect(server.make_client_context_for_user(schema.clone(), "alice-history"))
+        jazz_testkit::connect(server.make_client_context_for_user(schema.clone(), "alice-history"))
             .await
             .expect("connect history writer");
 
@@ -147,7 +147,7 @@ async fn fresh_client_resolves_object_with_deep_update_history_impl() {
     assert_eq!(writer_rows[0].1[0], Value::Text(final_title.clone()));
 
     let fresh_client =
-        JazzClient::connect(server.make_client_context_for_user(schema, "bob-fresh-history"))
+        jazz_testkit::connect(server.make_client_context_for_user(schema, "bob-fresh-history"))
             .await
             .expect("connect fresh history reader");
     wait_for_edge_query_ready(&fresh_client, Duration::from_secs(30)).await;
@@ -184,12 +184,12 @@ async fn jazz_tools_cli_two_clients_sync_values() {
         .run_until(async {
             let schema = test_schema();
             let server = JazzServer::start_with_schema(schema.clone()).await;
-            let client_a = JazzClient::connect(
+            let client_a = jazz_testkit::connect(
                 server.make_client_context_for_user(schema.clone(), "sync-values-user"),
             )
             .await
             .expect("connect client a");
-            let client_b = JazzClient::connect(
+            let client_b = jazz_testkit::connect(
                 server.make_client_context_for_user(schema, "sync-values-user"),
             )
             .await
@@ -314,12 +314,12 @@ async fn update_through_one_client_waits_for_ack_and_updates_peer_query_results(
 async fn update_through_one_client_waits_for_ack_and_updates_peer_query_results_impl() {
     let schema = test_schema();
     let server = JazzServer::start_with_schema(schema.clone()).await;
-    let client_a = JazzClient::connect(
+    let client_a = jazz_testkit::connect(
         server.make_client_context_for_user(schema.clone(), "update-through-server-user"),
     )
     .await
     .expect("connect client a");
-    let client_b = JazzClient::connect(
+    let client_b = jazz_testkit::connect(
         server.make_client_context_for_user(schema, "update-through-server-user"),
     )
     .await
@@ -395,12 +395,12 @@ async fn delete_through_one_client_removes_row_from_peer_query_results() {
 async fn delete_through_one_client_removes_row_from_peer_query_results_impl() {
     let schema = test_schema();
     let server = JazzServer::start_with_schema(schema.clone()).await;
-    let client_a = JazzClient::connect(
+    let client_a = jazz_testkit::connect(
         server.make_client_context_for_user(schema.clone(), "delete-through-server-user"),
     )
     .await
     .expect("connect client a");
-    let client_b = JazzClient::connect(
+    let client_b = jazz_testkit::connect(
         server.make_client_context_for_user(schema, "delete-through-server-user"),
     )
     .await
@@ -468,7 +468,7 @@ async fn caller_supplied_uuid_is_used_for_created_row() {
                 &schema,
             )
             .await;
-            let client = JazzClient::connect(
+            let client = jazz_testkit::connect(
                 server.make_client_context_for_user(schema.clone(), "external-id-writer"),
             )
             .await
@@ -522,7 +522,7 @@ async fn wait_for_batch_reaches_edge_and_global_tiers() {
         .run_until(async {
             let schema = test_schema();
             let server = JazzServer::start_with_schema(schema.clone()).await;
-            let alice = JazzClient::connect(
+            let alice = jazz_testkit::connect(
                 server.make_client_context_for_user(schema, "alice-direct-wait-for-batch"),
             )
             .await
@@ -575,7 +575,7 @@ async fn caller_supplied_uuid_keeps_created_at_as_explicit_metadata_impl() {
         &schema,
     )
     .await;
-    let client = JazzClient::connect(
+    let client = jazz_testkit::connect(
         server.make_client_context_for_user(schema.clone(), "external-id-provenance-writer"),
     )
     .await
@@ -656,7 +656,7 @@ async fn upsert_uses_external_uuid_for_insert_and_updates_existing_row_impl() {
         &schema,
     )
     .await;
-    let client = JazzClient::connect(
+    let client = jazz_testkit::connect(
         server.make_client_context_for_user(schema.clone(), "external-id-upsert-writer"),
     )
     .await
@@ -731,12 +731,13 @@ async fn jazz_tools_cli_two_different_users_sync_values() {
 async fn jazz_tools_cli_two_different_users_sync_values_impl() {
     let schema = test_schema();
     let server = JazzServer::start_with_schema(schema.clone()).await;
-    let client_alice =
-        JazzClient::connect(server.make_client_context_for_user(schema.clone(), "alice-sync-user"))
-            .await
-            .expect("connect alice client");
+    let client_alice = jazz_testkit::connect(
+        server.make_client_context_for_user(schema.clone(), "alice-sync-user"),
+    )
+    .await
+    .expect("connect alice client");
     let client_bob =
-        JazzClient::connect(server.make_client_context_for_user(schema, "bob-sync-user"))
+        jazz_testkit::connect(server.make_client_context_for_user(schema, "bob-sync-user"))
             .await
             .expect("connect bob client");
 

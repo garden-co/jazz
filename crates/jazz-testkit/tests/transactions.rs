@@ -62,7 +62,7 @@ async fn wait_for_edge_ready(client: &JazzClient) {
 }
 
 async fn connect_user(server: &JazzServer, schema: Schema, user_id: &str) -> JazzClient {
-    let client = JazzClient::connect(server.make_client_context_for_user(schema, user_id))
+    let client = jazz_testkit::connect(server.make_client_context_for_user(schema, user_id))
         .await
         .expect("connect user");
     wait_for_edge_ready(&client).await;

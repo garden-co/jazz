@@ -822,7 +822,7 @@ fn reserve_local_port() -> u16 {
 }
 
 async fn connect_user(server: &JazzServer, schema: Schema, user_id: &str) -> JazzClient {
-    let client = JazzClient::connect(server.make_client_context_for_user(schema, user_id))
+    let client = jazz_testkit::connect(server.make_client_context_for_user(schema, user_id))
         .await
         .expect("connect user");
     wait_for_edge_query_ready(&client, "todos", Duration::from_secs(30)).await;
@@ -1153,7 +1153,7 @@ async fn fixed_schema_data_dir_reopen_bootstraps_policy_graph_policy_serving_sta
                 let server = JazzServer::builder()
                     .with_schema(schema.clone())
                     .with_data_dir(data_dir.path())
-                    .with_persistent_storage()
+                    .with_storage_factory(jazz_testkit::persistent_storage_factory())
                     .start()
                     .await;
                 let admin = TestingClient::builder()
@@ -1172,7 +1172,7 @@ async fn fixed_schema_data_dir_reopen_bootstraps_policy_graph_policy_serving_sta
             let reopened = JazzServer::builder()
                 .with_schema(schema.clone())
                 .with_data_dir(data_dir.path())
-                .with_persistent_storage()
+                .with_storage_factory(jazz_testkit::persistent_storage_factory())
                 .start()
                 .await;
             let member = TestingClient::builder()
@@ -1202,6 +1202,7 @@ async fn edge_server_accepts_mergeable_write_while_core_down_then_promotes() {
             let edge = JazzServer::builder()
                 .with_app_id(app_id)
                 .with_schema(schema.clone())
+                .with_native_transport_connector(jazz_testkit::native_connector())
                 .with_upstream_url(core_url.clone())
                 .start()
                 .await;
@@ -1295,12 +1296,14 @@ async fn core_write_reaches_clients_on_both_edges() {
             let edge_us = JazzServer::builder()
                 .with_app_id(app_id)
                 .with_schema(schema.clone())
+                .with_native_transport_connector(jazz_testkit::native_connector())
                 .with_upstream_url(core.base_url())
                 .start()
                 .await;
             let edge_eu = JazzServer::builder()
                 .with_app_id(app_id)
                 .with_schema(schema.clone())
+                .with_native_transport_connector(jazz_testkit::native_connector())
                 .with_upstream_url(core.base_url())
                 .start()
                 .await;
@@ -1400,12 +1403,14 @@ async fn edge_write_reaches_client_on_peer_edge() {
             let edge_us = JazzServer::builder()
                 .with_app_id(app_id)
                 .with_schema(schema.clone())
+                .with_native_transport_connector(jazz_testkit::native_connector())
                 .with_upstream_url(core.base_url())
                 .start()
                 .await;
             let edge_eu = JazzServer::builder()
                 .with_app_id(app_id)
                 .with_schema(schema.clone())
+                .with_native_transport_connector(jazz_testkit::native_connector())
                 .with_upstream_url(core.base_url())
                 .start()
                 .await;

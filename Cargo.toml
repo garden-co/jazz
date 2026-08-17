@@ -35,6 +35,7 @@ jazz = { path = "crates/jazz", default-features = false }
 jazz-compression = { path = "crates/jazz-compression", default-features = false }
 jazz-otel = { path = "crates/jazz-otel" }
 jazz-storage-rocksdb = { path = "crates/jazz-storage-rocksdb" }
+jazz-native-transport = { path = "crates/jazz-native-transport" }
 rustc-hash = "2.1.1"
 
 [patch.crates-io]

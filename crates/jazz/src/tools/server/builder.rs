@@ -19,7 +19,6 @@ use crate::tools::middleware::auth::{
 };
 use crate::tools::native_transport_connector::{NativeTransportConnector, NativeTransportRequest};
 #[allow(deprecated)]
-use crate::tools::native_websocket_transport::validate_catalogue_bootstrap_upstream_url;
 use crate::tools::public_schema::Schema;
 use crate::tools::server::routes;
 use crate::tools::server::{
@@ -182,12 +181,16 @@ impl ServerBuilder {
         };
         validate_server_config(&auth_config, topology)?;
         if topology == ServerTopology::Edge {
-            validate_catalogue_bootstrap_upstream_url(
-                self.upstream_url
-                    .as_deref()
-                    .expect("edge topology has an upstream URL"),
-                self.app_id,
-            )?;
+            if let Some(connector) = self.native_transport_connector.as_ref() {
+                connector
+                    .validate_catalogue_bootstrap_url(
+                        self.upstream_url
+                            .as_deref()
+                            .expect("edge topology has an upstream URL"),
+                        self.app_id,
+                    )
+                    .map_err(|error| error.to_string())?;
+            }
             if self.native_transport_connector.is_none() {
                 // Library unit tests exercise edge catalogue state without a
                 // target-owned socket implementation. Native process shells
@@ -849,27 +852,6 @@ mod tests {
             .await;
 
         assert!(result.is_ok());
-    }
-
-    #[tokio::test]
-    async fn edge_builder_rejects_remote_plaintext_bootstrap_upstream() {
-        let result = ServerBuilder::new(AppId::from_name("edge-plaintext-bootstrap-rejected"))
-            .with_storage(StorageBackend::InMemory)
-            .with_auth_config(AuthConfig {
-                admin_secret: Some("admin-secret".to_owned()),
-                ..Default::default()
-            })
-            .with_upstream_url("http://core.example.test")
-            .build()
-            .await;
-        let error = match result {
-            Err(error) => error,
-            Ok(_) => panic!("remote plaintext bootstrap must fail configuration"),
-        };
-        assert!(
-            error.contains("plaintext ws:// bootstrap"),
-            "error: {error}"
-        );
     }
 
     #[test]

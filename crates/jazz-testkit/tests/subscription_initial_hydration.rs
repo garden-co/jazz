@@ -4,7 +4,7 @@ use std::time::Duration;
 use jazz::row_input;
 use jazz::tools::server::JazzServer;
 use jazz::tools::{
-    ColumnType, DurabilityTier, JazzClient, QueryBuilder, ResultKey, Schema, SchemaBuilder,
+    ColumnType, DurabilityTier, QueryBuilder, ResultKey, Schema, SchemaBuilder,
     SubscriptionStreamItem, TableSchema, Value,
 };
 
@@ -20,13 +20,13 @@ async fn fresh_subscription_first_delivery_reduces_from_empty_to_initial_view() 
         .run_until(async {
             let schema = hydration_schema();
             let server = JazzServer::start_with_schema(schema.clone()).await;
-            let writer = JazzClient::connect(server.make_client_context_for_user(
+            let writer = jazz_testkit::connect(server.make_client_context_for_user(
                 schema.clone(),
                 "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaa401",
             ))
             .await
             .expect("connect writer");
-            let client = JazzClient::connect(
+            let client = jazz_testkit::connect(
                 server.make_client_context_for_user(schema, "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaa402"),
             )
             .await
@@ -115,7 +115,7 @@ async fn fresh_empty_subscription_waits_for_and_reports_the_settled_empty_view()
         .run_until(async {
             let schema = hydration_schema();
             let server = JazzServer::start_with_schema(schema.clone()).await;
-            let client = JazzClient::connect(
+            let client = jazz_testkit::connect(
                 server.make_client_context_for_user(schema, "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaa403"),
             )
             .await

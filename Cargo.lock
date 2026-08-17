@@ -1929,6 +1929,7 @@ dependencies = [
  "clap",
  "futures-util",
  "jazz",
+ "jazz-native-transport",
  "jazz-otel",
  "jazz-server",
  "jazz-storage-rocksdb",
@@ -1987,10 +1988,13 @@ dependencies = [
  "futures",
  "hex",
  "jazz",
+ "jazz-benchmark-guard",
+ "jazz-storage-rocksdb",
  "postcard",
  "reqwest",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tokio-tungstenite",
 ]
@@ -2073,7 +2077,9 @@ dependencies = [
 name = "jazz-testkit"
 version = "0.1.0"
 dependencies = [
+ "groove",
  "jazz",
+ "jazz-native-transport",
  "jazz-storage-rocksdb",
  "jsonwebtoken",
  "reqwest",

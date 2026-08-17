@@ -6,6 +6,14 @@ use jazz::tools::{
 };
 use tokio::sync::{mpsc, oneshot};
 
+async fn connect_native(context: AppContext) -> jazz::tools::Result<JazzClient> {
+    JazzClient::connect_with_native_transport(
+        context,
+        std::sync::Arc::new(jazz_native_transport::NativeWebSocketConnector),
+    )
+    .await
+}
+
 #[derive(Clone)]
 pub struct TodoClient {
     tx: mpsc::UnboundedSender<ClientCommand>,
@@ -124,7 +132,7 @@ fn run_client_worker(
 
     let local = tokio::task::LocalSet::new();
     local.block_on(&runtime, async move {
-        let client = match JazzClient::connect(context).await {
+        let client = match connect_native(context).await {
             Ok(client) => {
                 let _ = ready_tx.send(Ok(()));
                 client

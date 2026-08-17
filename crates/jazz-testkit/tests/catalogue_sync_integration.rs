@@ -654,6 +654,7 @@ async fn edge_catalogue_http_reads_and_writes_forward_to_real_core_impl() {
     let core = JazzServer::builder().with_app_id(app_id).start().await;
     let edge = JazzServer::builder()
         .with_app_id(app_id)
+        .with_native_transport_connector(jazz_testkit::native_connector())
         .with_upstream_url(core.base_url())
         .start()
         .await;
@@ -789,11 +790,13 @@ async fn edge_catalogue_publish_reaches_peer_edge_through_core_sync_impl() {
     let core = JazzServer::builder().with_app_id(app_id).start().await;
     let edge_us = JazzServer::builder()
         .with_app_id(app_id)
+        .with_native_transport_connector(jazz_testkit::native_connector())
         .with_upstream_url(core.base_url())
         .start()
         .await;
     let edge_eu = JazzServer::builder()
         .with_app_id(app_id)
+        .with_native_transport_connector(jazz_testkit::native_connector())
         .with_upstream_url(core.base_url())
         .start()
         .await;
@@ -879,9 +882,10 @@ async fn persisted_stale_edge_reconnect_replays_catalogue_before_client_work_imp
 
     let edge_before_restart = JazzServer::builder()
         .with_app_id(app_id)
+        .with_native_transport_connector(jazz_testkit::native_connector())
         .with_upstream_url(core.base_url())
         .with_data_dir(edge_data_dir.path())
-        .with_persistent_storage()
+        .with_storage_factory(jazz_testkit::persistent_storage_factory())
         .start()
         .await;
     let alice_v1 = TestingClient::builder()
@@ -900,9 +904,10 @@ async fn persisted_stale_edge_reconnect_replays_catalogue_before_client_work_imp
 
     let edge_after_restart = JazzServer::builder()
         .with_app_id(app_id)
+        .with_native_transport_connector(jazz_testkit::native_connector())
         .with_upstream_url(core.base_url())
         .with_data_dir(edge_data_dir.path())
-        .with_persistent_storage()
+        .with_storage_factory(jazz_testkit::persistent_storage_factory())
         .start()
         .await;
     let alice_v2 = TestingClient::builder()
@@ -972,9 +977,10 @@ async fn persistent_dynamic_edge_reopens_ready_catalogue_before_first_client_imp
 
     let edge_before_shutdown = JazzServer::builder()
         .with_app_id(app_id)
+        .with_native_transport_connector(jazz_testkit::native_connector())
         .with_upstream_url(unavailable_core_url.clone())
         .with_data_dir(edge_data_dir.path())
-        .with_persistent_storage()
+        .with_storage_factory(jazz_testkit::persistent_storage_factory())
         .start()
         .await;
     let warmup = TestingClient::builder()
@@ -990,9 +996,10 @@ async fn persistent_dynamic_edge_reopens_ready_catalogue_before_first_client_imp
 
     let edge_after_restart = JazzServer::builder()
         .with_app_id(app_id)
+        .with_native_transport_connector(jazz_testkit::native_connector())
         .with_upstream_url(unavailable_core_url)
         .with_data_dir(edge_data_dir.path())
-        .with_persistent_storage()
+        .with_storage_factory(jazz_testkit::persistent_storage_factory())
         .start()
         .await;
     let first_client = TestingClient::builder()
@@ -1037,11 +1044,13 @@ async fn core_permission_retightening_reaches_subscribed_clients_on_every_edge_i
         publish_allow_all_permissions(&core.base_url(), app_id, core.admin_secret(), &schema).await;
     let edge_us = JazzServer::builder()
         .with_app_id(app_id)
+        .with_native_transport_connector(jazz_testkit::native_connector())
         .with_upstream_url(core.base_url())
         .start()
         .await;
     let edge_eu = JazzServer::builder()
         .with_app_id(app_id)
+        .with_native_transport_connector(jazz_testkit::native_connector())
         .with_upstream_url(core.base_url())
         .start()
         .await;
@@ -1184,6 +1193,7 @@ async fn edge_migration_publish_forwards_to_real_core_and_is_readable_through_ed
     let core = JazzServer::builder().with_app_id(app_id).start().await;
     let edge = JazzServer::builder()
         .with_app_id(app_id)
+        .with_native_transport_connector(jazz_testkit::native_connector())
         .with_upstream_url(core.base_url())
         .start()
         .await;
@@ -1305,7 +1315,7 @@ async fn dynamic_server_denies_reads_until_permissions_head_is_published_impl() 
         server.make_client_context_for_user(schema.clone(), test_user_id("reader-dynamic"));
     reader_context.backend_secret = None;
     reader_context.admin_secret = None;
-    let reader = JazzClient::connect(reader_context)
+    let reader = jazz_testkit::connect(reader_context)
         .await
         .expect("connect reader");
 
@@ -1332,7 +1342,7 @@ async fn dynamic_server_denies_reads_until_permissions_head_is_published_impl() 
 
     wait_for_edge_query_ready(&reader, "users", Duration::from_secs(30)).await;
 
-    let admin = JazzClient::connect(
+    let admin = jazz_testkit::connect(
         server.make_client_context_for_user(schema.clone(), test_user_id("admin-dynamic")),
     )
     .await
@@ -1695,7 +1705,7 @@ async fn dynamic_server_live_subscription_replays_on_first_permissions_head_and_
     )
     .await;
 
-    let admin = JazzClient::connect(
+    let admin = jazz_testkit::connect(
         server.make_client_context_for_user(schema.clone(), test_user_id("admin-subscribe")),
     )
     .await
@@ -1807,7 +1817,7 @@ async fn column_addition_new_client_can_read_old_rows_impl() {
     .await;
 
     // === Alice connects with v1, creates a user after permissions publish ===
-    let alice = JazzClient::connect(
+    let alice = jazz_testkit::connect(
         server.make_client_context_for_user(schema_v1(), test_user_id("alice-catalogue")),
     )
     .await
@@ -1828,7 +1838,7 @@ async fn column_addition_new_client_can_read_old_rows_impl() {
         .expect("alice user reaches edge after permissions publish");
 
     // === Bob connects with v2, queries — should see Alice's row with email: null ===
-    let bob = JazzClient::connect(
+    let bob = jazz_testkit::connect(
         server.make_client_context_for_user(target_schema, test_user_id("bob-catalogue")),
     )
     .await
@@ -1902,7 +1912,7 @@ async fn cannot_read_from_old_schema_until_lens_is_added_impl() {
     .await;
 
     let alice =
-        JazzClient::connect(server.make_client_context_for_user(
+        jazz_testkit::connect(server.make_client_context_for_user(
             v1_schema.clone(),
             test_user_id("alice-schema-before-lens"),
         ))
@@ -1925,7 +1935,7 @@ async fn cannot_read_from_old_schema_until_lens_is_added_impl() {
     seed_schema_catalogue(&server, &v2_schema).await;
 
     let bob =
-        JazzClient::connect(server.make_client_context_for_user(
+        jazz_testkit::connect(server.make_client_context_for_user(
             v2_schema.clone(),
             test_user_id("bob-schema-before-lens"),
         ))
@@ -2021,7 +2031,7 @@ async fn multi_hop_column_additions_new_client_can_read_old_rows_impl() {
     )
     .await;
 
-    let alice = JazzClient::connect(
+    let alice = jazz_testkit::connect(
         server.make_client_context_for_user(schema_v1(), test_user_id("alice-multi-hop")),
     )
     .await
@@ -2039,7 +2049,7 @@ async fn multi_hop_column_additions_new_client_can_read_old_rows_impl() {
         .await
         .expect("alice user reaches edge");
 
-    let bob = JazzClient::connect(
+    let bob = jazz_testkit::connect(
         server.make_client_context_for_user(schema_v2(), test_user_id("bob-multi-hop")),
     )
     .await
@@ -2059,7 +2069,7 @@ async fn multi_hop_column_additions_new_client_can_read_old_rows_impl() {
     .await
     .expect("bob user reaches edge");
 
-    let charlie = JazzClient::connect(
+    let charlie = jazz_testkit::connect(
         server.make_client_context_for_user(v3_schema, test_user_id("charlie-multi-hop")),
     )
     .await
@@ -2191,7 +2201,7 @@ async fn multi_hop_column_renames_new_client_can_read_old_rows_impl() {
     )
     .await;
 
-    let alice = JazzClient::connect(
+    let alice = jazz_testkit::connect(
         server.make_client_context_for_user(v1_schema, test_user_id("alice-rename-chain")),
     )
     .await
@@ -2213,7 +2223,7 @@ async fn multi_hop_column_renames_new_client_can_read_old_rows_impl() {
         .await
         .expect("alice user reaches edge");
 
-    let bob = JazzClient::connect(
+    let bob = jazz_testkit::connect(
         server.make_client_context_for_user(v3_schema, test_user_id("bob-rename-chain")),
     )
     .await
@@ -2284,7 +2294,7 @@ async fn multi_hop_column_renames_old_client_can_read_new_rows_impl() {
     )
     .await;
 
-    let bob = JazzClient::connect(
+    let bob = jazz_testkit::connect(
         server.make_client_context_for_user(v3_schema, test_user_id("bob-rename-chain-new")),
     )
     .await
@@ -2302,7 +2312,7 @@ async fn multi_hop_column_renames_old_client_can_read_new_rows_impl() {
     .await
     .expect("bob user reaches edge");
 
-    let alice = JazzClient::connect(
+    let alice = jazz_testkit::connect(
         server.make_client_context_for_user(v1_schema, test_user_id("alice-rename-chain-old")),
     )
     .await
@@ -2372,7 +2382,7 @@ async fn table_rename_new_client_can_read_old_rows_impl() {
     )
     .await;
 
-    let alice = JazzClient::connect(
+    let alice = jazz_testkit::connect(
         server.make_client_context_for_user(v1_schema, test_user_id("alice-table-rename")),
     )
     .await
@@ -2394,7 +2404,7 @@ async fn table_rename_new_client_can_read_old_rows_impl() {
         .await
         .expect("alice user reaches edge");
 
-    let bob = JazzClient::connect(
+    let bob = jazz_testkit::connect(
         server.make_client_context_for_user(v2_schema, test_user_id("bob-table-rename")),
     )
     .await
@@ -2457,7 +2467,7 @@ async fn table_rename_subscription_reacts_to_old_branch_updates_impl() {
     )
     .await;
 
-    let bob = JazzClient::connect(
+    let bob = jazz_testkit::connect(
         server.make_client_context_for_user(v2_schema, test_user_id("bob-table-rename-sub")),
     )
     .await
@@ -2483,7 +2493,7 @@ async fn table_rename_subscription_reacts_to_old_branch_updates_impl() {
         "subscription should start empty before old-table rows are written"
     );
 
-    let alice = JazzClient::connect(
+    let alice = jazz_testkit::connect(
         server.make_client_context_for_user(v1_schema, test_user_id("alice-table-rename-sub")),
     )
     .await
@@ -2578,7 +2588,7 @@ async fn table_rename_subscription_reacts_to_new_branch_updates_after_schema_evo
     )
     .await;
 
-    let alice = JazzClient::connect(server.make_client_context_for_user(
+    let alice = jazz_testkit::connect(server.make_client_context_for_user(
         v1_schema.clone(),
         test_user_id("alice-table-rename-evolve-sub"),
     ))
@@ -2624,7 +2634,7 @@ async fn table_rename_subscription_reacts_to_new_branch_updates_after_schema_evo
     .await;
     wait_for_edge_query_ready(&alice, "users", Duration::from_secs(30)).await;
 
-    let bob = JazzClient::connect(
+    let bob = jazz_testkit::connect(
         server.make_client_context_for_user(v2_schema, test_user_id("bob-table-rename-evolve-sub")),
     )
     .await
@@ -2706,7 +2716,7 @@ async fn table_rename_update_and_delete_copy_on_write_impl() {
     )
     .await;
 
-    let alice = JazzClient::connect(server.make_client_context_for_user(
+    let alice = jazz_testkit::connect(server.make_client_context_for_user(
         v1_schema.clone(),
         test_user_id("alice-table-rename-copy-on-write"),
     ))
@@ -2741,7 +2751,7 @@ async fn table_rename_update_and_delete_copy_on_write_impl() {
     .await;
 
     let bob =
-        JazzClient::connect(server.make_client_context_for_user(
+        jazz_testkit::connect(server.make_client_context_for_user(
             v2_schema,
             test_user_id("bob-table-rename-copy-on-write"),
         ))
@@ -2848,7 +2858,7 @@ async fn table_rename_join_query_translates_join_target_on_old_branch_impl() {
     )
     .await;
 
-    let alice = JazzClient::connect(
+    let alice = jazz_testkit::connect(
         server.make_client_context_for_user(v1_schema, test_user_id("alice-join-rename")),
     )
     .await
@@ -2891,7 +2901,7 @@ async fn table_rename_join_query_translates_join_target_on_old_branch_impl() {
         .await
         .expect("alice post reaches edge");
 
-    let bob = JazzClient::connect(
+    let bob = jazz_testkit::connect(
         server.make_client_context_for_user(v2_schema, test_user_id("bob-join-rename")),
     )
     .await
@@ -2971,7 +2981,7 @@ async fn table_rename_fk_array_lookup_finds_related_rows_on_old_branch_impl() {
     )
     .await;
 
-    let alice = JazzClient::connect(
+    let alice = jazz_testkit::connect(
         server.make_client_context_for_user(v1_schema, test_user_id("alice-array-rename")),
     )
     .await
@@ -3010,7 +3020,7 @@ async fn table_rename_fk_array_lookup_finds_related_rows_on_old_branch_impl() {
         .await
         .expect("alice post reaches edge");
 
-    let bob = JazzClient::connect(
+    let bob = jazz_testkit::connect(
         server.make_client_context_for_user(v2_schema, test_user_id("bob-array-rename")),
     )
     .await
@@ -3293,7 +3303,7 @@ async fn multi_hop_table_renames_and_column_rename_impl() {
         &v1_schema,
     )
     .await;
-    let alice = JazzClient::connect(
+    let alice = jazz_testkit::connect(
         server.make_client_context_for_user(v1_schema, test_user_id("alice-multi-table-rename")),
     )
     .await
@@ -3321,7 +3331,7 @@ async fn multi_hop_table_renames_and_column_rename_impl() {
         &v2_schema,
     )
     .await;
-    let bob = JazzClient::connect(
+    let bob = jazz_testkit::connect(
         server.make_client_context_for_user(v2_schema, test_user_id("bob-multi-table-rename")),
     )
     .await
@@ -3349,7 +3359,7 @@ async fn multi_hop_table_renames_and_column_rename_impl() {
     )
     .await;
     let carol =
-        JazzClient::connect(server.make_client_context_for_user(
+        jazz_testkit::connect(server.make_client_context_for_user(
             v3_schema.clone(),
             test_user_id("carol-multi-table-rename"),
         ))
@@ -3451,7 +3461,7 @@ async fn removed_table_then_readded_does_not_resurface_old_rows_impl() {
     )
     .await;
 
-    let alice = JazzClient::connect(
+    let alice = jazz_testkit::connect(
         server.make_client_context_for_user(v1_schema, test_user_id("alice-removed-readded-v1")),
     )
     .await
@@ -3481,7 +3491,7 @@ async fn removed_table_then_readded_does_not_resurface_old_rows_impl() {
     )
     .await;
 
-    let bob = JazzClient::connect(
+    let bob = jazz_testkit::connect(
         server.make_client_context_for_user(v3_schema, test_user_id("bob-removed-readded-v3")),
     )
     .await
@@ -3575,7 +3585,7 @@ async fn column_addition_old_client_can_read_new_rows_impl() {
     .await;
 
     // === Bob connects with v2, creates a user with the new email column ===
-    let bob = JazzClient::connect(
+    let bob = jazz_testkit::connect(
         server.make_client_context_for_user(schema_v2(), test_user_id("bob-backward")),
     )
     .await
@@ -3603,7 +3613,7 @@ async fn column_addition_old_client_can_read_new_rows_impl() {
     .await;
 
     // === Alice connects with v1, queries — should see Bob's row without email ===
-    let alice = JazzClient::connect(
+    let alice = jazz_testkit::connect(
         server.make_client_context_for_user(schema_v1(), test_user_id("alice-backward")),
     )
     .await
@@ -3675,7 +3685,7 @@ async fn keeps_authorization_through_v1_head_impl() {
     )
     .await;
 
-    let alice = JazzClient::connect(
+    let alice = jazz_testkit::connect(
         server.make_client_context_for_user(schema_v1(), test_user_id("alice-v1-head")),
     )
     .await
@@ -3724,7 +3734,7 @@ async fn keeps_authorization_through_v1_head_impl() {
     .await
     .expect("push catalogue after v1 permissions head");
 
-    let bob = JazzClient::connect(
+    let bob = jazz_testkit::connect(
         server.make_client_context_for_user(schema_v2(), test_user_id("bob-v2-head")),
     )
     .await

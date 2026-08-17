@@ -18,6 +18,7 @@ test = ["jazz/test"]
 [dependencies]
 jazz = { workspace = true, default-features = false, features = ["server"] }
 jazz-server = { path = "../jazz-server" }
+jazz-native-transport.workspace = true
 jazz-storage-rocksdb = { workspace = true, optional = true }
 jazz-otel = { workspace = true, optional = true }
 axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "tokio"] }

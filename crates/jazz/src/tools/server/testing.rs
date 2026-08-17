@@ -32,6 +32,8 @@ pub struct JazzServerBuilder {
     schema: Option<Schema>,
     persistent_storage: bool,
     storage_factory: Option<Arc<dyn crate::groove::storage::StorageFactory>>,
+    native_transport_connector:
+        Option<Arc<dyn crate::tools::native_transport_connector::NativeTransportConnector>>,
     admin_secret: Option<String>,
     backend_secret: Option<String>,
     upstream_url: Option<String>,
@@ -88,6 +90,14 @@ impl JazzServerBuilder {
     ) -> Self {
         self.storage_factory = Some(factory);
         self.persistent_storage = true;
+        self
+    }
+
+    pub fn with_native_transport_connector(
+        mut self,
+        connector: Arc<dyn crate::tools::native_transport_connector::NativeTransportConnector>,
+    ) -> Self {
+        self.native_transport_connector = Some(connector);
         self
     }
 
@@ -262,6 +272,7 @@ impl JazzServer {
             schema,
             persistent_storage,
             storage_factory,
+            native_transport_connector,
             admin_secret,
             backend_secret,
             upstream_url,
@@ -299,15 +310,10 @@ impl JazzServer {
             ..Default::default()
         };
 
-        // Keep the in-crate integration harness on the deprecated adapter
-        // until its online clients move to the outward native-transport test
-        // package. Production shells inject their adapter explicitly.
-        #[allow(deprecated)]
-        let mut server_builder = ServerBuilder::new(app_id)
-            .with_auth_config(auth_config)
-            .with_native_transport_connector(Arc::new(
-                crate::tools::native_websocket_transport::NativeWebSocketConnector,
-            ));
+        let mut server_builder = ServerBuilder::new(app_id).with_auth_config(auth_config);
+        if let Some(connector) = native_transport_connector {
+            server_builder = server_builder.with_native_transport_connector(connector);
+        }
         if let Some(factory) = storage_factory {
             server_builder = server_builder.with_storage_factory(factory);
         }

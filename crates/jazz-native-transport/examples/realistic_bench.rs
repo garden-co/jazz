@@ -365,7 +365,11 @@ async fn connect_client(
         backend_secret: None,
         admin_secret: None,
     };
-    Ok(JazzClient::connect(context).await?)
+    Ok(JazzClient::connect_with_native_transport(
+        context,
+        std::sync::Arc::new(jazz_native_transport::NativeWebSocketConnector),
+    )
+    .await?)
 }
 
 async fn seed_dataset(

@@ -1200,7 +1200,7 @@ async fn persistent_peer_reloads_synced_state_before_offline_editing_impl() {
     bob.shutdown().await.expect("bob shutdown for offline");
 
     bob_ctx.server_url = String::new();
-    let bob_offline = JazzClient::connect(bob_ctx)
+    let bob_offline = jazz_testkit::connect(bob_ctx)
         .await
         .expect("bob reconnects offline");
 
@@ -1298,7 +1298,7 @@ async fn offline_reconnect_replays_local_edit_after_rejoin_impl() {
     .await;
 
     bob_ctx.server_url = String::new();
-    let bob_offline = JazzClient::connect(bob_ctx.clone())
+    let bob_offline = jazz_testkit::connect(bob_ctx.clone())
         .await
         .expect("bob connects offline");
 
@@ -1337,7 +1337,7 @@ async fn offline_reconnect_replays_local_edit_after_rejoin_impl() {
     bob_offline.shutdown().await.expect("bob offline shutdown");
 
     bob_ctx.server_url = server.base_url();
-    let bob_online = JazzClient::connect(bob_ctx)
+    let bob_online = jazz_testkit::connect(bob_ctx)
         .await
         .expect("bob reconnects online");
 
@@ -1441,7 +1441,7 @@ async fn online_user_wins_on_reconnect_impl() {
     // --- Phase 3: Bob makes 1 stale edit from v1 (earlier timestamp). ---
 
     bob_ctx.server_url = String::new();
-    let bob_offline = JazzClient::connect(bob_ctx.clone())
+    let bob_offline = jazz_testkit::connect(bob_ctx.clone())
         .await
         .expect("bob connects offline");
 
@@ -1495,7 +1495,7 @@ async fn online_user_wins_on_reconnect_impl() {
     // --- Phase 5: Bob reconnects to the real server. ---
 
     bob_ctx.server_url = server.base_url();
-    let bob_online = JazzClient::connect(bob_ctx)
+    let bob_online = jazz_testkit::connect(bob_ctx)
         .await
         .expect("bob reconnects online");
 
