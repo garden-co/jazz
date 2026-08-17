@@ -303,7 +303,7 @@ describe("Chat App E2E", () => {
   // 4. Delete a message
   // -------------------------------------------------------------------------
 
-  it.fails("deletes a message via the dropdown menu", async () => {
+  it("deletes a message via the dropdown menu", async () => {
     const el = await mountApp();
 
     await waitFor(

@@ -458,6 +458,7 @@ export class SubscriptionManager<T extends { id: string }> {
   ): SubscriptionDelta<T> {
     const beforeIndices = new Map(this.orderedIdIndex);
     const affectedRoots = new Set<string>();
+    const removedRoots = new Set<string>();
     // Pre-establish only newly inserted root payloads so child-before-root
     // batches are addressable. Positional insertion remains in producer order:
     // applying its index before an earlier root Remove makes the outcome depend
@@ -510,6 +511,7 @@ export class SubscriptionManager<T extends { id: string }> {
             if (isUuidOnlyTerminalKey(operation.root_key)) continue;
             throw new Error(`terminal root removal addressed missing root ${rootId}`);
           }
+          removedRoots.add(rootId);
           this.currentResults.delete(rootId);
           this.removeId(rootId);
         } else if ("Move" in edit) {
@@ -524,6 +526,10 @@ export class SubscriptionManager<T extends { id: string }> {
       }
 
       const root = this.terminalRows.get(rootId);
+      // A root removal subsumes any descendant removals emitted later in the
+      // same producer frame. Missing roots without that explicit removal still
+      // fail closed below.
+      if (!root && removedRoots.has(rootId)) continue;
       if (!root) throw new Error(`terminal child edit addressed missing root ${rootId}`);
       assertTerminalPathEditKey(operation.path, edit);
       const target = terminalCollection(root, rootColumns, operation.path);
