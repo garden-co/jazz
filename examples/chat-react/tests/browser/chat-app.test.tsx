@@ -649,7 +649,7 @@ describe("Chat App E2E", () => {
     // and would look like "019c…" or "false" — the above assertion covers both.
   });
 
-  it.fails("denies access and hides messages for non-members of a private chat", async () => {
+  it("denies access and hides messages for non-members of a private chat", async () => {
     const { bobContainer } = await setupPrivateChatAccess();
 
     // The secret message should NOT be visible to a non-member
