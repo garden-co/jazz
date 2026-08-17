@@ -67,7 +67,6 @@ describe("JazzProvider local-first auth", () => {
       configurable: true,
       value: makeStorage(),
     });
-    localStorage.clear();
     await BrowserAuthSecretStore.clearSecret();
     localStorage.setItem("jazz-auth-secret", SECRET);
     mock.createJazzClient.mockReset();
