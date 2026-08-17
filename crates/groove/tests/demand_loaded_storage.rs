@@ -8,13 +8,13 @@ use groove::schema::{
     ColumnSchema, ColumnType, DatabaseSchema, IntegerKeyType, PrimaryKey, TableSchema,
 };
 use groove::storage::async_ordered::{
-    OrderedKvStorage, OwnedStorageOperation, OwnedStorageRequest, OwnedStorageResponse,
-    StorageRequestId,
+    ImmediateStorage, OrderedKvStorage, OwnedStorageOperation, OwnedStorageRequest,
+    OwnedStorageResponse, StorageRequestId,
 };
 use groove::storage::{DemandLoadedStorage, Error, MemoryStorage, ResidentStorage};
 
 struct GatedStorage {
-    inner: MemoryStorage,
+    inner: ImmediateStorage<MemoryStorage>,
     released: Rc<Cell<bool>>,
     polls: Rc<Cell<usize>>,
 }
@@ -79,7 +79,7 @@ fn query_requests_only_its_missing_range_then_retries_from_cache() {
     let mut batch = seeded.open_batch();
     batch.insert("rows", vec![Value::U64(7), Value::String("durable".into())]);
     seeded.commit_batch(batch).unwrap();
-    let mut durable = seeded.into_storage();
+    let mut durable = ImmediateStorage::new(seeded.into_storage());
 
     let cache = DemandLoadedStorage::new(&["rows", "indices"]);
     let database = Database::new(schema, cache.clone()).unwrap();
@@ -143,7 +143,7 @@ fn pollable_query_fetches_on_demand_and_then_reads_resident_state() {
     let released = Rc::new(Cell::new(false));
     let polls = Rc::new(Cell::new(0));
     let durable = GatedStorage {
-        inner: seeded.into_storage(),
+        inner: ImmediateStorage::new(seeded.into_storage()),
         released: Rc::clone(&released),
         polls: Rc::clone(&polls),
     };
@@ -188,7 +188,7 @@ fn write_preflight_loads_inputs_before_the_single_real_ivm_tick() {
         .subscribe_one_sink(GraphBuilder::table("rows"))
         .unwrap();
     assert!(subscription.recv().unwrap().is_empty());
-    let mut durable = MemoryStorage::new(&["rows", "indices"]);
+    let mut durable = ImmediateStorage::new(MemoryStorage::new(&["rows", "indices"]));
     let mut batch = database.open_batch();
     batch.insert("rows", vec![Value::U64(11), Value::String("input".into())]);
     let mut context = Context::from_waker(Waker::noop());
@@ -223,7 +223,7 @@ fn opened_subscription_inherits_synchronous_write_visibility_over_async_storage(
     let released = Rc::new(Cell::new(false));
     let polls = Rc::new(Cell::new(0));
     let durable = GatedStorage {
-        inner: MemoryStorage::new(&["rows", "indices"]),
+        inner: ImmediateStorage::new(MemoryStorage::new(&["rows", "indices"])),
         released: Rc::clone(&released),
         polls,
     };
@@ -302,7 +302,7 @@ fn direct_write_is_synchronous_while_an_unloaded_reference_may_suspend() {
     let released = Rc::new(Cell::new(true));
     let polls = Rc::new(Cell::new(0));
     let durable = GatedStorage {
-        inner: MemoryStorage::new(&["rows", "related", "indices"]),
+        inner: ImmediateStorage::new(MemoryStorage::new(&["rows", "related", "indices"])),
         released: Rc::clone(&released),
         polls,
     };

@@ -19,7 +19,8 @@ pub struct PollableNodeOpen {
 enum NodeOpenPhase {
     Acquiring,
     Finalizing {
-        request: groove::storage::async_ordered::OwnedStorageRequest,
+        requests:
+            std::collections::VecDeque<groove::storage::async_ordered::OwnedStorageRequest>,
         node: NodeState<groove::storage::DemandLoadedStorage>,
         cache: groove::storage::DemandLoadedStorage,
     },
@@ -112,9 +113,9 @@ impl DemandDrivenNode {
             };
             match self.persistence.poll_request(request, context) {
                 std::task::Poll::Pending => return std::task::Poll::Pending,
-                std::task::Poll::Ready(Ok(
-                    groove::storage::async_ordered::OwnedStorageResponse::Committed,
-                )) => {
+                std::task::Poll::Ready(Ok(response))
+                    if storage_response_matches(request.operation(), &response) =>
+                {
                     self.pending_persistence.pop_front();
                 }
                 std::task::Poll::Ready(Ok(response)) => {
@@ -134,6 +135,16 @@ impl DemandDrivenNode {
     }
 
     fn collect_persistence_unit(&mut self) {
+        let column_families = self.cache.take_pending_column_families();
+        if !column_families.is_empty() {
+            self.pending_persistence.push_back(
+                groove::storage::async_ordered::OwnedStorageRequest::new(
+                    groove::storage::async_ordered::OwnedStorageOperation::EnsureColumnFamilies(
+                        column_families,
+                    ),
+                ),
+            );
+        }
         let operations = self.cache.take_pending_writes();
         if !operations.is_empty() {
             self.pending_persistence.push_back(
@@ -145,7 +156,9 @@ impl DemandDrivenNode {
     }
 
     fn discard_failed_operation_writes(&mut self) {
-        if !self.cache.take_pending_writes().is_empty() {
+        if !self.cache.take_pending_writes().is_empty()
+            || !self.cache.take_pending_column_families().is_empty()
+        {
             // An operation that emitted a durable batch before failing has an
             // ambiguous resident outcome. Publish none of it and prevent this
             // runtime from accepting dependent work until a clean reopen.
@@ -167,6 +180,22 @@ impl DemandDrivenNode {
             let _ = self.persistence.cancel_request(request.id());
         }
     }
+}
+
+fn storage_response_matches(
+    operation: &groove::storage::async_ordered::OwnedStorageOperation,
+    response: &groove::storage::async_ordered::OwnedStorageResponse,
+) -> bool {
+    matches!(
+        (operation, response),
+        (
+            groove::storage::async_ordered::OwnedStorageOperation::EnsureColumnFamilies(_),
+            groove::storage::async_ordered::OwnedStorageResponse::ColumnFamiliesReady
+        ) | (
+            groove::storage::async_ordered::OwnedStorageOperation::Commit(_),
+            groove::storage::async_ordered::OwnedStorageResponse::Committed
+        )
+    )
 }
 
 impl Drop for DemandDrivenNode {
@@ -245,7 +274,10 @@ impl PollableNodeOpen {
         context: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Result<DemandDrivenNode, Error>> {
         loop {
-            if let NodeOpenPhase::Finalizing { request, .. } = &self.phase {
+            if let NodeOpenPhase::Finalizing { requests, .. } = &self.phase {
+                let request = requests
+                    .front()
+                    .expect("finalizing node opening retains at least one request");
                 match self
                     .persistence
                     .as_mut()
@@ -253,16 +285,23 @@ impl PollableNodeOpen {
                     .poll_request(request, context)
                 {
                     std::task::Poll::Pending => return std::task::Poll::Pending,
-                    std::task::Poll::Ready(Ok(
-                        groove::storage::async_ordered::OwnedStorageResponse::Committed,
-                    )) => {
-                        let NodeOpenPhase::Finalizing { node, cache, .. } = std::mem::replace(
-                            &mut self.phase,
-                            NodeOpenPhase::Complete,
-                        ) else {
+                    std::task::Poll::Ready(Ok(response))
+                        if storage_response_matches(request.operation(), &response) =>
+                    {
+                        let NodeOpenPhase::Finalizing { requests, .. } = &mut self.phase else {
                             unreachable!("finalizing phase was just matched")
                         };
-                        return std::task::Poll::Ready(Ok(self.finish(node, cache)));
+                        requests.pop_front();
+                        if requests.is_empty() {
+                            let NodeOpenPhase::Finalizing { node, cache, .. } = std::mem::replace(
+                                &mut self.phase,
+                                NodeOpenPhase::Complete,
+                            ) else {
+                                unreachable!("finalizing phase was just matched")
+                            };
+                            return std::task::Poll::Ready(Ok(self.finish(node, cache)));
+                        }
+                        continue;
                     }
                     std::task::Poll::Ready(Ok(response)) => {
                         self.phase = NodeOpenPhase::Complete;
@@ -309,15 +348,33 @@ impl PollableNodeOpen {
             ) {
                 std::task::Poll::Pending => return std::task::Poll::Pending,
                 std::task::Poll::Ready(Ok((node, transaction))) => {
+                    let column_families = transaction.take_pending_column_families();
                     let writes = transaction.take_pending_writes();
-                    if writes.is_empty() {
+                    let mut requests = std::collections::VecDeque::new();
+                    if !column_families.is_empty() {
+                        requests.push_back(
+                            groove::storage::async_ordered::OwnedStorageRequest::new(
+                                groove::storage::async_ordered::OwnedStorageOperation::EnsureColumnFamilies(
+                                    column_families,
+                                ),
+                            ),
+                        );
+                    }
+                    if !writes.is_empty() {
+                        requests.push_back(
+                            groove::storage::async_ordered::OwnedStorageRequest::new(
+                                groove::storage::async_ordered::OwnedStorageOperation::Commit(
+                                    writes,
+                                ),
+                            ),
+                        );
+                    }
+                    if requests.is_empty() {
                         self.phase = NodeOpenPhase::Complete;
                         return std::task::Poll::Ready(Ok(self.finish(node, transaction)));
                     }
                     self.phase = NodeOpenPhase::Finalizing {
-                        request: groove::storage::async_ordered::OwnedStorageRequest::new(
-                            groove::storage::async_ordered::OwnedStorageOperation::Commit(writes),
-                        ),
+                        requests,
                         node,
                         cache: transaction,
                     };
@@ -337,8 +394,10 @@ impl Drop for PollableNodeOpen {
             return;
         };
         let _ = self.acquisition.cancel(persistence.as_mut());
-        if let NodeOpenPhase::Finalizing { request, .. } = &self.phase {
-            let _ = persistence.cancel_request(request.id());
+        if let NodeOpenPhase::Finalizing { requests, .. } = &self.phase {
+            for request in requests {
+                let _ = persistence.cancel_request(request.id());
+            }
         }
     }
 }

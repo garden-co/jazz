@@ -218,7 +218,7 @@ fn async_authority_ingest_owns_complete_persistence_before_fate_publication() {
 }
 
 struct GatedAuthorityStorage {
-    inner: MemoryStorage,
+    inner: groove::storage::async_ordered::ImmediateStorage<MemoryStorage>,
     released: std::rc::Rc<std::cell::Cell<bool>>,
     cancellations: std::rc::Rc<std::cell::Cell<usize>>,
     committed_units: std::rc::Rc<std::cell::RefCell<Vec<usize>>>,
@@ -246,18 +246,6 @@ impl groove::storage::async_ordered::OrderedKvStorage for GatedAuthorityStorage 
                 }));
             }
             self.committed_units.borrow_mut().push(operations.len());
-            let families = operations
-                .iter()
-                .map(|operation| match operation {
-                    groove::storage::OwnedWriteOperation::Set { cf, .. }
-                    | groove::storage::OwnedWriteOperation::Delete { cf, .. }
-                    | groove::storage::OwnedWriteOperation::Delta { cf, .. } => cf.clone(),
-                })
-                .collect::<BTreeSet<_>>()
-                .into_iter()
-                .collect::<Vec<_>>();
-            let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
-            self.inner = self.inner.clone().reopen(&refs)?;
         }
         groove::storage::async_ordered::OrderedKvStorage::poll_request(
             &mut self.inner,
@@ -293,7 +281,7 @@ fn pollable_node_open_acquires_inputs_then_durably_finalizes_once() {
     let durable = MemoryStorage::new(&refs);
     let released = std::rc::Rc::new(std::cell::Cell::new(false));
     let backend = GatedAuthorityStorage {
-        inner: durable.clone(),
+        inner: groove::storage::async_ordered::ImmediateStorage::new(durable.clone()),
         released: std::rc::Rc::clone(&released),
         cancellations: std::rc::Rc::new(std::cell::Cell::new(0)),
         committed_units: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
@@ -330,7 +318,7 @@ fn dropping_pollable_node_open_cancels_its_exact_pending_input() {
         .collect::<Vec<_>>();
     let cancellations = std::rc::Rc::new(std::cell::Cell::new(0));
     let backend = GatedAuthorityStorage {
-        inner: MemoryStorage::new(&refs),
+        inner: groove::storage::async_ordered::ImmediateStorage::new(MemoryStorage::new(&refs)),
         released: std::rc::Rc::new(std::cell::Cell::new(false)),
         cancellations: std::rc::Rc::clone(&cancellations),
         committed_units: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
@@ -356,7 +344,9 @@ fn immediate_storage_inherits_first_poll_node_readiness() {
     let mut opening = PollableNodeOpen::new(
         node(0xd3),
         node_schema,
-        Box::new(MemoryStorage::new(&refs)),
+        Box::new(groove::storage::async_ordered::ImmediateStorage::new(
+            MemoryStorage::new(&refs),
+        )),
     );
     let waker = std::sync::Arc::new(PersistenceTestWake).into();
     let mut context = std::task::Context::from_waker(&waker);
@@ -376,7 +366,7 @@ fn demand_driven_node_publishes_locally_before_one_atomic_durable_unit() {
     let released = std::rc::Rc::new(std::cell::Cell::new(true));
     let committed_units = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
     let backend = GatedAuthorityStorage {
-        inner: durable.clone(),
+        inner: groove::storage::async_ordered::ImmediateStorage::new(durable.clone()),
         released: std::rc::Rc::clone(&released),
         cancellations: std::rc::Rc::new(std::cell::Cell::new(0)),
         committed_units: std::rc::Rc::clone(&committed_units),
@@ -434,7 +424,7 @@ fn demand_driven_node_poisoned_after_durable_commit_failure() {
         .collect::<Vec<_>>();
     let fail_commits = std::rc::Rc::new(std::cell::Cell::new(false));
     let backend = GatedAuthorityStorage {
-        inner: MemoryStorage::new(&refs),
+        inner: groove::storage::async_ordered::ImmediateStorage::new(MemoryStorage::new(&refs)),
         released: std::rc::Rc::new(std::cell::Cell::new(true)),
         cancellations: std::rc::Rc::new(std::cell::Cell::new(0)),
         committed_units: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
@@ -513,7 +503,9 @@ fn authority_scheduler_releases_fate_only_after_async_storage_completion() {
 
     let released = std::rc::Rc::new(std::cell::Cell::new(false));
     let storage = GatedAuthorityStorage {
-        inner: persistence_storage_for(&pending),
+        inner: groove::storage::async_ordered::ImmediateStorage::new(persistence_storage_for(
+            &pending,
+        )),
         released: std::rc::Rc::clone(&released),
         cancellations: std::rc::Rc::new(std::cell::Cell::new(0)),
         committed_units: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
@@ -564,7 +556,9 @@ fn authority_scheduler_uses_same_first_poll_path_for_immediate_storage() {
         )
         .unwrap();
     let durable = persistence_storage_for(&pending);
-    let mut scheduler = AuthorityPersistenceScheduler::new(Box::new(durable));
+    let mut scheduler = AuthorityPersistenceScheduler::new(Box::new(
+        groove::storage::async_ordered::ImmediateStorage::new(durable),
+    ));
     scheduler.enqueue(pending);
     let waker = std::task::Waker::from(std::sync::Arc::new(PersistenceTestWake));
     let mut context = std::task::Context::from_waker(&waker);
@@ -616,7 +610,9 @@ fn authority_persistence_failure_discards_fate_and_poisons_resident_node() {
         .collect::<Vec<_>>();
     let persistence = FailWriteManyMemoryStorage::new(&refs);
     persistence.fail_nth_following_write_many(1);
-    let mut scheduler = AuthorityPersistenceScheduler::new(Box::new(persistence));
+    let mut scheduler = AuthorityPersistenceScheduler::new(Box::new(
+        groove::storage::async_ordered::ImmediateStorage::new(persistence),
+    ));
     scheduler.enqueue(pending);
     let waker = std::task::Waker::from(std::sync::Arc::new(PersistenceTestWake));
     let mut context = std::task::Context::from_waker(&waker);

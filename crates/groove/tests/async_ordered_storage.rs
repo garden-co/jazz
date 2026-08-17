@@ -7,8 +7,8 @@ use std::sync::Arc;
 use std::task::{Context, Poll, Wake, Waker};
 
 use groove::storage::async_ordered::{
-    OrderedKvStorage, OwnedScanRequest, OwnedStorageOperation, OwnedStorageRequest,
-    OwnedStorageResponse, ScanDirection, StorageRequestId,
+    ImmediateStorage, OrderedKvStorage, OwnedScanRequest, OwnedStorageOperation,
+    OwnedStorageRequest, OwnedStorageResponse, ScanDirection, StorageRequestId,
 };
 use groove::storage::{Error, MemoryStorage, OwnedWriteOperation};
 use groove::{
@@ -46,7 +46,7 @@ impl OperationGate {
 }
 
 struct ControlledStorage {
-    storage: MemoryStorage,
+    storage: ImmediateStorage<MemoryStorage>,
     gate: OperationGate,
 }
 
@@ -70,7 +70,7 @@ impl OrderedKvStorage for FailingCommitStorage {
 }
 
 struct OrderedControlledStorage {
-    storage: MemoryStorage,
+    storage: ImmediateStorage<MemoryStorage>,
     permitted: Rc<Cell<usize>>,
     seen: Rc<RefCell<Vec<StorageRequestId>>>,
 }
@@ -83,7 +83,7 @@ impl OrderedControlledStorage {
         let seen = Rc::new(RefCell::new(Vec::new()));
         (
             Self {
-                storage: MemoryStorage::new(column_families),
+                storage: ImmediateStorage::new(MemoryStorage::new(column_families)),
                 permitted: Rc::clone(&permitted),
                 seen: Rc::clone(&seen),
             },
@@ -124,7 +124,7 @@ impl ControlledStorage {
         let gate = OperationGate::default();
         (
             Self {
-                storage: MemoryStorage::new(column_families),
+                storage: ImmediateStorage::new(MemoryStorage::new(column_families)),
                 gate: gate.clone(),
             },
             gate,
@@ -151,7 +151,7 @@ impl OrderedKvStorage for ControlledStorage {
 
 #[test]
 fn memory_storage_inherits_first_poll_read_write_and_scan_readiness() {
-    let mut storage = MemoryStorage::new(&["rows"]);
+    let mut storage = ImmediateStorage::new(MemoryStorage::new(&["rows"]));
 
     assert!(matches!(
         poll_request(

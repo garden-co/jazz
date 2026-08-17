@@ -9,7 +9,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll};
 
-use super::{Error, KeyValue, OwnedWriteOperation, ResidentStorage};
+use super::{Error, KeyValue, OwnedWriteOperation, ReopenableStorage, ResidentStorage};
 
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -70,6 +70,7 @@ impl OwnedScanRequest {
 /// Operation payload retained by the scheduler across suspension.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OwnedStorageOperation {
+    EnsureColumnFamilies(Vec<String>),
     Get { column_family: String, key: Vec<u8> },
     Scan(OwnedScanRequest),
     Commit(Vec<OwnedWriteOperation>),
@@ -104,6 +105,7 @@ impl OwnedStorageRequest {
 /// Owned result of a storage request.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OwnedStorageResponse {
+    ColumnFamiliesReady,
     Value(Option<Vec<u8>>),
     Rows(Vec<KeyValue>),
     Committed,
@@ -135,27 +137,69 @@ pub trait OrderedKvStorage {
     fn cancel_request(&mut self, request: StorageRequestId) -> Result<(), Error>;
 }
 
-/// Existing immediate backends inherit the object-safe pollable contract.
-impl<S> OrderedKvStorage for S
+/// Adapt a synchronous resident implementation to the async durable boundary.
+///
+/// Every operation completes during its first poll. The wrapper owns the
+/// resident implementation so a column-family expansion can consume and reopen
+/// it without introducing a special synchronous runtime mode.
+pub struct ImmediateStorage<S> {
+    inner: Option<S>,
+}
+
+impl<S> ImmediateStorage<S> {
+    pub fn new(inner: S) -> Self {
+        Self { inner: Some(inner) }
+    }
+
+    pub fn into_inner(mut self) -> S {
+        self.inner
+            .take()
+            .expect("immediate ordered storage always owns its backend")
+    }
+}
+
+impl<S> OrderedKvStorage for ImmediateStorage<S>
 where
-    S: ResidentStorage,
+    S: ResidentStorage + ReopenableStorage,
 {
     fn poll_request(
         &mut self,
         request: &OwnedStorageRequest,
         _context: &mut Context<'_>,
     ) -> Poll<Result<OwnedStorageResponse, Error>> {
+        if let OwnedStorageOperation::EnsureColumnFamilies(column_families) = request.operation() {
+            let refs = column_families
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>();
+            let inner = self
+                .inner
+                .take()
+                .expect("immediate ordered storage always owns its backend");
+            return Poll::Ready(match inner.reopen(&refs) {
+                Ok(inner) => {
+                    self.inner = Some(inner);
+                    Ok(OwnedStorageResponse::ColumnFamiliesReady)
+                }
+                Err(error) => Err(error),
+            });
+        }
+        let inner = self
+            .inner
+            .as_ref()
+            .expect("immediate ordered storage always owns its backend");
         Poll::Ready(match request.operation() {
+            OwnedStorageOperation::EnsureColumnFamilies(_) => unreachable!("handled above"),
             OwnedStorageOperation::Get { column_family, key } => {
-                ResidentStorage::get(self, column_family, key).map(OwnedStorageResponse::Value)
+                ResidentStorage::get(inner, column_family, key).map(OwnedStorageResponse::Value)
             }
             OwnedStorageOperation::Scan(request) => {
                 let mut rows = match &request.bounds {
                     OwnedScanBounds::Prefix(prefix) => {
-                        ResidentStorage::prefix(self, &request.column_family, prefix)?
+                        ResidentStorage::prefix(inner, &request.column_family, prefix)?
                     }
                     OwnedScanBounds::Range { start, end } => {
-                        ResidentStorage::range(self, &request.column_family, start, end)?
+                        ResidentStorage::range(inner, &request.column_family, start, end)?
                     }
                 };
                 if request.direction == ScanDirection::Reverse {
@@ -168,14 +212,14 @@ where
                     .iter()
                     .map(OwnedWriteOperation::as_write_operation)
                     .collect::<Vec<_>>();
-                ResidentStorage::write_many(self, &operations)
+                ResidentStorage::write_many(inner, &operations)
                     .map(|()| OwnedStorageResponse::Committed)
             }
             OwnedStorageOperation::Flush => {
-                ResidentStorage::flush_write_boundary(self).map(|()| OwnedStorageResponse::Flushed)
+                ResidentStorage::flush_write_boundary(inner).map(|()| OwnedStorageResponse::Flushed)
             }
             OwnedStorageOperation::Close => {
-                ResidentStorage::close(self).map(|()| OwnedStorageResponse::Closed)
+                ResidentStorage::close(inner).map(|()| OwnedStorageResponse::Closed)
             }
         })
     }

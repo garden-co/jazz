@@ -60,6 +60,23 @@ Bindings may eagerly poll an operation once. If it completes, they drain local
 subscription events inline. If it suspends, they return a promise and resume the
 same owned operation later. The semantic phases and outputs are identical.
 
+The Rust names reflect those roles:
+
+- `ResidentStorage` is the synchronous interface Groove evaluates against. It
+  means “this key range has already been admitted,” not “this is the durable
+  backend.”
+- `async_ordered::OrderedKvStorage` is the owned-request durable boundary.
+- `ImmediateStorage<S>` adapts Memory, RocksDB, or another reopenable resident
+  implementation to that boundary and completes every operation in its first
+  poll.
+- `DemandLoadedStorage` is the resident cache and operation journal used when
+  the durable boundary can suspend.
+
+Column-family/layout expansion is itself an ordered storage operation. It runs
+before the first commit that can mention the new family. RocksDB performs its
+reopen synchronously through `ImmediateStorage`; IndexedDB acknowledges it
+immediately because family identity is encoded into ordered key prefixes.
+
 ## Visibility is not durability
 
 Jazz already separates transaction fate from durability. A memory client authors

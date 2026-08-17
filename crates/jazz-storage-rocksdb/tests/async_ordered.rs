@@ -3,7 +3,8 @@ use std::task::{Context, Poll, Wake, Waker};
 
 use groove::storage::OwnedWriteOperation;
 use groove::storage::async_ordered::{
-    OrderedKvStorage, OwnedStorageOperation, OwnedStorageRequest, OwnedStorageResponse,
+    ImmediateStorage, OrderedKvStorage, OwnedStorageOperation, OwnedStorageRequest,
+    OwnedStorageResponse,
 };
 use jazz_storage_rocksdb::RocksDbStorage;
 
@@ -25,7 +26,8 @@ fn poll_request(
 #[test]
 fn rocksdb_inherits_first_poll_commit_readiness() {
     let directory = tempfile::tempdir().unwrap();
-    let mut storage = RocksDbStorage::open(directory.path(), &["rows"]).unwrap();
+    let storage = RocksDbStorage::open(directory.path(), &["rows"]).unwrap();
+    let mut storage = ImmediateStorage::new(storage);
 
     assert!(matches!(
         poll_request(
@@ -49,4 +51,28 @@ fn rocksdb_inherits_first_poll_commit_readiness() {
         panic!("RocksDB get must complete successfully on its first poll");
     };
     assert_eq!(value, Some(b"value".to_vec()));
+
+    assert!(matches!(
+        poll_request(
+            &mut storage,
+            &OwnedStorageRequest::new(OwnedStorageOperation::EnsureColumnFamilies(vec![
+                "rows".to_owned(),
+                "later_rows".to_owned(),
+            ])),
+        ),
+        Poll::Ready(Ok(OwnedStorageResponse::ColumnFamiliesReady))
+    ));
+    assert!(matches!(
+        poll_request(
+            &mut storage,
+            &OwnedStorageRequest::new(OwnedStorageOperation::Commit(vec![
+                OwnedWriteOperation::Set {
+                    cf: "later_rows".to_owned(),
+                    key: b"later".to_vec(),
+                    value: b"ready".to_vec(),
+                },
+            ])),
+        ),
+        Poll::Ready(Ok(OwnedStorageResponse::Committed))
+    ));
 }

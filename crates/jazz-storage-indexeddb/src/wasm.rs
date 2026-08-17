@@ -118,6 +118,14 @@ impl OrderedKvStorage for IndexedDbOrderedStorage {
         request: &OwnedStorageRequest,
         context: &mut Context<'_>,
     ) -> Poll<Result<OwnedStorageResponse, Error>> {
+        if matches!(
+            request.operation(),
+            OwnedStorageOperation::EnsureColumnFamilies(_)
+        ) {
+            // IndexedDB stores column-family identity in the ordered key
+            // prefix; no physical namespace creation is required.
+            return Poll::Ready(Ok(OwnedStorageResponse::ColumnFamiliesReady));
+        }
         let mut requests = self.requests.borrow_mut();
         match requests.remove(&request.id()) {
             Some(RequestState::Complete(result)) => return Poll::Ready(result),
@@ -173,6 +181,9 @@ async fn execute(
     operation: OwnedStorageOperation,
 ) -> Result<OwnedStorageResponse, Error> {
     match operation {
+        OwnedStorageOperation::EnsureColumnFamilies(_) => {
+            Ok(OwnedStorageResponse::ColumnFamiliesReady)
+        }
         OwnedStorageOperation::Get { column_family, key } => tree
             .get(&storage_key(&column_family, &key))
             .await
