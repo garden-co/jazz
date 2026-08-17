@@ -195,7 +195,10 @@ The current open path mixes these classes and must be separated:
   when a referenced identity or branch is used, apart from the small identities
   required to finish opening;
 - pending-edge and locally rejected-transaction recovery should be driven by
-  the retry/sync operation that consumes those records;
+  the retry/sync operation that consumes those records. Pending cascades use a
+  parent-keyed durable index: rejecting one parent loads only that parent's
+  children, then follows the same index recursively. An empty in-memory child
+  map before that lookup means “not admitted”, not “durably empty”;
 - settled result members, program facts, authorization progress, and known
   state should be loaded for one `BindingViewKey` when that binding is opened;
 - ahead-current winners should be loaded for the requested physical table and
@@ -251,6 +254,26 @@ must not become a partial second source of truth. Immediate backends drain all
 queued units in the same poll; pending backends retain the oldest request and
 never let a later unit overtake it. A failed unit poisons the owner and releases
 no later durable work until clean reopen.
+
+### Local operation phases
+
+A local mutation is one operation with two explicit phases, not a synchronous
+and an asynchronous implementation mode:
+
+1. **prepare/acquire** performs every durable-backed lookup that can influence
+   the mutation. It may suspend and retry, but cannot advance clocks, publish an
+   IVM delta, install a subscription, or emit a durable write;
+2. **resident publish** applies the prepared mutation to canonical resident
+   state and the IVM without suspension, then hands its complete journal to the
+   ordered persistence queue.
+
+`DemandDrivenNode::poll_local_operation` is the orchestration seam;
+operation-specific entry points such as `poll_mergeable_commit` own their
+typed preparation. With Memory/RocksDB, acquisition completes in the first
+poll. With IndexedDB, a cold dependency can yield `Pending`, but the eventual
+publish and its local subscription callbacks still occur in one synchronous
+poll. Encountering a new cold input during publish is an invariant violation
+and poisons the resident runtime rather than exposing a partial mutation.
 
 ## Resident current-state requirement
 

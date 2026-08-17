@@ -1914,7 +1914,7 @@ where
     {
         match target {
             BranchLineage::Root => {
-                let made_at = self.mint_tx_time(0);
+                let made_at = self.preview_mergeable_tx_time(&commits, 0);
                 self.commit_mergeable_many_at_with_branch_merge(
                     commits,
                     made_at,

@@ -50,6 +50,9 @@ where
         if let Some(durability) = durability {
             stored.durability = stored.durability.max(durability);
         }
+        if matches!(stored.fate, Fate::Rejected(_)) {
+            self.ensure_child_edge_closure_loaded(tx_id)?;
+        }
         let advanced_global_seqs = if matches!(stored.fate, Fate::Accepted)
             && let Some(global_seq) = stored.global_seq
         {
@@ -757,6 +760,7 @@ where
         rejected: TxId,
         root: TxId,
     ) -> Result<Vec<TxId>, Error> {
+        self.ensure_child_edges_loaded(rejected)?;
         let mut descendants = BTreeSet::new();
         let mut stack = self
             .rejections
@@ -780,6 +784,7 @@ where
                 );
             if eligible {
                 descendants.insert(tx_id);
+                self.ensure_child_edges_loaded(tx_id)?;
                 if let Some(children) = self.rejections.child_txs_by_parent.get(&tx_id) {
                     stack.extend(children.iter().copied());
                 }

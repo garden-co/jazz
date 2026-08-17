@@ -923,6 +923,80 @@ where
         }
     }
 
+    pub(super) fn ensure_child_edges_loaded(&mut self, parent: TxId) -> Result<(), Error> {
+        if self.rejections.loaded_child_edges.contains(&parent) {
+            return Ok(());
+        }
+        let Some(parent_alias) = self.node_aliases.get(&parent.node).copied() else {
+            return Err(Error::InvalidStoredValue(
+                "pending edge parent alias must exist",
+            ));
+        };
+        let parent_is_pending = self
+            .query_transaction(parent)?
+            .is_some_and(|tx| matches!(tx.fate, Fate::Pending));
+        if parent_is_pending {
+            let children = self
+                .database
+                .index_scan_raw(
+                    "jazz_pending_edges",
+                    "by_parent",
+                    &[Value::U64(parent.time.0), Value::U64(parent_alias.0)],
+                )?
+                .into_iter()
+                .map(|raw| {
+                    let record = raw.record();
+                    let child_alias = NodeAlias(
+                        record.get_u64(PendingEdgeRowRecord::FIELD_CHILD_NODE_ID_IDX)?,
+                    );
+                    let child_node = self.node_for_alias(child_alias).ok_or(
+                        Error::InvalidStoredValue("pending edge child alias must exist"),
+                    )?;
+                    Ok(TxId::new(
+                        TxTime(record.get_u64(PendingEdgeRowRecord::FIELD_CHILD_TIME_IDX)?),
+                        child_node,
+                    ))
+                })
+                .collect::<Result<Vec<_>, Error>>()?;
+            for child in children {
+                if self
+                    .query_transaction(child)?
+                    .is_some_and(|tx| matches!(tx.fate, Fate::Pending))
+                {
+                    self.rejections
+                        .child_txs_by_parent
+                        .entry(parent)
+                        .or_default()
+                        .insert(child);
+                }
+            }
+        }
+        self.rejections.loaded_child_edges.insert(parent);
+        Ok(())
+    }
+
+    /// Admit the complete pending-descendant closure before a fate mutation
+    /// starts publishing or writing. Each step is one parent-keyed lookup; a
+    /// cold backend may suspend between steps, but retries only extend this
+    /// inert recovery index and never replay a partially applied fate.
+    pub(super) fn ensure_child_edge_closure_loaded(
+        &mut self,
+        root: TxId,
+    ) -> Result<(), Error> {
+        let mut stack = vec![root];
+        let mut seen = BTreeSet::new();
+        while let Some(parent) = stack.pop() {
+            if !seen.insert(parent) {
+                continue;
+            }
+            self.ensure_child_edges_loaded(parent)?;
+            if let Some(children) = self.rejections.child_txs_by_parent.get(&parent) {
+                stack.extend(children.iter().copied());
+            }
+        }
+        Ok(())
+    }
+
     fn prune_child_edges(&mut self, child: TxId) {
         self.rejections.child_txs_by_parent.retain(|_, children| {
             children.remove(&child);

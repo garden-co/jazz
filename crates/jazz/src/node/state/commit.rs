@@ -5,8 +5,7 @@ where
     /// Commit a local mergeable write and leave its fate pending.
     pub fn commit_mergeable(&mut self, commit: MergeableCommit) -> Result<TxId, Error> {
         commit.validate()?;
-        self.merge_commit_parent_times(std::slice::from_ref(&commit))?;
-        let made_at = self.mint_tx_time(commit.now_ms);
+        let made_at = self.preview_mergeable_tx_time(std::slice::from_ref(&commit), commit.now_ms);
         self.commit_mergeable_at(commit, made_at)
     }
 
@@ -39,8 +38,7 @@ where
                 ));
             }
         }
-        self.merge_commit_parent_times(&commits)?;
-        let made_at = self.mint_tx_time(commits[0].now_ms);
+        let made_at = self.preview_mergeable_tx_time(&commits, commits[0].now_ms);
         self.commit_mergeable_many_at(commits, made_at)
     }
 
@@ -73,8 +71,7 @@ where
                 ));
             }
         }
-        self.merge_commit_parent_times(&commits)?;
-        let made_at = self.mint_tx_time(commits[0].now_ms);
+        let made_at = self.preview_mergeable_tx_time(&commits, commits[0].now_ms);
         self.commit_mergeable_many_at_with_schema_versions(
             commits
                 .into_iter()
@@ -85,15 +82,30 @@ where
         )
     }
 
-    fn merge_commit_parent_times(&mut self, commits: &[MergeableCommit]) -> Result<(), Error> {
-        for commit in commits {
-            if !commit.parents.is_empty() {
-                for parent in &commit.parents {
-                    self.merge_tx_time(parent.time);
-                }
-            }
-        }
-        Ok(())
+    pub(crate) fn preview_mergeable_tx_time(
+        &self,
+        commits: &[MergeableCommit],
+        now_ms: u64,
+    ) -> TxTime {
+        let observed = commits
+            .iter()
+            .flat_map(|commit| commit.parents.iter().map(|parent| parent.time))
+            .fold(self.clock.tx_time, TxTime::max);
+        TxTime::tick(observed, now_ms)
+    }
+
+    pub(crate) fn prepare_current_mergeable_commit(
+        &mut self,
+        commit: MergeableCommit,
+    ) -> Result<PreparedMergeableCommit, Error> {
+        commit.validate()?;
+        let made_at = self.preview_mergeable_tx_time(std::slice::from_ref(&commit), commit.now_ms);
+        let schema = self.catalogue.current_write_schema.schema;
+        self.prepare_mergeable_many_at_with_schema_versions(
+            vec![(schema, commit)],
+            made_at,
+            None,
+        )
     }
 
     fn commit_mergeable_at(
@@ -133,6 +145,20 @@ where
         made_at: TxTime,
         branch_merge: Option<BranchMergeProvenance>,
     ) -> Result<TxId, Error> {
+        let prepared = self.prepare_mergeable_many_at_with_schema_versions(
+            commits,
+            made_at,
+            branch_merge,
+        )?;
+        self.publish_prepared_mergeable_commit(prepared)
+    }
+
+    fn prepare_mergeable_many_at_with_schema_versions(
+        &mut self,
+        commits: Vec<(SchemaVersionId, MergeableCommit)>,
+        made_at: TxTime,
+        branch_merge: Option<BranchMergeProvenance>,
+    ) -> Result<PreparedMergeableCommit, Error> {
         let tx_id = TxId::new(made_at, self.node_uuid);
         let made_by = commits[0].1.made_by;
         let permission_subject = commits[0].1.effective_permission_subject();
@@ -153,7 +179,13 @@ where
             target_lineage: crate::tx::BranchLineage::Root,
             branch_merge,
         };
-        let tx_node_alias = self.ensure_node_alias(tx_id.node)?;
+        let tx_node_alias = self
+            .node_aliases
+            .get(&tx_id.node)
+            .copied()
+            .ok_or(Error::InvalidStoredValue(
+                "local node alias must be installed before write preparation",
+            ))?;
         let mut batch = self.database.open_batch();
         batch.insert(
             "jazz_transactions",
@@ -168,7 +200,14 @@ where
         let mut stored_versions = Vec::new();
         let mut pending_parents = BTreeSet::new();
         for (write_schema_version, commit) in commits {
-            let schema_version_alias = self.ensure_schema_version_alias(write_schema_version)?;
+            let schema_version_alias = self
+                .catalogue
+                .schema_version_aliases
+                .get(&write_schema_version)
+                .copied()
+                .ok_or(Error::InvalidStoredValue(
+                    "authored schema alias must be installed before write preparation",
+                ))?;
             let table_schema = self.table_in_schema(&commit.table, write_schema_version)?;
             let layer = VersionLayer::for_commit(&commit);
             let previous_current =
@@ -264,7 +303,30 @@ where
                 );
             }
         }
-        self.commit_database_batch(batch)?;
+        self.stage_recovery_checkpoint(&mut batch, made_at);
+        self.database.preflight_batch_storage_inputs(&batch)?;
+        Ok(PreparedMergeableCommit {
+            tx_id,
+            batch,
+            stored_versions,
+            made_by,
+            permission_subject,
+        })
+    }
+
+    pub(crate) fn publish_prepared_mergeable_commit(
+        &mut self,
+        prepared: PreparedMergeableCommit,
+    ) -> Result<TxId, Error> {
+        let PreparedMergeableCommit {
+            tx_id,
+            batch,
+            stored_versions,
+            made_by,
+            permission_subject,
+        } = prepared;
+        self.clock.tx_time = self.clock.tx_time.max(tx_id.time);
+        self.commit_prepared_database_batch(batch)?;
         self.cache_tx_versions(tx_id, stored_versions.clone());
         if permission_subject != made_by {
             self.open_tx

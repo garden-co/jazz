@@ -70,6 +70,70 @@ impl DemandDrivenNode {
         result
     }
 
+    /// Acquire every cold input for a local mutation before synchronously
+    /// publishing that mutation into the resident node and its IVM.
+    ///
+    /// `prepare` may read durable-backed node state and may therefore suspend;
+    /// it must not publish application state or emit durable writes. `publish`
+    /// runs exactly once only after preparation succeeds. A correct prepared
+    /// operation cannot encounter another cold input while publishing.
+    /// Immediate storage drives acquisition and publication in the first poll;
+    /// a genuinely asynchronous backend returns `Pending` without invoking
+    /// `publish`.
+    pub fn poll_local_operation<P, T>(
+        &mut self,
+        context: &mut std::task::Context<'_>,
+        mut prepare: impl FnMut(
+            &mut NodeState<groove::storage::DemandLoadedStorage>,
+        ) -> Result<P, Error>,
+        publish: impl FnOnce(
+            &mut NodeState<groove::storage::DemandLoadedStorage>,
+            P,
+        ) -> Result<T, Error>,
+    ) -> std::task::Poll<Result<T, Error>> {
+        if let Err(error) = self.ensure_persistence_usable() {
+            return std::task::Poll::Ready(Err(error));
+        }
+        let prepared = match self.acquisition.poll(
+            self.persistence.as_mut(),
+            &self.cache,
+            context,
+            || prepare(&mut self.node),
+            missing_node_open_input,
+        ) {
+            std::task::Poll::Pending => return std::task::Poll::Pending,
+            std::task::Poll::Ready(Err(error)) => {
+                self.discard_failed_operation_writes();
+                return std::task::Poll::Ready(Err(error));
+            }
+            std::task::Poll::Ready(Ok(prepared)) => prepared,
+        };
+        let result = publish(&mut self.node, prepared);
+        match &result {
+            Ok(_) => self.collect_persistence_unit(),
+            Err(error) if is_not_resident(error) => {
+                self.fail_persistence();
+                return std::task::Poll::Ready(result);
+            }
+            Err(_) => self.discard_failed_operation_writes(),
+        }
+        std::task::Poll::Ready(result)
+    }
+
+    /// Commit one mergeable write through the native acquire-then-publish
+    /// operation boundary.
+    pub fn poll_mergeable_commit(
+        &mut self,
+        context: &mut std::task::Context<'_>,
+        commit: &MergeableCommit,
+    ) -> std::task::Poll<Result<TxId, Error>> {
+        self.poll_local_operation(
+            context,
+            |node| node.prepare_current_mergeable_commit(commit.clone()),
+            |node, prepared| node.publish_prepared_mergeable_commit(prepared),
+        )
+    }
+
     /// Poll a restartable query or subscription operation. It may suspend only
     /// while acquiring a missing durable input; once ready, evaluation runs on
     /// the same resident node used by local writes.
@@ -429,4 +493,21 @@ fn missing_node_open_input(
         )) => Ok(*request),
         error => Err(error),
     }
+}
+
+fn is_not_resident(error: &Error) -> bool {
+    matches!(error, Error::Storage(groove::storage::Error::NotResident { .. }))
+        || matches!(
+            error,
+            Error::Groove(groove::db::Error::Storage(error))
+                if matches!(error.as_ref(), groove::storage::Error::NotResident { .. })
+        )
+        || matches!(
+            error,
+            Error::Groove(groove::db::Error::IvmRuntime(
+                groove::ivm::IvmRuntimeError::Storage(
+                    groove::storage::Error::NotResident { .. }
+                )
+            ))
+        )
 }

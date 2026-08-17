@@ -12,12 +12,21 @@ where
         &mut self,
         mut batch: DatabaseBatch,
     ) -> Result<(), GrooveDbError> {
+        self.stage_recovery_checkpoint(&mut batch, self.clock.tx_time);
+        self.commit_prepared_database_batch(batch)
+    }
+
+    pub(crate) fn stage_recovery_checkpoint(
+        &self,
+        batch: &mut DatabaseBatch,
+        tx_time: TxTime,
+    ) {
         batch.update(
             "jazz_node_recovery_state",
             vec![
                 Value::Uuid(self.node_uuid.0),
                 Value::U64(1),
-                Value::U64(self.clock.tx_time.0),
+                Value::U64(tx_time.0),
                 Value::U64(self.clock.next_global_seq.0),
                 Value::U64(u64::from(self.clock.global_seq_exhausted)),
                 Value::U64(self.clock.applied_global_watermark.0),
@@ -26,6 +35,12 @@ where
                 )),
             ],
         );
+    }
+
+    pub(crate) fn commit_prepared_database_batch(
+        &mut self,
+        batch: DatabaseBatch,
+    ) -> Result<(), GrooveDbError> {
         let persistence = self.database.commit_batch_for_async_persistence(batch)?;
         if self.capture_persistence_batches {
             self.pending_persistence_batches.push_back(persistence);

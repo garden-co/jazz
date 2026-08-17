@@ -995,6 +995,15 @@ fn pending_edges_table() -> GrooveTableSchema {
         PrimaryKeyColumn::integer("parent_time", IntegerKeyType::U64),
         PrimaryKeyColumn::integer("parent_node_id", IntegerKeyType::U64),
     ]))
+    .with_index(GrooveIndexSchema::new(
+        "by_parent",
+        [
+            "parent_time",
+            "parent_node_id",
+            "child_time",
+            "child_node_id",
+        ],
+    ))
 }
 
 /// Policy-shape constructors.

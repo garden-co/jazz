@@ -430,6 +430,8 @@ fn recovery_rebuilds_only_pending_parent_edges_and_prunes_on_acceptance() {
     }
 
     let mut reopened = reopen_node_at(&temp_dir, node(1), schema);
+    assert!(reopened.rejections.child_txs_by_parent.is_empty());
+    reopened.ensure_child_edges_loaded(parent).unwrap();
     assert_eq!(
         reopened.rejections.child_txs_by_parent.get(&parent),
         Some(&BTreeSet::from([child]))
@@ -1006,6 +1008,8 @@ fn reopen_in_place_recovers_history_watermarks_pending_edges_and_rehydrates_peer
     assert!(matches!(update, SyncMessage::ViewUpdate { .. }));
 
     let mut reopened = core.reopen_in_place().unwrap();
+    assert!(reopened.rejections.child_txs_by_parent.is_empty());
+    reopened.ensure_child_edges_loaded(parent).unwrap();
     assert_eq!(
         reopened.transaction_state(accepted).unwrap(),
         (Fate::Accepted, Some(GlobalSeq(7)), DurabilityTier::Global)

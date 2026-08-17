@@ -369,48 +369,6 @@ where
 
         #[cfg(feature = "testing")]
         let started = receipt.as_ref().map(|_| web_time::Instant::now());
-        let mut pending_edges = Vec::new();
-        for raw in self
-            .database
-            .primary_key_scan_raw("jazz_pending_edges", &[])?
-        {
-            let record = raw.record();
-            let child_alias =
-                NodeAlias(record.get_u64(PendingEdgeRowRecord::FIELD_CHILD_NODE_ID_IDX)?);
-            let parent_alias =
-                NodeAlias(record.get_u64(PendingEdgeRowRecord::FIELD_PARENT_NODE_ID_IDX)?);
-            let Some(child_node) = alias_to_node.get(&child_alias).copied() else {
-                return Err(Error::InvalidStoredValue(
-                    "pending edge child alias must exist",
-                ));
-            };
-            let Some(parent_node) = alias_to_node.get(&parent_alias).copied() else {
-                return Err(Error::InvalidStoredValue(
-                    "pending edge parent alias must exist",
-                ));
-            };
-            let child = TxId::new(
-                TxTime(record.get_u64(PendingEdgeRowRecord::FIELD_CHILD_TIME_IDX)?),
-                child_node,
-            );
-            let parent = TxId::new(
-                TxTime(record.get_u64(PendingEdgeRowRecord::FIELD_PARENT_TIME_IDX)?),
-                parent_node,
-            );
-            pending_edges.push((child, parent));
-        }
-        for (child, parent) in pending_edges {
-            if self
-                .query_transaction(child)?
-                .is_some_and(|tx| matches!(tx.fate, Fate::Pending))
-                && self
-                    .query_transaction(parent)?
-                    .is_some_and(|tx| matches!(tx.fate, Fate::Pending))
-            {
-                self.record_child_edges(child, [parent]);
-            }
-        }
-
         let mut rejected_headers = Vec::new();
         for raw in self
             .database

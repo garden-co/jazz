@@ -794,23 +794,26 @@ pub async fn verify_indexeddb_node_lifecycle(page_store: JsValue) -> Result<JsVa
     drop(opening);
 
     let row = RowUuid::from_bytes([0xd6; 16]);
-    runtime
-        .commit_local(|node| {
-            node.commit_mergeable_unit(MergeableCommit::new("todos", row, 10).cells(
-                BTreeMap::from([(
-                    "title".to_owned(),
-                    Value::String("resident IndexedDB input".to_owned()),
-                )]),
-            ))?;
-            let rows = node.current_rows("todos", DurabilityTier::None)?;
-            if rows.len() != 1 || rows[0].row_uuid() != row {
-                return Err(jazz::node::Error::InvalidStoredValue(
-                    "resident node did not expose its local write synchronously",
-                ));
-            }
-            Ok(())
-        })
+    let commit = MergeableCommit::new("todos", row, 10).cells(BTreeMap::from([(
+        "title".to_owned(),
+        Value::String("resident IndexedDB input".to_owned()),
+    )]));
+    futures::future::poll_fn(|context| runtime.poll_mergeable_commit(context, &commit))
+        .await
         .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    let std::task::Poll::Ready(rows) = runtime.poll_query(&mut context, |node| {
+        node.current_rows("todos", DurabilityTier::None)
+    }) else {
+        return Err(JsValue::from_str(
+            "one-shot local read suspended after its direct row was published",
+        ));
+    };
+    let rows = rows.map_err(|error| JsValue::from_str(&error.to_string()))?;
+    if rows.len() != 1 || rows[0].row_uuid() != row {
+        return Err(JsValue::from_str(
+            "resident node did not expose its local write synchronously",
+        ));
+    }
     if !runtime.poll_persistence(&mut context).is_pending() {
         return Err(JsValue::from_str(
             "real IndexedDB node commit unexpectedly completed on its first poll",

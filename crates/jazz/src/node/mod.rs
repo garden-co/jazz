@@ -804,6 +804,16 @@ struct OpenTxState {
     local_permission_subjects: BTreeMap<TxId, AuthorId>,
 }
 
+/// Fully read-preflighted mergeable publication. Constructing this value may
+/// demand-load storage; applying it is a no-suspension resident mutation.
+pub(crate) struct PreparedMergeableCommit {
+    tx_id: TxId,
+    batch: DatabaseBatch,
+    stored_versions: Vec<VersionRow>,
+    made_by: AuthorId,
+    permission_subject: AuthorId,
+}
+
 /// Rejection records and derived indexes used for pending-cascade handling.
 #[derive(Clone, Debug, Default)]
 struct RejectionTracking {
@@ -811,6 +821,9 @@ struct RejectionTracking {
     rejected_transactions: BTreeMap<TxId, RejectedTransaction>,
     /// Pending child transactions grouped by pending parent transaction.
     child_txs_by_parent: BTreeMap<TxId, BTreeSet<TxId>>,
+    /// Parents whose durable pending-edge prefix has been admitted into the
+    /// in-memory cascade index. Absence means "not loaded", not "no children".
+    loaded_child_edges: BTreeSet<TxId>,
 }
 
 /// Authenticated identity attached to an inbound commit-unit upload.

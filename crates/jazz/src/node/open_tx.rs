@@ -825,7 +825,11 @@ where
         let first = commits.first().ok_or(Error::InvalidMergeableCommit(
             "mergeable transaction requires at least one write",
         ))?;
-        let made_at = self.mint_tx_time(first.1.now_ms);
+        let plain_commits = commits
+            .iter()
+            .map(|(_, commit)| commit.clone())
+            .collect::<Vec<_>>();
+        let made_at = self.preview_mergeable_tx_time(&plain_commits, first.1.now_ms);
         let committed =
             self.commit_mergeable_many_at_with_schema_versions(commits, made_at, None)?;
         self.open_tx.open_transactions.remove(&open_batch_id);
