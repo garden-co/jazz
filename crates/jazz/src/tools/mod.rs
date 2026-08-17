@@ -6,6 +6,8 @@ pub mod identity;
 pub mod metadata;
 #[cfg(feature = "server")]
 pub mod middleware;
+/// Target-shell factory boundary for native peer transports.
+pub mod native_transport_connector;
 #[cfg(any(feature = "client", feature = "server"))]
 pub mod native_websocket_transport;
 mod object;
