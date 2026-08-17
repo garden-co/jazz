@@ -28,6 +28,9 @@ interface JazzClientContextValue {
   shutdown: CreatedJazzClient["shutdown"];
 }
 
+const createClient: CreateJazzClient = (config) =>
+  createJazzClient(config) as Promise<CreatedJazzClient>;
+
 // Dev-only: mount the inspector overlay + publish the host handle for this db.
 // Only rendered when shouldAutoAttach is true, so the lazy overlay chunk is
 // dropped from production bundles.
@@ -72,8 +75,6 @@ function ConfiguredJazzProvider({
   onJWTExpired,
   autoAttachDevTools,
 }: ConfiguredJazzProviderProps) {
-  const createClient: CreateJazzClient = (nextConfig) =>
-    createJazzClient(nextConfig) as Promise<CreatedJazzClient>;
   const shouldAutoAttach = process.env.NODE_ENV !== "production" && autoAttachDevTools !== false;
   // Subscription traces only register while devMode is on at subscribe time,
   // so it must be on from Db construction for the overlay's Subscriptions tab
@@ -106,7 +107,7 @@ function LocalFirstJazzProvider({
 } & JazzProviderCommonProps) {
   const { secret, isLoading } = useLocalFirstAuth();
 
-  if (isLoading || !secret) return <>{props.fallback ?? null}</>;
+  if (isLoading || !secret) return props.fallback ?? null;
 
   return <ConfiguredJazzProvider {...props} config={{ ...config, secret }} />;
 }

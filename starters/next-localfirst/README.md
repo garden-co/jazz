@@ -36,7 +36,7 @@ app/
   page.tsx                     ← homepage (header + todo widget + backup UI)
   globals.css
 components/
-  jazz-provider.tsx            ← LocalFirstProvider (per-device secret)
+  jazz-provider.tsx            ← JazzProvider (per-device secret)
   todo-widget.tsx              ← Jazz-powered todo list
   auth-backup.tsx              ← recovery phrase + passkey backup/restore
 schema.ts                      ← Jazz app schema (todos table)
