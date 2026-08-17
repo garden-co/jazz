@@ -1,5 +1,5 @@
 export {
-  type CreateOptions,
+  type InsertOptions,
   type AuthConfig,
   type LocalTransactionRecord,
   type MutationErrorEvent,

@@ -1,6 +1,7 @@
 import type {
   DbConfig as PackageDbConfig,
   InsertOptions as PackageInsertOptions,
+  Session,
 } from "../index.js";
 import type {
   DbConfig as RuntimeDbConfig,
@@ -14,19 +15,20 @@ import type { CreateOptions as RuntimeCreateOptions } from "./index.js";
 
 const packageInsertOptions: PackageInsertOptions = { id: "row-1", updatedAt: 1 };
 const runtimeInsertOptions: RuntimeInsertOptions = { id: "row-1", updatedAt: 1 };
+const session: Session = { user_id: "user", claims: {}, authMode: "external" };
 
 const unauthenticated: PackageDbConfig = { appId: "app" };
 const localFirst: PackageDbConfig = { appId: "app", secret: "secret" };
 const jwt: RuntimeDbConfig = { appId: "app", jwtToken: "jwt" };
 const cookie: RuntimeDbConfig = {
   appId: "app",
-  cookieSession: { user_id: "user", claims: {}, authMode: "external" },
+  cookieSession: session,
 };
 const admin: PackageDbConfig = { appId: "app", adminSecret: "admin" };
 const backend: PackageDbConfig = {
   appId: "app",
   backendSecret: "backend",
-  cookieSession: { user_id: "user", claims: {}, authMode: "external" },
+  cookieSession: session,
 };
 const optionalJwt: PackageDbConfig = {
   appId: "app",
@@ -39,13 +41,13 @@ const localFirstWithJwt: PackageDbConfig = { appId: "app", secret: "secret", jwt
 const localFirstWithCookie: PackageDbConfig = {
   appId: "app",
   secret: "secret",
-  cookieSession: { user_id: "user", claims: {}, authMode: "external" },
+  cookieSession: session,
 };
 // @ts-expect-error JWT and cookie authentication are mutually exclusive.
 const jwtWithCookie: RuntimeDbConfig = {
   appId: "app",
   jwtToken: "jwt",
-  cookieSession: { user_id: "user", claims: {}, authMode: "external" },
+  cookieSession: session,
 };
 
 void packageInsertOptions;
