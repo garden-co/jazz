@@ -220,7 +220,7 @@ fn write_preflight_loads_inputs_before_the_single_real_ivm_tick() {
 #[test]
 fn opened_subscription_inherits_synchronous_write_visibility_over_async_storage() {
     let schema = schema();
-    let released = Rc::new(Cell::new(true));
+    let released = Rc::new(Cell::new(false));
     let polls = Rc::new(Cell::new(0));
     let durable = GatedStorage {
         inner: MemoryStorage::new(&["rows", "indices"]),
@@ -229,15 +229,23 @@ fn opened_subscription_inherits_synchronous_write_visibility_over_async_storage(
     };
     let mut database = DemandDrivenDatabase::new(schema, Box::new(durable)).unwrap();
     let mut context = Context::from_waker(Waker::noop());
-    let Poll::Ready(Ok(_)) = database.poll_read(&mut context, |database| {
-        database.primary_key_scan("rows", &[])
-    }) else {
-        panic!("released empty opening must load its range")
+    let mut graph = Some(GraphBuilder::table("rows"));
+    assert!(
+        database
+            .poll_subscribe_one_sink(&mut context, &mut graph)
+            .is_pending()
+    );
+    assert_eq!(
+        database.resident().runtime_stats().active_subscriptions,
+        0,
+        "a cold preflight must not partially register the real subscription"
+    );
+    released.set(true);
+    let Poll::Ready(Ok(subscription)) = database.poll_subscribe_one_sink(&mut context, &mut graph)
+    else {
+        panic!("released empty opening must register exactly once")
     };
-    let subscription = database
-        .resident_mut()
-        .subscribe_one_sink(GraphBuilder::table("rows"))
-        .unwrap();
+    assert!(graph.is_none());
     assert!(subscription.recv().unwrap().is_empty());
 
     released.set(false);

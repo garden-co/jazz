@@ -661,28 +661,19 @@ pub async fn verify_indexeddb_demand_loading(page_store: JsValue) -> Result<JsVa
     let mut database = DemandDrivenDatabase::new(schema, Box::new(durable))
         .map_err(|error| JsValue::from_str(&error.to_string()))?;
     let mut context = Context::from_waker(Waker::noop());
+    let mut graph = Some(GraphBuilder::table("rows"));
     if !database
-        .poll_read(&mut context, |database| {
-            database.primary_key_scan("rows", &[])
-        })
+        .poll_subscribe_one_sink(&mut context, &mut graph)
         .is_pending()
     {
         return Err(JsValue::from_str(
-            "cold query-driven IndexedDB read did not suspend",
+            "cold query-driven IndexedDB subscription did not suspend",
         ));
     }
-    let rows = futures::future::poll_fn(|context| {
-        database.poll_read(context, |database| database.primary_key_scan("rows", &[]))
-    })
-    .await
-    .map_err(|error| JsValue::from_str(&error.to_string()))?;
-    if rows.len() != 1 {
-        return Err(JsValue::from_str("demand-loaded query missed durable seed"));
-    }
-    let subscription = database
-        .resident_mut()
-        .subscribe_one_sink(GraphBuilder::table("rows"))
-        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    let subscription =
+        futures::future::poll_fn(|context| database.poll_subscribe_one_sink(context, &mut graph))
+            .await
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
     if subscription
         .recv()
         .map_err(|error| JsValue::from_str(&error.to_string()))?
@@ -694,6 +685,16 @@ pub async fn verify_indexeddb_demand_loading(page_store: JsValue) -> Result<JsVa
         return Err(JsValue::from_str(
             "opened subscription did not use resident query state",
         ));
+    }
+    let Poll::Ready(Ok(rows)) = database.poll_read(&mut context, |database| {
+        database.primary_key_scan("rows", &[])
+    }) else {
+        return Err(JsValue::from_str(
+            "one-shot after subscription hydration was not resident",
+        ));
+    };
+    if rows.len() != 1 {
+        return Err(JsValue::from_str("demand-loaded query missed durable seed"));
     }
 
     let mut batch = Some(database.resident().open_batch());

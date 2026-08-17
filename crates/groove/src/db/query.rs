@@ -46,6 +46,22 @@ where
             .map_err(Error::IvmRuntime)
     }
 
+    /// Validate and hydrate the storage inputs for one subscription opening
+    /// against a disposable runtime clone.
+    ///
+    /// A demand-driven host may retry this method after a storage miss without
+    /// registering a partial graph or publishing an opening on the real IVM.
+    #[doc(hidden)]
+    pub fn preflight_subscription_storage_inputs(&self, graph: &GraphBuilder) -> Result<(), Error> {
+        self.ensure_not_poisoned()?;
+        let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
+        let mut runtime = self.ivm_runtime.clone();
+        runtime
+            .subscribe_one_sink(graph.clone(), &storage)
+            .map(|_| ())
+            .map_err(Error::IvmRuntime)
+    }
+
     /// Subscribe to several named IVM graph outputs as one logical stream.
     ///
     /// The initial message includes every sink, even if that sink is empty.

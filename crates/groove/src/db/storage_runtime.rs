@@ -198,6 +198,11 @@ impl DemandDrivenDatabase {
                     }
                     error => return Poll::Ready(Err(error.into())),
                 },
+                Err(Error::IvmRuntime(crate::ivm::IvmRuntimeError::Storage(
+                    crate::storage::Error::NotResident { request },
+                ))) => {
+                    self.pending_read = Some(OwnedStorageRequest::new(*request));
+                }
                 Err(error) => return Poll::Ready(Err(error)),
             }
         }
@@ -241,6 +246,60 @@ impl DemandDrivenDatabase {
                     }
                     error => return Poll::Ready(Err(error.into())),
                 },
+                Err(Error::IvmRuntime(crate::ivm::IvmRuntimeError::Storage(
+                    crate::storage::Error::NotResident { request },
+                ))) => {
+                    self.pending_read = Some(OwnedStorageRequest::new(*request));
+                }
+                Err(error) => return Poll::Ready(Err(error)),
+            }
+        }
+    }
+
+    /// Poll the cold inputs for a subscription, then register it exactly once
+    /// in the resident runtime.
+    #[doc(hidden)]
+    pub fn poll_subscribe_one_sink(
+        &mut self,
+        context: &mut Context<'_>,
+        graph: &mut Option<GraphBuilder>,
+    ) -> Poll<Result<Subscription, Error>> {
+        loop {
+            if let Some(request) = self.pending_read.as_ref() {
+                match self.persistence.poll_request(request, context) {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(Ok(response)) => {
+                        let request = self
+                            .pending_read
+                            .take()
+                            .expect("polled subscription input remains pending");
+                        self.cache.admit(request.operation().clone(), response)?;
+                    }
+                    Poll::Ready(Err(error)) => return Poll::Ready(Err(error.into())),
+                }
+            }
+            let pending_graph = graph
+                .as_ref()
+                .expect("subscription graph is consumed exactly once after Ready");
+            match self
+                .database
+                .preflight_subscription_storage_inputs(pending_graph)
+            {
+                Ok(()) => {
+                    let graph = graph.take().expect("preflight retains subscription graph");
+                    return Poll::Ready(self.database.subscribe_one_sink(graph));
+                }
+                Err(Error::Storage(error)) => match *error {
+                    crate::storage::Error::NotResident { request } => {
+                        self.pending_read = Some(OwnedStorageRequest::new(*request));
+                    }
+                    error => return Poll::Ready(Err(error.into())),
+                },
+                Err(Error::IvmRuntime(crate::ivm::IvmRuntimeError::Storage(
+                    crate::storage::Error::NotResident { request },
+                ))) => {
+                    self.pending_read = Some(OwnedStorageRequest::new(*request));
+                }
                 Err(error) => return Poll::Ready(Err(error)),
             }
         }
