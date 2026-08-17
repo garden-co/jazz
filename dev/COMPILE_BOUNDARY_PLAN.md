@@ -69,6 +69,11 @@ access is valuable.
 - Move binaries, clap configuration, signals, allocator selection, and command
   presentation to `jazz-cli`.
 
+Progress: JWT verification is now selected by the server capability rather
+than compiled as an unconditional semantic-core dependency. Identity signing
+remains in core because it is part of client identity semantics, not the HTTP
+authentication adapter.
+
 ### Storage and compression
 
 - Make generic storage the only core contract.
