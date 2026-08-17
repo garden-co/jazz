@@ -1,0 +1,983 @@
+impl<S> NodeState<S>
+where
+    S: OrderedKvStorage,
+{
+    /// Apply one sync message and return any outgoing sync messages.
+    pub fn apply_sync_message(&mut self, message: SyncMessage) -> Result<Vec<SyncMessage>, Error>
+    where
+        S: ReopenableStorage,
+    {
+        self.apply_sync_message_with_ingest_context(message, None)
+    }
+
+    /// Apply a catalogue mutation from the trusted local administrative lane.
+    pub fn apply_trusted_catalogue_message(
+        &mut self,
+        message: SyncMessage,
+    ) -> Result<Vec<SyncMessage>, Error>
+    where
+        S: ReopenableStorage,
+    {
+        self.apply_sync_message_with_ingest_context(
+            message,
+            Some(CommitUnitIngestContext {
+                identity: AuthorId::SYSTEM,
+                trust: CommitUnitTrust::TrustedBackend,
+                edge_authority: false,
+            }),
+        )
+    }
+
+    /// Apply one sync message from a connection-authenticated upload path.
+    pub fn apply_sync_message_with_ingest_context(
+        &mut self,
+        message: SyncMessage,
+        ingest_context: Option<CommitUnitIngestContext>,
+    ) -> Result<Vec<SyncMessage>, Error>
+    where
+        S: ReopenableStorage,
+    {
+        // A dynamic edge has exactly one admissible pre-ready transition: the
+        // authenticated upstream invokes `apply_trusted_catalogue_snapshot`
+        // directly.  Incremental catalogue/data/branch traffic has no
+        // authority lineage to validate against and must not leave durable
+        // pending rows that poison a later reopen.
+        self.require_catalogue_ready()?;
+        if self.catalogue_activation_failed {
+            return Err(Error::CatalogueActivationFailed);
+        }
+        let message = message
+            .expand_version_carriers_for_receive()
+            .map_err(|_| Error::UnsupportedSyncMessage("malformed version-bundle run"))?;
+        match message {
+            SyncMessage::BranchMetadata(metadata) => {
+                self.admit_branch_metadata(metadata)?;
+                self.drain_parked_commit_units()
+            }
+            SyncMessage::FetchBranchMetadata { .. } => Err(Error::UnsupportedSyncMessage(
+                "branch metadata repair must be served by peer state",
+            )),
+            SyncMessage::SessionClaims { identity, claims } => {
+                if let Some(context) = ingest_context
+                    && context.trust == CommitUnitTrust::TrustedBackend
+                {
+                    self.set_session_claims(identity, claims);
+                }
+                Ok(Vec::new())
+            }
+            SyncMessage::CommitUnit { tx, versions } => self.ingest_commit_unit_with_context(
+                tx,
+                versions,
+                u64::MAX - SKEW_TOLERANCE_MS,
+                ingest_context,
+            ),
+            SyncMessage::FateUpdate {
+                tx_id,
+                fate,
+                global_seq,
+                durability,
+            } => {
+                validate_received_fate_update_global_seq_durability(global_seq, durability)?;
+                self.apply_fate_update(tx_id, fate, global_seq, durability)?;
+                self.drain_parked_commit_units()
+            }
+            SyncMessage::ViewUpdate {
+                subscription,
+                settled_through,
+                reset_result_set,
+                version_carriers,
+                version_bundles,
+                peer_payload_inventory,
+                result_member_adds,
+                result_member_removes,
+                terminal_operations,
+                program_fact_adds,
+                program_fact_removes,
+            } => {
+                self.apply_view_update(ViewUpdateParts {
+                    subscription,
+                    settled_through,
+                    defer_settlement: false,
+                    reset_result_set,
+                    version_carriers,
+                    version_bundles,
+                    peer_complete_tx_payload_refs: peer_payload_inventory.complete_tx_payloads,
+                    authorization_progress: peer_payload_inventory.authorization_progress,
+                    opening_pending: peer_payload_inventory.opening_pending,
+                    result_member_adds,
+                    result_member_removes,
+                    terminal_operations,
+                    program_fact_adds,
+                    program_fact_removes,
+                })?;
+                Ok(Vec::new())
+            }
+            SyncMessage::RegisterShape {
+                shape_id,
+                ast,
+                opts: _,
+            } => {
+                validate_shape_ast_size(&ast)
+                    .map_err(|_| Error::UnsupportedSyncMessage("shape AST exceeds byte limit"))?;
+                self.register_shape(shape_id, ast)?;
+                Ok(Vec::new())
+            }
+            SyncMessage::FetchRowVersions { .. } => Err(Error::UnsupportedSyncMessage(
+                "row-version repair fetch must be served by peer state",
+            )),
+            SyncMessage::RowVersionPayloads { .. } => Err(Error::UnsupportedSyncMessage(
+                "row-version repair payload requires outstanding request context",
+            )),
+            SyncMessage::CatalogueSnapshot(_) => Err(Error::UnsupportedSyncMessage(
+                "catalogue snapshot requires a trusted upstream link",
+            )),
+            SyncMessage::Subscribe(subscribe) => {
+                validate_known_state_declaration(&subscribe.known_state).map_err(|_| {
+                    Error::UnsupportedSyncMessage("known-state declaration exceeds limit")
+                })?;
+                self.apply_subscribe(subscribe)?;
+                Ok(Vec::new())
+            }
+            SyncMessage::SubscribeRejected { .. } => Err(Error::UnsupportedSyncMessage(
+                "subscription rejection requires subscription stream context",
+            )),
+            SyncMessage::Unsubscribe { subscription } => {
+                self.apply_unsubscribe(subscription);
+                Ok(Vec::new())
+            }
+            SyncMessage::PublishSchema { author, schema } => {
+                self.apply_publish_schema(author, ingest_context, *schema)
+            }
+            SyncMessage::PublishSchemaWithLens {
+                author,
+                catalogue_seq,
+                publication,
+            } => self.apply_publish_schema_with_lens(
+                author,
+                ingest_context,
+                catalogue_seq,
+                *publication,
+            ),
+            SyncMessage::PublishLens { author, lens } => {
+                self.apply_publish_lens(author, ingest_context, lens)
+            }
+            SyncMessage::SetCurrentWriteSchema { author, pointer } => {
+                self.apply_set_current_write_schema(author, ingest_context, pointer)
+            }
+            SyncMessage::CatalogueAck(_) => Ok(Vec::new()),
+            SyncMessage::PermissionAdviceRequest { .. }
+            | SyncMessage::PermissionAdviceResponse { .. }
+            | SyncMessage::AuthorizationScopeSubscribe { .. }
+            | SyncMessage::AuthorizationScopeReceipt { .. }
+            | SyncMessage::AuthorizationScopeIntent { .. }
+            | SyncMessage::AuthorizationScopeView { .. }
+            | SyncMessage::AuthorizationScopeAggregateReceipt { .. }
+            | SyncMessage::AuthorizationScopeUnavailable { .. }
+            | SyncMessage::AuthorizationScopeDecision { .. } => Err(Error::UnsupportedSyncMessage(
+                "permission advice requires authenticated link context",
+            )),
+        }
+    }
+
+    fn apply_publish_schema(
+        &mut self,
+        author: AuthorId,
+        ingest_context: Option<CommitUnitIngestContext>,
+        schema: SchemaVersion,
+    ) -> Result<Vec<SyncMessage>, Error>
+    where
+        S: ReopenableStorage,
+    {
+        self.require_catalogue_admin(author, ingest_context)?;
+        if schema.id != schema.schema.version_id() {
+            return Err(Error::InvalidCatalogueUpdate(
+                "schema id does not match schema payload",
+            ));
+        }
+        if !self.catalogue.catalogue_schemas.contains_key(&schema.id) {
+            return Err(Error::InvalidCatalogueUpdate(
+                "non-genesis schema requires lineage publication",
+            ));
+        }
+        let active_schema_changed = schema.id == self.catalogue.current_write_schema.schema
+            && self
+                .catalogue
+                .catalogue_schemas
+                .get(&schema.id)
+                .is_some_and(|current| current.schema != schema.schema);
+        self.catalogue
+            .catalogue_schemas
+            .insert(schema.id, schema.clone());
+        self.query.version_storage_sources_cache.clear();
+        self.query.read_policy_authorization_request_cache.clear();
+        self.query.policy_authorization_graph_cache.clear();
+        if schema.id == self.catalogue.current_schema_version_id {
+            self.catalogue.schema = schema.schema.clone();
+        }
+        self.persist_catalogue_schema(&schema)?;
+        self.ensure_provisional_physical_mapping(schema.id)?;
+        self.ensure_schema_version_alias(schema.id)?;
+        self.synchronize_physical_version_tables()?;
+        if active_schema_changed {
+            // Policy declarations are intentionally outside the schema version
+            // identity. Invalidate maintained handles when that same-version
+            // payload changes so live subscriptions rebuild their authorization
+            // graph without reopening storage through the old catalogue row.
+            self.groove_runtime_token = next_groove_runtime_token();
+        }
+        let updates = self.drain_parked_commit_units()?;
+        self.drain_parked_relay_commit_units()?;
+        self.drain_parked_shape_registrations()?;
+        let mut out = vec![SyncMessage::CatalogueAck(CatalogueAck {
+            revision: None,
+            schema: Some(schema.id),
+            lens: None,
+            applied: true,
+        })];
+        out.extend(updates);
+        Ok(out)
+    }
+
+    fn apply_publish_schema_with_lens(
+        &mut self,
+        author: AuthorId,
+        ingest_context: Option<CommitUnitIngestContext>,
+        catalogue_seq: u64,
+        publication: SchemaLineagePublication,
+    ) -> Result<Vec<SyncMessage>, Error>
+    where
+        S: ReopenableStorage,
+    {
+        self.require_catalogue_admin(author, ingest_context)?;
+        Self::validate_schema_lineage_publication(&publication)?;
+        if catalogue_seq == 0 {
+            return Err(Error::InvalidCatalogueUpdate(
+                "schema lineage catalogue sequence must be nonzero",
+            ));
+        }
+        let schema = &publication.schema;
+        let lens = &publication.lens;
+        if let Some(existing) = self.catalogue.active_lineages_by_target.get(&schema.id) {
+            if existing.publication != publication || existing.catalogue_seq != catalogue_seq {
+                return Err(Error::InvalidCatalogueUpdate(
+                    "schema lineage publication conflicts with catalogue",
+                ));
+            }
+            return Ok(vec![SyncMessage::CatalogueAck(CatalogueAck {
+                revision: None,
+                schema: Some(schema.id),
+                lens: Some(lens.id),
+                applied: true,
+            })]);
+        }
+
+        if catalogue_seq <= self.catalogue.active_catalogue_seq {
+            return Err(Error::InvalidCatalogueUpdate(
+                "schema lineage catalogue sequence conflicts with active catalogue",
+            ));
+        }
+        if let Some(existing) = self.catalogue.pending_lineages.get(&catalogue_seq) {
+            if existing.publication != publication {
+                return Err(Error::InvalidCatalogueUpdate(
+                    "schema lineage catalogue sequence conflict",
+                ));
+            }
+        } else {
+            if let Some(source) = self.catalogue.catalogue_schemas.get(&lens.source) {
+                Self::validate_migration_lens_between(lens, source, schema)?;
+                Self::validate_lineage_table_partition(
+                    &source.schema,
+                    &schema.schema,
+                    lens,
+                    &publication.new_tables,
+                    &publication.dropped_tables,
+                )?;
+            }
+            if self
+                .catalogue
+                .pending_lineages
+                .values()
+                .any(|pending| pending.publication.schema.id == schema.id)
+                || self
+                    .catalogue
+                    .staged_lineages
+                    .values()
+                    .any(|staged| staged.publication.schema.id == schema.id)
+            {
+                return Err(Error::InvalidCatalogueUpdate(
+                    "schema lineage target is already reserved",
+                ));
+            }
+            let pending = PendingSchemaLineage {
+                catalogue_seq,
+                publication,
+            };
+            self.persist_pending_schema_lineage(&pending)?;
+            self.catalogue
+                .pending_lineages
+                .insert(catalogue_seq, pending);
+        }
+        self.drain_pending_schema_lineages()
+    }
+
+    pub(super) fn drain_pending_schema_lineages(&mut self) -> Result<Vec<SyncMessage>, Error>
+    where
+        S: ReopenableStorage,
+    {
+        let mut out = Vec::new();
+        loop {
+            let next = self.catalogue.active_catalogue_seq.saturating_add(1);
+            let Some(pending) = self.catalogue.pending_lineages.get(&next).cloned() else {
+                break;
+            };
+            let publication = pending.publication;
+            let Some(source) = self
+                .catalogue
+                .catalogue_schemas
+                .get(&publication.lens.source)
+                .cloned()
+            else {
+                break;
+            };
+            let validation = Self::validate_migration_lens_between(
+                &publication.lens,
+                &source,
+                &publication.schema,
+            )
+            .and_then(|()| {
+                Self::validate_lineage_table_partition(
+                    &source.schema,
+                    &publication.schema.schema,
+                    &publication.lens,
+                    &publication.new_tables,
+                    &publication.dropped_tables,
+                )
+            });
+            if validation.is_err() {
+                self.remove_pending_schema_lineage(next, publication.id)?;
+                break;
+            }
+            if self
+                .catalogue
+                .active_lineages_by_target
+                .contains_key(&publication.schema.id)
+            {
+                return Err(Error::InvalidCatalogueUpdate(
+                    "schema lineage target already has an active bundle",
+                ));
+            }
+            let staged = if let Some(staged) = self.catalogue.staged_lineages.get(&next) {
+                if staged.publication != publication {
+                    return Err(Error::InvalidCatalogueUpdate(
+                        "staged schema lineage conflicts with pending bundle",
+                    ));
+                }
+                staged.clone()
+            } else {
+                let fresh = allocate_provisional_physical_mapping(
+                    &publication.schema.schema,
+                    &mut self.catalogue.next_physical_table_id,
+                    &mut self.catalogue.next_physical_column_id,
+                )?;
+                let mapping = self.reconcile_physical_mapping_for_lens_payload(
+                    &publication.lens,
+                    &publication.schema,
+                    &fresh,
+                )?;
+                let staged = StagedSchemaLineage {
+                    catalogue_seq: next,
+                    publication: publication.clone(),
+                    alias: self.next_schema_version_alias()?,
+                    mapping,
+                };
+                self.persist_catalogue_schema_lineage(&staged)?;
+                self.catalogue.staged_lineages.insert(next, staged.clone());
+                staged
+            };
+
+            // A new logical column widens the shared physical current-row
+            // descriptor. Existing prepared/maintained graphs embed the old
+            // fixed projection output, so they must be rebuilt after the
+            // activation commits. A pure new variant over the same physical
+            // columns remains safe to refresh in place.
+            let widens_shared_current_descriptor = staged.mapping.tables.values().any(|target| {
+                let existing_columns = self
+                    .catalogue
+                    .physical_mappings
+                    .values()
+                    .flat_map(|mapping| mapping.tables.values())
+                    .filter(|existing| existing.table_id == target.table_id)
+                    .flat_map(|existing| existing.columns.values().copied())
+                    .collect::<BTreeSet<_>>();
+                !existing_columns.is_empty()
+                    && target
+                        .columns
+                        .values()
+                        .any(|column| !existing_columns.contains(column))
+            });
+
+            #[cfg(test)]
+            if self.catalogue_activation_failpoint
+                == Some(CatalogueActivationFailpoint::AfterStaged)
+            {
+                self.catalogue_activation_failpoint = None;
+                self.catalogue_activation_failed = true;
+                return Err(Error::CatalogueActivationFailed);
+            }
+
+            self.install_staged_schema_lineage_in_memory(&staged);
+            // A widened lineage adds new variant cases to existing physical
+            // current tables. Install those cases in the live registry rather
+            // than reopening the database: a reopen drops active history and
+            // maintained-subscription receivers even when their output shape
+            // remains compatible.
+            if self.synchronize_physical_version_tables().is_err() {
+                self.remove_staged_schema_lineage_from_memory(&staged);
+                self.catalogue_activation_failed = true;
+                return Err(Error::CatalogueActivationFailed);
+            }
+            // Closed raw receivers can otherwise make a cold server look live
+            // until a later non-empty notification. Prune them explicitly;
+            // then rebuild only when no observable subscription handle would
+            // be disconnected. Live handles use the in-place cases above.
+            if self.database.prune_dropped_subscriptions().is_err() {
+                self.remove_staged_schema_lineage_from_memory(&staged);
+                self.catalogue_activation_failed = true;
+                return Err(Error::CatalogueActivationFailed);
+            }
+            let rebuild_cold_runtime = self.database.runtime_stats().active_subscriptions == 0;
+            if rebuild_cold_runtime && self.rebuild_database_slot().is_err() {
+                self.remove_staged_schema_lineage_from_memory(&staged);
+                self.catalogue_activation_failed = true;
+                return Err(Error::CatalogueActivationFailed);
+            }
+            if widens_shared_current_descriptor && !rebuild_cold_runtime {
+                // Peer-serving and maintained caches are compiled against the
+                // shared current-row descriptor too. Retire those handles now;
+                // their owners rebuild from the new runtime token below. Raw
+                // history subscriptions remain attached to the live Groove
+                // registry and keep receiving compatible projected rows.
+                self.invalidate_runtime_handles_after_database_rebuild();
+            }
+            #[cfg(test)]
+            if self.catalogue_activation_failpoint
+                == Some(CatalogueActivationFailpoint::AfterRegistration)
+            {
+                self.catalogue_activation_failpoint = None;
+                self.remove_staged_schema_lineage_from_memory(&staged);
+                self.catalogue_activation_failed = true;
+                return Err(Error::CatalogueActivationFailed);
+            }
+            let mut batch = self.database.open_batch();
+            Self::write_active_schema_lineage_to_batch(&mut batch, &staged)?;
+            if self.database.commit_batch(batch).is_err() {
+                self.remove_staged_schema_lineage_from_memory(&staged);
+                self.catalogue_activation_failed = true;
+                return Err(Error::CatalogueActivationFailed);
+            }
+            self.catalogue.staged_lineages.remove(&next);
+            self.catalogue.pending_lineages.remove(&next);
+            self.catalogue
+                .active_lineages_by_target
+                .insert(staged.publication.schema.id, staged.clone());
+            self.catalogue.active_catalogue_seq = next;
+            if widens_shared_current_descriptor {
+                self.groove_runtime_token = next_groove_runtime_token();
+            }
+            out.push(SyncMessage::CatalogueAck(CatalogueAck {
+                revision: Some(next),
+                schema: Some(staged.publication.schema.id),
+                lens: Some(staged.publication.lens.id),
+                applied: true,
+            }));
+            out.extend(self.drain_parked_commit_units()?);
+            self.drain_parked_relay_commit_units()?;
+            self.drain_parked_shape_registrations()?;
+            out.extend(self.drain_pending_catalogue_pointers()?);
+        }
+        Ok(out)
+    }
+
+    fn install_staged_schema_lineage_in_memory(&mut self, staged: &StagedSchemaLineage) {
+        self.catalogue.catalogue_schemas.insert(
+            staged.publication.schema.id,
+            staged.publication.schema.clone(),
+        );
+        self.catalogue
+            .catalogue_lenses
+            .insert(staged.publication.lens.id, staged.publication.lens.clone());
+        self.catalogue
+            .schema_version_aliases
+            .insert(staged.publication.schema.id, staged.alias);
+        self.catalogue
+            .physical_mappings
+            .insert(staged.publication.schema.id, staged.mapping.clone());
+        self.catalogue.lens_path_cache.clear();
+        self.catalogue.compiled_lens_cache.clear();
+        self.query.version_storage_sources_cache.clear();
+        self.query.query_shape_cache.clear();
+        self.query.read_policy_authorization_request_cache.clear();
+        self.query.policy_authorization_graph_cache.clear();
+    }
+
+    fn remove_staged_schema_lineage_from_memory(&mut self, staged: &StagedSchemaLineage) {
+        self.catalogue
+            .catalogue_schemas
+            .remove(&staged.publication.schema.id);
+        self.catalogue
+            .catalogue_lenses
+            .remove(&staged.publication.lens.id);
+        self.catalogue
+            .schema_version_aliases
+            .remove(&staged.publication.schema.id);
+        self.catalogue
+            .physical_mappings
+            .remove(&staged.publication.schema.id);
+        self.catalogue.lens_path_cache.clear();
+        self.catalogue.compiled_lens_cache.clear();
+        self.query.version_storage_sources_cache.clear();
+        self.query.query_shape_cache.clear();
+        self.query.read_policy_authorization_request_cache.clear();
+        self.query.policy_authorization_graph_cache.clear();
+    }
+
+    fn apply_publish_lens(
+        &mut self,
+        author: AuthorId,
+        ingest_context: Option<CommitUnitIngestContext>,
+        lens: MigrationLens,
+    ) -> Result<Vec<SyncMessage>, Error>
+    where
+        S: ReopenableStorage,
+    {
+        self.require_catalogue_admin(author, ingest_context)?;
+        if lens.id != lens.content_id() {
+            return Err(Error::InvalidCatalogueUpdate(
+                "lens id does not match lens payload",
+            ));
+        }
+        if !self.catalogue.catalogue_schemas.contains_key(&lens.source)
+            || !self.catalogue.catalogue_schemas.contains_key(&lens.target)
+        {
+            return Err(Error::InvalidCatalogueUpdate("lens endpoint is unknown"));
+        }
+        self.validate_migration_lens(&lens)?;
+        let installed = !self.catalogue.catalogue_lenses.contains_key(&lens.id);
+        if installed {
+            let candidate = self.reconcile_physical_mapping_for_lens(&lens)?;
+            let authoritative = self.catalogue.physical_mappings.get(&lens.target).ok_or(
+                Error::InvalidStoredValue("authoritative physical mapping missing"),
+            )?;
+            if candidate != *authoritative {
+                return Err(Error::InvalidCatalogueUpdate(
+                    "cross-lens conflicts with authoritative physical mapping",
+                ));
+            }
+        }
+        self.persist_catalogue_lens_with_physical_metadata(&lens, None)?;
+        if installed {
+            self.catalogue
+                .catalogue_lenses
+                .insert(lens.id, lens.clone());
+        }
+        self.catalogue.lens_path_cache.clear();
+        self.catalogue.compiled_lens_cache.clear();
+        self.query.version_storage_sources_cache.clear();
+        self.query.query_shape_cache.clear();
+        self.query.read_policy_authorization_request_cache.clear();
+        self.query.policy_authorization_graph_cache.clear();
+        // Both endpoint schemas are already Active and their agreeing physical
+        // projection cases were registered during activation. A cross-lens adds
+        // a catalogue path only; re-registering those cases is unnecessary and
+        // Groove rejects it as a duplicate variant projection.
+        Ok(vec![SyncMessage::CatalogueAck(CatalogueAck {
+            revision: None,
+            schema: None,
+            lens: Some(lens.id),
+            applied: true,
+        })])
+    }
+
+    fn apply_set_current_write_schema(
+        &mut self,
+        author: AuthorId,
+        ingest_context: Option<CommitUnitIngestContext>,
+        pointer: CurrentWriteSchema,
+    ) -> Result<Vec<SyncMessage>, Error>
+    where
+        S: ReopenableStorage,
+    {
+        self.require_catalogue_admin(author, ingest_context)?;
+        if !self
+            .catalogue
+            .catalogue_schemas
+            .contains_key(&pointer.schema)
+        {
+            self.persist_pending_catalogue_pointer(pointer)?;
+            self.catalogue
+                .pending_write_pointers
+                .insert(pointer.revision, pointer);
+            return Ok(Vec::new());
+        }
+        Ok(vec![self.apply_active_catalogue_pointer(pointer)?])
+    }
+
+    fn apply_active_catalogue_pointer(
+        &mut self,
+        pointer: CurrentWriteSchema,
+    ) -> Result<SyncMessage, Error> {
+        let applied = pointer.revision > self.catalogue.current_write_schema.revision;
+        if applied {
+            self.catalogue.current_write_schema = pointer;
+            self.persist_catalogue_pointer(pointer)?;
+            self.query.version_storage_sources_cache.clear();
+            self.query.read_policy_authorization_request_cache.clear();
+            self.query.policy_authorization_graph_cache.clear();
+            let active_schema = self
+                .catalogue
+                .catalogue_schemas
+                .get(&pointer.schema)
+                .ok_or(Error::InvalidStoredValue(
+                    "current write schema payload missing",
+                ))?;
+            if pointer.schema == self.catalogue.current_schema_version_id {
+                self.catalogue.schema = active_schema.schema.clone();
+            }
+        }
+        Ok(SyncMessage::CatalogueAck(CatalogueAck {
+            revision: Some(pointer.revision),
+            schema: Some(pointer.schema),
+            lens: None,
+            applied,
+        }))
+    }
+
+    pub(super) fn drain_pending_catalogue_pointers(&mut self) -> Result<Vec<SyncMessage>, Error> {
+        let ready = self
+            .catalogue
+            .pending_write_pointers
+            .iter()
+            .filter(|(_, pointer)| {
+                self.catalogue
+                    .catalogue_schemas
+                    .contains_key(&pointer.schema)
+            })
+            .map(|(revision, pointer)| (*revision, *pointer))
+            .collect::<Vec<_>>();
+        let mut out = Vec::new();
+        for (revision, pointer) in ready {
+            out.push(self.apply_active_catalogue_pointer(pointer)?);
+            self.catalogue.pending_write_pointers.remove(&revision);
+        }
+        Ok(out)
+    }
+
+    fn require_catalogue_admin(
+        &self,
+        _claimed_author: AuthorId,
+        ingest_context: Option<CommitUnitIngestContext>,
+    ) -> Result<(), Error> {
+        if matches!(
+            ingest_context,
+            Some(context)
+                if context.identity == AuthorId::SYSTEM
+                    && context.trust == CommitUnitTrust::TrustedBackend
+        ) {
+            Ok(())
+        } else {
+            Err(Error::UnauthorizedCatalogueUpdate)
+        }
+    }
+
+    fn validate_migration_lens(&self, lens: &MigrationLens) -> Result<(), Error> {
+        let source = self
+            .catalogue
+            .catalogue_schemas
+            .get(&lens.source)
+            .ok_or(Error::InvalidCatalogueUpdate("lens endpoint is unknown"))?;
+        let target = self
+            .catalogue
+            .catalogue_schemas
+            .get(&lens.target)
+            .ok_or(Error::InvalidCatalogueUpdate("lens endpoint is unknown"))?;
+        Self::validate_migration_lens_between(lens, source, target)
+    }
+
+    pub(super) fn validate_migration_lens_between(
+        lens: &MigrationLens,
+        source: &SchemaVersion,
+        target: &SchemaVersion,
+    ) -> Result<(), Error> {
+        for table_lens in &lens.table_lenses {
+            let source_table = source
+                .schema
+                .tables
+                .iter()
+                .find(|table| table.name == table_lens.source_table)
+                .ok_or(Error::InvalidCatalogueUpdate("table lens is unknown"))?;
+            let target_table = target
+                .schema
+                .tables
+                .iter()
+                .find(|table| table.name == table_lens.target_table)
+                .ok_or(Error::InvalidCatalogueUpdate("table lens is unknown"))?;
+            let mut columns = source_table
+                .columns
+                .iter()
+                .cloned()
+                .map(|column| (column.name.clone(), column))
+                .collect::<BTreeMap<_, _>>();
+            let mut saw_table_rename = source_table.name == target_table.name;
+            for op in &table_lens.ops {
+                match op {
+                    LensOp::RenameTable { from, to } => {
+                        if saw_table_rename
+                            || from != &source_table.name
+                            || to != &target_table.name
+                        {
+                            return Err(Error::InvalidCatalogueUpdate(
+                                "table rename does not match lens endpoints",
+                            ));
+                        }
+                        saw_table_rename = true;
+                    }
+                    LensOp::RenameColumn { from, to } => {
+                        if columns.contains_key(to) {
+                            return Err(Error::InvalidCatalogueUpdate(
+                                "column rename collides with existing column",
+                            ));
+                        }
+                        let mut column = columns.remove(from).ok_or(
+                            Error::InvalidCatalogueUpdate("column rename source is unknown"),
+                        )?;
+                        column.name = to.clone();
+                        columns.insert(to.clone(), column);
+                    }
+                    LensOp::CopyColumn { from, to } => {
+                        if columns.contains_key(to) {
+                            return Err(Error::InvalidCatalogueUpdate(
+                                "column copy collides with existing column",
+                            ));
+                        }
+                        let mut column =
+                            columns
+                                .get(from)
+                                .cloned()
+                                .ok_or(Error::InvalidCatalogueUpdate(
+                                    "column copy source is unknown",
+                                ))?;
+                        column.name = to.clone();
+                        columns.insert(to.clone(), column);
+                    }
+                    LensOp::AddColumn { column, .. } => {
+                        if columns.contains_key(column) {
+                            return Err(Error::InvalidCatalogueUpdate(
+                                "added column already exists",
+                            ));
+                        }
+                        let target_column = target_table
+                            .columns
+                            .iter()
+                            .find(|candidate| candidate.name == *column)
+                            .cloned()
+                            .ok_or(Error::InvalidCatalogueUpdate(
+                                "added column is absent from target",
+                            ))?;
+                        columns.insert(column.clone(), target_column);
+                    }
+                    LensOp::DropColumn { column, .. } => {
+                        if columns.remove(column).is_none() {
+                            return Err(Error::InvalidCatalogueUpdate(
+                                "dropped column is absent from source",
+                            ));
+                        }
+                    }
+                    LensOp::TransformColumn { column, transform } => {
+                        validate_transform_column(columns.get(column), transform)?;
+                        let source_column =
+                            columns.get(column).ok_or(Error::InvalidCatalogueUpdate(
+                                "transformed column is absent from source",
+                            ))?;
+                        let target_column = target_table
+                            .columns
+                            .iter()
+                            .find(|candidate| candidate.name == *column)
+                            .ok_or(Error::InvalidCatalogueUpdate(
+                                "transformed column is absent from target",
+                            ))?;
+                        if !physical_value_epoch_is_compatible(
+                            &source_column.column_type,
+                            &target_column.column_type,
+                        ) {
+                            return Err(Error::InvalidCatalogueUpdate(
+                                "column transform changes variant registry non-additively",
+                            ));
+                        }
+                        columns.insert(column.clone(), target_column.clone());
+                    }
+                    LensOp::RejectSourceDelta { .. } => {}
+                }
+            }
+            if !saw_table_rename {
+                return Err(Error::InvalidCatalogueUpdate(
+                    "renamed table requires an explicit RenameTable operation",
+                ));
+            }
+            let target_columns = target_table
+                .columns
+                .iter()
+                .cloned()
+                .map(|column| (column.name.clone(), column))
+                .collect::<BTreeMap<_, _>>();
+            if columns != target_columns {
+                return Err(Error::InvalidCatalogueUpdate(
+                    "lens operations do not reproduce target columns",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn validate_lineage_table_partition(
+        source: &JazzSchema,
+        target: &JazzSchema,
+        lens: &MigrationLens,
+        new_tables: &[String],
+        dropped_tables: &[String],
+    ) -> Result<(), Error> {
+        let source_tables = source
+            .tables
+            .iter()
+            .map(|table| table.name.clone())
+            .collect::<BTreeSet<_>>();
+        let target_tables = target
+            .tables
+            .iter()
+            .map(|table| table.name.clone())
+            .collect::<BTreeSet<_>>();
+        let related_source = lens
+            .table_lenses
+            .iter()
+            .map(|table| table.source_table.clone())
+            .collect::<BTreeSet<_>>();
+        let related_target = lens
+            .table_lenses
+            .iter()
+            .map(|table| table.target_table.clone())
+            .collect::<BTreeSet<_>>();
+        let new = new_tables.iter().cloned().collect::<BTreeSet<_>>();
+        let dropped = dropped_tables.iter().cloned().collect::<BTreeSet<_>>();
+        if related_source.len() != lens.table_lenses.len()
+            || related_target.len() != lens.table_lenses.len()
+            || new.len() != new_tables.len()
+            || dropped.len() != dropped_tables.len()
+            || !related_source.is_disjoint(&dropped)
+            || !related_target.is_disjoint(&new)
+            || related_source
+                .union(&dropped)
+                .cloned()
+                .collect::<BTreeSet<_>>()
+                != source_tables
+            || related_target.union(&new).cloned().collect::<BTreeSet<_>>() != target_tables
+        {
+            return Err(Error::InvalidCatalogueUpdate(
+                "lineage table declarations do not partition schemas",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(super) fn validate_schema_lineage_publication_bounds(
+        publication: &SchemaLineagePublication,
+    ) -> Result<(), Error> {
+        let declaration_count = publication
+            .lens
+            .table_lenses
+            .len()
+            .saturating_add(publication.new_tables.len())
+            .saturating_add(publication.dropped_tables.len());
+        let operation_count = publication
+            .lens
+            .table_lenses
+            .iter()
+            .map(|table| table.ops.len())
+            .sum::<usize>();
+        let names_in_bounds = publication
+            .new_tables
+            .iter()
+            .chain(&publication.dropped_tables)
+            .chain(
+                publication
+                    .lens
+                    .table_lenses
+                    .iter()
+                    .flat_map(|table| [&table.source_table, &table.target_table]),
+            )
+            .all(|name| !name.is_empty() && name.len() <= MAX_SCHEMA_LINEAGE_NAME_BYTES);
+        if declaration_count > MAX_SCHEMA_LINEAGE_DECLARATIONS
+            || operation_count > MAX_SCHEMA_LINEAGE_OPS
+            || !names_in_bounds
+        {
+            return Err(Error::InvalidCatalogueUpdate(
+                "schema lineage publication exceeds structural limits",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(super) fn validate_schema_lineage_publication(
+        publication: &SchemaLineagePublication,
+    ) -> Result<(), Error> {
+        Self::validate_schema_lineage_publication_bounds(publication)?;
+        if publication.id != publication.content_id() {
+            return Err(Error::InvalidCatalogueUpdate(
+                "schema lineage publication id mismatch",
+            ));
+        }
+        if publication.schema.id != publication.schema.schema.version_id() {
+            return Err(Error::InvalidCatalogueUpdate(
+                "schema id does not match schema payload",
+            ));
+        }
+        if publication.lens.id != publication.lens.content_id() {
+            return Err(Error::InvalidCatalogueUpdate(
+                "lens id does not match lens payload",
+            ));
+        }
+        if publication.lens.target != publication.schema.id {
+            return Err(Error::InvalidCatalogueUpdate(
+                "lineage lens target does not match schema",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Prepare physical branch storage only after bounded structural checks and
+    /// catalogue dependencies are known to be satisfiable. Missing catalogue
+    /// schemas are left for the ordinary parking path.
+    pub(super) fn prepare_branch_target_partitions_if_ready(
+        &mut self,
+        tx: &Transaction,
+        versions: &[VersionRecord],
+    ) -> Result<(), Error>
+    where
+        S: ReopenableStorage,
+    {
+        let crate::tx::BranchLineage::Branch(branch_id) = tx.target_lineage else {
+            return Ok(());
+        };
+        if !self.branches.branches.contains_key(&branch_id)
+            || !commit_unit_write_count_matches(tx, versions.len())
+            || versions.iter().any(|version| {
+                !self
+                    .catalogue
+                    .catalogue_schemas
+                    .contains_key(&version.schema_version())
+            })
+        {
+            return Ok(());
+        }
+        self.ensure_branch_target_partitions(branch_id, versions)
+    }
+
+}
