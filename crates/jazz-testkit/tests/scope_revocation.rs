@@ -1,5 +1,3 @@
-#![cfg(feature = "test")]
-
 use jazz_testkit as support;
 
 use std::collections::HashMap;
@@ -70,7 +68,7 @@ async fn scope_revocation_removes_edge_results_without_redacting_local_copy() {
                 server.app_id(),
                 "dev",
                 "main",
-                &[schema.clone()],
+                std::slice::from_ref(&schema),
                 &[],
             )
             .await

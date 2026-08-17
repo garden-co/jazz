@@ -193,18 +193,6 @@ harness = false
 required-features = ["testing"]
 
 [[test]]
-name = "branch_claims_integration"
-required-features = ["test"]
-
-[[test]]
-name = "inherited_policies"
-required-features = ["test"]
-
-[[test]]
-name = "scope_revocation"
-required-features = ["test"]
-
-[[test]]
 name = "aggregate_subscriptions"
 required-features = ["test-utils"]
 
@@ -225,19 +213,11 @@ name = "nullable_writes"
 required-features = ["test-utils"]
 
 [[test]]
-name = "policy_branch_closure"
-required-features = ["test"]
-
-[[test]]
 name = "query_membership_filters"
 required-features = ["test"]
 
 [[test]]
 name = "flush_once_per_refresh"
-required-features = ["test"]
-
-[[test]]
-name = "rename_write_authorization"
 required-features = ["test"]
 
 [[test]]
@@ -261,15 +241,7 @@ name = "clients_sync"
 required-features = ["test"]
 
 [[test]]
-name = "local_first_auth_integration"
-required-features = ["test"]
-
-[[test]]
 name = "gset_merge"
-required-features = ["test"]
-
-[[test]]
-name = "claims_merge_integration"
 required-features = ["test"]
 
 [[example]]
