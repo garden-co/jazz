@@ -84,7 +84,13 @@ impl DemandLoadedStorage {
     }
 
     fn require(&self, request: OwnedStorageOperation) -> Result<(), Error> {
-        if self.state.borrow().admitted.contains(&request) {
+        if self
+            .state
+            .borrow()
+            .admitted
+            .iter()
+            .any(|admitted| covers(admitted, &request))
+        {
             Ok(())
         } else {
             Err(Error::NotResident {
@@ -103,6 +109,45 @@ impl DemandLoadedStorage {
         if !state.admitted.contains(&request) {
             state.admitted.push(request);
         }
+    }
+}
+
+fn covers(admitted: &OwnedStorageOperation, requested: &OwnedStorageOperation) -> bool {
+    if admitted == requested {
+        return true;
+    }
+    match (admitted, requested) {
+        (
+            OwnedStorageOperation::Scan(admitted),
+            OwnedStorageOperation::Get { column_family, key },
+        ) if admitted.column_family == *column_family => match &admitted.bounds {
+            super::pollable::OwnedScanBounds::Prefix(prefix) => key.starts_with(prefix),
+            super::pollable::OwnedScanBounds::Range { start, end } => {
+                key.as_slice() >= start.as_slice() && key.as_slice() < end.as_slice()
+            }
+        },
+        (OwnedStorageOperation::Scan(admitted), OwnedStorageOperation::Scan(requested))
+            if admitted.column_family == requested.column_family =>
+        {
+            match (&admitted.bounds, &requested.bounds) {
+                (
+                    super::pollable::OwnedScanBounds::Prefix(admitted),
+                    super::pollable::OwnedScanBounds::Prefix(requested),
+                ) => requested.starts_with(admitted),
+                (
+                    super::pollable::OwnedScanBounds::Range {
+                        start: admitted_start,
+                        end: admitted_end,
+                    },
+                    super::pollable::OwnedScanBounds::Range {
+                        start: requested_start,
+                        end: requested_end,
+                    },
+                ) => requested_start >= admitted_start && requested_end <= admitted_end,
+                _ => false,
+            }
+        }
+        _ => false,
     }
 }
 

@@ -2,7 +2,7 @@ use std::cell::Cell;
 use std::rc::Rc;
 use std::task::{Context, Poll, Waker};
 
-use groove::db::{Database, DemandDrivenDatabase};
+use groove::db::{Database, DemandDrivenDatabase, GraphBuilder};
 use groove::records::Value;
 use groove::schema::{
     ColumnSchema, ColumnType, DatabaseSchema, IntegerKeyType, PrimaryKey, TableSchema,
@@ -145,5 +145,101 @@ fn pollable_query_fetches_on_demand_and_then_reads_resident_state() {
         polls.get(),
         polls_after_hydration,
         "the same one-shot must be served entirely from its resident working set"
+    );
+}
+
+#[test]
+fn write_preflight_loads_inputs_before_the_single_real_ivm_tick() {
+    let schema = schema();
+    let cache = DemandLoadedStorage::new(&["rows", "indices"]);
+    cache
+        .admit(
+            OwnedStorageOperation::Scan(groove::storage::pollable::OwnedScanRequest::prefix(
+                "rows",
+                Vec::new(),
+            )),
+            OwnedStorageResponse::Rows(Vec::new()),
+        )
+        .unwrap();
+    let mut database = Database::new(schema, cache.clone()).unwrap();
+    let subscription = database
+        .subscribe_one_sink(GraphBuilder::table("rows"))
+        .unwrap();
+    assert!(subscription.recv().unwrap().is_empty());
+    let mut durable = MemoryStorage::new(&["rows", "indices"]);
+    let mut batch = database.open_batch();
+    batch.insert("rows", vec![Value::U64(11), Value::String("input".into())]);
+    let mut context = Context::from_waker(Waker::noop());
+
+    loop {
+        match database.preflight_batch_storage_inputs(&batch) {
+            Ok(()) => break,
+            Err(groove::db::Error::Storage(error)) => {
+                let groove::storage::Error::NotResident { request } = *error else {
+                    panic!("preflight failed for a reason other than missing input")
+                };
+                let request = OwnedStorageRequest::new(*request);
+                let Poll::Ready(Ok(response)) = durable.poll_request(&request, &mut context) else {
+                    panic!("memory input fetch must be immediately ready")
+                };
+                cache.admit(request.operation().clone(), response).unwrap();
+            }
+            Err(error) => panic!("unexpected preflight error: {error:?}"),
+        }
+    }
+    assert!(
+        subscription.try_recv().is_err(),
+        "preflight must not mutate or publish the real IVM"
+    );
+    database.commit_batch(batch).unwrap();
+    assert_eq!(subscription.recv().unwrap().to_values().unwrap().len(), 1);
+}
+
+#[test]
+fn opened_subscription_inherits_synchronous_write_visibility_over_async_storage() {
+    let schema = schema();
+    let released = Rc::new(Cell::new(true));
+    let polls = Rc::new(Cell::new(0));
+    let durable = GatedStorage {
+        inner: MemoryStorage::new(&["rows", "indices"]),
+        released: Rc::clone(&released),
+        polls,
+    };
+    let mut database = DemandDrivenDatabase::new(schema, Box::new(durable)).unwrap();
+    let mut context = Context::from_waker(Waker::noop());
+    let Poll::Ready(Ok(_)) = database.poll_read(&mut context, |database| {
+        database.primary_key_scan("rows", &[])
+    }) else {
+        panic!("released empty opening must load its range")
+    };
+    let subscription = database
+        .resident_mut()
+        .subscribe_one_sink(GraphBuilder::table("rows"))
+        .unwrap();
+    assert!(subscription.recv().unwrap().is_empty());
+
+    released.set(false);
+    let mut batch = Some(database.resident().open_batch());
+    batch
+        .as_mut()
+        .unwrap()
+        .insert("rows", vec![Value::U64(12), Value::String("typed".into())]);
+    let Poll::Ready(Ok(_persistence)) = database.poll_commit_batch(&mut context, &mut batch) else {
+        panic!("the opened working set must make the local write first-poll ready")
+    };
+    assert!(batch.is_none());
+    assert_eq!(
+        subscription.recv().unwrap().to_values().unwrap().len(),
+        1,
+        "the callback delta must already be queued when the write returns Ready"
+    );
+    assert_eq!(
+        database
+            .resident()
+            .primary_key_scan("rows", &[Value::U64(12)])
+            .unwrap()
+            .len(),
+        1,
+        "a new one-shot must synchronously observe the resident write"
     );
 }

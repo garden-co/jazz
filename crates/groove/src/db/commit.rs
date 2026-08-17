@@ -105,6 +105,42 @@ where
             .map(|receipt| receipt.expect("async persistence requested a receipt"))
     }
 
+    /// Run the read-dependent portion of a commit against a disposable IVM
+    /// clone. A demand-loaded host uses this to discover and fetch every
+    /// missing durable input before the real resident tick mutates state.
+    #[doc(hidden)]
+    pub fn preflight_batch_storage_inputs(&self, batch: &DatabaseBatch) -> Result<(), Error> {
+        self.ensure_not_poisoned()?;
+        let pending_writes = self.pending_writes_from_operations(&batch.operations)?;
+        let descriptors = pending_writes
+            .iter()
+            .map(PendingTableWrite::descriptor)
+            .collect::<Vec<_>>();
+        let stores = pending_writes
+            .iter()
+            .zip(&descriptors)
+            .map(|(write, descriptor)| {
+                let key_descriptor = self
+                    .table(write.table())
+                    .ok()
+                    .and_then(|table| table.primary_key.as_ref().map(primary_key_descriptor));
+                record_store_for_table(&self.storage, write.table(), key_descriptor, descriptor)
+            })
+            .collect::<Vec<_>>();
+        let table_deltas =
+            compute_table_deltas(&pending_writes, &stores, self.ivm_runtime.schema())?;
+        let mut staged_operations = pending_writes
+            .iter()
+            .map(|write| self.owned_storage_operation_for_pending(write))
+            .collect::<Result<Vec<_>, _>>()?;
+        let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
+        let mut runtime = self.ivm_runtime.clone();
+        runtime
+            .tick_staged(table_deltas, &storage, &mut staged_operations)
+            .map_err(Error::IvmRuntime)?;
+        Ok(())
+    }
+
     /// Fail closed after a resident commit could not be durably persisted.
     #[doc(hidden)]
     pub fn mark_async_persistence_failed(&mut self) {

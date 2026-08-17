@@ -201,6 +201,49 @@ impl DemandDrivenDatabase {
         }
     }
 
+    /// Poll prerequisite durable reads, then execute exactly one real resident
+    /// commit and return its owned persistence batch. The subscription effects
+    /// of that commit are published synchronously before this method returns
+    /// `Ready`; only prerequisite cache filling may suspend it.
+    #[doc(hidden)]
+    pub fn poll_commit_batch(
+        &mut self,
+        context: &mut Context<'_>,
+        batch: &mut Option<DatabaseBatch>,
+    ) -> Poll<Result<PendingPersistenceBatch, Error>> {
+        loop {
+            if let Some(request) = self.pending_read.as_ref() {
+                match self.persistence.poll_request(request, context) {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(Ok(response)) => {
+                        let request = self
+                            .pending_read
+                            .take()
+                            .expect("polled commit input remains pending");
+                        self.cache.admit(request.operation().clone(), response)?;
+                    }
+                    Poll::Ready(Err(error)) => return Poll::Ready(Err(error.into())),
+                }
+            }
+            let pending_batch = batch
+                .as_ref()
+                .expect("commit batch is consumed exactly once after Ready");
+            match self.database.preflight_batch_storage_inputs(pending_batch) {
+                Ok(()) => {
+                    let batch = batch.take().expect("preflight retains commit batch");
+                    return Poll::Ready(self.database.commit_batch_for_async_persistence(batch));
+                }
+                Err(Error::Storage(error)) => match *error {
+                    crate::storage::Error::NotResident { request } => {
+                        self.pending_read = Some(OwnedStorageRequest::new(*request));
+                    }
+                    error => return Poll::Ready(Err(error.into())),
+                },
+                Err(error) => return Poll::Ready(Err(error)),
+            }
+        }
+    }
+
     #[doc(hidden)]
     pub fn resident(&self) -> &Database<crate::storage::DemandLoadedStorage> {
         &self.database
