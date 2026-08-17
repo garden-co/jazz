@@ -114,6 +114,21 @@ impl DemandDrivenNode {
         )
     }
 
+    /// Create one local branch through the same acquire-then-publish boundary
+    /// as application-row writes.
+    pub fn poll_create_branch(
+        &mut self,
+        context: &mut std::task::Context<'_>,
+        branch_id: BranchId,
+        created_by: AuthorId,
+    ) -> std::task::Poll<Result<BranchRecord, Error>> {
+        self.poll_local_operation(
+            context,
+            |node| node.prepare_branch_creation(branch_id, created_by),
+            |node, prepared| node.publish_branch_creation(prepared),
+        )
+    }
+
     /// Poll a restartable query or subscription operation. It may suspend only
     /// while acquiring a missing durable input; once ready, evaluation runs on
     /// the same resident node used by local writes.

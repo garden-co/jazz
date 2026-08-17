@@ -27,6 +27,17 @@ pub struct BranchRecord {
     pub state: codec::BranchState,
 }
 
+pub(crate) enum PreparedBranchCreation {
+    Existing(BranchRecord),
+    New(PreparedBranchRecordMutation),
+}
+
+pub(crate) struct PreparedBranchRecordMutation {
+    record: BranchRecord,
+    metadata_pending: bool,
+    batch: groove::db::PreparedDatabaseBatch,
+}
+
 impl From<&BranchRecord> for crate::protocol::BranchMetadata {
     fn from(record: &BranchRecord) -> Self {
         Self {
@@ -83,9 +94,8 @@ where
             ),
             state: codec::BranchState::Open,
         };
-        self.persist_branch_record(&record, true)?;
-        self.branches.branches.insert(branch_id, record.clone());
-        Ok(record)
+        let prepared = self.prepare_branch_record_mutation(record, true, false)?;
+        self.publish_branch_record_mutation(prepared)
     }
 
     /// Declare a root branch with no parent fallback.
@@ -100,9 +110,8 @@ where
         };
         // The distinguished root is local storage scaffolding, not session-authored
         // branch metadata, so it must never enter the sync outbox.
-        self.persist_branch_record(&record, false)?;
-        self.branches.branches.insert(branch_id, record.clone());
-        Ok(record)
+        let prepared = self.prepare_branch_record_mutation(record, false, false)?;
+        self.publish_branch_record_mutation(prepared)
     }
 
     /// Return recovered branch metadata.
@@ -144,7 +153,8 @@ where
                 "branch metadata acknowledgement does not match local record",
             ));
         }
-        self.persist_branch_record(&record, false)?;
+        let prepared = self.prepare_branch_record_mutation(record, false, false)?;
+        self.publish_branch_record_mutation(prepared)?;
         Ok(())
     }
 
@@ -186,14 +196,15 @@ where
                 && existing.state == codec::BranchState::Open
                 && record.state == codec::BranchState::Discarded
             {
-                self.persist_branch_record(&record, relay_upstream)?;
-                self.branches.branches.insert(record.branch_id, record);
+                let prepared =
+                    self.prepare_branch_record_mutation(record, relay_upstream, false)?;
+                self.publish_branch_record_mutation(prepared)?;
                 return Ok(());
             }
             return Err(Error::InvalidStoredValue("conflicting branch metadata"));
         }
-        self.persist_branch_record(&record, relay_upstream)?;
-        self.branches.branches.insert(record.branch_id, record);
+        let prepared = self.prepare_branch_record_mutation(record, relay_upstream, false)?;
+        self.publish_branch_record_mutation(prepared)?;
         Ok(())
     }
 
@@ -258,8 +269,8 @@ where
             return Err(Error::BranchClosed(branch_id));
         }
         record.state = codec::BranchState::Discarded;
-        self.persist_branch_record(&record, true)?;
-        self.branches.branches.insert(branch_id, record);
+        let prepared = self.prepare_branch_record_mutation(record, true, false)?;
+        self.publish_branch_record_mutation(prepared)?;
         Ok(())
     }
 
@@ -1942,11 +1953,12 @@ where
         }
     }
 
-    fn persist_branch_record(
-        &mut self,
-        record: &BranchRecord,
+    fn prepare_branch_record_mutation(
+        &self,
+        record: BranchRecord,
         metadata_pending: bool,
-    ) -> Result<(), Error> {
+        acquire_tick_storage: bool,
+    ) -> Result<PreparedBranchRecordMutation, Error> {
         let mut batch = self.database.open_batch();
         batch.update(
             "jazz_branches",
@@ -1963,7 +1975,29 @@ where
                 Value::Bool(metadata_pending),
             ],
         );
-        self.commit_database_batch(batch)?;
+        self.stage_recovery_checkpoint(&mut batch, self.clock.tx_time);
+        let batch = if acquire_tick_storage {
+            self.database.prepare_batch_storage_inputs(&batch)?
+        } else {
+            self.database.prepare_resident_batch(&batch)?
+        };
+        Ok(PreparedBranchRecordMutation {
+            record,
+            metadata_pending,
+            batch,
+        })
+    }
+
+    fn publish_branch_record_mutation(
+        &mut self,
+        prepared: PreparedBranchRecordMutation,
+    ) -> Result<BranchRecord, Error> {
+        let PreparedBranchRecordMutation {
+            record,
+            metadata_pending,
+            batch,
+        } = prepared;
+        self.publish_prepared_database_batch(batch)?;
         if metadata_pending {
             self.branches
                 .pending_metadata_uploads
@@ -1973,7 +2007,56 @@ where
                 .pending_metadata_uploads
                 .remove(&record.branch_id);
         }
-        Ok(())
+        self.branches
+            .branches
+            .insert(record.branch_id, record.clone());
+        Ok(record)
+    }
+
+    pub(crate) fn prepare_branch_creation(
+        &self,
+        branch_id: BranchId,
+        created_by: AuthorId,
+    ) -> Result<PreparedBranchCreation, Error> {
+        self.require_catalogue_ready()?;
+        if let Some(existing) = self.branches.branches.get(&branch_id) {
+            if existing.created_by == created_by
+                && existing.parent.is_none()
+                && existing.base.is_some()
+                && existing.state == codec::BranchState::Open
+            {
+                return Ok(PreparedBranchCreation::Existing(existing.clone()));
+            }
+            return Err(Error::InvalidStoredValue("conflicting branch creation"));
+        }
+        let record = BranchRecord {
+            branch_id,
+            created_by,
+            parent: None,
+            base: Some(
+                Snapshot::exclusive_base(
+                    NodeUuid(uuid::Uuid::nil()),
+                    self.clock.applied_global_watermark,
+                    TxTime::default(),
+                    Vec::new(),
+                )
+                .map_err(Error::InvalidStoredValue)?,
+            ),
+            state: codec::BranchState::Open,
+        };
+        Ok(PreparedBranchCreation::New(
+            self.prepare_branch_record_mutation(record, true, true)?,
+        ))
+    }
+
+    pub(crate) fn publish_branch_creation(
+        &mut self,
+        prepared: PreparedBranchCreation,
+    ) -> Result<BranchRecord, Error> {
+        match prepared {
+            PreparedBranchCreation::Existing(record) => Ok(record),
+            PreparedBranchCreation::New(prepared) => self.publish_branch_record_mutation(prepared),
+        }
     }
 
     pub(super) fn recover_branch_record(

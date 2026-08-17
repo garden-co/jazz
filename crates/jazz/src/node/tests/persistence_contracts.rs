@@ -537,6 +537,45 @@ fn prepared_local_write_notifies_jazz_subscription_in_publish_poll() {
 }
 
 #[test]
+fn prepared_branch_creation_publishes_metadata_before_async_durability() {
+    let node_schema = schema();
+    let column_families = node_schema.column_families();
+    let refs = column_families.iter().map(String::as_str).collect::<Vec<_>>();
+    let released = std::rc::Rc::new(std::cell::Cell::new(true));
+    let backend = GatedAuthorityStorage {
+        inner: groove::storage::async_ordered::ImmediateStorage::new(MemoryStorage::new(&refs)),
+        released: std::rc::Rc::clone(&released),
+        cancellations: std::rc::Rc::new(std::cell::Cell::new(0)),
+        committed_units: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
+        fail_commits: std::rc::Rc::new(std::cell::Cell::new(false)),
+    };
+    let mut opening = PollableNodeOpen::new(node(0xd9), node_schema, Box::new(backend));
+    let waker = std::sync::Arc::new(PersistenceTestWake).into();
+    let mut context = std::task::Context::from_waker(&waker);
+    let std::task::Poll::Ready(Ok(mut runtime)) = opening.poll(&mut context) else {
+        panic!("released backend must open in its first poll")
+    };
+
+    released.set(false);
+    let branch = BranchId(uuid::Uuid::from_bytes([0xda; 16]));
+    let author = AuthorId(uuid::Uuid::from_bytes([0xdb; 16]));
+    assert!(matches!(
+        runtime.poll_create_branch(&mut context, branch, author),
+        std::task::Poll::Ready(Ok(_))
+    ));
+    assert_eq!(
+        runtime.resident().branch_record(branch).unwrap().created_by,
+        author
+    );
+    assert_eq!(
+        runtime.resident().pending_branch_metadata_uploads().len(),
+        1,
+        "resident metadata and its sync outbox must publish together"
+    );
+    assert!(runtime.poll_persistence(&mut context).is_pending());
+}
+
+#[test]
 fn demand_driven_node_poisoned_after_durable_commit_failure() {
     let node_schema = schema();
     let column_families = node_schema.column_families();
