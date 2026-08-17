@@ -1,0 +1,1247 @@
+impl<S> NodeState<S>
+where
+    S: OrderedKvStorage,
+{
+    /// Open or create a node over the supplied storage.
+    pub fn new(node_uuid: NodeUuid, schema: JazzSchema, storage: S) -> Result<Self, Error>
+    where
+        S: ReopenableStorage,
+    {
+        Self::new_with_history_complete(node_uuid, schema, storage, false)
+    }
+
+    /// Open an edge-local runtime before it has received an authenticated
+    /// authority catalogue.
+    ///
+    /// Unlike [`NodeState::new`], this deliberately does *not* create a
+    /// durable genesis from `JazzSchema::new([])`.  Its only valid transition
+    /// is installation of a trusted catalogue snapshot; application reads,
+    /// writes, and current-schema access fail closed beforehand.
+    pub(crate) fn new_catalogue_uninitialized(
+        node_uuid: NodeUuid,
+        storage: S,
+    ) -> Result<Self, Error>
+    where
+        S: ReopenableStorage,
+    {
+        let (storage, durable_genesis) = Self::discover_durable_catalogue_genesis(storage)?;
+        if let Some(schema) = durable_genesis {
+            // A fresh process cannot assume the temporary empty schema it
+            // would use for an uninitialized edge.  Recover the authority
+            // genesis from the durable catalogue first, then use the normal
+            // ready open path so all physical layouts are reconstructed from
+            // the real lineage.
+            return Self::new_with_options_inner(
+                node_uuid,
+                schema,
+                storage,
+                false,
+                CatalogueBootstrapState::Ready,
+                #[cfg(feature = "testing")]
+                None,
+            );
+        }
+        Self::new_with_options_inner(
+            node_uuid,
+            JazzSchema::new([]),
+            storage,
+            false,
+            CatalogueBootstrapState::Uninitialized,
+            #[cfg(feature = "testing")]
+            None,
+        )
+    }
+
+    /// Read only the fixed catalogue metadata layout to discover an already
+    /// durable authority genesis before choosing an application schema for a
+    /// fresh process.  This is the inverse of the uninitialized constructor:
+    /// it never uses `JazzSchema::new([])` as a genesis candidate.
+    fn discover_durable_catalogue_genesis(storage: S) -> Result<(S, Option<JazzSchema>), Error> {
+        let bootstrap_schema = JazzSchema::new([]);
+        // Dynamic discovery must inspect the fixed history/branch/fate stores
+        // too: an empty catalogue does not make an existing Jazz store safe to
+        // repurpose as an uninitialized edge.
+        let meta_schema = bootstrap_schema.lower_to_groove();
+        let meta_database = Database::new_with_storage_layout(
+            meta_schema,
+            storage,
+            StorageLayout::jazz_class_v1(),
+        )?;
+        let mut genesis = None;
+        let mut schemas = BTreeMap::new();
+        let mut bootstrap_ready = None;
+        let mut staged_lineages = BTreeMap::new();
+        let mut active_lineages = BTreeMap::new();
+        let mut has_catalogue_residue = false;
+        for raw in meta_database.primary_key_scan_raw("jazz_catalogue", &[])? {
+            has_catalogue_residue = true;
+            let record = raw.record();
+            match record.get_bytes(CatalogueRowRecord::FIELD_KIND_IDX)? {
+                b"genesis" => {
+                    let schema =
+                        SchemaVersionId(record.get_uuid(CatalogueRowRecord::FIELD_ID_IDX)?);
+                    if genesis.replace(schema).is_some() {
+                        return Err(Error::InvalidStoredValue(
+                            "duplicate catalogue genesis marker",
+                        ));
+                    }
+                }
+                b"schema" => {
+                    let schema: SchemaVersion = serde_json::from_slice(
+                        record.get_bytes(CatalogueRowRecord::FIELD_PAYLOAD_IDX)?,
+                    )?;
+                    if schema.id
+                        != SchemaVersionId(record.get_uuid(CatalogueRowRecord::FIELD_ID_IDX)?)
+                        || schemas.insert(schema.id, schema).is_some()
+                    {
+                        return Err(Error::InvalidStoredValue("catalogue schema id mismatch"));
+                    }
+                }
+                b"schema_lineage_active" => {
+                    let active: SchemaLineageActivation = serde_json::from_slice(
+                        record.get_bytes(CatalogueRowRecord::FIELD_PAYLOAD_IDX)?,
+                    )?;
+                    if active.id.0 != record.get_uuid(CatalogueRowRecord::FIELD_ID_IDX)?
+                        || active.catalogue_seq == 0
+                        || active_lineages
+                            .insert(active.id, active.catalogue_seq)
+                            .is_some()
+                    {
+                        return Err(Error::InvalidStoredValue(
+                            "catalogue bootstrap active lineage marker is malformed",
+                        ));
+                    }
+                }
+                b"schema_lineage_staged" => {
+                    let staged: StagedSchemaLineage = serde_json::from_slice(
+                        record.get_bytes(CatalogueRowRecord::FIELD_PAYLOAD_IDX)?,
+                    )?;
+                    if staged.publication.id.0
+                        != record.get_uuid(CatalogueRowRecord::FIELD_ID_IDX)?
+                        || staged.catalogue_seq == 0
+                        || staged_lineages
+                            .insert(staged.publication.id, staged)
+                            .is_some()
+                    {
+                        return Err(Error::InvalidStoredValue(
+                            "catalogue bootstrap staged lineage marker is malformed",
+                        ));
+                    }
+                }
+                b"bootstrap_ready" => {
+                    let ready: CatalogueBootstrapReady = serde_json::from_slice(
+                        record.get_bytes(CatalogueRowRecord::FIELD_PAYLOAD_IDX)?,
+                    )?;
+                    if ready.genesis.0 != record.get_uuid(CatalogueRowRecord::FIELD_ID_IDX)?
+                        || bootstrap_ready.replace(ready).is_some()
+                    {
+                        return Err(Error::InvalidStoredValue(
+                            "duplicate or malformed catalogue bootstrap marker",
+                        ));
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mapping_ids = meta_database
+            .primary_key_scan_raw("jazz_schema_versions", &[])?
+            .into_iter()
+            .map(|raw| {
+                Ok(SchemaVersionId(
+                    raw.record()
+                        .get_uuid(SchemaVersionAliasRowRecord::FIELD_UUID_IDX)?,
+                ))
+            })
+            .collect::<Result<BTreeSet<_>, Error>>()?;
+        let durable_pointer = meta_database
+            .primary_key_last_raw("jazz_catalogue_pointer", &[])?
+            .map(|raw| {
+                let record = raw.record();
+                Ok::<CurrentWriteSchema, Error>(CurrentWriteSchema {
+                    revision: record.get_u64(CataloguePointerRowRecord::FIELD_REVISION_IDX)?,
+                    schema: SchemaVersionId(
+                        record.get_uuid(CataloguePointerRowRecord::FIELD_SCHEMA_IDX)?,
+                    ),
+                })
+            })
+            .transpose()?;
+        let mut has_non_catalogue_residue = false;
+        for table in [
+            "jazz_transactions",
+            "jazz_branches",
+            "jazz_branch_partitions",
+            "jazz_rejected_transactions",
+            "jazz_pending_edges",
+            "jazz_merge_heads",
+            "jazz_global_changes",
+            "jazz_deletion_history",
+        ] {
+            if !meta_database.primary_key_scan_raw(table, &[])?.is_empty() {
+                has_non_catalogue_residue = true;
+                break;
+            }
+        }
+        let has_residue = has_catalogue_residue
+            || !mapping_ids.is_empty()
+            || durable_pointer.is_some()
+            || has_non_catalogue_residue;
+        let schema = match bootstrap_ready {
+            None if !has_residue => None,
+            None if has_non_catalogue_residue => {
+                return Err(Error::InvalidStoredValue(
+                    "dynamic catalogue state cannot initialize over durable history",
+                ));
+            }
+            None => {
+                return Err(Error::InvalidStoredValue(
+                    "dynamic catalogue state has no bootstrap completion marker",
+                ));
+            }
+            Some(ready) => {
+                let mut active_lineage_targets = BTreeSet::new();
+                let mut active_catalogue_sequences = BTreeSet::new();
+                for staged in staged_lineages.values() {
+                    Self::validate_durable_staged_lineage(staged, &schemas)?;
+                    match active_lineages.remove(&staged.publication.id) {
+                        Some(sequence) if sequence == staged.catalogue_seq => {
+                            if schemas.get(&staged.publication.schema.id)
+                                != Some(&staged.publication.schema)
+                                || !active_lineage_targets.insert(staged.publication.schema.id)
+                            {
+                                return Err(Error::InvalidStoredValue(
+                                    "catalogue bootstrap active lineage does not own its schema",
+                                ));
+                            }
+                            if !active_catalogue_sequences.insert(sequence) {
+                                return Err(Error::InvalidStoredValue(
+                                    "catalogue bootstrap active lineage marker is malformed",
+                                ));
+                            }
+                        }
+                        Some(_) => {
+                            return Err(Error::InvalidStoredValue(
+                                "catalogue bootstrap active lineage marker conflicts with payload",
+                            ));
+                        }
+                        None if schemas.contains_key(&staged.publication.schema.id)
+                            || mapping_ids.contains(&staged.publication.schema.id) =>
+                        {
+                            return Err(Error::InvalidStoredValue(
+                                "catalogue bootstrap inactive lineage has durable target state",
+                            ));
+                        }
+                        None => {}
+                    }
+                }
+                if !active_lineages.is_empty() {
+                    return Err(Error::InvalidStoredValue(
+                        "catalogue bootstrap active lineage is missing canonical payload",
+                    ));
+                }
+                let expected_schema_ids = std::iter::once(ready.genesis)
+                    .chain(active_lineage_targets)
+                    .collect::<BTreeSet<_>>();
+                if genesis != Some(ready.genesis)
+                    || durable_pointer != Some(ready.current_write_schema)
+                    || !schemas.contains_key(&ready.genesis)
+                    || schemas.keys().copied().collect::<BTreeSet<_>>() != expected_schema_ids
+                    || mapping_ids != expected_schema_ids
+                    || active_catalogue_sequences.len()
+                        != usize::try_from(ready.active_catalogue_seq).map_err(|_| {
+                            Error::InvalidStoredValue("catalogue bootstrap sequence exceeds usize")
+                        })?
+                    || active_catalogue_sequences
+                        .iter()
+                        .copied()
+                        .ne(1..=ready.active_catalogue_seq)
+                {
+                    return Err(Error::InvalidStoredValue(
+                        "catalogue bootstrap completion marker does not match durable catalogue",
+                    ));
+                }
+                Some(
+                    schemas
+                        .remove(&ready.genesis)
+                        .expect("validated durable genesis schema must exist")
+                        .schema,
+                )
+            }
+        };
+        Ok((meta_database.into_storage(), schema))
+    }
+
+    /// Open or create a node that is known to hold complete settled history.
+    ///
+    /// This is the authority/local-complete constructor for historical reads.
+    /// Ordinary downstream clients should use [`NodeState::new`], which fails
+    /// historical handle reads closed until a complete-history subscription
+    /// path marks the queried shape complete in a later slice.
+    pub fn new_history_complete(
+        node_uuid: NodeUuid,
+        schema: JazzSchema,
+        storage: S,
+    ) -> Result<Self, Error>
+    where
+        S: ReopenableStorage,
+    {
+        Self::new_with_history_complete(node_uuid, schema, storage, true)
+    }
+
+    /// Rebuild the groove layer over the same storage using the standard open path.
+    pub fn reopen_in_place(self) -> Result<Self, Error>
+    where
+        S: ReopenableStorage,
+    {
+        let NodeState {
+            node_uuid,
+            catalogue,
+            catalogue_bootstrap_state,
+            database,
+            history_complete,
+            ..
+        } = self;
+        let storage = database.into_inner().into_storage();
+        let reopened = match catalogue_bootstrap_state {
+            CatalogueBootstrapState::Uninitialized => {
+                Self::new_catalogue_uninitialized(node_uuid, storage)?
+            }
+            CatalogueBootstrapState::Ready => Self::new_with_history_complete(
+                node_uuid,
+                catalogue.schema,
+                storage,
+                history_complete,
+            )?,
+        };
+        Ok(reopened)
+    }
+
+    fn new_with_history_complete(
+        node_uuid: NodeUuid,
+        schema: JazzSchema,
+        storage: S,
+        history_complete: bool,
+    ) -> Result<Self, Error>
+    where
+        S: ReopenableStorage,
+    {
+        Self::new_with_options(node_uuid, schema, storage, history_complete)
+    }
+
+    fn new_with_options(
+        node_uuid: NodeUuid,
+        schema: JazzSchema,
+        storage: S,
+        history_complete: bool,
+    ) -> Result<Self, Error>
+    where
+        S: ReopenableStorage,
+    {
+        Self::new_with_options_inner(
+            node_uuid,
+            schema,
+            storage,
+            history_complete,
+            CatalogueBootstrapState::Ready,
+            #[cfg(feature = "testing")]
+            None,
+        )
+    }
+
+    #[cfg(feature = "testing")]
+    /// Open a node and attribute durable recovery without changing open semantics.
+    pub fn new_with_open_receipt_for_test(
+        node_uuid: NodeUuid,
+        schema: JazzSchema,
+        storage: S,
+        history_complete: bool,
+    ) -> Result<(Self, NodeOpenReceipt), Error>
+    where
+        S: ReopenableStorage,
+    {
+        let mut receipt = NodeOpenReceipt::default();
+        let node = Self::new_with_options_inner(
+            node_uuid,
+            schema,
+            storage,
+            history_complete,
+            CatalogueBootstrapState::Ready,
+            Some(&mut receipt),
+        )?;
+        Ok((node, receipt))
+    }
+
+    fn new_with_options_inner(
+        node_uuid: NodeUuid,
+        schema: JazzSchema,
+        storage: S,
+        history_complete: bool,
+        catalogue_bootstrap_state: CatalogueBootstrapState,
+        #[cfg(feature = "testing")] mut receipt: Option<&mut NodeOpenReceipt>,
+    ) -> Result<Self, Error>
+    where
+        S: ReopenableStorage,
+    {
+        let current_schema_version_id = schema.version_id();
+        #[cfg(feature = "testing")]
+        let started = receipt.as_ref().map(|_| Instant::now());
+        let CatalogueOpenState {
+            storage,
+            mut schemas,
+            mut lenses,
+            mut schema_version_aliases,
+            mut physical_mappings,
+            mut staged_lineages,
+            pending_lineages,
+            mut active_lineages_by_target,
+            mut active_catalogue_seq,
+            pending_write_pointers,
+            next_physical_table_id,
+            next_physical_column_id,
+            current_write_schema,
+            branch_partitions,
+            catalogue_bootstrap_marker,
+        } = Self::open_catalogue_stage(schema.clone(), storage, catalogue_bootstrap_state)?;
+        #[cfg(feature = "testing")]
+        if let (Some(receipt), Some(started)) = (&mut receipt, started) {
+            receipt.catalogue_open = started.elapsed();
+        }
+        let mut registration_schemas = schemas.clone();
+        let mut registration_aliases = schema_version_aliases.clone();
+        let mut registration_mappings = physical_mappings.clone();
+        for staged in staged_lineages.values() {
+            registration_schemas.insert(
+                staged.publication.schema.id,
+                staged.publication.schema.clone(),
+            );
+            registration_aliases.insert(staged.publication.schema.id, staged.alias);
+            registration_mappings.insert(staged.publication.schema.id, staged.mapping.clone());
+        }
+        #[cfg(feature = "testing")]
+        let started = receipt.as_ref().map(|_| Instant::now());
+        let mut database = Self::open_full_database(
+            &schema,
+            &registration_schemas,
+            &registration_aliases,
+            &registration_mappings,
+            &branch_partitions,
+            storage,
+        )?;
+        #[cfg(feature = "testing")]
+        if let (Some(receipt), Some(started)) = (&mut receipt, started) {
+            receipt.database_open = started.elapsed();
+        }
+        loop {
+            let next = active_catalogue_seq.saturating_add(1);
+            let Some(staged) = staged_lineages.get(&next).cloned() else {
+                break;
+            };
+            if !schemas.contains_key(&staged.publication.lens.source) {
+                break;
+            }
+            let mut batch = database.open_batch();
+            Self::write_active_schema_lineage_to_batch(&mut batch, &staged)?;
+            if catalogue_bootstrap_marker {
+                let ready = CatalogueBootstrapReady {
+                    genesis: current_schema_version_id,
+                    current_write_schema,
+                    active_catalogue_seq: next,
+                };
+                batch.update(
+                    "jazz_catalogue",
+                    vec![
+                        Value::Bytes(b"bootstrap_ready".to_vec()),
+                        Value::Uuid(ready.genesis.0),
+                        Value::Bytes(serde_json::to_vec(&ready)?),
+                    ],
+                );
+            }
+            database.commit_batch(batch)?;
+            schemas.insert(
+                staged.publication.schema.id,
+                staged.publication.schema.clone(),
+            );
+            lenses.insert(staged.publication.lens.id, staged.publication.lens.clone());
+            schema_version_aliases.insert(staged.publication.schema.id, staged.alias);
+            physical_mappings.insert(staged.publication.schema.id, staged.mapping.clone());
+            active_lineages_by_target.insert(staged.publication.schema.id, staged.clone());
+            staged_lineages.remove(&next);
+            active_catalogue_seq = next;
+        }
+        let current_schema_version_alias = schema_version_aliases
+            .get(&current_schema_version_id)
+            .copied();
+        // Schema identity excludes policy and physical-index metadata. On a
+        // reopen, retain the durable payload previously learned from the
+        // authority instead of reverting to the caller's structural schema;
+        // otherwise the first catalogue snapshot spuriously changes runtime
+        // semantics and rebuilds warm subscriptions during resume.
+        let active_schema = schemas
+            .get(&current_schema_version_id)
+            .map(|version| version.schema.clone())
+            .unwrap_or_else(|| schema.clone());
+        #[cfg(feature = "testing")]
+        let started = receipt.as_ref().map(|_| Instant::now());
+        let mut node = Self {
+            node_uuid,
+            self_node_alias: None,
+            catalogue: SchemaCatalogue {
+                current_schema_version_id,
+                current_schema_version_alias,
+                schema: active_schema,
+                schema_version_aliases,
+                catalogue_schemas: schemas,
+                catalogue_lenses: lenses,
+                physical_mappings,
+                staged_lineages,
+                pending_lineages,
+                active_lineages_by_target,
+                active_catalogue_seq,
+                pending_write_pointers,
+                next_physical_table_id,
+                next_physical_column_id,
+                lens_path_cache: BTreeMap::new(),
+                compiled_lens_cache: BTreeMap::new(),
+                current_write_schema,
+            },
+            catalogue_bootstrap_state,
+            catalogue_bootstrap_marker,
+            branches: Branches {
+                branches: BTreeMap::new(),
+                branch_partitions,
+                pending_metadata_uploads: BTreeSet::new(),
+            },
+            clock: Clock {
+                tx_time: TxTime::default(),
+                next_global_seq: GlobalSeq(1),
+                global_seq_exhausted: false,
+                applied_global_watermark: GlobalSeq(0),
+                applied_global_above_watermark: BTreeSet::new(),
+            },
+            parking: Parking::default(),
+            query: QueryServing {
+                query_shape_cache: BTreeMap::new(),
+                read_policy_authorization_request_cache: BTreeMap::new(),
+                policy_authorization_graph_cache: BTreeMap::new(),
+                policy_proof_stack: Vec::new(),
+                tx_version_tables_cache: BTreeMap::new(),
+                tx_versions_cache: BTreeMap::new(),
+                tx_version_tables_cache_order: VecDeque::new(),
+                tx_version_tables_cache_order_set: BTreeSet::new(),
+                version_storage_sources_cache: BTreeMap::new(),
+                registered_shapes: BTreeMap::new(),
+                registered_bindings: BTreeMap::new(),
+                applied_view_update_generations: BTreeMap::new(),
+                settled_result_sets: BTreeMap::new(),
+                settled_result_row_index: BTreeMap::new(),
+                settled_program_facts: BTreeMap::new(),
+                settled_through_by_binding_view: BTreeMap::new(),
+                authorization_progress_by_binding_view: BTreeMap::new(),
+                known_state_declared_binding_views: BTreeSet::new(),
+                initial_hydration_binding_views: BTreeSet::new(),
+                deferred_publication_binding_views: BTreeSet::new(),
+                pending_authoritative_reset_binding_views: BTreeSet::new(),
+                pending_opening_binding_views: BTreeSet::new(),
+                pending_terminal_operations_by_binding_view: BTreeMap::new(),
+            },
+            open_tx: OpenTxState {
+                open_transactions: BTreeMap::new(),
+                closed_batches: BTreeSet::new(),
+                local_permission_subjects: BTreeMap::new(),
+            },
+            rejections: RejectionTracking::default(),
+            database: DatabaseSlot::new(database),
+            groove_runtime_token: next_groove_runtime_token(),
+            history_complete,
+            authored_commit_durability: DurabilityTier::Local,
+            node_aliases: BTreeMap::new(),
+            ahead_current_keys: BTreeSet::new(),
+            ahead_current_rows: BTreeSet::new(),
+            ahead_current_latest: BTreeMap::new(),
+            sync_metrics: SyncMetrics::default(),
+            query_engine_read_metrics: QueryEngineReadMetrics::default(),
+            session_claims: BTreeMap::new(),
+            session_claim_revisions: BTreeMap::new(),
+            permissions_ready: true,
+            catalogue_activation_failed: false,
+            #[cfg(test)]
+            catalogue_activation_failpoint: None,
+            initial_sync_flush_cadence: None,
+            initial_sync_flush_active: false,
+            initial_sync_flush_completed: false,
+        };
+        #[cfg(feature = "testing")]
+        if let (Some(receipt), Some(started)) = (&mut receipt, started) {
+            receipt.state_init = started.elapsed();
+        }
+        let known_schema_versions = node
+            .catalogue
+            .catalogue_schemas
+            .keys()
+            .copied()
+            .collect::<Vec<_>>();
+        for schema_version in known_schema_versions {
+            node.ensure_provisional_physical_mapping(schema_version)?;
+        }
+        node.synchronize_physical_version_tables()?;
+        node.drain_pending_schema_lineages()?;
+        node.drain_pending_catalogue_pointers()?;
+        #[cfg(feature = "testing")]
+        if let Some(receipt) = receipt.as_deref_mut() {
+            let started = Instant::now();
+            node.recover_from_storage_with_receipt(receipt)?;
+            receipt.recover_storage = started.elapsed();
+        } else {
+            node.recover_from_storage()?;
+        }
+        #[cfg(not(feature = "testing"))]
+        node.recover_from_storage()?;
+        #[cfg(feature = "testing")]
+        let started = receipt.as_ref().map(|_| Instant::now());
+        node.recover_known_state_facts()?;
+        #[cfg(feature = "testing")]
+        if let (Some(receipt), Some(started)) = (&mut receipt, started) {
+            receipt.recover_known_state = started.elapsed();
+        }
+        #[cfg(feature = "testing")]
+        let started = receipt.as_ref().map(|_| Instant::now());
+        #[cfg(feature = "testing")]
+        if let Some(receipt) = receipt.as_deref_mut() {
+            node.rebuild_ahead_current_keys_with_receipt(receipt)?;
+        } else {
+            node.rebuild_ahead_current_keys()?;
+        }
+        #[cfg(not(feature = "testing"))]
+        node.rebuild_ahead_current_keys()?;
+        #[cfg(feature = "testing")]
+        if let (Some(receipt), Some(started)) = (&mut receipt, started) {
+            receipt.rebuild_ahead_current = started.elapsed();
+        }
+        #[cfg(feature = "testing")]
+        let started = receipt.as_ref().map(|_| Instant::now());
+        let self_node_alias = node.ensure_node_alias(node_uuid)?;
+        node.self_node_alias = Some(self_node_alias);
+        let schema_alias = node.ensure_schema_version_alias(current_schema_version_id)?;
+        node.catalogue.current_schema_version_alias = Some(schema_alias);
+        #[cfg(feature = "testing")]
+        if let (Some(receipt), Some(started)) = (&mut receipt, started) {
+            receipt.finalize_catalogue = started.elapsed();
+        }
+        Ok(node)
+    }
+
+    fn open_full_database(
+        schema: &JazzSchema,
+        catalogue_schemas: &BTreeMap<SchemaVersionId, SchemaVersion>,
+        schema_version_aliases: &BTreeMap<SchemaVersionId, SchemaVersionAlias>,
+        physical_mappings: &BTreeMap<SchemaVersionId, SchemaPhysicalMapping>,
+        branch_partitions: &BTreeSet<(PhysicalTableId, BranchId)>,
+        storage: S,
+    ) -> Result<Database<S>, Error> {
+        debug_assert_lowered_layouts(schema);
+        let mut lowered = schema.lower_to_groove();
+        lowered.tables.extend(physical_version_storage_tables(
+            catalogue_schemas,
+            schema_version_aliases,
+            physical_mappings,
+            branch_partitions,
+        )?);
+        let layout = StorageLayout::jazz_class_v1();
+        Database::new_with_storage_layout(lowered, storage, layout).map_err(Error::from)
+    }
+
+    pub(crate) fn applied_global_watermark(&self) -> GlobalSeq {
+        self.clock.applied_global_watermark
+    }
+
+    /// Stable identity of the authority issuing wire-level receipts.
+    pub(crate) fn node_uuid(&self) -> NodeUuid {
+        self.node_uuid
+    }
+
+    pub(crate) fn authored_commit_durability(&self) -> DurabilityTier {
+        self.authored_commit_durability
+    }
+
+    pub(crate) fn set_non_durable_client(&mut self) {
+        self.authored_commit_durability = DurabilityTier::None;
+    }
+
+    /// Attach process-local auth claims to an accepted subscriber identity.
+    pub(crate) fn set_session_claims(
+        &mut self,
+        identity: AuthorId,
+        claims: BTreeMap<String, Value>,
+    ) {
+        if self.session_claims.get(&identity) == Some(&claims) {
+            return;
+        }
+        self.session_claims.insert(identity, claims);
+        let revision = self.session_claim_revisions.entry(identity).or_default();
+        *revision = revision
+            .checked_add(1)
+            .expect("session claim revision overflow must stop authorization delivery");
+        self.query.read_policy_authorization_request_cache.clear();
+        self.query.policy_authorization_graph_cache.clear();
+    }
+
+    /// Return the revision of process-local claims for `identity`.
+    pub(crate) fn session_claim_revision(&self, identity: AuthorId) -> u64 {
+        self.session_claim_revisions
+            .get(&identity)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    /// Return the current process-local claims together with their revisions.
+    ///
+    /// Upstream links use this snapshot to decide which claims have not yet
+    /// reached that particular connection.
+    pub(crate) fn session_claims_with_revisions(
+        &self,
+    ) -> Vec<(AuthorId, BTreeMap<String, Value>, u64)> {
+        self.session_claims
+            .iter()
+            .map(|(identity, claims)| {
+                (
+                    *identity,
+                    claims.clone(),
+                    self.session_claim_revision(*identity),
+                )
+            })
+            .collect()
+    }
+
+    /// Gate session-scoped serving until an authority has installed its
+    /// permissions head. Local/offline nodes stay ready by default.
+    pub(crate) fn set_permissions_ready(&mut self, ready: bool) {
+        self.permissions_ready = ready;
+    }
+
+    pub(crate) fn permissions_ready(&self) -> bool {
+        self.permissions_ready
+    }
+
+    fn rebuild_database_slot(&mut self) -> Result<(), Error> {
+        // Reopening the database refreshes Groove's physical table catalogue.
+        // Parking is in-memory delivery state, not derivable from storage, so a
+        // live refresh must retain it for the caller to drain afterwards.
+        let parking = self.parking.clone();
+        let old_database = self.database.take();
+        let storage = old_database.into_storage();
+        let database = Self::open_full_database(
+            &self.catalogue.schema,
+            &self.catalogue.catalogue_schemas,
+            &self.catalogue.schema_version_aliases,
+            &self.catalogue.physical_mappings,
+            &self.branches.branch_partitions,
+            storage,
+        )?;
+        self.database.replace(database);
+        self.register_physical_history_variant_projections()?;
+        self.register_physical_current_variant_projections()?;
+        self.groove_runtime_token = next_groove_runtime_token();
+        self.invalidate_runtime_handles_after_database_rebuild();
+        self.parking = parking;
+        Ok(())
+    }
+
+    /// A catalogue change rebuilds Groove's in-memory graph registry, but it
+    /// does not restart this node. Keep recovered durable facts intact while
+    /// dropping handles and plans that were compiled against the old registry.
+    fn invalidate_runtime_handles_after_database_rebuild(&mut self) {
+        self.query.query_shape_cache.clear();
+        self.query.read_policy_authorization_request_cache.clear();
+        self.query.policy_authorization_graph_cache.clear();
+        self.query.tx_version_tables_cache.clear();
+        self.query.tx_versions_cache.clear();
+        self.query.tx_version_tables_cache_order.clear();
+        self.query.tx_version_tables_cache_order_set.clear();
+        self.query.version_storage_sources_cache.clear();
+        self.query.settled_result_sets.clear();
+        self.query.settled_result_row_index.clear();
+        self.query.settled_program_facts.clear();
+        self.query.settled_through_by_binding_view.clear();
+        self.query.authorization_progress_by_binding_view.clear();
+        self.query.known_state_declared_binding_views.clear();
+        self.query.initial_hydration_binding_views.clear();
+        self.query.deferred_publication_binding_views.clear();
+        self.query.pending_authoritative_reset_binding_views.clear();
+        self.query.pending_opening_binding_views.clear();
+    }
+
+    fn result_member_row_key(member: &ResultMemberEntry) -> Option<ResultRowMembershipKey> {
+        member.output_occurrence_id()
+    }
+
+    fn insert_settled_result_member_indexed(
+        &mut self,
+        binding_view_key: BindingViewKey,
+        member: ResultMemberEntry,
+    ) {
+        if let Some(row_key) = Self::result_member_row_key(&member) {
+            self.query
+                .settled_result_row_index
+                .entry(binding_view_key)
+                .or_default()
+                .insert(row_key, member.clone());
+        }
+        self.query
+            .settled_result_sets
+            .entry(binding_view_key)
+            .or_default()
+            .insert(member);
+    }
+
+    fn remove_settled_result_member_indexed(
+        &mut self,
+        binding_view_key: BindingViewKey,
+        member: &ResultMemberEntry,
+    ) -> bool {
+        let removed = self
+            .query
+            .settled_result_sets
+            .get_mut(&binding_view_key)
+            .is_some_and(|members| members.remove(member));
+        if removed
+            && let Some(row_key) = Self::result_member_row_key(member)
+            && self
+                .query
+                .settled_result_row_index
+                .get(&binding_view_key)
+                .and_then(|index| index.get(&row_key))
+                == Some(member)
+            && let Some(index) = self
+                .query
+                .settled_result_row_index
+                .get_mut(&binding_view_key)
+        {
+            index.remove(&row_key);
+        }
+        removed
+    }
+
+    fn remove_settled_result_member_for_occurrence_indexed(
+        &mut self,
+        binding_view_key: BindingViewKey,
+        occurrence_id: ResultRowMembershipKey,
+    ) -> Option<ResultMemberEntry> {
+        let previous = self
+            .query
+            .settled_result_row_index
+            .get_mut(&binding_view_key)
+            .and_then(|index| index.remove(&occurrence_id))?;
+        if let Some(members) = self.query.settled_result_sets.get_mut(&binding_view_key) {
+            members.remove(&previous);
+        }
+        Some(previous)
+    }
+
+    fn clear_settled_result_view(&mut self, binding_view_key: BindingViewKey) {
+        self.query.settled_result_sets.remove(&binding_view_key);
+        self.query
+            .settled_result_row_index
+            .remove(&binding_view_key);
+    }
+
+    fn open_catalogue_stage(
+        schema: JazzSchema,
+        storage: S,
+        catalogue_bootstrap_state: CatalogueBootstrapState,
+    ) -> Result<CatalogueOpenState<S>, Error> {
+        let current_schema_version_id = schema.version_id();
+        let meta_schema = schema.lower_catalogue_meta_to_groove();
+        let mut meta_database = Database::new_with_storage_layout(
+            meta_schema,
+            storage,
+            StorageLayout::jazz_class_v1(),
+        )?;
+        let mut catalogue_schemas = BTreeMap::new();
+        let mut catalogue_lenses = BTreeMap::new();
+        let mut staged_lineages_by_id = BTreeMap::new();
+        let mut pending_lineages = BTreeMap::new();
+        let mut active_lineages_by_id = BTreeMap::new();
+        let mut pending_write_pointers = BTreeMap::new();
+        let mut genesis_schema = None;
+        let mut catalogue_bootstrap_ready = None;
+        for raw in meta_database.primary_key_scan_raw("jazz_catalogue", &[])? {
+            let record = raw.record();
+            match record.get_bytes(CatalogueRowRecord::FIELD_KIND_IDX)? {
+                b"schema" => {
+                    let schema_version: SchemaVersion = serde_json::from_slice(
+                        record.get_bytes(CatalogueRowRecord::FIELD_PAYLOAD_IDX)?,
+                    )?;
+                    if schema_version.id
+                        != SchemaVersionId(record.get_uuid(CatalogueRowRecord::FIELD_ID_IDX)?)
+                    {
+                        return Err(Error::InvalidStoredValue("catalogue schema id mismatch"));
+                    }
+                    catalogue_schemas.insert(schema_version.id, schema_version);
+                }
+                b"lens" => {
+                    let lens: MigrationLens = serde_json::from_slice(
+                        record.get_bytes(CatalogueRowRecord::FIELD_PAYLOAD_IDX)?,
+                    )?;
+                    if lens.id
+                        != MigrationLensId(record.get_uuid(CatalogueRowRecord::FIELD_ID_IDX)?)
+                    {
+                        return Err(Error::InvalidStoredValue("catalogue lens id mismatch"));
+                    }
+                    catalogue_lenses.insert(lens.id, lens);
+                }
+                b"schema_lineage_staged" => {
+                    let staged: StagedSchemaLineage = serde_json::from_slice(
+                        record.get_bytes(CatalogueRowRecord::FIELD_PAYLOAD_IDX)?,
+                    )?;
+                    if staged.publication.id.0
+                        != record.get_uuid(CatalogueRowRecord::FIELD_ID_IDX)?
+                        || staged.publication.id != staged.publication.content_id()
+                    {
+                        return Err(Error::InvalidStoredValue(
+                            "staged schema lineage id mismatch",
+                        ));
+                    }
+                    staged_lineages_by_id.insert(staged.publication.id, staged);
+                }
+                b"schema_lineage_pending" => {
+                    let pending: PendingSchemaLineage = serde_json::from_slice(
+                        record.get_bytes(CatalogueRowRecord::FIELD_PAYLOAD_IDX)?,
+                    )?;
+                    if pending.publication.id.0
+                        != record.get_uuid(CatalogueRowRecord::FIELD_ID_IDX)?
+                        || pending.publication.id != pending.publication.content_id()
+                        || pending_lineages
+                            .insert(pending.catalogue_seq, pending)
+                            .is_some()
+                    {
+                        return Err(Error::InvalidStoredValue(
+                            "pending schema lineage identity conflict",
+                        ));
+                    }
+                }
+                b"schema_lineage_active" => {
+                    let active: SchemaLineageActivation = serde_json::from_slice(
+                        record.get_bytes(CatalogueRowRecord::FIELD_PAYLOAD_IDX)?,
+                    )?;
+                    if active.id.0 != record.get_uuid(CatalogueRowRecord::FIELD_ID_IDX)?
+                        || active.catalogue_seq == 0
+                        || active_lineages_by_id.insert(active.id, active).is_some()
+                    {
+                        return Err(Error::InvalidStoredValue(
+                            "active schema lineage id mismatch",
+                        ));
+                    }
+                }
+                b"write_pointer_pending" => {
+                    let pointer: CurrentWriteSchema = serde_json::from_slice(
+                        record.get_bytes(CatalogueRowRecord::FIELD_PAYLOAD_IDX)?,
+                    )?;
+                    pending_write_pointers.insert(pointer.revision, pointer);
+                }
+                b"genesis" => {
+                    let schema =
+                        SchemaVersionId(record.get_uuid(CatalogueRowRecord::FIELD_ID_IDX)?);
+                    if genesis_schema.replace(schema).is_some() {
+                        return Err(Error::InvalidStoredValue(
+                            "duplicate catalogue genesis marker",
+                        ));
+                    }
+                }
+                b"bootstrap_ready" => {
+                    let ready: CatalogueBootstrapReady = serde_json::from_slice(
+                        record.get_bytes(CatalogueRowRecord::FIELD_PAYLOAD_IDX)?,
+                    )?;
+                    if ready.genesis.0 != record.get_uuid(CatalogueRowRecord::FIELD_ID_IDX)?
+                        || catalogue_bootstrap_ready.replace(ready).is_some()
+                    {
+                        return Err(Error::InvalidStoredValue(
+                            "duplicate or malformed catalogue bootstrap marker",
+                        ));
+                    }
+                }
+                _ => return Err(Error::InvalidStoredValue("unknown catalogue kind")),
+            }
+        }
+        let mut staged_lineages = BTreeMap::new();
+        let mut active_lineages_by_target = BTreeMap::new();
+        let mut lineage_targets = BTreeSet::new();
+        let mut active_lineages_by_seq = BTreeMap::new();
+        for active in active_lineages_by_id.values() {
+            if active_lineages_by_seq
+                .insert(active.catalogue_seq, active.id)
+                .is_some()
+            {
+                return Err(Error::InvalidStoredValue(
+                    "duplicate active catalogue sequence",
+                ));
+            }
+        }
+        for staged in staged_lineages_by_id.into_values() {
+            Self::validate_durable_staged_lineage(&staged, &catalogue_schemas)?;
+            if staged.catalogue_seq == 0 {
+                return Err(Error::InvalidStoredValue(
+                    "staged schema lineage sequence must be nonzero",
+                ));
+            }
+            if !lineage_targets.insert(staged.publication.schema.id) {
+                return Err(Error::InvalidStoredValue(
+                    "duplicate durable schema lineage target",
+                ));
+            }
+            if let Some(active) = active_lineages_by_id.remove(&staged.publication.id) {
+                if active.catalogue_seq != staged.catalogue_seq {
+                    return Err(Error::InvalidStoredValue(
+                        "active schema lineage payload conflicts with marker",
+                    ));
+                }
+                active_lineages_by_target.insert(staged.publication.schema.id, staged);
+            } else if active_lineages_by_seq.contains_key(&staged.catalogue_seq) {
+                return Err(Error::InvalidStoredValue(
+                    "staged catalogue sequence conflicts with active lineage",
+                ));
+            } else if staged_lineages
+                .insert(staged.catalogue_seq, staged)
+                .is_some()
+            {
+                return Err(Error::InvalidStoredValue(
+                    "duplicate staged catalogue sequence",
+                ));
+            }
+        }
+        if !active_lineages_by_id.is_empty() {
+            return Err(Error::InvalidStoredValue(
+                "active schema lineage is missing canonical payload",
+            ));
+        }
+        for (expected, actual) in (1..).zip(active_lineages_by_seq.keys().copied()) {
+            if actual != expected {
+                return Err(Error::InvalidStoredValue(
+                    "active catalogue sequences are not contiguous",
+                ));
+            }
+        }
+        let active_catalogue_seq = active_lineages_by_seq
+            .keys()
+            .next_back()
+            .copied()
+            .unwrap_or(0);
+        let mut schema_version_aliases = BTreeMap::new();
+        let mut physical_mappings = BTreeMap::new();
+        for raw in meta_database.primary_key_scan_raw("jazz_schema_versions", &[])? {
+            let record = raw.record();
+            let mapping: SchemaPhysicalMapping = serde_json::from_slice(
+                record.get_bytes(SchemaVersionAliasRowRecord::FIELD_PHYSICAL_MAPPING_IDX)?,
+            )?;
+            let schema_version =
+                SchemaVersionId(record.get_uuid(SchemaVersionAliasRowRecord::FIELD_UUID_IDX)?);
+            let alias =
+                SchemaVersionAlias(record.get_u64(SchemaVersionAliasRowRecord::FIELD_ID_IDX)?);
+            schema_version_aliases.insert(schema_version, alias);
+            physical_mappings.insert(schema_version, mapping);
+        }
+        validate_physical_variant_cases(&physical_mappings, &schema_version_aliases)?;
+        let mut next_physical_table_id = 1;
+        let mut next_physical_column_id = 1;
+        for mapping in physical_mappings.values() {
+            for table in mapping.tables.values() {
+                let table_successor = table
+                    .table_id
+                    .0
+                    .checked_add(1)
+                    .ok_or(Error::InvalidStoredValue("physical table id exhausted"))?;
+                next_physical_table_id = next_physical_table_id.max(table_successor);
+                for column_id in table.columns.values() {
+                    let column_successor = column_id
+                        .0
+                        .checked_add(1)
+                        .ok_or(Error::InvalidStoredValue("physical column id exhausted"))?;
+                    next_physical_column_id = next_physical_column_id.max(column_successor);
+                }
+            }
+        }
+        for staged in staged_lineages.values() {
+            for table in staged.mapping.tables.values() {
+                next_physical_table_id = next_physical_table_id.max(
+                    table
+                        .table_id
+                        .0
+                        .checked_add(1)
+                        .ok_or(Error::InvalidStoredValue("physical table id exhausted"))?,
+                );
+                for column in table.columns.values() {
+                    next_physical_column_id = next_physical_column_id.max(
+                        column
+                            .0
+                            .checked_add(1)
+                            .ok_or(Error::InvalidStoredValue("physical column id exhausted"))?,
+                    );
+                }
+            }
+        }
+        match genesis_schema {
+            Some(genesis) if genesis != current_schema_version_id => {
+                return Err(Error::InvalidStoredValue(
+                    "opened schema does not match durable catalogue genesis",
+                ));
+            }
+            None if !catalogue_schemas.is_empty() => {
+                return Err(Error::InvalidStoredValue(
+                    "catalogue schemas exist without a genesis marker",
+                ));
+            }
+            _ => {}
+        }
+        if catalogue_bootstrap_state == CatalogueBootstrapState::Uninitialized
+            && (genesis_schema.is_some()
+                || !catalogue_schemas.is_empty()
+                || !catalogue_lenses.is_empty()
+                || !physical_mappings.is_empty()
+                || !schema_version_aliases.is_empty()
+                || active_catalogue_seq != 0
+                || !staged_lineages.is_empty()
+                || !pending_lineages.is_empty()
+                || !active_lineages_by_target.is_empty()
+                || !pending_write_pointers.is_empty())
+        {
+            return Err(Error::InvalidStoredValue(
+                "uninitialized catalogue open requires empty durable catalogue state",
+            ));
+        }
+        let had_current_schema = catalogue_schemas.contains_key(&current_schema_version_id);
+        if !had_current_schema {
+            catalogue_schemas.insert(
+                current_schema_version_id,
+                SchemaVersion::new(schema.clone()),
+            );
+        }
+        if !physical_mappings.contains_key(&current_schema_version_id)
+            || !schema_version_aliases.contains_key(&current_schema_version_id)
+        {
+            let mapping = match physical_mappings.get(&current_schema_version_id) {
+                Some(mapping) => mapping.clone(),
+                None => allocate_provisional_physical_mapping(
+                    &schema,
+                    &mut next_physical_table_id,
+                    &mut next_physical_column_id,
+                )?,
+            };
+            let alias = schema_version_aliases
+                .get(&current_schema_version_id)
+                .copied()
+                .unwrap_or(SchemaVersionAlias(
+                    schema_version_aliases
+                        .values()
+                        .map(|alias| alias.0)
+                        .max()
+                        .unwrap_or(0)
+                        .checked_add(1)
+                        .ok_or(Error::InvalidStoredValue("schema version alias exhausted"))?,
+                ));
+            if catalogue_bootstrap_state == CatalogueBootstrapState::Ready {
+                let mut batch = meta_database.open_batch();
+                if genesis_schema.is_none() {
+                    batch.update(
+                        "jazz_catalogue",
+                        vec![
+                            Value::Bytes(b"genesis".to_vec()),
+                            Value::Uuid(current_schema_version_id.0),
+                            Value::Bytes(Vec::new()),
+                        ],
+                    );
+                }
+                if !had_current_schema {
+                    batch.update(
+                        "jazz_catalogue",
+                        vec![
+                            Value::Bytes(b"schema".to_vec()),
+                            Value::Uuid(current_schema_version_id.0),
+                            Value::Bytes(serde_json::to_vec(&SchemaVersion::new(schema.clone()))?),
+                        ],
+                    );
+                }
+                Self::write_schema_version_mapping_to_batch(
+                    &mut batch,
+                    alias,
+                    current_schema_version_id,
+                    &mapping,
+                )?;
+                meta_database.commit_batch(batch)?;
+            }
+            schema_version_aliases.insert(current_schema_version_id, alias);
+            physical_mappings.insert(current_schema_version_id, mapping);
+        }
+        let mut current_write_schema = CurrentWriteSchema {
+            revision: 0,
+            schema: current_schema_version_id,
+        };
+        if let Some(raw) = meta_database.primary_key_last_raw("jazz_catalogue_pointer", &[])? {
+            let record = raw.record();
+            current_write_schema = CurrentWriteSchema {
+                revision: record.get_u64(CataloguePointerRowRecord::FIELD_REVISION_IDX)?,
+                schema: SchemaVersionId(
+                    record.get_uuid(CataloguePointerRowRecord::FIELD_SCHEMA_IDX)?,
+                ),
+            };
+        }
+        let mut branch_partitions = BTreeSet::new();
+        for raw in meta_database.primary_key_scan_raw("jazz_branch_partitions", &[])? {
+            let record = raw.record();
+            let table_id = PhysicalTableId(
+                record.get_u64(BranchPartitionRowRecord::FIELD_PHYSICAL_TABLE_ID_IDX)?,
+            );
+            let branch_id =
+                BranchId(record.get_uuid(BranchPartitionRowRecord::FIELD_BRANCH_ID_IDX)?);
+            branch_partitions.insert((table_id, branch_id));
+        }
+        Ok(CatalogueOpenState {
+            storage: meta_database.into_storage(),
+            schemas: catalogue_schemas,
+            lenses: catalogue_lenses,
+            schema_version_aliases,
+            physical_mappings,
+            staged_lineages,
+            pending_lineages,
+            active_lineages_by_target,
+            active_catalogue_seq,
+            pending_write_pointers,
+            next_physical_table_id,
+            next_physical_column_id,
+            current_write_schema,
+            branch_partitions,
+            catalogue_bootstrap_marker: catalogue_bootstrap_ready.is_some(),
+        })
+    }
+
+    fn validate_durable_staged_lineage(
+        staged: &StagedSchemaLineage,
+        catalogue_schemas: &BTreeMap<SchemaVersionId, SchemaVersion>,
+    ) -> Result<(), Error> {
+        Self::validate_schema_lineage_publication(&staged.publication).map_err(|_| {
+            Error::InvalidStoredValue(
+                "staged schema lineage violates trusted publication invariants",
+            )
+        })?;
+        let source = catalogue_schemas
+            .get(&staged.publication.lens.source)
+            .ok_or(Error::InvalidStoredValue(
+                "staged schema lineage source is missing",
+            ))?;
+        Self::validate_migration_lens_between(
+            &staged.publication.lens,
+            source,
+            &staged.publication.schema,
+        )
+        .map_err(|_| Error::InvalidStoredValue("staged schema lineage lens is invalid"))?;
+        Self::validate_lineage_table_partition(
+            &source.schema,
+            &staged.publication.schema.schema,
+            &staged.publication.lens,
+            &staged.publication.new_tables,
+            &staged.publication.dropped_tables,
+        )
+        .map_err(|_| {
+            Error::InvalidStoredValue("staged schema lineage table partition is invalid")
+        })?;
+        Ok(())
+    }
+
+}
