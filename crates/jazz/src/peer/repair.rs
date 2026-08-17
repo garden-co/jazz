@@ -14,7 +14,7 @@ impl PeerState {
         now_ms: u64,
     ) -> Result<Vec<SyncMessage>, Error>
     where
-        S: OrderedKvStorage + ReopenableStorage,
+        S: ResidentStorage + ReopenableStorage,
     {
         self.evict_idle_edge_scope_subscriptions(node, now_ms);
         if tx.kind != TxKind::Mergeable {
@@ -63,7 +63,7 @@ impl PeerState {
         now_ms: u64,
     ) -> Result<Vec<SyncMessage>, Error>
     where
-        S: OrderedKvStorage + ReopenableStorage,
+        S: ResidentStorage + ReopenableStorage,
     {
         self.evict_idle_edge_scope_subscriptions(node, now_ms);
         let deferred = self
@@ -151,7 +151,7 @@ impl PeerState {
         versions: &[VersionRecord],
     ) -> Result<(), Error>
     where
-        S: OrderedKvStorage,
+        S: ResidentStorage,
     {
         for action in node.authorization_actions_for_versions(versions)? {
             let scope = node.authorization_support_scope(writer, &action)?;
@@ -243,7 +243,7 @@ impl PeerState {
         retained_scope_is_unsettled: bool,
     ) -> Result<Option<Vec<SubscriptionKey>>, Error>
     where
-        S: OrderedKvStorage,
+        S: ResidentStorage,
     {
         let mut unsettled = Vec::new();
         for action in node.authorization_actions_for_versions(versions)? {
@@ -364,7 +364,7 @@ impl PeerState {
         subscription: SubscriptionKey,
         now_ms: u64,
     ) where
-        S: OrderedKvStorage,
+        S: ResidentStorage,
     {
         let Some(refcount) = self.edge_scope_subscription_refs.get_mut(&subscription) else {
             return;
@@ -383,7 +383,7 @@ impl PeerState {
 
     fn evict_idle_edge_scope_subscriptions<S>(&mut self, node: &mut NodeState<S>, now_ms: u64)
     where
-        S: OrderedKvStorage,
+        S: ResidentStorage,
     {
         let ttl_ms = edge_scope_ttl_ms();
         if ttl_ms == 0 {

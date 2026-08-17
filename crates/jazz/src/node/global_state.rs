@@ -9,7 +9,7 @@ use super::*;
 
 impl<S> NodeState<S>
 where
-    S: OrderedKvStorage,
+    S: ResidentStorage,
 {
     pub(super) fn global_layer_winner_at(
         &mut self,

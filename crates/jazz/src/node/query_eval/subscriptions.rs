@@ -8,7 +8,7 @@ use super::*;
 
 impl<S> NodeState<S>
 where
-    S: OrderedKvStorage,
+    S: ResidentStorage,
 {
     pub(in crate::node) fn register_shape(
         &mut self,

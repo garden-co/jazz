@@ -2,7 +2,7 @@
 //!
 //! This module owns the backing-implementation contract: column families, point
 //! reads, ordered range/prefix scans, reverse/prefix helpers, and atomic write
-//! batches. Storage backends only need to provide [`OrderedKvStorage`]. Higher
+//! batches. Storage backends only need to provide [`ResidentStorage`]. Higher
 //! layers should work through record-store handles such as [`RecordStore`] and
 //! directly exposed direct stores rather than reaching through to column
 //! families or raw ordered-KV operations.
@@ -12,11 +12,12 @@
 //! adapters live in outward crates; higher layers decide when a batch is
 //! durable and how storage writes relate to an IVM tick.
 
+/// Owned-request asynchronous ordered storage boundary.
+pub mod async_ordered;
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 mod key_codec;
 mod memory;
 mod opfs;
-pub mod pollable;
 mod resident_cache;
 
 use std::cell::RefCell;
@@ -180,15 +181,15 @@ fn current_winner_key(
     ))
 }
 
-/// Backing-implementation interface for ordered key/value storage.
+/// Synchronous ordered view of the keys currently admitted to the core.
 ///
-/// This is the only trait a storage backend must implement. Its column-family
-/// names are backing details consumed by record-store plumbing; higher layers
-/// should use typed record-store handles instead of calling these methods
-/// directly. The trait intentionally exposes batch atomicity but no higher
-/// transaction semantics; `commit_batch` owns the tick ordering above this
-/// layer.
-pub trait OrderedKvStorage {
+/// Groove evaluates against this interface without suspending. A complete
+/// in-memory store can implement it directly; a durable async runtime normally
+/// supplies a demand-loaded resident cache and handles [`Error::NotResident`]
+/// through [`async_ordered::OrderedKvStorage`]. Column-family names remain
+/// backing details consumed by record-store plumbing; higher layers should use
+/// typed record-store handles instead of calling these methods directly.
+pub trait ResidentStorage {
     /// Begin an encoded storage transaction over this backend.
     ///
     /// The transaction buffers already-encoded key/value writes and presents
@@ -479,7 +480,7 @@ pub struct LayoutStorage<S> {
 
 impl<S> LayoutStorage<S>
 where
-    S: OrderedKvStorage,
+    S: ResidentStorage,
 {
     pub fn new(inner: S, layout: StorageLayout) -> Result<Self, Error> {
         let storage = Self { inner, layout };
@@ -572,9 +573,9 @@ where
     }
 }
 
-impl<S> OrderedKvStorage for LayoutStorage<S>
+impl<S> ResidentStorage for LayoutStorage<S>
 where
-    S: OrderedKvStorage,
+    S: ResidentStorage,
 {
     fn get(&self, cf: &ColumnFamilyName, key: &Key) -> Result<Option<Value>, Error> {
         let (physical_cf, physical_key) = self.physical_key(cf, key);
@@ -719,13 +720,13 @@ where
 }
 
 /// Storage that can be reconstructed with an expanded table/column-family set.
-pub trait ReopenableStorage: OrderedKvStorage + Sized {
+pub trait ReopenableStorage: ResidentStorage + Sized {
     fn reopen(self, column_families: &[&str]) -> Result<Self, Error>;
 }
 
 /// Object-safe form of [`ReopenableStorage`] used at runtime adapter
 /// boundaries.
-pub trait ErasedReopenableStorage: OrderedKvStorage + Send {
+pub trait ErasedReopenableStorage: ResidentStorage + Send {
     fn reopen_boxed(
         self: Box<Self>,
         column_families: &[&str],
@@ -760,7 +761,7 @@ impl BoxedStorage {
     }
 }
 
-impl OrderedKvStorage for BoxedStorage {
+impl ResidentStorage for BoxedStorage {
     fn get(&self, cf: &ColumnFamilyName, key: &Key) -> Result<Option<Value>, Error> {
         self.inner.get(cf, key)
     }
@@ -868,7 +869,7 @@ pub struct RecordStore<'a, S> {
 
 impl<'a, S> RecordStore<'a, S>
 where
-    S: OrderedKvStorage,
+    S: ResidentStorage,
 {
     pub fn new(storage: &'a S, column_family: &'a str, descriptor: &'a RecordDescriptor) -> Self {
         Self {
@@ -1122,7 +1123,7 @@ pub struct StorageTransaction<'a, S> {
 
 impl<'a, S> StorageTransaction<'a, S>
 where
-    S: OrderedKvStorage,
+    S: ResidentStorage,
 {
     pub fn new(base: &'a S) -> Self {
         Self {
@@ -1152,9 +1153,9 @@ where
     }
 }
 
-impl<S> OrderedKvStorage for StorageTransaction<'_, S>
+impl<S> ResidentStorage for StorageTransaction<'_, S>
 where
-    S: OrderedKvStorage,
+    S: ResidentStorage,
 {
     fn get(&self, cf: &ColumnFamilyName, key: &Key) -> Result<Option<Value>, Error> {
         StagedWriteOverlay::new(self.base, &self.staged_writes).get(cf, key)
@@ -1246,9 +1247,9 @@ impl<'a, S> StagedWriteOverlay<'a, S> {
     }
 }
 
-impl<S> OrderedKvStorage for StagedWriteOverlay<'_, S>
+impl<S> ResidentStorage for StagedWriteOverlay<'_, S>
 where
-    S: OrderedKvStorage,
+    S: ResidentStorage,
 {
     fn get(&self, cf: &ColumnFamilyName, key: &Key) -> Result<Option<Value>, Error> {
         if self.staged_writes.borrow().is_empty() {
@@ -1660,7 +1661,7 @@ impl<'a> WriteOperation<'a> {
 pub enum Error {
     #[error("ordered storage input is not resident: {request:?}")]
     NotResident {
-        request: Box<pollable::OwnedStorageOperation>,
+        request: Box<async_ordered::OwnedStorageOperation>,
     },
     #[error("column family not found: {0}")]
     ColumnFamilyNotFound(String),
@@ -1693,7 +1694,7 @@ pub(crate) mod conformance {
 
     pub(crate) fn persistence_order_and_batch_atomicity<S>(storage: S)
     where
-        S: OrderedKvStorage,
+        S: ResidentStorage,
     {
         storage.set("records", b"user:2", b"two").unwrap();
         storage.set("records", b"user:1", b"one").unwrap();
@@ -1763,7 +1764,7 @@ pub(crate) mod conformance {
 
     pub(crate) fn delta_append_current_winner_observes_merged_state<S>(storage: S)
     where
-        S: OrderedKvStorage,
+        S: ResidentStorage,
     {
         fn record(time: u64, node: u8, payload: &[u8]) -> Vec<u8> {
             let mut bytes = Vec::new();
@@ -1850,7 +1851,7 @@ mod tests {
         ));
     }
 
-    fn reverse_prefix_values<S: OrderedKvStorage>(
+    fn reverse_prefix_values<S: ResidentStorage>(
         storage: &S,
         cf: &str,
         prefix: &[u8],
@@ -2428,9 +2429,9 @@ mod tests {
     fn staged_overlay_reverse_prefix_scans_match_trait_default() {
         struct DefaultReverse<'a, S>(&'a StagedWriteOverlay<'a, S>);
 
-        impl<S> OrderedKvStorage for DefaultReverse<'_, S>
+        impl<S> ResidentStorage for DefaultReverse<'_, S>
         where
-            S: OrderedKvStorage,
+            S: ResidentStorage,
         {
             fn get(&self, cf: &ColumnFamilyName, key: &Key) -> Result<Option<Vec<u8>>, Error> {
                 self.0.get(cf, key)
@@ -2629,9 +2630,9 @@ mod tests {
             }
         }
 
-        impl<S> OrderedKvStorage for CountingStorage<S>
+        impl<S> ResidentStorage for CountingStorage<S>
         where
-            S: OrderedKvStorage,
+            S: ResidentStorage,
         {
             fn get(&self, cf: &ColumnFamilyName, key: &Key) -> Result<Option<Vec<u8>>, Error> {
                 self.inner.get(cf, key)

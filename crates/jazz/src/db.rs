@@ -22,7 +22,7 @@ use futures_channel::oneshot;
 use futures_core::Stream;
 use groove::records::{OwnedRecord, RecordDescriptor, Value};
 use groove::schema::ColumnType as GrooveColumnType;
-use groove::storage::{OrderedKvStorage, ReopenableStorage};
+use groove::storage::{ReopenableStorage, ResidentStorage};
 use thiserror::Error;
 #[cfg(feature = "cold-settle-attribution")]
 use web_time::Instant;
@@ -250,7 +250,7 @@ pub fn block_on<F: Future>(future: F) -> F::Output {
 /// Thread-affine high-level database handle.
 pub struct Db<S>
 where
-    S: OrderedKvStorage,
+    S: ResidentStorage,
 {
     schema: JazzSchema,
     schema_version_id: SchemaVersionId,
@@ -372,7 +372,7 @@ fn register_local_fate_route(
 
 fn queue_local_acknowledgements<S>(routes: &LocalFateRoutes, node: &Rc<RefCell<NodeState<S>>>)
 where
-    S: OrderedKvStorage,
+    S: ResidentStorage,
 {
     let mut routes = routes.borrow_mut();
     let mut node = node.borrow_mut();
@@ -433,7 +433,7 @@ fn collect_local_replay_commit_units<S>(
     units: &mut Vec<(TxId, SyncMessage)>,
 ) -> Result<(), Error>
 where
-    S: OrderedKvStorage,
+    S: ResidentStorage,
 {
     if !visited.insert(tx_id) {
         return Ok(());
@@ -1193,7 +1193,7 @@ fn validate_shape_ast_for_registration<S>(
     ast: &ShapeAst,
 ) -> Result<Option<ValidatedQuery>, crate::node::Error>
 where
-    S: OrderedKvStorage,
+    S: ResidentStorage,
 {
     node.validate_shape_ast_for_registration(shape_id, ast)
 }
@@ -1372,7 +1372,7 @@ macro_rules! row {
 /// Import this trait to call its methods.
 pub trait MergeableTxOps<S>
 where
-    S: OrderedKvStorage + ReopenableStorage + 'static,
+    S: ResidentStorage + ReopenableStorage + 'static,
 {
     /// The database that owns the open transaction.
     fn db(&self) -> &Db<S>;
@@ -1544,7 +1544,7 @@ where
 /// [`OpenBatchId`] between calls and must not close the transaction on return.
 pub struct MergeableTx<'a, S>
 where
-    S: OrderedKvStorage + ReopenableStorage + 'static,
+    S: ResidentStorage + ReopenableStorage + 'static,
 {
     db: &'a Db<S>,
     tx_id: OpenBatchId,
@@ -1558,7 +1558,7 @@ where
 
 impl<S> MergeableTx<'_, S>
 where
-    S: OrderedKvStorage + ReopenableStorage + 'static,
+    S: ResidentStorage + ReopenableStorage + 'static,
 {
     /// Commit all staged writes as one mergeable transaction.
     ///
@@ -1576,7 +1576,7 @@ where
 
 impl<S> MergeableTxOps<S> for MergeableTx<'_, S>
 where
-    S: OrderedKvStorage + ReopenableStorage + 'static,
+    S: ResidentStorage + ReopenableStorage + 'static,
 {
     fn db(&self) -> &Db<S> {
         self.db
@@ -1593,7 +1593,7 @@ where
 /// [`OpenBatchId`] lifetime. Dropping this ref never abandons the transaction.
 pub struct MergeableTxRef<'a, S>
 where
-    S: OrderedKvStorage + ReopenableStorage + 'static,
+    S: ResidentStorage + ReopenableStorage + 'static,
 {
     db: &'a Db<S>,
     tx_id: OpenBatchId,
@@ -1601,7 +1601,7 @@ where
 
 impl<S> MergeableTxOps<S> for MergeableTxRef<'_, S>
 where
-    S: OrderedKvStorage + ReopenableStorage + 'static,
+    S: ResidentStorage + ReopenableStorage + 'static,
 {
     fn db(&self) -> &Db<S> {
         self.db
@@ -1614,7 +1614,7 @@ where
 
 impl<S> Drop for MergeableTx<'_, S>
 where
-    S: OrderedKvStorage + ReopenableStorage + 'static,
+    S: ResidentStorage + ReopenableStorage + 'static,
 {
     fn drop(&mut self) {
         if self.committed {
@@ -1631,7 +1631,7 @@ where
 /// lifetime. Import this trait to call its methods.
 pub trait ExclusiveTxOps<S>
 where
-    S: OrderedKvStorage + ReopenableStorage + 'static,
+    S: ResidentStorage + ReopenableStorage + 'static,
 {
     /// The database that owns the open transaction.
     fn db(&self) -> &Db<S>;
@@ -1727,7 +1727,7 @@ where
 /// [`OpenBatchId`] between calls and must not close the transaction on return.
 pub struct ExclusiveTx<'a, S>
 where
-    S: OrderedKvStorage + ReopenableStorage + 'static,
+    S: ResidentStorage + ReopenableStorage + 'static,
 {
     db: &'a Db<S>,
     tx_id: OpenBatchId,
@@ -1736,7 +1736,7 @@ where
 
 impl<S> ExclusiveTx<'_, S>
 where
-    S: OrderedKvStorage + ReopenableStorage + 'static,
+    S: ResidentStorage + ReopenableStorage + 'static,
 {
     /// Commit the exclusive transaction.
     ///
@@ -1754,7 +1754,7 @@ where
 
 impl<S> ExclusiveTxOps<S> for ExclusiveTx<'_, S>
 where
-    S: OrderedKvStorage + ReopenableStorage + 'static,
+    S: ResidentStorage + ReopenableStorage + 'static,
 {
     fn db(&self) -> &Db<S> {
         self.db
@@ -1767,7 +1767,7 @@ where
 
 impl<S> Drop for ExclusiveTx<'_, S>
 where
-    S: OrderedKvStorage + ReopenableStorage + 'static,
+    S: ResidentStorage + ReopenableStorage + 'static,
 {
     fn drop(&mut self) {
         if self.committed {
@@ -1783,7 +1783,7 @@ where
 /// [`OpenBatchId`] lifetime. Dropping this ref never abandons the transaction.
 pub struct ExclusiveTxRef<'a, S>
 where
-    S: OrderedKvStorage + ReopenableStorage + 'static,
+    S: ResidentStorage + ReopenableStorage + 'static,
 {
     db: &'a Db<S>,
     tx_id: OpenBatchId,
@@ -1791,7 +1791,7 @@ where
 
 impl<S> ExclusiveTxOps<S> for ExclusiveTxRef<'_, S>
 where
-    S: OrderedKvStorage + ReopenableStorage + 'static,
+    S: ResidentStorage + ReopenableStorage + 'static,
 {
     fn db(&self) -> &Db<S> {
         self.db
@@ -1805,7 +1805,7 @@ where
 /// Handle for an applied local write.
 pub struct WriteHandle<S>
 where
-    S: OrderedKvStorage,
+    S: ResidentStorage,
 {
     node: Weak<RefCell<NodeState<S>>>,
     row_uuid: RowUuid,
@@ -1815,7 +1815,7 @@ where
 
 impl<S> WriteHandle<S>
 where
-    S: OrderedKvStorage,
+    S: ResidentStorage,
 {
     /// Generated or caller-supplied row id affected by this write.
     pub fn row_uuid(&self) -> RowUuid {
@@ -2731,7 +2731,7 @@ fn order_maintained_snapshot_roots<S>(
     snapshot_index: &mut RelationSnapshotIndex,
 ) -> Result<(), Error>
 where
-    S: OrderedKvStorage,
+    S: ResidentStorage,
 {
     let mut roots = snapshot.rows[..snapshot.root_count].to_vec();
     let mut occurrences = snapshot_root_occurrences(snapshot, snapshot_index)?;
@@ -2808,7 +2808,7 @@ fn maintained_snapshot_index_or_row_index<S>(
     snapshot: &RelationSnapshot,
 ) -> Result<RelationSnapshotIndex, Error>
 where
-    S: OrderedKvStorage,
+    S: ResidentStorage,
 {
     let SubscriptionKind::Prepared {
         shape,
@@ -2858,7 +2858,7 @@ fn subscription_is_settled<S>(
     requires_authority_receipt: bool,
 ) -> bool
 where
-    S: OrderedKvStorage,
+    S: ResidentStorage,
 {
     if tier <= DurabilityTier::Local {
         return true;

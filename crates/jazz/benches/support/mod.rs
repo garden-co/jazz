@@ -7,7 +7,7 @@ use jazz::groove::db::{
     CommitMetrics, StorageReadBucket, StorageReadMetrics, StorageWriteBucket, StorageWriteMetrics,
 };
 use jazz::groove::ivm::{RuntimeStats, TickMetrics};
-use jazz::groove::storage::OrderedKvStorage;
+use jazz::groove::storage::ResidentStorage;
 use jazz::node::{NodeState, QueryEngineReadMetrics, SyncMetrics};
 use jazz::tx::DurabilityTier;
 use serde_json::{Map, Value, json};
@@ -48,7 +48,7 @@ pub fn phase_fields(phase: &str, wall_us: u128) -> Map<String, Value> {
 
 pub fn insert_node_metrics<S>(fields: &mut Map<String, Value>, prefix: &str, node: &NodeState<S>)
 where
-    S: OrderedKvStorage,
+    S: ResidentStorage,
 {
     insert_storage_read_metrics(
         fields,
@@ -71,7 +71,7 @@ where
 
 pub fn reset_phase_counters<S>(nodes: &mut [&mut NodeState<S>])
 where
-    S: OrderedKvStorage,
+    S: ResidentStorage,
 {
     for node in nodes {
         node.reset_storage_read_metrics();

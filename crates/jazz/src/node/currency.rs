@@ -10,7 +10,7 @@ use crate::tx::BranchLineage;
 
 impl<S> NodeState<S>
 where
-    S: OrderedKvStorage,
+    S: ResidentStorage,
 {
     #[allow(dead_code)] // Stage 1 read primitive; production reads switch in Stage 2.
     pub(super) fn query_row_versions(

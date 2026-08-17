@@ -1,6 +1,6 @@
 impl<S> NodeState<S>
 where
-    S: OrderedKvStorage,
+    S: ResidentStorage,
 {
     /// Open or create a node over the supplied storage.
     pub fn new(node_uuid: NodeUuid, schema: JazzSchema, storage: S) -> Result<Self, Error>

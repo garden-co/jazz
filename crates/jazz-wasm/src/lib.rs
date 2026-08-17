@@ -16,7 +16,7 @@ use jazz::db::{
 use jazz::groove::records::{BorrowedRecord, RecordDescriptor, Value};
 #[cfg(target_arch = "wasm32")]
 use jazz::groove::storage::OpfsStorage;
-use jazz::groove::storage::{MemoryStorage, OrderedKvStorage, ReopenableStorage};
+use jazz::groove::storage::{MemoryStorage, ReopenableStorage, ResidentStorage};
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::protocol::PermissionAdviceAction;
 use jazz::query::{Query, RelationExpr, RelationQuery};
@@ -2411,7 +2411,7 @@ fn open_db<S>(
     config: WasmOpenDbConfig,
 ) -> Result<Db<S>, jazz::db::Error>
 where
-    S: OrderedKvStorage + ReopenableStorage + 'static,
+    S: ResidentStorage + ReopenableStorage + 'static,
 {
     let mut db_config = DbConfig::new(schema, storage, config.identity.into());
     if let Some(seed) = config.row_id_seed {
@@ -2434,7 +2434,7 @@ fn configure_initial_sync_flush_cadence<S>(
     every: Option<u32>,
 ) -> Result<(), jazz::db::Error>
 where
-    S: OrderedKvStorage + ReopenableStorage + 'static,
+    S: ResidentStorage + ReopenableStorage + 'static,
 {
     let Some(every) = every else {
         return Ok(());
@@ -2447,7 +2447,7 @@ where
 
 fn tick_connection<S>(connection: &Option<Rc<RefCell<PeerConnection<S>>>>) -> Result<u32, JsValue>
 where
-    S: OrderedKvStorage + ReopenableStorage + 'static,
+    S: ResidentStorage + ReopenableStorage + 'static,
 {
     let Some(connection) = connection else {
         return Ok(0);
@@ -2458,7 +2458,7 @@ where
 
 fn wait_promise<S>(db: &Db<S>, tx_id: TxId, tier: DurabilityTier) -> js_sys::Promise
 where
-    S: OrderedKvStorage + ReopenableStorage + 'static,
+    S: ResidentStorage + ReopenableStorage + 'static,
 {
     js_sys::Promise::new(&mut |resolve, reject| {
         db.wait_for_transaction_with(tx_id, tier, move |result| match result {
@@ -2488,7 +2488,7 @@ fn author_id_from_bytes(bytes: &[u8]) -> Result<AuthorId, JsValue> {
 
 fn set_identity_claims<S>(db: &Db<S>, author: AuthorId)
 where
-    S: OrderedKvStorage + ReopenableStorage + 'static,
+    S: ResidentStorage + ReopenableStorage + 'static,
 {
     let subject = author.0.to_string();
     db.set_identity_claims(

@@ -33,7 +33,7 @@ impl FailWriteManyMemoryStorage {
     }
 }
 
-impl OrderedKvStorage for FailWriteManyMemoryStorage {
+impl ResidentStorage for FailWriteManyMemoryStorage {
     fn get(
         &self,
         cf: &ColumnFamilyName,
@@ -225,18 +225,18 @@ struct GatedAuthorityStorage {
     fail_commits: std::rc::Rc<std::cell::Cell<bool>>,
 }
 
-impl groove::storage::pollable::PollableOrderedKvStorage for GatedAuthorityStorage {
+impl groove::storage::async_ordered::OrderedKvStorage for GatedAuthorityStorage {
     fn poll_request(
         &mut self,
-        request: &groove::storage::pollable::OwnedStorageRequest,
+        request: &groove::storage::async_ordered::OwnedStorageRequest,
         context: &mut std::task::Context<'_>,
     ) -> std::task::Poll<
-        Result<groove::storage::pollable::OwnedStorageResponse, groove::storage::Error>,
+        Result<groove::storage::async_ordered::OwnedStorageResponse, groove::storage::Error>,
     > {
         if !self.released.get() {
             return std::task::Poll::Pending;
         }
-        if let groove::storage::pollable::OwnedStorageOperation::Commit(operations) =
+        if let groove::storage::async_ordered::OwnedStorageOperation::Commit(operations) =
             request.operation()
         {
             if self.fail_commits.get() {
@@ -259,7 +259,7 @@ impl groove::storage::pollable::PollableOrderedKvStorage for GatedAuthorityStora
             let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
             self.inner = self.inner.clone().reopen(&refs)?;
         }
-        groove::storage::pollable::PollableOrderedKvStorage::poll_request(
+        groove::storage::async_ordered::OrderedKvStorage::poll_request(
             &mut self.inner,
             request,
             context,
@@ -268,7 +268,7 @@ impl groove::storage::pollable::PollableOrderedKvStorage for GatedAuthorityStora
 
     fn cancel_request(
         &mut self,
-        _request: groove::storage::pollable::StorageRequestId,
+        _request: groove::storage::async_ordered::StorageRequestId,
     ) -> Result<(), groove::storage::Error> {
         self.cancellations
             .set(self.cancellations.get().saturating_add(1));

@@ -16,7 +16,7 @@ const STORAGE_CONSISTENCY_MARKER_VERSION: u64 = 1;
 
 impl<S> NodeState<S>
 where
-    S: OrderedKvStorage,
+    S: ResidentStorage,
 {
     pub(super) fn persist_clean_close_marker(&self) -> Result<(), Error> {
         self.database

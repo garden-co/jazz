@@ -97,7 +97,7 @@ pub(super) fn validate_table_schema_variants(table: &TableSchema) -> Result<(), 
 
 impl<S> Database<S>
 where
-    S: OrderedKvStorage,
+    S: ResidentStorage,
 {
     /// Return the live schema for a table.
     pub fn table_schema(&self, table: &str) -> Result<&TableSchema, Error> {

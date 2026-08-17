@@ -4,7 +4,7 @@ use super::*;
 
 impl<S> Db<S>
 where
-    S: OrderedKvStorage + ReopenableStorage + 'static,
+    S: ResidentStorage + ReopenableStorage + 'static,
 {
     /// Insert a row locally, generating a uuidv7-shaped row id.
     ///

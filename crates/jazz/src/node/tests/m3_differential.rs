@@ -69,7 +69,7 @@ type AggregateSpec = (
 );
 
 impl DifferentialOracle {
-    fn open<S: OrderedKvStorage>(
+    fn open<S: ResidentStorage>(
         core: &mut NodeState<S>,
         schema: &JazzSchema,
         shapes: Vec<DifferentialShape>,
@@ -78,7 +78,7 @@ impl DifferentialOracle {
         Self::open_with_aggregate_specs(core, schema, shapes, aggregate_differential_specs(), seed)
     }
 
-    fn open_with_aggregate_specs<S: OrderedKvStorage>(
+    fn open_with_aggregate_specs<S: ResidentStorage>(
         core: &mut NodeState<S>,
         schema: &JazzSchema,
         shapes: Vec<DifferentialShape>,
@@ -147,7 +147,7 @@ impl DifferentialOracle {
         oracle
     }
 
-    fn tick_and_assert<S: OrderedKvStorage>(
+    fn tick_and_assert<S: ResidentStorage>(
         &mut self,
         core: &mut NodeState<S>,
         seed: u64,
@@ -157,7 +157,7 @@ impl DifferentialOracle {
         self.assert_checkpoint(core, seed, checkpoint);
     }
 
-    fn tick<S: OrderedKvStorage>(
+    fn tick<S: ResidentStorage>(
         &mut self,
         core: &mut NodeState<S>,
         seed: u64,
@@ -210,7 +210,7 @@ impl DifferentialOracle {
         }
     }
 
-    fn assert_checkpoint<S: OrderedKvStorage>(
+    fn assert_checkpoint<S: ResidentStorage>(
         &mut self,
         core: &mut NodeState<S>,
         seed: u64,
@@ -439,7 +439,7 @@ fn churn_row(index: u64) -> RowUuid {
     RowUuid::from_bytes(bytes)
 }
 
-fn accept_churn_with_parent<S: OrderedKvStorage>(
+fn accept_churn_with_parent<S: ResidentStorage>(
     core: &mut NodeState<S>,
     parents: &mut BTreeMap<RowUuid, TxId>,
     row_uuid: RowUuid,
@@ -461,7 +461,7 @@ fn accept_churn_with_parent<S: OrderedKvStorage>(
     parents.insert(row_uuid, tx_id);
 }
 
-fn delete_churn_with_parent<S: OrderedKvStorage>(
+fn delete_churn_with_parent<S: ResidentStorage>(
     core: &mut NodeState<S>,
     parents: &mut BTreeMap<RowUuid, TxId>,
     row_uuid: RowUuid,
@@ -675,7 +675,7 @@ fn m3_maintained_one_shot_differential_oracle_null_semantics() {
     );
 }
 
-fn report_f64_churn_divergence<S: OrderedKvStorage>(
+fn report_f64_churn_divergence<S: ResidentStorage>(
     differential: &DifferentialOracle,
     core: &mut NodeState<S>,
     depth: u64,
@@ -1639,7 +1639,7 @@ fn latest_tx_for_row(
         .map(|row| row.tx_id())
 }
 
-fn one_shot_rows<S: OrderedKvStorage>(
+fn one_shot_rows<S: ResidentStorage>(
     core: &mut NodeState<S>,
     shape: &ValidatedQuery,
     binding: &Binding,
@@ -1757,7 +1757,7 @@ fn aggregate_payload_value(
     Some((bucket, value))
 }
 
-fn one_shot_aggregate_values<S: OrderedKvStorage>(
+fn one_shot_aggregate_values<S: ResidentStorage>(
     core: &mut NodeState<S>,
     shape: &ValidatedQuery,
     binding: &Binding,
@@ -1777,7 +1777,7 @@ fn one_shot_aggregate_values<S: OrderedKvStorage>(
         .collect()
 }
 
-fn assert_aggregate_agreement<S: OrderedKvStorage>(
+fn assert_aggregate_agreement<S: ResidentStorage>(
     maintained: &BTreeMap<u64, Value>,
     one_shot: &BTreeMap<u64, Value>,
     aggregate: &AggregateDifferential,
@@ -1823,7 +1823,7 @@ fn assert_aggregate_agreement<S: OrderedKvStorage>(
     }
 }
 
-fn f64_absolute_sums_by_bucket<S: OrderedKvStorage>(
+fn f64_absolute_sums_by_bucket<S: ResidentStorage>(
     core: &mut NodeState<S>,
 ) -> BTreeMap<u64, f64> {
     let mut sums = BTreeMap::new();

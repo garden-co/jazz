@@ -4,7 +4,7 @@ use super::*;
 
 impl<S> Db<S>
 where
-    S: OrderedKvStorage + ReopenableStorage + 'static,
+    S: ResidentStorage + ReopenableStorage + 'static,
 {
     /// Start a query rooted at `table`.
     ///

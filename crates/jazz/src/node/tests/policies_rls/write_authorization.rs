@@ -26,7 +26,7 @@ impl FailTransactionReadMemoryStorage {
     }
 }
 
-impl OrderedKvStorage for FailTransactionReadMemoryStorage {
+impl ResidentStorage for FailTransactionReadMemoryStorage {
     fn get(
         &self,
         cf: &ColumnFamilyName,

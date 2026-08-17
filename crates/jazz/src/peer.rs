@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::mpsc::TryRecvError;
 
 use groove::db::{StorageReadBucket, StorageReadMetrics};
-use groove::storage::{OrderedKvStorage, ReopenableStorage};
+use groove::storage::{ReopenableStorage, ResidentStorage};
 use web_time::Instant;
 
 use crate::authorization_scope::AuthorityScopeAggregate;

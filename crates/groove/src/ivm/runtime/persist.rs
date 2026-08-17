@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::ivm::DurableStorage;
 use crate::records::RecordDescriptor;
-use crate::storage::{OrderedKvStorage, RecordStore};
+use crate::storage::{RecordStore, ResidentStorage};
 
 use super::{
     IvmRuntimeError, RecordDeltas, encode_key_part, encode_ordered_bytes, index_record_descriptor,
@@ -24,7 +24,7 @@ struct PendingPersistKey {
 }
 
 pub(super) fn apply_persist_delta(
-    storage: &impl OrderedKvStorage,
+    storage: &impl ResidentStorage,
     durable_storage: &DurableStorage,
     key_fields: &[usize],
     unique: bool,
@@ -114,7 +114,7 @@ pub(super) fn apply_persist_delta(
 }
 
 fn apply_index_persist_delta(
-    storage: &impl OrderedKvStorage,
+    storage: &impl ResidentStorage,
     durable_storage: &DurableStorage,
     unique: bool,
     delta: &RecordDeltas,

@@ -2,7 +2,7 @@
 
 use std::collections::BTreeSet;
 
-use groove::storage::OrderedKvStorage;
+use groove::storage::ResidentStorage;
 
 use crate::peer::PeerEvictionPins;
 use crate::tx::{DurabilityTier, Fate, TxId};
@@ -82,7 +82,7 @@ struct EvictableRowVersion {
 
 impl<S> NodeState<S>
 where
-    S: OrderedKvStorage,
+    S: ResidentStorage,
 {
     /// Return the conservative cache class for one stored row version.
     ///

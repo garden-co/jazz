@@ -11,7 +11,7 @@ pub struct PollableNodeOpen {
     schema: JazzSchema,
     history_complete: bool,
     cache: groove::storage::DemandLoadedStorage,
-    persistence: Option<Box<dyn groove::storage::pollable::PollableOrderedKvStorage>>,
+    persistence: Option<Box<dyn groove::storage::async_ordered::OrderedKvStorage>>,
     acquisition: groove::db::StorageAcquisition,
     phase: NodeOpenPhase,
 }
@@ -19,7 +19,7 @@ pub struct PollableNodeOpen {
 enum NodeOpenPhase {
     Acquiring,
     Finalizing {
-        request: groove::storage::pollable::OwnedStorageRequest,
+        request: groove::storage::async_ordered::OwnedStorageRequest,
         node: NodeState<groove::storage::DemandLoadedStorage>,
         cache: groove::storage::DemandLoadedStorage,
     },
@@ -36,10 +36,10 @@ enum NodeOpenPhase {
 pub struct DemandDrivenNode {
     node: NodeState<groove::storage::DemandLoadedStorage>,
     cache: groove::storage::DemandLoadedStorage,
-    persistence: Box<dyn groove::storage::pollable::PollableOrderedKvStorage>,
+    persistence: Box<dyn groove::storage::async_ordered::OrderedKvStorage>,
     acquisition: groove::db::StorageAcquisition,
     pending_persistence:
-        std::collections::VecDeque<groove::storage::pollable::OwnedStorageRequest>,
+        std::collections::VecDeque<groove::storage::async_ordered::OwnedStorageRequest>,
     persistence_failed: bool,
 }
 
@@ -113,7 +113,7 @@ impl DemandDrivenNode {
             match self.persistence.poll_request(request, context) {
                 std::task::Poll::Pending => return std::task::Poll::Pending,
                 std::task::Poll::Ready(Ok(
-                    groove::storage::pollable::OwnedStorageResponse::Committed,
+                    groove::storage::async_ordered::OwnedStorageResponse::Committed,
                 )) => {
                     self.pending_persistence.pop_front();
                 }
@@ -137,8 +137,8 @@ impl DemandDrivenNode {
         let operations = self.cache.take_pending_writes();
         if !operations.is_empty() {
             self.pending_persistence.push_back(
-                groove::storage::pollable::OwnedStorageRequest::new(
-                    groove::storage::pollable::OwnedStorageOperation::Commit(operations),
+                groove::storage::async_ordered::OwnedStorageRequest::new(
+                    groove::storage::async_ordered::OwnedStorageOperation::Commit(operations),
                 ),
             );
         }
@@ -206,7 +206,7 @@ impl PollableNodeOpen {
     pub fn new(
         node_uuid: NodeUuid,
         schema: JazzSchema,
-        persistence: Box<dyn groove::storage::pollable::PollableOrderedKvStorage>,
+        persistence: Box<dyn groove::storage::async_ordered::OrderedKvStorage>,
     ) -> Self {
         Self::with_history_complete(node_uuid, schema, persistence, false)
     }
@@ -215,7 +215,7 @@ impl PollableNodeOpen {
     pub fn new_history_complete(
         node_uuid: NodeUuid,
         schema: JazzSchema,
-        persistence: Box<dyn groove::storage::pollable::PollableOrderedKvStorage>,
+        persistence: Box<dyn groove::storage::async_ordered::OrderedKvStorage>,
     ) -> Self {
         Self::with_history_complete(node_uuid, schema, persistence, true)
     }
@@ -223,7 +223,7 @@ impl PollableNodeOpen {
     fn with_history_complete(
         node_uuid: NodeUuid,
         schema: JazzSchema,
-        persistence: Box<dyn groove::storage::pollable::PollableOrderedKvStorage>,
+        persistence: Box<dyn groove::storage::async_ordered::OrderedKvStorage>,
         history_complete: bool,
     ) -> Self {
         let column_families = schema.column_families();
@@ -254,7 +254,7 @@ impl PollableNodeOpen {
                 {
                     std::task::Poll::Pending => return std::task::Poll::Pending,
                     std::task::Poll::Ready(Ok(
-                        groove::storage::pollable::OwnedStorageResponse::Committed,
+                        groove::storage::async_ordered::OwnedStorageResponse::Committed,
                     )) => {
                         let NodeOpenPhase::Finalizing { node, cache, .. } = std::mem::replace(
                             &mut self.phase,
@@ -315,8 +315,8 @@ impl PollableNodeOpen {
                         return std::task::Poll::Ready(Ok(self.finish(node, transaction)));
                     }
                     self.phase = NodeOpenPhase::Finalizing {
-                        request: groove::storage::pollable::OwnedStorageRequest::new(
-                            groove::storage::pollable::OwnedStorageOperation::Commit(writes),
+                        request: groove::storage::async_ordered::OwnedStorageRequest::new(
+                            groove::storage::async_ordered::OwnedStorageOperation::Commit(writes),
                         ),
                         node,
                         cache: transaction,
@@ -358,7 +358,7 @@ fn construct_pollable_node(
 
 fn missing_node_open_input(
     error: Error,
-) -> Result<groove::storage::pollable::OwnedStorageOperation, Error> {
+) -> Result<groove::storage::async_ordered::OwnedStorageOperation, Error> {
     match error {
         Error::Storage(groove::storage::Error::NotResident { request }) => Ok(*request),
         Error::Groove(groove::db::Error::Storage(error)) => match *error {

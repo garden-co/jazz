@@ -4,9 +4,9 @@ use std::rc::Rc;
 use std::task::{Context, Poll, Waker};
 
 use futures::lock::Mutex;
-use groove::storage::pollable::{
-    OwnedScanBounds, OwnedScanRequest, OwnedStorageOperation, OwnedStorageRequest,
-    OwnedStorageResponse, PollableOrderedKvStorage, ScanDirection, StorageRequestId,
+use groove::storage::async_ordered::{
+    OrderedKvStorage, OwnedScanBounds, OwnedScanRequest, OwnedStorageOperation,
+    OwnedStorageRequest, OwnedStorageResponse, ScanDirection, StorageRequestId,
 };
 use groove::storage::{Error, OwnedWriteOperation, apply_storage_delta};
 use groove::{
@@ -112,7 +112,7 @@ impl IndexedDbOrderedStorage {
     }
 }
 
-impl PollableOrderedKvStorage for IndexedDbOrderedStorage {
+impl OrderedKvStorage for IndexedDbOrderedStorage {
     fn poll_request(
         &mut self,
         request: &OwnedStorageRequest,

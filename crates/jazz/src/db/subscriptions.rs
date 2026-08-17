@@ -4,7 +4,7 @@ use super::*;
 
 impl<S> Db<S>
 where
-    S: OrderedKvStorage + ReopenableStorage + 'static,
+    S: ResidentStorage + ReopenableStorage + 'static,
 {
     /// Subscribe to a query and return a stream of materialized subscription events.
     ///

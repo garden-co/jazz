@@ -162,7 +162,7 @@ fn authorization_operation_key(
 
 impl<S> NodeState<S>
 where
-    S: OrderedKvStorage,
+    S: ResidentStorage,
 {
     fn policy_authorization_row_id_graph(
         &mut self,

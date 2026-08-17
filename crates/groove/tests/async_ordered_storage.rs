@@ -6,9 +6,9 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::task::{Context, Poll, Wake, Waker};
 
-use groove::storage::pollable::{
-    OwnedScanRequest, OwnedStorageOperation, OwnedStorageRequest, OwnedStorageResponse,
-    PollableOrderedKvStorage, ScanDirection, StorageRequestId,
+use groove::storage::async_ordered::{
+    OrderedKvStorage, OwnedScanRequest, OwnedStorageOperation, OwnedStorageRequest,
+    OwnedStorageResponse, ScanDirection, StorageRequestId,
 };
 use groove::storage::{Error, MemoryStorage, OwnedWriteOperation};
 use groove::{
@@ -24,7 +24,7 @@ impl Wake for NoopWake {
 }
 
 fn poll_request(
-    storage: &mut dyn PollableOrderedKvStorage,
+    storage: &mut dyn OrderedKvStorage,
     request: &OwnedStorageRequest,
 ) -> Poll<Result<OwnedStorageResponse, Error>> {
     let waker = Waker::from(Arc::new(NoopWake));
@@ -52,7 +52,7 @@ struct ControlledStorage {
 
 struct FailingCommitStorage;
 
-impl PollableOrderedKvStorage for FailingCommitStorage {
+impl OrderedKvStorage for FailingCommitStorage {
     fn poll_request(
         &mut self,
         _request: &OwnedStorageRequest,
@@ -93,7 +93,7 @@ impl OrderedControlledStorage {
     }
 }
 
-impl PollableOrderedKvStorage for OrderedControlledStorage {
+impl OrderedKvStorage for OrderedControlledStorage {
     fn poll_request(
         &mut self,
         request: &OwnedStorageRequest,
@@ -132,7 +132,7 @@ impl ControlledStorage {
     }
 }
 
-impl PollableOrderedKvStorage for ControlledStorage {
+impl OrderedKvStorage for ControlledStorage {
     fn poll_request(
         &mut self,
         request: &OwnedStorageRequest,
@@ -219,7 +219,7 @@ fn controlled_storage_retains_owned_commit_until_async_release() {
 
     let request = OwnedStorageRequest::new(OwnedStorageOperation::Scan(OwnedScanRequest {
         column_family: "rows".to_owned(),
-        bounds: groove::storage::pollable::OwnedScanBounds::Prefix(Vec::new()),
+        bounds: groove::storage::async_ordered::OwnedScanBounds::Prefix(Vec::new()),
         direction: ScanDirection::Forward,
     }));
     let Poll::Ready(Ok(OwnedStorageResponse::Rows(rows))) = poll_request(&mut storage, &request)

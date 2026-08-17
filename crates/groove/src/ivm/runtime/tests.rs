@@ -539,8 +539,8 @@ fn assert_auto_family_matches_direct_with_prepared_count(
     schema: DatabaseSchema,
     families: &[GraphBuilder],
     table_deltas: Vec<TableDelta>,
-    storage_familied: &impl OrderedKvStorage,
-    storage_direct: &impl OrderedKvStorage,
+    storage_familied: &impl ResidentStorage,
+    storage_direct: &impl ResidentStorage,
     expected_prepared_shapes: usize,
 ) {
     let mut familied = IvmRuntime::new(schema.clone()).unwrap();
@@ -600,8 +600,8 @@ fn assert_auto_family_matches_direct(
     schema: DatabaseSchema,
     families: &[GraphBuilder],
     table_deltas: Vec<TableDelta>,
-    storage_familied: &impl OrderedKvStorage,
-    storage_direct: &impl OrderedKvStorage,
+    storage_familied: &impl ResidentStorage,
+    storage_direct: &impl ResidentStorage,
 ) {
     assert_auto_family_matches_direct_with_prepared_count(
         schema,
@@ -726,7 +726,7 @@ fn hydration_memo_survives_empty_ticks_without_replaying_deltas() {
     assert!(subscription.try_recv().is_err());
 }
 
-fn write_two_album_rows(storage: &impl OrderedKvStorage, albums: &RecordDescriptor) {
+fn write_two_album_rows(storage: &impl ResidentStorage, albums: &RecordDescriptor) {
     let store = RecordStore::new(storage, "albums", albums);
     let first = albums
         .create(&[Value::U64(1), Value::String("one".to_owned())])

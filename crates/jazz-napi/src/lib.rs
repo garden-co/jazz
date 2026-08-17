@@ -57,8 +57,8 @@ use jazz::groove::records::{
     BorrowedRecord as CoreBorrowedRecord, RecordDescriptor, Value as CoreValue,
 };
 use jazz::groove::storage::{
-    MemoryStorage as CoreMemoryStorage, OrderedKvStorage as CoreOrderedKvStorage,
-    ReopenableStorage as CoreReopenableStorage,
+    MemoryStorage as CoreMemoryStorage, ReopenableStorage as CoreReopenableStorage,
+    ResidentStorage as CoreResidentStorage,
 };
 use jazz::ids::{AuthorId as CoreAuthorId, NodeUuid as CoreNodeUuid, RowUuid as CoreRowUuid};
 use jazz::query::{
@@ -2036,7 +2036,7 @@ fn open_core_db<S>(
     config: CoreOpenDbConfig,
 ) -> std::result::Result<CoreDb<S>, jazz::db::Error>
 where
-    S: CoreOrderedKvStorage + CoreReopenableStorage + 'static,
+    S: CoreResidentStorage + CoreReopenableStorage + 'static,
 {
     let mut db_config = CoreDbConfig::new(schema, storage, config.identity.into());
     if let Some(seed) = config.row_id_seed {
@@ -2059,7 +2059,7 @@ fn configure_initial_sync_flush_cadence<S>(
     every: Option<u32>,
 ) -> std::result::Result<(), jazz::db::Error>
 where
-    S: CoreOrderedKvStorage + CoreReopenableStorage + 'static,
+    S: CoreResidentStorage + CoreReopenableStorage + 'static,
 {
     let Some(every) = every else {
         return Ok(());
@@ -2207,7 +2207,7 @@ fn core_tick_connection<S>(
     connection: &Option<Rc<RefCell<CorePeerConnection<S>>>>,
 ) -> napi::Result<u32>
 where
-    S: CoreOrderedKvStorage + CoreReopenableStorage + 'static,
+    S: CoreResidentStorage + CoreReopenableStorage + 'static,
 {
     let Some(connection) = connection else {
         return Ok(0);
@@ -2266,7 +2266,7 @@ fn finish_wait_promise(
 
 fn core_commit_tx<S>(db: &CoreDb<S>, open_tx: CoreOpenBatchId) -> napi::Result<TxId>
 where
-    S: CoreOrderedKvStorage + CoreReopenableStorage + 'static,
+    S: CoreResidentStorage + CoreReopenableStorage + 'static,
 {
     db.commit_mergeable_handle(open_tx)
         .map_err(|error| napi::Error::from_reason(error.to_string()))

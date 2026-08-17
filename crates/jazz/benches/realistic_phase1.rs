@@ -24,7 +24,7 @@ use jazz::db::{
 };
 use jazz::groove::records::Value;
 use jazz::groove::schema::{ColumnSchema, ColumnType};
-use jazz::groove::storage::{MemoryStorage, OrderedKvStorage};
+use jazz::groove::storage::{MemoryStorage, ResidentStorage};
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::query::{Query, all_of, claim, col, eq, lit};
 use jazz::schema::{JazzSchema, Policy, TableSchema};
@@ -299,7 +299,7 @@ fn open_db_with_storage<S>(
     context: &str,
 ) -> Db<S>
 where
-    S: OrderedKvStorage + jazz::groove::storage::ReopenableStorage + 'static,
+    S: ResidentStorage + jazz::groove::storage::ReopenableStorage + 'static,
 {
     let column_families = schema.column_families();
     let refs = column_families
@@ -412,7 +412,7 @@ fn row_uuid(tag: u8, index: usize) -> RowUuid {
 
 fn wait_local<S>(write: jazz::db::WriteHandle<S>)
 where
-    S: OrderedKvStorage,
+    S: ResidentStorage,
 {
     block_on(write.wait(DurabilityTier::Local)).expect("write should be local");
 }
@@ -563,7 +563,7 @@ struct Fixture {
 
 fn seed_fixture<S>(db: &Db<S>, profile: SmallProfile) -> Fixture
 where
-    S: OrderedKvStorage + jazz::groove::storage::ReopenableStorage + 'static,
+    S: ResidentStorage + jazz::groove::storage::ReopenableStorage + 'static,
 {
     let users = (0..profile.users)
         .map(|index| {
@@ -656,7 +656,7 @@ where
 
 fn seed_resume_fixture<S>(db: &Db<S>, profile: SmallProfile) -> Fixture
 where
-    S: OrderedKvStorage + jazz::groove::storage::ReopenableStorage + 'static,
+    S: ResidentStorage + jazz::groove::storage::ReopenableStorage + 'static,
 {
     let users = (0..profile.users)
         .map(|index| {
@@ -715,7 +715,7 @@ where
 
 fn project_board_query<S>(db: &Db<S>, project: RowUuid) -> jazz::db::PreparedQuery
 where
-    S: OrderedKvStorage + jazz::groove::storage::ReopenableStorage + 'static,
+    S: ResidentStorage + jazz::groove::storage::ReopenableStorage + 'static,
 {
     db.prepare_query(&Query::from("tasks").filter(eq(col("project"), lit(project.0))))
         .expect("prepare project board query")
@@ -723,7 +723,7 @@ where
 
 fn my_work_query<S>(db: &Db<S>, user: RowUuid) -> jazz::db::PreparedQuery
 where
-    S: OrderedKvStorage + jazz::groove::storage::ReopenableStorage + 'static,
+    S: ResidentStorage + jazz::groove::storage::ReopenableStorage + 'static,
 {
     db.prepare_query(&Query::from("tasks").filter(all_of([
         eq(col("assignee"), lit(user.0)),
@@ -734,7 +734,7 @@ where
 
 fn task_comments_query<S>(db: &Db<S>, task: RowUuid) -> jazz::db::PreparedQuery
 where
-    S: OrderedKvStorage + jazz::groove::storage::ReopenableStorage + 'static,
+    S: ResidentStorage + jazz::groove::storage::ReopenableStorage + 'static,
 {
     db.prepare_query(&Query::from("comments").filter(eq(col("task"), lit(task.0))))
         .expect("prepare task comments query")
@@ -742,7 +742,7 @@ where
 
 fn activity_feed_query<S>(db: &Db<S>, project: RowUuid) -> jazz::db::PreparedQuery
 where
-    S: OrderedKvStorage + jazz::groove::storage::ReopenableStorage + 'static,
+    S: ResidentStorage + jazz::groove::storage::ReopenableStorage + 'static,
 {
     db.prepare_query(&Query::from("activity").filter(eq(col("project"), lit(project.0))))
         .expect("prepare activity feed query")
@@ -916,7 +916,7 @@ fn seed_permission_resume_fixture(db: &BenchDb) {
 
 fn recursive_docs_query<S>(db: &Db<S>) -> jazz::db::PreparedQuery
 where
-    S: OrderedKvStorage + jazz::groove::storage::ReopenableStorage + 'static,
+    S: ResidentStorage + jazz::groove::storage::ReopenableStorage + 'static,
 {
     db.prepare_query(&Query::from("docs"))
         .expect("prepare recursive docs query")

@@ -216,7 +216,7 @@ fn apply_policy_graph_reset_receipt<S>(
     entry_count: usize,
 ) -> std::time::Duration
 where
-    S: OrderedKvStorage + ReopenableStorage,
+    S: ResidentStorage + ReopenableStorage,
 {
     register_shape_binding(reader, shape, binding);
     let apply_start = std::time::Instant::now();

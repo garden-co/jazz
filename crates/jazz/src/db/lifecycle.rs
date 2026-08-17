@@ -4,7 +4,7 @@ use super::*;
 
 impl<S> Db<S>
 where
-    S: OrderedKvStorage + ReopenableStorage + 'static,
+    S: ResidentStorage + ReopenableStorage + 'static,
 {
     /// Route later node commits into owned persistence batches and mark this
     /// facade as a non-durable optimistic client until its host acknowledges

@@ -9,7 +9,7 @@ impl IvmRuntime {
         storage: &S,
     ) -> Result<TickMetrics, IvmRuntimeError>
     where
-        S: OrderedKvStorage,
+        S: ResidentStorage,
     {
         self.tick_with_params(table_deltas, Vec::new(), storage)
     }
@@ -19,7 +19,7 @@ impl IvmRuntime {
         storage: &S,
     ) -> Result<(), IvmRuntimeError>
     where
-        S: OrderedKvStorage,
+        S: ResidentStorage,
     {
         if !self.pending_binding_retractions.is_empty() {
             // Unsubscribe may queue routed binding retractions for the next
@@ -39,7 +39,7 @@ impl IvmRuntime {
         staged_writes: &mut Vec<OwnedWriteOperation>,
     ) -> Result<TickMetrics, IvmRuntimeError>
     where
-        S: OrderedKvStorage,
+        S: ResidentStorage,
     {
         debug_assert!(
             !self.defer_subscription_notifications,
@@ -90,7 +90,7 @@ impl IvmRuntime {
         storage: &S,
     ) -> Result<TickMetrics, IvmRuntimeError>
     where
-        S: OrderedKvStorage,
+        S: ResidentStorage,
     {
         if !self.pending_binding_retractions.is_empty() {
             let mut pending = std::mem::take(&mut self.pending_binding_retractions);
@@ -383,7 +383,7 @@ impl IvmRuntime {
         mode: HydrationMode,
     ) -> Result<RecordDeltas, IvmRuntimeError>
     where
-        S: OrderedKvStorage,
+        S: ResidentStorage,
     {
         let table_deltas = snapshot_table_deltas(&self.schema, &self.graph, storage, output_node)?;
         let binding_snapshots = self.binding_snapshot_deltas();
@@ -442,7 +442,7 @@ impl IvmRuntime {
         mode: HydrationMode,
     ) -> Result<MultisinkDeltas, IvmRuntimeError>
     where
-        S: OrderedKvStorage,
+        S: ResidentStorage,
     {
         let mut sinks = BTreeMap::new();
         for (sink, output) in outputs {
@@ -471,7 +471,7 @@ impl IvmRuntime {
         storage: &S,
     ) -> Result<MultisinkDeltas, IvmRuntimeError>
     where
-        S: OrderedKvStorage,
+        S: ResidentStorage,
     {
         self.hydration_snapshots(outputs, storage, HydrationMode::Subscription)
     }
@@ -498,7 +498,7 @@ impl IvmRuntime {
         storage: &S,
     ) -> Result<(), IvmRuntimeError>
     where
-        S: OrderedKvStorage,
+        S: ResidentStorage,
     {
         let durable_nodes = self
             .retained_node_ids()

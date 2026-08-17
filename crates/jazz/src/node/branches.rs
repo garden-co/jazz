@@ -41,7 +41,7 @@ impl From<&BranchRecord> for crate::protocol::BranchMetadata {
 
 impl<S> NodeState<S>
 where
-    S: OrderedKvStorage,
+    S: ResidentStorage,
 {
     /// Create a snapshot-base branch over this node's current settled watermark.
     ///

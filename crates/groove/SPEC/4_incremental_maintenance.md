@@ -252,7 +252,7 @@ has one write path, one probe interface, and one identity scheme
 (`ArrangementKey`) for all of them (`INV-ARR-1`, target).
 
 **All arrangements are ordered.** The arrangement interface is the ordered-KV
-contract (ch. 2 `OrderedKvStorage`; the in-memory implementation backs
+contract (ch. 2 `ResidentStorage`; the in-memory implementation backs
 `resident`). Ordering buys uniform range probes (range-parameter bindings
 probe the same arrangement as equality bindings) and deterministic iteration.
 The accepted cost is O(log n) point probes for resident state where a hash map

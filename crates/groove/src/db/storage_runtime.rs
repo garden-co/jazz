@@ -4,8 +4,8 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll};
 
-use crate::storage::pollable::{
-    OwnedStorageOperation, OwnedStorageRequest, OwnedStorageResponse, PollableOrderedKvStorage,
+use crate::storage::async_ordered::{
+    OrderedKvStorage, OwnedStorageOperation, OwnedStorageRequest, OwnedStorageResponse,
 };
 
 use super::*;
@@ -30,14 +30,14 @@ struct QueuedPersistenceRequest {
 /// Fate/ViewUpdate closure at exactly the durable boundary.
 #[doc(hidden)]
 pub struct PersistenceQueue {
-    persistence: Box<dyn PollableOrderedKvStorage>,
+    persistence: Box<dyn OrderedKvStorage>,
     pending: VecDeque<QueuedPersistenceRequest>,
     completed_without_io: VecDeque<PersistenceUnitId>,
 }
 
 impl PersistenceQueue {
     #[doc(hidden)]
-    pub fn new(persistence: Box<dyn PollableOrderedKvStorage>) -> Self {
+    pub fn new(persistence: Box<dyn OrderedKvStorage>) -> Self {
         Self {
             persistence,
             pending: VecDeque::new(),
@@ -125,11 +125,11 @@ impl PersistenceQueue {
 ///
 /// This is an internal migration surface. Immediate and asynchronous durable
 /// stores use the same queue and poll path; their only difference is whether
-/// [`PollableOrderedKvStorage::poll_request`] returns `Ready` on its first poll.
+/// [`OrderedKvStorage::poll_request`] returns `Ready` on its first poll.
 #[doc(hidden)]
 pub struct PollableDatabase<S>
 where
-    S: OrderedKvStorage,
+    S: ResidentStorage,
 {
     resident: Database<S>,
     persistence: PersistenceQueue,
@@ -145,7 +145,7 @@ where
 pub struct DemandDrivenDatabase {
     database: Database<crate::storage::DemandLoadedStorage>,
     cache: crate::storage::DemandLoadedStorage,
-    persistence: Box<dyn PollableOrderedKvStorage>,
+    persistence: Box<dyn OrderedKvStorage>,
     acquisition: StorageAcquisition,
     pending_persistence: VecDeque<OwnedStorageRequest>,
 }
@@ -165,7 +165,7 @@ impl StorageAcquisition {
     /// until it can complete synchronously.
     pub fn poll<T, E>(
         &mut self,
-        persistence: &mut dyn PollableOrderedKvStorage,
+        persistence: &mut dyn OrderedKvStorage,
         cache: &crate::storage::DemandLoadedStorage,
         context: &mut Context<'_>,
         mut attempt: impl FnMut() -> Result<T, E>,
@@ -205,7 +205,7 @@ impl StorageAcquisition {
     /// Cancel any backend work retained for the suspended operation.
     pub fn cancel(
         &mut self,
-        persistence: &mut dyn PollableOrderedKvStorage,
+        persistence: &mut dyn OrderedKvStorage,
     ) -> Result<(), crate::storage::Error> {
         if let Some(request) = self.pending.take() {
             persistence.cancel_request(request.id())?;
@@ -231,7 +231,7 @@ impl DemandDrivenDatabase {
     #[doc(hidden)]
     pub fn new(
         schema: crate::schema::DatabaseSchema,
-        persistence: Box<dyn PollableOrderedKvStorage>,
+        persistence: Box<dyn OrderedKvStorage>,
     ) -> Result<Self, Error> {
         let column_families = schema.column_families();
         let cache = crate::storage::DemandLoadedStorage::new(&column_families);
@@ -368,10 +368,10 @@ impl DemandDrivenDatabase {
 
 impl<S> PollableDatabase<S>
 where
-    S: OrderedKvStorage,
+    S: ResidentStorage,
 {
     #[doc(hidden)]
-    pub fn new(resident: Database<S>, persistence: Box<dyn PollableOrderedKvStorage>) -> Self {
+    pub fn new(resident: Database<S>, persistence: Box<dyn OrderedKvStorage>) -> Self {
         Self {
             resident,
             persistence: PersistenceQueue::new(persistence),

@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 
 use jazz::groove::records::Value;
-use jazz::groove::storage::{OrderedKvStorage, ReopenableStorage};
+use jazz::groove::storage::{ReopenableStorage, ResidentStorage};
 use jazz::ids::{AuthorId, RowUuid};
 use jazz::node::{MergeableCommit, NodeState};
 use jazz::peer::PeerState;
@@ -397,7 +397,7 @@ pub fn apply_fixture_commit<S>(
     options: FixtureCommitApply<'_>,
 ) -> Result<(), String>
 where
-    S: OrderedKvStorage + ReopenableStorage,
+    S: ResidentStorage + ReopenableStorage,
 {
     let (_tx_id, unit) = writer
         .commit_mergeable_unit(
@@ -442,7 +442,7 @@ pub fn sync_current_rows<S>(
     options: CurrentRowsSync<'_>,
 ) -> Result<(), String>
 where
-    S: OrderedKvStorage + ReopenableStorage,
+    S: ResidentStorage + ReopenableStorage,
 {
     let update = peer
         .current_rows_update(from, options.table)

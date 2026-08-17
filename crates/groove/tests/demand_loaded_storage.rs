@@ -7,11 +7,11 @@ use groove::records::Value;
 use groove::schema::{
     ColumnSchema, ColumnType, DatabaseSchema, IntegerKeyType, PrimaryKey, TableSchema,
 };
-use groove::storage::pollable::{
-    OwnedStorageOperation, OwnedStorageRequest, OwnedStorageResponse, PollableOrderedKvStorage,
+use groove::storage::async_ordered::{
+    OrderedKvStorage, OwnedStorageOperation, OwnedStorageRequest, OwnedStorageResponse,
     StorageRequestId,
 };
-use groove::storage::{DemandLoadedStorage, Error, MemoryStorage, OrderedKvStorage};
+use groove::storage::{DemandLoadedStorage, Error, MemoryStorage, ResidentStorage};
 
 struct GatedStorage {
     inner: MemoryStorage,
@@ -19,7 +19,7 @@ struct GatedStorage {
     polls: Rc<Cell<usize>>,
 }
 
-impl PollableOrderedKvStorage for GatedStorage {
+impl OrderedKvStorage for GatedStorage {
     fn poll_request(
         &mut self,
         request: &OwnedStorageRequest,
@@ -176,7 +176,7 @@ fn write_preflight_loads_inputs_before_the_single_real_ivm_tick() {
     let cache = DemandLoadedStorage::new(&["rows", "indices"]);
     cache
         .admit(
-            OwnedStorageOperation::Scan(groove::storage::pollable::OwnedScanRequest::prefix(
+            OwnedStorageOperation::Scan(groove::storage::async_ordered::OwnedScanRequest::prefix(
                 "rows",
                 Vec::new(),
             )),

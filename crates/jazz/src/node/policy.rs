@@ -15,7 +15,7 @@ pub(super) struct ViewEvaluationContext {
 
 impl<S> NodeState<S>
 where
-    S: OrderedKvStorage,
+    S: ResidentStorage,
 {
     /// Reconstruct the exact policy operation represented by each incoming
     /// version record.  This is the sole bridge from committed wire data to

@@ -6,7 +6,7 @@ impl PeerState {
         table: &str,
     ) -> Result<SyncMessage, Error>
     where
-        S: OrderedKvStorage,
+        S: ResidentStorage,
     {
         self.rehydrate_current_rows(node, table)
     }
@@ -57,7 +57,7 @@ impl PeerState {
         subscription: SubscriptionKey,
     ) -> bool
     where
-        S: OrderedKvStorage,
+        S: ResidentStorage,
     {
         let Some(mut state) = self.subscriptions.remove(&subscription) else {
             return false;
@@ -91,7 +91,7 @@ impl PeerState {
         binding: &Binding,
     ) -> bool
     where
-        S: OrderedKvStorage,
+        S: ResidentStorage,
     {
         self.forget_subscription_with_node(
             node,
@@ -151,7 +151,7 @@ impl PeerState {
         message: SyncMessage,
     ) -> Result<Vec<SyncMessage>, Error>
     where
-        S: OrderedKvStorage,
+        S: ResidentStorage,
     {
         let SyncMessage::FetchRowVersions { requests } = message else {
             return Err(Error::UnsupportedSyncMessage(
@@ -171,7 +171,7 @@ impl PeerState {
         requests: &[RowVersionRef],
     ) -> Result<Vec<SyncMessage>, Error>
     where
-        S: OrderedKvStorage,
+        S: ResidentStorage,
     {
         let versions = node.row_version_payloads_for_refs(requests, self.identity())?;
         Ok(vec![SyncMessage::RowVersionPayloads {

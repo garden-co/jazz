@@ -159,7 +159,7 @@ pub(crate) struct LocalMaintainedViewSubscriptionUpdate {
 
 impl<S> NodeState<S>
 where
-    S: OrderedKvStorage,
+    S: ResidentStorage,
 {
     pub(crate) fn open_maintained_view_subscription_in_authorization_mode(
         &mut self,

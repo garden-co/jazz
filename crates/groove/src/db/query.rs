@@ -2,7 +2,7 @@ use super::*;
 
 impl<S> Database<S>
 where
-    S: OrderedKvStorage,
+    S: ResidentStorage,
 {
     /// Subscribe to an IVM graph and receive an initial snapshot followed by
     /// deltas from committed batches.

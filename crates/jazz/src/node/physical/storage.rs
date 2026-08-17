@@ -1,6 +1,6 @@
 impl<S> NodeState<S>
 where
-    S: OrderedKvStorage,
+    S: ResidentStorage,
 {
     pub(super) fn version_storage_table_for_row(
         &mut self,

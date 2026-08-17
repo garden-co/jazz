@@ -1,6 +1,6 @@
 impl<S> NodeState<S>
 where
-    S: OrderedKvStorage,
+    S: ResidentStorage,
 {
     /// Apply an upstream fate update.
     pub fn apply_fate_update(

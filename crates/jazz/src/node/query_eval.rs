@@ -218,7 +218,7 @@ pub(crate) use maintained_views::{
 
 impl<S> NodeState<S>
 where
-    S: OrderedKvStorage,
+    S: ResidentStorage,
 {
     fn table_in_schema_or_branch_metadata(
         &self,
@@ -2656,7 +2656,7 @@ mod authorization;
 
 impl<S> HistoricalRead<'_, S>
 where
-    S: OrderedKvStorage,
+    S: ResidentStorage,
 {
     /// Read a validated query at this handle's historical settle position.
     ///

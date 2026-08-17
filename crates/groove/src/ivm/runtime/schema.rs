@@ -139,7 +139,7 @@ impl IvmRuntime {
         storage: &S,
     ) -> Result<(), IvmRuntimeError>
     where
-        S: OrderedKvStorage,
+        S: ResidentStorage,
     {
         let table_position = self
             .schema
@@ -695,7 +695,7 @@ impl IvmRuntime {
         storage: &S,
     ) -> Result<RecordDeltas, IvmRuntimeError>
     where
-        S: OrderedKvStorage,
+        S: ResidentStorage,
     {
         self.flush_pending_binding_retractions(storage)?;
         if builder_contains_binding_source(&graph) {
@@ -727,7 +727,7 @@ impl IvmRuntime {
     where
         I: IntoIterator<Item = (K, GraphBuilder)>,
         K: Into<String>,
-        S: OrderedKvStorage,
+        S: ResidentStorage,
     {
         self.flush_pending_binding_retractions(storage)?;
         let sinks = sinks

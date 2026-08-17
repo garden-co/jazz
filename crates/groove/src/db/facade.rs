@@ -2,7 +2,7 @@ use super::*;
 
 impl<S> Database<S>
 where
-    S: OrderedKvStorage,
+    S: ResidentStorage,
 {
     /// Open a schema-aware database over an ordered key/value store.
     ///
@@ -145,7 +145,7 @@ where
 
 impl<S> Database<S>
 where
-    S: OrderedKvStorage,
+    S: ResidentStorage,
 {
     /// Include arrangement and recursive-state size walks in future tick metrics.
     ///
@@ -166,7 +166,7 @@ where
         descriptor: &'a RecordDescriptor,
     ) -> RecordStore<'a, T>
     where
-        T: OrderedKvStorage,
+        T: ResidentStorage,
     {
         RecordStore::new(storage, "indices", descriptor)
     }

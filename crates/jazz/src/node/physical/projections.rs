@@ -1,6 +1,6 @@
 impl<S> NodeState<S>
 where
-    S: OrderedKvStorage,
+    S: ResidentStorage,
 {
     pub(super) fn physical_table_id_for_schema(
         &self,

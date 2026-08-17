@@ -4,7 +4,7 @@ use groove::schema::{
     ColumnSchema, ColumnType, DatabaseSchema, IndexSchema, IntegerKeyType, PrimaryKey, TableSchema,
     TableVariant,
 };
-use groove::storage::{MemoryStorage, OrderedKvStorage};
+use groove::storage::{MemoryStorage, ResidentStorage};
 
 fn versioned_schema() -> DatabaseSchema {
     DatabaseSchema::new([TableSchema::new(

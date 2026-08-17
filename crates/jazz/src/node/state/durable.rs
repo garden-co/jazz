@@ -1,6 +1,6 @@
 impl<S> NodeState<S>
 where
-    S: OrderedKvStorage,
+    S: ResidentStorage,
 {
     /// Commit one complete node-owned Groove batch.
     ///
@@ -910,7 +910,7 @@ pub struct AuthorityPersistenceScheduler {
 
 impl AuthorityPersistenceScheduler {
     #[doc(hidden)]
-    pub fn new(persistence: Box<dyn groove::storage::pollable::PollableOrderedKvStorage>) -> Self {
+    pub fn new(persistence: Box<dyn groove::storage::async_ordered::OrderedKvStorage>) -> Self {
         Self {
             persistence: groove::db::PersistenceQueue::new(persistence),
             responses: BTreeMap::new(),

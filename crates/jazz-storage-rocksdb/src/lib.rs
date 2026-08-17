@@ -2,7 +2,7 @@
 //!
 //! This module owns opening RocksDB with the requested column families,
 //! durability tier, ordered iterators, and atomic write batches. It implements
-//! [`OrderedKvStorage`] but does not understand schemas, records, query graphs,
+//! [`ResidentStorage`] but does not understand schemas, records, query graphs,
 //! or IVM ticks; callers provide already-encoded keys and values. In-memory
 //! storage for tests lives in [`super`], and all schema-aware behavior lives
 //! above this adapter.
@@ -19,7 +19,7 @@ use rocksdb::{
 use serde::Serialize;
 
 use groove::storage::{
-    BoxedStorage, ColumnFamilyName, Error, Key, KeyValue, OrderedKvStorage, ReopenableStorage,
+    BoxedStorage, ColumnFamilyName, Error, Key, KeyValue, ReopenableStorage, ResidentStorage,
     ScanVisitor, StorageFactory, Value, WriteOperation, apply_storage_delta,
     compact_storage_delta_operand,
 };
@@ -370,7 +370,7 @@ impl ReopenableStorage for RocksDbStorage {
     }
 }
 
-impl OrderedKvStorage for RocksDbStorage {
+impl ResidentStorage for RocksDbStorage {
     fn get(&self, cf: &ColumnFamilyName, key: &Key) -> Result<Option<Value>, Error> {
         if cf == "default" {
             self.db.get(key).storage()
@@ -749,7 +749,7 @@ mod tests {
 
     #[test]
     fn approximate_class_bytes_reports_populated_family() {
-        use groove::storage::OrderedKvStorage;
+        use groove::storage::ResidentStorage;
 
         let dir = tempfile::tempdir().unwrap();
         let storage = RocksDbStorage::open(dir.path(), &["records"]).unwrap();
@@ -764,7 +764,7 @@ mod tests {
 
     #[test]
     fn metrics_include_memtable_bytes_written_to_each_column_family() {
-        use groove::storage::OrderedKvStorage;
+        use groove::storage::ResidentStorage;
 
         let dir = tempfile::tempdir().unwrap();
         let storage = RocksDbStorage::open(dir.path(), &["left", "right"]).unwrap();

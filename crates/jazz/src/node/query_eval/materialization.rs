@@ -20,7 +20,7 @@ pub(crate) struct LocalMaintainedRelationSnapshot {
 
 impl<S> NodeState<S>
 where
-    S: OrderedKvStorage,
+    S: ResidentStorage,
 {
     pub(super) fn materialize_authoritative_reset_member(
         &mut self,

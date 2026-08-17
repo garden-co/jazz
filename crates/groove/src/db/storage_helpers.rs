@@ -34,7 +34,7 @@ pub struct DirectRecordStore<'a, S> {
 
 impl<S> DirectRecordStore<'_, S>
 where
-    S: OrderedKvStorage,
+    S: ResidentStorage,
 {
     /// Return the schema-declared column family name backing this direct store.
     pub fn name(&self) -> &str {
@@ -401,9 +401,9 @@ impl<'a, S> MeteredStorage<'a, S> {
     }
 }
 
-impl<S> OrderedKvStorage for MeteredStorage<'_, S>
+impl<S> ResidentStorage for MeteredStorage<'_, S>
 where
-    S: OrderedKvStorage,
+    S: ResidentStorage,
 {
     fn get(
         &self,
@@ -771,7 +771,7 @@ pub(super) fn compute_table_deltas<S>(
     schema: &DatabaseSchema,
 ) -> Result<Vec<TableDelta>, Error>
 where
-    S: OrderedKvStorage,
+    S: ResidentStorage,
 {
     // Reads see earlier writes in the same batch through this overlay. Without
     // it, same-key insert/update/delete sequences emit deltas against stale
@@ -867,7 +867,7 @@ pub(super) fn record_store_for_table<'a, S>(
     descriptor: &'a RecordDescriptor,
 ) -> RecordStore<'a, S>
 where
-    S: OrderedKvStorage,
+    S: ResidentStorage,
 {
     let _ = key_descriptor;
     RecordStore::new(storage, table, descriptor)

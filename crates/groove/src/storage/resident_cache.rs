@@ -3,10 +3,10 @@
 use std::cell::RefCell;
 use std::collections::BTreeSet;
 
-use super::pollable::{OwnedScanRequest, OwnedStorageOperation, OwnedStorageResponse};
+use super::async_ordered::{OwnedScanRequest, OwnedStorageOperation, OwnedStorageResponse};
 use super::{
-    ColumnFamilyName, Error, Key, MemoryStorage, OrderedKvStorage, OwnedWriteOperation,
-    ReopenableStorage, ScanVisitor, Value, WriteOperation, apply_storage_delta,
+    ColumnFamilyName, Error, Key, MemoryStorage, OwnedWriteOperation, ReopenableStorage,
+    ResidentStorage, ScanVisitor, Value, WriteOperation, apply_storage_delta,
 };
 
 /// Synchronous working set that reports exact missing storage inputs instead
@@ -159,8 +159,8 @@ fn covers(admitted: &OwnedStorageOperation, requested: &OwnedStorageOperation) -
             OwnedStorageOperation::Scan(admitted),
             OwnedStorageOperation::Get { column_family, key },
         ) if admitted.column_family == *column_family => match &admitted.bounds {
-            super::pollable::OwnedScanBounds::Prefix(prefix) => key.starts_with(prefix),
-            super::pollable::OwnedScanBounds::Range { start, end } => {
+            super::async_ordered::OwnedScanBounds::Prefix(prefix) => key.starts_with(prefix),
+            super::async_ordered::OwnedScanBounds::Range { start, end } => {
                 key.as_slice() >= start.as_slice() && key.as_slice() < end.as_slice()
             }
         },
@@ -169,15 +169,15 @@ fn covers(admitted: &OwnedStorageOperation, requested: &OwnedStorageOperation) -
         {
             match (&admitted.bounds, &requested.bounds) {
                 (
-                    super::pollable::OwnedScanBounds::Prefix(admitted),
-                    super::pollable::OwnedScanBounds::Prefix(requested),
+                    super::async_ordered::OwnedScanBounds::Prefix(admitted),
+                    super::async_ordered::OwnedScanBounds::Prefix(requested),
                 ) => requested.starts_with(admitted),
                 (
-                    super::pollable::OwnedScanBounds::Range {
+                    super::async_ordered::OwnedScanBounds::Range {
                         start: admitted_start,
                         end: admitted_end,
                     },
-                    super::pollable::OwnedScanBounds::Range {
+                    super::async_ordered::OwnedScanBounds::Range {
                         start: requested_start,
                         end: requested_end,
                     },
@@ -189,7 +189,7 @@ fn covers(admitted: &OwnedStorageOperation, requested: &OwnedStorageOperation) -
     }
 }
 
-impl OrderedKvStorage for DemandLoadedStorage {
+impl ResidentStorage for DemandLoadedStorage {
     fn get(&self, cf: &ColumnFamilyName, key: &Key) -> Result<Option<Value>, Error> {
         self.require(OwnedStorageOperation::Get {
             column_family: cf.to_owned(),

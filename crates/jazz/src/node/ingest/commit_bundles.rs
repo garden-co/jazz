@@ -1,6 +1,6 @@
 impl<S> NodeState<S>
 where
-    S: OrderedKvStorage,
+    S: ResidentStorage,
 {
     /// Apply an authority commit to resident state while retaining both its
     /// complete durable closure and its externally observable responses.

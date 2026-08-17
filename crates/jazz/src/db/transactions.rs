@@ -4,7 +4,7 @@ use super::*;
 
 impl<S> Db<S>
 where
-    S: OrderedKvStorage + ReopenableStorage + 'static,
+    S: ResidentStorage + ReopenableStorage + 'static,
 {
     /// Build a mergeable transaction that commits multiple writes under one id.
     pub fn mergeable_tx(&self) -> Result<MergeableTx<'_, S>, Error> {
