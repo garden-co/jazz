@@ -9,6 +9,12 @@ use groove::storage::pollable::{
     OwnedStorageResponse, PollableOrderedKvStorage, ScanDirection, StorageRequestId,
 };
 use groove::storage::{Error, OwnedWriteOperation, apply_storage_delta};
+use groove::{
+    db::{Database, GraphBuilder, PollableDatabase},
+    records::Value,
+    schema::{ColumnSchema, ColumnType, DatabaseSchema, IntegerKeyType, PrimaryKey, TableSchema},
+    storage::MemoryStorage,
+};
 use opfs_btree::BTreeError;
 use opfs_btree::async_db::{AsyncPageBTree, AsyncPageBTreeOptions};
 use opfs_btree::async_page_store::{
@@ -326,5 +332,95 @@ pub async fn verify_indexeddb_ordered_storage(page_store: JsValue) -> Result<JsV
     }
     Ok(JsValue::from_str(
         "ordered IndexedDB commit/scan/delete/reopen passed",
+    ))
+}
+
+/// Prove Groove's immediate-local contract while the real IndexedDB commit is
+/// suspended, then verify the encoded batch reached the backing tree.
+#[wasm_bindgen]
+pub async fn verify_indexeddb_groove_visibility(page_store: JsValue) -> Result<JsValue, JsValue> {
+    let schema = DatabaseSchema::new([TableSchema::new(
+        "rows",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("value", ColumnType::String),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+    let resident = Database::new(schema, MemoryStorage::new(&["rows", "indices"]))
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    let persistence = IndexedDbOrderedStorage::open(page_store.clone(), 4096, 3)
+        .await
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    let mut database = PollableDatabase::new(resident, Box::new(persistence));
+    let subscription = database
+        .resident_mut()
+        .subscribe_one_sink(GraphBuilder::table("rows"))
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    if !subscription
+        .recv()
+        .map_err(|error| JsValue::from_str(&error.to_string()))?
+        .is_empty()
+    {
+        return Err(JsValue::from_str(
+            "Groove opening was unexpectedly nonempty",
+        ));
+    }
+
+    let mut batch = database.resident().open_batch();
+    batch.insert(
+        "rows",
+        vec![Value::U64(1), Value::String("controlled input".into())],
+    );
+    database
+        .commit_batch(batch)
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+
+    let local_delta = subscription
+        .recv()
+        .map_err(|error| JsValue::from_str(&error.to_string()))?
+        .to_values()
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    let local_rows = database
+        .resident()
+        .primary_key_scan("rows", &[Value::U64(1)])
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    if local_delta.len() != 1 || local_rows.len() != 1 {
+        return Err(JsValue::from_str(
+            "Groove local delta and one-shot were not visible synchronously",
+        ));
+    }
+
+    let mut context = Context::from_waker(Waker::noop());
+    if !database.poll_persistence(&mut context).is_pending() {
+        return Err(JsValue::from_str(
+            "real IndexedDB persistence unexpectedly completed on its first poll",
+        ));
+    }
+    futures::future::poll_fn(|context| database.poll_persistence(context))
+        .await
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    drop(database);
+
+    let mut reopened = IndexedDbOrderedStorage::open(page_store, 4096, 3)
+        .await
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    let scan = OwnedStorageRequest::new(OwnedStorageOperation::Scan(OwnedScanRequest::prefix(
+        "rows",
+        Vec::new(),
+    )));
+    let OwnedStorageResponse::Rows(durable_rows) = complete_request(&mut reopened, &scan).await?
+    else {
+        return Err(JsValue::from_str(
+            "durable Groove scan returned wrong response",
+        ));
+    };
+    if durable_rows.len() != 1 {
+        return Err(JsValue::from_str(
+            "Groove resident batch did not survive IndexedDB reopen",
+        ));
+    }
+    Ok(JsValue::from_str(
+        "Groove local visibility preceded IndexedDB durability",
     ))
 }

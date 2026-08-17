@@ -2134,6 +2134,41 @@ fn single_branch_read_view_uses_query_engine_branch_source_for_one_shot_reads() 
 }
 
 #[test]
+fn immediate_local_visibility_is_complete_before_write_returns() {
+    let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
+    let prepared = prepared(&db, &db.table("todos"));
+    let opts = ReadOpts {
+        tier: DurabilityTier::None,
+        local_updates: LocalUpdates::Immediate,
+        propagation: Propagation::LocalOnly,
+        include_deleted: false,
+        ..ReadOpts::default()
+    };
+    let mut subscription =
+        doctest_support::block_on(db.subscribe(&prepared, opts.clone())).unwrap();
+    assert!(subscription.try_next_event().is_some());
+
+    let write = db
+        .insert(
+            "todos",
+            doctest_support::todo_cells("controlled input", false),
+        )
+        .unwrap();
+
+    let event = subscription
+        .try_next_event()
+        .expect("immediate local subscription event must be queued inside insert");
+    let SubscriptionEvent::Delta { added, .. } = event else {
+        panic!("local write must emit a delta");
+    };
+    assert_eq!(added.len(), 1);
+    assert_eq!(added[0].row_uuid(), write.row_uuid());
+
+    let rows = doctest_support::block_on(db.all(&prepared, opts)).unwrap();
+    assert_eq!(row_ids(&rows), vec![write.row_uuid()]);
+}
+
+#[test]
 fn edge_read_opts_and_wait_honor_edge_durability() {
     let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
     let write = db

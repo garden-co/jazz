@@ -21,7 +21,7 @@ async function main() {
     "async-page-stores.js",
   );
   const worker = `
-    import init, { verify_indexeddb_ordered_storage } from "/pkg/jazz_storage_indexeddb.js";
+    import init, { verify_indexeddb_groove_visibility, verify_indexeddb_ordered_storage } from "/pkg/jazz_storage_indexeddb.js";
     import { IndexedDbPageStore } from "/async-page-stores.js";
     self.onmessage = async () => {
       const name = "jazz-ordered-idb-" + Date.now() + "-" + Math.random();
@@ -32,7 +32,12 @@ async function main() {
         const receipt = await verify_indexeddb_ordered_storage(store);
         store.close();
         await IndexedDbPageStore.destroy(name);
-        self.postMessage({ receipt });
+        const grooveName = name + "-groove";
+        store = await IndexedDbPageStore.open(grooveName);
+        const grooveReceipt = await verify_indexeddb_groove_visibility(store);
+        store.close();
+        await IndexedDbPageStore.destroy(grooveName);
+        self.postMessage({ receipt, grooveReceipt });
       } catch (error) {
         if (store) store.close();
         self.postMessage({ error: error.stack || error.message || String(error) });
@@ -75,7 +80,11 @@ async function main() {
     if (result.receipt !== "ordered IndexedDB commit/scan/delete/reopen passed") {
       throw new Error(JSON.stringify(result));
     }
+    if (result.grooveReceipt !== "Groove local visibility preceded IndexedDB durability") {
+      throw new Error(JSON.stringify(result));
+    }
     console.log(result.receipt);
+    console.log(result.grooveReceipt);
   } finally {
     await browser.close();
     await new Promise((resolve) => server.close(resolve));
