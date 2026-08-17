@@ -415,7 +415,7 @@ pub struct NodeOpenReceipt {
     pub recover_unclean_close: Duration,
     /// Persisted maintained-query known-state recovery time.
     pub recover_known_state: Duration,
-    /// In-memory ahead-current index reconstruction time.
+    /// Retained for receipt compatibility; startup no longer rebuilds this index.
     pub rebuild_ahead_current: Duration,
     /// Final catalogue persistence time, when applicable.
     pub finalize_catalogue: Duration,
@@ -425,7 +425,7 @@ pub struct NodeOpenReceipt {
     pub accepted_global_sequences: usize,
     /// Transaction index records inspected for global sequences.
     pub global_sequence_records_scanned: usize,
-    /// Physical ahead-current records consumed while rebuilding indexes.
+    /// Physical ahead-current records consumed by the retired startup sweep.
     pub ahead_current_entries: usize,
 }
 
@@ -557,12 +557,6 @@ pub struct NodeState<S> {
     authored_commit_durability: DurabilityTier,
     /// Mapping from stable node UUIDs to compact on-disk aliases.
     pub(crate) node_aliases: BTreeMap<NodeUuid, NodeAlias>,
-    /// Ahead-current overlay keys for rows whose non-global versions can affect local reads.
-    ahead_current_keys: BTreeSet<(String, VersionLayer, RowUuid, TxTime, NodeAlias)>,
-    /// Rows touched by the ahead-current overlay.
-    ahead_current_rows: BTreeSet<(String, RowUuid)>,
-    /// Latest ahead-current key per table/layer/row for local overlay reads.
-    ahead_current_latest: BTreeMap<(String, VersionLayer, RowUuid), (TxTime, NodeAlias)>,
     /// Runtime counters for sync parking, draining, and ingestion behavior.
     sync_metrics: SyncMetrics,
     /// Runtime counters for query-engine read authorization paths.

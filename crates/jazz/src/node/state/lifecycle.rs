@@ -556,9 +556,6 @@ where
             history_complete,
             authored_commit_durability: DurabilityTier::Local,
             node_aliases: BTreeMap::new(),
-            ahead_current_keys: BTreeSet::new(),
-            ahead_current_rows: BTreeSet::new(),
-            ahead_current_latest: BTreeMap::new(),
             sync_metrics: SyncMetrics::default(),
             query_engine_read_metrics: QueryEngineReadMetrics::default(),
             session_claims: BTreeMap::new(),
@@ -603,20 +600,6 @@ where
         #[cfg(feature = "testing")]
         if let (Some(receipt), Some(started)) = (&mut receipt, started) {
             receipt.recover_known_state = started.elapsed();
-        }
-        #[cfg(feature = "testing")]
-        let started = receipt.as_ref().map(|_| Instant::now());
-        #[cfg(feature = "testing")]
-        if let Some(receipt) = receipt.as_deref_mut() {
-            node.rebuild_ahead_current_keys_with_receipt(receipt)?;
-        } else {
-            node.rebuild_ahead_current_keys()?;
-        }
-        #[cfg(not(feature = "testing"))]
-        node.rebuild_ahead_current_keys()?;
-        #[cfg(feature = "testing")]
-        if let (Some(receipt), Some(started)) = (&mut receipt, started) {
-            receipt.rebuild_ahead_current = started.elapsed();
         }
         #[cfg(feature = "testing")]
         let started = receipt.as_ref().map(|_| Instant::now());

@@ -76,7 +76,41 @@ fn open_receipt_counts_physical_recovery_scans_exactly() {
     // decoded by bounded `Some`-range recovery.
     assert_eq!(receipt.global_sequence_records_scanned, 0);
     assert_eq!(receipt.accepted_global_sequences, 0);
-    assert_eq!(receipt.ahead_current_entries, 2);
+    assert_eq!(
+        receipt.ahead_current_entries, 0,
+        "ahead-current replay protection is queried by exact version, not rebuilt at startup"
+    );
+}
+
+#[test]
+fn reopened_relay_replay_probes_only_the_exact_ahead_version() {
+    let schema = schema();
+    let (_writer_dir, mut writer) = open_node_with_uuid(node(2));
+    let (_, message) = writer
+        .commit_mergeable_unit(
+            MergeableCommit::new("todos", row(33), 33).cells(title_cells("relay replay")),
+        )
+        .unwrap();
+    let SyncMessage::CommitUnit { tx, versions } = message else {
+        panic!("mergeable commit must emit its canonical unit")
+    };
+
+    let receiver_dir = tempfile::tempdir().unwrap();
+    {
+        let mut receiver = open_node_at(&receiver_dir, schema.clone());
+        receiver
+            .ingest_relay_commit_unit(tx.clone(), versions.clone())
+            .unwrap();
+        assert_eq!(ahead_current_row_count(&mut receiver, "todos"), 1);
+    }
+
+    let mut reopened = reopen_node_at(&receiver_dir, node(1), schema);
+    reopened.ingest_relay_commit_unit(tx, versions).unwrap();
+    assert_eq!(
+        ahead_current_row_count(&mut reopened, "todos"),
+        1,
+        "replaying one pending version must probe and retain its exact durable ahead row"
+    );
 }
 
 #[cfg(feature = "testing")]

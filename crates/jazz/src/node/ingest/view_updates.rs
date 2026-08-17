@@ -1075,34 +1075,46 @@ where
         batch: &mut DatabaseBatch,
         version: &VersionRow,
     ) -> Result<(), Error> {
-        // A peer may replay a transaction that is already present locally
-        // (notably while a fresh browser relay hydrates from its persistent
-        // worker). History ingestion verifies that replay is byte-identical;
-        // its pending-current projection must be idempotent too. Otherwise a
-        // self-referential schema can visit the same version twice and try to
-        // insert its exact current primary key again.
-        if self.ahead_current_keys.contains(&(
-            version.table().to_owned(),
-            version.layer(),
-            version.row_uuid(),
-            version.tx_time(),
-            version.tx_node_alias(),
-        )) {
-            return Ok(());
-        }
         let schema_version = self
             .schema_version_for_alias(version.schema_version_alias())
             .ok_or(Error::InvalidStoredValue("unknown schema version alias"))?;
+        let storage_table = match version.layer() {
+            VersionLayer::Content => physical_current_binding(
+                &self.catalogue.catalogue_schemas,
+                &self.catalogue.physical_mappings,
+                schema_version,
+                version.table(),
+                PhysicalCurrentClass::Ahead,
+            )?
+            .storage_table,
+            VersionLayer::Deletion => self.physical_current_table_for_schema(
+                schema_version,
+                version.table(),
+                VersionLayer::Deletion,
+                PhysicalCurrentClass::Ahead,
+            )?,
+        };
+        // A peer may replay a transaction that is already present locally
+        // (notably while a fresh browser relay hydrates from its persistent
+        // worker). Probe only this exact version instead of rebuilding every
+        // ahead-current key during node startup.
+        if !self
+            .database
+            .primary_key_scan_raw(
+                &storage_table,
+                &[
+                    Value::Uuid(version.row_uuid().0),
+                    Value::U64(version.tx_time().0),
+                    Value::U64(version.tx_node_alias().0),
+                ],
+            )?
+            .is_empty()
+        {
+            return Ok(());
+        }
         match version.layer() {
             VersionLayer::Content => {
                 let table = self.table_in_schema(version.table(), schema_version)?;
-                let binding = physical_current_binding(
-                    &self.catalogue.catalogue_schemas,
-                    &self.catalogue.physical_mappings,
-                    schema_version,
-                    version.table(),
-                    PhysicalCurrentClass::Ahead,
-                )?;
                 let logical = owned_record_from_storage_values(
                     &table.ahead_current_storage_tables()[0],
                     self.public_current_values(&table, version, None)?,
@@ -1117,7 +1129,7 @@ where
                     .ok_or(Error::InvalidStoredValue(
                         "physical ahead-current table mapping missing",
                     ))?;
-                let physical_table = self.database.table_schema(&binding.storage_table)?.clone();
+                let physical_table = self.database.table_schema(&storage_table)?.clone();
                 let descriptor = physical_write_descriptor(
                     &table.ahead_current_storage_tables()[0].record_schema(),
                     &physical_current_field_names(&table, &mapping)?,
@@ -1133,7 +1145,7 @@ where
                 )?;
                 let physical = OwnedRecord::new(descriptor.create(&values)?, descriptor);
                 batch.insert_raw(
-                    binding.storage_table,
+                    storage_table,
                     history_primary_key(version),
                     groove::records::VariantRecord::new(
                         u32::try_from(version.schema_version_alias().0)
@@ -1143,12 +1155,7 @@ where
                 );
             }
             VersionLayer::Deletion => batch.insert_raw(
-                self.physical_current_table_for_schema(
-                    schema_version,
-                    version.table(),
-                    VersionLayer::Deletion,
-                    PhysicalCurrentClass::Ahead,
-                )?,
+                storage_table,
                 history_primary_key(version),
                 version.bind_groove_record(
                     owned_record_from_storage_values(
@@ -1161,13 +1168,6 @@ where
                 ),
             ),
         }
-        self.insert_ahead_current_key(
-            version.table().to_owned(),
-            version.layer(),
-            version.row_uuid(),
-            version.tx_time(),
-            version.tx_node_alias(),
-        );
         Ok(())
     }
 
@@ -1196,13 +1196,6 @@ where
             PhysicalCurrentClass::Ahead,
         )?;
         batch.delete(table, history_primary_key(version));
-        self.remove_ahead_current_key(
-            version.table(),
-            version.layer(),
-            version.row_uuid(),
-            version.tx_time(),
-            version.tx_node_alias(),
-        );
         Ok(())
     }
 
