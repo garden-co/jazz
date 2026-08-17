@@ -5,7 +5,8 @@ use std::task::{Context, Poll, Waker};
 
 use groove::records::{EnumCase, EnumSchema, EnumValue, RecordDescriptor, ValueType};
 use groove::schema::{ColumnSchema, ColumnType};
-use groove::storage::{OrderedKvStorage, ReopenableStorage, RocksDbStorage};
+use groove::storage::{OrderedKvStorage, ReopenableStorage};
+use jazz_storage_rocksdb::RocksDbStorage;
 
 use super::*;
 use crate::ids::{AuthorId, BranchId, NodeUuid};

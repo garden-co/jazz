@@ -3,37 +3,32 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
-use crate::db::WireTransportAdapter;
-use crate::ids::AuthorId;
-use crate::node::EdgeCacheBudget;
-use crate::schema::JazzSchema;
-use crate::serving::{NodeRole, StorageConfig};
 use axum::Router;
+use jazz::db::WireTransportAdapter;
+use jazz::groove::storage::StorageFactory;
+use jazz::ids::AuthorId;
+use jazz::node::EdgeCacheBudget;
+use jazz::schema::JazzSchema;
+use jazz::serving::{NodeRole, StorageConfig};
 use tracing::info;
 
-use crate::tools::AppId;
-use crate::tools::middleware::AuthConfig;
-use crate::tools::middleware::auth::{
+use crate::middleware::AuthConfig;
+use crate::middleware::auth::{
     JWKS_CACHE_TTL, JWKS_MAX_STALE, JwksCache, JwtVerifier, StaticJwtVerifier,
 };
-use crate::tools::native_transport_connector::{NativeTransportConnector, NativeTransportRequest};
-#[allow(deprecated)]
-use crate::tools::native_websocket_transport::validate_catalogue_bootstrap_upstream_url;
-use crate::tools::public_schema::Schema;
-#[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
-use crate::tools::server::CatalogueRocksDbStorage;
-use crate::tools::server::routes;
-use crate::tools::server::{
-    CatalogueMemoryStorage, DynCatalogueStorage, ServerState, ServerTopology, StoredCatalogue,
+use crate::server::routes;
+use crate::server::{
+    CatalogueKvStorage, CatalogueMemoryStorage, DynCatalogueStorage, ServerState, ServerTopology,
+    StoredCatalogue,
 };
+use jazz::tools::AppId;
+use jazz::tools::native_transport_connector::{NativeTransportConnector, NativeTransportRequest};
+#[allow(deprecated)]
+use jazz::tools::public_schema::Schema;
 #[cfg(test)]
-use crate::tools::sync::DurabilityTier;
+use jazz::tools::sync::DurabilityTier;
 
-#[cfg(feature = "rocksdb")]
-const STORAGE_CACHE_SIZE_BYTES: usize = 64 * 1024 * 1024;
-#[cfg(feature = "rocksdb")]
 const CATALOGUE_ROCKSDB_DIR: &str = "catalogue.rocksdb";
-#[cfg(feature = "rocksdb")]
 const SERVER_SHELL_ROCKSDB_DIR: &str = "server-shell.rocksdb";
 const DEFAULT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -54,7 +49,7 @@ impl BuiltServer {
     /// may await this method from any async executor. The operation is
     /// idempotent: subsequent calls return the terminal shutdown phase
     /// recorded by the state.
-    pub async fn shutdown(&self) -> crate::tools::server::ShutdownPhase {
+    pub async fn shutdown(&self) -> crate::server::ShutdownPhase {
         self.state.shutdown.request_shutdown();
         self.state.run_shutdown_finalization().await
     }
@@ -68,9 +63,9 @@ enum ServerSchemaMode {
 
 /// Storage backend selection for [`ServerBuilder::with_storage`].
 ///
-/// `Persistent` requires the RocksDB feature for durable server shell
-/// storage. SQLite remains a client/native storage backend, but is not a
-/// supported server shell backend.
+/// `Persistent` requires a target-owned [`StorageFactory`] supplied at the
+/// native composition boundary. SQLite remains a client/native storage
+/// backend, but is not a supported server shell backend.
 #[derive(Debug, Clone)]
 pub enum StorageBackend {
     InMemory,
@@ -79,10 +74,6 @@ pub enum StorageBackend {
     },
     #[cfg(feature = "sqlite")]
     Sqlite {
-        path: PathBuf,
-    },
-    #[cfg(feature = "rocksdb")]
-    RocksDb {
         path: PathBuf,
     },
 }
@@ -97,6 +88,7 @@ pub struct ServerBuilder {
     edge_cache_budget: Option<EdgeCacheBudget>,
     shutdown_timeout: Duration,
     native_transport_connector: Option<Arc<dyn NativeTransportConnector>>,
+    storage_factory: Option<Arc<dyn StorageFactory>>,
 }
 
 impl ServerBuilder {
@@ -116,6 +108,7 @@ impl ServerBuilder {
             edge_cache_budget: None,
             shutdown_timeout: DEFAULT_SHUTDOWN_TIMEOUT,
             native_transport_connector: None,
+            storage_factory: None,
         }
     }
 
@@ -146,6 +139,12 @@ impl ServerBuilder {
 
     pub fn with_storage(mut self, backend: StorageBackend) -> Self {
         self.storage_backend = backend;
+        self
+    }
+
+    /// Supply the target-owned durable storage adapter.
+    pub fn with_storage_factory(mut self, factory: Arc<dyn StorageFactory>) -> Self {
+        self.storage_factory = Some(factory);
         self
     }
 
@@ -182,12 +181,16 @@ impl ServerBuilder {
         };
         validate_server_config(&auth_config, topology)?;
         if topology == ServerTopology::Edge {
-            validate_catalogue_bootstrap_upstream_url(
-                self.upstream_url
-                    .as_deref()
-                    .expect("edge topology has an upstream URL"),
-                self.app_id,
-            )?;
+            if let Some(connector) = self.native_transport_connector.as_ref() {
+                connector
+                    .validate_catalogue_bootstrap_url(
+                        self.upstream_url
+                            .as_deref()
+                            .expect("edge topology has an upstream URL"),
+                        self.app_id,
+                    )
+                    .map_err(|error| error.to_string())?;
+            }
             if self.native_transport_connector.is_none() {
                 // Library unit tests exercise edge catalogue state without a
                 // target-owned socket implementation. Native process shells
@@ -217,7 +220,7 @@ impl ServerBuilder {
 
         let state = Arc::new(ServerState {
             catalogue_store,
-            catalogue: crate::tools::server::ServerCatalogue,
+            catalogue: crate::server::ServerCatalogue,
             app_id: self.app_id,
             auth_config,
             upstream_http_url,
@@ -226,11 +229,12 @@ impl ServerBuilder {
             http_client,
             core_server_shell: std::sync::RwLock::new(core_server_shell),
             core_server_shell_storage_config,
+            storage_factory: self.storage_factory.clone(),
             // A validated durable catalogue remains usable while its core is
             // offline. Blank edges have no such generation and stay behind
             // RetryLater until authenticated bootstrap completes.
             dynamic_edge_catalogue_ready: AtomicBool::new(dynamic_edge_catalogue_ready),
-            shutdown: crate::tools::server::ShutdownController::new(self.shutdown_timeout),
+            shutdown: crate::server::ShutdownController::new(self.shutdown_timeout),
         });
 
         if let (ServerTopology::Edge, Some(upstream_url), Some(admin_secret), Some(connector)) = (
@@ -289,7 +293,7 @@ impl ServerBuilder {
         latest_catalogue_schema: Option<Schema>,
         storage_config: Result<StorageConfig, String>,
         topology: ServerTopology,
-    ) -> Result<Option<crate::tools::server::core_server_shell::ServerShellHandle>, String> {
+    ) -> Result<Option<crate::server::ServerRuntimeHandle>, String> {
         let role = match topology {
             ServerTopology::Core => NodeRole::Core,
             ServerTopology::Edge => NodeRole::Edge,
@@ -297,9 +301,10 @@ impl ServerBuilder {
         if let Some(schema) = &self.core_server_shell_schema {
             let storage_config = storage_config?;
             return Ok(Some(
-                crate::tools::server::core_server_shell::ServerShellHandle::start_with_storage_config(
+                crate::server::ServerRuntimeHandle::start_with_storage_config(
                     schema.clone(),
                     storage_config,
+                    self.storage_factory.clone(),
                     role,
                     self.edge_cache_budget,
                 )?,
@@ -312,20 +317,22 @@ impl ServerBuilder {
         };
         let Some(schema) = schema else {
             if topology == ServerTopology::Edge {
-                return crate::tools::server::core_server_shell::ServerShellHandle::try_start_dynamic_edge_from_storage(
+                return crate::server::ServerRuntimeHandle::try_start_dynamic_edge_from_storage(
                     storage_config?,
+                    self.storage_factory.clone(),
                     self.edge_cache_budget,
                 );
             }
             return Ok(None);
         };
         let storage_config = storage_config?;
-        let schema = crate::tools::public_schema_convert::convert_public_schema(&schema)
+        let schema = jazz::tools::public_schema_convert::convert_public_schema(&schema)
             .map_err(|error| format!("failed to build server shell schema: {error}"))?;
         Ok(Some(
-            crate::tools::server::core_server_shell::ServerShellHandle::start_with_storage_config(
+            crate::server::ServerRuntimeHandle::start_with_storage_config(
                 schema,
                 storage_config,
+                self.storage_factory.clone(),
                 role,
                 self.edge_cache_budget,
             )?,
@@ -339,21 +346,6 @@ impl ServerBuilder {
                 std::fs::create_dir_all(path)
                     .map_err(|e| format!("failed to create data dir '{}': {e}", path.display()))?;
 
-                #[cfg(feature = "rocksdb")]
-                {
-                    Ok(StorageConfig::RocksDb {
-                        path: path.join(SERVER_SHELL_ROCKSDB_DIR),
-                    })
-                }
-                #[cfg(not(feature = "rocksdb"))]
-                {
-                    Err("server shell persistent storage requires the rocksdb feature".to_owned())
-                }
-            }
-            #[cfg(feature = "rocksdb")]
-            StorageBackend::RocksDb { path } => {
-                std::fs::create_dir_all(path)
-                    .map_err(|e| format!("failed to create data dir '{}': {e}", path.display()))?;
                 Ok(StorageConfig::RocksDb {
                     path: path.join(SERVER_SHELL_ROCKSDB_DIR),
                 })
@@ -371,50 +363,24 @@ impl ServerBuilder {
                 std::fs::create_dir_all(path)
                     .map_err(|e| format!("failed to create data dir '{}': {e}", path.display()))?;
 
-                #[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
-                {
-                    let db_path = path.join(CATALOGUE_ROCKSDB_DIR);
-                    let storage = CatalogueRocksDbStorage::open(&db_path, STORAGE_CACHE_SIZE_BYTES)
-                        .map_err(|e| {
-                            format!(
-                                "failed to open catalogue storage '{}': {e:?}",
-                                db_path.display()
-                            )
-                        })?;
-                    Ok(Box::new(storage))
-                }
-                #[cfg(all(feature = "rocksdb", target_arch = "wasm32"))]
-                {
-                    Err("catalogue storage does not support rocksdb on wasm".to_owned())
-                }
-                #[cfg(not(all(feature = "rocksdb", not(target_arch = "wasm32"))))]
-                {
-                    Err("persistent catalogue storage requires the rocksdb feature".to_owned())
-                }
+                let factory = self.storage_factory.as_deref().ok_or_else(|| {
+                    "persistent catalogue storage requires a target-shell storage factory"
+                        .to_owned()
+                })?;
+                let db_path = path.join(CATALOGUE_ROCKSDB_DIR);
+                let storage = factory
+                    .open(&db_path, &[CatalogueKvStorage::COLUMN_FAMILY])
+                    .map_err(|error| {
+                        format!(
+                            "failed to open catalogue storage '{}': {error}",
+                            db_path.display()
+                        )
+                    })?;
+                Ok(Box::new(CatalogueKvStorage::new(storage)))
             }
             #[cfg(feature = "sqlite")]
             StorageBackend::Sqlite { .. } => {
                 Err("server catalogue storage does not support sqlite".to_owned())
-            }
-            #[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
-            StorageBackend::RocksDb { path } => {
-                std::fs::create_dir_all(path)
-                    .map_err(|e| format!("failed to create data dir '{}': {e}", path.display()))?;
-                let db_path = path.join(CATALOGUE_ROCKSDB_DIR);
-                let storage = CatalogueRocksDbStorage::open(&db_path, STORAGE_CACHE_SIZE_BYTES)
-                    .map_err(|e| {
-                        format!(
-                            "failed to open catalogue storage '{}': {e:?}",
-                            db_path.display()
-                        )
-                    })?;
-                Ok(Box::new(storage))
-            }
-            #[cfg(all(feature = "rocksdb", target_arch = "wasm32"))]
-            StorageBackend::RocksDb { path } => {
-                std::fs::create_dir_all(path)
-                    .map_err(|e| format!("failed to create data dir '{}': {e}", path.display()))?;
-                Err("catalogue storage does not support rocksdb on wasm".to_owned())
             }
             StorageBackend::InMemory => Ok(Box::new(CatalogueMemoryStorage::new())),
         }
@@ -449,7 +415,7 @@ fn spawn_edge_upstream_connector(
             if state.shutdown.is_shutting_down() {
                 return;
             }
-            let auth = crate::tools::websocket_prelude_auth::AuthConfig {
+            let auth = jazz::tools::websocket_prelude_auth::AuthConfig {
                 admin_secret: Some(admin_secret.clone()),
                 ..Default::default()
             };
@@ -474,7 +440,7 @@ fn spawn_edge_upstream_connector(
                     continue;
                 }
             };
-            let shell = match state.core_server_shell() {
+            let shell = match state.runtime() {
                 Some(shell) => match state.refresh_dynamic_edge_catalogue(&shell, snapshot).await {
                     Ok(()) => shell,
                     Err(error) => {
@@ -658,15 +624,15 @@ pub fn upstream_http_url(base_url: &str, app_id: AppId) -> Result<String, String
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tools::AppId;
-    use crate::tools::server::catalogue::CatalogueStore;
+    use crate::server::catalogue::CatalogueStore;
+    use jazz::tools::AppId;
 
-    fn dynamic_bootstrap_schema() -> crate::tools::public_schema::Schema {
-        crate::tools::public_schema::SchemaBuilder::new()
+    fn dynamic_bootstrap_schema() -> jazz::tools::public_schema::Schema {
+        jazz::tools::public_schema::SchemaBuilder::new()
             .table(
-                crate::tools::public_schema::TableSchema::builder("notes")
-                    .column("id", crate::tools::public_schema::ColumnType::Uuid)
-                    .column("body", crate::tools::public_schema::ColumnType::Text),
+                jazz::tools::public_schema::TableSchema::builder("notes")
+                    .column("id", jazz::tools::public_schema::ColumnType::Uuid)
+                    .column("body", jazz::tools::public_schema::ColumnType::Text),
             )
             .build()
     }
@@ -687,7 +653,7 @@ mod tests {
             .expect("build authority core");
         let snapshot = core
             .state
-            .core_server_shell()
+            .runtime()
             .expect("core has shell")
             .trusted_catalogue_snapshot_for_test()
             .await
@@ -713,7 +679,7 @@ mod tests {
                 .is_err()
         );
         assert!(
-            edge.state.core_server_shell().is_none(),
+            edge.state.runtime().is_none(),
             "failed adoption must not publish a shell to downstream clients"
         );
         assert!(
@@ -721,10 +687,7 @@ mod tests {
                 .start_dynamic_edge_shell(snapshot.clone(), None)
                 .is_ok()
         );
-        let first_shell = edge
-            .state
-            .core_server_shell()
-            .expect("retry publishes ready shell");
+        let first_shell = edge.state.runtime().expect("retry publishes ready shell");
         let second_shell = edge
             .state
             .start_dynamic_edge_shell(snapshot, None)
@@ -759,7 +722,7 @@ mod tests {
             .expect("build authority core");
         let snapshot = core
             .state
-            .core_server_shell()
+            .runtime()
             .expect("core has shell")
             .trusted_catalogue_snapshot_for_test()
             .await
@@ -772,12 +735,9 @@ mod tests {
             .build()
             .await
             .expect("build edge with a validated durable generation");
-        let shell = edge
-            .state
-            .core_server_shell()
-            .expect("edge has ready shell");
+        let shell = edge.state.runtime().expect("edge has ready shell");
         assert!(
-            edge.state.core_server_shell_for_client().is_some(),
+            edge.state.runtime_for_client().is_some(),
             "validated catalogue is usable while the upstream is offline"
         );
 
@@ -796,7 +756,7 @@ mod tests {
                 .is_err()
         );
         assert!(
-            edge.state.core_server_shell_for_client().is_none(),
+            edge.state.runtime_for_client().is_none(),
             "failed validation/install must not advance the ready generation"
         );
 
@@ -805,7 +765,7 @@ mod tests {
             .await
             .expect("later complete refresh installs successfully");
         assert!(
-            edge.state.core_server_shell_for_client().is_some(),
+            edge.state.runtime_for_client().is_some(),
             "readiness advances only after the complete install returns"
         );
 
@@ -814,8 +774,8 @@ mod tests {
             .first()
             .expect("authority has genesis")
             .clone();
-        let evolved = crate::protocol::SchemaVersion::new(crate::schema::JazzSchema::new([
-            crate::schema::TableSchema::new(
+        let evolved = jazz::protocol::SchemaVersion::new(jazz::schema::JazzSchema::new([
+            jazz::schema::TableSchema::new(
                 "notes",
                 [
                     groove::schema::ColumnSchema::new("id", groove::schema::ColumnType::Uuid),
@@ -828,15 +788,15 @@ mod tests {
         evolved_snapshot.schemas.push(evolved.clone());
         evolved_snapshot.lineages.push((
             1,
-            crate::protocol::SchemaLineagePublication::new(
+            jazz::protocol::SchemaLineagePublication::new(
                 evolved.clone(),
-                crate::protocol::MigrationLens::new(
+                jazz::protocol::MigrationLens::new(
                     base.id,
                     evolved.id,
-                    vec![crate::protocol::TableLens {
+                    vec![jazz::protocol::TableLens {
                         source_table: "notes".to_owned(),
                         target_table: "notes".to_owned(),
-                        ops: vec![crate::protocol::LensOp::AddColumn {
+                        ops: vec![jazz::protocol::LensOp::AddColumn {
                             column: "extra".to_owned(),
                             default: groove::records::Value::String(String::new()),
                         }],
@@ -846,13 +806,13 @@ mod tests {
                 Vec::<String>::new(),
             ),
         ));
-        evolved_snapshot.current_write_schema = crate::protocol::CurrentWriteSchema {
+        evolved_snapshot.current_write_schema = jazz::protocol::CurrentWriteSchema {
             revision: 1,
             schema: evolved.id,
         };
         shell
             .set_catalogue_activation_failpoint(
-                crate::node::CatalogueActivationFailpoint::BeforeSnapshotActivationCommit,
+                jazz::node::CatalogueActivationFailpoint::BeforeSnapshotActivationCommit,
             )
             .await
             .expect("arm post-registry install failure");
@@ -864,7 +824,7 @@ mod tests {
             "v1-to-v2 activation fails after registry reconstruction at the planted boundary"
         );
         assert!(
-            edge.state.core_server_shell_for_client().is_none(),
+            edge.state.runtime_for_client().is_none(),
             "a post-registry activation failure must not publish the new ready generation"
         );
     }
@@ -886,27 +846,6 @@ mod tests {
             .await;
 
         assert!(result.is_ok());
-    }
-
-    #[tokio::test]
-    async fn edge_builder_rejects_remote_plaintext_bootstrap_upstream() {
-        let result = ServerBuilder::new(AppId::from_name("edge-plaintext-bootstrap-rejected"))
-            .with_storage(StorageBackend::InMemory)
-            .with_auth_config(AuthConfig {
-                admin_secret: Some("admin-secret".to_owned()),
-                ..Default::default()
-            })
-            .with_upstream_url("http://core.example.test")
-            .build()
-            .await;
-        let error = match result {
-            Err(error) => error,
-            Ok(_) => panic!("remote plaintext bootstrap must fail configuration"),
-        };
-        assert!(
-            error.contains("plaintext ws:// bootstrap"),
-            "error: {error}"
-        );
     }
 
     #[test]
@@ -1011,29 +950,29 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "rocksdb")]
     #[tokio::test]
     async fn dynamic_builder_starts_core_server_shell_from_rehydrated_catalogue_schema() {
         let data_dir = tempfile::TempDir::new().expect("temp data dir");
         let app_id = AppId::from_name("dynamic-server-shell-rehydrate");
-        let schema = crate::tools::public_schema::SchemaBuilder::new()
+        let schema = jazz::tools::public_schema::SchemaBuilder::new()
             .table(
-                crate::tools::public_schema::TableSchema::builder("todos")
-                    .column("id", crate::tools::public_schema::ColumnType::Uuid)
-                    .column("title", crate::tools::public_schema::ColumnType::Text),
+                jazz::tools::public_schema::TableSchema::builder("todos")
+                    .column("id", jazz::tools::public_schema::ColumnType::Uuid)
+                    .column("title", jazz::tools::public_schema::ColumnType::Text),
             )
             .build();
 
         {
             let built = ServerBuilder::new(app_id)
                 .with_schema(schema)
-                .with_storage(StorageBackend::RocksDb {
+                .with_storage_factory(Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory))
+                .with_storage(StorageBackend::Persistent {
                     path: data_dir.path().to_path_buf(),
                 })
                 .build()
                 .await
                 .expect("build fixed schema server");
-            assert!(built.state.core_server_shell().is_some());
+            assert!(built.state.runtime().is_some());
             built
                 .state
                 .catalogue_store
@@ -1047,64 +986,66 @@ mod tests {
         }
 
         let rebuilt = ServerBuilder::new(app_id)
-            .with_storage(StorageBackend::RocksDb {
+            .with_storage_factory(Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory))
+            .with_storage(StorageBackend::Persistent {
                 path: data_dir.path().to_path_buf(),
             })
             .build()
             .await
             .expect("build dynamic server from rehydrated catalogue");
 
-        assert!(rebuilt.state.core_server_shell().is_some());
+        assert!(rebuilt.state.runtime().is_some());
     }
 
-    #[cfg(feature = "rocksdb")]
     #[tokio::test]
-    async fn rocksdb_builder_starts_core_server_shell_with_catalogue_storage_after_restart() {
+    async fn persistent_adapter_starts_core_server_shell_with_catalogue_storage_after_restart() {
         let data_dir = tempfile::TempDir::new().expect("temp data dir");
         let app_id = AppId::from_name("rocksdb-server-shell-restart");
-        let schema = crate::tools::public_schema::SchemaBuilder::new()
+        let schema = jazz::tools::public_schema::SchemaBuilder::new()
             .table(
-                crate::tools::public_schema::TableSchema::builder("todos")
-                    .column("id", crate::tools::public_schema::ColumnType::Uuid)
-                    .column("title", crate::tools::public_schema::ColumnType::Text),
+                jazz::tools::public_schema::TableSchema::builder("todos")
+                    .column("id", jazz::tools::public_schema::ColumnType::Uuid)
+                    .column("title", jazz::tools::public_schema::ColumnType::Text),
             )
             .build();
 
         let retained_state = {
             let built = ServerBuilder::new(app_id)
                 .with_schema(schema.clone())
-                .with_storage(StorageBackend::RocksDb {
+                .with_storage_factory(Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory))
+                .with_storage(StorageBackend::Persistent {
                     path: data_dir.path().to_path_buf(),
                 })
                 .build()
                 .await
                 .expect("build RocksDB server with server shell");
 
-            assert!(built.state.core_server_shell().is_some());
+            assert!(built.state.runtime().is_some());
             assert!(data_dir.path().join(CATALOGUE_ROCKSDB_DIR).exists());
             assert!(data_dir.path().join(SERVER_SHELL_ROCKSDB_DIR).exists());
             assert_eq!(
                 built.shutdown().await,
-                crate::tools::server::ShutdownPhase::StorageClosed,
+                crate::server::ShutdownPhase::StorageClosed,
                 "the public builder lifecycle must join the shell before its RocksDB path is reopened"
             );
             Arc::clone(&built.state)
         };
         assert!(
-            retained_state.core_server_shell().is_none(),
+            retained_state.runtime().is_none(),
             "shutdown must retire the shell even if request/router state outlives BuiltServer"
         );
 
         let rebuilt = ServerBuilder::new(app_id)
             .with_schema(schema.clone())
-            .with_storage(StorageBackend::RocksDb {
+            .with_storage_factory(Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory))
+            .with_storage(StorageBackend::Persistent {
                 path: data_dir.path().to_path_buf(),
             })
             .build()
             .await
             .expect("rebuild RocksDB server with server shell");
 
-        assert!(rebuilt.state.core_server_shell().is_some());
+        assert!(rebuilt.state.runtime().is_some());
         assert!(data_dir.path().join(SERVER_SHELL_ROCKSDB_DIR).exists());
         rebuilt.shutdown().await;
 
@@ -1115,45 +1056,47 @@ mod tests {
         {
             let dropped = ServerBuilder::new(app_id)
                 .with_schema(schema.clone())
-                .with_storage(StorageBackend::RocksDb {
+                .with_storage_factory(Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory))
+                .with_storage(StorageBackend::Persistent {
                     path: data_dir.path().to_path_buf(),
                 })
                 .build()
                 .await
                 .expect("build RocksDB server for direct-drop lifecycle");
-            assert!(dropped.state.core_server_shell().is_some());
+            assert!(dropped.state.runtime().is_some());
         }
 
         let reopened_after_drop = ServerBuilder::new(app_id)
             .with_schema(schema)
-            .with_storage(StorageBackend::RocksDb {
+            .with_storage_factory(Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory))
+            .with_storage(StorageBackend::Persistent {
                 path: data_dir.path().to_path_buf(),
             })
             .build()
             .await
             .expect("reopen RocksDB server after direct builder drop");
-        assert!(reopened_after_drop.state.core_server_shell().is_some());
+        assert!(reopened_after_drop.state.runtime().is_some());
         assert_eq!(
             reopened_after_drop.shutdown().await,
-            crate::tools::server::ShutdownPhase::StorageClosed
+            crate::server::ShutdownPhase::StorageClosed
         );
         drop(retained_state);
     }
 
-    #[cfg(feature = "rocksdb")]
     #[tokio::test]
-    async fn rocksdb_builder_reopens_after_first_shutdown_waiter_is_aborted() {
+    async fn persistent_adapter_reopens_after_first_shutdown_waiter_is_aborted() {
         let data_dir = tempfile::TempDir::new().expect("temp data dir");
         let app_id = AppId::from_name("rocksdb-server-shell-aborted-shutdown");
-        let schema = crate::tools::public_schema::SchemaBuilder::new()
+        let schema = jazz::tools::public_schema::SchemaBuilder::new()
             .table(
-                crate::tools::public_schema::TableSchema::builder("todos")
-                    .column("id", crate::tools::public_schema::ColumnType::Uuid),
+                jazz::tools::public_schema::TableSchema::builder("todos")
+                    .column("id", jazz::tools::public_schema::ColumnType::Uuid),
             )
             .build();
         let built = ServerBuilder::new(app_id)
             .with_schema(schema.clone())
-            .with_storage(StorageBackend::RocksDb {
+            .with_storage_factory(Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory))
+            .with_storage(StorageBackend::Persistent {
                 path: data_dir.path().to_path_buf(),
             })
             .build()
@@ -1169,9 +1112,7 @@ mod tests {
         let first_state = Arc::clone(&state);
         let first = tokio::spawn(async move { first_state.run_shutdown_finalization().await });
         let mut phases = state.shutdown.subscribe();
-        while *phases.borrow_and_update()
-            != crate::tools::server::ShutdownPhase::DrainingConnections
-        {
+        while *phases.borrow_and_update() != crate::server::ShutdownPhase::DrainingConnections {
             phases
                 .changed()
                 .await
@@ -1182,12 +1123,13 @@ mod tests {
         drop(request);
         assert_eq!(
             state.run_shutdown_finalization().await,
-            crate::tools::server::ShutdownPhase::StorageClosed
+            crate::server::ShutdownPhase::StorageClosed
         );
 
         let reopened = ServerBuilder::new(app_id)
             .with_schema(schema)
-            .with_storage(StorageBackend::RocksDb {
+            .with_storage_factory(Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory))
+            .with_storage(StorageBackend::Persistent {
                 path: data_dir.path().to_path_buf(),
             })
             .build()
@@ -1195,19 +1137,18 @@ mod tests {
             .expect("reopen RocksDB after aborted shutdown waiter");
         assert_eq!(
             reopened.shutdown().await,
-            crate::tools::server::ShutdownPhase::StorageClosed
+            crate::server::ShutdownPhase::StorageClosed
         );
     }
 
-    #[cfg(feature = "rocksdb")]
     #[test]
-    fn rocksdb_builder_shutdown_survives_initiating_runtime_drop() {
+    fn persistent_adapter_shutdown_survives_initiating_runtime_drop() {
         let data_dir = tempfile::TempDir::new().expect("temp data dir");
         let app_id = AppId::from_name("rocksdb-server-shell-foreign-shutdown");
-        let schema = crate::tools::public_schema::SchemaBuilder::new()
+        let schema = jazz::tools::public_schema::SchemaBuilder::new()
             .table(
-                crate::tools::public_schema::TableSchema::builder("todos")
-                    .column("id", crate::tools::public_schema::ColumnType::Uuid),
+                jazz::tools::public_schema::TableSchema::builder("todos")
+                    .column("id", jazz::tools::public_schema::ColumnType::Uuid),
             )
             .build();
         let (built, state, request) = {
@@ -1219,7 +1160,8 @@ mod tests {
                 .block_on(
                     ServerBuilder::new(app_id)
                         .with_schema(schema.clone())
-                        .with_storage(StorageBackend::RocksDb {
+                        .with_storage_factory(Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory))
+                        .with_storage(StorageBackend::Persistent {
                             path: data_dir.path().to_path_buf(),
                         })
                         .build(),
@@ -1236,7 +1178,7 @@ mod tests {
                 tokio::spawn(async move { first_state.run_shutdown_finalization().await });
                 let mut phases = state.shutdown.subscribe();
                 while *phases.borrow_and_update()
-                    != crate::tools::server::ShutdownPhase::DrainingConnections
+                    != crate::server::ShutdownPhase::DrainingConnections
                 {
                     phases
                         .changed()
@@ -1259,12 +1201,13 @@ mod tests {
                 tokio::time::timeout(std::time::Duration::from_secs(1), built.shutdown())
                     .await
                     .expect("later runtime reaches durable-close barrier"),
-                crate::tools::server::ShutdownPhase::StorageClosed
+                crate::server::ShutdownPhase::StorageClosed
             );
-            assert!(state.core_server_shell().is_none());
+            assert!(state.runtime().is_none());
             ServerBuilder::new(app_id)
                 .with_schema(schema)
-                .with_storage(StorageBackend::RocksDb {
+                .with_storage_factory(Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory))
+                .with_storage(StorageBackend::Persistent {
                     path: data_dir.path().to_path_buf(),
                 })
                 .build()
@@ -1273,7 +1216,7 @@ mod tests {
         });
         assert_eq!(
             second_runtime.block_on(reopened.shutdown()),
-            crate::tools::server::ShutdownPhase::StorageClosed
+            crate::server::ShutdownPhase::StorageClosed
         );
     }
 

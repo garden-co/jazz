@@ -44,7 +44,7 @@ where
         self.catalogue.active_catalogue_seq
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "testing"))]
     pub(crate) fn set_catalogue_activation_failpoint(
         &mut self,
         failpoint: CatalogueActivationFailpoint,

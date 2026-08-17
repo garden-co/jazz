@@ -52,7 +52,7 @@ where
             return Err(Error::CatalogueActivationFailed);
         }
 
-        #[cfg(test)]
+        #[cfg(any(test, feature = "testing"))]
         if self.catalogue_activation_failpoint
             == Some(CatalogueActivationFailpoint::BeforeSnapshotActivationCommit)
         {

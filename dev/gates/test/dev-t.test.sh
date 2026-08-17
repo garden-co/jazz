@@ -35,8 +35,8 @@ run() {
 }
 
 run db::tests::round
-grep -F -- '-p jazz --no-default-features --features test --lib -- --list' "$TEMP/cargo.log" >/dev/null
-grep -F -- '-p jazz --no-default-features --features test --lib db::tests::round_trips -- --exact' "$TEMP/cargo.log" >/dev/null
+grep -F -- '-p jazz --no-default-features --features testing,transport-compression-zstd --lib -- --list' "$TEMP/cargo.log" >/dev/null
+grep -F -- '-p jazz --no-default-features --features testing,transport-compression-zstd --lib db::tests::round_trips -- --exact' "$TEMP/cargo.log" >/dev/null
 
 : >"$TEMP/cargo.log"
 run --exact db::tests::round_trips

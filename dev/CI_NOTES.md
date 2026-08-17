@@ -61,7 +61,8 @@ split-string evasion of the sensitive-data gate in the jazz-sim bench.
 
 ## OBSERVATION: local canonical gate vs CI shape
 
-CI runs `cargo test --workspace --lib --bins --tests --features test` — a
+CI runs the workspace tests with explicit package features
+`jazz/testing,jazz/transport-compression-zstd,jazz-server/test,jazz-cli/test` — a
 different slicing than the canonical per-crate gates. Both catch the 8
 failures; keep both (workspace slicing in CI catches feature-unification
 differences the per-crate gates can miss).

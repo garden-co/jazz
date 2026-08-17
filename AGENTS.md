@@ -23,14 +23,14 @@ module-path name, and runs that name with `--exact`; a miss or an ambiguous
 filter is an error before any test run. For a library test, use
 `dev/t unique::module::test_name`; for an integration target, use
 `dev/t --test target_name unique::module::test_name`. The wrapper preserves the
-core gate's `-p jazz --no-default-features --features test` selection.
+core gate's `-p jazz --no-default-features --features testing,transport-compression-zstd` selection.
 
 **Canonical gates:** do not let born-red or rotted targets accumulate silently.
 For ordinary Rust/core work, the full gate set is:
 
 - `cargo test -p jazz`
 - `cargo test -p groove`
-- `cargo test -p jazz --no-default-features --features test` (matches `crates/jazz/TESTING_GUIDELINES.md`).
+- `cargo test -p jazz --no-default-features --features testing,transport-compression-zstd` (matches `crates/jazz/TESTING_GUIDELINES.md`).
 - `cargo test -p jazz-cli --features test` covers the `jazz-tools` and
   `jazz-server` executable shells, including their process-level integration
   tests. The binary names are stable, but their Cargo package is `jazz-cli`;

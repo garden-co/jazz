@@ -1,8 +1,8 @@
 //! Public-API coverage that a connected persistent client releases its local
 //! storage when it shuts down.
 
-use jazz::tools::server::JazzServer;
-use jazz::tools::{ClientStorage, ColumnType, JazzClient, SchemaBuilder, TableSchema};
+use jazz::tools::{ClientStorage, ColumnType, SchemaBuilder, TableSchema};
+use jazz_server::JazzServer;
 use tempfile::TempDir;
 
 fn test_schema() -> jazz::tools::Schema {
@@ -23,16 +23,19 @@ async fn shutdown_releases_persistent_storage_for_reopen_impl() {
     let data_dir = TempDir::new().expect("create persistent client directory");
     let mut context = server.make_client_context_for_user(test_schema(), "storage-release-user");
     context.storage = ClientStorage::Persistent;
+    context.storage_factory = Some(std::sync::Arc::new(
+        jazz_storage_rocksdb::RocksDbStorageFactory,
+    ));
     context.data_dir = data_dir.path().to_path_buf();
 
-    JazzClient::connect(context.clone())
+    jazz_testkit::connect(context.clone())
         .await
         .expect("connect persistent client")
         .shutdown()
         .await
         .expect("shutdown persistent client");
 
-    JazzClient::connect(context)
+    jazz_testkit::connect(context)
         .await
         .expect("reopen the same persistent client directory")
         .shutdown()

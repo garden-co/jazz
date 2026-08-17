@@ -905,7 +905,7 @@ pub(super) fn prepared_reachability_graph(
 }
 
 pub(super) fn prepared_reachability_shape(
-    database: &mut Database<RocksDbStorage>,
+    database: &mut Database<TestStorage>,
 ) -> crate::ivm::PreparedShape {
     database
         .prepare_one_sink(
@@ -918,7 +918,7 @@ pub(super) fn prepared_reachability_shape(
 }
 
 pub(super) fn prepared_reachability_with_antijoin_shape(
-    database: &mut Database<RocksDbStorage>,
+    database: &mut Database<TestStorage>,
 ) -> crate::ivm::PreparedShape {
     let unblocked = GraphBuilder::anti_join(
         GraphBuilder::table("edges"),

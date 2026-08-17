@@ -12,7 +12,7 @@ use groove::records::Value;
 use groove::schema::{
     ColumnSchema, ColumnType, DatabaseSchema, IntegerKeyType, PrimaryKey, TableSchema,
 };
-use groove::storage::{Durability, RocksDbStorage};
+use jazz_storage_rocksdb::{Durability, RocksDbStorage};
 
 fn schema() -> DatabaseSchema {
     DatabaseSchema::new([

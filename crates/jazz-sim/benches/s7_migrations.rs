@@ -9,7 +9,6 @@ use std::time::Instant;
 use jazz::db::{Db, DbConfig, DbIdentity, MergeableTxOps, SeededRowIdSource, Transport};
 use jazz::groove::records::Value;
 use jazz::groove::schema::{ColumnSchema, ColumnType};
-use jazz::groove::storage::{Durability, RocksDbStorage};
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::node::{CurrentRow, NodeState};
 use jazz::peer::PeerState;
@@ -22,6 +21,7 @@ use jazz::schema::{JazzSchema, TableSchema};
 use jazz::tx::DurabilityTier;
 use jazz::wire::TransportError;
 use jazz_sim::{emit_json_line, metadata_fields};
+use jazz_storage_rocksdb::{Durability, RocksDbStorage};
 use serde_json::{Value as JsonValue, json};
 
 fn main() {

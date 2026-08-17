@@ -8,13 +8,11 @@
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-#[cfg(feature = "rocksdb")]
 use std::env;
-#[cfg(all(feature = "rocksdb", target_os = "linux"))]
+#[cfg(target_os = "linux")]
 use std::fs;
-#[cfg(all(feature = "rocksdb", target_os = "linux"))]
+#[cfg(target_os = "linux")]
 use std::os::fd::AsRawFd;
-#[cfg(feature = "rocksdb")]
 use std::path::Path;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -26,8 +24,6 @@ use jazz::db::{
 };
 use jazz::groove::records::Value;
 use jazz::groove::schema::{ColumnSchema, ColumnType};
-#[cfg(feature = "rocksdb")]
-use jazz::groove::storage::RocksDbStorage;
 use jazz::groove::storage::{MemoryStorage, OrderedKvStorage};
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::query::{Query, all_of, claim, col, eq, lit};
@@ -37,16 +33,14 @@ use jazz::wire::{
     FEATURE_SESSION_FRAME, FEATURE_STRUCTURED_ERRORS, FEATURE_SYNC_MESSAGE_PAYLOAD, TransportError,
     WIRE_PROTOCOL_VERSION, WireSession, WireTransport,
 };
-#[cfg(feature = "rocksdb")]
+use jazz_storage_rocksdb::RocksDbStorage;
 use tempfile::TempDir;
 
 type BenchDb = Db<MemoryStorage>;
-#[cfg(feature = "rocksdb")]
 type RocksBenchDb = Db<RocksDbStorage>;
 
 const AUTHOR: AuthorId = AuthorId(uuid::uuid!("00000000-0000-0000-0000-0000000000a1"));
 const READER_AUTHOR: AuthorId = AuthorId(uuid::uuid!("00000000-0000-0000-0000-0000000000b2"));
-#[cfg(feature = "rocksdb")]
 const R3_REOPEN_SEED: u64 = 31;
 
 #[derive(Debug, Clone, Copy)]
@@ -280,7 +274,6 @@ fn open_db_with_schema(
     )
 }
 
-#[cfg(feature = "rocksdb")]
 fn open_rocks_db_with_author(
     seed: u64,
     author: AuthorId,
@@ -1161,14 +1154,12 @@ fn r2_reads(c: &mut Criterion) {
     group.finish();
 }
 
-#[cfg(feature = "rocksdb")]
 #[derive(Clone, Copy)]
 struct R3Profile {
     id: &'static str,
     profile: SmallProfile,
 }
 
-#[cfg(feature = "rocksdb")]
 fn r3_profiles() -> Vec<R3Profile> {
     let requested = env::var("JAZZ_R3_PROFILES").unwrap_or_else(|_| "ci".to_owned());
     requested
@@ -1195,7 +1186,6 @@ fn r3_profiles() -> Vec<R3Profile> {
         .collect()
 }
 
-#[cfg(feature = "rocksdb")]
 #[derive(Debug)]
 struct R3PhaseSample {
     storage_open: Duration,
@@ -1214,7 +1204,6 @@ struct R3PhaseSample {
     rows: usize,
 }
 
-#[cfg(feature = "rocksdb")]
 #[derive(Debug)]
 struct R3OpenBreakdown {
     catalogue_open: Duration,
@@ -1235,21 +1224,18 @@ struct R3OpenBreakdown {
     ahead_current_entries: usize,
 }
 
-#[cfg(feature = "rocksdb")]
 #[derive(Clone, Copy)]
 enum R3CacheMode {
     Warm,
     Evicted,
 }
 
-#[cfg(feature = "rocksdb")]
 #[derive(Clone, Copy)]
 enum R3CloseMode {
     Clean,
     Unclean,
 }
 
-#[cfg(feature = "rocksdb")]
 impl R3CloseMode {
     fn id(self) -> &'static str {
         match self {
@@ -1259,7 +1245,6 @@ impl R3CloseMode {
     }
 }
 
-#[cfg(feature = "rocksdb")]
 fn r3_close_modes() -> Vec<R3CloseMode> {
     let requested = env::var("JAZZ_R3_CLOSE_MODES").unwrap_or_else(|_| "unclean".to_owned());
     requested
@@ -1276,7 +1261,6 @@ fn r3_close_modes() -> Vec<R3CloseMode> {
         .collect()
 }
 
-#[cfg(feature = "rocksdb")]
 impl R3CacheMode {
     fn id(self) -> &'static str {
         match self {
@@ -1293,7 +1277,6 @@ impl R3CacheMode {
     }
 }
 
-#[cfg(feature = "rocksdb")]
 fn r3_cache_modes() -> Vec<R3CacheMode> {
     let requested = env::var("JAZZ_R3_CACHE_MODES").unwrap_or_else(|_| "warm".to_owned());
     requested
@@ -1310,7 +1293,7 @@ fn r3_cache_modes() -> Vec<R3CacheMode> {
         .collect()
 }
 
-#[cfg(all(feature = "rocksdb", target_os = "linux"))]
+#[cfg(target_os = "linux")]
 fn evict_path_from_linux_page_cache(path: &Path) {
     for entry in fs::read_dir(path).expect("read R3 RocksDB directory for cache eviction") {
         let entry = entry.expect("read R3 RocksDB cache eviction entry");
@@ -1339,12 +1322,11 @@ fn evict_path_from_linux_page_cache(path: &Path) {
     }
 }
 
-#[cfg(all(feature = "rocksdb", not(target_os = "linux")))]
+#[cfg(not(target_os = "linux"))]
 fn evict_path_from_linux_page_cache(_path: &Path) {
     panic!("JAZZ_R3_CACHE_MODES=evicted is currently supported only on Linux");
 }
 
-#[cfg(feature = "rocksdb")]
 fn open_rocks_db_with_phases(
     seed: u64,
     author: AuthorId,
@@ -1409,7 +1391,6 @@ fn open_rocks_db_with_phases(
     (db, storage_open, jazz_open, open_breakdown)
 }
 
-#[cfg(feature = "rocksdb")]
 fn measure_r3_phase_sample(
     path: &Path,
     project: RowUuid,
@@ -1461,7 +1442,6 @@ fn measure_r3_phase_sample(
     }
 }
 
-#[cfg(feature = "rocksdb")]
 fn establish_r3_close_mode(path: &Path, close_mode: R3CloseMode) {
     let db = open_rocks_db_with_author(R3_REOPEN_SEED, AUTHOR, false, path);
     if matches!(close_mode, R3CloseMode::Clean) {
@@ -1470,7 +1450,6 @@ fn establish_r3_close_mode(path: &Path, close_mode: R3CloseMode) {
     }
 }
 
-#[cfg(feature = "rocksdb")]
 fn median_open_us(
     samples: &[R3PhaseSample],
     phase: impl Fn(&R3OpenBreakdown) -> Duration,
@@ -1487,7 +1466,6 @@ fn median_open_us(
     Some(values[values.len() / 2])
 }
 
-#[cfg(feature = "rocksdb")]
 fn median_us(samples: &[R3PhaseSample], phase: impl Fn(&R3PhaseSample) -> Duration) -> u64 {
     let mut values = samples
         .iter()
@@ -1497,7 +1475,6 @@ fn median_us(samples: &[R3PhaseSample], phase: impl Fn(&R3PhaseSample) -> Durati
     values[values.len() / 2]
 }
 
-#[cfg(feature = "rocksdb")]
 fn emit_r3_phase_receipts(path: &Path, project: RowUuid, selected: R3Profile) {
     let sample_count = env::var("JAZZ_R3_PHASE_SAMPLES")
         .ok()
@@ -1612,7 +1589,6 @@ fn emit_r3_phase_receipts(path: &Path, project: RowUuid, selected: R3Profile) {
     }
 }
 
-#[cfg(feature = "rocksdb")]
 fn r3_rocksdb_cold_load(c: &mut Criterion) {
     let mut group = c.benchmark_group("realistic_phase1/r3_rocksdb_cold_load");
 
@@ -1654,9 +1630,6 @@ fn r3_rocksdb_cold_load(c: &mut Criterion) {
 
     group.finish();
 }
-
-#[cfg(not(feature = "rocksdb"))]
-fn r3_rocksdb_cold_load(_c: &mut Criterion) {}
 
 fn r4_hot_task_history(c: &mut Criterion) {
     let mut group = c.benchmark_group("realistic_phase1/r4_hot_task_history");

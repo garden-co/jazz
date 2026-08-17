@@ -16,7 +16,7 @@ use crate::tx::DeletionEvent;
 use crate::tx::{DurabilityTier, Fate, TxKind};
 use groove::records::{BorrowedRecord, RecordDescriptor, Value, ValueType};
 use groove::schema::{ColumnSchema, ColumnType};
-use groove::storage::RocksDbStorage;
+use jazz_storage_rocksdb::RocksDbStorage;
 
 fn node(byte: u8) -> NodeUuid {
     NodeUuid::from_bytes([byte; 16])

@@ -96,7 +96,8 @@ fn apply_materialized(
 #[test]
 fn aggregate_hydrates_and_updates_group_summaries() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = RocksDbStorage::open(temp_dir.path(), &["metrics"]).unwrap();
+    let storage =
+        TestStorage::open(temp_dir.path().join("groove-test.btree"), &["metrics"]).unwrap();
     let mut database = Database::new(metric_schema(), storage).unwrap();
     let subscription = database
         .subscribe_one_sink(metric_aggregate_table_graph())
@@ -189,7 +190,8 @@ fn aggregate_hydrates_and_updates_group_summaries() {
 #[test]
 fn aggregate_counts_weighted_multiplicity_from_bag_union() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = RocksDbStorage::open(temp_dir.path(), &["metrics"]).unwrap();
+    let storage =
+        TestStorage::open(temp_dir.path().join("groove-test.btree"), &["metrics"]).unwrap();
     let mut database = Database::new(metric_schema(), storage).unwrap();
     let graph = metric_aggregate_graph(GraphBuilder::union([
         GraphBuilder::table("metrics"),
@@ -222,7 +224,8 @@ fn aggregate_counts_weighted_multiplicity_from_bag_union() {
 #[test]
 fn aggregate_incremental_matches_recompute_under_seeded_changes() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = RocksDbStorage::open(temp_dir.path(), &["metrics"]).unwrap();
+    let storage =
+        TestStorage::open(temp_dir.path().join("groove-test.btree"), &["metrics"]).unwrap();
     let mut database = Database::new(metric_schema(), storage).unwrap();
     let graph = metric_aggregate_table_graph();
     let subscription = database.subscribe_one_sink(graph.clone()).unwrap();
@@ -276,7 +279,8 @@ fn aggregate_incremental_matches_recompute_under_seeded_changes() {
 #[test]
 fn aggregate_query_hydration_does_not_perturb_subscription_deltas() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = RocksDbStorage::open(temp_dir.path(), &["metrics"]).unwrap();
+    let storage =
+        TestStorage::open(temp_dir.path().join("groove-test.btree"), &["metrics"]).unwrap();
     let mut database = Database::new(metric_schema(), storage).unwrap();
     let graph = metric_aggregate_table_graph();
     let subscription = database.subscribe_one_sink(graph.clone()).unwrap();

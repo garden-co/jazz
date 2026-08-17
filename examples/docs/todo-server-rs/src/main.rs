@@ -106,6 +106,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         server_url,
         data_dir: PathBuf::from(data_dir),
         storage: ClientStorage::Persistent,
+        storage_factory: Some(std::sync::Arc::new(
+            jazz_storage_rocksdb::RocksDbStorageFactory,
+        )),
         jwt_token: None,
         backend_secret: None,
         admin_secret: None,

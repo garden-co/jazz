@@ -16,9 +16,7 @@ use crate::db::{
     TickScheduler, TickUrgency, Transport as CoreTransport, WireTransportAdapter,
 };
 use crate::groove::records::Value as CoreValue;
-use crate::groove::storage::MemoryStorage as CoreMemoryStorage;
-#[cfg(feature = "rocksdb")]
-use crate::groove::storage::RocksDbStorage as CoreRocksDbStorage;
+use crate::groove::storage::{BoxedStorage as CoreStorage, MemoryStorage as CoreMemoryStorage};
 use crate::ids::{AuthorId as CoreAuthorId, NodeUuid as CoreNodeUuid, RowUuid as CoreRowUuid};
 use crate::protocol::{
     ReadViewSourceSpec as CoreReadViewSourceSpec, ReadViewSpec as CoreReadViewSpec,
@@ -36,7 +34,7 @@ use crate::tools::public_schema::{ColumnType, Query, Session, TableSchema, Value
 use crate::tools::public_schema::{OrderedRowDelta, QueryResult, Row};
 use crate::tools::public_schema::{Schema, validate_json_value};
 use crate::tools::public_schema_convert::convert_public_schema;
-#[cfg(feature = "test-utils")]
+#[cfg(feature = "testing")]
 use crate::tools::sync::ClientId;
 use crate::tools::sync::DurabilityTier;
 use crate::tools::transaction::BatchId;
@@ -50,23 +48,14 @@ use serde::{Deserialize, Deserializer};
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-#[cfg(feature = "rocksdb")]
-use crate::tools::ClientStorage;
 use crate::tools::{
-    AppContext, JazzError, ObjectId, OutputOccurrenceId, Result, ResultKey, SubscriptionHandle,
-    SubscriptionRejectReason, SubscriptionServerFailureCode, SubscriptionStream,
-    SubscriptionStreamItem,
+    AppContext, ClientStorage, JazzError, ObjectId, OutputOccurrenceId, Result, ResultKey,
+    SubscriptionHandle, SubscriptionRejectReason, SubscriptionServerFailureCode,
+    SubscriptionStream, SubscriptionStreamItem,
 };
 
-type CoreMemoryDb = CoreDb<CoreMemoryStorage>;
-#[cfg(feature = "rocksdb")]
-type CoreRocksDb = CoreDb<CoreRocksDbStorage>;
-
-enum BackendConnection {
-    Memory(Rc<RefCell<CorePeerConnection<CoreMemoryStorage>>>),
-    #[cfg(feature = "rocksdb")]
-    RocksDb(Rc<RefCell<CorePeerConnection<CoreRocksDbStorage>>>),
-}
+type CoreClientDb = CoreDb<CoreStorage>;
+type BackendConnection = Rc<RefCell<CorePeerConnection<CoreStorage>>>;
 
 const QUERY_COVERAGE_TIMEOUT: Duration = Duration::from_secs(5);
 const DEFAULT_TEST_WAIT_TIMEOUT_MULTIPLIER: u32 = 8;
@@ -83,11 +72,7 @@ fn load_tolerant_test_timeout(timeout: Duration) -> Duration {
     timeout.checked_mul(multiplier).unwrap_or(timeout)
 }
 
-enum StorageBundle {
-    Memory(CoreMemoryStorage),
-    #[cfg(feature = "rocksdb")]
-    RocksDb(CoreRocksDbStorage),
-}
+type StorageBundle = CoreStorage;
 
 #[derive(Debug, Deserialize)]
 struct UnverifiedJwtClaims {
@@ -230,21 +215,8 @@ enum ClosedTransactionState {
     RolledBack,
 }
 
-enum Backend {
-    Memory(Rc<CoreMemoryDb>),
-    #[cfg(feature = "rocksdb")]
-    RocksDb(Rc<CoreRocksDb>),
-}
-
-impl Clone for Backend {
-    fn clone(&self) -> Self {
-        match self {
-            Self::Memory(db) => Self::Memory(Rc::clone(db)),
-            #[cfg(feature = "rocksdb")]
-            Self::RocksDb(db) => Self::RocksDb(Rc::clone(db)),
-        }
-    }
-}
+#[derive(Clone)]
+struct Backend(Rc<CoreClientDb>);
 
 impl Backend {
     async fn open(
@@ -252,65 +224,32 @@ impl Backend {
         storage: StorageBundle,
         identity: CoreDbIdentity,
     ) -> Result<Self> {
-        match storage {
-            StorageBundle::Memory(storage) => Ok(Self::Memory(Rc::new(
-                CoreDb::open(CoreDbConfig::new(schema, storage, identity))
-                    .await
-                    .map_err(|error| JazzError::Connection(error.to_string()))?,
-            ))),
-            #[cfg(feature = "rocksdb")]
-            StorageBundle::RocksDb(storage) => Ok(Self::RocksDb(Rc::new(
-                CoreDb::open(CoreDbConfig::new(schema, storage, identity))
-                    .await
-                    .map_err(|error| JazzError::Connection(error.to_string()))?,
-            ))),
-        }
+        Ok(Self(Rc::new(
+            CoreDb::open(CoreDbConfig::new(schema, storage, identity))
+                .await
+                .map_err(|error| JazzError::Connection(error.to_string()))?,
+        )))
     }
 
     fn set_tick_scheduler(&self, scheduler: Rc<TickSchedulerImpl>) {
-        match self {
-            Self::Memory(db) => db.set_tick_scheduler(Some(scheduler)),
-            #[cfg(feature = "rocksdb")]
-            Self::RocksDb(db) => db.set_tick_scheduler(Some(scheduler)),
-        }
+        self.0.set_tick_scheduler(Some(scheduler));
     }
 
     fn connect_upstream(&self, transport: Box<dyn CoreTransport>) -> BackendConnection {
-        match self {
-            Self::Memory(db) => BackendConnection::Memory(db.connect_upstream(transport)),
-            #[cfg(feature = "rocksdb")]
-            Self::RocksDb(db) => BackendConnection::RocksDb(db.connect_upstream(transport)),
-        }
+        self.0.connect_upstream(transport)
     }
 
     fn detach_connection(&self, connection: &BackendConnection) -> bool {
-        match (self, connection) {
-            (Self::Memory(db), BackendConnection::Memory(connection)) => {
-                db.detach_connection(connection)
-            }
-            #[cfg(feature = "rocksdb")]
-            (Self::RocksDb(db), BackendConnection::RocksDb(connection)) => {
-                db.detach_connection(connection)
-            }
-            #[allow(unreachable_patterns)]
-            _ => false,
-        }
+        self.0.detach_connection(connection)
     }
 
     fn set_identity_claims(&self, identity: CoreAuthorId, claims: HashMap<String, CoreValue>) {
-        match self {
-            Self::Memory(db) => db.set_identity_claims(identity, claims.into_iter().collect()),
-            #[cfg(feature = "rocksdb")]
-            Self::RocksDb(db) => db.set_identity_claims(identity, claims.into_iter().collect()),
-        }
+        self.0
+            .set_identity_claims(identity, claims.into_iter().collect());
     }
 
     fn tick(&self) -> std::result::Result<(), CoreDbError> {
-        match self {
-            Self::Memory(db) => db.tick(),
-            #[cfg(feature = "rocksdb")]
-            Self::RocksDb(db) => db.tick(),
-        }
+        self.0.tick()
     }
 
     fn insert(
@@ -318,17 +257,8 @@ impl Backend {
         table: &str,
         cells: crate::db::RowCells,
     ) -> std::result::Result<(CoreRowUuid, CoreTxId), CoreDbError> {
-        match self {
-            Self::Memory(db) => {
-                let write = db.insert(table, cells)?;
-                Ok((write.row_uuid(), write.mergeable_tx_id()))
-            }
-            #[cfg(feature = "rocksdb")]
-            Self::RocksDb(db) => {
-                let write = db.insert(table, cells)?;
-                Ok((write.row_uuid(), write.mergeable_tx_id()))
-            }
-        }
+        let write = self.0.insert(table, cells)?;
+        Ok((write.row_uuid(), write.mergeable_tx_id()))
     }
 
     fn insert_for_identity(
@@ -337,17 +267,8 @@ impl Backend {
         table: &str,
         cells: crate::db::RowCells,
     ) -> std::result::Result<(CoreRowUuid, CoreTxId), CoreDbError> {
-        match self {
-            Self::Memory(db) => {
-                let write = db.insert_for_identity(identity, table, cells)?;
-                Ok((write.row_uuid(), write.mergeable_tx_id()))
-            }
-            #[cfg(feature = "rocksdb")]
-            Self::RocksDb(db) => {
-                let write = db.insert_for_identity(identity, table, cells)?;
-                Ok((write.row_uuid(), write.mergeable_tx_id()))
-            }
-        }
+        let write = self.0.insert_for_identity(identity, table, cells)?;
+        Ok((write.row_uuid(), write.mergeable_tx_id()))
     }
 
     fn insert_with_id(
@@ -356,11 +277,10 @@ impl Backend {
         row_id: CoreRowUuid,
         cells: crate::db::RowCells,
     ) -> std::result::Result<CoreTxId, CoreDbError> {
-        match self {
-            Self::Memory(db) => Ok(db.insert_with_id(table, row_id, cells)?.mergeable_tx_id()),
-            #[cfg(feature = "rocksdb")]
-            Self::RocksDb(db) => Ok(db.insert_with_id(table, row_id, cells)?.mergeable_tx_id()),
-        }
+        Ok(self
+            .0
+            .insert_with_id(table, row_id, cells)?
+            .mergeable_tx_id())
     }
 
     fn insert_with_id_for_identity(
@@ -370,15 +290,10 @@ impl Backend {
         row_id: CoreRowUuid,
         cells: crate::db::RowCells,
     ) -> std::result::Result<CoreTxId, CoreDbError> {
-        match self {
-            Self::Memory(db) => Ok(db
-                .insert_with_id_for_identity(identity, table, row_id, cells)?
-                .mergeable_tx_id()),
-            #[cfg(feature = "rocksdb")]
-            Self::RocksDb(db) => Ok(db
-                .insert_with_id_for_identity(identity, table, row_id, cells)?
-                .mergeable_tx_id()),
-        }
+        Ok(self
+            .0
+            .insert_with_id_for_identity(identity, table, row_id, cells)?
+            .mergeable_tx_id())
     }
 
     fn upsert(
@@ -387,11 +302,7 @@ impl Backend {
         row_id: CoreRowUuid,
         cells: crate::db::RowCells,
     ) -> std::result::Result<CoreTxId, CoreDbError> {
-        match self {
-            Self::Memory(db) => Ok(db.upsert(table, row_id, cells)?.mergeable_tx_id()),
-            #[cfg(feature = "rocksdb")]
-            Self::RocksDb(db) => Ok(db.upsert(table, row_id, cells)?.mergeable_tx_id()),
-        }
+        Ok(self.0.upsert(table, row_id, cells)?.mergeable_tx_id())
     }
 
     fn upsert_for_identity(
@@ -401,15 +312,10 @@ impl Backend {
         row_id: CoreRowUuid,
         cells: crate::db::RowCells,
     ) -> std::result::Result<CoreTxId, CoreDbError> {
-        match self {
-            Self::Memory(db) => Ok(db
-                .upsert_for_identity(identity, table, row_id, cells)?
-                .mergeable_tx_id()),
-            #[cfg(feature = "rocksdb")]
-            Self::RocksDb(db) => Ok(db
-                .upsert_for_identity(identity, table, row_id, cells)?
-                .mergeable_tx_id()),
-        }
+        Ok(self
+            .0
+            .upsert_for_identity(identity, table, row_id, cells)?
+            .mergeable_tx_id())
     }
 
     fn update(
@@ -418,11 +324,7 @@ impl Backend {
         row_id: CoreRowUuid,
         cells: crate::db::RowCells,
     ) -> std::result::Result<CoreTxId, CoreDbError> {
-        match self {
-            Self::Memory(db) => Ok(db.update(table, row_id, cells)?.mergeable_tx_id()),
-            #[cfg(feature = "rocksdb")]
-            Self::RocksDb(db) => Ok(db.update(table, row_id, cells)?.mergeable_tx_id()),
-        }
+        Ok(self.0.update(table, row_id, cells)?.mergeable_tx_id())
     }
 
     fn delete_for_identity(
@@ -431,15 +333,10 @@ impl Backend {
         table: &str,
         row_id: CoreRowUuid,
     ) -> std::result::Result<CoreTxId, CoreDbError> {
-        match self {
-            Self::Memory(db) => Ok(db
-                .delete_for_identity(identity, table, row_id)?
-                .mergeable_tx_id()),
-            #[cfg(feature = "rocksdb")]
-            Self::RocksDb(db) => Ok(db
-                .delete_for_identity(identity, table, row_id)?
-                .mergeable_tx_id()),
-        }
+        Ok(self
+            .0
+            .delete_for_identity(identity, table, row_id)?
+            .mergeable_tx_id())
     }
 
     fn delete(
@@ -447,22 +344,14 @@ impl Backend {
         table: &str,
         row_id: CoreRowUuid,
     ) -> std::result::Result<CoreTxId, CoreDbError> {
-        match self {
-            Self::Memory(db) => Ok(db.delete(table, row_id)?.mergeable_tx_id()),
-            #[cfg(feature = "rocksdb")]
-            Self::RocksDb(db) => Ok(db.delete(table, row_id)?.mergeable_tx_id()),
-        }
+        Ok(self.0.delete(table, row_id)?.mergeable_tx_id())
     }
 
     fn prepare_query(
         &self,
         query: &crate::query::Query,
     ) -> std::result::Result<crate::db::PreparedQuery, CoreDbError> {
-        match self {
-            Self::Memory(db) => db.prepare_query_for_open_schema(query),
-            #[cfg(feature = "rocksdb")]
-            Self::RocksDb(db) => db.prepare_query_for_open_schema(query),
-        }
+        self.0.prepare_query_for_open_schema(query)
     }
 
     fn attach_query(
@@ -470,38 +359,22 @@ impl Backend {
         prepared: &crate::db::PreparedQuery,
         opts: CoreReadOpts,
     ) -> std::result::Result<crate::db::QueryAttachment, CoreDbError> {
-        match self {
-            Self::Memory(db) => db.attach_query_with_opts(prepared, opts),
-            #[cfg(feature = "rocksdb")]
-            Self::RocksDb(db) => db.attach_query_with_opts(prepared, opts),
-        }
+        self.0.attach_query_with_opts(prepared, opts)
     }
 
     fn query_attachment_is_covered(&self, attachment: &crate::db::QueryAttachment) -> bool {
-        match self {
-            Self::Memory(db) => db.query_attachment_is_covered(attachment),
-            #[cfg(feature = "rocksdb")]
-            Self::RocksDb(db) => db.query_attachment_is_covered(attachment),
-        }
+        self.0.query_attachment_is_covered(attachment)
     }
 
     fn detach_query(&self, attachment: crate::db::QueryAttachment) {
-        match self {
-            Self::Memory(db) => db.detach_query(attachment),
-            #[cfg(feature = "rocksdb")]
-            Self::RocksDb(db) => db.detach_query(attachment),
-        }
+        self.0.detach_query(attachment);
     }
 
     fn row_provenance(
         &self,
         row: &crate::node::CurrentRow,
     ) -> std::result::Result<Option<crate::node::RowProvenance>, CoreDbError> {
-        match self {
-            Self::Memory(db) => db.row_provenance(row),
-            #[cfg(feature = "rocksdb")]
-            Self::RocksDb(db) => db.row_provenance(row),
-        }
+        self.0.row_provenance(row)
     }
 
     async fn all(
@@ -509,11 +382,7 @@ impl Backend {
         prepared: &crate::db::PreparedQuery,
         opts: CoreReadOpts,
     ) -> std::result::Result<Vec<crate::node::CurrentRow>, CoreDbError> {
-        match self {
-            Self::Memory(db) => db.all(prepared, opts).await,
-            #[cfg(feature = "rocksdb")]
-            Self::RocksDb(db) => db.all(prepared, opts).await,
-        }
+        self.0.all(prepared, opts).await
     }
 
     fn transaction_all_for_identity(
@@ -523,11 +392,8 @@ impl Backend {
         author: CoreAuthorId,
         opts: CoreReadOpts,
     ) -> std::result::Result<Vec<crate::node::CurrentRow>, CoreDbError> {
-        match self {
-            Self::Memory(db) => db.transaction_all_for_identity(tx_id, prepared, author, opts),
-            #[cfg(feature = "rocksdb")]
-            Self::RocksDb(db) => db.transaction_all_for_identity(tx_id, prepared, author, opts),
-        }
+        self.0
+            .transaction_all_for_identity(tx_id, prepared, author, opts)
     }
 
     async fn subscribe(
@@ -535,38 +401,22 @@ impl Backend {
         prepared: &crate::db::PreparedQuery,
         opts: CoreReadOpts,
     ) -> std::result::Result<crate::db::SubscriptionStream, CoreDbError> {
-        match self {
-            Self::Memory(db) => db.subscribe(prepared, opts).await,
-            #[cfg(feature = "rocksdb")]
-            Self::RocksDb(db) => db.subscribe(prepared, opts).await,
-        }
+        self.0.subscribe(prepared, opts).await
     }
 
     fn write_state(
         &self,
         tx_id: CoreTxId,
     ) -> std::result::Result<crate::db::WriteState, CoreDbError> {
-        match self {
-            Self::Memory(db) => db.write_state(tx_id),
-            #[cfg(feature = "rocksdb")]
-            Self::RocksDb(db) => db.write_state(tx_id),
-        }
+        self.0.write_state(tx_id)
     }
 
     async fn next_write_state_change(&self, tx_id: CoreTxId) {
-        match self {
-            Self::Memory(db) => db.next_write_state_change(tx_id).await,
-            #[cfg(feature = "rocksdb")]
-            Self::RocksDb(db) => db.next_write_state_change(tx_id).await,
-        }
+        self.0.next_write_state_change(tx_id).await;
     }
 
     fn begin_exclusive(&self, id: OpenBatchId) -> std::result::Result<(), CoreDbError> {
-        match self {
-            Self::Memory(db) => db.begin_exclusive(id),
-            #[cfg(feature = "rocksdb")]
-            Self::RocksDb(db) => db.begin_exclusive(id),
-        }
+        self.0.begin_exclusive(id)
     }
 
     fn exclusive_write(
@@ -576,15 +426,9 @@ impl Backend {
         row_id: CoreRowUuid,
         cells: crate::db::RowCells,
     ) -> std::result::Result<(), CoreDbError> {
-        match self {
-            Self::Memory(db) => db
-                .exclusive_tx_ref(tx_id)
-                .insert_with_id(table, row_id, cells),
-            #[cfg(feature = "rocksdb")]
-            Self::RocksDb(db) => db
-                .exclusive_tx_ref(tx_id)
-                .insert_with_id(table, row_id, cells),
-        }
+        self.0
+            .exclusive_tx_ref(tx_id)
+            .insert_with_id(table, row_id, cells)
     }
 
     fn exclusive_update(
@@ -594,11 +438,7 @@ impl Backend {
         row_id: CoreRowUuid,
         cells: crate::db::RowCells,
     ) -> std::result::Result<(), CoreDbError> {
-        match self {
-            Self::Memory(db) => db.exclusive_tx_ref(tx_id).update(table, row_id, cells),
-            #[cfg(feature = "rocksdb")]
-            Self::RocksDb(db) => db.exclusive_tx_ref(tx_id).update(table, row_id, cells),
-        }
+        self.0.exclusive_tx_ref(tx_id).update(table, row_id, cells)
     }
 
     fn exclusive_delete(
@@ -607,22 +447,14 @@ impl Backend {
         table: &str,
         row_id: CoreRowUuid,
     ) -> std::result::Result<(), CoreDbError> {
-        match self {
-            Self::Memory(db) => db.exclusive_tx_ref(tx_id).delete(table, row_id),
-            #[cfg(feature = "rocksdb")]
-            Self::RocksDb(db) => db.exclusive_tx_ref(tx_id).delete(table, row_id),
-        }
+        self.0.exclusive_tx_ref(tx_id).delete(table, row_id)
     }
 
     fn commit_exclusive_handle(
         &self,
         tx_id: OpenBatchId,
     ) -> std::result::Result<CoreTxId, CoreDbError> {
-        match self {
-            Self::Memory(db) => db.commit_exclusive_handle(tx_id),
-            #[cfg(feature = "rocksdb")]
-            Self::RocksDb(db) => db.commit_exclusive_handle(tx_id),
-        }
+        self.0.commit_exclusive_handle(tx_id)
     }
 }
 
@@ -1036,7 +868,7 @@ impl ClientDb {
         self.inner.borrow_mut().disconnect_upstream()
     }
 
-    #[cfg(feature = "test-utils")]
+    #[cfg(feature = "testing")]
     async fn reconnect_upstream(&self) -> Result<bool> {
         ClientDbInner::reconnect_upstream(&self.inner).await
     }
@@ -1680,23 +1512,18 @@ fn core_storage(schema: &crate::schema::JazzSchema, context: &AppContext) -> Res
         .iter()
         .map(String::as_str)
         .collect::<Vec<_>>();
-    #[cfg(feature = "rocksdb")]
-    {
-        match context.storage {
-            ClientStorage::Memory => Ok(StorageBundle::Memory(CoreMemoryStorage::new(&refs))),
-            ClientStorage::Persistent => {
-                std::fs::create_dir_all(&context.data_dir)?;
-                let db_path = context.data_dir.join("jazz-core.rocksdb");
-                let storage = CoreRocksDbStorage::open(&db_path, &refs)
-                    .map_err(|error| JazzError::Connection(error.to_string()))?;
-                Ok(StorageBundle::RocksDb(storage))
-            }
-        }
-    }
-    #[cfg(not(feature = "rocksdb"))]
-    {
-        let _ = context;
-        Ok(StorageBundle::Memory(CoreMemoryStorage::new(&refs)))
+    match context.storage {
+        ClientStorage::Memory => Ok(CoreStorage::new(CoreMemoryStorage::new(&refs))),
+        ClientStorage::Persistent => context
+            .storage_factory
+            .as_ref()
+            .ok_or_else(|| {
+                JazzError::Connection(
+                    "persistent client storage requires a target-shell storage factory".to_string(),
+                )
+            })?
+            .open(&context.data_dir.join("jazz-core.rocksdb"), &refs)
+            .map_err(|error| JazzError::Connection(error.to_string())),
     }
 }
 
@@ -2857,14 +2684,13 @@ impl JazzClient {
             })
             .collect()
     }
-    /// Connect to Jazz with the given configuration.
-    #[allow(deprecated)]
+    /// Open a local client with no target-specific network adapter.
+    ///
+    /// An empty `server_url` is an offline client. Native online applications
+    /// use [`Self::connect_with_native_transport`] from their process or
+    /// binding composition crate.
     pub async fn connect(context: AppContext) -> Result<Self> {
-        let connector = (!context.server_url.is_empty()).then(|| {
-            Arc::new(crate::tools::native_websocket_transport::NativeWebSocketConnector)
-                as Arc<dyn NativeTransportConnector>
-        });
-        Self::connect_inner(context, connector).await
+        Self::connect_inner(context, None).await
     }
 
     /// Connect using a transport selected at a native composition point.
@@ -3184,7 +3010,7 @@ impl JazzClient {
     }
 }
 
-#[cfg(feature = "test-utils")]
+#[cfg(feature = "testing")]
 impl JazzClient {
     pub fn client_id(&self) -> Option<ClientId> {
         None
@@ -3218,7 +3044,7 @@ impl JazzClient {
     }
 }
 
-#[cfg(any(test, feature = "test-utils"))]
+#[cfg(any(test, feature = "testing"))]
 impl Drop for JazzClient {
     /// This is a simplified and synchronous implementation of `JazzClient.shutdown`
     /// that is good-enough for tests (so that we don't require an explicit
@@ -3275,6 +3101,9 @@ mod tests {
             server_url: String::new(),
             data_dir,
             storage: ClientStorage::default(),
+            storage_factory: Some(std::sync::Arc::new(
+                jazz_storage_rocksdb::RocksDbStorageFactory,
+            )),
             jwt_token: None,
             backend_secret: None,
             admin_secret: None,
@@ -3287,10 +3116,16 @@ mod tests {
         schema: Schema,
         storage: ClientStorage,
     ) -> AppContext {
-        AppContext {
+        let mut context = AppContext {
             storage,
             ..make_offline_context(app_id, data_dir, schema)
+        };
+        if storage == ClientStorage::Persistent {
+            context.storage_factory = Some(std::sync::Arc::new(
+                jazz_storage_rocksdb::RocksDbStorageFactory,
+            ));
         }
+        context
     }
 
     fn make_test_jwt(sub: &str, claims: serde_json::Value) -> String {
@@ -3469,7 +3304,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "rocksdb")]
     #[tokio::test]
     async fn offline_persistent_client_rehydrates_rows_from_core_storage() {
         let data_dir = TempDir::new().expect("temp client dir");
@@ -3516,7 +3350,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "rocksdb")]
     #[tokio::test]
     async fn offline_memory_client_does_not_create_core_rocksdb_dir() {
         let data_dir = TempDir::new().expect("temp client dir");

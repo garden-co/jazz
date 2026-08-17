@@ -57,7 +57,7 @@ where
     ///
     /// Typed client facades are pinned to that schema even when a catalogue
     /// snapshot advances or rolls back the separate current-write pointer.
-    #[cfg(feature = "client")]
+    #[cfg(feature = "runtime")]
     pub(crate) fn prepare_query_for_open_schema(
         &self,
         query: &Query,

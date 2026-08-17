@@ -12,12 +12,12 @@ use jazz_testkit as support;
 use std::collections::HashMap;
 use std::time::Duration;
 
-use jazz::tools::middleware::auth::TestClock;
-use jazz::tools::server::JazzServer;
 use jazz::tools::{
-    AppContext, ClientId, ClientStorage, ColumnType, JazzClient, QueryBuilder, Schema,
-    SchemaBuilder, Session, TableSchema, Value, identity,
+    AppContext, ClientId, ClientStorage, ColumnType, QueryBuilder, Schema, SchemaBuilder, Session,
+    TableSchema, Value, identity,
 };
+use jazz_server::JazzServer;
+use jazz_server::middleware::auth::TestClock;
 
 use support::{has_row, wait_for_rows};
 
@@ -70,6 +70,11 @@ fn local_first_context(
     ctx.backend_secret = None;
     ctx.admin_secret = None;
     ctx.storage = storage;
+    if storage == ClientStorage::Persistent {
+        ctx.storage_factory = Some(std::sync::Arc::new(
+            jazz_storage_rocksdb::RocksDbStorageFactory,
+        ));
+    }
     ctx
 }
 
@@ -93,7 +98,7 @@ async fn same_seed_syncs_across_devices() {
 async fn same_seed_syncs_across_devices_impl() {
     let server = JazzServer::start_with_schema(test_schema()).await;
 
-    let alice_device_a = JazzClient::connect(local_first_context(
+    let alice_device_a = jazz_testkit::connect(local_first_context(
         &server,
         test_schema(),
         &alice_seed(),
@@ -106,7 +111,7 @@ async fn same_seed_syncs_across_devices_impl() {
         .insert("todos", todo_values("buy milk", false))
         .expect("alice device A creates todo");
 
-    let alice_device_b = JazzClient::connect(local_first_context(
+    let alice_device_b = jazz_testkit::connect(local_first_context(
         &server,
         test_schema(),
         &alice_seed(),
@@ -148,7 +153,7 @@ async fn different_seeds_produce_distinct_principals_impl() {
         "distinct seeds must derive distinct principal IDs"
     );
 
-    let alice = JazzClient::connect(local_first_context(
+    let alice = jazz_testkit::connect(local_first_context(
         &server,
         test_schema(),
         &alice_seed(),
@@ -157,7 +162,7 @@ async fn different_seeds_produce_distinct_principals_impl() {
     .await
     .expect("connect alice");
 
-    let bob = JazzClient::connect(local_first_context(
+    let bob = jazz_testkit::connect(local_first_context(
         &server,
         test_schema(),
         &bob_seed(),
@@ -222,7 +227,7 @@ async fn persistent_seed_reconnects_as_same_principal_impl() {
     );
     let expected_user_id = identity::derive_user_id(&alice_seed()).to_string();
 
-    let first = JazzClient::connect(context.clone())
+    let first = jazz_testkit::connect(context.clone())
         .await
         .expect("first connect");
     let (todo_id, expected_values, _) = first
@@ -241,7 +246,7 @@ async fn persistent_seed_reconnects_as_same_principal_impl() {
 
     first.shutdown().await.expect("shutdown first");
 
-    let reconnected = JazzClient::connect(context.clone())
+    let reconnected = jazz_testkit::connect(context.clone())
         .await
         .expect("reconnect with same seed and data_dir");
 
@@ -288,7 +293,7 @@ async fn local_first_writes_carry_derived_principal_as_created_by() {
 async fn local_first_writes_carry_derived_principal_as_created_by_impl() {
     let server = JazzServer::start_with_schema(test_schema()).await;
 
-    let alice = JazzClient::connect(local_first_context(
+    let alice = jazz_testkit::connect(local_first_context(
         &server,
         test_schema(),
         &alice_seed(),
@@ -337,7 +342,7 @@ async fn local_first_and_jwt_clients_coexist() {
 async fn local_first_and_jwt_clients_coexist_impl() {
     let server = JazzServer::start_with_schema(test_schema()).await;
 
-    let alice = JazzClient::connect(local_first_context(
+    let alice = jazz_testkit::connect(local_first_context(
         &server,
         test_schema(),
         &alice_seed(),
@@ -357,7 +362,7 @@ async fn local_first_and_jwt_clients_coexist_impl() {
     let mut bob_ctx = server.make_client_context_for_user(test_schema(), bob_subject);
     bob_ctx.backend_secret = None;
     bob_ctx.admin_secret = None;
-    let bob = JazzClient::connect(bob_ctx)
+    let bob = jazz_testkit::connect(bob_ctx)
         .await
         .expect("connect bob (jwt)");
 
@@ -447,7 +452,7 @@ async fn expired_token_reconnect_flushes_queued_writes_impl() {
         .expect("mint short-lived token"),
     );
 
-    let client = JazzClient::connect(ctx.clone())
+    let client = jazz_testkit::connect(ctx.clone())
         .await
         .expect("connect with short-lived token");
 
@@ -489,7 +494,7 @@ async fn expired_token_reconnect_flushes_queued_writes_impl() {
         .expect("mint refreshed token"),
     );
 
-    let reconnected = JazzClient::connect(fresh_ctx)
+    let reconnected = jazz_testkit::connect(fresh_ctx)
         .await
         .expect("reconnect with fresh token");
 

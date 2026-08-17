@@ -6,6 +6,14 @@ use jazz::tools::{
 };
 use tokio::sync::{mpsc, oneshot};
 
+async fn connect_native(context: AppContext) -> jazz::tools::Result<JazzClient> {
+    JazzClient::connect_with_native_transport(
+        context,
+        std::sync::Arc::new(jazz_native_transport::NativeWebSocketConnector),
+    )
+    .await
+}
+
 #[derive(Clone)]
 pub struct TodoClient {
     tx: mpsc::UnboundedSender<ClientCommand>,
@@ -20,16 +28,16 @@ enum ClientCommand {
     Insert {
         table: String,
         values: HashMap<String, Value>,
-        reply: oneshot::Sender<jazz::tools::Result<(ObjectId, Vec<Value>, BatchId)>>,
+        reply: oneshot::Sender<jazz::tools::Result<(ObjectId, Vec<Value>, Option<BatchId>)>>,
     },
     Update {
         object_id: ObjectId,
         updates: Vec<(String, Value)>,
-        reply: oneshot::Sender<jazz::tools::Result<BatchId>>,
+        reply: oneshot::Sender<jazz::tools::Result<Option<BatchId>>>,
     },
     Delete {
         object_id: ObjectId,
-        reply: oneshot::Sender<jazz::tools::Result<BatchId>>,
+        reply: oneshot::Sender<jazz::tools::Result<Option<BatchId>>>,
     },
 }
 
@@ -67,7 +75,7 @@ impl TodoClient {
         &self,
         table: &str,
         values: HashMap<String, Value>,
-    ) -> jazz::tools::Result<(ObjectId, Vec<Value>, BatchId)> {
+    ) -> jazz::tools::Result<(ObjectId, Vec<Value>, Option<BatchId>)> {
         let (reply, rx) = oneshot::channel();
         self.tx
             .send(ClientCommand::Insert {
@@ -83,7 +91,7 @@ impl TodoClient {
         &self,
         object_id: ObjectId,
         updates: Vec<(String, Value)>,
-    ) -> jazz::tools::Result<BatchId> {
+    ) -> jazz::tools::Result<Option<BatchId>> {
         let (reply, rx) = oneshot::channel();
         self.tx
             .send(ClientCommand::Update {
@@ -95,7 +103,7 @@ impl TodoClient {
         rx.await.map_err(|_| JazzError::ChannelClosed)?
     }
 
-    pub async fn delete(&self, object_id: ObjectId) -> jazz::tools::Result<BatchId> {
+    pub async fn delete(&self, object_id: ObjectId) -> jazz::tools::Result<Option<BatchId>> {
         let (reply, rx) = oneshot::channel();
         self.tx
             .send(ClientCommand::Delete { object_id, reply })
@@ -124,7 +132,7 @@ fn run_client_worker(
 
     let local = tokio::task::LocalSet::new();
     local.block_on(&runtime, async move {
-        let client = match JazzClient::connect(context).await {
+        let client = match connect_native(context).await {
             Ok(client) => {
                 let _ = ready_tx.send(Ok(()));
                 client

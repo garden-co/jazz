@@ -8,7 +8,9 @@ name = "todo-server-docs"
 path = "src/main.rs"
 
 [dependencies]
-jazz = { path = "../../../crates/jazz", default-features = false, features = ["client"] }
+jazz = { path = "../../../crates/jazz", default-features = false, features = ["runtime"] }
+jazz-storage-rocksdb = { path = "../../../crates/jazz-storage-rocksdb" }
+jazz-native-transport = { path = "../../../crates/jazz-native-transport" }
 
 tokio = { version = "1", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
@@ -22,10 +24,6 @@ uuid = { version = "1", features = ["v4"] }
 futures-util = "0.3"
 
 [dev-dependencies]
-jazz = { path = "../../../crates/jazz", default-features = false, features = [
-  "rocksdb",
-  "test-utils",
-] }
 tempfile = "3"
 reqwest = { version = "0.12", features = ["json"] }
 tower = { version = "0.5", features = ["util"] }

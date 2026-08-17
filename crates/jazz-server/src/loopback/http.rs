@@ -22,15 +22,15 @@ use std::sync::{
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::db::DbIdentity;
-use crate::ids::{AuthorId, NodeUuid};
-use crate::schema::JazzSchema;
+use jazz::db::DbIdentity;
+use jazz::ids::{AuthorId, NodeUuid};
+use jazz::schema::JazzSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-use crate::serving::admin_schema_convert::convert_admin_schema;
-use crate::serving::{InMemoryServerShell, InMemoryServerShellConfig, MetricsSnapshot, ShellError};
+use crate::loopback::admin_schema_convert::convert_admin_schema;
+use jazz::serving::{InMemoryServerShell, InMemoryServerShellConfig, MetricsSnapshot, ShellError};
 
 /// Result type returned by loopback HTTP helpers.
 pub type LoopbackHttpResult<T> = std::result::Result<T, LoopbackHttpError>;
@@ -257,7 +257,7 @@ impl From<ShellError> for LoopbackHttpError {
 #[derive(Debug)]
 struct LoopbackState {
     shell: InMemoryServerShell,
-    sessions: HashMap<u64, crate::serving::ServerSession>,
+    sessions: HashMap<u64, jazz::serving::ServerSession>,
     next_session_id: u64,
     admin_secret: Option<String>,
     schema_store_path: Option<PathBuf>,
@@ -781,11 +781,11 @@ fn render_metrics(metrics: &MetricsSnapshot) -> String {
     )
 }
 
-fn health_status_name(status: crate::serving::HealthStatus) -> &'static str {
+fn health_status_name(status: jazz::serving::HealthStatus) -> &'static str {
     match status {
-        crate::serving::HealthStatus::Ready => "ready",
-        crate::serving::HealthStatus::Draining => "draining",
-        crate::serving::HealthStatus::Unhealthy => "unhealthy",
+        jazz::serving::HealthStatus::Ready => "ready",
+        jazz::serving::HealthStatus::Draining => "draining",
+        jazz::serving::HealthStatus::Unhealthy => "unhealthy",
     }
 }
 

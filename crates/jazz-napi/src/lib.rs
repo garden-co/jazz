@@ -58,7 +58,7 @@ use jazz::groove::records::{
 };
 use jazz::groove::storage::{
     MemoryStorage as CoreMemoryStorage, OrderedKvStorage as CoreOrderedKvStorage,
-    ReopenableStorage as CoreReopenableStorage, RocksDbStorage as CoreRocksDbStorage,
+    ReopenableStorage as CoreReopenableStorage,
 };
 use jazz::ids::{AuthorId as CoreAuthorId, NodeUuid as CoreNodeUuid, RowUuid as CoreRowUuid};
 use jazz::query::{
@@ -67,17 +67,18 @@ use jazz::query::{
 use jazz::schema::JazzSchema;
 use jazz::tools::OpenBatchId as CoreOpenBatchId;
 use jazz::tools::identity;
-use jazz::tools::middleware::AuthConfig;
-use jazz::tools::server::{
-    JazzServer as CoreJazzServer, ServerBuilder, ServerDataDir, StorageBackend,
-    TestJwtIssuer as JazzTestJwtIssuer, TestJwtOptions,
-};
 use jazz::tools::{AppId, BatchId};
 use jazz::tx::{DurabilityTier as CoreDurabilityTier, TxId};
 use jazz::wire::{
     TransportError, WireAuthorityEndpoint as CoreWireAuthorityEndpoint,
     WireTransport as CoreWireTransport,
 };
+use jazz_server::AuthConfig;
+use jazz_server::{
+    JazzServer as CoreJazzServer, ServerBuilder, ServerDataDir, StorageBackend,
+    TestJwtIssuer as JazzTestJwtIssuer, TestJwtOptions,
+};
+use jazz_storage_rocksdb::RocksDbStorage as CoreRocksDbStorage;
 
 #[derive(Clone, Debug, Deserialize)]
 struct CoreOpenDbConfig {
@@ -2850,9 +2851,13 @@ impl JazzServer {
         } else {
             #[cfg(feature = "rocksdb")]
             {
-                server_builder = server_builder.with_storage(StorageBackend::RocksDb {
-                    path: data_dir.clone().into(),
-                });
+                server_builder = server_builder
+                    .with_storage_factory(std::sync::Arc::new(
+                        jazz_storage_rocksdb::RocksDbStorageFactory,
+                    ))
+                    .with_storage(StorageBackend::Persistent {
+                        path: data_dir.clone().into(),
+                    });
             }
             #[cfg(not(feature = "rocksdb"))]
             {

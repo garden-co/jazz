@@ -7,11 +7,11 @@ use jazz::groove::records::Value as CoreValue;
 use jazz::ids::{BranchId, RowUuid};
 use jazz::row_input;
 use jazz::tools::public_schema::{PolicyExpr, TablePolicies};
-use jazz::tools::server::JazzServer;
 use jazz::tools::{
     ColumnType, DurabilityTier, QueryBuilder, Schema, SchemaBuilder, TableSchema, Value,
     policy_expr,
 };
+use jazz_server::JazzServer;
 use serde_json::json;
 use support::{
     TestingClient, has_added, has_removed, wait_for_query, wait_for_subscription_update,

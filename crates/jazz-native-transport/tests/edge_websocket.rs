@@ -7,11 +7,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use jazz::tools::AppId;
-use jazz::tools::middleware::AuthConfig;
-use jazz::tools::server::{BuiltServer, ServerBuilder, ServerState, StorageBackend};
 use jazz::tools::{AppContext, ClientStorage, JazzClient};
 use jazz::wire::WireTransport as _;
 use jazz_native_transport::{NativeWebSocketConnector, WebSocketClientError, WebSocketTransport};
+use jazz_server::{AuthConfig, BuiltServer, ServerBuilder, ServerState, StorageBackend};
 
 async fn serve(builder: ServerBuilder) -> (String, tokio::task::JoinHandle<()>) {
     let built = builder
@@ -57,6 +56,25 @@ fn transport_auth(secret: &str) -> jazz::tools::websocket_prelude_auth::AuthConf
 
 fn native_connector() -> Arc<NativeWebSocketConnector> {
     Arc::new(NativeWebSocketConnector)
+}
+
+#[tokio::test]
+async fn edge_builder_uses_adapter_bootstrap_url_validation() {
+    let result = ServerBuilder::new(AppId::from_name("edge-plaintext-bootstrap-rejected"))
+        .with_storage(StorageBackend::InMemory)
+        .with_auth_config(auth("admin-secret"))
+        .with_native_transport_connector(native_connector())
+        .with_upstream_url("http://core.example.test")
+        .build()
+        .await;
+    let error = match result {
+        Err(error) => error,
+        Ok(_) => panic!("remote plaintext bootstrap must fail configuration"),
+    };
+    assert!(
+        error.contains("plaintext ws:// bootstrap"),
+        "error: {error}"
+    );
 }
 
 #[tokio::test]
@@ -118,9 +136,9 @@ async fn websocket_transport_wakes_only_for_inbound_db_work() {
 /// Alice's unchanged public `JazzClient::connect` call retains a real online
 /// session through the temporary core WebSocket compatibility adapter.
 ///
-/// alice ──JazzClient::connect──► core compatibility adapter ──websocket──► server
+/// alice ──explicit native adapter composition──► websocket ──► server
 #[tokio::test]
-async fn public_jazz_client_connect_retains_online_compatibility() {
+async fn public_jazz_client_connects_through_explicit_native_adapter() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let app_id = AppId::from_name("adapter-public-client-connect");
@@ -130,17 +148,21 @@ async fn public_jazz_client_connect_retains_online_compatibility() {
                     .with_auth_config(auth("secret")),
             )
             .await;
-            let client = JazzClient::connect(AppContext {
-                app_id,
-                client_id: None,
-                schema: schema(),
-                server_url: url,
-                data_dir: std::env::temp_dir(),
-                storage: ClientStorage::Memory,
-                jwt_token: None,
-                backend_secret: None,
-                admin_secret: Some("secret".to_owned()),
-            })
+            let client = JazzClient::connect_with_native_transport(
+                AppContext {
+                    app_id,
+                    client_id: None,
+                    schema: schema(),
+                    server_url: url,
+                    data_dir: std::env::temp_dir(),
+                    storage: ClientStorage::Memory,
+                    storage_factory: None,
+                    jwt_token: None,
+                    backend_secret: None,
+                    admin_secret: Some("secret".to_owned()),
+                },
+                native_connector(),
+            )
             .await
             .expect("public client connect retains online WebSocket compatibility");
             client.shutdown().await.expect("shutdown online client");

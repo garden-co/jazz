@@ -9,11 +9,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value as JsonValue, json};
 use uuid::Uuid;
 
-use crate::node::EdgeCacheBudget;
-use crate::tools::AppContext;
-use crate::tools::AppId;
-use crate::tools::middleware::AuthConfig;
-use crate::tools::public_schema::Schema;
+use crate::middleware::AuthConfig;
+use jazz::node::EdgeCacheBudget;
+use jazz::tools::AppContext;
+use jazz::tools::AppId;
+use jazz::tools::public_schema::Schema;
 
 use super::{BuiltServer, ServerBuilder, ServerState, StorageBackend};
 use tokio::sync::oneshot;
@@ -31,13 +31,15 @@ pub struct JazzServerBuilder {
     data_dir: Option<PathBuf>,
     schema: Option<Schema>,
     persistent_storage: bool,
-    rocksdb_storage: bool,
+    storage_factory: Option<Arc<dyn jazz::groove::storage::StorageFactory>>,
+    native_transport_connector:
+        Option<Arc<dyn jazz::tools::native_transport_connector::NativeTransportConnector>>,
     admin_secret: Option<String>,
     backend_secret: Option<String>,
     upstream_url: Option<String>,
     edge_cache_budget: Option<EdgeCacheBudget>,
     jwks_url: Option<String>,
-    auth_clock: Option<crate::tools::middleware::auth::AuthClock>,
+    auth_clock: Option<crate::middleware::auth::AuthClock>,
 }
 
 impl std::fmt::Debug for JazzServerBuilder {
@@ -81,12 +83,21 @@ impl JazzServerBuilder {
         self
     }
 
-    /// Use RocksDB as the server storage backend, regardless of which other
-    /// storage features are compiled in.  Implies persistent storage.
-    #[cfg(feature = "rocksdb")]
-    pub fn with_rocksdb_storage(mut self) -> Self {
-        self.rocksdb_storage = true;
+    /// Supply the target-owned adapter used by persistent test storage.
+    pub fn with_storage_factory(
+        mut self,
+        factory: Arc<dyn jazz::groove::storage::StorageFactory>,
+    ) -> Self {
+        self.storage_factory = Some(factory);
         self.persistent_storage = true;
+        self
+    }
+
+    pub fn with_native_transport_connector(
+        mut self,
+        connector: Arc<dyn jazz::tools::native_transport_connector::NativeTransportConnector>,
+    ) -> Self {
+        self.native_transport_connector = Some(connector);
         self
     }
 
@@ -115,8 +126,8 @@ impl JazzServerBuilder {
         self
     }
 
-    #[cfg(feature = "test-utils")]
-    pub fn with_auth_clock(mut self, clock: crate::tools::middleware::auth::TestClock) -> Self {
+    #[cfg(feature = "test")]
+    pub fn with_auth_clock(mut self, clock: crate::middleware::auth::TestClock) -> Self {
         self.auth_clock = Some(clock.into());
         self
     }
@@ -233,7 +244,7 @@ pub struct JazzServer {
     backend_secret: String,
     client_data_dirs: Mutex<Vec<OwnedTempDir>>,
     embedded_jwks_server: Option<TestJwtIssuer>,
-    auth_clock: crate::tools::middleware::auth::AuthClock,
+    auth_clock: crate::middleware::auth::AuthClock,
 }
 
 impl JazzServer {
@@ -260,7 +271,8 @@ impl JazzServer {
             data_dir,
             schema,
             persistent_storage,
-            rocksdb_storage,
+            storage_factory,
+            native_transport_connector,
             admin_secret,
             backend_secret,
             upstream_url,
@@ -298,27 +310,21 @@ impl JazzServer {
             ..Default::default()
         };
 
-        // Keep the in-crate integration harness on the deprecated adapter
-        // until its online clients move to the outward native-transport test
-        // package. Production shells inject their adapter explicitly.
-        #[allow(deprecated)]
-        let mut server_builder = ServerBuilder::new(app_id)
-            .with_auth_config(auth_config)
-            .with_native_transport_connector(Arc::new(
-                crate::tools::native_websocket_transport::NativeWebSocketConnector,
-            ));
+        let mut server_builder = ServerBuilder::new(app_id).with_auth_config(auth_config);
+        if let Some(connector) = native_transport_connector {
+            server_builder = server_builder.with_native_transport_connector(connector);
+        }
+        if let Some(factory) = storage_factory {
+            server_builder = server_builder.with_storage_factory(factory);
+        }
         if let Some(upstream_url) = upstream_url {
             server_builder = server_builder.with_upstream_url(upstream_url);
         }
         if let Some(edge_cache_budget) = edge_cache_budget {
             server_builder = server_builder.with_edge_cache_budget(edge_cache_budget);
         }
-        let mut server_builder = apply_storage_mode(
-            server_builder,
-            storage_data_dir,
-            persistent_storage,
-            rocksdb_storage,
-        );
+        let mut server_builder =
+            apply_storage_mode(server_builder, storage_data_dir, persistent_storage);
 
         if let Some(schema) = schema {
             server_builder = server_builder.with_schema(schema);
@@ -378,7 +384,7 @@ impl JazzServer {
             backend_secret,
             client_data_dirs: Mutex::new(Vec::new()),
             embedded_jwks_server: None,
-            auth_clock: crate::tools::middleware::auth::AuthClock::default(),
+            auth_clock: crate::middleware::auth::AuthClock::default(),
         };
         server.wait_ready().await;
         server
@@ -419,14 +425,14 @@ impl JazzServer {
     /// query-engine path.
     pub async fn seed_branch_row_for_test(
         &self,
-        branch: crate::ids::BranchId,
+        branch: jazz::ids::BranchId,
         table: impl Into<String>,
-        row_id: crate::ids::RowUuid,
-        cells: crate::db::RowCells,
+        row_id: jazz::ids::RowUuid,
+        cells: jazz::db::RowCells,
     ) {
         let shell = self
             .state
-            .core_server_shell()
+            .runtime()
             .expect("test server starts a core server shell");
         shell
             .seed_branch_row_for_test(branch, table.into(), row_id, cells)
@@ -434,10 +440,10 @@ impl JazzServer {
             .expect("seed branch row through server shell");
     }
 
-    pub async fn create_branch_for_test(&self, branch: crate::ids::BranchId) {
+    pub async fn create_branch_for_test(&self, branch: jazz::ids::BranchId) {
         let shell = self
             .state
-            .core_server_shell()
+            .runtime()
             .expect("test server starts a core server shell");
         shell
             .create_branch_for_test(branch)
@@ -487,7 +493,8 @@ impl JazzServer {
             schema,
             server_url: self.base_url(),
             data_dir,
-            storage: crate::tools::ClientStorage::Memory,
+            storage: jazz::tools::ClientStorage::Memory,
+            storage_factory: None,
             jwt_token: Some(jwt_token),
             backend_secret: Some(self.backend_secret().to_string()),
             admin_secret: None,
@@ -630,12 +637,7 @@ fn apply_storage_mode(
     builder: ServerBuilder,
     data_dir: PathBuf,
     persistent: bool,
-    #[allow(unused_variables)] rocksdb: bool,
 ) -> ServerBuilder {
-    #[cfg(feature = "rocksdb")]
-    if rocksdb {
-        return builder.with_storage(StorageBackend::RocksDb { path: data_dir });
-    }
     if persistent {
         builder.with_storage(StorageBackend::Persistent { path: data_dir })
     } else {
@@ -663,7 +665,7 @@ mod tests {
 
     use reqwest::StatusCode;
 
-    use crate::tools::server::ShutdownPhase;
+    use crate::server::ShutdownPhase;
 
     use super::*;
 

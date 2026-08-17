@@ -126,7 +126,7 @@ where
     /// it to receive one connection-authenticated catalogue snapshot and then
     /// select one of the snapshot's admitted schema views.  Until then the
     /// node has no application schema and rejects ordinary data/sync work.
-    #[cfg(any(feature = "server", test))]
+    #[cfg(any(feature = "runtime", test))]
     pub(crate) async fn open_catalogue_uninitialized_edge(
         config: DbConfig<S>,
     ) -> Result<Self, Error> {
@@ -158,7 +158,7 @@ where
     /// Install a complete catalogue received over the authenticated upstream
     /// bootstrap link.  This is intentionally crate-private: ordinary wire
     /// dispatch must never turn an arbitrary peer's snapshot into authority.
-    #[cfg(any(feature = "server", test))]
+    #[cfg(any(feature = "runtime", test))]
     pub(crate) fn apply_trusted_catalogue_snapshot(
         &self,
         snapshot: crate::protocol::CatalogueSnapshot,
@@ -170,7 +170,7 @@ where
             .apply_trusted_catalogue_snapshot(snapshot)?)
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "testing"))]
     pub(crate) fn set_catalogue_activation_failpoint(
         &self,
         failpoint: crate::node::CatalogueActivationFailpoint,
@@ -183,7 +183,7 @@ where
 
     /// Produce the authority's complete catalogue for the privileged
     /// snapshot-only transport exchange.
-    #[cfg(any(feature = "server", test))]
+    #[cfg(any(feature = "runtime", test))]
     pub(crate) fn trusted_catalogue_snapshot(
         &self,
     ) -> Result<crate::protocol::CatalogueSnapshot, Error> {
@@ -192,7 +192,7 @@ where
 
     /// Return the active authority-admitted schema, failing closed when this
     /// dynamic edge still has no bootstrap receipt.
-    #[cfg(any(feature = "server", test))]
+    #[cfg(any(feature = "runtime", test))]
     pub(crate) fn trusted_current_catalogue_schema(&self) -> Result<JazzSchema, Error> {
         let node = self.node.node.borrow();
         let pointer = node.current_write_schema()?;
@@ -202,7 +202,7 @@ where
             .ok_or_else(|| Error::new(ErrorCode::Schema, "active catalogue schema is missing"))
     }
 
-    #[cfg(any(feature = "server", test))]
+    #[cfg(any(feature = "runtime", test))]
     pub(crate) fn catalogue_bootstrap_is_ready(&self) -> bool {
         self.node.node.borrow().catalogue_bootstrap_state()
             == crate::node::CatalogueBootstrapState::Ready

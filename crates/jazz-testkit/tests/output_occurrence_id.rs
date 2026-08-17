@@ -4,11 +4,11 @@ use std::collections::BTreeSet;
 use std::time::Duration;
 
 use jazz::row_input;
-use jazz::tools::server::JazzServer;
 use jazz::tools::{
     ColumnType, DurabilityTier, QueryBuilder, QueryResult, ResultKey, Schema, SchemaBuilder,
     SubscriptionStreamItem, TableSchema, Value,
 };
+use jazz_server::JazzServer;
 use support::TestingClient;
 
 fn todos_schema() -> Schema {

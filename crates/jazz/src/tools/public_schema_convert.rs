@@ -30,7 +30,8 @@ const PUBLIC_USER_ID_SESSION_PATHS: &[&str] = &["user_id", "userId"];
 const RESERVED_AGGREGATE_OUTPUT_PREFIX: &str = "__jazz_aggregate_";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct SchemaConversionError {
+#[doc(hidden)]
+pub struct SchemaConversionError {
     path: String,
     message: String,
 }
@@ -52,7 +53,8 @@ impl fmt::Display for SchemaConversionError {
 
 impl std::error::Error for SchemaConversionError {}
 
-pub(crate) fn convert_public_schema(schema: &Schema) -> Result<JazzSchema, SchemaConversionError> {
+#[doc(hidden)]
+pub fn convert_public_schema(schema: &Schema) -> Result<JazzSchema, SchemaConversionError> {
     let mut tables = schema.iter().collect::<Vec<_>>();
     tables.sort_by_key(|(name, _)| name.as_str());
     let mut converted = tables

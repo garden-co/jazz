@@ -26,7 +26,7 @@ use axum::{
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 
-use crate::tools::server::ServerState;
+use crate::server::ServerState;
 
 use http::{
     admin_subscription_introspection_handler, health_handler, internal_shutdown_handler,
@@ -72,7 +72,7 @@ async fn app_shutdown_gate(
     let Some(_guard) = state.shutdown.try_enter_app_request() else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
-            axum::Json(crate::tools::transport_error::ErrorResponse::internal(
+            axum::Json(jazz::tools::transport_error::ErrorResponse::internal(
                 "server is shutting down".to_string(),
             )),
         )
@@ -125,23 +125,23 @@ mod tests {
     use axum::http::{HeaderMap, StatusCode, Uri};
     use axum::response::Json;
 
-    use crate::tools::AppId;
-    use crate::tools::public_api::types::{SchemaHash, TableName};
-    use crate::tools::schema_lens::LensOp;
+    use jazz::tools::AppId;
+    use jazz::tools::public_schema::{SchemaHash, TableName};
+    use jazz::tools::schema_lens::LensOp;
     use std::time::Duration;
 
-    use crate::tools::public_api::types::{ColumnType, Schema, SchemaBuilder, TableSchema};
-    use crate::tools::server::catalogue::ConnectionSchemaDiagnostics;
+    use crate::server::catalogue::ConnectionSchemaDiagnostics;
     use axum::body;
     use axum::routing::{get, post};
     use futures::{SinkExt as _, StreamExt as _};
+    use jazz::tools::public_schema::{ColumnType, Schema, SchemaBuilder, TableSchema};
     use serde_json::Value;
     use tokio_tungstenite::{connect_async, tungstenite::Message as WsMessage};
     use tower::ServiceExt;
 
-    use crate::tools::middleware::AuthConfig;
-    use crate::tools::server::{ServerBuilder, ServerState, StorageBackend};
-    use crate::wire::{
+    use crate::middleware::AuthConfig;
+    use crate::server::{ServerBuilder, ServerState, StorageBackend};
+    use jazz::wire::{
         FEATURE_STRUCTURED_ERRORS, FEATURE_SYNC_MESSAGE_PAYLOAD, WireFrame, WireHello,
         WirePeerRole, decode_frame, encode_frame,
     };
@@ -178,7 +178,7 @@ mod tests {
     }
 
     async fn make_state_with_schema(
-        schema: crate::tools::public_api::types::Schema,
+        schema: jazz::tools::public_schema::Schema,
     ) -> Arc<ServerState> {
         ServerBuilder::new(AppId::from_name("test-app"))
             .with_auth_config(test_auth_config())
@@ -191,7 +191,7 @@ mod tests {
     }
 
     async fn make_edge_state_with_schema(
-        schema: crate::tools::public_api::types::Schema,
+        schema: jazz::tools::public_schema::Schema,
         upstream_url: String,
     ) -> Arc<ServerState> {
         ServerBuilder::new(AppId::from_name("test-app"))
@@ -343,7 +343,7 @@ mod tests {
 
         assert_eq!(
             state.shutdown.phase(),
-            crate::tools::server::ShutdownPhase::ShuttingDown
+            crate::server::ShutdownPhase::ShuttingDown
         );
     }
 
@@ -1381,9 +1381,9 @@ mod tests {
         let state = make_state_with_schema(v1.clone()).await;
         let app = make_test_router(state.clone());
         publish_schema_for_test(&app, v2).await;
-        let runtime_v1 = crate::tools::public_schema_convert::convert_public_schema(&v1)
+        let runtime_v1 = jazz::tools::public_schema_convert::convert_public_schema(&v1)
             .expect("convert source schema");
-        let runtime_v2 = crate::tools::public_schema_convert::convert_public_schema(
+        let runtime_v2 = jazz::tools::public_schema_convert::convert_public_schema(
             &state
                 .catalogue
                 .known_schema(&state.catalogue_store, &v2_hash)
@@ -1391,19 +1391,19 @@ mod tests {
                 .expect("target schema stored"),
         )
         .expect("convert target schema");
-        let expected_runtime_lens = crate::protocol::MigrationLens::new(
+        let expected_runtime_lens = jazz::protocol::MigrationLens::new(
             runtime_v1.version_id(),
             runtime_v2.version_id(),
-            vec![crate::protocol::TableLens {
+            vec![jazz::protocol::TableLens {
                 source_table: "users".to_owned(),
                 target_table: "users".to_owned(),
-                ops: vec![crate::protocol::LensOp::RenameColumn {
+                ops: vec![jazz::protocol::LensOp::RenameColumn {
                     from: "email".to_owned(),
                     to: "email_address".to_owned(),
                 }],
             }],
         );
-        let runtime_shell = state.core_server_shell().expect("runtime shell started");
+        let runtime_shell = state.runtime().expect("runtime shell started");
         assert_eq!(
             runtime_shell
                 .runtime_catalogue_contains(runtime_v2.version_id(), expected_runtime_lens.id)
@@ -1632,9 +1632,9 @@ mod tests {
         let state = make_state_with_schema(v1.clone()).await;
         let app = make_test_router(state.clone());
         publish_schema_for_test(&app, v2).await;
-        let runtime_v1 = crate::tools::public_schema_convert::convert_public_schema(&v1)
+        let runtime_v1 = jazz::tools::public_schema_convert::convert_public_schema(&v1)
             .expect("convert source schema");
-        let runtime_v2 = crate::tools::public_schema_convert::convert_public_schema(
+        let runtime_v2 = jazz::tools::public_schema_convert::convert_public_schema(
             &state
                 .catalogue
                 .known_schema(&state.catalogue_store, &v2_hash)
@@ -1642,19 +1642,19 @@ mod tests {
                 .expect("target schema stored"),
         )
         .expect("convert target schema");
-        let expected_runtime_lens = crate::protocol::MigrationLens::new(
+        let expected_runtime_lens = jazz::protocol::MigrationLens::new(
             runtime_v1.version_id(),
             runtime_v2.version_id(),
-            vec![crate::protocol::TableLens {
+            vec![jazz::protocol::TableLens {
                 source_table: "users".to_owned(),
                 target_table: "users".to_owned(),
-                ops: vec![crate::protocol::LensOp::RenameColumn {
+                ops: vec![jazz::protocol::LensOp::RenameColumn {
                     from: "email".to_owned(),
                     to: "email_address".to_owned(),
                 }],
             }],
         );
-        let runtime_shell = state.core_server_shell().expect("runtime shell started");
+        let runtime_shell = state.runtime().expect("runtime shell started");
         assert_eq!(
             runtime_shell
                 .runtime_catalogue_contains(runtime_v2.version_id(), expected_runtime_lens.id)

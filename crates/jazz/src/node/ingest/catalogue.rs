@@ -416,7 +416,7 @@ where
                         .any(|column| !existing_columns.contains(column))
             });
 
-            #[cfg(test)]
+            #[cfg(any(test, feature = "testing"))]
             if self.catalogue_activation_failpoint
                 == Some(CatalogueActivationFailpoint::AfterStaged)
             {
@@ -459,7 +459,7 @@ where
                 // registry and keep receiving compatible projected rows.
                 self.invalidate_runtime_handles_after_database_rebuild();
             }
-            #[cfg(test)]
+            #[cfg(any(test, feature = "testing"))]
             if self.catalogue_activation_failpoint
                 == Some(CatalogueActivationFailpoint::AfterRegistration)
             {

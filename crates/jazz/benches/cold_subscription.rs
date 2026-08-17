@@ -5,13 +5,13 @@ mod support;
 
 use jazz::groove::records::Value;
 use jazz::groove::schema::{ColumnSchema, ColumnType};
-use jazz::groove::storage::{Durability, RocksDbStorage};
 use jazz::ids::{NodeUuid, RowUuid};
 use jazz::node::{MergeableCommit, NodeState, SKEW_TOLERANCE_MS};
 use jazz::peer::PeerState;
 use jazz::protocol::SyncMessage;
 use jazz::schema::{JazzSchema, TableSchema};
 use jazz::tx::{DurabilityTier, Fate};
+use jazz_storage_rocksdb::{Durability, RocksDbStorage};
 use support::{
     csv_usizes, emit_json_line, insert_durability_tier, insert_node_metrics, phase_fields,
     reset_phase_counters,

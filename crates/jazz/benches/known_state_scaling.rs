@@ -5,7 +5,6 @@ mod support;
 
 use jazz::groove::records::Value;
 use jazz::groove::schema::{ColumnSchema, ColumnType};
-use jazz::groove::storage::{Durability, RocksDbStorage};
 use jazz::ids::{NodeUuid, RowUuid};
 use jazz::node::{MergeableCommit, NodeState, SKEW_TOLERANCE_MS};
 use jazz::peer::PeerState;
@@ -15,6 +14,7 @@ use jazz::protocol::{
 use jazz::schema::{JazzSchema, TableSchema};
 use jazz::tx::{Fate, TxId};
 use jazz::wire::encode_sync_message;
+use jazz_storage_rocksdb::{Durability, RocksDbStorage};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use support::{csv_usizes, emit_json_line, env_usize, phase_fields};

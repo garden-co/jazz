@@ -27,11 +27,11 @@ use jazz::db::{
 use jazz::groove::db::StorageReadMetrics;
 use jazz::groove::records::Value;
 use jazz::groove::schema::ColumnType;
-use jazz::groove::storage::RocksDbStorage;
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::query::{OrderDirection, Query, col, eq, lit, param};
 use jazz::schema::{ColumnSchema, JazzSchema, TableSchema};
 use jazz::tx::DurabilityTier;
+use jazz_storage_rocksdb::RocksDbStorage;
 use serde_json::{Map, json};
 use sha2::{Digest, Sha256};
 

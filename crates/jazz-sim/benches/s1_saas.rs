@@ -11,7 +11,6 @@ use jazz::db::{
 };
 use jazz::groove::records::Value;
 use jazz::groove::schema::{ColumnSchema, ColumnType};
-use jazz::groove::storage::{Durability, RocksDbStorage};
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::node::{CurrentRow, MergeableCommit, NodeState};
 use jazz::peer::{MaintainedSubscriptionViewMetrics, PeerState};
@@ -30,6 +29,7 @@ use jazz_sim::{
     ThreadedDriver, Topology, bench_profile, emit_json_line, metadata_fields, profiling,
     scenario_transport_codec_env,
 };
+use jazz_storage_rocksdb::{Durability, RocksDbStorage};
 use serde_json::{Value as JsonValue, json};
 
 const ORGS: &str = "orgs";

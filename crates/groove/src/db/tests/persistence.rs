@@ -5,7 +5,8 @@ use super::*;
 #[test]
 fn query_subscription_matches_one_shot_recompute_under_seeded_interleavings() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = RocksDbStorage::open(temp_dir.path(), &["albums"]).unwrap();
+    let storage =
+        TestStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
     let mut database = Database::new(albums_schema(), storage).unwrap();
     let query = select_query(
         Select::new([SelectItem::expr(col("title"))])
@@ -107,7 +108,11 @@ fn shape_subscriptions_match_recompute_under_seeded_interleavings() {
 
 fn run_shape_subscription_oracle(mut seed: u64) {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = RocksDbStorage::open(temp_dir.path(), &["albums", "artists"]).unwrap();
+    let storage = TestStorage::open(
+        temp_dir.path().join("groove-test.btree"),
+        &["albums", "artists"],
+    )
+    .unwrap();
     let mut database = Database::new(albums_artists_schema(), storage).unwrap();
     let shape = database
         .prepare_one_sink(
@@ -259,7 +264,11 @@ fn graph_subscriptions_match_recompute_under_seeded_interleavings() {
 
 fn run_graph_subscription_oracle(mut seed: u64) {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = RocksDbStorage::open(temp_dir.path(), &["edges", "blockers"]).unwrap();
+    let storage = TestStorage::open(
+        temp_dir.path().join("groove-test.btree"),
+        &["edges", "blockers"],
+    )
+    .unwrap();
     let mut database = Database::new(edges_blockers_schema(), storage).unwrap();
     let mut edges = std::collections::BTreeMap::<u64, (u64, u64)>::new();
     let mut blockers = std::collections::BTreeMap::<u64, (u64, u64)>::new();
@@ -334,7 +343,7 @@ fn run_graph_subscription_oracle(mut seed: u64) {
 }
 
 fn table_pairs_from_query(
-    database: &mut Database<RocksDbStorage>,
+    database: &mut Database<TestStorage>,
     table: &str,
 ) -> std::collections::BTreeMap<u64, (u64, u64)> {
     let result = database

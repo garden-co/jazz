@@ -3,12 +3,12 @@
 use std::future::Future;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use jazz::tools::server::JazzServer;
 use jazz::tools::sync::ClientId;
 use jazz::tools::{
     AppContext, ClientStorage, DurabilityTier, JazzClient, ObjectId, OrderedRowDelta, Query,
     QueryBuilder, Schema, SubscriptionStream, SubscriptionStreamItem, Value,
 };
+use jazz_server::JazzServer;
 use jsonwebtoken::{EncodingKey, Header, encode};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
@@ -23,9 +23,9 @@ const TEST_JWT_SECRET: &str = "test-jwt-secret-for-integration";
 const TEST_JWT_KID: &str = "test-jwks-kid";
 
 #[allow(unused_imports)]
-pub use jazz::tools::test_support::{
-    QueryRows, push_catalogue_in_memory, wait_for_query, wait_for_query_results,
-};
+pub use jazz::tools::test_support::{QueryRows, wait_for_query, wait_for_query_results};
+#[allow(unused_imports)]
+pub use jazz_server::push_catalogue_in_memory;
 
 #[allow(unused_imports)]
 pub use crate::permissions::{
@@ -172,7 +172,7 @@ impl<'a> TestingClient<'a> {
         let deadline = tokio::time::Instant::now() + timeout;
 
         let client = loop {
-            match JazzClient::connect(context.clone()).await {
+            match crate::connect(context.clone()).await {
                 Ok(client) => break client,
                 Err(error)
                     if error.to_string().contains("bootstrapping")
@@ -207,7 +207,7 @@ impl<'a> TestingClient<'a> {
         let ready_timeout = self.ready_timeout;
         let context = self.build_context();
 
-        let client = JazzClient::connect(context.clone())
+        let client = crate::connect(context.clone())
             .await
             .expect("connect test client");
 
@@ -272,6 +272,16 @@ impl<'a> TestingClient<'a> {
             TestingClientStorage::Memory => ClientStorage::Memory,
             TestingClientStorage::Persistent => ClientStorage::Persistent,
         };
+        if matches!(self.storage, TestingClientStorage::Persistent) {
+            #[cfg(feature = "rocksdb")]
+            {
+                context.storage_factory = Some(std::sync::Arc::new(
+                    jazz_storage_rocksdb::RocksDbStorageFactory,
+                ));
+            }
+            #[cfg(not(feature = "rocksdb"))]
+            panic!("persistent test clients require the rocksdb adapter feature");
+        }
 
         context
     }

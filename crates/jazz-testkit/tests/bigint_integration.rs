@@ -3,10 +3,10 @@ use jazz_testkit as support;
 use std::time::Duration;
 
 use jazz::row_input;
-use jazz::tools::server::JazzServer;
 use jazz::tools::{
     ColumnType, DurabilityTier, QueryBuilder, Schema, SchemaBuilder, TableSchema, Value,
 };
+use jazz_server::JazzServer;
 use support::{
     TestingClient, has_added, wait_for_edge_query_ready, wait_for_query,
     wait_for_subscription_update,

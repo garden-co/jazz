@@ -28,6 +28,14 @@ const ADMIN_SECRET: &str = "admin-secret-for-integration-tests";
 const JWT_KID: &str = "test-jwks-kid";
 const JWT_SECRET: &str = "test-jwt-secret-for-integration";
 
+async fn connect_native(context: AppContext) -> jazz::tools::Result<JazzClient> {
+    JazzClient::connect_with_native_transport(
+        context,
+        std::sync::Arc::new(jazz_native_transport::NativeWebSocketConnector),
+    )
+    .await
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct JwtClaims {
     sub: String,
@@ -262,6 +270,9 @@ fn make_context(
         server_url,
         data_dir,
         storage: ClientStorage::Persistent,
+        storage_factory: Some(std::sync::Arc::new(
+            jazz_storage_rocksdb::RocksDbStorageFactory,
+        )),
         jwt_token: Some(jwt_token),
         backend_secret: None,
         admin_secret: None,
@@ -354,7 +365,7 @@ async fn jazz_tools_cli_existing_client_keeps_working_after_server_restart_witho
     publish_allow_all_permissions(&server.base_url(), app_id, ADMIN_SECRET, &test_schema()).await;
 
     let client_dir = TempDir::new().expect("client dir");
-    let client = JazzClient::connect(make_context(
+    let client = connect_native(make_context(
         app_id,
         server.base_url(),
         client_dir.path().to_path_buf(),
@@ -464,12 +475,13 @@ async fn memory_storage_client_does_not_persist_local_state_to_disk_impl() {
         server_url: String::new(),
         data_dir: data_dir.path().to_path_buf(),
         storage: ClientStorage::Memory,
+        storage_factory: None,
         jwt_token: None,
         backend_secret: None,
         admin_secret: None,
     };
 
-    let client = JazzClient::connect(context.clone())
+    let client = connect_native(context.clone())
         .await
         .expect("connect memory client");
 
@@ -511,7 +523,7 @@ async fn memory_storage_client_does_not_persist_local_state_to_disk_impl() {
         "memory storage should not persist a client_id file"
     );
 
-    let restarted = JazzClient::connect(context)
+    let restarted = connect_native(context)
         .await
         .expect("reconnect memory client");
     let rows_after_restart = restarted

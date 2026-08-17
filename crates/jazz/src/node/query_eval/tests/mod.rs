@@ -15,7 +15,7 @@ mod subscriptions;
 use std::collections::{BTreeMap, BTreeSet};
 
 use groove::schema::{ColumnSchema, ColumnType};
-use groove::storage::{Durability, RocksDbStorage};
+use jazz_storage_rocksdb::{Durability, RocksDbStorage};
 
 use crate::ids::{AuthorId, BranchId, NodeUuid, RowUuid};
 use crate::node::query_engine::{CoverageScope, FieldRequirement, ProgramFactOutput};

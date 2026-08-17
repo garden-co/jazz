@@ -7,11 +7,11 @@ use jazz::tools::public_schema::{
     RelColumnRef, RelExpr, RelJoinCondition, RelJoinKind, RelKeyRef, RelPredicateCmpOp,
     RelPredicateExpr, RelRecursionBound, RelValueRef, RowIdRef, TablePolicies,
 };
-use jazz::tools::server::JazzServer;
 use jazz::tools::{
     ColumnType, DurabilityTier, JazzClient, PolicyExpr, QueryBuilder, Schema, SchemaBuilder,
     TableSchema, Value,
 };
+use jazz_server::JazzServer;
 use support::{TestingClient, wait_for_query};
 
 const MEMBER_ID: &str = "00000000-0000-4000-8000-0000000000b0";
