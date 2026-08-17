@@ -27,7 +27,7 @@ use groove::storage::{
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 include!("support.rs");
-include!("catalogue_lenses.rs");
+include!("catalogue_lenses/mod.rs");
 include!("lens_projected_maintained.rs");
 include!("branching.rs");
 include!("time_travel.rs");
