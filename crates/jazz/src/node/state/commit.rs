@@ -105,6 +105,7 @@ where
             vec![(schema, commit)],
             made_at,
             None,
+            true,
         )
     }
 
@@ -149,6 +150,7 @@ where
             commits,
             made_at,
             branch_merge,
+            false,
         )?;
         self.publish_prepared_mergeable_commit(prepared)
     }
@@ -158,6 +160,7 @@ where
         commits: Vec<(SchemaVersionId, MergeableCommit)>,
         made_at: TxTime,
         branch_merge: Option<BranchMergeProvenance>,
+        acquire_tick_storage: bool,
     ) -> Result<PreparedMergeableCommit, Error> {
         let tx_id = TxId::new(made_at, self.node_uuid);
         let made_by = commits[0].1.made_by;
@@ -304,7 +307,11 @@ where
             }
         }
         self.stage_recovery_checkpoint(&mut batch, made_at);
-        let batch = self.database.prepare_batch_storage_inputs(&batch)?;
+        let batch = if acquire_tick_storage {
+            self.database.prepare_batch_storage_inputs(&batch)?
+        } else {
+            self.database.prepare_resident_batch(&batch)?
+        };
         Ok(PreparedMergeableCommit {
             tx_id,
             batch,

@@ -125,7 +125,7 @@ where
         batch: &DatabaseBatch,
     ) -> Result<PreparedDatabaseBatch, Error> {
         self.ensure_not_poisoned()?;
-        let pending_writes = self.pending_writes_from_operations(&batch.operations)?;
+        let prepared = self.prepare_resident_batch(batch)?;
         let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
         self.ivm_runtime
             .tick_storage_requirements()
@@ -133,10 +133,24 @@ where
             .map_err(Error::IvmRuntime)?;
         // Keep the operation conversion in preparation: Delta writes can read
         // the resident value while being converted to an owned durable write.
-        for write in &pending_writes {
+        for write in &prepared.pending_writes {
             self.owned_storage_operation_for_pending(write)?;
         }
-        Ok(PreparedDatabaseBatch { pending_writes })
+        Ok(prepared)
+    }
+
+    /// Resolve base-table writes without acquiring async-only IVM closure
+    /// inputs. Fully resident Memory/RocksDB callers use this path and retain
+    /// their existing point-read cost model.
+    #[doc(hidden)]
+    pub fn prepare_resident_batch(
+        &self,
+        batch: &DatabaseBatch,
+    ) -> Result<PreparedDatabaseBatch, Error> {
+        self.ensure_not_poisoned()?;
+        Ok(PreparedDatabaseBatch {
+            pending_writes: self.pending_writes_from_operations(&batch.operations)?,
+        })
     }
 
     /// Fail closed after a resident commit could not be durably persisted.
