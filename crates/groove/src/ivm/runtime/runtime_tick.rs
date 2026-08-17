@@ -262,7 +262,7 @@ impl IvmRuntime {
         Ok(metrics)
     }
 
-    pub(super) fn bump_input_frontiers(
+    fn bump_input_frontiers(
         &mut self,
         table_deltas: &[TableDelta],
         binding_deltas: &[BindingDelta],
@@ -308,7 +308,7 @@ impl IvmRuntime {
         }
     }
 
-    pub(super) fn evict_eval_memo(&mut self) {
+    fn evict_eval_memo(&mut self) {
         if self.eval_memo.keys().any(|key| key.tick_epoch.is_some()) {
             let mut retained_bytes = 0usize;
             self.eval_memo.retain(|key, entry| {
@@ -344,7 +344,7 @@ impl IvmRuntime {
     }
 
     #[cfg(test)]
-    pub(super) fn recompute_eval_memo_bytes(&mut self) {
+    fn recompute_eval_memo_bytes(&mut self) {
         self.eval_memo_bytes = self
             .eval_memo
             .values()
@@ -476,10 +476,7 @@ impl IvmRuntime {
         self.hydration_snapshots(outputs, storage, HydrationMode::Subscription)
     }
 
-    pub(super) fn output_depends_on_aggregate(
-        &self,
-        output_node: NodeId,
-    ) -> Result<bool, IvmRuntimeError> {
+    fn output_depends_on_aggregate(&self, output_node: NodeId) -> Result<bool, IvmRuntimeError> {
         let mut ancestors = HashSet::new();
         self.graph.mark_ancestors(output_node, &mut ancestors);
         for ancestor in ancestors {
@@ -494,7 +491,7 @@ impl IvmRuntime {
         Ok(false)
     }
 
-    pub(super) fn tick_durable_nodes<S>(
+    fn tick_durable_nodes<S>(
         &mut self,
         table_deltas: &[TableDelta],
         current_tick: u64,

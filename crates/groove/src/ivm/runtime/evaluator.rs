@@ -18,8 +18,8 @@ pub(super) struct CollectByIncrementalState {
     pub(super) roots: BTreeMap<CollectByOrderKey, i64>,
 }
 
-pub(super) type CollectByOrderKey = (Vec<TopBySortPart>, Bytes);
-pub(super) type CollectByGroups = BTreeMap<Vec<u8>, BTreeMap<CollectByOrderKey, i64>>;
+type CollectByOrderKey = (Vec<TopBySortPart>, Bytes);
+type CollectByGroups = BTreeMap<Vec<u8>, BTreeMap<CollectByOrderKey, i64>>;
 
 pub(super) fn operator_state_for(operator: &OpType) -> OperatorState {
     match operator {
@@ -163,7 +163,7 @@ pub(super) struct GraphRuntimeView<'a, S> {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn graph_runtime_view<'a, S>(
+fn graph_runtime_view<'a, S>(
     schema: &'a DatabaseSchema,
     graph: &'a IvmGraph,
     variant_projections: &'a HashMap<VariantProjectionKey, VariantProjection>,
@@ -429,7 +429,7 @@ where
         Ok(false)
     }
 
-    pub(super) fn node_depends_on_aggregate(&self, node: NodeId) -> Result<bool, IvmRuntimeError> {
+    fn node_depends_on_aggregate(&self, node: NodeId) -> Result<bool, IvmRuntimeError> {
         let mut ancestors = HashSet::new();
         self.graph.mark_ancestors(node, &mut ancestors);
         for ancestor in ancestors {
@@ -444,14 +444,14 @@ where
         Ok(false)
     }
 
-    pub(super) fn aggregate_arrangements_are_current(
+    fn aggregate_arrangements_are_current(
         &mut self,
         node: NodeId,
     ) -> Result<bool, IvmRuntimeError> {
         self.aggregate_arrangements_are_current_inner(node, &mut HashSet::new())
     }
 
-    pub(super) fn aggregate_arrangements_are_current_inner(
+    fn aggregate_arrangements_are_current_inner(
         &mut self,
         node: NodeId,
         seen: &mut HashSet<NodeId>,
@@ -834,17 +834,14 @@ where
         hasher.finish()
     }
 
-    pub(super) fn operator_key(
-        &mut self,
-        node: NodeId,
-    ) -> Result<OperatorStateKey, IvmRuntimeError> {
+    fn operator_key(&mut self, node: NodeId) -> Result<OperatorStateKey, IvmRuntimeError> {
         Ok(OperatorStateKey {
             scope: self.operator_scope(node)?,
             node,
         })
     }
 
-    pub(super) fn operator_scope(&mut self, node: NodeId) -> Result<ScopeId, IvmRuntimeError> {
+    fn operator_scope(&mut self, node: NodeId) -> Result<ScopeId, IvmRuntimeError> {
         // Recursive step evaluation must be isolated per recursive node even
         // for context-independent table/index inputs. Sibling recursive nodes
         // can evaluate the same base-table delta in one outer tick; sharing
@@ -875,7 +872,7 @@ where
         self.input_signature_inner(node, &mut HashSet::new())
     }
 
-    pub(super) fn input_signature_inner(
+    fn input_signature_inner(
         &mut self,
         node: NodeId,
         seen: &mut HashSet<NodeId>,
@@ -1011,7 +1008,7 @@ where
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn update_join(
+    fn update_join(
         &mut self,
         node: NodeId,
         join: &JoinOp,
@@ -1121,7 +1118,7 @@ where
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn update_anti_join(
+    fn update_anti_join(
         &mut self,
         node: NodeId,
         join: &JoinOp,
@@ -1196,7 +1193,7 @@ where
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn update_semi_join(
+    fn update_semi_join(
         &mut self,
         node: NodeId,
         join: &JoinOp,
@@ -1270,7 +1267,7 @@ where
         })
     }
 
-    pub(super) fn update_arg_by(
+    fn update_arg_by(
         &mut self,
         node: NodeId,
         spec: ArgBySpec<'_>,
@@ -1376,7 +1373,7 @@ where
         })
     }
 
-    pub(super) fn update_top_by(
+    fn update_top_by(
         &mut self,
         node: NodeId,
         top_by: &TopByOp,
@@ -1472,7 +1469,7 @@ where
     /// a root-scope arrangement keyed by the collector input; a collector is
     /// structurally terminal, so it can never become state in a recursive step
     /// or inherit a recursive sub-tick work bound.
-    pub(super) fn update_collect_by(
+    fn update_collect_by(
         &mut self,
         node: NodeId,
         collect_by: &CollectByOp,
@@ -1677,7 +1674,7 @@ where
         })
     }
 
-    pub(super) fn update_aggregate(
+    fn update_aggregate(
         &mut self,
         node: NodeId,
         aggregate: &AggregateOp,
@@ -1877,7 +1874,7 @@ where
         })
     }
 
-    pub(super) fn arrangement_key(
+    fn arrangement_key(
         &mut self,
         input: NodeId,
         descriptor: RecordDescriptor,
@@ -1893,11 +1890,7 @@ where
         })
     }
 
-    pub(super) fn join_field_names(
-        &mut self,
-        node: NodeId,
-        join: &JoinOp,
-    ) -> (Arc<[String]>, Arc<[String]>) {
+    fn join_field_names(&mut self, node: NodeId, join: &JoinOp) -> (Arc<[String]>, Arc<[String]>) {
         let meta = self.node_meta.entry(node).or_default();
         let left = meta
             .join_left_fields
@@ -1961,7 +1954,7 @@ where
             .clone()
     }
 
-    pub(super) fn arrangement_sub_tick(&self, key: &ArrangementKey) -> SubTick {
+    fn arrangement_sub_tick(&self, key: &ArrangementKey) -> SubTick {
         SubTick {
             tick: self.current_tick,
             // Root-scope arrangements represent table time, not recursive
@@ -1975,7 +1968,7 @@ where
         }
     }
 
-    pub(super) fn update_recursive(
+    fn update_recursive(
         &mut self,
         node: NodeId,
         recursive: &RecursiveOp,
@@ -2090,7 +2083,7 @@ where
         })
     }
 
-    pub(super) fn update_unary_input(
+    fn update_unary_input(
         &mut self,
         graph_node: &crate::ivm::GraphNode,
         node: NodeId,

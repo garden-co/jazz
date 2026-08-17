@@ -277,7 +277,7 @@ pub(super) fn validate_output_capabilities(
 /// Relation-edge materialization applies the equivalent child-local comparator
 /// per correlation group; recursive closures intentionally have no injected
 /// order (SPEC/16_maintained_subscription_views.md).
-pub(super) fn plan_with_default_result_order(
+fn plan_with_default_result_order(
     mut plan: AnalyzedQueryPlan,
     request: &QueryProgramRequest,
 ) -> AnalyzedQueryPlan {
@@ -306,7 +306,7 @@ pub(super) fn plan_with_default_result_order(
     plan
 }
 
-pub(super) fn inject_default_root_order(root: &LinearRoot, steps: &mut Vec<LinearStep>) {
+fn inject_default_root_order(root: &LinearRoot, steps: &mut Vec<LinearStep>) {
     let Some(source) = root.source().cloned() else {
         return;
     };
@@ -329,14 +329,14 @@ pub(super) fn inject_default_root_order(root: &LinearRoot, steps: &mut Vec<Linea
     steps.insert(first_terminal, default_root_order(source));
 }
 
-pub(super) fn default_root_order(source: SourceId) -> LinearStep {
+fn default_root_order(source: SourceId) -> LinearStep {
     LinearStep::OrderBy(vec![OrderKey {
         value: NormalizedValueRef::RowId(RowIdRef::Source(source)),
         direction: SortDirection::Asc,
     }])
 }
 
-pub(super) fn maintained_result_membership_window_supported(plan: &AnalyzedQueryPlan) -> bool {
+fn maintained_result_membership_window_supported(plan: &AnalyzedQueryPlan) -> bool {
     let fragments = collect_plan_fragments(plan);
     !fragments.recursives.iter().any(|recursive| {
         recursive.seed.steps.iter().any(is_slice_step)
@@ -347,7 +347,7 @@ pub(super) fn maintained_result_membership_window_supported(plan: &AnalyzedQuery
         .all(|fragment| linear_window_supported(fragment.steps))
 }
 
-pub(super) fn plan_contains_aggregate(plan: &AnalyzedQueryPlan) -> bool {
+fn plan_contains_aggregate(plan: &AnalyzedQueryPlan) -> bool {
     collect_plan_fragments(plan).linears.iter().any(|fragment| {
         fragment
             .steps
@@ -368,18 +368,18 @@ pub(super) fn root_aggregate_step(
     }
 }
 
-pub(super) fn linear_window_supported(_steps: &[LinearStep]) -> bool {
+fn linear_window_supported(_steps: &[LinearStep]) -> bool {
     // Relation-local slices use their declared row-id tie-breaker as the
     // default ascending comparator within the edge materializer. Root slices
     // have an explicit row-id OrderBy injected above.
     true
 }
 
-pub(super) fn is_slice_step(step: &LinearStep) -> bool {
+fn is_slice_step(step: &LinearStep) -> bool {
     matches!(step, LinearStep::Slice { .. })
 }
 
-pub(super) fn analyze_root_node(
+fn analyze_root_node(
     request: &QueryProgramRequest,
 ) -> Result<AnalyzedQueryPlan, UnsupportedReason> {
     let mut visited = BTreeSet::new();
@@ -535,7 +535,7 @@ pub(super) fn analyze_root_node(
     Ok(plan)
 }
 
-pub(super) fn analyze_correlated_path_root(
+fn analyze_correlated_path_root(
     node_id: &RowSetNodeId,
     request: &QueryProgramRequest,
     visited: &mut BTreeSet<RowSetNodeId>,
@@ -608,7 +608,7 @@ pub(super) fn analyze_correlated_path_root(
     }
 }
 
-pub(super) fn collect_nested_correlated_paths(
+fn collect_nested_correlated_paths(
     owner: &SourceId,
     nodes: &BTreeMap<RowSetNodeId, RowSetExpr>,
     visited: &mut BTreeSet<RowSetNodeId>,
@@ -649,7 +649,7 @@ pub(super) fn collect_nested_correlated_paths(
     Ok(paths)
 }
 
-pub(super) fn collect_sibling_correlated_paths(
+fn collect_sibling_correlated_paths(
     owner: &SourceId,
     excluded_child: &SourceId,
     nodes: &BTreeMap<RowSetNodeId, RowSetExpr>,
@@ -691,7 +691,7 @@ pub(super) fn collect_sibling_correlated_paths(
     Ok(paths)
 }
 
-pub(super) fn analyze_correlated_child_subplan(
+fn analyze_correlated_child_subplan(
     child_input: &RowSetNodeId,
     path: &ProgramPathId,
     nodes: &BTreeMap<RowSetNodeId, RowSetExpr>,
@@ -709,7 +709,7 @@ pub(super) fn analyze_correlated_child_subplan(
     analyze_linear_subplan(child_input, nodes, visited)
 }
 
-pub(super) fn analyze_linear_root(
+fn analyze_linear_root(
     node_id: &RowSetNodeId,
     request: &QueryProgramRequest,
     visited: &mut BTreeSet<RowSetNodeId>,
@@ -726,7 +726,7 @@ pub(super) fn analyze_linear_root(
     })
 }
 
-pub(super) fn analyze_linear_subplan(
+fn analyze_linear_subplan(
     node_id: &RowSetNodeId,
     nodes: &BTreeMap<RowSetNodeId, RowSetExpr>,
     visited: &mut BTreeSet<RowSetNodeId>,
@@ -743,7 +743,7 @@ pub(super) fn analyze_linear_subplan(
     })
 }
 
-pub(super) fn validate_result_source(
+fn validate_result_source(
     request: &QueryProgramRequest,
     source: &SourceId,
 ) -> Result<(), UnsupportedReason> {
@@ -780,10 +780,7 @@ pub(super) fn collect_plan_fragments(plan: &AnalyzedQueryPlan) -> PlanFragments<
     fragments
 }
 
-pub(super) fn collect_analyzed_fragments<'a>(
-    plan: &'a AnalyzedQueryPlan,
-    fragments: &mut PlanFragments<'a>,
-) {
+fn collect_analyzed_fragments<'a>(plan: &'a AnalyzedQueryPlan, fragments: &mut PlanFragments<'a>) {
     match plan {
         AnalyzedQueryPlan::Linear(linear) => collect_linear_fragments(linear, fragments),
         AnalyzedQueryPlan::Union(union) => collect_union_fragments(union, fragments),
@@ -796,7 +793,7 @@ pub(super) fn collect_analyzed_fragments<'a>(
     }
 }
 
-pub(super) fn collect_correlated_path_fragments<'a>(
+fn collect_correlated_path_fragments<'a>(
     path: &'a CorrelatedPathPlan,
     fragments: &mut PlanFragments<'a>,
 ) {
@@ -818,10 +815,7 @@ pub(super) fn collect_correlated_path_fragments<'a>(
     }
 }
 
-pub(super) fn collect_relation_fragments<'a>(
-    plan: &'a RelationInputPlan,
-    fragments: &mut PlanFragments<'a>,
-) {
+fn collect_relation_fragments<'a>(plan: &'a RelationInputPlan, fragments: &mut PlanFragments<'a>) {
     match plan {
         RelationInputPlan::Linear(linear) => collect_linear_fragments(linear, fragments),
         RelationInputPlan::Union(union) => collect_union_fragments(union, fragments),
@@ -829,13 +823,13 @@ pub(super) fn collect_relation_fragments<'a>(
     }
 }
 
-pub(super) fn collect_union_fragments<'a>(union: &'a UnionPlan, fragments: &mut PlanFragments<'a>) {
+fn collect_union_fragments<'a>(union: &'a UnionPlan, fragments: &mut PlanFragments<'a>) {
     for branch in &union.branches {
         collect_relation_fragments(&branch.plan, fragments);
     }
 }
 
-pub(super) fn collect_recursive_fragments<'a>(
+fn collect_recursive_fragments<'a>(
     relation: &'a RecursiveRelationPlan,
     fragments: &mut PlanFragments<'a>,
 ) {
@@ -844,10 +838,7 @@ pub(super) fn collect_recursive_fragments<'a>(
     collect_linear_fragments(&relation.step, fragments);
 }
 
-pub(super) fn collect_linear_fragments<'a>(
-    linear: &'a LinearCurrentRoot,
-    fragments: &mut PlanFragments<'a>,
-) {
+fn collect_linear_fragments<'a>(linear: &'a LinearCurrentRoot, fragments: &mut PlanFragments<'a>) {
     fragments.linears.push(LinearFragment {
         root: Some(&linear.root),
         steps: &linear.steps,
@@ -855,10 +846,7 @@ pub(super) fn collect_linear_fragments<'a>(
     collect_step_relation_fragments(&linear.steps, fragments);
 }
 
-pub(super) fn collect_step_relation_fragments<'a>(
-    steps: &'a [LinearStep],
-    fragments: &mut PlanFragments<'a>,
-) {
+fn collect_step_relation_fragments<'a>(steps: &'a [LinearStep], fragments: &mut PlanFragments<'a>) {
     for step in steps {
         if let LinearStep::Join { right, .. } = step {
             collect_relation_fragments(right, fragments);
@@ -866,7 +854,7 @@ pub(super) fn collect_step_relation_fragments<'a>(
     }
 }
 
-pub(super) fn analyzed_plan_sources(plan: &AnalyzedQueryPlan) -> BTreeSet<SourceId> {
+fn analyzed_plan_sources(plan: &AnalyzedQueryPlan) -> BTreeSet<SourceId> {
     collect_plan_fragments(plan)
         .linears
         .into_iter()
@@ -905,7 +893,7 @@ pub(super) fn source_current_tier(
     request.reads.primary.sources.get(source)?.current_tier()
 }
 
-pub(super) fn supported_current_storage_projection(
+fn supported_current_storage_projection(
     source: Option<&RequestedSourceExpr>,
 ) -> Option<&SchemaProjection<RequestedSourceStage>> {
     match source? {
@@ -944,7 +932,7 @@ pub(super) fn supported_current_storage_projection(
     }
 }
 
-pub(super) fn analyze_current_node(
+fn analyze_current_node(
     node_id: &RowSetNodeId,
     nodes: &BTreeMap<RowSetNodeId, RowSetExpr>,
     visited: &mut BTreeSet<RowSetNodeId>,
@@ -1120,7 +1108,7 @@ pub(super) fn analyze_relation_input_node(
     }
 }
 
-pub(super) fn analyze_union(
+fn analyze_union(
     inputs: &[UnionInput],
     nodes: &BTreeMap<RowSetNodeId, RowSetExpr>,
     visited: &mut BTreeSet<RowSetNodeId>,
@@ -1156,7 +1144,7 @@ pub(super) fn analyze_union(
 }
 
 #[cfg(test)]
-pub(super) fn analyzed_union_labels(
+pub(crate) fn analyzed_union_labels(
     inputs: &[UnionInput],
     nodes: &BTreeMap<RowSetNodeId, RowSetExpr>,
 ) -> Result<Vec<String>, UnsupportedReason> {
@@ -1168,7 +1156,7 @@ pub(super) fn analyzed_union_labels(
     })
 }
 
-pub(super) fn validate_join_relation(plan: &LinearCurrentRoot) -> Result<(), UnsupportedReason> {
+fn validate_join_relation(plan: &LinearCurrentRoot) -> Result<(), UnsupportedReason> {
     for step in &plan.steps {
         match step {
             LinearStep::Filter(_) | LinearStep::Join { .. } | LinearStep::Project(_) => {}
@@ -1182,14 +1170,14 @@ pub(super) fn validate_join_relation(plan: &LinearCurrentRoot) -> Result<(), Uns
     Ok(())
 }
 
-pub(super) fn unsupported_marker_message(keys: &[NormalizedValueRef]) -> Option<String> {
+fn unsupported_marker_message(keys: &[NormalizedValueRef]) -> Option<String> {
     let [NormalizedValueRef::Literal(bytes)] = keys else {
         return None;
     };
     String::from_utf8(bytes.clone()).ok()
 }
 
-pub(super) fn predicate_contains_param(predicate: &PredicateExpr) -> bool {
+fn predicate_contains_param(predicate: &PredicateExpr) -> bool {
     match predicate {
         PredicateExpr::True | PredicateExpr::False => false,
         PredicateExpr::Compare { left, right, .. } => {
@@ -1215,11 +1203,11 @@ pub(super) fn predicate_contains_param(predicate: &PredicateExpr) -> bool {
     }
 }
 
-pub(super) fn value_contains_param(value: &NormalizedValueRef) -> bool {
+fn value_contains_param(value: &NormalizedValueRef) -> bool {
     matches!(value, NormalizedValueRef::Param(_))
 }
 
-pub(super) fn validate_step_order(steps: &[LinearStep], gaps: &mut Vec<UnsupportedReason>) {
+fn validate_step_order(steps: &[LinearStep], gaps: &mut Vec<UnsupportedReason>) {
     let mut seen_order = false;
     let mut seen_slice = false;
     let mut seen_aggregate = false;

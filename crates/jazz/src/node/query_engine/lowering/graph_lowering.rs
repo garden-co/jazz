@@ -33,7 +33,7 @@ pub(super) fn lower_plan_steps(
     }
 }
 
-pub(super) fn lower_correlated_path_plan(
+fn lower_correlated_path_plan(
     graph: GraphBuilder,
     path: &CorrelatedPathPlan,
     root_source: &ResolvedSource,
@@ -165,7 +165,7 @@ pub(super) fn lower_correlated_path_plan(
 /// Apply requirements declared by nested relation builders to the rows of
 /// their immediate parent. Optional nested relations never gate that parent;
 /// their own descendants are handled when the optional relation is collected.
-pub(super) fn lower_required_nested_parent_graph(
+fn lower_required_nested_parent_graph(
     mut parent: GraphBuilder,
     nested: &[CorrelatedPathPlan],
     parent_source: &ResolvedSource,
@@ -183,7 +183,7 @@ pub(super) fn lower_required_nested_parent_graph(
     Ok(parent)
 }
 
-pub(super) fn lower_cardinality_complete_parent_graph(
+fn lower_cardinality_complete_parent_graph(
     parent: GraphBuilder,
     child: GraphBuilder,
     root_source: &ResolvedSource,
@@ -342,7 +342,7 @@ pub(super) fn lower_correlated_path_relation_graph_from_parent(
     })
 }
 
-pub(super) fn child_steps_for_relation_edges(steps: &[LinearStep]) -> Vec<LinearStep> {
+fn child_steps_for_relation_edges(steps: &[LinearStep]) -> Vec<LinearStep> {
     let mut previous_was_order_by = false;
     let mut filtered = Vec::with_capacity(steps.len());
     for step in steps {
@@ -359,7 +359,7 @@ pub(super) fn child_steps_for_relation_edges(steps: &[LinearStep]) -> Vec<Linear
     filtered
 }
 
-pub(super) fn unwrap_join_key_if_nullable(
+fn unwrap_join_key_if_nullable(
     mut graph: GraphBuilder,
     field: String,
     nullable_depth: usize,
@@ -431,7 +431,7 @@ pub(super) fn lower_relation_input(
     }
 }
 
-pub(super) fn lower_union_relation_input(
+fn lower_union_relation_input(
     union: &UnionPlan,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
     request: &QueryProgramRequest,
@@ -439,7 +439,7 @@ pub(super) fn lower_union_relation_input(
     lower_union_relation_input_with_prefix(union, resolved_sources, request, None)
 }
 
-pub(super) fn lower_union_relation_input_with_prefix(
+fn lower_union_relation_input_with_prefix(
     union: &UnionPlan,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
     request: &QueryProgramRequest,
@@ -528,7 +528,7 @@ pub(super) fn lower_union_relation_input_with_prefix(
     lower_union_inputs(lowered, request)
 }
 
-pub(super) fn lower_union_plan(
+fn lower_union_plan(
     union: &UnionPlan,
     root_graph: Option<GraphBuilder>,
     root_source: &ResolvedSource,
@@ -572,7 +572,7 @@ pub(super) fn lower_union_plan(
     lower_union_inputs(lowered, request)
 }
 
-pub(super) fn lower_union_inputs(
+fn lower_union_inputs(
     lowered: Vec<LoweredRelationInput>,
     request: &QueryProgramRequest,
 ) -> Result<LoweredRelationInput, UnsupportedReason> {
@@ -634,14 +634,14 @@ pub(super) fn lower_union_inputs(
     })
 }
 
-pub(super) fn lowered_union_fields(lowered: &[LoweredRelationInput]) -> BTreeSet<String> {
+fn lowered_union_fields(lowered: &[LoweredRelationInput]) -> BTreeSet<String> {
     lowered
         .iter()
         .flat_map(|branch| branch.fields.iter().cloned())
         .collect()
 }
 
-pub(super) fn align_union_route_fields(
+fn align_union_route_fields(
     mut branch: LoweredRelationInput,
     fields: &BTreeSet<String>,
     request: &QueryProgramRequest,
@@ -707,7 +707,7 @@ pub(super) fn align_union_route_fields(
     Ok(branch)
 }
 
-pub(super) fn linear_root_fields(root: &LinearRoot) -> BTreeSet<String> {
+fn linear_root_fields(root: &LinearRoot) -> BTreeSet<String> {
     match root {
         LinearRoot::Source { .. } => BTreeSet::new(),
         LinearRoot::Value { columns, .. } | LinearRoot::Frontier { columns, .. } => {
@@ -716,7 +716,7 @@ pub(super) fn linear_root_fields(root: &LinearRoot) -> BTreeSet<String> {
     }
 }
 
-pub(super) fn source_fields(source: &ResolvedSource) -> impl Iterator<Item = String> + '_ {
+fn source_fields(source: &ResolvedSource) -> impl Iterator<Item = String> + '_ {
     source
         .row_shape
         .descriptor
@@ -726,11 +726,11 @@ pub(super) fn source_fields(source: &ResolvedSource) -> impl Iterator<Item = Str
         .chain(source.routing_fields.iter().cloned())
 }
 
-pub(super) fn source_nullable_fields(source: &ResolvedSource) -> BTreeSet<String> {
+fn source_nullable_fields(source: &ResolvedSource) -> BTreeSet<String> {
     source_nullable_field_depths(source).into_keys().collect()
 }
 
-pub(super) fn source_nullable_field_depths(source: &ResolvedSource) -> BTreeMap<String, usize> {
+fn source_nullable_field_depths(source: &ResolvedSource) -> BTreeMap<String, usize> {
     let mut depths = BTreeMap::new();
     for name in source_fields(source) {
         if let Some((field, depth)) = {
@@ -746,7 +746,7 @@ pub(super) fn source_nullable_field_depths(source: &ResolvedSource) -> BTreeMap<
     depths
 }
 
-pub(super) fn lower_recursive_relation(
+fn lower_recursive_relation(
     root_graph: Option<GraphBuilder>,
     relation: &RecursiveRelationPlan,
     root_source: &ResolvedSource,
@@ -808,7 +808,7 @@ pub(super) fn lower_recursive_relation(
     })
 }
 
-pub(super) fn lower_linear_plan_steps(
+fn lower_linear_plan_steps(
     graph: GraphBuilder,
     plan: &LinearCurrentRoot,
     root_source: &ResolvedSource,
@@ -1281,11 +1281,11 @@ pub(super) fn lower_linear_plan_steps(
     })
 }
 
-pub(super) fn uses_policy_value_comparison(request: &QueryProgramRequest) -> bool {
+fn uses_policy_value_comparison(request: &QueryProgramRequest) -> bool {
     matches!(request.policy, PolicyContext::AuthorizationSubplan { .. })
 }
 
-pub(super) fn policy_join_if_needed(
+fn policy_join_if_needed(
     left: GraphBuilder,
     right: GraphBuilder,
     left_on: impl IntoIterator<Item = impl Into<String>>,
@@ -1299,7 +1299,7 @@ pub(super) fn policy_join_if_needed(
     }
 }
 
-pub(super) fn value_source_descriptor(columns: &[ValueSourceColumn]) -> RecordDescriptor {
+fn value_source_descriptor(columns: &[ValueSourceColumn]) -> RecordDescriptor {
     RecordDescriptor::new(
         columns
             .iter()
@@ -1307,7 +1307,7 @@ pub(super) fn value_source_descriptor(columns: &[ValueSourceColumn]) -> RecordDe
     )
 }
 
-pub(super) fn binding_descriptor_params_with_user_params(
+fn binding_descriptor_params_with_user_params(
     request: &QueryProgramRequest,
     additional_user_params: impl IntoIterator<Item = (String, ColumnType)>,
 ) -> Result<Vec<(String, ColumnType)>, UnsupportedReason> {
@@ -1326,13 +1326,13 @@ pub(super) fn binding_descriptor_params_with_user_params(
         .collect())
 }
 
-pub(super) fn binding_descriptor_params(
+fn binding_descriptor_params(
     request: &QueryProgramRequest,
 ) -> Result<Vec<(String, ColumnType)>, UnsupportedReason> {
     binding_descriptor_params_with_user_params(request, [])
 }
 
-pub(super) fn binding_source_descriptor_with_user_params(
+fn binding_source_descriptor_with_user_params(
     request: &QueryProgramRequest,
     additional_user_params: impl IntoIterator<Item = (String, ColumnType)>,
 ) -> Result<RecordDescriptor, UnsupportedReason> {
@@ -1343,7 +1343,7 @@ pub(super) fn binding_source_descriptor_with_user_params(
     ))
 }
 
-pub(super) fn lower_value_source(
+fn lower_value_source(
     shape: &str,
     columns: &[ValueSourceColumn],
     mode: &ValueSourceMode,
@@ -1489,7 +1489,7 @@ pub(super) fn lower_value_source(
 }
 
 #[cfg(test)]
-pub(super) fn binding_value_source_projection_fields_for_test(
+pub(crate) fn binding_value_source_projection_fields_for_test(
     request: &QueryProgramRequest,
     columns: &[ValueSourceColumn],
 ) -> Result<BTreeSet<String>, UnsupportedReason> {
@@ -1506,7 +1506,7 @@ pub(super) fn binding_value_source_projection_fields_for_test(
     })
 }
 
-pub(super) fn lower_value_source_column(
+fn lower_value_source_column(
     column: &ValueSourceColumn,
     request: &QueryProgramRequest,
 ) -> Result<Value, UnsupportedReason> {
@@ -1547,7 +1547,7 @@ pub(super) fn lower_path_key_pair(
     )
 }
 
-pub(super) fn lower_join_key_pair(
+fn lower_join_key_pair(
     predicate: &PredicateExpr,
     left_source_id: &SourceId,
     left_source: &ResolvedSource,
@@ -1564,7 +1564,7 @@ pub(super) fn lower_join_key_pair(
     )
 }
 
-pub(super) fn lower_join_key_pairs(
+fn lower_join_key_pairs(
     predicate: &PredicateExpr,
     left_source_id: &SourceId,
     left_source: &ResolvedSource,
@@ -1603,7 +1603,7 @@ pub(super) fn lower_join_key_pairs(
     Ok(pairs.into_iter().unzip())
 }
 
-pub(super) fn lower_linear_join_key_pair(
+fn lower_linear_join_key_pair(
     predicate: &PredicateExpr,
     left_root: &LinearRoot,
     left_source: &ResolvedSource,
@@ -1632,7 +1632,7 @@ pub(super) fn lower_linear_join_key_pair(
     )
 }
 
-pub(super) fn lower_linear_join_key_pairs(
+fn lower_linear_join_key_pairs(
     predicate: &PredicateExpr,
     left_root: &LinearRoot,
     left_source: &ResolvedSource,
@@ -1674,7 +1674,7 @@ pub(super) fn lower_linear_join_key_pairs(
     Ok(pairs.into_iter().unzip())
 }
 
-pub(super) fn lower_root_to_relation_key_pair(
+fn lower_root_to_relation_key_pair(
     predicate: &PredicateExpr,
     root_source: &ResolvedSource,
     right_plan: &RelationInputPlan,
@@ -1726,7 +1726,7 @@ pub(super) fn lower_root_to_relation_key_pairs(
     Ok(pairs.into_iter().unzip())
 }
 
-pub(super) fn lower_bidirectional_key_pair(
+fn lower_bidirectional_key_pair(
     predicate: &PredicateExpr,
     non_equality_message: &str,
     mismatch_message: &str,
@@ -1757,14 +1757,14 @@ pub(super) fn lower_bidirectional_key_pair(
     }
 }
 
-pub(super) fn key_pair_error(result: Result<String, UnsupportedReason>) -> String {
+fn key_pair_error(result: Result<String, UnsupportedReason>) -> String {
     match result {
         Ok(field) => format!("accepted {field:?}"),
         Err(reason) => format!("{reason:?}"),
     }
 }
 
-pub(super) fn lower_relation_key_ref(
+fn lower_relation_key_ref(
     value: &NormalizedValueRef,
     plan: &RelationInputPlan,
     output: &LoweredRelationInput,
@@ -1791,11 +1791,11 @@ pub(super) fn lower_relation_key_ref(
     }
 }
 
-pub(super) fn linear_ends_in_projection(linear: &LinearCurrentRoot) -> bool {
+fn linear_ends_in_projection(linear: &LinearCurrentRoot) -> bool {
     matches!(linear.steps.last(), Some(LinearStep::Project(_)))
 }
 
-pub(super) fn lower_named_relation_field(
+fn lower_named_relation_field(
     value: &NormalizedValueRef,
     fields: &BTreeSet<String>,
 ) -> Result<String, UnsupportedReason> {
@@ -1822,7 +1822,7 @@ pub(super) fn lower_named_relation_field(
     }
 }
 
-pub(super) fn lower_linear_root_key_ref(
+fn lower_linear_root_key_ref(
     value: &NormalizedValueRef,
     root: &LinearRoot,
     source: &ResolvedSource,
@@ -1865,7 +1865,7 @@ pub(super) fn lower_linear_root_key_ref(
     }
 }
 
-pub(super) fn accumulated_join_field(
+fn accumulated_join_field(
     value: &NormalizedValueRef,
     fields: &BTreeMap<(SourceId, String), (String, usize)>,
 ) -> Option<(String, usize)> {
@@ -1877,7 +1877,7 @@ pub(super) fn accumulated_join_field(
     fields.get(&(source.clone(), field)).cloned()
 }
 
-pub(super) fn lower_projection_field(
+fn lower_projection_field(
     column: &RowProjection,
     plan: &LinearCurrentRoot,
     source: &ResolvedSource,
@@ -1925,7 +1925,7 @@ pub(super) fn lower_projection_field(
 }
 
 #[derive(Clone, Debug)]
-pub(super) enum ProjectionSource {
+enum ProjectionSource {
     Field {
         field: String,
         nullable_depth: usize,
@@ -1934,13 +1934,13 @@ pub(super) enum ProjectionSource {
 }
 
 #[derive(Clone, Debug)]
-pub(super) struct ProjectionFieldPlan {
+struct ProjectionFieldPlan {
     pub(super) project: ProjectField,
     pub(super) unwrap_before_project: BTreeMap<String, usize>,
     pub(super) nullable_after_project: Option<(String, usize)>,
 }
 
-pub(super) fn lower_projection_source(
+fn lower_projection_source(
     value: &NormalizedValueRef,
     plan: &LinearCurrentRoot,
     source: &ResolvedSource,
@@ -2012,7 +2012,7 @@ pub(super) fn lower_projection_source(
     }
 }
 
-pub(super) fn lower_relation_projection_ref(
+fn lower_relation_projection_ref(
     value: &NormalizedValueRef,
     plan: &RelationInputPlan,
     _request: &QueryProgramRequest,
@@ -2075,7 +2075,7 @@ pub(super) fn lower_relation_projection_ref(
     }
 }
 
-pub(super) fn lower_equality_param_filter_joins(
+fn lower_equality_param_filter_joins(
     mut graph: GraphBuilder,
     predicate: &PredicateExpr,
     source_id: &SourceId,
@@ -2180,14 +2180,14 @@ pub(super) fn lower_equality_param_filter_joins(
     Ok((graph, residual, retained_route_fields))
 }
 
-pub(super) struct EqualityParamJoin {
+struct EqualityParamJoin {
     pub(super) field: String,
     pub(super) param: String,
     pub(super) value_type: ValueType,
     pub(super) nullable: bool,
 }
 
-pub(super) fn equality_param_join(
+fn equality_param_join(
     predicate: &PredicateExpr,
     source_id: &SourceId,
     source: &ResolvedSource,
@@ -2223,7 +2223,7 @@ pub(super) fn equality_param_join(
     }
 }
 
-pub(super) fn source_join_field(
+fn source_join_field(
     value: &NormalizedValueRef,
     source_id: &SourceId,
     source: &ResolvedSource,
@@ -2254,7 +2254,7 @@ pub(super) fn source_join_field(
     Ok(Some((field, value_type, nullable)))
 }
 
-pub(super) fn lower_literal_projection_value(
+fn lower_literal_projection_value(
     value: &NormalizedValueRef,
     request: &QueryProgramRequest,
 ) -> Result<Option<LiteralValue>, UnsupportedReason> {
@@ -2275,7 +2275,7 @@ pub(super) fn lower_literal_projection_value(
     }
 }
 
-pub(super) fn lower_join_key_ref(
+fn lower_join_key_ref(
     value: &NormalizedValueRef,
     source_id: &SourceId,
     source: &ResolvedSource,
@@ -2298,11 +2298,11 @@ pub(super) fn lower_join_key_ref(
     }
 }
 
-pub(super) fn source_field_is_nullable(source: &ResolvedSource, field: &str) -> bool {
+fn source_field_is_nullable(source: &ResolvedSource, field: &str) -> bool {
     source_field_nullable_depth(source, field) > 0
 }
 
-pub(super) fn source_field_nullable_depth(source: &ResolvedSource, field: &str) -> usize {
+fn source_field_nullable_depth(source: &ResolvedSource, field: &str) -> usize {
     let mut depth = 0;
     if source_field_type(source, field)
         .is_some_and(|field_type| matches!(field_type, ValueType::Nullable(_)))
@@ -2334,7 +2334,7 @@ pub(super) fn source_field_type<'a>(
         .map(|field| &field.value_type)
 }
 
-pub(super) fn project_left_source_fields_with_join_routes(
+fn project_left_source_fields_with_join_routes(
     source: &ResolvedSource,
     existing_route_fields: &BTreeSet<String>,
     introduced_route_fields: &BTreeSet<String>,
@@ -2353,7 +2353,7 @@ pub(super) fn project_left_source_fields_with_join_routes(
     fields
 }
 
-pub(super) fn lower_window(
+fn lower_window(
     graph: GraphBuilder,
     order: &[OrderKey],
     partition_by: &[NormalizedValueRef],
@@ -2417,7 +2417,7 @@ pub(super) fn lower_window(
     ))
 }
 
-pub(super) fn lower_aggregate(
+fn lower_aggregate(
     mut graph: GraphBuilder,
     group_by: &[NormalizedValueRef],
     outputs: &[AggregateExpr],
@@ -2467,7 +2467,7 @@ pub(super) fn lower_aggregate(
     })
 }
 
-pub(super) fn lower_aggregate_expr(
+fn lower_aggregate_expr(
     aggregate: &AggregateExpr,
     plan: &LinearCurrentRoot,
     source: &ResolvedSource,
@@ -2495,7 +2495,7 @@ pub(super) fn lower_aggregate_expr(
     })
 }
 
-pub(super) fn lower_order_key(
+fn lower_order_key(
     key: &OrderKey,
     plan: &LinearCurrentRoot,
     source: &ResolvedSource,
@@ -2508,7 +2508,7 @@ pub(super) fn lower_order_key(
     })
 }
 
-pub(super) fn lower_predicate(
+fn lower_predicate(
     predicate: &PredicateExpr,
     source_id: &SourceId,
     source: &ResolvedSource,
@@ -2521,7 +2521,7 @@ pub(super) fn lower_predicate(
     Ok(lowered.canonicalize())
 }
 
-pub(super) fn lower_predicate_inner(
+fn lower_predicate_inner(
     predicate: &PredicateExpr,
     source_id: &SourceId,
     source: &ResolvedSource,
@@ -2589,7 +2589,7 @@ pub(super) fn lower_predicate_inner(
     })
 }
 
-pub(super) fn lower_enum_payload_predicate(
+fn lower_enum_payload_predicate(
     predicate: &PredicateExpr,
 ) -> Result<GroovePredicateExpr, UnsupportedReason> {
     Ok(match predicate {
@@ -2666,7 +2666,7 @@ pub(super) fn lower_enum_payload_predicate(
     })
 }
 
-pub(super) fn lower_not_predicate(
+fn lower_not_predicate(
     predicate: &PredicateExpr,
     source_id: &SourceId,
     source: &ResolvedSource,
@@ -2679,7 +2679,7 @@ pub(super) fn lower_not_predicate(
     Ok(lowered.canonicalize())
 }
 
-pub(super) fn lower_not_predicate_inner(
+fn lower_not_predicate_inner(
     predicate: &PredicateExpr,
     source_id: &SourceId,
     source: &ResolvedSource,
@@ -2734,7 +2734,7 @@ pub(super) fn lower_not_predicate_inner(
     })
 }
 
-pub(super) fn invert_comparison(op: ComparisonOp) -> ComparisonOp {
+fn invert_comparison(op: ComparisonOp) -> ComparisonOp {
     match op {
         ComparisonOp::Eq => ComparisonOp::Ne,
         ComparisonOp::Ne => ComparisonOp::Eq,
@@ -2745,7 +2745,7 @@ pub(super) fn invert_comparison(op: ComparisonOp) -> ComparisonOp {
     }
 }
 
-pub(super) fn lower_compare(
+fn lower_compare(
     left: &NormalizedValueRef,
     op: ComparisonOp,
     right: &NormalizedValueRef,
@@ -2783,7 +2783,7 @@ pub(super) fn lower_compare(
     }
 }
 
-pub(super) fn lower_contains(
+fn lower_contains(
     value: &NormalizedValueRef,
     needle: &NormalizedValueRef,
     source_id: &SourceId,
@@ -2823,7 +2823,7 @@ pub(super) fn lower_contains(
     }
 }
 
-pub(super) fn coerce_literal_for_source_array_element(
+fn coerce_literal_for_source_array_element(
     value: LiteralValue,
     source: &ResolvedSource,
     field: &str,
@@ -2837,7 +2837,7 @@ pub(super) fn coerce_literal_for_source_array_element(
     }
 }
 
-pub(super) fn coerce_literal_for_source_field(
+fn coerce_literal_for_source_field(
     value: LiteralValue,
     source: &ResolvedSource,
     field: &str,
@@ -2848,7 +2848,7 @@ pub(super) fn coerce_literal_for_source_field(
     coerce_literal_for_value_type(value, non_null_value_type(value_type))
 }
 
-pub(super) fn non_null_value_type(mut value_type: &ValueType) -> &ValueType {
+fn non_null_value_type(mut value_type: &ValueType) -> &ValueType {
     while let ValueType::Nullable(inner) = value_type {
         value_type = inner.as_ref();
     }
@@ -2893,7 +2893,7 @@ pub(super) fn coerce_literal_for_value_type(
     }
 }
 
-pub(super) fn lower_null_test(
+fn lower_null_test(
     value: &NormalizedValueRef,
     is_null: bool,
     source_id: &SourceId,
@@ -2908,7 +2908,7 @@ pub(super) fn lower_null_test(
     }
 }
 
-pub(super) fn predicate_kind(op: ComparisonOp) -> PredicateKind {
+fn predicate_kind(op: ComparisonOp) -> PredicateKind {
     match op {
         ComparisonOp::Eq => PredicateKind::Eq,
         ComparisonOp::Ne => PredicateKind::Neq,
@@ -2919,11 +2919,7 @@ pub(super) fn predicate_kind(op: ComparisonOp) -> PredicateKind {
     }
 }
 
-pub(super) fn compare_literals(
-    left: &LiteralValue,
-    op: ComparisonOp,
-    right: &LiteralValue,
-) -> bool {
+fn compare_literals(left: &LiteralValue, op: ComparisonOp, right: &LiteralValue) -> bool {
     match op {
         ComparisonOp::Eq => left == right,
         ComparisonOp::Ne => left != right,
@@ -2934,7 +2930,7 @@ pub(super) fn compare_literals(
     }
 }
 
-pub(super) fn constant_predicate(value: bool) -> GroovePredicateExpr {
+fn constant_predicate(value: bool) -> GroovePredicateExpr {
     if value {
         GroovePredicateExpr::And(Vec::new())
     } else {
@@ -2943,12 +2939,12 @@ pub(super) fn constant_predicate(value: bool) -> GroovePredicateExpr {
 }
 
 #[derive(Clone, Debug)]
-pub(super) enum LoweredValueRef {
+enum LoweredValueRef {
     Field(String),
     Literal(LiteralValue),
 }
 
-pub(super) fn lower_field_ref(
+fn lower_field_ref(
     value: &NormalizedValueRef,
     plan: &LinearCurrentRoot,
     source: &ResolvedSource,
@@ -2966,7 +2962,7 @@ pub(super) fn lower_field_ref(
     }
 }
 
-pub(super) fn lower_value_ref(
+fn lower_value_ref(
     value: &NormalizedValueRef,
     source_id: &SourceId,
     source: &ResolvedSource,
@@ -3074,7 +3070,7 @@ pub(super) fn claim_value(
     }
 }
 
-pub(super) fn is_unbound_claim_reason(reason: &UnsupportedReason) -> bool {
+fn is_unbound_claim_reason(reason: &UnsupportedReason) -> bool {
     matches!(reason, UnsupportedReason::UnboundClaim(_))
 }
 
@@ -3092,7 +3088,7 @@ pub(super) fn require_source_field(
     }
 }
 
-pub(super) fn provenance_source_field(field: ProvenanceField) -> &'static str {
+fn provenance_source_field(field: ProvenanceField) -> &'static str {
     match field {
         ProvenanceField::CreatedAt => "$createdAt",
         ProvenanceField::CreatedBy => "$createdBy",

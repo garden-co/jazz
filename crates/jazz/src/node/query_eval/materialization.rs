@@ -65,7 +65,7 @@ where
         self.materialize_authoritative_reset_version_row(table_name.as_str(), row_uuid, tx_id, None)
     }
 
-    pub(super) fn materialize_authoritative_reset_current_row(
+    fn materialize_authoritative_reset_current_row(
         &mut self,
         table_name: &str,
         row_uuid: RowUuid,
@@ -198,7 +198,7 @@ where
         })
     }
 
-    pub(super) fn project_relation_edge_table_through_read_schema(
+    fn project_relation_edge_table_through_read_schema(
         &mut self,
         canonical_table: &str,
         row_uuid: RowUuid,
@@ -314,7 +314,7 @@ where
         }
     }
 
-    pub(super) fn relation_edge_branch_id(
+    fn relation_edge_branch_id(
         version_ref: &RowVersionRefEntry,
     ) -> Result<Option<BranchId>, Error> {
         let Some(bytes) = &version_ref.branch_or_prefix else {
@@ -650,7 +650,7 @@ where
             .as_slice()
     }
 
-    pub(super) fn preload_tx_versions_for_materialization(
+    fn preload_tx_versions_for_materialization(
         &mut self,
         tx_ids: impl IntoIterator<Item = TxId>,
         cache: &mut BTreeMap<TxId, Vec<VersionRow>>,
@@ -771,7 +771,7 @@ where
         current_row_from_materialized_cells(&read_table, version, &cells).map(Some)
     }
 
-    pub(super) fn current_row_from_aggregate_result_payload(
+    fn current_row_from_aggregate_result_payload(
         &mut self,
         query: &crate::query::Query,
         member: &ResultMemberEntry,
@@ -798,7 +798,7 @@ where
         )
     }
 
-    pub(super) fn current_row_from_result_payload(
+    fn current_row_from_result_payload(
         &mut self,
         table: &TableSchema,
         payload: &ResultMemberPayloadEntry,
@@ -1139,7 +1139,7 @@ where
         windows
     }
 
-    pub(super) fn materialize_relation_snapshot_root_rows(
+    fn materialize_relation_snapshot_root_rows(
         &mut self,
         shape: &ValidatedQuery,
         snapshots: &MultisinkDeltas,

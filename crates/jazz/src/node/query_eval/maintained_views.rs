@@ -346,7 +346,7 @@ where
             self.applied_view_update_generation(binding_view_key);
     }
 
-    pub(super) fn drain_local_maintained_view_subscription_transitions(
+    fn drain_local_maintained_view_subscription_transitions(
         &mut self,
         local: &mut LocalMaintainedViewSubscription,
         authoritative_binding_view: Option<BindingViewKey>,
@@ -655,7 +655,7 @@ where
         Ok(Some(transitions))
     }
 
-    pub(super) fn apply_local_maintained_view_transitions(
+    fn apply_local_maintained_view_transitions(
         &mut self,
         local: &mut LocalMaintainedViewSubscription,
         transitions: super::maintained_subscription_view::ResultTransitions,
@@ -663,7 +663,7 @@ where
         self.apply_local_maintained_view_transitions_inner(local, transitions, true)
     }
 
-    pub(super) fn apply_local_maintained_view_transitions_inner(
+    fn apply_local_maintained_view_transitions_inner(
         &mut self,
         local: &mut LocalMaintainedViewSubscription,
         transitions: super::maintained_subscription_view::ResultTransitions,

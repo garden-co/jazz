@@ -201,7 +201,7 @@ pub(super) fn source_requirements(
 }
 
 #[cfg(test)]
-pub(super) fn source_requirements_for_test(
+pub(crate) fn source_requirements_for_test(
     request: &QueryProgramRequest,
 ) -> CapabilityResult<BTreeMap<SourceId, SourceRequirements>> {
     let plan = analyze_query_plan(request).map_err(|gaps| {
@@ -213,7 +213,7 @@ pub(super) fn source_requirements_for_test(
     source_requirements(request, &plan)
 }
 
-pub(super) fn collect_app_path_projection_requirements(
+fn collect_app_path_projection_requirements(
     paths: &[AppPathProjection],
     requirements: &mut BTreeMap<SourceId, SourceRequirements>,
 ) -> CapabilityResult<()> {
@@ -233,7 +233,7 @@ pub(super) fn collect_app_path_projection_requirements(
     Ok(())
 }
 
-pub(super) fn merge_field_requirement(existing: &mut FieldRequirement, incoming: FieldRequirement) {
+fn merge_field_requirement(existing: &mut FieldRequirement, incoming: FieldRequirement) {
     match incoming {
         FieldRequirement::None => {}
         FieldRequirement::All => *existing = FieldRequirement::All,
@@ -245,7 +245,7 @@ pub(super) fn merge_field_requirement(existing: &mut FieldRequirement, incoming:
     }
 }
 
-pub(super) fn collect_plan_requirements(
+fn collect_plan_requirements(
     plan: &AnalyzedQueryPlan,
     requirements: &mut BTreeMap<SourceId, SourceRequirements>,
 ) -> CapabilityResult<()> {
@@ -285,7 +285,7 @@ pub(super) fn collect_plan_requirements(
     Ok(())
 }
 
-pub(super) fn collect_predicate_requirements_for_all_sources(
+fn collect_predicate_requirements_for_all_sources(
     predicate: &PredicateExpr,
     requirements: &mut BTreeMap<SourceId, SourceRequirements>,
 ) -> CapabilityResult<()> {
@@ -303,7 +303,7 @@ pub(super) fn collect_predicate_requirements_for_all_sources(
     Ok(())
 }
 
-pub(super) fn collect_value_requirements_for_all_sources(
+fn collect_value_requirements_for_all_sources(
     value: &NormalizedValueRef,
     requirements: &mut BTreeMap<SourceId, SourceRequirements>,
 ) -> CapabilityResult<()> {
@@ -330,7 +330,7 @@ impl From<FieldProjection> for FieldRequirement {
     }
 }
 
-pub(super) fn collect_step_requirements(
+fn collect_step_requirements(
     step: &LinearStep,
     source: &SourceId,
     requirements: &mut SourceRequirements,
@@ -389,7 +389,7 @@ pub(super) fn collect_step_requirements(
     })
 }
 
-pub(super) fn collect_predicate_requirements(
+fn collect_predicate_requirements(
     predicate: &PredicateExpr,
     source: &SourceId,
     requirements: &mut SourceRequirements,
@@ -430,7 +430,7 @@ pub(super) fn collect_predicate_requirements(
     }
 }
 
-pub(super) fn collect_value_requirements(
+fn collect_value_requirements(
     value: &NormalizedValueRef,
     source: &SourceId,
     requirements: &mut SourceRequirements,
@@ -469,7 +469,7 @@ pub(super) fn collect_value_requirements(
     Ok(())
 }
 
-pub(super) fn add_required_app_field(requirements: &mut SourceRequirements, field: String) {
+fn add_required_app_field(requirements: &mut SourceRequirements, field: String) {
     match &mut requirements.app_fields {
         FieldRequirement::None => {
             requirements.app_fields = FieldRequirement::Fields(BTreeSet::from([field]));

@@ -282,10 +282,7 @@ where
     /// with the empty schema. This is the local-first bootstrap equivalent of
     /// having opened the runtime with that schema originally; later schemas
     /// still arrive through ordinary catalogue lineage publication.
-    pub(super) fn admit_local_schema_view_if_needed(
-        &self,
-        schema: &JazzSchema,
-    ) -> Result<(), Error> {
+    fn admit_local_schema_view_if_needed(&self, schema: &JazzSchema) -> Result<(), Error> {
         let empty_schema = JazzSchema::new([]);
         let empty_id = empty_schema.version_id();
         let target_id = schema.version_id();
@@ -897,9 +894,7 @@ pub struct DbMaintainedSubscriptionFootprint {
 
 #[cfg(feature = "testing")]
 impl DbMaintainedSubscriptionFootprint {
-    pub(super) fn from_local(
-        footprint: crate::node::LocalMaintainedViewSubscriptionFootprint,
-    ) -> Self {
+    fn from_local(footprint: crate::node::LocalMaintainedViewSubscriptionFootprint) -> Self {
         Self {
             result_rows: footprint.maintained.result_rows,
             result_weights: footprint.maintained.result_weights,

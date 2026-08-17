@@ -143,7 +143,7 @@ where
         self.attach_or_refresh_query_coverage(&shape, &binding, upstream_opts, author)
     }
 
-    pub(super) fn attach_or_refresh_query_coverage(
+    fn attach_or_refresh_query_coverage(
         &self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -242,7 +242,7 @@ where
         })
     }
 
-    pub(super) fn register_query_coverage(
+    fn register_query_coverage(
         &self,
         coverage: CoverageKey,
         subscription: PendingUpstreamSubscription,
@@ -260,7 +260,7 @@ where
             });
     }
 
-    pub(super) fn attach_query_shape_binding_with_opts(
+    fn attach_query_shape_binding_with_opts(
         &self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -637,7 +637,7 @@ where
         })
     }
 
-    pub(super) fn validate_prepared_shape_for_registration(
+    fn validate_prepared_shape_for_registration(
         &self,
         prepared: &PreparedQuery,
     ) -> Result<(), Error> {
@@ -663,7 +663,7 @@ where
             .await
     }
 
-    pub(super) fn open_subscription_upstream_coverage(
+    fn open_subscription_upstream_coverage(
         &self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -743,7 +743,7 @@ where
         })
     }
 
-    pub(super) fn upstream_subscription_cleanup(
+    fn upstream_subscription_cleanup(
         &self,
         upstream_subscriptions: Vec<UpstreamCoverageHandle>,
         owner: Weak<RefCell<SubscriptionState>>,

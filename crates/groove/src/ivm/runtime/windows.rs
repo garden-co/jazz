@@ -2,7 +2,7 @@
 
 use super::*;
 
-pub(super) type SourceRecord = (Vec<u8>, Bytes);
+type SourceRecord = (Vec<u8>, Bytes);
 pub(super) type WindowedRecord = (Bytes, i64);
 
 #[derive(Clone, Debug)]
@@ -190,7 +190,7 @@ pub(super) fn records_before_deltas(
     records.into_iter().collect()
 }
 
-pub(super) fn collect_by_projection_value_type(
+fn collect_by_projection_value_type(
     input_desc: RecordDescriptor,
     field: &CollectByProjection,
 ) -> Result<ValueType, IvmRuntimeError> {
@@ -217,7 +217,7 @@ pub(super) fn collect_by_output_value(output_type: &ValueType, value: Value) -> 
     }
 }
 
-pub(super) fn collect_by_projected_value(
+fn collect_by_projected_value(
     values: &[Value],
     field: &CollectByProjection,
 ) -> Result<Value, IvmRuntimeError> {
@@ -464,7 +464,7 @@ pub(super) fn update_unbounded_collect_by_terminal_state(
     Ok(operations)
 }
 
-pub(super) fn canonical_collect_by_terminal_deltas(
+fn canonical_collect_by_terminal_deltas(
     input_desc: RecordDescriptor,
     collect_by: &CollectByOp,
     direct_tree_slot: Option<&CollectBySlot>,
@@ -530,7 +530,7 @@ pub(super) fn canonicalize_collect_by_terminal_weights(
     canonical
 }
 
-pub(super) fn update_collect_by_root_terminal_state(
+fn update_collect_by_root_terminal_state(
     input_desc: RecordDescriptor,
     output_desc: RecordDescriptor,
     collect_by: &CollectByOp,
@@ -725,7 +725,7 @@ pub(super) fn collect_by_tree_parent_from_records(
     Ok(Some(output_desc.create(&values)?.into()))
 }
 
-pub(super) fn render_collect_by_slots(
+fn render_collect_by_slots(
     input_desc: RecordDescriptor,
     records: &[(Bytes, i64)],
     owner_record: &Bytes,
@@ -815,7 +815,7 @@ pub(super) fn render_collect_by_slots(
         .collect()
 }
 
-pub(super) fn collect_by_slot_window_from_records(
+fn collect_by_slot_window_from_records(
     descriptor: RecordDescriptor,
     records: Vec<Bytes>,
     slot: &CollectBySlot,
@@ -882,7 +882,7 @@ pub(super) fn collect_by_expanded_window(
     Ok(expanded)
 }
 
-pub(super) fn collect_by_window_from_records(
+fn collect_by_window_from_records(
     descriptor: RecordDescriptor,
     records: &[(Bytes, i64)],
     collect_by: &CollectByOp,
@@ -925,7 +925,7 @@ pub(super) fn collect_by_window_from_records(
     Ok(window)
 }
 
-pub(super) fn collect_by_sort_key(
+fn collect_by_sort_key(
     descriptor: RecordDescriptor,
     record: &[u8],
     collect_by: &CollectByOp,
@@ -938,7 +938,7 @@ pub(super) fn collect_by_sort_key(
     )
 }
 
-pub(super) fn collect_by_sort_key_for_fields(
+fn collect_by_sort_key_for_fields(
     descriptor: RecordDescriptor,
     record: &[u8],
     sort_field_indices: &[usize],
@@ -962,7 +962,7 @@ pub(super) fn collect_by_sort_key_for_fields(
         .collect()
 }
 
-pub(super) fn top_by_sort_key(
+fn top_by_sort_key(
     descriptor: RecordDescriptor,
     record: &[u8],
     top_by: &TopByOp,
@@ -1030,7 +1030,7 @@ pub(super) fn encoded_arrangement_key_part(
     Ok(key)
 }
 
-pub(super) fn encode_runtime_primary_key_part(
+fn encode_runtime_primary_key_part(
     key: &mut Vec<u8>,
     value: &Value,
 ) -> Result<(), IvmRuntimeError> {
@@ -1105,7 +1105,7 @@ pub(super) fn encode_runtime_primary_key_part(
     Ok(())
 }
 
-pub(super) fn ordered_f64_key(value: f64) -> u64 {
+fn ordered_f64_key(value: f64) -> u64 {
     let bits = value.to_bits();
     if bits & (1 << 63) == 0 {
         bits ^ (1 << 63)
@@ -1114,7 +1114,7 @@ pub(super) fn ordered_f64_key(value: f64) -> u64 {
     }
 }
 
-pub(super) fn encode_runtime_ordered_bytes(key: &mut Vec<u8>, value: &[u8]) {
+fn encode_runtime_ordered_bytes(key: &mut Vec<u8>, value: &[u8]) {
     for byte in value {
         if *byte == 0 {
             key.extend([0, 0xff]);

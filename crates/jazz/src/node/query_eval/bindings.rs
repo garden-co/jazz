@@ -163,7 +163,7 @@ pub(super) fn default_policy_claim_values(writer: AuthorId) -> BTreeMap<String, 
 
 const BUILTIN_POLICY_CLAIMS: &[&str] = &["sub", "user_id", "isAdmin"];
 
-pub(super) fn is_builtin_policy_claim(name: &str) -> bool {
+fn is_builtin_policy_claim(name: &str) -> bool {
     BUILTIN_POLICY_CLAIMS.contains(&name)
 }
 
@@ -214,7 +214,7 @@ pub(super) fn bind_scope_claim_operands(
     }
 }
 
-pub(super) fn bind_scope_claim_join(
+fn bind_scope_claim_join(
     join: &mut JoinVia,
     claim_values: &BTreeMap<String, Value>,
     binding_values: &mut BTreeMap<String, Value>,
@@ -227,7 +227,7 @@ pub(super) fn bind_scope_claim_join(
     }
 }
 
-pub(super) fn bind_scope_claim_predicate(
+fn bind_scope_claim_predicate(
     predicate: &mut Predicate,
     claim_values: &BTreeMap<String, Value>,
     binding_values: &mut BTreeMap<String, Value>,
@@ -266,7 +266,7 @@ pub(super) fn bind_scope_claim_predicate(
     }
 }
 
-pub(super) fn bind_scope_claim_operand(
+fn bind_scope_claim_operand(
     operand: &mut Operand,
     claim_values: &BTreeMap<String, Value>,
     binding_values: &mut BTreeMap<String, Value>,
@@ -342,7 +342,7 @@ pub(super) fn typed_claim_param_alias(name: &str, ty: &ColumnType) -> String {
     format!("__jazz_claim_typed:{}:{ty}:{name}", ty.len())
 }
 
-pub(super) fn rename_query_params(query: &mut JazzQuery, aliases: &BTreeMap<String, String>) {
+fn rename_query_params(query: &mut JazzQuery, aliases: &BTreeMap<String, String>) {
     for predicate in &mut query.filters {
         rename_predicate_params(predicate, aliases);
     }
@@ -365,7 +365,7 @@ pub(super) fn rename_query_params(query: &mut JazzQuery, aliases: &BTreeMap<Stri
     }
 }
 
-pub(super) fn rename_join_params(join: &mut JoinVia, aliases: &BTreeMap<String, String>) {
+fn rename_join_params(join: &mut JoinVia, aliases: &BTreeMap<String, String>) {
     for predicate in &mut join.filters {
         rename_predicate_params(predicate, aliases);
     }
@@ -374,7 +374,7 @@ pub(super) fn rename_join_params(join: &mut JoinVia, aliases: &BTreeMap<String, 
     }
 }
 
-pub(super) fn rename_reachable_params(
+fn rename_reachable_params(
     reachable: &mut crate::query::ReachableVia,
     aliases: &BTreeMap<String, String>,
 ) {
@@ -392,10 +392,7 @@ pub(super) fn rename_reachable_params(
     }
 }
 
-pub(super) fn rename_predicate_params(
-    predicate: &mut Predicate,
-    aliases: &BTreeMap<String, String>,
-) {
+fn rename_predicate_params(predicate: &mut Predicate, aliases: &BTreeMap<String, String>) {
     match predicate {
         Predicate::All(predicates) | Predicate::Any(predicates) => {
             for predicate in predicates {
@@ -424,7 +421,7 @@ pub(super) fn rename_predicate_params(
     }
 }
 
-pub(super) fn rename_operand_param(operand: &mut Operand, aliases: &BTreeMap<String, String>) {
+fn rename_operand_param(operand: &mut Operand, aliases: &BTreeMap<String, String>) {
     let Operand::Param(name) = operand else {
         return;
     };
@@ -433,14 +430,14 @@ pub(super) fn rename_operand_param(operand: &mut Operand, aliases: &BTreeMap<Str
     }
 }
 
-pub(super) fn false_predicate() -> Predicate {
+fn false_predicate() -> Predicate {
     Predicate::Eq(
         Operand::Literal(Value::Bool(true)),
         Operand::Literal(Value::Bool(false)),
     )
 }
 
-pub(super) fn predicate_contains_unbound_claim(
+fn predicate_contains_unbound_claim(
     predicate: &Predicate,
     claims: Option<&BTreeMap<String, Value>>,
 ) -> bool {
@@ -467,7 +464,7 @@ pub(super) fn predicate_contains_unbound_claim(
     }
 }
 
-pub(super) fn operands_contain_unbound_claim<'a>(
+fn operands_contain_unbound_claim<'a>(
     operands: impl IntoIterator<Item = &'a Operand>,
     claims: Option<&BTreeMap<String, Value>>,
 ) -> bool {
@@ -476,7 +473,7 @@ pub(super) fn operands_contain_unbound_claim<'a>(
         .any(|operand| operand_contains_unbound_claim(operand, claims))
 }
 
-pub(super) fn operand_contains_unbound_claim(
+fn operand_contains_unbound_claim(
     operand: &Operand,
     claims: Option<&BTreeMap<String, Value>>,
 ) -> bool {
@@ -631,7 +628,7 @@ pub(super) fn bind_query_params_with_mode(
     Ok(rebound)
 }
 
-pub(super) fn bind_array_subquery_filter_literals(
+fn bind_array_subquery_filter_literals(
     mut subquery: ArraySubquery,
     binding: &Binding,
     schema: &JazzSchema,
@@ -768,7 +765,7 @@ pub(super) fn collect_reachable_seed_claim_params(
     Ok(())
 }
 
-pub(super) fn collect_claim_field_params_from_node(
+fn collect_claim_field_params_from_node(
     node: &RowSetExpr,
     param_types: &BTreeMap<String, ColumnType>,
     params: &mut BTreeMap<String, ProgramClaimParam>,
@@ -841,7 +838,7 @@ pub(super) fn collect_claim_field_params_from_node(
     }
 }
 
-pub(super) fn collect_claim_field_params_from_predicate(
+fn collect_claim_field_params_from_predicate(
     predicate: &NormalizedPredicateExpr,
     param_types: &BTreeMap<String, ColumnType>,
     params: &mut BTreeMap<String, ProgramClaimParam>,
@@ -884,7 +881,7 @@ pub(super) fn collect_claim_field_params_from_predicate(
     }
 }
 
-pub(super) fn collect_claim_field_param(
+fn collect_claim_field_param(
     value: &NormalizedValueRef,
     param_types: &BTreeMap<String, ColumnType>,
     params: &mut BTreeMap<String, ProgramClaimParam>,
@@ -903,7 +900,7 @@ pub(super) fn collect_claim_field_param(
         .or_insert(ProgramClaimParam { path, ty });
 }
 
-pub(super) fn collect_claim_field_param_authoritative(
+fn collect_claim_field_param_authoritative(
     value: &NormalizedValueRef,
     ty: ColumnType,
     params: &mut BTreeMap<String, ProgramClaimParam>,
@@ -917,7 +914,7 @@ pub(super) fn collect_claim_field_param_authoritative(
     params.insert(param.clone(), ProgramClaimParam { path, ty });
 }
 
-pub(super) fn bind_query_predicate(
+fn bind_query_predicate(
     predicate: Predicate,
     binding: &Binding,
     schema: &JazzSchema,
@@ -1022,7 +1019,7 @@ pub(super) fn bind_query_predicate(
     })
 }
 
-pub(super) fn bind_reachable_seed_filters(
+fn bind_reachable_seed_filters(
     reachable: &mut crate::query::ReachableVia,
     binding: &Binding,
     schema: &JazzSchema,
@@ -1038,7 +1035,7 @@ pub(super) fn bind_reachable_seed_filters(
     Ok(())
 }
 
-pub(super) fn bind_join_filter_literals(
+fn bind_join_filter_literals(
     mut join: JoinVia,
     binding: &Binding,
     schema: &JazzSchema,
@@ -1058,7 +1055,7 @@ pub(super) fn bind_join_filter_literals(
     Ok(join)
 }
 
-pub(super) fn bind_binary_predicate(
+fn bind_binary_predicate(
     left: Operand,
     right: Operand,
     binding: &Binding,
@@ -1075,7 +1072,7 @@ pub(super) fn bind_binary_predicate(
     ))
 }
 
-pub(super) fn bind_source_for_table(table: &str) -> SourceId {
+fn bind_source_for_table(table: &str) -> SourceId {
     SourceId {
         table: table.to_owned(),
         path: SourcePath {
@@ -1084,7 +1081,7 @@ pub(super) fn bind_source_for_table(table: &str) -> SourceId {
     }
 }
 
-pub(super) fn should_inline_reachable_seed(operand: &Operand, mode: ParamBindingMode) -> bool {
+fn should_inline_reachable_seed(operand: &Operand, mode: ParamBindingMode) -> bool {
     match (operand, mode) {
         (Operand::Param(_), ParamBindingMode::InlineAllReachableSeeds) => true,
         (Operand::Param(_), ParamBindingMode::RetainAllParams) => false,
@@ -1092,7 +1089,7 @@ pub(super) fn should_inline_reachable_seed(operand: &Operand, mode: ParamBinding
     }
 }
 
-pub(super) fn bind_query_operand(
+fn bind_query_operand(
     operand: Operand,
     binding: &Binding,
     mode: ParamBindingMode,
@@ -1100,7 +1097,7 @@ pub(super) fn bind_query_operand(
     bind_query_operand_with_target_type(operand, binding, None, mode)
 }
 
-pub(super) fn bind_query_operand_with_target_type(
+fn bind_query_operand_with_target_type(
     operand: Operand,
     binding: &Binding,
     target_type: Option<&ColumnType>,

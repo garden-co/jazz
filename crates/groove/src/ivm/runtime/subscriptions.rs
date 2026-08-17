@@ -103,7 +103,7 @@ impl Subscription {
             .map(|deltas| self.extract_sink_deltas(deltas))
     }
 
-    pub(super) fn extract_sink_deltas(&self, mut deltas: MultisinkDeltas) -> RecordDeltas {
+    fn extract_sink_deltas(&self, mut deltas: MultisinkDeltas) -> RecordDeltas {
         deltas
             .sinks
             .remove(&self.sink)
@@ -311,7 +311,7 @@ pub(super) struct AutoDirectFamilyKey {
     pub(super) public_fields: Vec<String>,
 }
 
-pub(super) struct AutoDirectFamilyPlan {
+struct AutoDirectFamilyPlan {
     pub(super) key: AutoDirectFamilyKey,
     pub(super) graph: GraphBuilder,
     pub(super) shape: String,
@@ -395,9 +395,7 @@ pub(super) fn multisink_deltas_encoded_bytes(deltas: &MultisinkDeltas) -> usize 
     deltas.sinks.values().map(record_deltas_encoded_bytes).sum()
 }
 
-pub(super) fn descriptor_field_names(
-    descriptor: &RecordDescriptor,
-) -> Result<Vec<String>, IvmRuntimeError> {
+fn descriptor_field_names(descriptor: &RecordDescriptor) -> Result<Vec<String>, IvmRuntimeError> {
     descriptor
         .fields()
         .iter()
@@ -421,7 +419,7 @@ where
     RecordStore::new(storage, &table.name, descriptor)
 }
 
-pub(super) fn validate_public_output_fields(
+fn validate_public_output_fields(
     source: &RecordDescriptor,
     public_output: &RecordDescriptor,
 ) -> Result<(), IvmRuntimeError> {
@@ -447,7 +445,7 @@ pub(super) fn validate_public_output_fields(
     Ok(())
 }
 
-pub(super) fn validate_public_output_for_shape(
+fn validate_public_output_for_shape(
     shape: &RoutedMultisinkShapeState,
     sink: &str,
     public_output: &RecordDescriptor,
@@ -459,7 +457,7 @@ pub(super) fn validate_public_output_for_shape(
     validate_public_output_fields(&terminal.output.output, public_output)
 }
 
-pub(super) fn bound_routed_multisink_graph(
+fn bound_routed_multisink_graph(
     terminal: &RoutedMultisinkTerminal,
     binding_values: &[Value],
 ) -> GraphBuilder {
@@ -499,7 +497,7 @@ pub(super) fn bound_routed_multisink_graph(
     graph.project(terminal.public_fields.clone())
 }
 
-pub(super) fn route_predicate(field: &str, value: &Value) -> PredicateExpr {
+fn route_predicate(field: &str, value: &Value) -> PredicateExpr {
     match value {
         Value::Nullable(None) => PredicateExpr::is_null(field),
         value => PredicateExpr::eq(field.to_owned(), value.clone()),
@@ -565,14 +563,14 @@ pub(super) fn builder_contains_binding_source(graph: &GraphBuilder) -> bool {
 }
 
 #[derive(Clone)]
-pub(super) struct LiftedLiteralFilter {
+struct LiftedLiteralFilter {
     pub(super) graph: GraphBuilder,
     pub(super) value: LiteralValue,
 }
 
 const AUTO_DIRECT_BINDING_PREFIX: &str = "\0groove.auto_direct.binding.";
 
-pub(super) fn auto_direct_binding_field(
+fn auto_direct_binding_field(
     graph: &GraphBuilder,
     output: &RecordDescriptor,
     runtime: &IvmRuntime,
@@ -594,7 +592,7 @@ pub(super) fn auto_direct_binding_field(
     unreachable!("unbounded hidden binding field search should always find a free name")
 }
 
-pub(super) fn collect_builder_field_names(
+fn collect_builder_field_names(
     graph: &GraphBuilder,
     runtime: &IvmRuntime,
     occupied: &mut HashSet<String>,
@@ -643,7 +641,7 @@ pub(super) fn collect_builder_field_names(
     Ok(())
 }
 
-pub(super) fn lift_literal_filter(
+fn lift_literal_filter(
     runtime: &IvmRuntime,
     graph: &GraphBuilder,
     binding_field: &str,
@@ -1067,7 +1065,7 @@ pub(super) fn lift_literal_filter(
     }
 }
 
-pub(super) fn literal_filter_binding_join(
+fn literal_filter_binding_join(
     input: GraphBuilder,
     field: &str,
     value: &LiteralValue,
@@ -1088,14 +1086,14 @@ pub(super) fn literal_filter_binding_join(
     ))
 }
 
-pub(super) fn project_source_from_joined_filter_input(
+fn project_source_from_joined_filter_input(
     input_output: &RecordDescriptor,
     source: &FieldRef,
 ) -> Result<String, IvmRuntimeError> {
     Ok(format!("left.{}", field_ref_name(input_output, source)?))
 }
 
-pub(super) fn project_fields_against_rewritten_input(
+fn project_fields_against_rewritten_input(
     runtime: &IvmRuntime,
     original_input: &GraphBuilder,
     rewritten_input: &GraphBuilder,
@@ -1178,7 +1176,7 @@ pub(super) fn project_fields_against_rewritten_input(
         .collect()
 }
 
-pub(super) fn project_to_output_with_binding(
+fn project_to_output_with_binding(
     runtime: &IvmRuntime,
     graph: GraphBuilder,
     original_output: &RecordDescriptor,
@@ -1210,7 +1208,7 @@ pub(super) fn project_to_output_with_binding(
     })
 }
 
-pub(super) fn append_binding_project_field(
+fn append_binding_project_field(
     fields: &mut Vec<ProjectField>,
     binding_field: &str,
     source: String,
@@ -1223,7 +1221,7 @@ pub(super) fn append_binding_project_field(
     }
 }
 
-pub(super) fn binding_project_source(input: &GraphBuilder, binding_field: &str) -> String {
+fn binding_project_source(input: &GraphBuilder, binding_field: &str) -> String {
     match input {
         GraphBuilder::Join { left, right, .. }
         | GraphBuilder::SemiJoin { left, right, .. }
@@ -1240,7 +1238,7 @@ pub(super) fn binding_project_source(input: &GraphBuilder, binding_field: &str) 
     }
 }
 
-pub(super) fn graph_outputs_binding(graph: &GraphBuilder, binding_field: &str) -> bool {
+fn graph_outputs_binding(graph: &GraphBuilder, binding_field: &str) -> bool {
     match graph {
         GraphBuilder::BindingSource { output, .. }
         | GraphBuilder::FrontierSource { output, .. }
@@ -1273,7 +1271,7 @@ pub(super) fn graph_outputs_binding(graph: &GraphBuilder, binding_field: &str) -
 }
 
 #[allow(dead_code)]
-pub(super) fn propagate_binding_through_frontier(
+fn propagate_binding_through_frontier(
     graph: &GraphBuilder,
     frontier: &FrontierName,
     binding_field: &str,
@@ -1420,7 +1418,7 @@ pub(super) fn propagate_binding_through_frontier(
     }
 }
 
-pub(super) fn replace_binding_shape(graph: GraphBuilder, shape: &str) -> GraphBuilder {
+fn replace_binding_shape(graph: GraphBuilder, shape: &str) -> GraphBuilder {
     match graph {
         GraphBuilder::BindingSource { output, .. } => GraphBuilder::binding_source(shape, output),
         GraphBuilder::Recursive {
@@ -1773,7 +1771,7 @@ impl IvmRuntime {
         self.bind_shape_with_public_fields(shape_id, binding_values, BTreeMap::new(), storage)
     }
 
-    pub(super) fn bind_shape_with_public_fields<S>(
+    fn bind_shape_with_public_fields<S>(
         &mut self,
         shape_id: PreparedShapeId,
         binding_values: &[Value],
@@ -2072,7 +2070,7 @@ impl IvmRuntime {
             .map(|output| &output.output)
     }
 
-    pub(super) fn single_sink_subscription(
+    fn single_sink_subscription(
         &self,
         inner: MultisinkSubscription,
         sink: &str,
@@ -2088,7 +2086,7 @@ impl IvmRuntime {
         })
     }
 
-    pub(super) fn plan_auto_direct_family(
+    fn plan_auto_direct_family(
         &self,
         graph: &GraphBuilder,
     ) -> Result<Option<AutoDirectFamilyPlan>, IvmRuntimeError> {
@@ -2136,7 +2134,7 @@ impl IvmRuntime {
         }))
     }
 
-    pub(super) fn infer_builder_output(
+    fn infer_builder_output(
         &self,
         graph: &GraphBuilder,
     ) -> Result<RecordDescriptor, IvmRuntimeError> {
@@ -2158,7 +2156,7 @@ impl IvmRuntime {
         Ok(output)
     }
 
-    pub(super) fn infer_builder_output_uncached(
+    fn infer_builder_output_uncached(
         &self,
         graph: &GraphBuilder,
         output_memo: &mut HashMap<usize, RecordDescriptor>,
@@ -2302,7 +2300,7 @@ impl IvmRuntime {
         id
     }
 
-    pub(super) fn add_binding_ref(
+    fn add_binding_ref(
         &mut self,
         shape_id: PreparedShapeId,
         binding: BindingKey,
@@ -2311,7 +2309,7 @@ impl IvmRuntime {
         self.add_binding_ref_for_shape(&shape, binding)
     }
 
-    pub(super) fn add_binding_ref_for_shape(
+    fn add_binding_ref_for_shape(
         &mut self,
         shape: &str,
         binding: BindingKey,
@@ -2336,7 +2334,7 @@ impl IvmRuntime {
         })
     }
 
-    pub(super) fn remove_binding_ref(
+    fn remove_binding_ref(
         &mut self,
         shape_id: PreparedShapeId,
         binding: &BindingKey,
@@ -2345,7 +2343,7 @@ impl IvmRuntime {
         self.remove_binding_ref_for_shape(&shape, binding)
     }
 
-    pub(super) fn remove_binding_ref_for_shape(
+    fn remove_binding_ref_for_shape(
         &mut self,
         shape: &str,
         binding: &BindingKey,
@@ -2371,7 +2369,7 @@ impl IvmRuntime {
         })
     }
 
-    pub(super) fn binding_source_shape_name(
+    fn binding_source_shape_name(
         &self,
         shape_id: PreparedShapeId,
     ) -> Result<String, IvmRuntimeError> {
@@ -2407,7 +2405,7 @@ impl IvmRuntime {
             .collect()
     }
 
-    pub(super) fn remove_unreferenced_auto_family(&mut self, shape_id: PreparedShapeId) {
+    fn remove_unreferenced_auto_family(&mut self, shape_id: PreparedShapeId) {
         let Some(shape) = self.prepared_shapes.get(&shape_id) else {
             return;
         };

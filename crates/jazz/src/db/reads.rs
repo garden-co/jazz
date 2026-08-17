@@ -70,7 +70,7 @@ where
         )
     }
 
-    pub(super) fn prepare_query_bound_for_schema(
+    fn prepare_query_bound_for_schema(
         &self,
         query: &Query,
         params: BTreeMap<String, Value>,
@@ -193,7 +193,7 @@ where
         self.at_prepared(position, prepared)
     }
 
-    pub(super) fn at_prepared(
+    fn at_prepared(
         &self,
         position: GlobalSeq,
         prepared: &PreparedQuery,

@@ -321,7 +321,7 @@ pub(super) enum FieldLiteralOrdering {
     Unsupported,
 }
 
-pub(super) fn record_field_literal_ordering(
+fn record_field_literal_ordering(
     record: BorrowedRecord<'_>,
     field_idx: usize,
     value: &LiteralValue,
@@ -377,7 +377,7 @@ pub(super) fn record_field_literal_ordering(
     }
 }
 
-pub(super) fn nullable_record_field_literal_ordering(
+fn nullable_record_field_literal_ordering(
     record: BorrowedRecord<'_>,
     field_idx: usize,
     inner: &ValueType,
@@ -466,7 +466,7 @@ pub(super) fn contains_record_field_value(
     Ok(value_contains_sql(&haystack, &needle, comparison))
 }
 
-pub(super) fn value_contains_sql(left: &Value, right: &Value, comparison: ValueComparison) -> bool {
+fn value_contains_sql(left: &Value, right: &Value, comparison: ValueComparison) -> bool {
     match (left, right) {
         (Value::Nullable(None), _) | (_, Value::Nullable(None)) => false,
         (Value::Nullable(Some(left)), right) => value_contains_sql(left, right, comparison),
@@ -500,7 +500,7 @@ pub(super) fn is_sql_null_value(value: &Value) -> bool {
     }
 }
 
-pub(super) fn compare_values(
+fn compare_values(
     left: &Value,
     right: &Value,
     comparison: ValueComparison,
@@ -542,7 +542,7 @@ pub(super) fn compare_values(
     }
 }
 
-pub(super) fn integer_value(value: &Value) -> Option<i128> {
+fn integer_value(value: &Value) -> Option<i128> {
     match value {
         Value::U8(value) => Some(i128::from(*value)),
         Value::U16(value) => Some(i128::from(*value)),
@@ -655,7 +655,7 @@ pub(crate) fn encode_key_part(key: &mut Vec<u8>, value: &Value) -> Result<(), Iv
     Ok(())
 }
 
-pub(super) fn order_preserving_f64_bits(value: f64) -> u64 {
+fn order_preserving_f64_bits(value: f64) -> u64 {
     let bits = value.to_bits();
     // Flip positive signs and invert negatives; the resulting unsigned integer
     // sorts like IEEE numeric order for non-NaN values.

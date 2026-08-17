@@ -3,7 +3,9 @@
 //! The node runtime owns shared connection state, scheduling, pending uploads,
 //! subscription refresh, write-state notification, and connection lifecycle.
 
-use super::peer_connection::*;
+use super::peer_connection::{
+    ConnectionLink, PeerConnection, mutation_error_event, take_pending_mutation_error_delivery,
+};
 use super::*;
 
 /// Node-owned participant surface for upstream and subscriber connections.
@@ -100,7 +102,7 @@ where
 
     /// Ordinary `Db::open` nodes are Local receivers. Only the structurally
     /// separate history-complete path acts as the Core fate authority.
-    pub(super) fn receives_commits_as_local(&self) -> bool {
+    fn receives_commits_as_local(&self) -> bool {
         !self.node.borrow().is_history_complete()
     }
 
@@ -154,7 +156,7 @@ where
         Ok(())
     }
 
-    pub(super) fn restore_local_subscriber(
+    fn restore_local_subscriber(
         &self,
         author: AuthorId,
         downstream_fates: &PendingDownstreamFates,
@@ -266,7 +268,7 @@ where
         }
     }
 
-    pub(super) fn consume_mutation_error(&self, tx_id: TxId) -> Result<bool, Error> {
+    fn consume_mutation_error(&self, tx_id: TxId) -> Result<bool, Error> {
         let pending = self.mutation_errors.borrow_mut().pending.remove(&tx_id);
         let retained = self.node.borrow().rejected_transaction(tx_id).is_some();
         if retained {
@@ -315,7 +317,7 @@ where
         );
     }
 
-    pub(super) fn deliver_pending_mutation_errors(&self) {
+    fn deliver_pending_mutation_errors(&self) {
         let Some((callback, events)) = take_pending_mutation_error_delivery(&self.mutation_errors)
         else {
             return;
@@ -395,7 +397,7 @@ where
         }
     }
 
-    pub(super) fn register_write_state_callback(&self, tx_id: TxId, callback: Box<dyn FnOnce()>) {
+    fn register_write_state_callback(&self, tx_id: TxId, callback: Box<dyn FnOnce()>) {
         let waiter_id = self.next_write_state_waiter_id.get();
         self.next_write_state_waiter_id
             .set(waiter_id.wrapping_add(1).max(1));
@@ -714,7 +716,7 @@ where
         )
     }
 
-    pub(super) fn accept_subscriber_with_resume_and_trust(
+    fn accept_subscriber_with_resume_and_trust(
         &self,
         transport: Box<dyn Transport>,
         identity: AuthorId,
@@ -735,7 +737,7 @@ where
         self.accept_subscriber_with_peer(transport, identity, trust, claims, cursor, peer, false)
     }
 
-    pub(super) fn accept_subscriber_with_peer(
+    fn accept_subscriber_with_peer(
         &self,
         transport: Box<dyn Transport>,
         identity: AuthorId,
@@ -1009,7 +1011,7 @@ where
         Ok(stats)
     }
 
-    pub(super) fn prune_settled_outbox_uploads(&self) {
+    fn prune_settled_outbox_uploads(&self) {
         let mut outbox = self.outbox.borrow_mut();
         if outbox.is_empty() {
             return;

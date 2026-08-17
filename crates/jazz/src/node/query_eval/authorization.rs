@@ -22,7 +22,7 @@ pub(crate) struct AuthorizationSupportScope {
     pub(crate) subscriptions: Vec<(ValidatedQuery, Binding)>,
 }
 
-pub(super) fn empty_policy_filtered_current_source_graph(
+fn empty_policy_filtered_current_source_graph(
     base: GraphBuilder,
     output_fields: &[String],
 ) -> PolicyAuthorizationGraph {
@@ -40,7 +40,7 @@ pub(super) fn empty_policy_filtered_current_source_graph(
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
-pub(super) fn compile_permission_scope_policy(
+fn compile_permission_scope_policy(
     mut query: JazzQuery,
     claims: Option<&BTreeMap<String, Value>>,
     claim_values: &BTreeMap<String, Value>,
@@ -88,7 +88,7 @@ pub(super) fn compile_permission_scope_policy(
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
-pub(super) fn authorization_scope_action(
+fn authorization_scope_action(
     action: &PermissionAdviceAction,
 ) -> (AuthorizationScopeOperation, &str) {
     match action {
@@ -106,7 +106,7 @@ pub(super) fn authorization_scope_action(
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
-pub(super) fn authorization_policy_queries(
+fn authorization_policy_queries(
     table: &crate::schema::TableSchema,
     operation: AuthorizationScopeOperation,
 ) -> Vec<JazzQuery> {
@@ -140,7 +140,7 @@ pub(super) fn authorization_policy_queries(
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
-pub(super) fn authorization_operation_key(
+fn authorization_operation_key(
     operation: AuthorizationScopeOperation,
     table: &str,
     action: &PermissionAdviceAction,
@@ -164,7 +164,7 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
-    pub(super) fn policy_authorization_row_id_graph(
+    fn policy_authorization_row_id_graph(
         &mut self,
         request: QueryProgramRequest,
     ) -> Result<PolicyAuthorizationGraph, Error> {
@@ -554,7 +554,7 @@ where
         )
     }
 
-    pub(super) fn write_policy_query_program_allows(
+    fn write_policy_query_program_allows(
         &mut self,
         program: &QueryProgram,
         policy_shape: &ValidatedQuery,
@@ -900,7 +900,7 @@ where
         )
     }
 
-    pub(super) fn table_read_policy_authorization_request_with_root_visibility(
+    fn table_read_policy_authorization_request_with_root_visibility(
         &mut self,
         policy_schema_version: SchemaVersionId,
         table_name: &str,
@@ -1161,7 +1161,7 @@ where
         self.maintained_view_content_current_with_version_in_schema(table, tier, schema_version)
     }
 
-    pub(super) fn maintained_view_content_current_with_version_in_schema(
+    fn maintained_view_content_current_with_version_in_schema(
         &self,
         table: &TableSchema,
         tier: DurabilityTier,
@@ -1244,7 +1244,7 @@ where
     /// A newer read-policy revision must not shadow an older write-policy
     /// revision (or vice versa): the terminal proof must hydrate precisely the
     /// policy clause that admission will evaluate.
-    pub(super) fn authorization_scope_policy_schema_for_action(
+    fn authorization_scope_policy_schema_for_action(
         &self,
         table: &str,
         operation: AuthorizationScopeOperation,

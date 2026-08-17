@@ -68,7 +68,7 @@ impl RecursiveState {
             .collect()
     }
 
-    pub(super) fn accept_positive(
+    fn accept_positive(
         &mut self,
         deltas: Vec<RecordDelta>,
     ) -> Result<Vec<RecordDelta>, IvmRuntimeError> {

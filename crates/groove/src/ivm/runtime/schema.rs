@@ -181,7 +181,7 @@ impl IvmRuntime {
         )
     }
 
-    pub(super) fn define_variant_projection_target(
+    fn define_variant_projection_target(
         &mut self,
         table: &str,
         target: VariantProjectionTarget,
@@ -485,7 +485,7 @@ impl IvmRuntime {
         )))
     }
 
-    pub(super) fn register_variant_projection_target_case(
+    fn register_variant_projection_target_case(
         &mut self,
         table: &str,
         target: VariantProjectionTarget,
@@ -627,7 +627,7 @@ impl IvmRuntime {
         Ok(())
     }
 
-    pub(super) fn register_schema_index_variant_case(
+    fn register_schema_index_variant_case(
         &mut self,
         table: &TableSchema,
         index: &IndexSchema,
@@ -658,7 +658,7 @@ impl IvmRuntime {
         )
     }
 
-    pub(super) fn invalidate_table_inputs(&mut self, table: &str) {
+    fn invalidate_table_inputs(&mut self, table: &str) {
         *self.table_frontiers.entry(table.to_owned()).or_default() += 1;
         self.eval_memo.retain(|key, _| {
             self.node_meta

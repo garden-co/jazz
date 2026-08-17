@@ -478,7 +478,7 @@ pub(super) struct CollectLayout {
 }
 
 #[derive(Clone, Debug)]
-pub(super) struct LoweredCollectByAppRows {
+struct LoweredCollectByAppRows {
     pub(super) graph: GraphBuilder,
     pub(super) descriptor: RecordDescriptor,
     pub(super) hidden_fields: BTreeSet<String>,
@@ -487,7 +487,7 @@ pub(super) struct LoweredCollectByAppRows {
     pub(super) public_field_names: BTreeMap<String, String>,
 }
 
-pub(super) fn lower_collect_by_app_rows(
+fn lower_collect_by_app_rows(
     visible_root: GraphBuilder,
     projection: &AppProjectionTree,
     plan: &AnalyzedQueryPlan,
@@ -723,7 +723,7 @@ pub(super) fn lower_collect_by_app_rows(
     })
 }
 
-pub(super) fn align_collect_join_key_types(
+fn align_collect_join_key_types(
     slots: &mut [CollectSlotLayout],
     plan: &AnalyzedQueryPlan,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
@@ -819,7 +819,7 @@ pub(super) fn align_collect_join_key_types(
     Ok(())
 }
 
-pub(super) fn align_collect_root_window(
+fn align_collect_root_window(
     layout: &mut CollectLayout,
     plan: &AnalyzedQueryPlan,
 ) -> CapabilityResult<()> {
@@ -886,7 +886,7 @@ pub(super) fn align_collect_root_window(
     Ok(())
 }
 
-pub(super) fn collect_root_input_for_value(
+fn collect_root_input_for_value(
     layout: &CollectLayout,
     value: &NormalizedValueRef,
 ) -> CapabilityResult<String> {
@@ -916,7 +916,7 @@ pub(super) fn collect_root_input_for_value(
     })
 }
 
-pub(super) fn collect_slot_input_for_value(
+fn collect_slot_input_for_value(
     slot: &CollectSlotLayout,
     value: &NormalizedValueRef,
 ) -> CapabilityResult<String> {
@@ -1004,7 +1004,7 @@ pub(super) fn root_join_occurrence_fields(
     Ok(fields)
 }
 
-pub(super) fn find_correlated_path<'a>(
+fn find_correlated_path<'a>(
     plan: &'a AnalyzedQueryPlan,
     path: &ProgramPathId,
 ) -> Option<&'a CorrelatedPathPlan> {
@@ -1024,7 +1024,7 @@ pub(super) fn find_nested_correlated_path<'a>(
         .find_map(|candidate| find_correlated_path_in_tree(candidate, path))
 }
 
-pub(super) fn find_correlated_path_in_tree<'a>(
+fn find_correlated_path_in_tree<'a>(
     path: &'a CorrelatedPathPlan,
     target: &ProgramPathId,
 ) -> Option<&'a CorrelatedPathPlan> {
@@ -1037,7 +1037,7 @@ pub(super) fn find_correlated_path_in_tree<'a>(
         .find_map(|candidate| find_correlated_path_in_tree(candidate, target))
 }
 
-pub(super) fn lowered_aggregate_terminals(
+fn lowered_aggregate_terminals(
     graph: GraphBuilder,
     request: &QueryProgramRequest,
     plan: &AnalyzedQueryPlan,
@@ -1102,7 +1102,7 @@ pub(super) fn lowered_aggregate_terminals(
     Ok(terminals)
 }
 
-pub(super) fn fact_input_graph(
+fn fact_input_graph(
     key: &ProgramFactKey,
     graph: GraphBuilder,
     plan: &AnalyzedQueryPlan,
@@ -1187,7 +1187,7 @@ pub(super) fn project_source_fields_with_routes_from_prefix(
     fields
 }
 
-pub(super) fn fact_output(
+fn fact_output(
     key: &ProgramFactKey,
     plan: &AnalyzedQueryPlan,
     source: &ResolvedSource,
@@ -1204,7 +1204,7 @@ pub(super) fn fact_output(
     )
 }
 
-pub(super) fn fact_output_with_terminal(
+fn fact_output_with_terminal(
     key: &ProgramFactKey,
     terminal: ProgramFactTerminal,
     plan: &AnalyzedQueryPlan,
@@ -1305,7 +1305,7 @@ pub(super) fn fact_output_with_terminal(
     })
 }
 
-pub(super) fn result_occurrence_id_fields(
+fn result_occurrence_id_fields(
     plan: &AnalyzedQueryPlan,
     source: &ResolvedSource,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
@@ -1334,7 +1334,7 @@ pub(super) fn result_occurrence_id_fields(
     Ok(fields)
 }
 
-pub(super) fn result_occurrence_union_arm_fields(
+fn result_occurrence_union_arm_fields(
     plan: &AnalyzedQueryPlan,
     source: &ResolvedSource,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
@@ -1383,7 +1383,7 @@ pub(super) fn flat_join_payload_fields(plan: &AnalyzedQueryPlan) -> Vec<TypedOut
         .unwrap_or_default()
 }
 
-pub(super) fn projected_multisource_terminal(
+fn projected_multisource_terminal(
     plan: &AnalyzedQueryPlan,
     root_source: &ResolvedSource,
 ) -> Option<(SourceId, Vec<TypedOutputField>, bool)> {
@@ -1411,7 +1411,7 @@ pub(super) fn projected_multisource_terminal(
     })
 }
 
-pub(super) fn root_linear_steps(plan: &AnalyzedQueryPlan) -> Option<&[LinearStep]> {
+fn root_linear_steps(plan: &AnalyzedQueryPlan) -> Option<&[LinearStep]> {
     match plan {
         AnalyzedQueryPlan::Linear(plan) => Some(&plan.steps),
         _ => None,
@@ -1429,7 +1429,7 @@ pub(super) fn output_routing_fields(output: &ProgramFactOutput) -> BTreeSet<Stri
     }
 }
 
-pub(super) fn fact_sink_name(key: &ProgramFactKey) -> String {
+fn fact_sink_name(key: &ProgramFactKey) -> String {
     match key {
         ProgramFactKey::AuthorizedRows => "policy.authorized_rows".to_owned(),
         ProgramFactKey::ResultMembership => "maintained.result_current".to_owned(),
@@ -1442,13 +1442,13 @@ pub(super) fn fact_sink_name(key: &ProgramFactKey) -> String {
     }
 }
 
-pub(super) fn scoped_fact_sink_name(key: &ProgramFactKey, source: &SourceId) -> String {
+fn scoped_fact_sink_name(key: &ProgramFactKey, source: &SourceId) -> String {
     let base = fact_sink_name(key);
     let path = source_path_sink_fragment(source);
     format!("{base}.{}.{}", source.table, path)
 }
 
-pub(super) fn scoped_deletion_fact_sink_name(key: &ProgramFactKey, source: &SourceId) -> String {
+fn scoped_deletion_fact_sink_name(key: &ProgramFactKey, source: &SourceId) -> String {
     let base = match key {
         ProgramFactKey::VersionWitnesses => "maintained.version_deletion",
         ProgramFactKey::ReplacementWitnesses => "maintained.replacement_deletion",
@@ -1461,7 +1461,7 @@ pub(super) fn scoped_deletion_fact_sink_name(key: &ProgramFactKey, source: &Sour
     )
 }
 
-pub(super) fn source_path_sink_fragment(source: &SourceId) -> String {
+fn source_path_sink_fragment(source: &SourceId) -> String {
     source
         .path
         .components
@@ -1492,7 +1492,7 @@ pub(super) fn source_path_sink_fragment(source: &SourceId) -> String {
         .join(".")
 }
 
-pub(super) fn fact_terminal_graph(
+fn fact_terminal_graph(
     key: &ProgramFactKey,
     graph: GraphBuilder,
     plan: &AnalyzedQueryPlan,
@@ -1613,7 +1613,7 @@ pub(super) fn route_literal_project_field(
     Ok(ProjectField::literal(route_field.to_owned(), literal))
 }
 
-pub(super) fn relation_edge_graph(
+fn relation_edge_graph(
     key: &ProgramFactKey,
     graph: GraphBuilder,
     plan: &AnalyzedQueryPlan,
@@ -1646,7 +1646,7 @@ pub(super) fn relation_edge_graph(
     }
 }
 
-pub(super) fn correlated_relation_edge_graphs(
+fn correlated_relation_edge_graphs(
     path: &CorrelatedPathPlan,
     graph: GraphBuilder,
     source: &ResolvedSource,
@@ -1727,7 +1727,7 @@ pub(super) fn correlated_relation_edge_graphs(
     Ok(graphs)
 }
 
-pub(super) fn correlated_relation_edge_fields(
+fn correlated_relation_edge_fields(
     source: &ResolvedSource,
     target: &ResolvedSource,
     path: &CorrelatedPathPlan,
@@ -1782,7 +1782,7 @@ pub(super) fn correlated_relation_edge_fields(
     Ok(fields)
 }
 
-pub(super) fn correlated_relation_name(path: &CorrelatedPathPlan) -> String {
+fn correlated_relation_name(path: &CorrelatedPathPlan) -> String {
     path.path
         .child
         .path
@@ -1800,7 +1800,7 @@ pub(super) fn correlated_relation_name(path: &CorrelatedPathPlan) -> String {
         .unwrap_or_else(|| path.path.child.table.clone())
 }
 
-pub(super) fn deletion_witness_graph_for_current_register(
+fn deletion_witness_graph_for_current_register(
     source: &ResolvedSource,
     event_kind: &str,
 ) -> CapabilityResult<GraphBuilder> {
@@ -1818,7 +1818,7 @@ pub(super) fn deletion_witness_graph_for_current_register(
         .project_fields(deletion_witness_fields_for_tagged_rows(source, event_kind)?))
 }
 
-pub(super) fn content_version_witness_graph(
+fn content_version_witness_graph(
     source: &ResolvedSource,
     event_kind: &str,
 ) -> CapabilityResult<GraphBuilder> {
@@ -1843,7 +1843,7 @@ pub(super) fn content_version_witness_graph(
     )?))
 }
 
-pub(super) fn result_membership_fields(
+fn result_membership_fields(
     source: &ResolvedSource,
     routing_param_fields: BTreeSet<String>,
     payload_fields: &[TypedOutputField],
@@ -1891,7 +1891,7 @@ pub(super) fn result_membership_fields(
     Ok(fields)
 }
 
-pub(super) fn aggregate_app_row_descriptor(
+fn aggregate_app_row_descriptor(
     plan: &AnalyzedQueryPlan,
     source: &ResolvedSource,
 ) -> CapabilityResult<RecordDescriptor> {
@@ -1930,7 +1930,7 @@ pub(super) fn aggregate_app_row_descriptor(
     Ok(RecordDescriptor::new(fields))
 }
 
-pub(super) fn aggregate_result_schema(
+fn aggregate_result_schema(
     plan: &AnalyzedQueryPlan,
     source: &ResolvedSource,
     routing_param_fields: BTreeSet<String>,
@@ -1963,7 +1963,7 @@ pub(super) fn aggregate_result_schema(
     })
 }
 
-pub(super) fn aggregate_result_membership_fields(
+fn aggregate_result_membership_fields(
     plan: &AnalyzedQueryPlan,
     source: &ResolvedSource,
     routing_param_fields: BTreeSet<String>,
@@ -2029,7 +2029,7 @@ pub(super) fn aggregate_result_membership_fields(
     Ok(fields)
 }
 
-pub(super) fn aggregate_typed_group_field(
+fn aggregate_typed_group_field(
     value: &NormalizedValueRef,
     source: &ResolvedSource,
 ) -> CapabilityResult<TypedOutputField> {
@@ -2048,7 +2048,7 @@ pub(super) fn aggregate_typed_group_field(
     })
 }
 
-pub(super) fn aggregate_typed_output_field(
+fn aggregate_typed_output_field(
     output: &AggregateExpr,
     source: &ResolvedSource,
 ) -> CapabilityResult<TypedOutputField> {
@@ -2058,7 +2058,7 @@ pub(super) fn aggregate_typed_output_field(
     })
 }
 
-pub(super) fn aggregate_output_value_type(
+fn aggregate_output_value_type(
     output: &AggregateExpr,
     source: &ResolvedSource,
 ) -> CapabilityResult<ValueType> {
@@ -2091,7 +2091,7 @@ pub(super) fn aggregate_output_value_type(
     }
 }
 
-pub(super) fn aggregate_source_field_name(
+fn aggregate_source_field_name(
     value: &NormalizedValueRef,
     source: &ResolvedSource,
 ) -> CapabilityResult<String> {
@@ -2121,21 +2121,21 @@ pub(super) fn aggregate_source_field_name(
     }
 }
 
-pub(super) fn version_witness_fields_for_tagged_rows(
+fn version_witness_fields_for_tagged_rows(
     source: &ResolvedSource,
     event_kind: &str,
 ) -> CapabilityResult<Vec<ProjectField>> {
     prefixed_version_witness_fields_for_tagged_rows(source, event_kind, "right.")
 }
 
-pub(super) fn unprefixed_version_witness_fields_for_tagged_rows(
+fn unprefixed_version_witness_fields_for_tagged_rows(
     source: &ResolvedSource,
     event_kind: &str,
 ) -> CapabilityResult<Vec<ProjectField>> {
     prefixed_version_witness_fields_for_tagged_rows(source, event_kind, "")
 }
 
-pub(super) fn prefixed_version_witness_fields_for_tagged_rows(
+fn prefixed_version_witness_fields_for_tagged_rows(
     source: &ResolvedSource,
     event_kind: &str,
     prefix: &str,
@@ -2185,7 +2185,7 @@ pub(super) fn prefixed_version_witness_fields_for_tagged_rows(
     Ok(fields)
 }
 
-pub(super) fn inline_version_witness_fields_for_tagged_rows(
+fn inline_version_witness_fields_for_tagged_rows(
     source: &ResolvedSource,
     event_kind: &str,
 ) -> CapabilityResult<Vec<ProjectField>> {
@@ -2222,7 +2222,7 @@ pub(super) fn inline_version_witness_fields_for_tagged_rows(
     Ok(fields)
 }
 
-pub(super) fn deletion_witness_fields_for_tagged_rows(
+fn deletion_witness_fields_for_tagged_rows(
     source: &ResolvedSource,
     event_kind: &str,
 ) -> CapabilityResult<Vec<ProjectField>> {
@@ -2263,7 +2263,7 @@ pub(super) fn deletion_witness_fields_for_tagged_rows(
     Ok(fields)
 }
 
-pub(super) fn relation_edge_schema(
+fn relation_edge_schema(
     plan: &AnalyzedQueryPlan,
     root_source: &ResolvedSource,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
@@ -2347,7 +2347,7 @@ pub(super) fn relation_edge_schema(
     })
 }
 
-pub(super) fn path_correlation_coverage_schema(
+fn path_correlation_coverage_schema(
     plan: &AnalyzedQueryPlan,
     root_source: &ResolvedSource,
     _resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
@@ -2394,9 +2394,7 @@ pub(super) fn path_correlation_coverage_schema(
     }
 }
 
-pub(super) fn versioned_row_ref_schema(
-    source: &ResolvedSource,
-) -> CapabilityResult<VersionedRowRefSchema> {
+fn versioned_row_ref_schema(source: &ResolvedSource) -> CapabilityResult<VersionedRowRefSchema> {
     let version = version_witness_fields(&source.row_shape)?;
     Ok(VersionedRowRefSchema {
         row: RowRefSchema {
@@ -2409,7 +2407,7 @@ pub(super) fn versioned_row_ref_schema(
     })
 }
 
-pub(super) fn prefixed_versioned_row_ref_schema(
+fn prefixed_versioned_row_ref_schema(
     source: &ResolvedSource,
     prefix: &str,
 ) -> CapabilityResult<VersionedRowRefSchema> {
@@ -2432,16 +2430,14 @@ pub(super) fn prefixed_versioned_row_ref_schema(
     })
 }
 
-pub(super) fn content_version_schema(
-    version: &VersionWitnessFieldRefs,
-) -> ResultMembershipVersionSchema {
+fn content_version_schema(version: &VersionWitnessFieldRefs) -> ResultMembershipVersionSchema {
     ResultMembershipVersionSchema::Content(ContentVersionFields {
         tx_time_field: version.tx_time_field.clone(),
         tx_node_field: version.tx_node_field.clone(),
     })
 }
 
-pub(super) fn version_witness_schema(
+fn version_witness_schema(
     source: &ResolvedSource,
     version: &VersionWitnessFieldRefs,
 ) -> VersionWitnessSchema {
@@ -2480,7 +2476,7 @@ pub(super) fn version_witness_schema(
 }
 
 #[derive(Clone, Debug)]
-pub(super) struct VersionWitnessFieldRefs {
+struct VersionWitnessFieldRefs {
     pub(super) schema_version_field: String,
     pub(super) tx_time_field: String,
     pub(super) tx_node_field: String,
@@ -2488,13 +2484,11 @@ pub(super) struct VersionWitnessFieldRefs {
 }
 
 #[derive(Clone, Debug)]
-pub(super) struct CoverageFieldRefs {
+struct CoverageFieldRefs {
     pub(super) coverage_field: String,
 }
 
-pub(super) fn version_witness_fields(
-    row_shape: &SourceRowShape,
-) -> CapabilityResult<VersionWitnessFieldRefs> {
+fn version_witness_fields(row_shape: &SourceRowShape) -> CapabilityResult<VersionWitnessFieldRefs> {
     match row_shape
         .metadata
         .get(&SourceMetadataRequirement::VersionWitnesses)
@@ -2519,7 +2513,7 @@ pub(super) fn version_witness_fields(
     }
 }
 
-pub(super) fn settle_position_field(row_shape: &SourceRowShape) -> Option<String> {
+fn settle_position_field(row_shape: &SourceRowShape) -> Option<String> {
     match row_shape
         .metadata
         .get(&SourceMetadataRequirement::SettlePosition)
@@ -2531,7 +2525,7 @@ pub(super) fn settle_position_field(row_shape: &SourceRowShape) -> Option<String
     }
 }
 
-pub(super) fn coverage_fields(row_shape: &SourceRowShape) -> CapabilityResult<CoverageFieldRefs> {
+fn coverage_fields(row_shape: &SourceRowShape) -> CapabilityResult<CoverageFieldRefs> {
     match row_shape.metadata.get(&SourceMetadataRequirement::Coverage) {
         Some(SourceMetadataFields::Coverage { coverage_field }) => Ok(CoverageFieldRefs {
             coverage_field: coverage_field.clone(),
@@ -2545,7 +2539,7 @@ pub(super) fn coverage_fields(row_shape: &SourceRowShape) -> CapabilityResult<Co
     }
 }
 
-pub(super) fn hidden_source_fields(row_shape: &SourceRowShape) -> BTreeSet<String> {
+fn hidden_source_fields(row_shape: &SourceRowShape) -> BTreeSet<String> {
     let mut fields = BTreeSet::new();
     for metadata in row_shape.metadata.values() {
         match metadata {

@@ -4,7 +4,7 @@
 //! a served subscriber. It applies and emits sync messages, tracks coverage,
 //! performs bounded repair, and preserves authenticated reconnect state.
 
-use super::node_runtime::*;
+use super::node_runtime::{refresh_subscriptions_in, route_upstream_subscription_rejection};
 use super::*;
 
 /// A live link between this `Db` and one peer, owned by the `Db`.
@@ -151,7 +151,7 @@ pub(super) struct PendingRowVersionRepair {
 }
 
 /// Return one fair bounded repair page, advancing the cursor after the page.
-pub(super) fn next_branch_metadata_repairs(
+fn next_branch_metadata_repairs(
     repairs: &BTreeMap<crate::ids::BranchId, ()>,
     cursor: &mut Option<crate::ids::BranchId>,
 ) -> Vec<crate::ids::BranchId> {
@@ -215,7 +215,7 @@ where
     /// session immediately before it serves work for that subscriber. NodeState
     /// retains a cache keyed by identity, while several websocket sessions can
     /// legitimately share an identity with different claim maps.
-    pub(super) fn bind_subscriber_session_claims(&self) {
+    fn bind_subscriber_session_claims(&self) {
         let ConnectionLink::Subscriber {
             ingest_context,
             session_claims,
@@ -229,7 +229,7 @@ where
             .set_session_claims(ingest_context.identity, session_claims.clone());
     }
 
-    pub(super) fn subscriber_session_claim_revision(&self) -> u64 {
+    fn subscriber_session_claim_revision(&self) -> u64 {
         let ConnectionLink::Subscriber {
             session_claim_revision,
             ..
@@ -243,7 +243,7 @@ where
     /// Rebuild this subscriber's maintained views if its process-local claims
     /// changed. Policy claim values are bound when a maintained view opens, so
     /// retaining the old view after a claim change would retain its authority.
-    pub(super) fn rebind_subscriber_views_after_claim_change(&mut self) -> Result<bool, Error> {
+    fn rebind_subscriber_views_after_claim_change(&mut self) -> Result<bool, Error> {
         let connection_epoch = self.connection_epoch;
         let identity = match &self.link {
             ConnectionLink::Subscriber { ingest_context, .. } => ingest_context.identity,
@@ -2794,7 +2794,7 @@ where
         }
     }
 
-    pub(super) fn observe_shared_subscriber_dirty_epoch(&mut self) {
+    fn observe_shared_subscriber_dirty_epoch(&mut self) {
         let epoch = self.subscriber_dirty_epoch.get();
         if self.observed_subscriber_dirty_epoch.get() == epoch {
             return;
@@ -2819,7 +2819,7 @@ pub(super) fn schedule_tick_in(scheduler: &SharedTickScheduler, urgency: TickUrg
     }
 }
 
-pub(super) fn serialized_sync_message_len(message: &SyncMessage) -> usize {
+fn serialized_sync_message_len(message: &SyncMessage) -> usize {
     #[cfg(feature = "cold-settle-attribution")]
     let started = Instant::now();
     let encoded = encode_sync_message(message);
@@ -2831,7 +2831,7 @@ pub(super) fn serialized_sync_message_len(message: &SyncMessage) -> usize {
     encoded.map_or(0, |bytes| bytes.len())
 }
 
-pub(super) fn view_update_parts_from_message(message: SyncMessage) -> ViewUpdateParts {
+fn view_update_parts_from_message(message: SyncMessage) -> ViewUpdateParts {
     match message {
         SyncMessage::ViewUpdate {
             subscription,
@@ -2865,7 +2865,7 @@ pub(super) fn view_update_parts_from_message(message: SyncMessage) -> ViewUpdate
     }
 }
 
-pub(super) fn push_view_update_message_for_receiver(
+fn push_view_update_message_for_receiver(
     ready: &mut Vec<PendingAuthorityViewUpdate>,
     message: SyncMessage,
     authority_receipt_eligible: bool,
@@ -2877,7 +2877,7 @@ pub(super) fn push_view_update_message_for_receiver(
     Ok(())
 }
 
-pub(super) fn stage_initial_coverage_clear_for_update(
+fn stage_initial_coverage_clear_for_update(
     update: &SyncMessage,
     latest: &LatestCoverageSubscriptions,
     clears: &mut BTreeSet<CoverageKey>,
@@ -2902,7 +2902,7 @@ pub(super) fn stage_initial_coverage_clear_for_update(
     }
 }
 
-pub(super) fn apply_pending_authority_view_updates<S>(
+fn apply_pending_authority_view_updates<S>(
     node: &Rc<RefCell<NodeState<S>>>,
     pending: &mut Vec<PendingAuthorityViewUpdate>,
     awaiting: &AwaitingInitialAuthorityCoverage,
@@ -2989,7 +2989,7 @@ where
     Ok(())
 }
 
-pub(super) fn transport_error(error: TransportError) -> Error {
+fn transport_error(error: TransportError) -> Error {
     match error {
         TransportError::Backpressure => {
             Error::new(ErrorCode::Backpressure, "transport backpressure")
@@ -2998,7 +2998,7 @@ pub(super) fn transport_error(error: TransportError) -> Error {
     }
 }
 
-pub(super) fn evaluate_authoritative_permission_advice<S>(
+fn evaluate_authoritative_permission_advice<S>(
     node: &mut NodeState<S>,
     identity: AuthorId,
     action: PermissionAdviceAction,
@@ -3059,7 +3059,7 @@ where
 /// caller-provided subscription.  The authority allocates opaque usage-site
 /// keys, registers canonical shapes in the receiver, and only then sends the
 /// ordinary view updates in authority-scope envelopes.
-pub(super) fn serve_authorization_scope_intent<S>(
+fn serve_authorization_scope_intent<S>(
     node: &Rc<RefCell<NodeState<S>>>,
     peer: &mut PeerState,
     transport: &mut dyn Transport,
@@ -3297,7 +3297,7 @@ where
     Ok(())
 }
 
-pub(super) fn authorization_scope_receipt_for_view<S>(
+fn authorization_scope_receipt_for_view<S>(
     node: &NodeState<S>,
     peer: &PeerState,
     link_identity: AuthorId,
@@ -3331,7 +3331,7 @@ where
     ))
 }
 
-pub(super) fn aggregate_authorization_scope_receipt_for_view<S>(
+fn aggregate_authorization_scope_receipt_for_view<S>(
     aggregates: &mut BTreeMap<
         crate::protocol::AuthorizationSupportScopeKey,
         AuthorityScopeAggregate,
@@ -3413,7 +3413,7 @@ pub(super) fn authorization_scope_support_options_match(
     actual == expected && subscription.read_view == expected.read_view_key()
 }
 
-pub(super) fn move_scope_aggregate_member(
+fn move_scope_aggregate_member(
     aggregates: &mut BTreeMap<
         crate::protocol::AuthorizationSupportScopeKey,
         AuthorityScopeAggregate,
@@ -3465,7 +3465,7 @@ pub(super) fn remove_scope_aggregate_member(
     }
 }
 
-pub(super) fn refresh_authorized_scope_purpose<S>(
+fn refresh_authorized_scope_purpose<S>(
     node: &NodeState<S>,
     link_identity: AuthorId,
     subscription: SubscriptionKey,
@@ -3501,7 +3501,7 @@ where
     })
 }
 
-pub(super) fn query_root_filters_reference_id(query: &Query) -> bool {
+fn query_root_filters_reference_id(query: &Query) -> bool {
     query.filters.iter().any(predicate_references_id)
         || !query.reachable.is_empty()
         || query.joins.iter().any(root_join_references_id)
@@ -3512,7 +3512,7 @@ pub(super) fn query_root_filters_reference_id(query: &Query) -> bool {
         })
 }
 
-pub(super) fn root_join_references_id(join: &crate::query::JoinVia) -> bool {
+fn root_join_references_id(join: &crate::query::JoinVia) -> bool {
     join.source_column
         .as_deref()
         .is_none_or(|column| column == "id")
@@ -3526,7 +3526,7 @@ pub(super) fn root_join_references_id(join: &crate::query::JoinVia) -> bool {
             .any(|correlation| correlation.source_column == "id")
 }
 
-pub(super) fn predicate_references_id(predicate: &Predicate) -> bool {
+fn predicate_references_id(predicate: &Predicate) -> bool {
     match predicate {
         Predicate::All(items) | Predicate::Any(items) => items.iter().any(predicate_references_id),
         Predicate::Not(item) => predicate_references_id(item),
@@ -3547,18 +3547,18 @@ pub(super) fn predicate_references_id(predicate: &Predicate) -> bool {
     }
 }
 
-pub(super) fn operand_is_id(operand: &Operand) -> bool {
+fn operand_is_id(operand: &Operand) -> bool {
     matches!(operand, Operand::Column(column) if column == "id")
 }
 
-pub(super) fn drop_peer_request<S>(node: &Rc<RefCell<NodeState<S>>>)
+fn drop_peer_request<S>(node: &Rc<RefCell<NodeState<S>>>)
 where
     S: OrderedKvStorage,
 {
     node.borrow_mut().record_dropped_peer_request();
 }
 
-pub(super) fn handle_transport_backpressure<S>(
+fn handle_transport_backpressure<S>(
     node: &Rc<RefCell<NodeState<S>>>,
     scheduler: &SharedTickScheduler,
     error: &TransportError,
@@ -3576,7 +3576,7 @@ where
     }
 }
 
-pub(super) fn handle_db_backpressure<S>(
+fn handle_db_backpressure<S>(
     node: &Rc<RefCell<NodeState<S>>>,
     scheduler: &SharedTickScheduler,
     error: &Error,
@@ -3594,7 +3594,7 @@ where
 }
 
 #[cfg(feature = "sync-autopsy")]
-pub(super) fn summarize_subscription_key(subscription: SubscriptionKey) -> String {
+fn summarize_subscription_key(subscription: SubscriptionKey) -> String {
     format!(
         "shape={} binding={} read_view={}",
         subscription.shape_id.0, subscription.binding_id.0, subscription.read_view.id
@@ -3602,7 +3602,7 @@ pub(super) fn summarize_subscription_key(subscription: SubscriptionKey) -> Strin
 }
 
 #[cfg(feature = "sync-autopsy")]
-pub(super) fn summarize_sync_message(message: &SyncMessage) -> String {
+fn summarize_sync_message(message: &SyncMessage) -> String {
     match message {
         SyncMessage::RegisterShape { shape_id, opts, .. } => {
             format!(
@@ -3683,7 +3683,7 @@ pub(super) fn summarize_sync_message(message: &SyncMessage) -> String {
     }
 }
 
-pub(super) fn send_with_sync_context<S>(
+fn send_with_sync_context<S>(
     node: &Rc<RefCell<NodeState<S>>>,
     peer: &mut PeerState,
     transport: &mut dyn Transport,
@@ -3714,7 +3714,7 @@ where
 /// Send an authority catalogue snapshot exactly once per peer fingerprint.
 /// Trusted edge links have no application subscription during bootstrap, so
 /// catalogue propagation must not depend on a later ViewUpdate or fate.
-pub(super) fn send_catalogue_snapshot_if_needed<S>(
+fn send_catalogue_snapshot_if_needed<S>(
     node: &Rc<RefCell<NodeState<S>>>,
     peer: &mut PeerState,
     transport: &mut dyn Transport,
@@ -3736,14 +3736,14 @@ where
     Ok(())
 }
 
-pub(super) fn send_sync_message_chunked(
+fn send_sync_message_chunked(
     transport: &mut dyn Transport,
     message: SyncMessage,
 ) -> Result<(), Error> {
     transport.send(message).map_err(transport_error)
 }
 
-pub(super) fn send_with_local_sync_context<S>(
+fn send_with_local_sync_context<S>(
     node: &Rc<RefCell<NodeState<S>>>,
     transport: &mut dyn Transport,
     message: SyncMessage,
@@ -3760,31 +3760,28 @@ where
     transport.send(message).map_err(transport_error)
 }
 
-pub(super) fn view_update_subscription(message: &SyncMessage) -> Option<SubscriptionKey> {
+fn view_update_subscription(message: &SyncMessage) -> Option<SubscriptionKey> {
     match message {
         SyncMessage::ViewUpdate { subscription, .. } => Some(*subscription),
         _ => None,
     }
 }
 
-pub(super) fn retarget_view_update(
-    mut message: SyncMessage,
-    target: SubscriptionKey,
-) -> SyncMessage {
+fn retarget_view_update(mut message: SyncMessage, target: SubscriptionKey) -> SyncMessage {
     if let SyncMessage::ViewUpdate { subscription, .. } = &mut message {
         *subscription = target;
     }
     message
 }
 
-pub(super) fn write_state_update_tx_id(message: &SyncMessage) -> Option<TxId> {
+fn write_state_update_tx_id(message: &SyncMessage) -> Option<TxId> {
     match message {
         SyncMessage::FateUpdate { tx_id, .. } => Some(*tx_id),
         _ => None,
     }
 }
 
-pub(super) fn notify_write_state_waiters(waiters: &WriteStateWaiters, tx_id: TxId) -> bool {
+fn notify_write_state_waiters(waiters: &WriteStateWaiters, tx_id: TxId) -> bool {
     let Some(waiters) = waiters.borrow_mut().remove(&tx_id) else {
         return false;
     };
@@ -3805,7 +3802,7 @@ pub(super) fn notify_write_state_waiters(waiters: &WriteStateWaiters, tx_id: TxI
     handled_mutation_error
 }
 
-pub(super) fn handle_write_state_update<S>(
+fn handle_write_state_update<S>(
     node: &Rc<RefCell<NodeState<S>>>,
     waiters: &WriteStateWaiters,
     mutation_errors: &SharedMutationErrors,
@@ -3872,7 +3869,7 @@ pub(super) fn mutation_error_event(rejected: crate::tx::RejectedTransaction) -> 
     }
 }
 
-pub(super) fn mutation_error_details(reason: &RejectionReason) -> (String, String) {
+fn mutation_error_details(reason: &RejectionReason) -> (String, String) {
     match reason {
         RejectionReason::ClientClockTooFarAhead => (
             "client_clock_too_far_ahead".to_owned(),
@@ -3902,10 +3899,7 @@ pub(super) fn mutation_error_details(reason: &RejectionReason) -> (String, Strin
 }
 
 /// Bindings carry values positionally; the shape orders them by param name.
-pub(super) fn binding_values_in_param_order(
-    shape: &ValidatedQuery,
-    binding: &Binding,
-) -> Vec<Value> {
+fn binding_values_in_param_order(shape: &ValidatedQuery, binding: &Binding) -> Vec<Value> {
     shape
         .params()
         .keys()

@@ -121,10 +121,7 @@ where
         self.apply_subscribe(subscribe)
     }
 
-    pub(super) fn drain_parked_binding_deltas_for_shape(
-        &mut self,
-        shape_id: ShapeId,
-    ) -> Result<(), Error> {
+    fn drain_parked_binding_deltas_for_shape(&mut self, shape_id: ShapeId) -> Result<(), Error> {
         let Some(deltas) = self.parking.parked_binding_deltas.remove(&shape_id) else {
             return Ok(());
         };
@@ -138,7 +135,7 @@ where
         Ok(())
     }
 
-    pub(super) fn apply_known_shape_subscribe(
+    fn apply_known_shape_subscribe(
         &mut self,
         shape: &ValidatedQuery,
         subscribe: Subscribe,
@@ -208,7 +205,7 @@ where
         }
     }
 
-    pub(super) fn registered_binding_resolves_to_binding_view_key(
+    fn registered_binding_resolves_to_binding_view_key(
         &self,
         binding_view_key: BindingViewKey,
     ) -> bool {
@@ -641,7 +638,7 @@ where
         ))
     }
 
-    pub(super) fn canonical_whole_table_binding_view_key(
+    fn canonical_whole_table_binding_view_key(
         &self,
         subscription: SubscriptionKey,
     ) -> Result<Option<BindingViewKey>, Error> {

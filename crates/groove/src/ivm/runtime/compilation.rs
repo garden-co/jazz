@@ -12,7 +12,7 @@ impl IvmRuntime {
         self.add_dedup_graph_cached(graph, &mut output_memo)
     }
 
-    pub(super) fn add_dedup_graph_cached(
+    fn add_dedup_graph_cached(
         &mut self,
         graph: &GraphBuilder,
         output_memo: &mut HashMap<usize, RecordDescriptor>,
@@ -51,7 +51,7 @@ impl IvmRuntime {
     }
 
     #[inline(never)]
-    pub(super) fn add_dedup_source_graph(
+    fn add_dedup_source_graph(
         &mut self,
         graph: &GraphBuilder,
         inferred_output: RecordDescriptor,
@@ -219,7 +219,7 @@ impl IvmRuntime {
     }
 
     #[inline(never)]
-    pub(super) fn add_dedup_ordering_graph(
+    fn add_dedup_ordering_graph(
         &mut self,
         graph: &GraphBuilder,
         inferred_output: RecordDescriptor,
@@ -464,7 +464,7 @@ impl IvmRuntime {
     }
 
     #[inline(never)]
-    pub(super) fn add_dedup_unary_graph(
+    fn add_dedup_unary_graph(
         &mut self,
         graph: &GraphBuilder,
         inferred_output: RecordDescriptor,
@@ -697,7 +697,7 @@ impl IvmRuntime {
     }
 
     #[inline(never)]
-    pub(super) fn add_dedup_join_graph(
+    fn add_dedup_join_graph(
         &mut self,
         graph: &GraphBuilder,
         inferred_output: RecordDescriptor,
@@ -846,7 +846,7 @@ impl IvmRuntime {
         }
     }
 
-    pub(super) fn add_collect_by_graph(
+    fn add_collect_by_graph(
         &mut self,
         input: &GraphBuilder,
         collect: &CollectByBuilder,
@@ -1143,7 +1143,7 @@ impl IvmRuntime {
         Ok(persist)
     }
 
-    pub(super) fn index_source_op(
+    fn index_source_op(
         &self,
         table: &TableSchema,
         index: &IndexSchema,
@@ -1198,7 +1198,7 @@ impl IvmRuntime {
         })
     }
 
-    pub(super) fn add_dedup_index_by_from_input(
+    fn add_dedup_index_by_from_input(
         &mut self,
         table: &TableSchema,
         index: &IndexSchema,

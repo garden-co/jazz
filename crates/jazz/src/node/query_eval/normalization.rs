@@ -17,7 +17,7 @@ pub(super) fn root_source_id(table: &str) -> SourceId {
     }
 }
 
-pub(super) fn nested_join_source_id(join: &JoinVia, path: &str) -> SourceId {
+fn nested_join_source_id(join: &JoinVia, path: &str) -> SourceId {
     SourceId {
         table: join.table.clone(),
         path: SourcePath {
@@ -26,10 +26,7 @@ pub(super) fn nested_join_source_id(join: &JoinVia, path: &str) -> SourceId {
     }
 }
 
-pub(super) fn join_lookup_source_id(
-    lookup: &crate::query::JoinSourceLookup,
-    path: &str,
-) -> SourceId {
+fn join_lookup_source_id(lookup: &crate::query::JoinSourceLookup, path: &str) -> SourceId {
     SourceId {
         table: lookup.table.clone(),
         path: SourcePath {
@@ -92,10 +89,7 @@ pub(super) fn current_query_output_request(
     }
 }
 
-pub(super) fn app_row_payload_projection(
-    query: &JazzQuery,
-    collect_relations: bool,
-) -> PayloadProjection {
+fn app_row_payload_projection(query: &JazzQuery, collect_relations: bool) -> PayloadProjection {
     let paths = if collect_relations {
         app_row_path_projections(&root_source_id(&query.table), &query.array_subqueries, &[])
     } else {
@@ -124,7 +118,7 @@ pub(super) fn app_row_payload_projection(
     PayloadProjection::Tree(AppProjectionTree { fields, paths })
 }
 
-pub(super) fn app_row_path_projections(
+fn app_row_path_projections(
     owner: &SourceId,
     subqueries: &[ArraySubquery],
     path: &[usize],
@@ -175,7 +169,7 @@ pub(super) fn required_field_idx(
     })
 }
 
-pub(super) fn normalize_predicates(
+fn normalize_predicates(
     schema: &JazzSchema,
     source: &SourceId,
     predicates: &[Predicate],
@@ -209,7 +203,7 @@ pub(super) fn literal_equalities_for_filters(
     Ok(equalities)
 }
 
-pub(super) fn collect_root_literal_equalities(
+fn collect_root_literal_equalities(
     predicate: &Predicate,
     binding: &Binding,
     equalities: &mut BTreeMap<String, Value>,
@@ -242,7 +236,7 @@ pub(super) fn collect_root_literal_equalities(
     Ok(())
 }
 
-pub(super) fn root_equality_literal(
+fn root_equality_literal(
     field: &Operand,
     value: &Operand,
     binding: &Binding,
@@ -292,7 +286,7 @@ pub(super) fn static_scan_for_prefix(prefix: Vec<Value>, full_key_len: usize) ->
     }
 }
 
-pub(super) fn normalize_predicate(
+fn normalize_predicate(
     schema: &JazzSchema,
     source: &SourceId,
     predicate: &Predicate,
@@ -499,7 +493,7 @@ pub(super) fn normalize_enum_payload_predicate(
     })
 }
 
-pub(super) fn normalize_enum_payload_compare(
+fn normalize_enum_payload_compare(
     descriptor: &crate::groove::records::RecordDescriptor,
     source: &SourceId,
     left: &Operand,
@@ -515,7 +509,7 @@ pub(super) fn normalize_enum_payload_compare(
     })
 }
 
-pub(super) fn normalize_enum_payload_operand(
+fn normalize_enum_payload_operand(
     descriptor: &crate::groove::records::RecordDescriptor,
     source: &SourceId,
     operand: &Operand,
@@ -550,7 +544,7 @@ pub(super) fn normalize_enum_payload_operand(
     }
 }
 
-pub(super) fn enum_payload_operand_type(
+fn enum_payload_operand_type(
     descriptor: &crate::groove::records::RecordDescriptor,
     operand: &Operand,
 ) -> Result<Option<ColumnType>, Error> {
@@ -562,7 +556,7 @@ pub(super) fn enum_payload_operand_type(
     }
 }
 
-pub(super) fn enum_payload_field_type(
+fn enum_payload_field_type(
     descriptor: &crate::groove::records::RecordDescriptor,
     field: &str,
 ) -> Option<ColumnType> {
@@ -573,7 +567,7 @@ pub(super) fn enum_payload_field_type(
         .map(|candidate| candidate.value_type.clone())
 }
 
-pub(super) fn enum_payload_contains_needle_type(
+fn enum_payload_contains_needle_type(
     descriptor: &crate::groove::records::RecordDescriptor,
     value: &Operand,
 ) -> Result<Option<ColumnType>, Error> {
@@ -589,7 +583,7 @@ pub(super) fn enum_payload_contains_needle_type(
     })
 }
 
-pub(super) fn normalize_compare(
+fn normalize_compare(
     schema: &JazzSchema,
     source: &SourceId,
     left: &Operand,
@@ -605,14 +599,11 @@ pub(super) fn normalize_compare(
     })
 }
 
-pub(super) fn normalize_operand(
-    source: &SourceId,
-    operand: &Operand,
-) -> Result<NormalizedValueRef, Error> {
+fn normalize_operand(source: &SourceId, operand: &Operand) -> Result<NormalizedValueRef, Error> {
     normalize_operand_with_target_type(source, operand, None)
 }
 
-pub(super) fn normalize_operand_with_target_type(
+fn normalize_operand_with_target_type(
     source: &SourceId,
     operand: &Operand,
     target_type: Option<&ColumnType>,
@@ -722,7 +713,7 @@ pub(super) fn coerce_literal_for_column_type(value: Value, column_type: &ColumnT
     }
 }
 
-pub(super) fn provenance_field(column: &str) -> Option<ProvenanceField> {
+fn provenance_field(column: &str) -> Option<ProvenanceField> {
     match column {
         "$createdAt" => Some(ProvenanceField::CreatedAt),
         "$createdBy" => Some(ProvenanceField::CreatedBy),
@@ -732,7 +723,7 @@ pub(super) fn provenance_field(column: &str) -> Option<ProvenanceField> {
     }
 }
 
-pub(super) fn normalize_order_key(
+fn normalize_order_key(
     source: &SourceId,
     order: &crate::query::OrderBy,
 ) -> Result<NormalizedOrderKey, Error> {
@@ -745,7 +736,7 @@ pub(super) fn normalize_order_key(
     })
 }
 
-pub(super) fn normalized_aggregate_group_by(
+fn normalized_aggregate_group_by(
     source: &SourceId,
     aggregate: &AggregateQuery,
 ) -> Result<Vec<NormalizedValueRef>, Error> {
@@ -756,7 +747,7 @@ pub(super) fn normalized_aggregate_group_by(
         .collect()
 }
 
-pub(super) fn normalized_aggregate_outputs(
+fn normalized_aggregate_outputs(
     source: &SourceId,
     aggregate: &AggregateQuery,
 ) -> Result<Vec<NormalizedAggregateExpr>, Error> {
@@ -780,9 +771,7 @@ pub(super) fn normalized_aggregate_outputs(
         .collect()
 }
 
-pub(super) fn normalized_aggregate_function(
-    function: AggregateFunction,
-) -> NormalizedAggregateFunction {
+fn normalized_aggregate_function(function: AggregateFunction) -> NormalizedAggregateFunction {
     match function {
         AggregateFunction::Count => NormalizedAggregateFunction::Count,
         AggregateFunction::Sum => NormalizedAggregateFunction::Sum,
@@ -792,7 +781,7 @@ pub(super) fn normalized_aggregate_function(
     }
 }
 
-pub(super) fn normalized_aggregate_output_type(aggregate: &Aggregate) -> ColumnType {
+fn normalized_aggregate_output_type(aggregate: &Aggregate) -> ColumnType {
     match aggregate.function {
         AggregateFunction::Count => ColumnType::U64,
         AggregateFunction::Avg => ColumnType::Nullable(Box::new(ColumnType::F64)),
@@ -804,11 +793,11 @@ pub(super) fn normalized_aggregate_output_type(aggregate: &Aggregate) -> ColumnT
     }
 }
 
-pub(super) fn normalization_gap(message: impl Into<String>) -> Error {
+fn normalization_gap(message: impl Into<String>) -> Error {
     Error::QueryLowering(message.into())
 }
 
-pub(super) fn array_requirement(requirement: ArraySubqueryRequirement) -> CorrelationRequirement {
+fn array_requirement(requirement: ArraySubqueryRequirement) -> CorrelationRequirement {
     match requirement {
         ArraySubqueryRequirement::Optional => CorrelationRequirement::Optional,
         ArraySubqueryRequirement::AtLeastOne => CorrelationRequirement::AtLeastOne,
@@ -818,7 +807,7 @@ pub(super) fn array_requirement(requirement: ArraySubqueryRequirement) -> Correl
     }
 }
 
-pub(super) fn correlated_child_source_id(
+fn correlated_child_source_id(
     owner: &SourceId,
     subquery: &ArraySubquery,
     path: &[usize],
@@ -839,7 +828,7 @@ pub(super) fn correlated_child_source_id(
     }
 }
 
-pub(super) fn include_auxiliary_source_id(
+fn include_auxiliary_source_id(
     table: impl Into<String>,
     include_index: usize,
     segment_index: usize,
@@ -855,7 +844,7 @@ pub(super) fn include_auxiliary_source_id(
     }
 }
 
-pub(super) fn collect_closure_paths<S>(
+fn collect_closure_paths<S>(
     node: &NodeState<S>,
     root_table: &str,
     schema_version: SchemaVersionId,
@@ -925,7 +914,7 @@ where
     Ok((sources, paths))
 }
 
-pub(super) fn normalize_array_subquery(
+fn normalize_array_subquery(
     nodes: &mut BTreeMap<RowSetNodeId, RowSetExpr>,
     current: RowSetNodeId,
     schema: &JazzSchema,
@@ -1043,7 +1032,7 @@ pub(super) fn normalize_array_subquery(
     Ok(path_node)
 }
 
-pub(super) fn normalize_reachable(
+fn normalize_reachable(
     nodes: &mut BTreeMap<RowSetNodeId, RowSetExpr>,
     current: RowSetNodeId,
     schema: &JazzSchema,
@@ -1249,7 +1238,7 @@ pub(super) fn normalize_reachable(
     ))
 }
 
-pub(super) fn reachable_access_key(
+fn reachable_access_key(
     access_source: &SourceId,
     column: &str,
     target: JoinTarget,
@@ -1264,7 +1253,7 @@ pub(super) fn reachable_access_key(
     }
 }
 
-pub(super) fn normalize_join_via_right(
+fn normalize_join_via_right(
     nodes: &mut BTreeMap<RowSetNodeId, RowSetExpr>,
     auxiliary_sources: &mut BTreeSet<SourceId>,
     schema: &JazzSchema,
@@ -1371,7 +1360,7 @@ pub(super) fn normalize_join_via_right(
     Ok((current, join_source))
 }
 
-pub(super) fn reachable_dedupe_keys(
+fn reachable_dedupe_keys(
     frontier: &FrontierId,
     columns: &[ValueSourceColumn],
 ) -> Vec<NormalizedValueRef> {
@@ -1389,7 +1378,7 @@ pub(super) fn reachable_dedupe_keys(
         .collect()
 }
 
-pub(super) fn normalize_reachable_seed(
+fn normalize_reachable_seed(
     nodes: &mut BTreeMap<RowSetNodeId, RowSetExpr>,
     schema: &JazzSchema,
     reachable: &crate::query::ReachableVia,
@@ -1521,7 +1510,7 @@ pub(super) fn normalize_reachable_seed(
     Ok((seed_node, columns))
 }
 
-pub(super) fn reachable_edge_route_columns(
+fn reachable_edge_route_columns(
     reachable: &crate::query::ReachableVia,
     param_types: &BTreeMap<String, ColumnType>,
 ) -> Result<Vec<ValueSourceColumn>, Error> {
@@ -1540,7 +1529,7 @@ pub(super) fn reachable_edge_route_columns(
         .collect()
 }
 
-pub(super) fn reachable_seed_frontier_columns(
+fn reachable_seed_frontier_columns(
     schema: &JazzSchema,
     source: &SourceId,
     seed: &crate::query::ReachableSeed,
@@ -1589,7 +1578,7 @@ pub(super) fn reachable_seed_frontier_columns(
     Ok(columns)
 }
 
-pub(super) fn reachable_frontier_columns(
+fn reachable_frontier_columns(
     seed: &Operand,
     param_types: &BTreeMap<String, ColumnType>,
 ) -> Result<Vec<ValueSourceColumn>, Error> {
@@ -1644,7 +1633,7 @@ pub(super) fn reachable_frontier_columns(
     Ok(columns)
 }
 
-pub(super) fn reachable_seed_value_ref(seed: &Operand) -> Result<NormalizedValueRef, Error> {
+fn reachable_seed_value_ref(seed: &Operand) -> Result<NormalizedValueRef, Error> {
     match seed {
         Operand::Param(param) => Ok(NormalizedValueRef::Param(param.clone())),
         Operand::Literal(Value::Uuid(uuid)) => literal_value_ref(&Value::Uuid(*uuid)),
@@ -1657,7 +1646,7 @@ pub(super) fn reachable_seed_value_ref(seed: &Operand) -> Result<NormalizedValue
     }
 }
 
-pub(super) fn reachable_seed_value_source_mode(seed: &Operand) -> Result<ValueSourceMode, Error> {
+fn reachable_seed_value_source_mode(seed: &Operand) -> Result<ValueSourceMode, Error> {
     match seed {
         Operand::Param(_) | Operand::Claim(_) => Ok(ValueSourceMode::Binding),
         Operand::Literal(Value::Uuid(_)) => Ok(ValueSourceMode::Inline),
@@ -1667,14 +1656,14 @@ pub(super) fn reachable_seed_value_source_mode(seed: &Operand) -> Result<ValueSo
     }
 }
 
-pub(super) fn literal_value_ref(value: &Value) -> Result<NormalizedValueRef, Error> {
+fn literal_value_ref(value: &Value) -> Result<NormalizedValueRef, Error> {
     Ok(NormalizedValueRef::Literal(
         postcard::to_allocvec(value)
             .map_err(|err| Error::QueryLowering(format!("literal encoding failed: {err}")))?,
     ))
 }
 
-pub(super) fn typed_output_field(name: impl Into<String>, ty: ColumnType) -> TypedOutputField {
+fn typed_output_field(name: impl Into<String>, ty: ColumnType) -> TypedOutputField {
     TypedOutputField {
         name: name.into(),
         ty,
@@ -1692,11 +1681,7 @@ pub(super) fn table_schema<'a>(
         .ok_or_else(|| Error::QueryLowering(format!("unknown query table {table}")))
 }
 
-pub(super) fn schema_column_type(
-    schema: &JazzSchema,
-    table: &str,
-    column: &str,
-) -> Result<ColumnType, Error> {
+fn schema_column_type(schema: &JazzSchema, table: &str, column: &str) -> Result<ColumnType, Error> {
     if column == "id" {
         return Ok(ColumnType::Uuid);
     }
@@ -1708,14 +1693,11 @@ pub(super) fn schema_column_type(
         .ok_or_else(|| Error::QueryLowering(format!("unknown query column {table}.{column}")))
 }
 
-pub(super) fn row_id_output_field() -> TypedOutputField {
+fn row_id_output_field() -> TypedOutputField {
     typed_output_field("id", ColumnType::Uuid)
 }
 
-pub(super) fn source_public_field_projections(
-    table: &TableSchema,
-    source: &SourceId,
-) -> Vec<RowProjection> {
+fn source_public_field_projections(table: &TableSchema, source: &SourceId) -> Vec<RowProjection> {
     std::iter::once(RowProjection {
         output: row_id_output_field(),
         value: NormalizedValueRef::RowId(RowIdRef::Source(source.clone())),
@@ -1730,7 +1712,7 @@ pub(super) fn source_public_field_projections(
     .collect()
 }
 
-pub(super) fn join_via_root_key(root_source: &SourceId, join: &JoinVia) -> NormalizedValueRef {
+fn join_via_root_key(root_source: &SourceId, join: &JoinVia) -> NormalizedValueRef {
     join.source_column
         .as_ref()
         .map(|field| {
@@ -1746,7 +1728,7 @@ pub(super) fn join_via_root_key(root_source: &SourceId, join: &JoinVia) -> Norma
         .unwrap_or_else(|| NormalizedValueRef::RowId(RowIdRef::Source(root_source.clone())))
 }
 
-pub(super) fn join_via_target_key(join_source: &SourceId, join: &JoinVia) -> NormalizedValueRef {
+fn join_via_target_key(join_source: &SourceId, join: &JoinVia) -> NormalizedValueRef {
     match join.target {
         JoinTarget::Column => NormalizedValueRef::SourceField {
             source: join_source.clone(),
@@ -1756,7 +1738,7 @@ pub(super) fn join_via_target_key(join_source: &SourceId, join: &JoinVia) -> Nor
     }
 }
 
-pub(super) fn join_via_predicate(
+fn join_via_predicate(
     left_source: &SourceId,
     right_source: &SourceId,
     join: &JoinVia,
@@ -1856,7 +1838,7 @@ pub(super) fn reachable_seed_source_id(
     }
 }
 
-pub(super) fn inherited_parent_source_id(table: &str, prefix: &str) -> SourceId {
+fn inherited_parent_source_id(table: &str, prefix: &str) -> SourceId {
     SourceId {
         table: table.to_owned(),
         path: SourcePath {
@@ -1865,12 +1847,12 @@ pub(super) fn inherited_parent_source_id(table: &str, prefix: &str) -> SourceId 
     }
 }
 
-pub(super) struct FilterJoinChain<'a> {
+struct FilterJoinChain<'a> {
     pub(super) filters: &'a [Predicate],
     pub(super) joins: &'a [JoinVia],
 }
 
-pub(super) struct PolicyAtomChain<'a> {
+struct PolicyAtomChain<'a> {
     pub(super) filters: &'a [Predicate],
     pub(super) joins: &'a [JoinVia],
     pub(super) inherits: &'a [crate::query::InheritsVia],
@@ -1884,12 +1866,12 @@ pub(super) struct PolicyAtomChain<'a> {
 /// state per path so independent policy alternatives do not consume each
 /// other's depth budget.
 #[derive(Clone, Default)]
-pub(super) struct InheritanceExpansionPath {
+struct InheritanceExpansionPath {
     uses: BTreeMap<InheritanceExpansionKey, usize>,
 }
 
 #[derive(Clone, Debug, Ord, PartialOrd, Eq, PartialEq)]
-pub(super) struct InheritanceExpansionKey {
+struct InheritanceExpansionKey {
     child_table: String,
     parent_column: String,
     operation: crate::query::InheritsOperation,
@@ -1919,7 +1901,7 @@ impl InheritanceExpansionPath {
     }
 }
 
-pub(super) fn normalize_false_policy_branch(
+fn normalize_false_policy_branch(
     nodes: &mut BTreeMap<RowSetNodeId, RowSetExpr>,
     input: RowSetNodeId,
     prefix: &str,
@@ -1935,7 +1917,7 @@ pub(super) fn normalize_false_policy_branch(
     node
 }
 
-pub(super) fn normalize_filter_join_chain(
+fn normalize_filter_join_chain(
     nodes: &mut BTreeMap<RowSetNodeId, RowSetExpr>,
     auxiliary_sources: &mut BTreeSet<SourceId>,
     join_contributions: &mut Vec<JoinContribution>,
@@ -1992,7 +1974,7 @@ pub(super) fn normalize_filter_join_chain(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn normalize_policy_atom_chain(
+fn normalize_policy_atom_chain(
     nodes: &mut BTreeMap<RowSetNodeId, RowSetExpr>,
     auxiliary_sources: &mut BTreeSet<SourceId>,
     join_contributions: &mut Vec<JoinContribution>,
@@ -2057,7 +2039,7 @@ pub(super) fn normalize_policy_atom_chain(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn normalize_inherited_parent_policy(
+fn normalize_inherited_parent_policy(
     nodes: &mut BTreeMap<RowSetNodeId, RowSetExpr>,
     auxiliary_sources: &mut BTreeSet<SourceId>,
     join_contributions: &mut Vec<JoinContribution>,
@@ -2170,7 +2152,7 @@ pub(super) fn normalize_inherited_parent_policy(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn normalize_policy_branch_authorization(
+fn normalize_policy_branch_authorization(
     nodes: &mut BTreeMap<RowSetNodeId, RowSetExpr>,
     auxiliary_sources: &mut BTreeSet<SourceId>,
     join_contributions: &mut Vec<JoinContribution>,
@@ -2302,7 +2284,7 @@ pub(super) fn normalize_policy_branch_authorization(
     Ok(join_node)
 }
 
-pub(super) fn policy_branch_semantic_label(
+fn policy_branch_semantic_label(
     filters: &[crate::query::Predicate],
     joins: &[crate::query::JoinVia],
     reachable: &[crate::query::ReachableVia],
@@ -2316,7 +2298,7 @@ pub(super) fn policy_branch_semantic_label(
     Ok(format!("policy:{}", blake3::hash(&bytes).to_hex()))
 }
 
-pub(super) fn normalize_row_id_projection(
+fn normalize_row_id_projection(
     nodes: &mut BTreeMap<RowSetNodeId, RowSetExpr>,
     input: RowSetNodeId,
     root_source: &SourceId,
@@ -2338,12 +2320,12 @@ pub(super) fn normalize_row_id_projection(
     node_id
 }
 
-pub(super) fn unsupported_policy_branch_reason(query: &JazzQuery) -> Option<String> {
+fn unsupported_policy_branch_reason(query: &JazzQuery) -> Option<String> {
     let _ = query;
     None
 }
 
-pub(super) fn policy_branch_base_is_converter_false(query: &JazzQuery) -> bool {
+fn policy_branch_base_is_converter_false(query: &JazzQuery) -> bool {
     matches!(query.filters.as_slice(), [Predicate::Any(predicates)] if predicates.is_empty())
         && query.joins.is_empty()
         && query.reachable.is_empty()

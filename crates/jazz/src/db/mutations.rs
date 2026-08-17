@@ -607,7 +607,7 @@ where
         self.delete_for_identity_at_ms_option(identity, table, row, Some(now_ms))
     }
 
-    pub(super) fn delete_for_identity_at_ms_option(
+    fn delete_for_identity_at_ms_option(
         &self,
         identity: AuthorId,
         table: &str,
@@ -830,7 +830,7 @@ where
         })
     }
 
-    pub(super) fn write_mergeable_as_session_subject(
+    fn write_mergeable_as_session_subject(
         &self,
         made_by: AuthorId,
         table: &str,
@@ -851,7 +851,7 @@ where
         )
     }
 
-    pub(super) fn write_mergeable_as_session_subject_with_authored_columns(
+    fn write_mergeable_as_session_subject_with_authored_columns(
         &self,
         made_by: AuthorId,
         table: &str,
@@ -955,7 +955,7 @@ where
         })
     }
 
-    pub(super) fn write_mergeable(
+    fn write_mergeable(
         &self,
         made_by: AuthorId,
         permission_subject: Option<AuthorId>,
@@ -977,7 +977,7 @@ where
         )
     }
 
-    pub(super) fn write_mergeable_at_ms(
+    fn write_mergeable_at_ms(
         &self,
         made_by: AuthorId,
         permission_subject: Option<AuthorId>,
@@ -1001,7 +1001,7 @@ where
         )
     }
 
-    pub(super) fn write_mergeable_with_authored_columns(
+    fn write_mergeable_with_authored_columns(
         &self,
         made_by: AuthorId,
         permission_subject: Option<AuthorId>,
@@ -1025,7 +1025,7 @@ where
         )
     }
 
-    pub(super) fn write_mergeable_at_ms_with_authorship(
+    fn write_mergeable_at_ms_with_authorship(
         &self,
         made_by: AuthorId,
         permission_subject: Option<AuthorId>,
@@ -1079,7 +1079,7 @@ where
         })
     }
 
-    pub(super) fn check_attribution_allowed(&self, made_by: AuthorId) -> Result<(), Error> {
+    fn check_attribution_allowed(&self, made_by: AuthorId) -> Result<(), Error> {
         if made_by == self.identity.author {
             return Ok(());
         }
@@ -1177,7 +1177,7 @@ where
         Ok(cells)
     }
 
-    pub(super) fn upsert_target_for_client_identity(
+    fn upsert_target_for_client_identity(
         &self,
         table: &str,
         row: RowUuid,
@@ -1201,7 +1201,7 @@ where
         Err(read_for_write_denied("UPSERT", table))
     }
 
-    pub(super) fn upsert_target_for_trusted_identity(
+    fn upsert_target_for_trusted_identity(
         &self,
         table: &str,
         row: RowUuid,
@@ -1236,7 +1236,7 @@ where
         Ok(self.node.node.borrow_mut().local_current_row(table, row)?)
     }
 
-    pub(super) fn ensure_row_absent(
+    fn ensure_row_absent(
         &self,
         table: &str,
         row: RowUuid,
@@ -1262,7 +1262,7 @@ where
         Ok(())
     }
 
-    pub(super) fn ensure_row_deleted(
+    fn ensure_row_deleted(
         &self,
         table: &str,
         row: RowUuid,
@@ -1285,7 +1285,7 @@ where
         }
     }
 
-    pub(super) fn ensure_row_not_deleted(&self, table: &str, row: RowUuid) -> Result<(), Error> {
+    fn ensure_row_not_deleted(&self, table: &str, row: RowUuid) -> Result<(), Error> {
         self.table_schema(table)?;
         let deleted = self
             .node
@@ -1300,7 +1300,7 @@ where
         }
     }
 
-    pub(super) fn row_layer_parents(
+    fn row_layer_parents(
         &self,
         table: &str,
         row: RowUuid,
@@ -1317,7 +1317,7 @@ where
         Ok((content_parents, deletion_parents))
     }
 
-    pub(super) fn local_row_for_client_identity(
+    fn local_row_for_client_identity(
         &self,
         table: &str,
         row: RowUuid,
@@ -1338,7 +1338,7 @@ where
             .find(|candidate| candidate.row_uuid() == row))
     }
 
-    pub(super) fn local_row_for_trusted_identity(
+    fn local_row_for_trusted_identity(
         &self,
         table: &str,
         row: RowUuid,
@@ -1360,7 +1360,7 @@ where
             .find(|candidate| candidate.row_uuid() == row))
     }
 
-    pub(super) fn no_op_update_handle_for_client(
+    fn no_op_update_handle_for_client(
         &self,
         table: &str,
         row: RowUuid,
@@ -1385,7 +1385,7 @@ where
         })
     }
 
-    pub(super) fn no_op_update_handle_for_identity(
+    fn no_op_update_handle_for_identity(
         &self,
         table: &str,
         row: RowUuid,
@@ -1410,7 +1410,7 @@ where
         })
     }
 
-    pub(super) fn merge_existing_cells(
+    fn merge_existing_cells(
         &self,
         table: &str,
         row: RowUuid,
@@ -1419,7 +1419,7 @@ where
         self.merge_existing_cells_for_client_identity(table, row, patch, self.identity.author)
     }
 
-    pub(super) fn merge_existing_cells_for_client_identity(
+    fn merge_existing_cells_for_client_identity(
         &self,
         table: &str,
         row: RowUuid,
@@ -1461,7 +1461,7 @@ where
         Ok((cells, parent, authored_columns))
     }
 
-    pub(super) fn merge_existing_cells_for_identity(
+    fn merge_existing_cells_for_identity(
         &self,
         table: &str,
         row: RowUuid,

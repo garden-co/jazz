@@ -6,7 +6,7 @@
 //! in their neighboring stages.
 
 use super::*;
-pub(super) fn app_row_terminal_fields(output: &ProgramOutputSchemas) -> Result<Vec<String>, Error> {
+fn app_row_terminal_fields(output: &ProgramOutputSchemas) -> Result<Vec<String>, Error> {
     app_row_terminal_schema(output).and_then(|app_rows| {
         app_rows
             .descriptor
@@ -21,7 +21,7 @@ pub(super) fn app_row_terminal_fields(output: &ProgramOutputSchemas) -> Result<V
     })
 }
 
-pub(super) fn app_row_terminal_route_eligible_fields(
+fn app_row_terminal_route_eligible_fields(
     output: &ProgramOutputSchemas,
 ) -> Result<Vec<String>, Error> {
     let app_rows = app_row_terminal_schema(output)?;
@@ -30,9 +30,7 @@ pub(super) fn app_row_terminal_route_eligible_fields(
     Ok(fields)
 }
 
-pub(super) fn app_row_terminal_schema(
-    output: &ProgramOutputSchemas,
-) -> Result<&AppRowSchema, Error> {
+fn app_row_terminal_schema(output: &ProgramOutputSchemas) -> Result<&AppRowSchema, Error> {
     let ProgramOutputSchemas::RowSet(terminals) = output;
     terminals
         .iter()
@@ -130,16 +128,14 @@ pub(super) fn prepared_params_from_domain(
     params
 }
 
-pub(super) fn prepared_param_route_field(param: &PreparedQueryParam) -> String {
+fn prepared_param_route_field(param: &PreparedQueryParam) -> String {
     match &param.source {
         PreparedQueryParamSource::User => route_param_field(&param.name),
         PreparedQueryParamSource::Claim(_) => param.name.clone(),
     }
 }
 
-pub(super) fn prepared_route_param_names(
-    parameters: &super::query_engine::ParameterDomain,
-) -> Vec<String> {
+fn prepared_route_param_names(parameters: &super::query_engine::ParameterDomain) -> Vec<String> {
     prepared_params_from_domain(parameters)
         .iter()
         .map(prepared_param_route_field)
@@ -147,7 +143,7 @@ pub(super) fn prepared_route_param_names(
         .collect()
 }
 
-pub(super) fn prepared_route_value_indices(
+fn prepared_route_value_indices(
     params: &[PreparedQueryParam],
     route_fields: &[String],
 ) -> Vec<usize> {
@@ -162,10 +158,7 @@ pub(super) fn prepared_route_value_indices(
         .collect()
 }
 
-pub(super) fn terminal_route_fields(
-    route_params: &[String],
-    route_eligible_fields: &[String],
-) -> Vec<String> {
+fn terminal_route_fields(route_params: &[String], route_eligible_fields: &[String]) -> Vec<String> {
     let route_eligible_fields = route_eligible_fields.iter().collect::<BTreeSet<_>>();
     route_params
         .iter()
@@ -174,18 +167,14 @@ pub(super) fn terminal_route_fields(
         .collect()
 }
 
-pub(super) fn terminal_public_fields(
-    terminal: &OutputTerminalSchema,
-) -> Result<Vec<String>, Error> {
+fn terminal_public_fields(terminal: &OutputTerminalSchema) -> Result<Vec<String>, Error> {
     match terminal {
         OutputTerminalSchema::AppRows(rows) => descriptor_field_names(&rows.descriptor),
         OutputTerminalSchema::Fact(fact) => fact_public_fields(&fact.schema),
     }
 }
 
-pub(super) fn terminal_route_eligible_fields(
-    terminal: &OutputTerminalSchema,
-) -> Result<Vec<String>, Error> {
+fn terminal_route_eligible_fields(terminal: &OutputTerminalSchema) -> Result<Vec<String>, Error> {
     let mut fields = terminal_public_fields(terminal)?;
     if let OutputTerminalSchema::AppRows(rows) = terminal {
         fields.extend(rows.hidden_fields.iter().cloned());
@@ -322,7 +311,7 @@ pub(super) fn output_routing_fields_for_query_eval(
     }
 }
 
-pub(super) fn version_witness_public_fields(
+fn version_witness_public_fields(
     role_field: &str,
     schema: &super::query_engine::VersionWitnessSchema,
 ) -> Vec<String> {
@@ -359,7 +348,7 @@ pub(super) fn descriptor_field_names(descriptor: &RecordDescriptor) -> Result<Ve
         .collect()
 }
 
-pub(super) fn row_ref_fields(schema: &QueryEngineRowRefSchema) -> Vec<String> {
+fn row_ref_fields(schema: &QueryEngineRowRefSchema) -> Vec<String> {
     vec![
         schema.source_field.clone(),
         schema.table_field.clone(),
@@ -376,9 +365,7 @@ pub(super) fn versioned_row_ref_fields(schema: &VersionedRowRefSchema) -> Vec<St
     fields
 }
 
-pub(super) fn result_membership_version_fields(
-    schema: &ResultMembershipVersionSchema,
-) -> Vec<String> {
+fn result_membership_version_fields(schema: &ResultMembershipVersionSchema) -> Vec<String> {
     match schema {
         ResultMembershipVersionSchema::Content(content) => content_version_fields(content),
         ResultMembershipVersionSchema::ContentOrDeletion {
@@ -394,13 +381,11 @@ pub(super) fn result_membership_version_fields(
     }
 }
 
-pub(super) fn content_version_fields(
-    schema: &super::query_engine::ContentVersionFields,
-) -> Vec<String> {
+fn content_version_fields(schema: &super::query_engine::ContentVersionFields) -> Vec<String> {
     vec![schema.tx_time_field.clone(), schema.tx_node_field.clone()]
 }
 
-pub(super) fn version_identity_fields(schema: &VersionIdentityFields) -> Vec<String> {
+fn version_identity_fields(schema: &VersionIdentityFields) -> Vec<String> {
     let mut fields = vec![
         schema.table_field.clone(),
         schema.row_field.clone(),

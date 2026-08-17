@@ -310,7 +310,7 @@ where
         )
     }
 
-    pub(super) fn transaction_all_in_authorization_mode(
+    fn transaction_all_in_authorization_mode(
         &self,
         tx_id: OpenBatchId,
         prepared: &PreparedQuery,

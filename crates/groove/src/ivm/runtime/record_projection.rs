@@ -258,7 +258,7 @@ pub(super) fn collect_by_tree_descriptor(
     Ok(RecordDescriptor::new(output))
 }
 
-pub(super) fn collect_by_slot_descriptor(
+fn collect_by_slot_descriptor(
     input: &RecordDescriptor,
     slot: &CollectBySlotBuilder,
     depth: usize,
@@ -491,7 +491,7 @@ pub(super) fn collect_by_projections(
         .collect()
 }
 
-pub(super) fn collect_by_field_value_type(
+fn collect_by_field_value_type(
     input: &RecordDescriptor,
     index: usize,
     field: &CollectByField,
@@ -932,10 +932,7 @@ pub(super) fn remap_recursive_enum_value(
     }
 }
 
-pub(super) fn remap_path_with_enum_occurrence_below(
-    remaps: &RecursiveEnumRemaps,
-    path: &str,
-) -> bool {
+fn remap_path_with_enum_occurrence_below(remaps: &RecursiveEnumRemaps, path: &str) -> bool {
     let below = format!("{path}/");
     remaps
         .scalar
@@ -1007,7 +1004,7 @@ pub(super) fn raw_projection_fields(
     Ok(fields)
 }
 
-pub(super) fn encode_projection_field_value(
+fn encode_projection_field_value(
     output_desc: RecordDescriptor,
     output_name: Option<&str>,
     value: Value,
@@ -1159,7 +1156,7 @@ pub(super) fn aggregate_descriptor(
     Ok(RecordDescriptor::new(fields))
 }
 
-pub(super) fn aggregate_output_type(
+fn aggregate_output_type(
     input: &RecordDescriptor,
     aggregate: &AggregateExpr,
 ) -> Result<ValueType, IvmRuntimeError> {
@@ -1186,7 +1183,7 @@ pub(super) fn aggregate_output_type(
     })
 }
 
-pub(super) fn aggregate_expr_value_type(
+fn aggregate_expr_value_type(
     input: &RecordDescriptor,
     aggregate: &AggregateExpr,
 ) -> Result<ValueType, IvmRuntimeError> {
@@ -1217,7 +1214,7 @@ pub(super) fn aggregate_expr_value_type(
     }
 }
 
-pub(super) fn non_nullable_type(value_type: &ValueType) -> &ValueType {
+fn non_nullable_type(value_type: &ValueType) -> &ValueType {
     match value_type {
         ValueType::Nullable(inner) => inner,
         other => other,
@@ -1225,7 +1222,7 @@ pub(super) fn non_nullable_type(value_type: &ValueType) -> &ValueType {
 }
 
 /// Used for converting non-nullable column types to nullable column types when aggregating.
-pub(super) fn nullable_type(value_type: &ValueType) -> ValueType {
+fn nullable_type(value_type: &ValueType) -> ValueType {
     ValueType::Nullable(Box::new(non_nullable_type(value_type).clone()))
 }
 
@@ -1326,7 +1323,7 @@ pub(super) fn apply_index_by(
     Ok(deltas)
 }
 
-pub(super) fn index_key_fields_are_scalar(
+fn index_key_fields_are_scalar(
     index_by: &IndexByOp,
     input_descriptor: &RecordDescriptor,
 ) -> Result<bool, IvmRuntimeError> {
@@ -1346,7 +1343,7 @@ pub(super) fn index_key_fields_are_scalar(
     Ok(true)
 }
 
-pub(super) fn scalar_index_key(
+fn scalar_index_key(
     index_by: &IndexByOp,
     input_descriptor: &RecordDescriptor,
     record: &[u8],
@@ -1363,7 +1360,7 @@ pub(super) fn scalar_index_key(
     Ok(key)
 }
 
-pub(super) fn index_keys(
+fn index_keys(
     index_by: &IndexByOp,
     input_descriptor: &RecordDescriptor,
     record: &[u8],
@@ -1419,7 +1416,7 @@ pub(super) fn scan_bounds(scan: &StaticScanSpec) -> Result<StaticScanBounds, Ivm
     }
 }
 
-pub(super) fn static_scan_key(values: &[LiteralValue]) -> Result<Vec<u8>, IvmRuntimeError> {
+fn static_scan_key(values: &[LiteralValue]) -> Result<Vec<u8>, IvmRuntimeError> {
     let mut key = Vec::new();
     for value in values {
         encode_key_part(&mut key, &value.to_value())?;

@@ -1381,7 +1381,7 @@ where
     }
 }
 
-pub(super) fn deletion_register_current_source_graph(
+fn deletion_register_current_source_graph(
     table: &str,
     physical_register_table: &str,
     tier: DurabilityTier,
@@ -1434,7 +1434,7 @@ pub(super) fn edge_visible_ahead_current_source_graph(
 /// raw history after rejection, so winner selection over the unfiltered table
 /// would expose pending rows at Edge/Global and let a rejected latest version
 /// continue masking an earlier accepted winner.
-pub(super) fn tier_visible_branch_history_graph(
+fn tier_visible_branch_history_graph(
     source: GraphBuilder,
     fields: Vec<String>,
     tier: DurabilityTier,
@@ -1475,7 +1475,7 @@ pub(super) fn tier_visible_branch_history_graph(
     )
 }
 
-pub(super) fn content_version_current_source_graph(
+fn content_version_current_source_graph(
     table: &TableSchema,
     tier: DurabilityTier,
     include_global_seq: bool,
@@ -1522,10 +1522,7 @@ pub(super) fn content_version_current_source_graph(
     .project(fields)
 }
 
-pub(super) fn deletion_register_current_keys_graph(
-    table: &str,
-    tier: DurabilityTier,
-) -> GraphBuilder {
+fn deletion_register_current_keys_graph(table: &str, tier: DurabilityTier) -> GraphBuilder {
     let key_fields = ["row_uuid", "tx_time", "tx_node_id"];
     if tier == DurabilityTier::Global {
         return GraphBuilder::table(register_global_current_table_name(table)).project(key_fields);
@@ -1564,7 +1561,7 @@ pub(super) fn deletion_register_current_keys_graph(
     .project(key_fields)
 }
 
-pub(super) fn selected_visible_current_primary_key_graph(
+fn selected_visible_current_primary_key_graph(
     table: &TableSchema,
     tier: DurabilityTier,
     prefix: Vec<Value>,
@@ -1717,17 +1714,14 @@ pub(super) fn register_storage_field_names() -> Vec<String> {
     .collect()
 }
 
-pub(super) fn source_resolution_error(
-    request: &SourceRequest,
-    gap: SourceGap,
-) -> SourceResolutionError {
+fn source_resolution_error(request: &SourceRequest, gap: SourceGap) -> SourceResolutionError {
     SourceResolutionError {
         request: Box::new(request.clone()),
         gap,
     }
 }
 
-pub(super) fn source_resolution_error_from_policy_proof(
+fn source_resolution_error_from_policy_proof(
     request: &SourceRequest,
     error: Error,
 ) -> SourceResolutionError {
@@ -1745,7 +1739,7 @@ pub(super) fn source_resolution_error_from_policy_proof(
     }
 }
 
-pub(super) fn policy_proof_cycle_from_capability(message: &str) -> Option<(String, usize)> {
+fn policy_proof_cycle_from_capability(message: &str) -> Option<(String, usize)> {
     let (_, suffix) = message.rsplit_once("PolicyProofCycle { table: \"")?;
     let (table, suffix) = suffix.split_once('"')?;
     let (_, suffix) = suffix.split_once(", depth: ")?;
@@ -1819,7 +1813,7 @@ pub(super) fn trace_capability_compile(
     );
 }
 
-pub(super) fn resolved_current_source_graph<S>(
+fn resolved_current_source_graph<S>(
     node: &mut NodeState<S>,
     table: &TableSchema,
     tier: DurabilityTier,
@@ -2016,7 +2010,7 @@ where
     Ok((graph, descriptor, metadata, routing_fields))
 }
 
-pub(super) fn canonical_current_source_fields(
+fn canonical_current_source_fields(
     table: &TableSchema,
     include_version: bool,
 ) -> Vec<ProjectField> {
@@ -2046,7 +2040,7 @@ pub(super) fn canonical_current_source_fields(
     fields
 }
 
-pub(super) fn source_provenance_field(field: ProvenanceField) -> &'static str {
+fn source_provenance_field(field: ProvenanceField) -> &'static str {
     match field {
         ProvenanceField::CreatedAt => "$createdAt",
         ProvenanceField::CreatedBy => "$createdBy",
@@ -2055,7 +2049,7 @@ pub(super) fn source_provenance_field(field: ProvenanceField) -> &'static str {
     }
 }
 
-pub(super) fn storage_to_canonical_current_source_fields(
+fn storage_to_canonical_current_source_fields(
     table: &TableSchema,
     include_version: bool,
     include_settle_position: bool,
@@ -2138,7 +2132,7 @@ pub(super) fn current_row_descriptor_with_hidden_source_fields(
     RecordDescriptor::new(fields)
 }
 
-pub(super) fn current_row_descriptor_fields(table: &TableSchema) -> Vec<(String, ValueType)> {
+fn current_row_descriptor_fields(table: &TableSchema) -> Vec<(String, ValueType)> {
     std::iter::once(("row_uuid".to_owned(), ValueType::Uuid))
         .chain(table.columns.iter().map(|column| {
             (
@@ -2170,7 +2164,7 @@ where
         self.current_query_access_paths(shape, binding, tier)
     }
 
-    pub(super) fn current_query_access_paths(
+    fn current_query_access_paths(
         &self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -2216,7 +2210,7 @@ where
         Ok(access_paths)
     }
 
-    pub(super) fn add_reachable_access_paths(
+    fn add_reachable_access_paths(
         &self,
         query: &JazzQuery,
         schema_version: SchemaVersionId,
@@ -2258,7 +2252,7 @@ where
         Ok(())
     }
 
-    pub(super) fn add_primary_key_access_path_for_filters(
+    fn add_primary_key_access_path_for_filters(
         &self,
         source: &SourceId,
         table_name: &str,
@@ -2279,7 +2273,7 @@ where
         Ok(())
     }
 
-    pub(super) fn physical_global_current_source_for_index_scan(
+    fn physical_global_current_source_for_index_scan(
         &self,
         table: &TableSchema,
         schema_version: SchemaVersionId,
@@ -2297,7 +2291,7 @@ where
         )
     }
 
-    pub(super) fn physical_global_current_source_for_index_scan_with_output(
+    fn physical_global_current_source_for_index_scan_with_output(
         &self,
         table: &TableSchema,
         schema_version: SchemaVersionId,
@@ -2390,7 +2384,7 @@ pub(super) fn global_current_storage_fields(
     fields
 }
 
-pub(super) fn current_row_descriptor(table: &TableSchema) -> RecordDescriptor {
+fn current_row_descriptor(table: &TableSchema) -> RecordDescriptor {
     RecordDescriptor::new(
         std::iter::once(("row_uuid".to_owned(), ValueType::Uuid))
             .chain(table.columns.iter().map(|column| {
@@ -2417,7 +2411,7 @@ pub(super) fn empty_authorized_row_id_graph() -> GraphBuilder {
     )
 }
 
-pub(super) fn inline_current_record(
+fn inline_current_record(
     table: &TableSchema,
     descriptor: &RecordDescriptor,
     row: &CurrentRow,
@@ -2446,10 +2440,7 @@ pub(super) fn inline_current_record(
     Ok(descriptor.create(&values)?)
 }
 
-pub(super) fn inline_current_graph(
-    table: &TableSchema,
-    rows: Vec<CurrentRow>,
-) -> Result<GraphBuilder, Error> {
+fn inline_current_graph(table: &TableSchema, rows: Vec<CurrentRow>) -> Result<GraphBuilder, Error> {
     let descriptor = current_row_descriptor(table);
     let records = rows
         .iter()
@@ -2458,7 +2449,7 @@ pub(super) fn inline_current_graph(
     Ok(GraphBuilder::inline_records(descriptor, records))
 }
 
-pub(super) fn inline_current_graph_with_source_metadata(
+fn inline_current_graph_with_source_metadata(
     table: &TableSchema,
     rows: Vec<CurrentRow>,
     schema_version_alias: SchemaVersionAlias,
@@ -2540,7 +2531,7 @@ pub(super) fn inline_current_graph_with_source_metadata(
     ))
 }
 
-pub(super) fn inline_current_record_with_source_metadata(
+fn inline_current_record_with_source_metadata(
     table: &TableSchema,
     descriptor: &RecordDescriptor,
     row: &CurrentRow,
@@ -2590,7 +2581,7 @@ pub(super) fn inline_current_record_with_source_metadata(
     Ok(descriptor.create(&values)?)
 }
 
-pub(super) fn inline_include_deleted_current_graph(
+fn inline_include_deleted_current_graph(
     table: &TableSchema,
     rows: Vec<(CurrentRow, bool)>,
 ) -> Result<GraphBuilder, Error> {
@@ -2624,7 +2615,7 @@ pub(super) fn inline_include_deleted_current_graph(
     Ok(GraphBuilder::inline_records(descriptor, records))
 }
 
-pub(super) fn inline_branch_current_graph(
+fn inline_branch_current_graph(
     table: &TableSchema,
     rows: Vec<(CurrentRow, TxTime, NodeAlias, Option<BranchId>)>,
     schema_version_alias: SchemaVersionAlias,
@@ -2870,7 +2861,7 @@ pub(super) fn historical_current_graph_full_scan(
     GraphBuilder::union([content_is_latest, restored_content])
 }
 
-pub(super) fn include_deleted_current_row_descriptor(table: &TableSchema) -> RecordDescriptor {
+fn include_deleted_current_row_descriptor(table: &TableSchema) -> RecordDescriptor {
     RecordDescriptor::new(
         std::iter::once(("row_uuid".to_owned(), ValueType::Uuid))
             .chain(table.columns.iter().map(|column| {
@@ -2891,10 +2882,7 @@ pub(super) fn include_deleted_current_row_descriptor(table: &TableSchema) -> Rec
     )
 }
 
-pub(super) fn include_deleted_current_graph(
-    table: &TableSchema,
-    tier: DurabilityTier,
-) -> GraphBuilder {
+fn include_deleted_current_graph(table: &TableSchema, tier: DurabilityTier) -> GraphBuilder {
     let user_fields = table
         .columns
         .iter()
