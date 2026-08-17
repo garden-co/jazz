@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import {
-  ExclusiveWriteHandle,
   JazzClient,
+  MutationResult,
   resolveDefaultDurabilityTier,
   type Runtime,
   type TransactionalRuntime,
@@ -332,7 +332,12 @@ describe("JazzClient runtime transaction waits", () => {
   it("waits for connected exclusive transactions at the global tier", async () => {
     const runtime = makeFakeRuntime();
     const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
-    const handle = new ExclusiveWriteHandle("transaction-exclusive" as BatchId, client);
+    const handle = new MutationResult(
+      undefined,
+      "transaction-exclusive" as BatchId,
+      client,
+      "exclusive",
+    );
 
     await expect(handle.wait()).resolves.toBeUndefined();
 
@@ -345,7 +350,12 @@ describe("JazzClient runtime transaction waits", () => {
       ...makeContext(),
       serverUrl: undefined,
     });
-    const handle = new ExclusiveWriteHandle("transaction-exclusive" as BatchId, client);
+    const handle = new MutationResult(
+      undefined,
+      "transaction-exclusive" as BatchId,
+      client,
+      "exclusive",
+    );
 
     await expect(handle.wait()).resolves.toBeUndefined();
 

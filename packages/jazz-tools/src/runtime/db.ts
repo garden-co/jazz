@@ -19,12 +19,9 @@ import type {
 } from "../drivers/types.js";
 import type { RuntimeSourcesConfig, Session } from "./context.js";
 import {
-  ExclusiveWriteHandle,
-  ExclusiveWriteResult,
-  WriteResult,
   JazzClient,
+  MutationResult,
   type MutationErrorEvent,
-  WriteHandle,
   type TransactionKind,
   type CreateOptions,
   type RestoreOptions,
@@ -517,16 +514,8 @@ function transformInputColumns(
 
 export type { TransactionKind } from "./client.js";
 
-type TransactionCommitHandle<TKind extends TransactionKind> = TKind extends "exclusive"
-  ? ExclusiveWriteHandle
-  : WriteHandle;
-
-type TransactionWriteResult<TResult, TKind extends TransactionKind> = TKind extends "exclusive"
-  ? ExclusiveWriteResult<TResult>
-  : WriteResult<TResult>;
-
 type RunInTransactionResult<TResult, TKind extends TransactionKind> = Promise<
-  TransactionWriteResult<Awaited<TResult>, TKind>
+  MutationResult<Awaited<TResult>, TKind>
 >;
 
 export type Scoped<TTransaction> = Omit<TTransaction, "commit" | "rollback">;
@@ -556,20 +545,13 @@ function createTransactionScope<TTransaction extends object>(
   }) as Scoped<TTransaction>;
 }
 
-function createTransactionWriteResult<TResult, TKind extends TransactionKind>(
+function createTransactionMutationResult<TResult, TKind extends TransactionKind>(
   transaction: Transaction<TKind>,
   value: TResult,
   batchId: BatchId,
   client: JazzClient,
-): TransactionWriteResult<TResult, TKind> {
-  if (transaction.kind === "exclusive") {
-    return new ExclusiveWriteResult(value, batchId, client) as TransactionWriteResult<
-      TResult,
-      TKind
-    >;
-  }
-
-  return new WriteResult(value, batchId, client) as TransactionWriteResult<TResult, TKind>;
+): MutationResult<TResult, TKind> {
+  return new MutationResult(value, batchId, client, transaction.kind);
 }
 
 export async function runInTransaction<TResult, TKind extends TransactionKind>(
@@ -601,7 +583,7 @@ export async function runInTransaction<TResult, TKind extends TransactionKind>(
     }
     throw error;
   }
-  let committed: TransactionCommitHandle<TKind>;
+  let committed: MutationResult<void, TKind>;
   try {
     committed = await transaction.commit();
   } catch (error) {
@@ -613,7 +595,7 @@ export async function runInTransaction<TResult, TKind extends TransactionKind>(
     }
     throw error;
   }
-  return createTransactionWriteResult(
+  return createTransactionMutationResult(
     transaction,
     resolvedValue,
     await committed.batchId,
@@ -665,16 +647,10 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
   /**
    * Commit this transaction.
    */
-  commit(): Promise<TransactionCommitHandle<TKind>> {
+  commit(): Promise<MutationResult<void, TKind>> {
     const { ownerClient, openBatchId } = this.requireBinding("commit");
     return ownerClient.commitTransaction(openBatchId).then((committed) => {
-      if (this.kind === "exclusive") {
-        return new ExclusiveWriteHandle(
-          committed.batchId,
-          ownerClient,
-        ) as TransactionCommitHandle<TKind>;
-      }
-      return committed as TransactionCommitHandle<TKind>;
+      return new MutationResult(undefined, committed.batchId, ownerClient, this.kind);
     });
   }
 
@@ -1058,13 +1034,26 @@ export class Db {
     await this.connection.ensureReady(tier);
   }
 
-  private wrapWriteWait<THandle extends WriteHandle<unknown>>(handle: THandle): THandle {
-    const wait = handle.wait.bind(handle);
-    handle.wait = (async (options: { tier: DurabilityTier }) => {
+  private wrapWriteWait<T>(result: MutationResult<T>): MutationResult<T> {
+    const wait = result.wait.bind(result);
+    result.wait = async (options: { tier: DurabilityTier }) => {
       await this.ensureReady(options.tier);
       return wait(options);
-    }) as THandle["wait"];
-    return handle;
+    };
+    return result;
+  }
+
+  private transformMutationResult<T, U>(
+    result: MutationResult<T>,
+    value: U,
+    client: JazzClient,
+  ): MutationResult<U> {
+    const transformed = new MutationResult(value, result.batchId, client, "mergeable");
+    transformed.wait = async (options: { tier: DurabilityTier }) => {
+      await result.wait(options);
+      return value;
+    };
+    return transformed;
   }
 
   protected getRuntimeOperationContext(): DbRuntimeOperationContext | null {
@@ -1129,7 +1118,7 @@ export class Db {
 
   /**
    * Attach a fallback listener for write rejections that are not handled by an
-   * active {@link WriteHandle.wait} call.
+   * active {@link MutationResult.wait} call.
    *
    * @returns an unsubscribe callback
    */
@@ -1210,13 +1199,17 @@ export class Db {
   /**
    * Insert a new row into a table without waiting for durability.
    *
-   * Use {@link WriteResult.wait} to wait for durable confirmation.
+   * Use {@link MutationResult.wait} to wait for durable confirmation.
    *
    * @param table Table proxy from generated app module
    * @param data Init object with column values
    * @returns Write result containing the inserted row
    */
-  insert<T, Init>(table: TableProxy<T, Init>, data: Init, options?: CreateOptions): WriteResult<T> {
+  insert<T, Init>(
+    table: TableProxy<T, Init>,
+    data: Init,
+    options?: CreateOptions,
+  ): MutationResult<T> {
     const client = this.getClient(table._schema);
     const transformedData = transformInputColumns(table, data);
     const values = toWriteRecordForOperation(
@@ -1234,8 +1227,10 @@ export class Db {
       context?.attribution,
     );
     return this.wrapWriteWait(
-      inserted.mapValue((row) =>
-        transformOutputRow(table, transformRow(row, table._schema, table._table)),
+      this.transformMutationResult(
+        inserted,
+        transformOutputRow(table, transformRow(inserted.value, table._schema, table._table)),
+        client,
       ),
     );
   }
@@ -1243,14 +1238,14 @@ export class Db {
   /**
    * Restore a soft-deleted row without waiting for durability.
    *
-   * Use {@link WriteResult.wait} to wait for durable confirmation.
+   * Use {@link MutationResult.wait} to wait for durable confirmation.
    */
   restore<T, Init>(
     table: TableProxy<T, Init>,
     id: string,
     data: Init,
     options?: RestoreOptions,
-  ): WriteResult<T> {
+  ): MutationResult<T> {
     const client = this.getClient(table._schema);
     const transformedData = transformInputColumns(table, data);
     const values = toWriteRecordForOperation(
@@ -1269,8 +1264,10 @@ export class Db {
       context?.attribution,
     );
     return this.wrapWriteWait(
-      restored.mapValue((row) =>
-        transformOutputRow(table, transformRow(row, table._schema, table._table)),
+      this.transformMutationResult(
+        restored,
+        transformOutputRow(table, transformRow(restored.value, table._schema, table._table)),
+        client,
       ),
     );
   }
@@ -1278,13 +1275,13 @@ export class Db {
   /**
    * Create or update a row with a caller-supplied id without waiting for durability.
    *
-   * Use {@link WriteHandle.wait} to wait for durable confirmation.
+   * Use {@link MutationResult.wait} to wait for durable confirmation.
    */
   upsert<T, Init>(
     table: TableProxy<T, Init>,
     data: Partial<Init>,
     options: UpsertOptions,
-  ): WriteHandle {
+  ): MutationResult<void> {
     const client = this.getClient(table._schema);
     const transformedData = transformInputColumns(table, data);
     const values = toWriteRecordForOperation(
@@ -1302,14 +1299,14 @@ export class Db {
   /**
    * Update an existing row without waiting for durability.
    *
-   * Use {@link WriteHandle.wait} to wait for durable confirmation.
+   * Use {@link MutationResult.wait} to wait for durable confirmation.
    */
   update<T, Init>(
     table: TableProxy<T, Init>,
     id: string,
     data: Partial<Init>,
     options?: UpdateOptions,
-  ): WriteHandle {
+  ): MutationResult<void> {
     const client = this.getClient(table._schema);
     const transformedData = transformInputColumns(table, data);
     const updates = toWriteRecordForOperation(
@@ -1327,9 +1324,13 @@ export class Db {
   /**
    * Delete a row without waiting for durability.
    *
-   * Use {@link WriteHandle.wait} to wait for durable confirmation.
+   * Use {@link MutationResult.wait} to wait for durable confirmation.
    */
-  delete<T, Init>(table: TableProxy<T, Init>, id: string, options?: DeleteOptions): WriteHandle {
+  delete<T, Init>(
+    table: TableProxy<T, Init>,
+    id: string,
+    options?: DeleteOptions,
+  ): MutationResult<void> {
     const client = this.getClient(table._schema);
     const context = this.getRuntimeOperationContext();
     return this.wrapWriteWait(
@@ -1433,7 +1434,7 @@ export class Db {
    */
   transaction<TResult>(
     callback: (tx: TransactionScope<"mergeable">) => TResult | Promise<TResult>,
-  ): Promise<WriteResult<Awaited<TResult>>> {
+  ): Promise<MutationResult<Awaited<TResult>>> {
     const transaction = this.beginTransaction();
     return runInTransaction(
       transaction,
@@ -1449,7 +1450,7 @@ export class Db {
    */
   exclusiveTransaction<TResult>(
     callback: (tx: TransactionScope<"exclusive">) => TResult | Promise<TResult>,
-  ): Promise<ExclusiveWriteResult<Awaited<TResult>>> {
+  ): Promise<MutationResult<Awaited<TResult>, "exclusive">> {
     const transaction = this.beginExclusiveTransaction();
     return runInTransaction(
       transaction,

@@ -282,21 +282,6 @@ describe("Db transactions", () => {
     }
   });
 
-  it("types exclusive transaction waits without durability options", async () => {
-    if (false) {
-      const result = await db.exclusiveTransaction((tx) => tx.kind);
-      void result.wait();
-      // @ts-expect-error - exclusive transactions are confirmed by the global authority.
-      void result.wait({ tier: "global" });
-
-      const tx = db.beginExclusiveTransaction();
-      const committed = await tx.commit();
-      void committed.wait();
-      // @ts-expect-error - exclusive transactions are confirmed by the global authority.
-      void committed.wait({ tier: "global" });
-    }
-  });
-
   it("commits an empty exclusive batch opened at begin", async () => {
     await allTodos();
     const tx = db.beginExclusiveTransaction();
