@@ -5,11 +5,11 @@ use jazz_testkit as support;
 
 use jazz::protocol_limits::MAX_WIRE_FRAME_BYTES;
 use jazz::row_input;
-use jazz::tools::server::JazzServer;
 use jazz::tools::{
     ColumnType, DurabilityTier, JazzClient, ObjectId, QueryBuilder, Schema, SchemaBuilder,
     TableSchema, Value, WriteContext,
 };
+use jazz_server::JazzServer;
 use support::wait_for_query;
 
 static TEST_USER_COUNTER: AtomicU64 = AtomicU64::new(1);

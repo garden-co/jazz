@@ -86,7 +86,7 @@ enum ServerShellCommand {
 impl ServerRuntimeHandle {
     /// Reopen an already bootstrapped dynamic edge. A blank store returns
     /// `None` so its owner can run the authenticated bootstrap exchange.
-    pub(crate) fn try_start_dynamic_edge_from_storage(
+    pub fn try_start_dynamic_edge_from_storage(
         storage_config: StorageConfig,
         storage_factory: Option<Arc<dyn StorageFactory>>,
         edge_cache_budget: Option<EdgeCacheBudget>,
@@ -147,7 +147,7 @@ impl ServerRuntimeHandle {
     /// Construct a ready edge shell only after an authenticated bootstrap
     /// snapshot has been durably adopted. The owner thread is not published to
     /// downstream routes until this returns successfully.
-    pub(crate) fn start_dynamic_edge_with_catalogue_snapshot(
+    pub fn start_dynamic_edge_with_catalogue_snapshot(
         storage_config: StorageConfig,
         storage_factory: Option<Arc<dyn StorageFactory>>,
         edge_cache_budget: Option<EdgeCacheBudget>,
@@ -205,7 +205,8 @@ impl ServerRuntimeHandle {
         })
     }
 
-    pub(crate) async fn encoded_trusted_catalogue_snapshot(
+    /// Encode the trusted catalogue through the negotiated wire format.
+    pub async fn encoded_trusted_catalogue_snapshot(
         &self,
         protocol_version: u16,
         features: crate::wire::WireFeatures,
@@ -222,7 +223,7 @@ impl ServerRuntimeHandle {
     /// same authenticated snapshot path used at first bootstrap. The snapshot
     /// adoption rebuilds the local physical projection registry before this
     /// call returns, so callers may safely make the edge externally ready.
-    pub(crate) async fn apply_trusted_catalogue_snapshot(
+    pub async fn apply_trusted_catalogue_snapshot(
         &self,
         snapshot: crate::protocol::CatalogueSnapshot,
     ) -> Result<(), String> {
@@ -234,8 +235,9 @@ impl ServerRuntimeHandle {
         .await
     }
 
-    #[cfg(test)]
-    pub(crate) async fn set_catalogue_activation_failpoint(
+    #[cfg(any(test, feature = "test"))]
+    #[doc(hidden)]
+    pub async fn set_catalogue_activation_failpoint(
         &self,
         failpoint: crate::node::CatalogueActivationFailpoint,
     ) -> Result<(), String> {
@@ -246,8 +248,8 @@ impl ServerRuntimeHandle {
         .await
     }
 
-    #[cfg(any(test, feature = "test"))]
-    pub(crate) async fn trusted_catalogue_snapshot_for_test(
+    #[doc(hidden)]
+    pub async fn trusted_catalogue_snapshot_for_test(
         &self,
     ) -> Result<crate::protocol::CatalogueSnapshot, String> {
         self.run(move |shell| {
@@ -257,8 +259,9 @@ impl ServerRuntimeHandle {
         })
         .await
     }
-    #[cfg(test)]
-    pub(crate) async fn runtime_catalogue_contains(
+    #[cfg(any(test, feature = "test"))]
+    #[doc(hidden)]
+    pub async fn runtime_catalogue_contains(
         &self,
         schema: SchemaVersionId,
         lens: crate::ids::MigrationLensId,
@@ -267,7 +270,8 @@ impl ServerRuntimeHandle {
             .await
     }
 
-    pub(crate) fn start_with_storage(
+    /// Start a core runtime over the selected storage configuration.
+    pub fn start_with_storage(
         schema: JazzSchema,
         storage_config: StorageConfig,
         storage_factory: Option<Arc<dyn StorageFactory>>,
@@ -282,7 +286,8 @@ impl ServerRuntimeHandle {
         )
     }
 
-    pub(crate) fn start_with_storage_config(
+    /// Start a runtime with an explicit role and optional Edge cache budget.
+    pub fn start_with_storage_config(
         schema: JazzSchema,
         storage_config: StorageConfig,
         storage_factory: Option<Arc<dyn StorageFactory>>,
@@ -429,7 +434,8 @@ impl ServerRuntimeHandle {
     }
 
     #[allow(dead_code)] // exercised only by the integration-test server feature
-    pub(crate) async fn seed_branch_row_for_test(
+    #[doc(hidden)]
+    pub async fn seed_branch_row_for_test(
         &self,
         branch: BranchId,
         table: String,
@@ -451,7 +457,8 @@ impl ServerRuntimeHandle {
     }
 
     #[allow(dead_code)] // exercised only by the integration-test server feature
-    pub(crate) async fn create_branch_for_test(&self, branch: BranchId) -> Result<(), String> {
+    #[doc(hidden)]
+    pub async fn create_branch_for_test(&self, branch: BranchId) -> Result<(), String> {
         let activity_tx = self.inner.activity_tx.clone();
         let result = self
             .run(move |shell| {

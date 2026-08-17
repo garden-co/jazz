@@ -3,11 +3,11 @@
 use jazz_testkit as support;
 
 use jazz::row_input;
-use jazz::tools::server::JazzServer;
 use jazz::tools::{
     ClientId, ClientStorage, ColumnType, DurabilityTier, QueryBuilder, Schema, SchemaBuilder,
     TableSchema,
 };
+use jazz_server::JazzServer;
 
 use support::{has_row, wait_for_rows};
 

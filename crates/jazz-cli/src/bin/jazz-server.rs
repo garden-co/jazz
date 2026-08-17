@@ -10,9 +10,9 @@ use jazz::serving::{
     DeploymentProfile, DrainState, DryRunReport, HealthStatus, NodeRole, ServerShell,
     StorageConfig, StorageKind,
     auth_admission::{AuthAdmissionConfig, JwtVerifierConfig},
-    loopback_http::load_latest_admin_schema_for_app,
-    loopback_websocket::{LoopbackWebSocketServer, LoopbackWebSocketServerConfig},
 };
+use jazz_server::loopback::http::load_latest_admin_schema_for_app;
+use jazz_server::loopback::websocket::{LoopbackWebSocketServer, LoopbackWebSocketServerConfig};
 
 fn start_loopback_server(
     config: LoopbackWebSocketServerConfig,

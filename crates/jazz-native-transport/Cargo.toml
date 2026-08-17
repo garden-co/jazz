@@ -23,4 +23,5 @@ tempfile = "3.27.0"
 
 [dev-dependencies]
 jazz = { workspace = true, features = ["test"] }
+jazz-server = { path = "../jazz-server", features = ["test"] }
 axum = { version = "0.8.9", default-features = false, features = ["tokio"] }

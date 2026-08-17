@@ -8,11 +8,11 @@ use std::time::Duration;
 
 use uuid::Uuid;
 
-use jazz::tools::server::JazzServer;
 use jazz::tools::{
     AppContext, ColumnType, DurabilityTier, JazzClient, ObjectId, Query, QueryBuilder,
     SchemaBuilder, TableSchema, Value,
 };
+use jazz_server::JazzServer;
 use support::{TestingClient, has_added, wait_for_query, wait_for_subscription_update};
 
 const READY_TIMEOUT: Duration = Duration::from_secs(30);

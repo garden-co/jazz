@@ -1,9 +1,19 @@
-//! Native process shell for serving a Jazz application over HTTP and WebSocket.
-//!
-//! This crate owns listener lifecycle and process-facing observability. The
-//! request router and database runtime remain behind Jazz's existing server
-//! facade until their private state can be replaced by a deliberate core
-//! contract.
+//! Native HTTP/WebSocket server adapter for Jazz's semantic runtime.
+
+pub mod loopback;
+pub mod middleware;
+pub mod server;
+
+pub use middleware::AuthConfig;
+pub use server::{
+    BuiltServer, ServerBuilder, ServerState, ServerTopology, ShutdownController, ShutdownPhase,
+    StorageBackend,
+};
+#[cfg(feature = "embedded-server")]
+pub use server::{
+    JazzServer, JazzServerBuilder, ServerDataDir, TestJwtIssuer, TestJwtOptions,
+    push_catalogue_in_memory,
+};
 
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -11,9 +21,7 @@ use std::time::Duration;
 use axum::serve;
 use jazz::node::EdgeCacheBudget;
 use jazz::tools::AppId;
-use jazz::tools::middleware::AuthConfig;
-use jazz::tools::server::{ServerBuilder, ShutdownController, ShutdownPhase, StorageBackend};
-use jazz_native_transport::NativeWebSocketConnector;
+use jazz::tools::native_transport_connector::NativeTransportConnector;
 use tokio::task::JoinHandle;
 use tracing::info;
 
@@ -31,6 +39,7 @@ pub async fn run(
     edge_cache_budget: Option<EdgeCacheBudget>,
     bound_port_file: Option<String>,
     shutdown_timeout: Duration,
+    native_transport: std::sync::Arc<dyn NativeTransportConnector>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let app_id = AppId::from_string(app_id_str)?;
     let app_id_string = app_id.to_string();
@@ -44,7 +53,7 @@ pub async fn run(
     let builder = ServerBuilder::new(app_id)
         .with_auth_config(auth_config)
         .with_shutdown_timeout(shutdown_timeout)
-        .with_native_transport_connector(std::sync::Arc::new(NativeWebSocketConnector));
+        .with_native_transport_connector(native_transport);
     let builder = match upstream_url {
         Some(url) => builder.with_upstream_url(url),
         None => builder,
@@ -282,7 +291,7 @@ mod tests {
 
     #[test]
     fn semantic_runtime_facade_is_consumable_without_core_state_access() {
-        let _boundary = |runtime: &jazz::tools::server::ServerRuntimeHandle| {
+        let _boundary = |runtime: &jazz::serving::ServerRuntimeHandle| {
             let _activity = runtime.subscribe_activity();
             runtime.notify_activity();
         };

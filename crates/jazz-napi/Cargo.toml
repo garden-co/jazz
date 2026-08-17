@@ -11,7 +11,8 @@ rocksdb = ["dep:jazz-storage-rocksdb"]
 crate-type = ["cdylib"]
 
 [dependencies]
-jazz = { path = "../jazz", default-features = false, features = ["embedded-server"] }
+jazz = { path = "../jazz", default-features = false, features = ["client", "test-utils"] }
+jazz-server = { path = "../jazz-server", features = ["embedded-server"] }
 jazz-native-transport = { path = "../jazz-native-transport" }
 jazz-storage-rocksdb = { workspace = true, optional = true }
 jazz-otel.workspace = true

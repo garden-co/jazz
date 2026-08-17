@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use crate::tools::object::ObjectId;
-use crate::tools::public_api::types::{ColumnDescriptor, ColumnType, RowDescriptor, Value};
+use crate::tools::ObjectId;
+use crate::tools::public_schema::{ColumnDescriptor, ColumnType, RowDescriptor, Value};
 use uuid::Uuid;
 
 /// Maximum payload size allowed for a single BYTEA value (1 MiB).
@@ -1201,7 +1201,7 @@ cfg_decode! {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tools::public_api::types::EnumCaseDescriptor;
+    use crate::tools::public_schema::EnumCaseDescriptor;
     use uuid::Uuid;
 
     fn test_descriptor() -> RowDescriptor {

@@ -5,11 +5,11 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use jazz::row_input;
-use jazz::tools::server::JazzServer;
 use jazz::tools::{
     ColumnType, DurabilityTier, JazzClient, QueryBuilder, SchemaBuilder, TableSchema, Value,
 };
 use jazz::tools::{ObjectId, SubscriptionStream, SubscriptionStreamItem};
+use jazz_server::JazzServer;
 use support::{publish_allow_all_permissions, wait_for_query};
 use uuid::Uuid;
 

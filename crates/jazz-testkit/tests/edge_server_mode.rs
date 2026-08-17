@@ -10,11 +10,11 @@ use jazz::tools::public_schema::{
     RelColumnRef, RelExpr, RelJoinCondition, RelJoinKind, RelKeyRef, RelPredicateCmpOp,
     RelPredicateExpr, RelRecursionBound, RelValueRef, RowIdRef, TablePolicies,
 };
-use jazz::tools::server::JazzServer;
 use jazz::tools::{
     AppId, ColumnType, DurabilityTier, JazzClient, ObjectId, PolicyExpr, QueryBuilder, Schema,
     SchemaBuilder, SubscriptionStreamItem, TableSchema, Value,
 };
+use jazz_server::JazzServer;
 use serde_json::json;
 use support::{
     TestingClient, has_added, has_removed, publish_permissions, wait_for_edge_query_ready,

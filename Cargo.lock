@@ -1874,7 +1874,6 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 name = "jazz"
 version = "0.1.0"
 dependencies = [
- "axum",
  "base64 0.22.1",
  "blake3",
  "criterion",
@@ -1907,11 +1906,8 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
- "tokio-tungstenite",
  "tower",
- "tower-http",
  "tracing",
- "tungstenite",
  "uuid",
  "web-time",
 ]
@@ -1967,6 +1963,7 @@ dependencies = [
  "jazz",
  "jazz-native-transport",
  "jazz-otel",
+ "jazz-server",
  "jazz-storage-rocksdb",
  "mimalloc-safe",
  "napi",
@@ -1989,6 +1986,7 @@ dependencies = [
  "hex",
  "jazz",
  "jazz-benchmark-guard",
+ "jazz-server",
  "jazz-storage-rocksdb",
  "postcard",
  "reqwest",
@@ -2004,6 +2002,7 @@ name = "jazz-otel"
 version = "0.1.0"
 dependencies = [
  "jazz",
+ "jazz-server",
  "jazz-testkit",
  "jsonwebtoken",
  "opentelemetry",
@@ -2026,13 +2025,30 @@ name = "jazz-server"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "base64 0.22.1",
+ "futures",
+ "futures-util",
+ "groove",
+ "hex",
+ "http",
  "jazz",
- "jazz-native-transport",
  "jazz-otel",
  "jazz-storage-rocksdb",
+ "jsonwebtoken",
  "opentelemetry",
+ "postcard",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
  "tokio",
+ "tokio-tungstenite",
+ "tower",
+ "tower-http",
  "tracing",
+ "tungstenite",
+ "uuid",
 ]
 
 [[package]]
@@ -2080,6 +2096,7 @@ dependencies = [
  "groove",
  "jazz",
  "jazz-native-transport",
+ "jazz-server",
  "jazz-storage-rocksdb",
  "jsonwebtoken",
  "reqwest",

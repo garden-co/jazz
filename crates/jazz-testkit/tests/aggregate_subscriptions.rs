@@ -5,12 +5,12 @@ use std::time::{Duration, Instant};
 use jazz::groove::records::{BorrowedRecord, RecordDescriptor, Value as GrooveValue, ValueType};
 use jazz::row_input;
 use jazz::tools::public_schema::AggregateFunction;
-use jazz::tools::server::JazzServer;
 use jazz::tools::{
     ColumnMergeStrategy, ColumnType, DurabilityTier, JazzClient, PolicyExpr, QueryBuilder, Row,
     RowDescriptor, Schema, SchemaBuilder, SubscriptionStream, SubscriptionStreamItem, TableName,
     TablePolicies, TableSchema, Value,
 };
+use jazz_server::JazzServer;
 use support::{TestingClient, wait_for_query};
 use uuid::Uuid;
 

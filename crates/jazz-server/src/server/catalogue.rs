@@ -4,21 +4,21 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use uuid::Uuid;
 
-use crate::tools::AppId;
-use crate::tools::admin_catalogue_payload_codec::{
+use crate::server::catalogue_entry::CatalogueEntry;
+use crate::server::catalogue_payload_codec::{
     decode_lens_transform, decode_permissions_bundle, decode_permissions_head, decode_schema,
     encode_lens_transform, encode_permissions_bundle, encode_permissions_head, encode_schema,
 };
-use crate::tools::metadata::{MetadataKey, ObjectType};
-use crate::tools::object::ObjectId;
-use crate::tools::public_api::types::{Schema, SchemaHash, TableName, TablePolicies};
-use crate::tools::schema_lens::Lens;
-use crate::tools::server::catalogue_entry::CatalogueEntry;
-use crate::tools::server::catalogue_storage::{
+use crate::server::catalogue_storage::{
     CatalogueStorage, CatalogueStorageError, DynCatalogueStorage,
 };
+use jazz::tools::AppId;
+use jazz::tools::ObjectId;
+use jazz::tools::metadata::{MetadataKey, ObjectType};
+use jazz::tools::public_schema::{Schema, SchemaHash, TableName, TablePolicies};
+use jazz::tools::schema_lens::Lens;
 #[cfg(test)]
-use crate::tools::sync::DurabilityTier;
+use jazz::tools::sync::DurabilityTier;
 
 #[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

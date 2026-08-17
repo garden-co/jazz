@@ -1,8 +1,8 @@
 //! Public-API coverage that a connected persistent client releases its local
 //! storage when it shuts down.
 
-use jazz::tools::server::JazzServer;
 use jazz::tools::{ClientStorage, ColumnType, SchemaBuilder, TableSchema};
+use jazz_server::JazzServer;
 use tempfile::TempDir;
 
 fn test_schema() -> jazz::tools::Schema {

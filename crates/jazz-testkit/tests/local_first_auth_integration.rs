@@ -12,12 +12,12 @@ use jazz_testkit as support;
 use std::collections::HashMap;
 use std::time::Duration;
 
-use jazz::tools::middleware::auth::TestClock;
-use jazz::tools::server::JazzServer;
 use jazz::tools::{
     AppContext, ClientId, ClientStorage, ColumnType, QueryBuilder, Schema, SchemaBuilder, Session,
     TableSchema, Value, identity,
 };
+use jazz_server::JazzServer;
+use jazz_server::middleware::auth::TestClock;
 
 use support::{has_row, wait_for_rows};
 

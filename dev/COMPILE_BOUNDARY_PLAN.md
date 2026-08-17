@@ -240,8 +240,13 @@ Separate Axum/server, native client networking, and CLI dependencies. Remove the
 Progress: executable binaries now live in `jazz-cli`, native client networking
 no longer selects the server module, and `jazz` is featureless by default.
 Actual shells select storage, compression, client, and server capabilities
-explicitly; the remaining work is extracting the Axum/server implementation
-without widening its private state into a public compatibility API.
+explicitly. The Axum routes, WebSocket serving, external JWT/JWK verification,
+catalogue HTTP orchestration, server state/builder, embedded server harness,
+and legacy loopback listeners now live in `jazz-server`. Jazz exposes an opaque
+semantic runtime handle plus schema-conversion vocabulary; it no longer has
+normal dependencies on Axum, reqwest, tower-http, or tungstenite. The final
+lane step is collapsing the temporary semantic `client`/`server` feature
+selection left inside Jazz.
 
 Groove is also featureless by default. Canonical tests and native Jazz shells
 select its existing RocksDB adapter explicitly, so checking the semantic

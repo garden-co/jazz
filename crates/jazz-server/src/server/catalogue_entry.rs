@@ -2,12 +2,11 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::tools::metadata::MetadataKey;
-use crate::tools::object::ObjectId;
-use crate::tools::{
-    admin_catalogue_row_format::{decode_row, encode_row},
-    public_api::types::{ColumnDescriptor, ColumnType, RowDescriptor, Value},
-};
+use jazz::tools::ObjectId;
+use jazz::tools::metadata::MetadataKey;
+use jazz::tools::public_schema::{ColumnDescriptor, ColumnType, RowDescriptor, Value};
+
+use jazz::tools::admin_catalogue_row_format::{decode_row, encode_row};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CatalogueEntry {

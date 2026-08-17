@@ -19,8 +19,8 @@ use jazz::schema::{JazzSchema, Policy, TableSchema, WritePolicies};
 use jazz::tools::SchemaBuilder;
 use jazz::tools::public_schema::SchemaHash;
 use jazz::tools::schema_lens::{Lens, LensTransform};
-use jazz::tools::server::JazzServer;
 use jazz::tx::{DurabilityTier, Fate, RejectionReason};
+use jazz_server::JazzServer;
 use support::{publish_allow_all_permissions, push_catalogue_in_memory, wait_for_edge_query_ready};
 
 fn author(byte: u8) -> AuthorId {

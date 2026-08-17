@@ -15,10 +15,10 @@ use jazz::tools::public_schema::PolicyExpr;
 use jazz::tools::public_schema::SchemaHash;
 use jazz::tools::public_schema::TablePolicies;
 use jazz::tools::schema_lens::{Lens, LensOp, LensTransform};
-use jazz::tools::server::JazzServer;
 use jazz::tools::{
     ColumnType, DurabilityTier, JazzClient, QueryBuilder, SchemaBuilder, TableSchema, Value,
 };
+use jazz_server::JazzServer;
 use reqwest::StatusCode;
 use serde::Deserialize;
 use serde_json::json;

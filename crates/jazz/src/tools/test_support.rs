@@ -1,18 +1,13 @@
 #[cfg(feature = "test-utils")]
 use std::time::Duration;
 
-#[cfg(feature = "test-utils")]
-use crate::tools::AppId;
 use crate::tools::object::ObjectId;
 #[cfg(feature = "test-utils")]
 use crate::tools::public_api::query::Query;
 #[cfg(feature = "test-utils")]
 use crate::tools::public_api::types::Value;
-use crate::tools::schema_lens::Lens;
 #[cfg(feature = "test-utils")]
-use crate::tools::server::ServerState;
-#[cfg(feature = "test-utils")]
-use crate::tools::{DurabilityTier, JazzClient, Schema};
+use crate::tools::{DurabilityTier, JazzClient};
 
 #[cfg(feature = "test-utils")]
 pub type QueryRows = Vec<(ObjectId, Vec<Value>)>;
@@ -159,46 +154,4 @@ where
         }
         tokio::time::sleep(DEFAULT_POLL_INTERVAL).await;
     }
-}
-
-/// Publishes schemas and lenses directly into an in-process test server's
-/// catalogue store.
-///
-/// This helper is intentionally scoped to `test-utils`: integration tests need
-/// to seed catalogue state before exercising public client behavior, but the
-/// catalogue storage itself remains a server-internal implementation detail.
-#[cfg(feature = "test-utils")]
-pub async fn push_catalogue_in_memory(
-    state: std::sync::Arc<ServerState>,
-    app_id: AppId,
-    env: &str,
-    user_branch: &str,
-    schemas: &[Schema],
-    lenses: &[Lens],
-) -> Result<(), Box<dyn std::error::Error>> {
-    for schema in schemas {
-        state
-            .catalogue
-            .publish_schema(&state.catalogue_store, schema.clone())
-            .map_err(|error| format!("publish schema to server catalogue: {error}"))?;
-    }
-
-    for lens in lenses {
-        state
-            .catalogue
-            .publish_lens(&state.catalogue_store, lens)
-            .map_err(|error| format!("publish lens to server catalogue: {error}"))?;
-    }
-
-    let _ = (app_id, env, user_branch);
-    crate::tools::server::runtime_catalogue::publish_runtime_catalogue(&state, schemas, lenses)
-        .await
-        .map_err(|error| format!("bridge catalogue into server runtime: {error}"))?;
-
-    state
-        .catalogue
-        .flush(&state.catalogue_store)
-        .map_err(|error| format!("flush server catalogue: {error}"))?;
-
-    Ok(())
 }

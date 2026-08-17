@@ -2,11 +2,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use jazz::row_input;
-use jazz::tools::server::JazzServer;
 use jazz::tools::{
     ColumnType, DurabilityTier, QueryBuilder, ResultKey, Schema, SchemaBuilder,
     SubscriptionStreamItem, TableSchema, Value,
 };
+use jazz_server::JazzServer;
 
 fn hydration_schema() -> Schema {
     SchemaBuilder::new()

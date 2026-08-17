@@ -5,11 +5,11 @@ use std::time::Duration;
 
 use jazz::row_input;
 use jazz::tools::public_schema::{PolicyExpr, TablePolicies};
-use jazz::tools::server::JazzServer;
 use jazz::tools::{
     ColumnDescriptor, ColumnType, DurabilityTier, ObjectId, QueryBuilder, RowDescriptor, Session,
     TableName, TableSchema, Value,
 };
+use jazz_server::JazzServer;
 use support::{
     publish_permissions, push_catalogue_in_memory, wait_for_edge_query_ready, wait_for_query,
 };

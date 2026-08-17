@@ -32,12 +32,10 @@ use crate::protocol::{
 use crate::schema::JazzSchema;
 use crate::wire::{TransportError, WireTransport};
 
-mod admin_schema_convert;
 pub mod auth_admission;
-#[cfg(feature = "server")]
-pub mod loopback_http;
-#[cfg(feature = "server")]
-pub mod loopback_websocket;
+mod server_runtime;
+
+pub use server_runtime::{ServerRuntimeActivity, ServerRuntimeFrameStream, ServerRuntimeHandle};
 
 /// Result type returned by server shell helpers.
 pub type Result<T> = std::result::Result<T, ConfigError>;
@@ -364,7 +362,7 @@ impl ShellDb {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test"))]
     fn set_catalogue_activation_failpoint(
         &self,
         failpoint: crate::node::CatalogueActivationFailpoint,
@@ -797,7 +795,7 @@ impl InMemoryServerShell {
         self.db.apply_trusted_catalogue_snapshot(snapshot)
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test"))]
     pub(crate) fn set_catalogue_activation_failpoint(
         &self,
         failpoint: crate::node::CatalogueActivationFailpoint,
@@ -844,7 +842,7 @@ impl InMemoryServerShell {
         self.runtime_schema_state.current_write_revision
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test"))]
     pub(crate) fn runtime_catalogue_contains(
         &self,
         schema: SchemaVersionId,

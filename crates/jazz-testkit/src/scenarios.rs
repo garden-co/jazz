@@ -3,12 +3,12 @@
 use std::future::Future;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use jazz::tools::server::JazzServer;
 use jazz::tools::sync::ClientId;
 use jazz::tools::{
     AppContext, ClientStorage, DurabilityTier, JazzClient, ObjectId, OrderedRowDelta, Query,
     QueryBuilder, Schema, SubscriptionStream, SubscriptionStreamItem, Value,
 };
+use jazz_server::JazzServer;
 use jsonwebtoken::{EncodingKey, Header, encode};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
@@ -23,9 +23,9 @@ const TEST_JWT_SECRET: &str = "test-jwt-secret-for-integration";
 const TEST_JWT_KID: &str = "test-jwks-kid";
 
 #[allow(unused_imports)]
-pub use jazz::tools::test_support::{
-    QueryRows, push_catalogue_in_memory, wait_for_query, wait_for_query_results,
-};
+pub use jazz::tools::test_support::{QueryRows, wait_for_query, wait_for_query_results};
+#[allow(unused_imports)]
+pub use jazz_server::push_catalogue_in_memory;
 
 #[allow(unused_imports)]
 pub use crate::permissions::{

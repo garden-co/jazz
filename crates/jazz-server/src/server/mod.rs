@@ -2,17 +2,17 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock as StdRwLock};
 use std::thread;
 
-use crate::serving::StorageConfig;
-use crate::tools::AppId;
-use crate::tools::middleware::AuthConfig;
-use crate::tools::middleware::auth::JwtVerifier;
+use crate::middleware::AuthConfig;
+use crate::middleware::auth::JwtVerifier;
+use jazz::serving::StorageConfig;
+use jazz::tools::AppId;
 
 mod builder;
 mod catalogue;
 mod catalogue_entry;
+mod catalogue_payload_codec;
 mod catalogue_storage;
-mod core_server_shell;
-pub use core_server_shell::{ServerRuntimeActivity, ServerRuntimeFrameStream, ServerRuntimeHandle};
+pub use jazz::serving::{ServerRuntimeActivity, ServerRuntimeFrameStream, ServerRuntimeHandle};
 pub mod routes;
 pub(crate) mod runtime_catalogue;
 mod shutdown;
@@ -29,6 +29,38 @@ pub(crate) use catalogue_storage::{
 pub use shutdown::{ShutdownController, ShutdownPhase};
 #[cfg(feature = "embedded-server")]
 pub use testing::{JazzServer, JazzServerBuilder, ServerDataDir, TestJwtIssuer, TestJwtOptions};
+
+/// Publish catalogue inputs directly into an in-process test server.
+#[cfg(feature = "embedded-server")]
+pub async fn push_catalogue_in_memory(
+    state: Arc<ServerState>,
+    _app_id: AppId,
+    _env: &str,
+    _user_branch: &str,
+    schemas: &[jazz::tools::Schema],
+    lenses: &[jazz::tools::Lens],
+) -> Result<(), Box<dyn std::error::Error>> {
+    for schema in schemas {
+        state
+            .catalogue
+            .publish_schema(&state.catalogue_store, schema.clone())
+            .map_err(|error| format!("publish schema to server catalogue: {error}"))?;
+    }
+    for lens in lenses {
+        state
+            .catalogue
+            .publish_lens(&state.catalogue_store, lens)
+            .map_err(|error| format!("publish lens to server catalogue: {error}"))?;
+    }
+    runtime_catalogue::publish_runtime_catalogue(&state, schemas, lenses)
+        .await
+        .map_err(|error| format!("bridge catalogue into server runtime: {error}"))?;
+    state
+        .catalogue
+        .flush(&state.catalogue_store)
+        .map_err(|error| format!("flush server catalogue: {error}"))?;
+    Ok(())
+}
 
 /// Cap on concurrent connections sharing a single `client_id`. When a new
 /// connection would exceed this cap, the oldest connection(s) for the same
@@ -72,9 +104,9 @@ pub struct ServerState {
     /// Configured verifier for external JWTs.
     pub jwt_verifier: Option<Arc<JwtVerifier>>,
     /// Sendable handle to the local-owner server shell for the websocket route.
-    pub(crate) core_server_shell: StdRwLock<Option<core_server_shell::ServerRuntimeHandle>>,
+    pub(crate) core_server_shell: StdRwLock<Option<ServerRuntimeHandle>>,
     pub(crate) core_server_shell_storage_config: Option<StorageConfig>,
-    pub(crate) storage_factory: Option<Arc<dyn crate::groove::storage::StorageFactory>>,
+    pub(crate) storage_factory: Option<Arc<dyn jazz::groove::storage::StorageFactory>>,
     /// Whether the current Edge shell generation has a fully installed,
     /// validated catalogue and local projection registry. A durable Ready
     /// generation remains usable offline; blank and refreshing generations do
@@ -159,8 +191,8 @@ impl ServerState {
     #[doc(hidden)]
     pub fn start_dynamic_edge_shell_for_test(
         &self,
-        snapshot: crate::protocol::CatalogueSnapshot,
-        edge_cache_budget: Option<crate::node::EdgeCacheBudget>,
+        snapshot: jazz::protocol::CatalogueSnapshot,
+        edge_cache_budget: Option<jazz::node::EdgeCacheBudget>,
     ) -> Result<(), String> {
         self.start_dynamic_edge_shell(snapshot, edge_cache_budget)
             .map(|_| ())
@@ -171,7 +203,7 @@ impl ServerState {
     #[doc(hidden)]
     pub async fn trusted_catalogue_snapshot_for_test(
         &self,
-    ) -> Result<crate::protocol::CatalogueSnapshot, String> {
+    ) -> Result<jazz::protocol::CatalogueSnapshot, String> {
         self.runtime()
             .ok_or_else(|| "server has no runtime shell".to_owned())?
             .trusted_catalogue_snapshot_for_test()
@@ -214,8 +246,8 @@ impl ServerState {
 
     pub(crate) async fn refresh_dynamic_edge_catalogue(
         &self,
-        shell: &core_server_shell::ServerRuntimeHandle,
-        snapshot: crate::protocol::CatalogueSnapshot,
+        shell: &ServerRuntimeHandle,
+        snapshot: jazz::protocol::CatalogueSnapshot,
     ) -> Result<(), String> {
         self.mark_dynamic_edge_catalogue_refreshing();
         shell.apply_trusted_catalogue_snapshot(snapshot).await?;
@@ -229,8 +261,8 @@ impl ServerState {
 
     pub(crate) fn start_core_server_shell(
         &self,
-        schema: crate::schema::JazzSchema,
-    ) -> Result<core_server_shell::ServerRuntimeHandle, String> {
+        schema: jazz::schema::JazzSchema,
+    ) -> Result<ServerRuntimeHandle, String> {
         if let Some(core_server_shell) = self.runtime() {
             return Ok(core_server_shell);
         }
@@ -243,7 +275,7 @@ impl ServerState {
         if let Some(existing) = core_server_shell.clone() {
             return Ok(existing);
         }
-        let started = core_server_shell::ServerRuntimeHandle::start_with_storage(
+        let started = ServerRuntimeHandle::start_with_storage(
             schema,
             storage_config,
             self.storage_factory.clone(),
@@ -258,9 +290,9 @@ impl ServerState {
     /// (retry later) or the fully adopted ready shell, never a half-ready one.
     pub(crate) fn start_dynamic_edge_shell(
         &self,
-        snapshot: crate::protocol::CatalogueSnapshot,
-        edge_cache_budget: Option<crate::node::EdgeCacheBudget>,
-    ) -> Result<core_server_shell::ServerRuntimeHandle, String> {
+        snapshot: jazz::protocol::CatalogueSnapshot,
+        edge_cache_budget: Option<jazz::node::EdgeCacheBudget>,
+    ) -> Result<ServerRuntimeHandle, String> {
         if self.topology != ServerTopology::Edge {
             return Err("dynamic catalogue bootstrap is only valid for edge topology".to_owned());
         }
@@ -272,13 +304,12 @@ impl ServerState {
         if let Some(existing) = core_server_shell.clone() {
             return Ok(existing);
         }
-        let started =
-            core_server_shell::ServerRuntimeHandle::start_dynamic_edge_with_catalogue_snapshot(
-                storage_config,
-                self.storage_factory.clone(),
-                edge_cache_budget,
-                snapshot,
-            )?;
+        let started = ServerRuntimeHandle::start_dynamic_edge_with_catalogue_snapshot(
+            storage_config,
+            self.storage_factory.clone(),
+            edge_cache_budget,
+            snapshot,
+        )?;
         self.dynamic_edge_catalogue_ready
             .store(false, Ordering::Release);
         *core_server_shell = Some(started.clone());
@@ -402,11 +433,11 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::tools::AppId;
-    use crate::tools::middleware::AuthConfig;
-    use crate::tools::public_api::types::{ColumnType, Schema, SchemaBuilder, TableSchema};
-    use crate::tools::server::builder::{ServerBuilder, StorageBackend};
-    use crate::tools::server::catalogue_storage::CatalogueStorageResult;
+    use crate::middleware::AuthConfig;
+    use crate::server::builder::{ServerBuilder, StorageBackend};
+    use crate::server::catalogue_storage::CatalogueStorageResult;
+    use jazz::tools::AppId;
+    use jazz::tools::public_schema::{ColumnType, Schema, SchemaBuilder, TableSchema};
 
     struct CloseObservingStorage {
         close_calls: Arc<AtomicUsize>,
@@ -417,14 +448,13 @@ mod tests {
     impl CatalogueStorage for CloseObservingStorage {
         fn scan_catalogue_entries(
             &self,
-        ) -> CatalogueStorageResult<Vec<crate::tools::server::catalogue_entry::CatalogueEntry>>
-        {
+        ) -> CatalogueStorageResult<Vec<crate::server::catalogue_entry::CatalogueEntry>> {
             Ok(Vec::new())
         }
 
         fn upsert_catalogue_entry(
             &mut self,
-            _entry: &crate::tools::server::catalogue_entry::CatalogueEntry,
+            _entry: &crate::server::catalogue_entry::CatalogueEntry,
         ) -> CatalogueStorageResult<()> {
             Ok(())
         }
@@ -446,14 +476,13 @@ mod tests {
     impl CatalogueStorage for PanicFlushStorage {
         fn scan_catalogue_entries(
             &self,
-        ) -> CatalogueStorageResult<Vec<crate::tools::server::catalogue_entry::CatalogueEntry>>
-        {
+        ) -> CatalogueStorageResult<Vec<crate::server::catalogue_entry::CatalogueEntry>> {
             Ok(Vec::new())
         }
 
         fn upsert_catalogue_entry(
             &mut self,
-            _entry: &crate::tools::server::catalogue_entry::CatalogueEntry,
+            _entry: &crate::server::catalogue_entry::CatalogueEntry,
         ) -> CatalogueStorageResult<()> {
             Ok(())
         }

@@ -170,7 +170,7 @@ where
             .apply_trusted_catalogue_snapshot(snapshot)?)
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test"))]
     pub(crate) fn set_catalogue_activation_failpoint(
         &self,
         failpoint: crate::node::CatalogueActivationFailpoint,

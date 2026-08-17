@@ -1,9 +1,9 @@
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 
-use crate::groove::storage::{BoxedStorage, OrderedKvStorage};
-use crate::tools::object::ObjectId;
-use crate::tools::server::catalogue_entry::CatalogueEntry;
+use crate::server::catalogue_entry::CatalogueEntry;
+use jazz::groove::storage::{BoxedStorage, OrderedKvStorage};
+use jazz::tools::ObjectId;
 
 pub(crate) type DynCatalogueStorage = Box<dyn CatalogueStorage + Send>;
 pub(crate) type CatalogueStorageResult<T> = Result<T, CatalogueStorageError>;
@@ -116,20 +116,20 @@ impl CatalogueStorage for CatalogueKvStorage {
                             return Ok(());
                         };
                         let uuid = uuid::Uuid::parse_str(std::str::from_utf8(hex_id).map_err(
-                            |error| crate::groove::storage::Error::Backend {
+                            |error| jazz::groove::storage::Error::Backend {
                                 backend: "catalogue",
                                 message: format!("catalogue key utf8: {error}"),
                             },
                         )?)
                         .map_err(|error| {
-                            crate::groove::storage::Error::Backend {
+                            jazz::groove::storage::Error::Backend {
                                 backend: "catalogue",
                                 message: format!("catalogue key uuid: {error}"),
                             }
                         })?;
                         let object_id = ObjectId::from_uuid(uuid);
                         let entry = CatalogueEntry::decode_storage_row(object_id, value).map_err(
-                            |error| crate::groove::storage::Error::Backend {
+                            |error| jazz::groove::storage::Error::Backend {
                                 backend: "catalogue",
                                 message: format!("decode catalogue entry: {error}"),
                             },
@@ -183,14 +183,14 @@ impl CatalogueStorage for CatalogueKvStorage {
     }
 }
 
-fn storage_error(error: crate::groove::storage::Error) -> CatalogueStorageError {
+fn storage_error(error: jazz::groove::storage::Error) -> CatalogueStorageError {
     CatalogueStorageError::IoError(error.to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::groove::storage::{OrderedKvStorage, StorageFactory};
+    use jazz::groove::storage::{OrderedKvStorage, StorageFactory};
 
     #[test]
     fn adapter_catalogue_reads_the_pre_extraction_default_cf_layout() {

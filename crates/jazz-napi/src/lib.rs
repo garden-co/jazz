@@ -67,16 +67,16 @@ use jazz::query::{
 use jazz::schema::JazzSchema;
 use jazz::tools::OpenBatchId as CoreOpenBatchId;
 use jazz::tools::identity;
-use jazz::tools::middleware::AuthConfig;
-use jazz::tools::server::{
-    JazzServer as CoreJazzServer, ServerBuilder, ServerDataDir, StorageBackend,
-    TestJwtIssuer as JazzTestJwtIssuer, TestJwtOptions,
-};
 use jazz::tools::{AppId, BatchId};
 use jazz::tx::{DurabilityTier as CoreDurabilityTier, TxId};
 use jazz::wire::{
     TransportError, WireAuthorityEndpoint as CoreWireAuthorityEndpoint,
     WireTransport as CoreWireTransport,
+};
+use jazz_server::AuthConfig;
+use jazz_server::{
+    JazzServer as CoreJazzServer, ServerBuilder, ServerDataDir, StorageBackend,
+    TestJwtIssuer as JazzTestJwtIssuer, TestJwtOptions,
 };
 use jazz_storage_rocksdb::RocksDbStorage as CoreRocksDbStorage;
 

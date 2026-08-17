@@ -7,11 +7,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use jazz::tools::AppId;
-use jazz::tools::middleware::AuthConfig;
-use jazz::tools::server::{BuiltServer, ServerBuilder, ServerState, StorageBackend};
 use jazz::tools::{AppContext, ClientStorage, JazzClient};
 use jazz::wire::WireTransport as _;
 use jazz_native_transport::{NativeWebSocketConnector, WebSocketClientError, WebSocketTransport};
+use jazz_server::{AuthConfig, BuiltServer, ServerBuilder, ServerState, StorageBackend};
 
 async fn serve(builder: ServerBuilder) -> (String, tokio::task::JoinHandle<()>) {
     let built = builder

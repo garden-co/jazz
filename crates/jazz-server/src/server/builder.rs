@@ -3,30 +3,30 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
-use crate::db::WireTransportAdapter;
-use crate::groove::storage::StorageFactory;
-use crate::ids::AuthorId;
-use crate::node::EdgeCacheBudget;
-use crate::schema::JazzSchema;
-use crate::serving::{NodeRole, StorageConfig};
 use axum::Router;
+use jazz::db::WireTransportAdapter;
+use jazz::groove::storage::StorageFactory;
+use jazz::ids::AuthorId;
+use jazz::node::EdgeCacheBudget;
+use jazz::schema::JazzSchema;
+use jazz::serving::{NodeRole, StorageConfig};
 use tracing::info;
 
-use crate::tools::AppId;
-use crate::tools::middleware::AuthConfig;
-use crate::tools::middleware::auth::{
+use crate::middleware::AuthConfig;
+use crate::middleware::auth::{
     JWKS_CACHE_TTL, JWKS_MAX_STALE, JwksCache, JwtVerifier, StaticJwtVerifier,
 };
-use crate::tools::native_transport_connector::{NativeTransportConnector, NativeTransportRequest};
-#[allow(deprecated)]
-use crate::tools::public_schema::Schema;
-use crate::tools::server::routes;
-use crate::tools::server::{
+use crate::server::routes;
+use crate::server::{
     CatalogueKvStorage, CatalogueMemoryStorage, DynCatalogueStorage, ServerState, ServerTopology,
     StoredCatalogue,
 };
+use jazz::tools::AppId;
+use jazz::tools::native_transport_connector::{NativeTransportConnector, NativeTransportRequest};
+#[allow(deprecated)]
+use jazz::tools::public_schema::Schema;
 #[cfg(test)]
-use crate::tools::sync::DurabilityTier;
+use jazz::tools::sync::DurabilityTier;
 
 const CATALOGUE_ROCKSDB_DIR: &str = "catalogue.rocksdb";
 const SERVER_SHELL_ROCKSDB_DIR: &str = "server-shell.rocksdb";
@@ -49,7 +49,7 @@ impl BuiltServer {
     /// may await this method from any async executor. The operation is
     /// idempotent: subsequent calls return the terminal shutdown phase
     /// recorded by the state.
-    pub async fn shutdown(&self) -> crate::tools::server::ShutdownPhase {
+    pub async fn shutdown(&self) -> crate::server::ShutdownPhase {
         self.state.shutdown.request_shutdown();
         self.state.run_shutdown_finalization().await
     }
@@ -220,7 +220,7 @@ impl ServerBuilder {
 
         let state = Arc::new(ServerState {
             catalogue_store,
-            catalogue: crate::tools::server::ServerCatalogue,
+            catalogue: crate::server::ServerCatalogue,
             app_id: self.app_id,
             auth_config,
             upstream_http_url,
@@ -234,7 +234,7 @@ impl ServerBuilder {
             // offline. Blank edges have no such generation and stay behind
             // RetryLater until authenticated bootstrap completes.
             dynamic_edge_catalogue_ready: AtomicBool::new(dynamic_edge_catalogue_ready),
-            shutdown: crate::tools::server::ShutdownController::new(self.shutdown_timeout),
+            shutdown: crate::server::ShutdownController::new(self.shutdown_timeout),
         });
 
         if let (ServerTopology::Edge, Some(upstream_url), Some(admin_secret), Some(connector)) = (
@@ -293,7 +293,7 @@ impl ServerBuilder {
         latest_catalogue_schema: Option<Schema>,
         storage_config: Result<StorageConfig, String>,
         topology: ServerTopology,
-    ) -> Result<Option<crate::tools::server::core_server_shell::ServerRuntimeHandle>, String> {
+    ) -> Result<Option<crate::server::ServerRuntimeHandle>, String> {
         let role = match topology {
             ServerTopology::Core => NodeRole::Core,
             ServerTopology::Edge => NodeRole::Edge,
@@ -301,7 +301,7 @@ impl ServerBuilder {
         if let Some(schema) = &self.core_server_shell_schema {
             let storage_config = storage_config?;
             return Ok(Some(
-                crate::tools::server::core_server_shell::ServerRuntimeHandle::start_with_storage_config(
+                crate::server::ServerRuntimeHandle::start_with_storage_config(
                     schema.clone(),
                     storage_config,
                     self.storage_factory.clone(),
@@ -317,7 +317,7 @@ impl ServerBuilder {
         };
         let Some(schema) = schema else {
             if topology == ServerTopology::Edge {
-                return crate::tools::server::core_server_shell::ServerRuntimeHandle::try_start_dynamic_edge_from_storage(
+                return crate::server::ServerRuntimeHandle::try_start_dynamic_edge_from_storage(
                     storage_config?,
                     self.storage_factory.clone(),
                     self.edge_cache_budget,
@@ -326,10 +326,10 @@ impl ServerBuilder {
             return Ok(None);
         };
         let storage_config = storage_config?;
-        let schema = crate::tools::public_schema_convert::convert_public_schema(&schema)
+        let schema = jazz::tools::public_schema_convert::convert_public_schema(&schema)
             .map_err(|error| format!("failed to build server shell schema: {error}"))?;
         Ok(Some(
-            crate::tools::server::core_server_shell::ServerRuntimeHandle::start_with_storage_config(
+            crate::server::ServerRuntimeHandle::start_with_storage_config(
                 schema,
                 storage_config,
                 self.storage_factory.clone(),
@@ -415,7 +415,7 @@ fn spawn_edge_upstream_connector(
             if state.shutdown.is_shutting_down() {
                 return;
             }
-            let auth = crate::tools::websocket_prelude_auth::AuthConfig {
+            let auth = jazz::tools::websocket_prelude_auth::AuthConfig {
                 admin_secret: Some(admin_secret.clone()),
                 ..Default::default()
             };
@@ -624,15 +624,15 @@ pub fn upstream_http_url(base_url: &str, app_id: AppId) -> Result<String, String
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tools::AppId;
-    use crate::tools::server::catalogue::CatalogueStore;
+    use crate::server::catalogue::CatalogueStore;
+    use jazz::tools::AppId;
 
-    fn dynamic_bootstrap_schema() -> crate::tools::public_schema::Schema {
-        crate::tools::public_schema::SchemaBuilder::new()
+    fn dynamic_bootstrap_schema() -> jazz::tools::public_schema::Schema {
+        jazz::tools::public_schema::SchemaBuilder::new()
             .table(
-                crate::tools::public_schema::TableSchema::builder("notes")
-                    .column("id", crate::tools::public_schema::ColumnType::Uuid)
-                    .column("body", crate::tools::public_schema::ColumnType::Text),
+                jazz::tools::public_schema::TableSchema::builder("notes")
+                    .column("id", jazz::tools::public_schema::ColumnType::Uuid)
+                    .column("body", jazz::tools::public_schema::ColumnType::Text),
             )
             .build()
     }
@@ -774,8 +774,8 @@ mod tests {
             .first()
             .expect("authority has genesis")
             .clone();
-        let evolved = crate::protocol::SchemaVersion::new(crate::schema::JazzSchema::new([
-            crate::schema::TableSchema::new(
+        let evolved = jazz::protocol::SchemaVersion::new(jazz::schema::JazzSchema::new([
+            jazz::schema::TableSchema::new(
                 "notes",
                 [
                     groove::schema::ColumnSchema::new("id", groove::schema::ColumnType::Uuid),
@@ -788,15 +788,15 @@ mod tests {
         evolved_snapshot.schemas.push(evolved.clone());
         evolved_snapshot.lineages.push((
             1,
-            crate::protocol::SchemaLineagePublication::new(
+            jazz::protocol::SchemaLineagePublication::new(
                 evolved.clone(),
-                crate::protocol::MigrationLens::new(
+                jazz::protocol::MigrationLens::new(
                     base.id,
                     evolved.id,
-                    vec![crate::protocol::TableLens {
+                    vec![jazz::protocol::TableLens {
                         source_table: "notes".to_owned(),
                         target_table: "notes".to_owned(),
-                        ops: vec![crate::protocol::LensOp::AddColumn {
+                        ops: vec![jazz::protocol::LensOp::AddColumn {
                             column: "extra".to_owned(),
                             default: groove::records::Value::String(String::new()),
                         }],
@@ -806,13 +806,13 @@ mod tests {
                 Vec::<String>::new(),
             ),
         ));
-        evolved_snapshot.current_write_schema = crate::protocol::CurrentWriteSchema {
+        evolved_snapshot.current_write_schema = jazz::protocol::CurrentWriteSchema {
             revision: 1,
             schema: evolved.id,
         };
         shell
             .set_catalogue_activation_failpoint(
-                crate::node::CatalogueActivationFailpoint::BeforeSnapshotActivationCommit,
+                jazz::node::CatalogueActivationFailpoint::BeforeSnapshotActivationCommit,
             )
             .await
             .expect("arm post-registry install failure");
@@ -954,11 +954,11 @@ mod tests {
     async fn dynamic_builder_starts_core_server_shell_from_rehydrated_catalogue_schema() {
         let data_dir = tempfile::TempDir::new().expect("temp data dir");
         let app_id = AppId::from_name("dynamic-server-shell-rehydrate");
-        let schema = crate::tools::public_schema::SchemaBuilder::new()
+        let schema = jazz::tools::public_schema::SchemaBuilder::new()
             .table(
-                crate::tools::public_schema::TableSchema::builder("todos")
-                    .column("id", crate::tools::public_schema::ColumnType::Uuid)
-                    .column("title", crate::tools::public_schema::ColumnType::Text),
+                jazz::tools::public_schema::TableSchema::builder("todos")
+                    .column("id", jazz::tools::public_schema::ColumnType::Uuid)
+                    .column("title", jazz::tools::public_schema::ColumnType::Text),
             )
             .build();
 
@@ -1001,11 +1001,11 @@ mod tests {
     async fn persistent_adapter_starts_core_server_shell_with_catalogue_storage_after_restart() {
         let data_dir = tempfile::TempDir::new().expect("temp data dir");
         let app_id = AppId::from_name("rocksdb-server-shell-restart");
-        let schema = crate::tools::public_schema::SchemaBuilder::new()
+        let schema = jazz::tools::public_schema::SchemaBuilder::new()
             .table(
-                crate::tools::public_schema::TableSchema::builder("todos")
-                    .column("id", crate::tools::public_schema::ColumnType::Uuid)
-                    .column("title", crate::tools::public_schema::ColumnType::Text),
+                jazz::tools::public_schema::TableSchema::builder("todos")
+                    .column("id", jazz::tools::public_schema::ColumnType::Uuid)
+                    .column("title", jazz::tools::public_schema::ColumnType::Text),
             )
             .build();
 
@@ -1025,7 +1025,7 @@ mod tests {
             assert!(data_dir.path().join(SERVER_SHELL_ROCKSDB_DIR).exists());
             assert_eq!(
                 built.shutdown().await,
-                crate::tools::server::ShutdownPhase::StorageClosed,
+                crate::server::ShutdownPhase::StorageClosed,
                 "the public builder lifecycle must join the shell before its RocksDB path is reopened"
             );
             Arc::clone(&built.state)
@@ -1078,7 +1078,7 @@ mod tests {
         assert!(reopened_after_drop.state.runtime().is_some());
         assert_eq!(
             reopened_after_drop.shutdown().await,
-            crate::tools::server::ShutdownPhase::StorageClosed
+            crate::server::ShutdownPhase::StorageClosed
         );
         drop(retained_state);
     }
@@ -1087,10 +1087,10 @@ mod tests {
     async fn persistent_adapter_reopens_after_first_shutdown_waiter_is_aborted() {
         let data_dir = tempfile::TempDir::new().expect("temp data dir");
         let app_id = AppId::from_name("rocksdb-server-shell-aborted-shutdown");
-        let schema = crate::tools::public_schema::SchemaBuilder::new()
+        let schema = jazz::tools::public_schema::SchemaBuilder::new()
             .table(
-                crate::tools::public_schema::TableSchema::builder("todos")
-                    .column("id", crate::tools::public_schema::ColumnType::Uuid),
+                jazz::tools::public_schema::TableSchema::builder("todos")
+                    .column("id", jazz::tools::public_schema::ColumnType::Uuid),
             )
             .build();
         let built = ServerBuilder::new(app_id)
@@ -1112,9 +1112,7 @@ mod tests {
         let first_state = Arc::clone(&state);
         let first = tokio::spawn(async move { first_state.run_shutdown_finalization().await });
         let mut phases = state.shutdown.subscribe();
-        while *phases.borrow_and_update()
-            != crate::tools::server::ShutdownPhase::DrainingConnections
-        {
+        while *phases.borrow_and_update() != crate::server::ShutdownPhase::DrainingConnections {
             phases
                 .changed()
                 .await
@@ -1125,7 +1123,7 @@ mod tests {
         drop(request);
         assert_eq!(
             state.run_shutdown_finalization().await,
-            crate::tools::server::ShutdownPhase::StorageClosed
+            crate::server::ShutdownPhase::StorageClosed
         );
 
         let reopened = ServerBuilder::new(app_id)
@@ -1139,7 +1137,7 @@ mod tests {
             .expect("reopen RocksDB after aborted shutdown waiter");
         assert_eq!(
             reopened.shutdown().await,
-            crate::tools::server::ShutdownPhase::StorageClosed
+            crate::server::ShutdownPhase::StorageClosed
         );
     }
 
@@ -1147,10 +1145,10 @@ mod tests {
     fn persistent_adapter_shutdown_survives_initiating_runtime_drop() {
         let data_dir = tempfile::TempDir::new().expect("temp data dir");
         let app_id = AppId::from_name("rocksdb-server-shell-foreign-shutdown");
-        let schema = crate::tools::public_schema::SchemaBuilder::new()
+        let schema = jazz::tools::public_schema::SchemaBuilder::new()
             .table(
-                crate::tools::public_schema::TableSchema::builder("todos")
-                    .column("id", crate::tools::public_schema::ColumnType::Uuid),
+                jazz::tools::public_schema::TableSchema::builder("todos")
+                    .column("id", jazz::tools::public_schema::ColumnType::Uuid),
             )
             .build();
         let (built, state, request) = {
@@ -1180,7 +1178,7 @@ mod tests {
                 tokio::spawn(async move { first_state.run_shutdown_finalization().await });
                 let mut phases = state.shutdown.subscribe();
                 while *phases.borrow_and_update()
-                    != crate::tools::server::ShutdownPhase::DrainingConnections
+                    != crate::server::ShutdownPhase::DrainingConnections
                 {
                     phases
                         .changed()
@@ -1203,7 +1201,7 @@ mod tests {
                 tokio::time::timeout(std::time::Duration::from_secs(1), built.shutdown())
                     .await
                     .expect("later runtime reaches durable-close barrier"),
-                crate::tools::server::ShutdownPhase::StorageClosed
+                crate::server::ShutdownPhase::StorageClosed
             );
             assert!(state.runtime().is_none());
             ServerBuilder::new(app_id)
@@ -1218,7 +1216,7 @@ mod tests {
         });
         assert_eq!(
             second_runtime.block_on(reopened.shutdown()),
-            crate::tools::server::ShutdownPhase::StorageClosed
+            crate::server::ShutdownPhase::StorageClosed
         );
     }
 

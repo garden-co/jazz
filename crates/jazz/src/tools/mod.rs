@@ -1,11 +1,8 @@
-#[cfg(any(feature = "server", test))]
-pub(crate) mod admin_catalogue_payload_codec;
-pub(crate) mod admin_catalogue_row_format;
+#[doc(hidden)]
+pub mod admin_catalogue_row_format;
 pub mod app_id;
 pub mod identity;
 pub mod metadata;
-#[cfg(feature = "server")]
-pub mod middleware;
 /// Target-shell factory boundary for native peer transports.
 pub mod native_transport_connector;
 mod object;
@@ -13,10 +10,9 @@ pub mod policy_claims;
 pub(crate) mod public_api;
 pub mod public_schema;
 #[cfg(any(feature = "client", feature = "server", test))]
-pub(crate) mod public_schema_convert;
+#[doc(hidden)]
+pub mod public_schema_convert;
 pub mod schema_lens;
-#[cfg(feature = "server")]
-pub mod server;
 pub mod sync;
 #[cfg(feature = "test-utils")]
 pub mod test_support;
