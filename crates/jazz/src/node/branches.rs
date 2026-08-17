@@ -68,34 +68,8 @@ where
         branch_id: BranchId,
         created_by: AuthorId,
     ) -> Result<BranchRecord, Error> {
-        self.require_catalogue_ready()?;
-        if let Some(existing) = self.branches.branches.get(&branch_id) {
-            if existing.created_by == created_by
-                && existing.parent.is_none()
-                && existing.base.is_some()
-                && existing.state == codec::BranchState::Open
-            {
-                return Ok(existing.clone());
-            }
-            return Err(Error::InvalidStoredValue("conflicting branch creation"));
-        }
-        let record = BranchRecord {
-            branch_id,
-            created_by,
-            parent: None,
-            base: Some(
-                Snapshot::exclusive_base(
-                    NodeUuid(uuid::Uuid::nil()),
-                    self.clock.applied_global_watermark,
-                    TxTime::default(),
-                    Vec::new(),
-                )
-                .map_err(Error::InvalidStoredValue)?,
-            ),
-            state: codec::BranchState::Open,
-        };
-        let prepared = self.prepare_branch_record_mutation(record, true, false)?;
-        self.publish_branch_record_mutation(prepared)
+        let prepared = self.prepare_branch_creation_with_storage(branch_id, created_by, false)?;
+        self.publish_branch_creation(prepared)
     }
 
     /// Declare a root branch with no parent fallback.
@@ -2018,6 +1992,15 @@ where
         branch_id: BranchId,
         created_by: AuthorId,
     ) -> Result<PreparedBranchCreation, Error> {
+        self.prepare_branch_creation_with_storage(branch_id, created_by, true)
+    }
+
+    fn prepare_branch_creation_with_storage(
+        &self,
+        branch_id: BranchId,
+        created_by: AuthorId,
+        acquire_tick_storage: bool,
+    ) -> Result<PreparedBranchCreation, Error> {
         self.require_catalogue_ready()?;
         if let Some(existing) = self.branches.branches.get(&branch_id) {
             if existing.created_by == created_by
@@ -2045,7 +2028,7 @@ where
             state: codec::BranchState::Open,
         };
         Ok(PreparedBranchCreation::New(
-            self.prepare_branch_record_mutation(record, true, true)?,
+            self.prepare_branch_record_mutation(record, true, acquire_tick_storage)?,
         ))
     }
 
