@@ -1,12 +1,12 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use jazz::groove::records::{BorrowedRecord, RecordDescriptor, Value as GrooveValue, ValueType};
 use jazz::row_input;
 use jazz::tools::server::JazzServer;
-use jazz::tools::test_support::decode_row;
 use jazz::tools::{
-    AppContext, AppId, ClientStorage, ColumnType, JazzClient, ObjectId, OrderedRowDelta,
-    RowDescriptor, Schema, SchemaBuilder, TableSchema, Value,
+    AppContext, AppId, ClientStorage, ColumnType, JazzClient, ObjectId, OrderedRowDelta, Row,
+    Schema, SchemaBuilder, TableSchema, Value,
 };
 use tempfile::TempDir;
 
@@ -250,72 +250,96 @@ pub(crate) async fn create_file(client: &JazzClient, name: &str, parts: &[Object
         .0
 }
 
-pub(crate) fn todo_descriptor(schema: &Schema) -> RowDescriptor {
-    schema
-        .get(&"todos".into())
-        .expect("todos table should exist in runtime schema")
-        .columns
-        .clone()
+/// Exact maintained-output record layout for the unprojected `todos` query.
+///
+/// Subscription row bytes use Groove's app-row terminal codec. Every source
+/// cell has an outer presence wrapper; nullable table columns therefore have
+/// a second, inner nullable wrapper. Maintained rows also retain provenance
+/// and transaction fields, which are part of the physical record layout even
+/// when this helper only reads the title.
+pub(crate) fn todo_subscription_record_descriptor() -> RecordDescriptor {
+    RecordDescriptor::new([
+        ("row_uuid", ValueType::Uuid),
+        (
+            "user_title",
+            ValueType::Nullable(Box::new(ValueType::String)),
+        ),
+        ("user_done", ValueType::Nullable(Box::new(ValueType::Bool))),
+        (
+            "user_priority",
+            ValueType::Nullable(Box::new(ValueType::Nullable(Box::new(ValueType::I32)))),
+        ),
+        (
+            "user_owner_id",
+            ValueType::Nullable(Box::new(ValueType::Nullable(Box::new(ValueType::Uuid)))),
+        ),
+        (
+            "user_tags",
+            ValueType::Nullable(Box::new(ValueType::Array(Box::new(ValueType::String)))),
+        ),
+        (
+            "user_payload",
+            ValueType::Nullable(Box::new(ValueType::Nullable(Box::new(ValueType::Bytes)))),
+        ),
+        ("$createdBy", ValueType::Uuid),
+        ("$createdAt", ValueType::U64),
+        ("$updatedBy", ValueType::Uuid),
+        ("$updatedAt", ValueType::U64),
+        ("tx_time", ValueType::U64),
+        ("tx_node_id", ValueType::U64),
+    ])
+}
+
+fn todo_title_from_subscription_row(row: &Row, descriptor: &RecordDescriptor) -> Option<String> {
+    let title_index = descriptor.field_index("user_title")?;
+    let value = BorrowedRecord::new(row.data.as_ref(), descriptor)
+        .get_idx(title_index)
+        .unwrap_or_else(|error| panic!("decode maintained todo title: {error}"));
+    match value {
+        GrooveValue::Nullable(Some(value)) => match *value {
+            GrooveValue::String(title) => Some(title),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 pub(crate) fn last_updated_todo_title(
     log: &[OrderedRowDelta],
-    descriptor: &RowDescriptor,
+    descriptor: &RecordDescriptor,
     todo_id: ObjectId,
 ) -> Option<String> {
-    let title_index = descriptor.column_index("title")?;
-
     log.iter().rev().find_map(|delta| {
         delta.updated.iter().rev().find_map(|change| {
-            if change.id != todo_id {
-                return None;
-            }
-
-            let row = change.row.as_ref()?;
-            let values = decode_row(descriptor, &row.data).ok()?;
-            match values.get(title_index) {
-                Some(Value::Text(title)) => Some(title.clone()),
-                _ => None,
-            }
+            (change.id == todo_id)
+                .then_some(change.row.as_ref())
+                .flatten()
+                .and_then(|row| todo_title_from_subscription_row(row, descriptor))
         })
     })
 }
 
 pub(crate) fn last_row_bearing_todo_title(
     log: &[OrderedRowDelta],
-    descriptor: &RowDescriptor,
+    descriptor: &RecordDescriptor,
     todo_id: ObjectId,
 ) -> Option<String> {
-    let title_index = descriptor.column_index("title")?;
-
     log.iter().rev().find_map(|delta| {
         delta
             .updated
             .iter()
             .rev()
             .find_map(|change| {
-                if change.id != todo_id {
-                    return None;
-                }
-
-                let row = change.row.as_ref()?;
-                let values = decode_row(descriptor, &row.data).ok()?;
-                match values.get(title_index) {
-                    Some(Value::Text(title)) => Some(title.clone()),
-                    _ => None,
-                }
+                (change.id == todo_id)
+                    .then_some(change.row.as_ref())
+                    .flatten()
+                    .and_then(|row| todo_title_from_subscription_row(row, descriptor))
             })
             .or_else(|| {
                 delta.added.iter().rev().find_map(|change| {
-                    if change.id != todo_id {
-                        return None;
-                    }
-
-                    let values = decode_row(descriptor, &change.row.data).ok()?;
-                    match values.get(title_index) {
-                        Some(Value::Text(title)) => Some(title.clone()),
-                        _ => None,
-                    }
+                    (change.id == todo_id)
+                        .then(|| todo_title_from_subscription_row(&change.row, descriptor))
+                        .flatten()
                 })
             })
     })
