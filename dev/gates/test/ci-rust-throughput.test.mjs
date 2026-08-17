@@ -275,7 +275,10 @@ test("Rust CI splits a bounded real differential-oracle smoke behind a stable ag
   ]) {
     assert.doesNotMatch(workspace, new RegExp(`cargo test -p jazz --test ${testTarget}`));
   }
-  assert.match(differential, /cargo test -p jazz --lib --no-run --message-format=json/);
+  assert.match(
+    differential,
+    /cargo test -p jazz --lib --features test --no-run --message-format=json/,
+  );
   assert.match(differential, /message\.target\.name === "jazz"/);
   assert.match(
     differential,
@@ -312,10 +315,10 @@ test("Rust CI splits a bounded real differential-oracle smoke behind a stable ag
     () =>
       assert.match(
         differential.replace(
-          "cargo test -p jazz --lib --no-run --message-format=json",
+          "cargo test -p jazz --lib --features test --no-run --message-format=json",
           "cargo test -p jazz --no-run --message-format=json",
         ),
-        /cargo test -p jazz --lib --no-run --message-format=json/,
+        /cargo test -p jazz --lib --features test --no-run --message-format=json/,
       ),
     /--lib/,
   );
@@ -347,8 +350,8 @@ test("Rust CI splits a bounded real differential-oracle smoke behind a stable ag
     () =>
       assertM3CompileThenRun(
         differential.replace(
-          "cargo test -p jazz --lib --no-run --message-format=json",
-          "timeout 60s cargo test -p jazz --lib --no-run --message-format=json",
+          "cargo test -p jazz --lib --features test --no-run --message-format=json",
+          "timeout 60s cargo test -p jazz --lib --features test --no-run --message-format=json",
         ),
       ),
     /cold compilation must not consume the semantic-execution timeout/,

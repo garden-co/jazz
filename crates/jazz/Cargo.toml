@@ -7,7 +7,9 @@ autobenches = false
 autotests = true
 
 [features]
-default = ["rocksdb", "server", "transport-compression-zstd"]
+# Jazz is the common semantic library. Process and target shells select
+# storage, transport, compression, and server capabilities explicitly.
+default = []
 rocksdb = ["groove/rocksdb", "dep:rocksdb"]
 sqlite = ["dep:rusqlite"]
 native-websocket-transport = [
@@ -34,7 +36,7 @@ transport-compression-lz4 = ["dep:lz4_flex"]
 transport-compression-zstd = ["dep:zstd"]
 transport-compression-ruzstd = ["dep:ruzstd"]
 test-utils = ["server", "client", "sqlite", "sync-autopsy"]
-test = ["test-utils", "transport-compression-zstd"]
+test = ["test-utils", "rocksdb", "transport-compression-zstd"]
 
 [dependencies]
 futures-core = "0.3.31"

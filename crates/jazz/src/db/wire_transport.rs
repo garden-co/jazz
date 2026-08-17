@@ -374,6 +374,7 @@ where
     /// bootstrap cannot safely skip a malformed physical frame and continue to
     /// a later catalogue snapshot: that would make the authority boundary
     /// depend on first-valid-message behavior.
+    #[cfg(any(feature = "server", test))]
     pub(crate) fn try_recv_strict(&mut self) -> Result<Option<SyncMessage>, WireError> {
         let _ = self.flush_pending_outbound();
         while let Some(bytes) = self.inner.try_recv_frame() {
