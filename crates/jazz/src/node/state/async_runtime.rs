@@ -50,26 +50,6 @@ impl DemandDrivenNode {
         &self.node
     }
 
-    /// Run one resident local operation and retain every resulting durable
-    /// batch in FIFO order. Local IVM effects are observable before this method
-    /// returns; durable publication is driven separately by
-    /// [`Self::poll_persistence`].
-    pub fn commit_local<T>(
-        &mut self,
-        operation: impl FnOnce(
-            &mut NodeState<groove::storage::DemandLoadedStorage>,
-        ) -> Result<T, Error>,
-    ) -> Result<T, Error> {
-        self.ensure_persistence_usable()?;
-        let result = operation(&mut self.node);
-        if result.is_ok() {
-            self.collect_persistence_unit();
-        } else {
-            self.discard_failed_operation_writes();
-        }
-        result
-    }
-
     /// Acquire every cold input for a local mutation before synchronously
     /// publishing that mutation into the resident node and its IVM.
     ///

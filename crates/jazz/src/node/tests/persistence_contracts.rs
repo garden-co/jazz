@@ -382,15 +382,17 @@ fn demand_driven_node_publishes_locally_before_one_atomic_durable_unit() {
     committed_units.borrow_mut().clear();
     released.set(false);
 
-    runtime
-        .commit_local(|node| {
-            node.commit_mergeable_unit(
-                MergeableCommit::new("todos", row(0xd5), 10).cells(title_cells("resident")),
-            )?;
-            assert_eq!(node.current_rows("todos", DurabilityTier::None)?.len(), 1);
-            Ok(())
-        })
-        .unwrap();
+    let commit = MergeableCommit::new("todos", row(0xd5), 10).cells(title_cells("resident"));
+    assert!(matches!(
+        runtime.poll_mergeable_commit(&mut context, &commit),
+        std::task::Poll::Ready(Ok(_))
+    ));
+    let std::task::Poll::Ready(Ok(rows)) = runtime.poll_query(&mut context, |node| {
+        node.current_rows("todos", DurabilityTier::None)
+    }) else {
+        panic!("the published local row must be synchronously queryable")
+    };
+    assert_eq!(rows.len(), 1);
     assert!(committed_units.borrow().is_empty());
     assert!(runtime.poll_persistence(&mut context).is_pending());
     assert!(committed_units.borrow().is_empty());
@@ -518,14 +520,12 @@ fn demand_driven_node_poisoned_after_durable_commit_failure() {
     let std::task::Poll::Ready(Ok(mut runtime)) = opening.poll(&mut context) else {
         panic!("immediate backend must open in its first poll")
     };
-    runtime
-        .commit_local(|node| {
-            node.commit_mergeable_unit(
-                MergeableCommit::new("todos", row(0xd6), 10).cells(title_cells("ambiguous")),
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    let commit =
+        MergeableCommit::new("todos", row(0xd6), 10).cells(title_cells("ambiguous"));
+    assert!(matches!(
+        runtime.poll_mergeable_commit(&mut context, &commit),
+        std::task::Poll::Ready(Ok(_))
+    ));
 
     fail_commits.set(true);
     assert!(matches!(
