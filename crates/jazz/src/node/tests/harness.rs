@@ -34,7 +34,7 @@ include!("time_travel.rs");
 include!("queries.rs");
 include!("exclusive_transactions.rs");
 include!("mergeable_open_transactions.rs");
-include!("policies_rls.rs");
+include!("policies_rls/mod.rs");
 include!("persistence_contracts.rs");
 include!("write_policy_lowering.rs");
 include!("sync.rs");

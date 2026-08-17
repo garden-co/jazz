@@ -1,0 +1,1039 @@
+// Maintained-view seeding, claims, joins, deltas, windows, and retained parameters.
+
+#[test]
+fn maintained_view_seeded_query_engine_snapshot_matches_rows_and_witnesses() {
+    let schema = JazzSchema::new([TableSchema::new(
+        "todos",
+        [
+            ColumnSchema::new("title", ColumnType::String),
+            ColumnSchema::new("owner", ColumnType::Uuid),
+        ],
+    )
+    .with_read_policy(Policy::owner_only("todos", "owner"))]);
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    let author_a = user(0xa1);
+    let author_b = user(0xb2);
+
+    let sibling_tx = core
+        .commit_mergeable_many(vec![
+            MergeableCommit::new("todos", row(0x90), 10).cells(owner_cells(author_a, "include")),
+            MergeableCommit::new("todos", row(0x91), 10).cells(owner_cells(author_b, "include")),
+            MergeableCommit::new("todos", row(0x92), 10).cells(owner_cells(author_a, "skip")),
+        ])
+        .unwrap();
+    core.apply_fate_update(
+        sibling_tx,
+        Fate::Accepted,
+        Some(core.clock.next_global_seq),
+        Some(DurabilityTier::Global),
+    )
+    .unwrap();
+
+    let deleted_readable_content = accept_global(
+        &mut core,
+        MergeableCommit::new("todos", row(0x93), 20).cells(owner_cells(author_a, "delete me")),
+    );
+    let deleted_readable_delete = accept_global(
+        &mut core,
+        MergeableCommit::new("todos", row(0x93), 21)
+            .parents(vec![deleted_readable_content])
+            .deletion(DeletionEvent::Deleted),
+    );
+    let deleted_unreadable_content = accept_global(
+        &mut core,
+        MergeableCommit::new("todos", row(0x94), 22).cells(owner_cells(author_b, "hidden delete")),
+    );
+    let deleted_unreadable_delete = accept_global(
+        &mut core,
+        MergeableCommit::new("todos", row(0x94), 23)
+            .parents(vec![deleted_unreadable_content])
+            .deletion(DeletionEvent::Deleted),
+    );
+
+    let shape = Query::from("todos")
+        .filter(eq(col("title"), lit("include")))
+        .validate(&core.catalogue.schema)
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+
+    assert_query_engine_maintained_seed_matches_public_rows_and_witnesses(
+        &mut core,
+        &shape,
+        &binding,
+        AuthorId::SYSTEM,
+        [
+            (sibling_tx, row(0x90), VersionLayer::Content),
+            (sibling_tx, row(0x91), VersionLayer::Content),
+            (deleted_readable_delete, row(0x93), VersionLayer::Deletion),
+            (deleted_unreadable_delete, row(0x94), VersionLayer::Deletion),
+        ],
+        [
+            (row(0x93), VersionLayer::Content, false),
+            (row(0x93), VersionLayer::Deletion, true),
+            (row(0x94), VersionLayer::Content, false),
+            (row(0x94), VersionLayer::Deletion, true),
+        ],
+    );
+    assert_query_engine_maintained_seed_matches_public_rows_and_witnesses(
+        &mut core,
+        &shape,
+        &binding,
+        author_a,
+        [
+            (sibling_tx, row(0x90), VersionLayer::Content),
+            (deleted_readable_delete, row(0x93), VersionLayer::Deletion),
+        ],
+        [
+            (row(0x93), VersionLayer::Content, false),
+            (row(0x93), VersionLayer::Deletion, true),
+            (row(0x94), VersionLayer::Content, false),
+            (row(0x94), VersionLayer::Deletion, true),
+        ],
+    );
+}
+
+#[test]
+fn maintained_view_query_engine_seed_clean_owner_policy_claim_params_match_one_shot() {
+    let schema = JazzSchema::new([TableSchema::new(
+        "todos",
+        [
+            ColumnSchema::new("title", ColumnType::String),
+            ColumnSchema::new("owner", ColumnType::Uuid),
+        ],
+    )
+    .with_read_policy(Policy::owner_only("todos", "owner"))]);
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    let author = user(0xa1);
+    let other = user(0xb2);
+
+    accept_global(
+        &mut core,
+        MergeableCommit::new("todos", row(0xa0), 10).cells(owner_cells(author, "owned")),
+    );
+    accept_global(
+        &mut core,
+        MergeableCommit::new("todos", row(0xb0), 11).cells(owner_cells(other, "hidden")),
+    );
+
+    let shape = Query::from("todos")
+        .filter(eq(col("title"), param("title")))
+        .validate(&core.catalogue.schema)
+        .unwrap();
+    let binding = shape
+        .bind(BTreeMap::from([(
+            "title".to_owned(),
+            Value::String("owned".to_owned()),
+        )]))
+        .unwrap();
+    let mut peer = PeerState::client_link(author);
+    let update = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
+    let (adds, removes) = canonical_view_update_rows(&update);
+    assert_eq!(
+        adds.into_iter()
+            .map(|(_table, row_uuid, _tx_id)| row_uuid)
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([row(0xa0)]),
+        "query-engine maintained rows should route by retained query and policy claim params"
+    );
+    assert!(removes.is_empty());
+}
+
+#[test]
+fn maintained_view_cold_snapshot_seeds_maintained_indexes_equal_one_shot() {
+    let schema = JazzSchema::new([TableSchema::new(
+        "todos",
+        [
+            ColumnSchema::new("title", ColumnType::String),
+            ColumnSchema::new("owner", ColumnType::Uuid),
+        ],
+    )
+    .with_read_policy(Policy::owner_only("todos", "owner"))]);
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    let author_a = user(0xa1);
+    let author_b = user(0xb2);
+
+    let sibling_tx = core
+        .commit_mergeable_many(vec![
+            MergeableCommit::new("todos", row(0x90), 10).cells(owner_cells(author_a, "include")),
+            MergeableCommit::new("todos", row(0x91), 10).cells(owner_cells(author_b, "include")),
+            MergeableCommit::new("todos", row(0x92), 10).cells(owner_cells(author_a, "skip")),
+        ])
+        .unwrap();
+    core.apply_fate_update(
+        sibling_tx,
+        Fate::Accepted,
+        Some(core.clock.next_global_seq),
+        Some(DurabilityTier::Global),
+    )
+    .unwrap();
+
+    let deleted_readable_content = accept_global(
+        &mut core,
+        MergeableCommit::new("todos", row(0x93), 20).cells(owner_cells(author_a, "delete me")),
+    );
+    accept_global(
+        &mut core,
+        MergeableCommit::new("todos", row(0x93), 21)
+            .parents(vec![deleted_readable_content])
+            .deletion(DeletionEvent::Deleted),
+    );
+    let deleted_unreadable_content = accept_global(
+        &mut core,
+        MergeableCommit::new("todos", row(0x94), 22).cells(owner_cells(author_b, "hidden delete")),
+    );
+    accept_global(
+        &mut core,
+        MergeableCommit::new("todos", row(0x94), 23)
+            .parents(vec![deleted_unreadable_content])
+            .deletion(DeletionEvent::Deleted),
+    );
+
+    let shape = Query::from("todos")
+        .filter(eq(col("title"), lit("include")))
+        .validate(&core.catalogue.schema)
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+
+    assert_maintained_view_cold_snapshot_seed_matches_one_shot(
+        &mut core,
+        &shape,
+        &binding,
+        AuthorId::SYSTEM,
+    );
+    assert_maintained_view_cold_snapshot_seed_matches_one_shot(
+        &mut core, &shape, &binding, author_a,
+    );
+}
+
+#[test]
+fn maintained_view_system_identity_bypasses_root_read_policy() {
+    let schema = JazzSchema::new([TableSchema::new(
+        "todos",
+        [
+            ColumnSchema::new("title", ColumnType::String),
+            ColumnSchema::new("owner", ColumnType::Uuid),
+        ],
+    )
+    .with_read_policy(Policy::owner_only("todos", "owner"))]);
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    let author_a = user(0xa1);
+    let author_b = user(0xb2);
+    let tx_a = accept_global(
+        &mut core,
+        MergeableCommit::new("todos", row(0xa0), 10).cells(owner_cells(author_a, "a")),
+    );
+    let tx_b = accept_global(
+        &mut core,
+        MergeableCommit::new("todos", row(0xa1), 11).cells(owner_cells(author_b, "b")),
+    );
+    let deleted_content = accept_global(
+        &mut core,
+        MergeableCommit::new("todos", row(0xa2), 12).cells(owner_cells(author_b, "deleted")),
+    );
+    accept_global(
+        &mut core,
+        MergeableCommit::new("todos", row(0xa2), 13)
+            .parents(vec![deleted_content])
+            .deletion(DeletionEvent::Deleted),
+    );
+
+    let shape = Query::from("todos")
+        .validate(&core.catalogue.schema)
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let mut peer = PeerState::new();
+    let update = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
+    let (adds, removes) = canonical_view_update_rows(&update);
+    assert_eq!(
+        adds.into_iter()
+            .map(|(_table, row_uuid, tx_id)| (row_uuid, tx_id))
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([(row(0xa0), tx_a), (row(0xa1), tx_b)])
+    );
+    assert!(removes.is_empty());
+}
+
+#[test]
+fn maintained_view_allows_join_policy_slice() {
+    let schema = JazzSchema::new([
+        TableSchema::new(
+            "todos",
+            [
+                ColumnSchema::new("title", ColumnType::String),
+                ColumnSchema::new("owner", ColumnType::Uuid),
+            ],
+        )
+        .with_read_policy(Policy::shape(Query::from("todos").join_via(
+            "members",
+            "owner",
+            [eq(col("user"), claim("sub"))],
+        ))),
+        TableSchema::new(
+            "members",
+            [
+                ColumnSchema::new("owner", ColumnType::Uuid),
+                ColumnSchema::new("user", ColumnType::Uuid),
+            ],
+        )
+        .with_reference("owner", "todos"),
+    ]);
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    let shape = Query::from("todos")
+        .validate(&core.catalogue.schema)
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let mut peer = PeerState::client_link(user(0xa1));
+    peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
+}
+
+#[test]
+fn maintained_view_retained_claim_param_equality_matches_literal_recompute() {
+    let schema = JazzSchema::new([TableSchema::new(
+        "todos",
+        [
+            ColumnSchema::new("title", ColumnType::String),
+            ColumnSchema::new("owner", ColumnType::Uuid),
+        ],
+    )
+    .with_read_policy(Policy::owner_only("todos", "owner"))]);
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    let author = user(0xa1);
+    let other = user(0xb2);
+
+    accept_global(
+        &mut core,
+        MergeableCommit::new("todos", row(0xa0), 10).cells(owner_cells(author, "owned")),
+    );
+    accept_global(
+        &mut core,
+        MergeableCommit::new("todos", row(0xb0), 11).cells(owner_cells(other, "other")),
+    );
+
+    let retained_shape = Query::from("todos")
+        .validate(&core.catalogue.schema)
+        .unwrap();
+    let retained_binding = retained_shape.bind(BTreeMap::new()).unwrap();
+    let expected_rows = BTreeSet::from([row(0xa0)]);
+
+    let (prepared_shape, prepared_binding, prepared_plan) = core
+        .prepare_query_binding_for_link(
+            &retained_shape,
+            &retained_binding,
+            DurabilityTier::Global,
+            author,
+        )
+        .unwrap();
+    let prepared_rows = core
+        .query_rows_with_prepared_plan_for_identity(
+            &prepared_shape,
+            &prepared_binding,
+            DurabilityTier::Global,
+            Some(&prepared_plan),
+            author,
+        )
+        .unwrap()
+        .into_iter()
+        .map(|row| row.row_uuid())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(prepared_rows, expected_rows);
+
+    let mut peer = PeerState::client_link(author);
+    let update = peer
+        .rehydrate_query(&mut core, &retained_shape, &retained_binding)
+        .unwrap();
+    let (adds, removes) = canonical_view_update_rows(&update);
+    assert_eq!(
+        adds.into_iter()
+            .map(|(_table, row_uuid, _tx_id)| row_uuid)
+            .collect::<BTreeSet<_>>(),
+        expected_rows
+    );
+    assert!(removes.is_empty());
+}
+
+#[test]
+fn maintained_view_join_policy_retained_claim_param_matches_query_engine_result() {
+    let schema = JazzSchema::new([
+        TableSchema::new(
+            "todos",
+            [
+                ColumnSchema::new("title", ColumnType::String),
+                ColumnSchema::new("owner", ColumnType::Uuid),
+            ],
+        )
+        .with_read_policy(Policy::shape(Query::from("todos").join_via(
+            "members",
+            "owner",
+            [eq(col("user"), claim("sub"))],
+        ))),
+        TableSchema::new(
+            "members",
+            [
+                ColumnSchema::new("owner", ColumnType::Uuid),
+                ColumnSchema::new("user", ColumnType::Uuid),
+            ],
+        )
+        .with_reference("owner", "todos"),
+    ]);
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    let author = user(0xa1);
+    let other = user(0xb2);
+
+    accept_global(
+        &mut core,
+        MergeableCommit::new("todos", row(0xa0), 10).cells(owner_cells(author, "owned")),
+    );
+    accept_global(
+        &mut core,
+        MergeableCommit::new("todos", row(0xb0), 11).cells(owner_cells(other, "other")),
+    );
+    accept_global(
+        &mut core,
+        MergeableCommit::new("members", row(0xa1), 12).cells(BTreeMap::from([
+            ("owner".to_owned(), Value::Uuid(row(0xa0).0)),
+            ("user".to_owned(), Value::Uuid(author.0)),
+        ])),
+    );
+    accept_global(
+        &mut core,
+        MergeableCommit::new("members", row(0xb1), 13).cells(BTreeMap::from([
+            ("owner".to_owned(), Value::Uuid(row(0xb0).0)),
+            ("user".to_owned(), Value::Uuid(other.0)),
+        ])),
+    );
+
+    let shape = Query::from("todos")
+        .validate(&core.catalogue.schema)
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    core.reset_query_engine_read_metrics();
+    let full_recompute_rows = core
+        .query_rows_for_link(&shape, &binding, DurabilityTier::Global, author)
+        .unwrap()
+        .into_iter()
+        .map(|row| row.row_uuid())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(full_recompute_rows, BTreeSet::from([row(0xa0)]));
+    let one_shot_metrics = core.query_engine_read_metrics();
+    assert!(one_shot_metrics.policy_authorization_graphs > 0);
+    assert!(one_shot_metrics.policy_authorized_source_joins > 0);
+
+    let mut peer = PeerState::client_link(author);
+    core.reset_query_engine_read_metrics();
+    let update = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
+    let (adds, removes) = canonical_view_update_rows(&update);
+    assert_eq!(
+        adds.into_iter()
+            .map(|(_table, row_uuid, _tx_id)| row_uuid)
+            .collect::<BTreeSet<_>>(),
+        full_recompute_rows
+    );
+    assert!(removes.is_empty());
+    let maintained_metrics = core.query_engine_read_metrics();
+    assert!(maintained_metrics.policy_authorization_graphs > 0);
+    assert!(maintained_metrics.policy_authorized_source_joins > 0);
+}
+
+#[test]
+fn maintained_subscription_view_shared_todo_member_include_emits_relation_deltas_without_full_recompute()
+{
+    let schema = JazzSchema::new([
+        TableSchema::new(
+            "sharedTodos",
+            [
+                ColumnSchema::new("title", ColumnType::String),
+                ColumnSchema::new("owner", ColumnType::Uuid),
+            ],
+        )
+        .with_reference("owner", "members"),
+        TableSchema::new(
+            "members",
+            [
+                ColumnSchema::new("name", ColumnType::String),
+                ColumnSchema::new("userID", ColumnType::Uuid),
+            ],
+        )
+        .with_read_policy(Policy::shape(
+            Query::from("members").filter(eq(col("userID"), claim("sub"))),
+        )),
+    ]);
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    let reader = user(0xa1);
+    let other = user(0xb2);
+    let member_row = row(0x71);
+    let todo_row = row(0x72);
+
+    let hidden_member_tx = accept_global(
+        &mut core,
+        MergeableCommit::new("members", member_row, 10).cells(BTreeMap::from([
+            ("name".to_owned(), Value::String("hidden owner".to_owned())),
+            ("userID".to_owned(), Value::Uuid(other.0)),
+        ])),
+    );
+    let todo_tx = accept_global(
+        &mut core,
+        MergeableCommit::new("sharedTodos", todo_row, 11).cells(BTreeMap::from([
+            ("title".to_owned(), Value::String("shared slice".to_owned())),
+            ("owner".to_owned(), Value::Uuid(member_row.0)),
+        ])),
+    );
+
+    let shape = Query::from("sharedTodos")
+        .include_with(Include::new("owner").require_includes())
+        .validate(&core.catalogue.schema)
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+
+    let mut peer = PeerState::client_link(reader);
+    let initial = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
+    assert_eq!(
+        canonical_view_update_rows(&initial),
+        (Vec::new(), Vec::new())
+    );
+    assert_eq!(peer.maintained_subscription_view_metrics().hits_out, 1);
+
+    let visible_member_tx = accept_global(
+        &mut core,
+        MergeableCommit::new("members", member_row, 12)
+            .parents(vec![hidden_member_tx])
+            .cells(BTreeMap::from([
+                ("name".to_owned(), Value::String("visible owner".to_owned())),
+                ("userID".to_owned(), Value::Uuid(reader.0)),
+            ])),
+    );
+    let grant = peer.query_update(&mut core, &shape, &binding).unwrap();
+    assert_eq!(
+        canonical_view_update_rows(&grant),
+        (
+            vec![
+                ("members".to_owned().into(), member_row, visible_member_tx),
+                ("sharedTodos".to_owned().into(), todo_row, todo_tx),
+            ],
+            Vec::new(),
+        )
+    );
+    assert_view_update_only_references_rows(&grant, BTreeSet::from([member_row, todo_row]));
+    assert_eq!(peer.maintained_subscription_view_metrics().hits_out, 2);
+
+    let hidden_again_tx = accept_global(
+        &mut core,
+        MergeableCommit::new("members", member_row, 13)
+            .parents(vec![visible_member_tx])
+            .cells(BTreeMap::from([
+                ("name".to_owned(), Value::String("hidden again".to_owned())),
+                ("userID".to_owned(), Value::Uuid(other.0)),
+            ])),
+    );
+    let revoke = peer.query_update(&mut core, &shape, &binding).unwrap();
+    assert_eq!(
+        canonical_view_update_rows(&revoke),
+        (
+            Vec::new(),
+            vec![
+                ("members".to_owned().into(), member_row, visible_member_tx),
+                ("sharedTodos".to_owned().into(), todo_row, todo_tx),
+            ],
+        )
+    );
+    assert_retraction_without_replacement_leak(
+        &revoke,
+        member_row,
+        visible_member_tx,
+        hidden_again_tx,
+    );
+    assert_eq!(peer.maintained_subscription_view_metrics().hits_out, 3);
+}
+
+#[test]
+fn inherited_parent_policy_semijoin_preserves_visibility_across_duplicate_derivations() {
+    let reader = user(0xa1);
+    let other = user(0xb2);
+    let container = row(0xc1);
+    let entry = row(0xe1);
+    let first_edge = row(0xa1);
+    let second_edge = row(0xa2);
+    let third_edge = row(0xa3);
+    let container_policy = Policy::shape(Query::from("containers").join_via(
+        "containerAccess",
+        "container",
+        [eq(col("reader"), claim("sub"))],
+    ));
+    let schema = JazzSchema::new([
+        TableSchema::new("containers", [ColumnSchema::new("name", ColumnType::String)])
+            .with_read_policy(container_policy),
+        TableSchema::new(
+            "entries",
+            [
+                ColumnSchema::new("container", ColumnType::Uuid),
+                ColumnSchema::new("title", ColumnType::String),
+            ],
+        )
+        .with_reference("container", "containers")
+        .with_read_policy(Policy::shape(Query::from("entries").inherits("container"))),
+        TableSchema::new(
+            "containerAccess",
+            [
+                ColumnSchema::new("container", ColumnType::Uuid),
+                ColumnSchema::new("reader", ColumnType::Uuid),
+            ],
+        )
+        .with_reference("container", "containers"),
+    ]);
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+
+    let _container_tx = accept_global(
+        &mut core,
+        MergeableCommit::new("containers", container, 10)
+            .cells(BTreeMap::from([("name".to_owned(), v("container"))])),
+    );
+    let entry_tx = accept_global(
+        &mut core,
+        MergeableCommit::new("entries", entry, 11).cells(BTreeMap::from([
+            ("container".to_owned(), Value::Uuid(container.0)),
+            ("title".to_owned(), v("entry")),
+        ])),
+    );
+    let first_edge_tx = accept_global(
+        &mut core,
+        MergeableCommit::new("containerAccess", first_edge, 12).cells(BTreeMap::from([
+            ("container".to_owned(), Value::Uuid(container.0)),
+            ("reader".to_owned(), Value::Uuid(reader.0)),
+        ])),
+    );
+    let second_edge_tx = accept_global(
+        &mut core,
+        MergeableCommit::new("containerAccess", second_edge, 13).cells(BTreeMap::from([
+            ("container".to_owned(), Value::Uuid(container.0)),
+            ("reader".to_owned(), Value::Uuid(reader.0)),
+        ])),
+    );
+    accept_global(
+        &mut core,
+        MergeableCommit::new("containerAccess", row(0xaf), 14).cells(BTreeMap::from([
+            ("container".to_owned(), Value::Uuid(container.0)),
+            ("reader".to_owned(), Value::Uuid(other.0)),
+        ])),
+    );
+
+    let shape = Query::from("entries")
+        .validate(&core.catalogue.schema)
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let one_shot_rows = core
+        .query_rows_for_link(&shape, &binding, DurabilityTier::Global, reader)
+        .unwrap();
+    assert_eq!(
+        one_shot_rows
+            .iter()
+            .map(|row| row.row_uuid())
+            .collect::<Vec<_>>(),
+        vec![entry]
+    );
+
+    let mut peer = PeerState::client_link(reader);
+    let initial = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
+    assert_eq!(
+        canonical_view_update_rows_for_table(&initial, "entries"),
+        (
+            vec![("entries".to_owned().into(), entry, entry_tx)],
+            Vec::new()
+        )
+    );
+    let _stable = peer.query_update(&mut core, &shape, &binding).unwrap();
+
+    accept_global(
+        &mut core,
+        MergeableCommit::new("containerAccess", first_edge, 15)
+            .parents(vec![first_edge_tx])
+            .deletion(DeletionEvent::Deleted),
+    );
+    let first_revoke = peer.query_update(&mut core, &shape, &binding).unwrap();
+    let (_, first_revoke_entry_removes) =
+        canonical_view_update_rows_for_table(&first_revoke, "entries");
+    assert!(first_revoke_entry_removes.is_empty());
+    assert_eq!(
+        core.query_rows_for_link(&shape, &binding, DurabilityTier::Global, reader)
+            .unwrap()
+            .into_iter()
+            .map(|row| row.row_uuid())
+            .collect::<Vec<_>>(),
+        vec![entry]
+    );
+
+    accept_global(
+        &mut core,
+        MergeableCommit::new("containerAccess", second_edge, 16)
+            .parents(vec![second_edge_tx])
+            .deletion(DeletionEvent::Deleted),
+    );
+    let last_revoke = peer.query_update(&mut core, &shape, &binding).unwrap();
+    let (_, last_revoke_entry_removes) =
+        canonical_view_update_rows_for_table(&last_revoke, "entries");
+    assert_eq!(
+        last_revoke_entry_removes
+            .iter()
+            .map(|(_, row, _)| *row)
+            .collect::<Vec<_>>(),
+        vec![entry]
+    );
+    assert!(
+        core.query_rows_for_link(&shape, &binding, DurabilityTier::Global, reader)
+            .unwrap()
+            .is_empty()
+    );
+
+    accept_global(
+        &mut core,
+        MergeableCommit::new("containerAccess", third_edge, 17).cells(BTreeMap::from([
+            ("container".to_owned(), Value::Uuid(container.0)),
+            ("reader".to_owned(), Value::Uuid(reader.0)),
+        ])),
+    );
+    let regrant = peer.query_update(&mut core, &shape, &binding).unwrap();
+    let (regrant_entry_adds, _) = canonical_view_update_rows_for_table(&regrant, "entries");
+    assert_eq!(
+        regrant_entry_adds
+            .iter()
+            .map(|(_, row, _)| *row)
+            .collect::<Vec<_>>(),
+        vec![entry]
+    );
+    assert_eq!(
+        core.query_rows_for_link(&shape, &binding, DurabilityTier::Global, reader)
+            .unwrap()
+            .into_iter()
+            .map(|row| row.row_uuid())
+            .collect::<Vec<_>>(),
+        vec![entry]
+    );
+}
+
+#[test]
+fn maintained_subscription_view_ordered_offset_limit_boundary_churn_stays_incremental() {
+    let (_core_dir, mut core) = open_node_with_schema(node(9), priority_schema());
+    let first = row(0x11);
+    let second = row(0x22);
+    let third = row(0x33);
+    let fourth = row(0x44);
+    let first_tx = accept_global(
+        &mut core,
+        MergeableCommit::new("todos", first, 10).cells(priority_cells("first", 10)),
+    );
+    let second_tx = accept_global(
+        &mut core,
+        MergeableCommit::new("todos", second, 11).cells(priority_cells("second", 20)),
+    );
+    let third_tx = accept_global(
+        &mut core,
+        MergeableCommit::new("todos", third, 12).cells(priority_cells("third", 30)),
+    );
+    let fourth_tx = accept_global(
+        &mut core,
+        MergeableCommit::new("todos", fourth, 13).cells(priority_cells("fourth", 40)),
+    );
+    let shape = Query::from("todos")
+        .order_by("priority", OrderDirection::Asc)
+        .offset(1)
+        .limit(2)
+        .validate(&core.catalogue.schema)
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+
+    let mut peer = PeerState::new();
+    let initial = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
+    assert_view_update_rows(
+        initial,
+        [("todos", second, second_tx), ("todos", third, third_tx)],
+        [],
+    );
+
+    let zeroth = row(0x05);
+    let zeroth_tx = accept_global(
+        &mut core,
+        MergeableCommit::new("todos", zeroth, 14).cells(priority_cells("zeroth", 5)),
+    );
+    let shifted_down = peer.query_update(&mut core, &shape, &binding).unwrap();
+    assert_view_update_rows(
+        shifted_down,
+        [("todos", first, first_tx)],
+        [("todos", third, third_tx)],
+    );
+
+    accept_global(
+        &mut core,
+        MergeableCommit::new("todos", zeroth, 15)
+            .parents(vec![zeroth_tx])
+            .deletion(DeletionEvent::Deleted),
+    );
+    let shifted_back = peer.query_update(&mut core, &shape, &binding).unwrap();
+    assert_view_update_rows(
+        shifted_back,
+        [("todos", third, third_tx)],
+        [("todos", first, first_tx)],
+    );
+
+    accept_global(
+        &mut core,
+        MergeableCommit::new("todos", second, 16)
+            .parents(vec![second_tx])
+            .deletion(DeletionEvent::Deleted),
+    );
+    let fill_from_tail = peer.query_update(&mut core, &shape, &binding).unwrap();
+    assert_view_update_rows(
+        fill_from_tail,
+        [("todos", fourth, fourth_tx)],
+        [("todos", second, second_tx)],
+    );
+
+    let metrics = peer.maintained_subscription_view_metrics();
+    assert_eq!(metrics.unsupported_skips_out, 0);
+    assert_eq!(metrics.hits_out, 4);
+}
+
+#[test]
+fn maintained_subscription_view_rehydrates_reference_bearing_root_table() {
+    // The maintained subscription view footprint is table-aware and now ships
+    // reference-closure rows from the fast path.
+    let ref_schema = JazzSchema::new([
+        TableSchema::new(
+            "todos",
+            [
+                ColumnSchema::new("title", ColumnType::String),
+                ColumnSchema::new("author", ColumnType::Uuid),
+            ],
+        )
+        .with_reference("author", "authors"),
+        TableSchema::new("authors", [ColumnSchema::new("name", ColumnType::String)]),
+    ]);
+    let (_ref_dir, mut ref_core) = open_node_with_schema(node(9), ref_schema);
+    let shape = Query::from("todos")
+        .validate(&ref_core.catalogue.schema)
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let mut ref_peer = PeerState::client_link(user(0xa1));
+    ref_peer
+        .rehydrate_query(&mut ref_core, &shape, &binding)
+        .unwrap();
+    let ref_metrics = ref_peer.maintained_subscription_view_metrics();
+    assert_eq!(ref_metrics.unsupported_skips_out, 0);
+    assert_eq!(ref_metrics.hits_out, 1);
+
+    // Control: the same query on a table with no references is supported.
+    let plain_schema = JazzSchema::new([TableSchema::new(
+        "todos",
+        [ColumnSchema::new("title", ColumnType::String)],
+    )]);
+    let (_plain_dir, mut plain_core) = open_node_with_schema(node(9), plain_schema);
+    let plain_shape = Query::from("todos")
+        .validate(&plain_core.catalogue.schema)
+        .unwrap();
+    let plain_binding = plain_shape.bind(BTreeMap::new()).unwrap();
+    let mut plain_peer = PeerState::client_link(user(0xa1));
+    plain_peer
+        .rehydrate_query(&mut plain_core, &plain_shape, &plain_binding)
+        .unwrap();
+    let plain_metrics = plain_peer.maintained_subscription_view_metrics();
+    assert_eq!(plain_metrics.unsupported_skips_out, 0);
+    assert_eq!(plain_metrics.hits_out, 1);
+}
+
+#[test]
+fn maintained_subscription_view_explicit_include_keeps_other_implicit_references() {
+    let schema = JazzSchema::new([
+        TableSchema::new(
+            "roots",
+            [
+                ColumnSchema::new("title", ColumnType::String),
+                ColumnSchema::new("primary", ColumnType::Uuid),
+                ColumnSchema::new("secondary", ColumnType::Uuid),
+            ],
+        )
+        .with_reference("primary", "targets")
+        .with_reference("secondary", "targets"),
+        TableSchema::new("targets", [ColumnSchema::new("name", ColumnType::String)]),
+    ]);
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    let included = row(0x11);
+    let excluded = row(0x22);
+    let root = row(0x33);
+    accept_global(
+        &mut core,
+        MergeableCommit::new("targets", included, 10)
+            .cells(BTreeMap::from([("name".to_owned(), v("included"))])),
+    );
+    accept_global(
+        &mut core,
+        MergeableCommit::new("targets", excluded, 11)
+            .cells(BTreeMap::from([("name".to_owned(), v("excluded"))])),
+    );
+    accept_global(
+        &mut core,
+        MergeableCommit::new("roots", root, 12).cells(BTreeMap::from([
+            ("title".to_owned(), v("root")),
+            ("primary".to_owned(), Value::Uuid(included.0)),
+            ("secondary".to_owned(), Value::Uuid(excluded.0)),
+        ])),
+    );
+
+    let shape = Query::from("roots")
+        .include("primary")
+        .validate(&core.catalogue.schema)
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let mut peer = PeerState::client_link(user(0xa1));
+    let update = peer.rehydrate_query(&mut core, &shape, &binding).unwrap();
+
+    assert_view_update_only_ships_rows(&update, BTreeSet::from([root, included, excluded]));
+    let metrics = peer.maintained_subscription_view_metrics();
+    assert_eq!(metrics.unsupported_skips_out, 0);
+}
+
+#[test]
+fn retained_user_param_filter_graph_matches_literal_filter() {
+    let schema = JazzSchema::new([TableSchema::new(
+        "docs",
+        [
+            ColumnSchema::new("title", ColumnType::String),
+            ColumnSchema::new("owner", ColumnType::Uuid),
+        ],
+    )
+    .with_read_policy(Policy::shape(
+        Query::from("docs").filter(eq(col("owner"), claim("sub"))),
+    ))
+    .with_write_policy(Policy::public())]);
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    let owner = user(0xa1);
+    core.set_session_claims(owner, BTreeMap::from([("sub".to_owned(), Value::Uuid(owner.0))]));
+    accept_global(
+        &mut core,
+        MergeableCommit::new("docs", row(0xd1), 10).cells(BTreeMap::from([
+            ("title".to_owned(), v("owned")),
+            ("owner".to_owned(), Value::Uuid(owner.0)),
+        ])),
+    );
+    accept_global(
+        &mut core,
+        MergeableCommit::new("docs", row(0xd2), 11).cells(BTreeMap::from([
+            ("title".to_owned(), v("other")),
+            ("owner".to_owned(), Value::Uuid(user(0xb2).0)),
+        ])),
+    );
+
+    let shape = Query::from("docs")
+        .filter(eq(col("owner"), param("owner")))
+        .validate(&core.catalogue.schema)
+        .unwrap();
+    let binding = shape
+        .bind(BTreeMap::from([("owner".to_owned(), Value::Uuid(owner.0))]))
+        .unwrap();
+    let (shape, binding, plan) = core
+        .prepare_query_binding_for_link(&shape, &binding, DurabilityTier::Global, owner)
+        .unwrap();
+    let rows = core
+        .query_rows_with_prepared_plan_for_identity(
+            &shape,
+            &binding,
+            DurabilityTier::Global,
+            Some(&plan),
+            owner,
+        )
+        .unwrap();
+
+    assert_eq!(
+        rows.into_iter()
+            .map(|row| row.row_uuid())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([row(0xd1)])
+    );
+    assert!(shape.params().contains_key("owner"));
+    assert!(binding.values().contains_key("owner"));
+}
+
+#[test]
+fn session_sub_claim_cannot_override_authenticated_subject() {
+    let schema = JazzSchema::new([TableSchema::new(
+        "docs",
+        [
+            ColumnSchema::new("title", ColumnType::String),
+            ColumnSchema::new("owner", ColumnType::Uuid),
+        ],
+    )
+    .with_read_policy(Policy::owner_only("docs", "owner"))
+    .with_write_policy(Policy::public())]);
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    let owner = user(0xa1);
+    let other = user(0xb2);
+    let owned_doc = row(0xd1);
+    let other_doc = row(0xd2);
+
+    accept_global(
+        &mut core,
+        MergeableCommit::new("docs", owned_doc, 10).cells(BTreeMap::from([
+            ("title".to_owned(), v("owned")),
+            ("owner".to_owned(), Value::Uuid(owner.0)),
+        ])),
+    );
+    accept_global(
+        &mut core,
+        MergeableCommit::new("docs", other_doc, 11).cells(BTreeMap::from([
+            ("title".to_owned(), v("other")),
+            ("owner".to_owned(), Value::Uuid(other.0)),
+        ])),
+    );
+    core.set_session_claims(owner, BTreeMap::from([("sub".to_owned(), Value::Uuid(other.0))]));
+
+    let shape = Query::from("docs")
+        .validate(&core.catalogue.schema)
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+
+    assert_eq!(
+        core.query_rows_for_link(&shape, &binding, DurabilityTier::Global, owner)
+            .unwrap()
+            .into_iter()
+            .map(|row| row.row_uuid())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([owned_doc])
+    );
+}
+
+#[test]
+fn retained_param_used_as_filter_and_reachable_seed_matches_literal_query() {
+    let (_core_dir, mut core) = open_node_with_schema(node(9), recursive_reachable_schema());
+    seed_recursive_reachable_fixture(&mut core);
+    let shape = Query::from("docs")
+        .reachable_via_with_access_filters(
+            "teamAccess",
+            "doc",
+            "team",
+            param("team"),
+            [eq(col("team"), param("team"))],
+            "teamEdges",
+            "member",
+            "parent",
+            [],
+        )
+        .validate(&core.catalogue.schema)
+        .unwrap();
+    let binding = shape
+        .bind(BTreeMap::from([("team".to_owned(), Value::Uuid(team(1)))]))
+        .unwrap();
+
+    let (prepared_shape, prepared_binding, prepared_plan) = core
+        .prepare_query_binding_for_link(&shape, &binding, DurabilityTier::Global, user(0xa1))
+        .unwrap();
+    let prepared_rows = core
+        .query_rows_with_prepared_plan_for_identity(
+            &prepared_shape,
+            &prepared_binding,
+            DurabilityTier::Global,
+            Some(&prepared_plan),
+            user(0xa1),
+        )
+        .unwrap()
+        .into_iter()
+        .map(|row| row.row_uuid())
+        .collect::<BTreeSet<_>>();
+
+    assert_eq!(prepared_rows, BTreeSet::from([row(0xd1)]));
+}
