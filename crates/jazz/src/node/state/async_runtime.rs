@@ -163,6 +163,17 @@ impl DemandDrivenNode {
         self.poll_query(context, |node| node.row_history(table, row))
     }
 
+    /// Poll a history subscription opening. Once returned, later prepared
+    /// local writes enqueue their callback delta in the same resident publish
+    /// stack that makes one-shot reads visible.
+    pub fn poll_subscribe_history(
+        &mut self,
+        context: &mut std::task::Context<'_>,
+        table: &str,
+    ) -> std::task::Poll<Result<Subscription, Error>> {
+        self.poll_query(context, |node| node.subscribe_history(table))
+    }
+
     /// Poll the oldest durable batch. Later batches cannot overtake it.
     pub fn poll_persistence(
         &mut self,

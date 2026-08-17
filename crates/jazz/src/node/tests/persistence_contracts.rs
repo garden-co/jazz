@@ -497,6 +497,46 @@ fn cold_mergeable_preparation_suspends_before_resident_publication() {
 }
 
 #[test]
+fn prepared_local_write_notifies_jazz_subscription_in_publish_poll() {
+    let node_schema = schema();
+    let column_families = node_schema.column_families();
+    let refs = column_families.iter().map(String::as_str).collect::<Vec<_>>();
+    let released = std::rc::Rc::new(std::cell::Cell::new(true));
+    let backend = GatedAuthorityStorage {
+        inner: groove::storage::async_ordered::ImmediateStorage::new(MemoryStorage::new(&refs)),
+        released: std::rc::Rc::clone(&released),
+        cancellations: std::rc::Rc::new(std::cell::Cell::new(0)),
+        committed_units: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
+        fail_commits: std::rc::Rc::new(std::cell::Cell::new(false)),
+    };
+    let mut opening = PollableNodeOpen::new(node(0xd8), node_schema, Box::new(backend));
+    let waker = std::sync::Arc::new(PersistenceTestWake).into();
+    let mut context = std::task::Context::from_waker(&waker);
+    let std::task::Poll::Ready(Ok(mut runtime)) = opening.poll(&mut context) else {
+        panic!("released backend must open in its first poll")
+    };
+    let std::task::Poll::Ready(Ok(subscription)) =
+        runtime.poll_subscribe_history(&mut context, "todos")
+    else {
+        panic!("released empty history must open in its first poll")
+    };
+    assert!(subscription.recv().unwrap().is_empty());
+
+    released.set(false);
+    let commit = MergeableCommit::new("todos", row(0xd8), 10).cells(title_cells("callback"));
+    assert!(matches!(
+        runtime.poll_mergeable_commit(&mut context, &commit),
+        std::task::Poll::Ready(Ok(_))
+    ));
+    assert_eq!(
+        subscription.recv().unwrap().to_values().unwrap().len(),
+        1,
+        "the callback must be queued before the publishing poll returns Ready"
+    );
+    assert!(runtime.poll_persistence(&mut context).is_pending());
+}
+
+#[test]
 fn demand_driven_node_poisoned_after_durable_commit_failure() {
     let node_schema = schema();
     let column_families = node_schema.column_families();
