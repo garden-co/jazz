@@ -432,7 +432,7 @@ impl JazzServer {
     ) {
         let shell = self
             .state
-            .core_server_shell()
+            .runtime()
             .expect("test server starts a core server shell");
         shell
             .seed_branch_row_for_test(branch, table.into(), row_id, cells)
@@ -443,7 +443,7 @@ impl JazzServer {
     pub async fn create_branch_for_test(&self, branch: crate::ids::BranchId) {
         let shell = self
             .state
-            .core_server_shell()
+            .runtime()
             .expect("test server starts a core server shell");
         shell
             .create_branch_for_test(branch)

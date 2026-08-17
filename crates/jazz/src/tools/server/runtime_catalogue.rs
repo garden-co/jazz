@@ -8,7 +8,7 @@ use crate::protocol::{LensOp as CoreLensOp, MigrationLens, TableLens};
 use crate::tools::public_api::types::{Schema, SchemaHash, TableName, Value};
 use crate::tools::schema_lens::{Lens, LensOp};
 
-use super::{ServerState, core_server_shell::ServerShellHandle};
+use super::{ServerState, core_server_shell::ServerRuntimeHandle};
 use crate::tools::public_schema_convert;
 
 /// Publish newly admitted catalogue entries into the active runtime shell.
@@ -22,11 +22,11 @@ pub(crate) async fn publish_runtime_catalogue(
     schemas: &[Schema],
     lenses: &[Lens],
 ) -> Result<(), String> {
-    if state.core_server_shell().is_none() && state.core_server_shell_storage_config.is_none() {
+    if state.runtime().is_none() && state.core_server_shell_storage_config.is_none() {
         return Ok(());
     }
 
-    let mut shell = state.core_server_shell();
+    let mut shell = state.runtime();
     let supplied_schemas = schemas
         .iter()
         .cloned()
@@ -104,9 +104,9 @@ pub(crate) async fn publish_runtime_catalogue(
 
 fn runtime_shell(
     state: &ServerState,
-    shell: &mut Option<ServerShellHandle>,
+    shell: &mut Option<ServerRuntimeHandle>,
     initial_schema: crate::schema::JazzSchema,
-) -> Result<ServerShellHandle, String> {
+) -> Result<ServerRuntimeHandle, String> {
     if let Some(shell) = shell.clone() {
         return Ok(shell);
     }

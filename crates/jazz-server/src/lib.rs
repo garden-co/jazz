@@ -279,4 +279,12 @@ mod tests {
             "admin secret must not appear in logged link"
         );
     }
+
+    #[test]
+    fn semantic_runtime_facade_is_consumable_without_core_state_access() {
+        let _boundary = |runtime: &jazz::tools::server::ServerRuntimeHandle| {
+            let _activity = runtime.subscribe_activity();
+            runtime.notify_activity();
+        };
+    }
 }

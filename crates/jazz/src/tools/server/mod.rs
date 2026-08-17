@@ -12,6 +12,7 @@ mod catalogue;
 mod catalogue_entry;
 mod catalogue_storage;
 mod core_server_shell;
+pub use core_server_shell::{ServerRuntimeActivity, ServerRuntimeFrameStream, ServerRuntimeHandle};
 pub mod routes;
 pub(crate) mod runtime_catalogue;
 mod shutdown;
@@ -71,7 +72,7 @@ pub struct ServerState {
     /// Configured verifier for external JWTs.
     pub jwt_verifier: Option<Arc<JwtVerifier>>,
     /// Sendable handle to the local-owner server shell for the websocket route.
-    pub(crate) core_server_shell: StdRwLock<Option<core_server_shell::ServerShellHandle>>,
+    pub(crate) core_server_shell: StdRwLock<Option<core_server_shell::ServerRuntimeHandle>>,
     pub(crate) core_server_shell_storage_config: Option<StorageConfig>,
     pub(crate) storage_factory: Option<Arc<dyn crate::groove::storage::StorageFactory>>,
     /// Whether the current Edge shell generation has a fully installed,
@@ -142,14 +143,14 @@ impl ServerState {
     #[cfg(feature = "test")]
     #[doc(hidden)]
     pub fn has_core_server_shell_for_test(&self) -> bool {
-        self.core_server_shell().is_some()
+        self.runtime().is_some()
     }
 
     /// Test-only observation of whether an edge is ready for downstream clients.
     #[cfg(feature = "test")]
     #[doc(hidden)]
     pub fn has_core_server_shell_for_client_for_test(&self) -> bool {
-        self.core_server_shell_for_client().is_some()
+        self.runtime_for_client().is_some()
     }
 
     /// Test-only adoption hook for exercising the interval between catalogue
@@ -171,22 +172,21 @@ impl ServerState {
     pub async fn trusted_catalogue_snapshot_for_test(
         &self,
     ) -> Result<crate::protocol::CatalogueSnapshot, String> {
-        self.core_server_shell()
+        self.runtime()
             .ok_or_else(|| "server has no runtime shell".to_owned())?
             .trusted_catalogue_snapshot_for_test()
             .await
     }
 
-    pub(crate) fn core_server_shell(&self) -> Option<core_server_shell::ServerShellHandle> {
+    /// Return the installed semantic runtime, including bootstrap-only access.
+    pub fn runtime(&self) -> Option<ServerRuntimeHandle> {
         self.core_server_shell.read().unwrap().clone()
     }
 
-    /// Shell eligible for an ordinary downstream websocket session. Bootstrap
-    /// code may inspect the raw shell, but a blank or refreshing dynamic Edge
+    /// Return the runtime eligible for an ordinary downstream client session.
+    /// Bootstrap code may inspect [`Self::runtime`], but a blank or refreshing dynamic Edge
     /// remains RetryLater until a complete catalogue generation is installed.
-    pub(crate) fn core_server_shell_for_client(
-        &self,
-    ) -> Option<core_server_shell::ServerShellHandle> {
+    pub fn runtime_for_client(&self) -> Option<ServerRuntimeHandle> {
         client_shell_snapshot(
             self.topology,
             &self.core_server_shell,
@@ -214,7 +214,7 @@ impl ServerState {
 
     pub(crate) async fn refresh_dynamic_edge_catalogue(
         &self,
-        shell: &core_server_shell::ServerShellHandle,
+        shell: &core_server_shell::ServerRuntimeHandle,
         snapshot: crate::protocol::CatalogueSnapshot,
     ) -> Result<(), String> {
         self.mark_dynamic_edge_catalogue_refreshing();
@@ -230,8 +230,8 @@ impl ServerState {
     pub(crate) fn start_core_server_shell(
         &self,
         schema: crate::schema::JazzSchema,
-    ) -> Result<core_server_shell::ServerShellHandle, String> {
-        if let Some(core_server_shell) = self.core_server_shell() {
+    ) -> Result<core_server_shell::ServerRuntimeHandle, String> {
+        if let Some(core_server_shell) = self.runtime() {
             return Ok(core_server_shell);
         }
 
@@ -243,7 +243,7 @@ impl ServerState {
         if let Some(existing) = core_server_shell.clone() {
             return Ok(existing);
         }
-        let started = core_server_shell::ServerShellHandle::start_with_storage(
+        let started = core_server_shell::ServerRuntimeHandle::start_with_storage(
             schema,
             storage_config,
             self.storage_factory.clone(),
@@ -260,7 +260,7 @@ impl ServerState {
         &self,
         snapshot: crate::protocol::CatalogueSnapshot,
         edge_cache_budget: Option<crate::node::EdgeCacheBudget>,
-    ) -> Result<core_server_shell::ServerShellHandle, String> {
+    ) -> Result<core_server_shell::ServerRuntimeHandle, String> {
         if self.topology != ServerTopology::Edge {
             return Err("dynamic catalogue bootstrap is only valid for edge topology".to_owned());
         }
@@ -273,7 +273,7 @@ impl ServerState {
             return Ok(existing);
         }
         let started =
-            core_server_shell::ServerShellHandle::start_dynamic_edge_with_catalogue_snapshot(
+            core_server_shell::ServerRuntimeHandle::start_dynamic_edge_with_catalogue_snapshot(
                 storage_config,
                 self.storage_factory.clone(),
                 edge_cache_budget,

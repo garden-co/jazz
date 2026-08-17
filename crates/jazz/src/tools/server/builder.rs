@@ -293,7 +293,7 @@ impl ServerBuilder {
         latest_catalogue_schema: Option<Schema>,
         storage_config: Result<StorageConfig, String>,
         topology: ServerTopology,
-    ) -> Result<Option<crate::tools::server::core_server_shell::ServerShellHandle>, String> {
+    ) -> Result<Option<crate::tools::server::core_server_shell::ServerRuntimeHandle>, String> {
         let role = match topology {
             ServerTopology::Core => NodeRole::Core,
             ServerTopology::Edge => NodeRole::Edge,
@@ -301,7 +301,7 @@ impl ServerBuilder {
         if let Some(schema) = &self.core_server_shell_schema {
             let storage_config = storage_config?;
             return Ok(Some(
-                crate::tools::server::core_server_shell::ServerShellHandle::start_with_storage_config(
+                crate::tools::server::core_server_shell::ServerRuntimeHandle::start_with_storage_config(
                     schema.clone(),
                     storage_config,
                     self.storage_factory.clone(),
@@ -317,7 +317,7 @@ impl ServerBuilder {
         };
         let Some(schema) = schema else {
             if topology == ServerTopology::Edge {
-                return crate::tools::server::core_server_shell::ServerShellHandle::try_start_dynamic_edge_from_storage(
+                return crate::tools::server::core_server_shell::ServerRuntimeHandle::try_start_dynamic_edge_from_storage(
                     storage_config?,
                     self.storage_factory.clone(),
                     self.edge_cache_budget,
@@ -329,7 +329,7 @@ impl ServerBuilder {
         let schema = crate::tools::public_schema_convert::convert_public_schema(&schema)
             .map_err(|error| format!("failed to build server shell schema: {error}"))?;
         Ok(Some(
-            crate::tools::server::core_server_shell::ServerShellHandle::start_with_storage_config(
+            crate::tools::server::core_server_shell::ServerRuntimeHandle::start_with_storage_config(
                 schema,
                 storage_config,
                 self.storage_factory.clone(),
@@ -440,7 +440,7 @@ fn spawn_edge_upstream_connector(
                     continue;
                 }
             };
-            let shell = match state.core_server_shell() {
+            let shell = match state.runtime() {
                 Some(shell) => match state.refresh_dynamic_edge_catalogue(&shell, snapshot).await {
                     Ok(()) => shell,
                     Err(error) => {
@@ -653,7 +653,7 @@ mod tests {
             .expect("build authority core");
         let snapshot = core
             .state
-            .core_server_shell()
+            .runtime()
             .expect("core has shell")
             .trusted_catalogue_snapshot_for_test()
             .await
@@ -679,7 +679,7 @@ mod tests {
                 .is_err()
         );
         assert!(
-            edge.state.core_server_shell().is_none(),
+            edge.state.runtime().is_none(),
             "failed adoption must not publish a shell to downstream clients"
         );
         assert!(
@@ -687,10 +687,7 @@ mod tests {
                 .start_dynamic_edge_shell(snapshot.clone(), None)
                 .is_ok()
         );
-        let first_shell = edge
-            .state
-            .core_server_shell()
-            .expect("retry publishes ready shell");
+        let first_shell = edge.state.runtime().expect("retry publishes ready shell");
         let second_shell = edge
             .state
             .start_dynamic_edge_shell(snapshot, None)
@@ -725,7 +722,7 @@ mod tests {
             .expect("build authority core");
         let snapshot = core
             .state
-            .core_server_shell()
+            .runtime()
             .expect("core has shell")
             .trusted_catalogue_snapshot_for_test()
             .await
@@ -738,12 +735,9 @@ mod tests {
             .build()
             .await
             .expect("build edge with a validated durable generation");
-        let shell = edge
-            .state
-            .core_server_shell()
-            .expect("edge has ready shell");
+        let shell = edge.state.runtime().expect("edge has ready shell");
         assert!(
-            edge.state.core_server_shell_for_client().is_some(),
+            edge.state.runtime_for_client().is_some(),
             "validated catalogue is usable while the upstream is offline"
         );
 
@@ -762,7 +756,7 @@ mod tests {
                 .is_err()
         );
         assert!(
-            edge.state.core_server_shell_for_client().is_none(),
+            edge.state.runtime_for_client().is_none(),
             "failed validation/install must not advance the ready generation"
         );
 
@@ -771,7 +765,7 @@ mod tests {
             .await
             .expect("later complete refresh installs successfully");
         assert!(
-            edge.state.core_server_shell_for_client().is_some(),
+            edge.state.runtime_for_client().is_some(),
             "readiness advances only after the complete install returns"
         );
 
@@ -830,7 +824,7 @@ mod tests {
             "v1-to-v2 activation fails after registry reconstruction at the planted boundary"
         );
         assert!(
-            edge.state.core_server_shell_for_client().is_none(),
+            edge.state.runtime_for_client().is_none(),
             "a post-registry activation failure must not publish the new ready generation"
         );
     }
@@ -978,7 +972,7 @@ mod tests {
                 .build()
                 .await
                 .expect("build fixed schema server");
-            assert!(built.state.core_server_shell().is_some());
+            assert!(built.state.runtime().is_some());
             built
                 .state
                 .catalogue_store
@@ -1000,7 +994,7 @@ mod tests {
             .await
             .expect("build dynamic server from rehydrated catalogue");
 
-        assert!(rebuilt.state.core_server_shell().is_some());
+        assert!(rebuilt.state.runtime().is_some());
     }
 
     #[tokio::test]
@@ -1026,7 +1020,7 @@ mod tests {
                 .await
                 .expect("build RocksDB server with server shell");
 
-            assert!(built.state.core_server_shell().is_some());
+            assert!(built.state.runtime().is_some());
             assert!(data_dir.path().join(CATALOGUE_ROCKSDB_DIR).exists());
             assert!(data_dir.path().join(SERVER_SHELL_ROCKSDB_DIR).exists());
             assert_eq!(
@@ -1037,7 +1031,7 @@ mod tests {
             Arc::clone(&built.state)
         };
         assert!(
-            retained_state.core_server_shell().is_none(),
+            retained_state.runtime().is_none(),
             "shutdown must retire the shell even if request/router state outlives BuiltServer"
         );
 
@@ -1051,7 +1045,7 @@ mod tests {
             .await
             .expect("rebuild RocksDB server with server shell");
 
-        assert!(rebuilt.state.core_server_shell().is_some());
+        assert!(rebuilt.state.runtime().is_some());
         assert!(data_dir.path().join(SERVER_SHELL_ROCKSDB_DIR).exists());
         rebuilt.shutdown().await;
 
@@ -1069,7 +1063,7 @@ mod tests {
                 .build()
                 .await
                 .expect("build RocksDB server for direct-drop lifecycle");
-            assert!(dropped.state.core_server_shell().is_some());
+            assert!(dropped.state.runtime().is_some());
         }
 
         let reopened_after_drop = ServerBuilder::new(app_id)
@@ -1081,7 +1075,7 @@ mod tests {
             .build()
             .await
             .expect("reopen RocksDB server after direct builder drop");
-        assert!(reopened_after_drop.state.core_server_shell().is_some());
+        assert!(reopened_after_drop.state.runtime().is_some());
         assert_eq!(
             reopened_after_drop.shutdown().await,
             crate::tools::server::ShutdownPhase::StorageClosed
@@ -1211,7 +1205,7 @@ mod tests {
                     .expect("later runtime reaches durable-close barrier"),
                 crate::tools::server::ShutdownPhase::StorageClosed
             );
-            assert!(state.core_server_shell().is_none());
+            assert!(state.runtime().is_none());
             ServerBuilder::new(app_id)
                 .with_schema(schema)
                 .with_storage_factory(Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory))

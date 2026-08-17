@@ -588,7 +588,7 @@ async fn handle_ws_connection(
             let _ = socket.close().await;
             return;
         }
-        let Some(core_server_shell) = state.core_server_shell() else {
+        let Some(core_server_shell) = state.runtime() else {
             send_ws_error(
                 &mut socket,
                 WireError::new(
@@ -647,7 +647,7 @@ async fn handle_ws_connection(
         return;
     }
 
-    let Some(core_server_shell) = state.core_server_shell_for_client() else {
+    let Some(core_server_shell) = state.runtime_for_client() else {
         send_ws_error(
             &mut socket,
             WireError::new(
@@ -867,7 +867,7 @@ async fn handle_ws_connection(
 
 async fn drain_ws_outbound(
     socket: &mut WebSocket,
-    core_server_shell: &crate::tools::server::core_server_shell::ServerShellHandle,
+    core_server_shell: &crate::tools::server::core_server_shell::ServerRuntimeHandle,
     session: crate::serving::ServerSession,
 ) -> Result<(), String> {
     let outbound = core_server_shell.tick_take(session).await?;
@@ -1253,7 +1253,7 @@ mod tests {
     // Internal admission-boundary test: server-shell policy reads are not yet
     // observable through a public websocket client helper, so this pins
     // the security invariant at the route admission point that feeds
-    // ServerShellHandle::open(identity, claims, trust).
+    // ServerRuntimeHandle::open(identity, claims, trust).
     #[tokio::test]
     async fn ws_backend_session_admits_session_claims_for_policy_reads() {
         let state = make_ws_test_state().await;

@@ -1403,7 +1403,7 @@ mod tests {
                 }],
             }],
         );
-        let runtime_shell = state.core_server_shell().expect("runtime shell started");
+        let runtime_shell = state.runtime().expect("runtime shell started");
         assert_eq!(
             runtime_shell
                 .runtime_catalogue_contains(runtime_v2.version_id(), expected_runtime_lens.id)
@@ -1654,7 +1654,7 @@ mod tests {
                 }],
             }],
         );
-        let runtime_shell = state.core_server_shell().expect("runtime shell started");
+        let runtime_shell = state.runtime().expect("runtime shell started");
         assert_eq!(
             runtime_shell
                 .runtime_catalogue_contains(runtime_v2.version_id(), expected_runtime_lens.id)
