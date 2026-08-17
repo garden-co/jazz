@@ -226,10 +226,8 @@ fn validate_query_canonical_parts(
     schema: &JazzSchema,
 ) -> Result<ValidatedQueryCanonicalParts, QueryError> {
     let root = table(schema, &query.table)?;
+    let mut resolved_query = query.clone();
     let mut params = BTreeMap::new();
-    for predicate in &query.filters {
-        validate_predicate(&root, predicate, &mut params)?;
-    }
     for join in &query.joins {
         validate_join(schema, &root, &query.table, join, &mut params)?;
     }
@@ -256,6 +254,18 @@ fn validate_query_canonical_parts(
             });
         }
         validate_flat_join(schema, &query.table, flat_join)?;
+        let sources = flat_join_source_tables(schema, &query.table, flat_join)?;
+        for predicate in &mut resolved_query.filters {
+            qualify_flat_join_predicate(predicate, &sources)?;
+        }
+        let filter_schema = flat_join_filter_schema(&sources)?;
+        for predicate in &resolved_query.filters {
+            validate_predicate(&filter_schema, predicate, &mut params)?;
+        }
+    } else {
+        for predicate in &query.filters {
+            validate_predicate(&root, predicate, &mut params)?;
+        }
     }
     for reachable in &query.reachable {
         validate_reachable(schema, &root, reachable, &mut params)?;
@@ -294,9 +304,136 @@ fn validate_query_canonical_parts(
             planner_column_type(&root, &order.column)?;
         }
     }
-    let normalized = normalize_query(query);
+    let normalized = normalize_query(&resolved_query);
     let canonical = canonical_query_bytes_for_schema(&normalized, schema)?;
     Ok((normalized, params, canonical))
+}
+
+fn flat_join_source_tables(
+    schema: &JazzSchema,
+    root_table: &str,
+    flat_join: &FlatJoin,
+) -> Result<BTreeMap<String, TableSchema>, QueryError> {
+    let root_name = flat_join_source_name(root_table, &flat_join.root_alias);
+    let mut sources = BTreeMap::from([(root_name, table(schema, root_table)?)]);
+    for source in &flat_join.sources {
+        let name = flat_join_source_name(&source.table, &source.alias);
+        if sources
+            .insert(name.clone(), table(schema, &source.table)?)
+            .is_some()
+        {
+            return Err(QueryError::UnknownColumn {
+                table: "flat join duplicate source".to_owned(),
+                column: name,
+            });
+        }
+    }
+    Ok(sources)
+}
+
+fn flat_join_filter_schema(
+    sources: &BTreeMap<String, TableSchema>,
+) -> Result<TableSchema, QueryError> {
+    let mut columns = Vec::new();
+    for (scope, table) in sources {
+        columns.push(JazzColumnSchema::new(
+            format!("{scope}.id"),
+            ColumnType::Uuid,
+        ));
+        for magic in ["$createdBy", "$updatedBy", "$createdAt", "$updatedAt"] {
+            columns.push(JazzColumnSchema::new(
+                format!("{scope}.{magic}"),
+                executable_magic_column_type(magic)?
+                    .expect("listed flat-join magic columns are executable")
+                    .clone(),
+            ));
+        }
+        columns.extend(
+            table
+                .columns
+                .iter()
+                .filter(|column| column.name != "id")
+                .map(|column| {
+                    JazzColumnSchema::new(
+                        format!("{scope}.{}", column.name),
+                        column.column_type.clone(),
+                    )
+                }),
+        );
+    }
+    Ok(TableSchema::new("flat join", columns))
+}
+
+fn qualify_flat_join_predicate(
+    predicate: &mut Predicate,
+    sources: &BTreeMap<String, TableSchema>,
+) -> Result<(), QueryError> {
+    let qualify_operand = |operand: &mut Operand| -> Result<(), QueryError> {
+        let Operand::Column(column) = operand else {
+            return Ok(());
+        };
+        *column = qualify_flat_join_column(column, sources)?;
+        Ok(())
+    };
+    match predicate {
+        Predicate::All(predicates) | Predicate::Any(predicates) => predicates
+            .iter_mut()
+            .try_for_each(|predicate| qualify_flat_join_predicate(predicate, sources)),
+        Predicate::Not(predicate) => qualify_flat_join_predicate(predicate, sources),
+        Predicate::Eq(left, right)
+        | Predicate::Ne(left, right)
+        | Predicate::Gt(left, right)
+        | Predicate::Gte(left, right)
+        | Predicate::Lt(left, right)
+        | Predicate::Lte(left, right)
+        | Predicate::Contains(left, right) => {
+            qualify_operand(left)?;
+            qualify_operand(right)
+        }
+        Predicate::In(value, options) => {
+            qualify_operand(value)?;
+            options.iter_mut().try_for_each(qualify_operand)
+        }
+        Predicate::EnumMatch { column, .. } => {
+            *column = qualify_flat_join_column(column, sources)?;
+            Ok(())
+        }
+        Predicate::IsNull(operand) => qualify_operand(operand),
+    }
+}
+
+fn qualify_flat_join_column(
+    column: &str,
+    sources: &BTreeMap<String, TableSchema>,
+) -> Result<String, QueryError> {
+    if let Ok((scope, field)) = flat_join_qualified_field(column) {
+        let table = sources
+            .get(scope)
+            .ok_or_else(|| QueryError::UnknownColumn {
+                table: "flat join source".to_owned(),
+                column: scope.to_owned(),
+            })?;
+        planner_column_type(table, field)?;
+        return Ok(column.to_owned());
+    }
+
+    let mut matches = sources
+        .iter()
+        .filter(|(_, table)| planner_column_type(table, column).is_ok())
+        .map(|(scope, _)| scope.clone());
+    let Some(scope) = matches.next() else {
+        return Err(QueryError::UnknownColumn {
+            table: "flat join".to_owned(),
+            column: column.to_owned(),
+        });
+    };
+    if matches.next().is_some() {
+        return Err(QueryError::UnknownColumn {
+            table: "ambiguous flat join column; qualify its source".to_owned(),
+            column: column.to_owned(),
+        });
+    }
+    Ok(format!("{scope}.{column}"))
 }
 
 fn flat_join_source_name(table: &str, alias: &Option<String>) -> String {
@@ -357,9 +494,10 @@ fn validate_flat_join(
         }
         let left_schema = table(schema, left_table)?;
         let right_schema = table(schema, &source.table)?;
-        if flat_join_column_type(&left_schema, left_column)?
-            != flat_join_column_type(&right_schema, right_column)?
-        {
+        if !flat_join_key_types_compatible(
+            planner_column_type(&left_schema, left_column)?,
+            planner_column_type(&right_schema, right_column)?,
+        ) {
             return Err(QueryError::OperandTypeMismatch);
         }
         sources.insert(name, source.table.clone());
@@ -1007,6 +1145,22 @@ fn column_types_comparable(left: &ColumnType, right: &ColumnType) -> bool {
             (&left, &right),
             (ColumnType::EnumTag(_), ColumnType::U8) | (ColumnType::U8, ColumnType::EnumTag(_))
         )
+}
+
+fn flat_join_key_types_compatible(left: &ColumnType, right: &ColumnType) -> bool {
+    column_types_comparable(left, right)
+        || array_element_type_compatible(left, right)
+        || array_element_type_compatible(right, left)
+}
+
+fn array_element_type_compatible(array: &ColumnType, scalar: &ColumnType) -> bool {
+    match non_null_column_type(array) {
+        ColumnType::Array(member) => {
+            !matches!(non_null_column_type(scalar), ColumnType::Array(_))
+                && column_types_comparable(&member, scalar)
+        }
+        _ => false,
+    }
 }
 
 fn in_operand_types_compatible(left: &ColumnType, right: &ColumnType) -> bool {

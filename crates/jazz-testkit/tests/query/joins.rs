@@ -154,7 +154,7 @@ async fn subscribe_all_join_returns_base_and_joined_table_values() {
 
 local_tokio_test! {
 /// Verifies that filters can target a column supplied by the joined table.
-#[ignore = "flat joins cannot filter joined-table columns (unknown column title)"]
+#[ignore = "post-join filters cannot lower fields from a joined source"]
 async fn subscribe_all_join_filter_on_joined_table_column() {
     let pair = ClientPair::start().await;
 
@@ -250,7 +250,6 @@ local_tokio_test! {
 ///                                          │
 ///                                          └──► subscriber (add delta: tuple ✓)
 /// ```
-#[ignore = "flat joins reject nullable foreign-key operands (Query: operand type mismatch)"]
 async fn subscribe_all_supports_hop_queries_via_projected_joins() {
     let pair = ClientPair::start().await;
     let query = QueryBuilder::new("users")
@@ -317,7 +316,6 @@ local_tokio_test! {
 ///   stream: change for team_a AND team_b
 ///   query result: [team_b]
 /// ```
-#[ignore = "flat joins reject nullable foreign-key operands (Query: operand type mismatch)"]
 async fn subscribe_all_reacts_to_scalar_fk_updates_in_projected_join_queries() {
     let pair = ClientPair::start().await;
 
