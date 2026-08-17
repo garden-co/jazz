@@ -1,14 +1,14 @@
 //! Contract tests live at the public storage seam because suspension and
 //! first-poll readiness are backend behavior, not an IVM implementation detail.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::task::{Context, Poll, Wake, Waker};
 
 use groove::storage::pollable::{
     OwnedScanRequest, OwnedStorageOperation, OwnedStorageRequest, OwnedStorageResponse,
-    PollableOrderedKvStorage, ScanDirection,
+    PollableOrderedKvStorage, ScanDirection, StorageRequestId,
 };
 use groove::storage::{Error, MemoryStorage, OwnedWriteOperation};
 use groove::{
@@ -63,6 +63,60 @@ impl PollableOrderedKvStorage for FailingCommitStorage {
             message: "injected commit failure".to_owned(),
         }))
     }
+
+    fn cancel_request(&mut self, _request: StorageRequestId) -> Result<(), Error> {
+        Ok(())
+    }
+}
+
+struct OrderedControlledStorage {
+    storage: MemoryStorage,
+    permitted: Rc<Cell<usize>>,
+    seen: Rc<RefCell<Vec<StorageRequestId>>>,
+}
+
+impl OrderedControlledStorage {
+    fn new(
+        column_families: &[&str],
+    ) -> (Self, Rc<Cell<usize>>, Rc<RefCell<Vec<StorageRequestId>>>) {
+        let permitted = Rc::new(Cell::new(0));
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        (
+            Self {
+                storage: MemoryStorage::new(column_families),
+                permitted: Rc::clone(&permitted),
+                seen: Rc::clone(&seen),
+            },
+            permitted,
+            seen,
+        )
+    }
+}
+
+impl PollableOrderedKvStorage for OrderedControlledStorage {
+    fn poll_request(
+        &mut self,
+        request: &OwnedStorageRequest,
+        context: &mut Context<'_>,
+    ) -> Poll<Result<OwnedStorageResponse, Error>> {
+        let position = {
+            let mut seen = self.seen.borrow_mut();
+            seen.iter()
+                .position(|id| *id == request.id())
+                .unwrap_or_else(|| {
+                    seen.push(request.id());
+                    seen.len() - 1
+                })
+        };
+        if position >= self.permitted.get() {
+            return Poll::Pending;
+        }
+        self.storage.poll_request(request, context)
+    }
+
+    fn cancel_request(&mut self, _request: StorageRequestId) -> Result<(), Error> {
+        Ok(())
+    }
 }
 
 impl ControlledStorage {
@@ -88,6 +142,10 @@ impl PollableOrderedKvStorage for ControlledStorage {
             return Poll::Pending;
         }
         self.storage.poll_request(request, context)
+    }
+
+    fn cancel_request(&mut self, _request: StorageRequestId) -> Result<(), Error> {
+        Ok(())
     }
 }
 
@@ -275,6 +333,84 @@ fn failed_async_persistence_keeps_published_delta_but_poisons_later_database_use
         database
             .resident()
             .primary_key_scan("rows", &[Value::U64(1)]),
+        Err(groove::db::Error::DatabasePoisoned)
+    ));
+}
+
+#[test]
+fn later_visible_commits_cannot_overtake_a_pending_durable_predecessor() {
+    let schema = DatabaseSchema::new([TableSchema::new(
+        "rows",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("value", ColumnType::String),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+    let resident = Database::new(schema, MemoryStorage::new(&["rows", "indices"])).unwrap();
+    let (persistence, permitted, seen) = OrderedControlledStorage::new(&["rows", "indices"]);
+    let mut database = PollableDatabase::new(resident, Box::new(persistence));
+
+    for id in [1, 2] {
+        let mut batch = database.resident().open_batch();
+        batch.insert(
+            "rows",
+            vec![Value::U64(id), Value::String(format!("row {id}"))],
+        );
+        database.commit_batch(batch).unwrap();
+    }
+    assert_eq!(
+        database
+            .resident()
+            .primary_key_scan("rows", &[])
+            .unwrap()
+            .len(),
+        2
+    );
+
+    let waker = Waker::from(Arc::new(NoopWake));
+    let mut context = Context::from_waker(&waker);
+    assert!(database.poll_persistence(&mut context).is_pending());
+    assert_eq!(seen.borrow().len(), 1, "only the queue head may be polled");
+
+    permitted.set(1);
+    assert!(database.poll_persistence(&mut context).is_pending());
+    assert_eq!(
+        seen.borrow().len(),
+        2,
+        "the successor starts only after its predecessor commits"
+    );
+
+    permitted.set(2);
+    assert!(matches!(
+        database.poll_persistence(&mut context),
+        Poll::Ready(Ok(()))
+    ));
+}
+
+#[test]
+fn cancelling_after_local_publication_poisons_instead_of_rolling_back() {
+    let schema = DatabaseSchema::new([TableSchema::new(
+        "rows",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("value", ColumnType::String),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+    let resident = Database::new(schema, MemoryStorage::new(&["rows", "indices"])).unwrap();
+    let (persistence, _gate) = ControlledStorage::new(&["rows", "indices"]);
+    let mut database = PollableDatabase::new(resident, Box::new(persistence));
+    let mut batch = database.resident().open_batch();
+    batch.insert(
+        "rows",
+        vec![Value::U64(1), Value::String("already observed".into())],
+    );
+    database.commit_batch(batch).unwrap();
+
+    database.cancel_pending_persistence().unwrap();
+    assert!(matches!(
+        database.resident().primary_key_scan("rows", &[]),
         Err(groove::db::Error::DatabasePoisoned)
     ));
 }

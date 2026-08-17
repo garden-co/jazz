@@ -132,18 +132,33 @@ impl PollableOrderedKvStorage for IndexedDbOrderedStorage {
             let result = execute(&mut *tree.lock().await, operation).await;
             let wake = {
                 let mut requests = requests.borrow_mut();
-                let wake = match requests.remove(&request_id) {
-                    Some(RequestState::Running(waker)) => Some(waker),
+                match requests.remove(&request_id) {
+                    Some(RequestState::Running(waker)) => {
+                        requests.insert(request_id, RequestState::Complete(result));
+                        Some(waker)
+                    }
+                    // Cancellation terminalized this identity. The backend
+                    // transaction may still finish, but its stale completion
+                    // cannot enter a replacement request.
                     _ => None,
-                };
-                requests.insert(request_id, RequestState::Complete(result));
-                wake
+                }
             };
             if let Some(waker) = wake {
                 waker.wake();
             }
         });
         Poll::Pending
+    }
+
+    fn cancel_request(&mut self, request: StorageRequestId) -> Result<(), Error> {
+        match self.requests.borrow_mut().remove(&request) {
+            Some(RequestState::Running(_)) => Err(Error::Backend {
+                backend: "indexeddb-pages",
+                message: "IndexedDB request cancellation has an ambiguous durable outcome"
+                    .to_owned(),
+            }),
+            Some(RequestState::Complete(_)) | None => Ok(()),
+        }
     }
 }
 

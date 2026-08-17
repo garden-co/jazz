@@ -81,6 +81,20 @@ where
         !self.pending.is_empty()
     }
 
+    /// Cancel queued persistence and poison resident state. Optimistic local
+    /// publication cannot be represented as a rollback after cancellation.
+    #[doc(hidden)]
+    pub fn cancel_pending_persistence(&mut self) -> Result<(), Error> {
+        let mut first_error = None;
+        for request in self.pending.drain(..) {
+            if let Err(error) = self.persistence.cancel_request(request.id()) {
+                first_error.get_or_insert(error);
+            }
+        }
+        self.resident.mark_async_persistence_failed();
+        first_error.map_or(Ok(()), |error| Err(error.into()))
+    }
+
     #[doc(hidden)]
     pub fn resident(&self) -> &Database<S> {
         &self.resident

@@ -123,6 +123,12 @@ pub trait PollableOrderedKvStorage {
         request: &OwnedStorageRequest,
         context: &mut Context<'_>,
     ) -> Poll<Result<OwnedStorageResponse, Error>>;
+
+    /// Cancel retained backend work for `request`.
+    ///
+    /// An error means the durable outcome is ambiguous; the owner must poison
+    /// and reopen rather than reuse the request identity.
+    fn cancel_request(&mut self, request: StorageRequestId) -> Result<(), Error>;
 }
 
 /// Existing immediate backends inherit the object-safe pollable contract.
@@ -168,5 +174,9 @@ where
                 OrderedKvStorage::close(self).map(|()| OwnedStorageResponse::Closed)
             }
         })
+    }
+
+    fn cancel_request(&mut self, _request: StorageRequestId) -> Result<(), Error> {
+        Ok(())
     }
 }
