@@ -1,0 +1,2447 @@
+//! Prepared shapes, routed bindings, and subscription delivery state.
+
+use super::*;
+
+/// Stable handle returned to callers for subscription management.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct SubscriptionId(pub(super) u64);
+
+impl SubscriptionId {
+    pub(super) fn retainer_key(self) -> String {
+        self.0.to_string()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct PreparedShapeId(pub(super) u64);
+
+impl PreparedShapeId {
+    pub(super) fn retainer_key(self) -> String {
+        self.0.to_string()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PreparedShape {
+    pub(super) id: PreparedShapeId,
+}
+
+impl PreparedShape {
+    pub fn id(&self) -> PreparedShapeId {
+        self.id
+    }
+}
+
+/// One prepared multisink terminal.
+///
+/// The terminal graph is the route-carrying graph Groove maintains: it includes
+/// hidden route fields plus any columns that a sink may expose publicly. Binding
+/// appends a route filter and public projection for each sink.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct RoutedMultisinkTerminal {
+    pub sink: String,
+    pub graph: GraphBuilder,
+    pub route_fields: Vec<String>,
+    /// Binding descriptor positions paired with `route_fields`.
+    pub route_value_indices: Vec<usize>,
+    pub public_fields: Vec<String>,
+}
+
+impl RoutedMultisinkTerminal {
+    pub fn new(
+        sink: impl Into<String>,
+        graph: GraphBuilder,
+        route_fields: impl IntoIterator<Item = impl Into<String>>,
+        public_fields: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        let route_fields = route_fields.into_iter().map(Into::into).collect::<Vec<_>>();
+        let route_value_indices = (0..route_fields.len()).collect();
+        Self {
+            sink: sink.into(),
+            graph,
+            route_fields,
+            route_value_indices,
+            public_fields: public_fields.into_iter().map(Into::into).collect(),
+        }
+    }
+
+    /// Select non-prefix binding values for the terminal's route predicates.
+    pub fn with_route_value_indices(
+        mut self,
+        route_value_indices: impl IntoIterator<Item = usize>,
+    ) -> Self {
+        self.route_value_indices = route_value_indices.into_iter().collect();
+        self
+    }
+}
+
+/// Receiving end of a one-sink live query subscription.
+///
+/// This is a convenience wrapper around [`MultisinkSubscription`] for callers
+/// that only asked for one output. The runtime delivery path is still multisink.
+#[derive(Debug)]
+pub struct Subscription {
+    pub(super) inner: MultisinkSubscription,
+    pub(super) sink: String,
+    pub(super) output: RecordDescriptor,
+}
+
+impl Subscription {
+    pub fn id(&self) -> SubscriptionId {
+        self.inner.id()
+    }
+
+    pub fn recv(&self) -> Result<RecordDeltas, RecvError> {
+        self.inner
+            .recv()
+            .map(|deltas| self.extract_sink_deltas(deltas))
+    }
+
+    pub fn try_recv(&self) -> Result<RecordDeltas, TryRecvError> {
+        self.inner
+            .try_recv()
+            .map(|deltas| self.extract_sink_deltas(deltas))
+    }
+
+    fn extract_sink_deltas(&self, mut deltas: MultisinkDeltas) -> RecordDeltas {
+        deltas
+            .sinks
+            .remove(&self.sink)
+            .unwrap_or_else(|| RecordDeltas::empty(self.output))
+    }
+}
+
+/// Deltas grouped by named output sink for one multisink graph subscription.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MultisinkDeltas {
+    pub sinks: BTreeMap<String, RecordDeltas>,
+    /// Structured terminal operations are a subscription-boundary output.
+    /// Relational operators never consume this map.
+    pub terminal_sinks: BTreeMap<String, TerminalDeltas>,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct QueuedMultisinkDeltas {
+    // Explicit fragment-output drain channel: once a tick or hydration computes
+    // subscription output, this queue owns delivery until the receiver drains
+    // it. Eval memo is only a recompute cache and may be evicted independently.
+    pub(super) deltas: MultisinkDeltas,
+}
+
+impl QueuedMultisinkDeltas {
+    pub(super) fn new(deltas: MultisinkDeltas) -> Self {
+        Self { deltas }
+    }
+}
+
+impl MultisinkDeltas {
+    pub fn is_empty(&self) -> bool {
+        self.sinks.values().all(RecordDeltas::is_empty)
+            && self.terminal_sinks.values().all(TerminalDeltas::is_empty)
+    }
+
+    pub fn get(&self, sink: &str) -> Option<&RecordDeltas> {
+        self.sinks.get(sink)
+    }
+}
+
+/// Receiving end of a live multisink graph subscription.
+#[derive(Debug)]
+pub struct MultisinkSubscription {
+    pub(super) id: SubscriptionId,
+    pub(super) receiver: Receiver<QueuedMultisinkDeltas>,
+    pub(super) _receiver_liveness: Arc<()>,
+}
+
+impl MultisinkSubscription {
+    pub fn id(&self) -> SubscriptionId {
+        self.id
+    }
+
+    pub fn recv(&self) -> Result<MultisinkDeltas, RecvError> {
+        self.receiver.recv().map(|queued| queued.deltas)
+    }
+
+    pub fn try_recv(&self) -> Result<MultisinkDeltas, TryRecvError> {
+        self.receiver.try_recv().map(|queued| queued.deltas)
+    }
+}
+
+impl PredicateExpr {
+    pub(super) fn matches(
+        &self,
+        record: BorrowedRecord<'_>,
+        comparison: ValueComparison,
+    ) -> Result<bool, IvmRuntimeError> {
+        match self {
+            Self::Eq { field, value } => {
+                compare_record_field(record, field, value, |ord| ord.is_eq(), comparison)
+            }
+            Self::Neq { field, value } => {
+                compare_record_field(record, field, value, |ord| !ord.is_eq(), comparison)
+            }
+            Self::Contains { field, value } => {
+                contains_record_field(record, field, value, comparison)
+            }
+            Self::EqField { field, value_field } => {
+                compare_record_fields(record, field, value_field, |ord| ord.is_eq(), comparison)
+            }
+            Self::ContainsField {
+                field,
+                needle_field,
+            } => contains_record_field_value(record, field, needle_field, comparison),
+            Self::NeqField { field, value_field } => {
+                compare_record_fields(record, field, value_field, |ord| !ord.is_eq(), comparison)
+            }
+            Self::Gt { field, value } => {
+                compare_record_field(record, field, value, |ord| ord.is_gt(), comparison)
+            }
+            Self::GtEq { field, value } => {
+                compare_record_field(record, field, value, |ord| ord.is_ge(), comparison)
+            }
+            Self::Lt { field, value } => {
+                compare_record_field(record, field, value, |ord| ord.is_lt(), comparison)
+            }
+            Self::LtEq { field, value } => {
+                compare_record_field(record, field, value, |ord| ord.is_le(), comparison)
+            }
+            Self::IsNull { field } => Ok(is_sql_null_value(&record.get(field)?)),
+            Self::IsNotNull { field } => Ok(!is_sql_null_value(&record.get(field)?)),
+            Self::EnumMatch {
+                field,
+                case_tag,
+                payload,
+            } => {
+                let value = record.get(field)?;
+                let value = match value {
+                    Value::Nullable(Some(value)) => *value,
+                    value => value,
+                };
+                match value {
+                    Value::Enum(value) if value.tag() == *case_tag => {
+                        payload.matches(value.record().borrowed(), comparison)
+                    }
+                    // Wrong arms and NULL never match. This is intentionally
+                    // fail-closed so cross-case updates produce ordinary
+                    // removal/insertion deltas through the existing filter
+                    // operator.
+                    Value::Enum(_) | Value::Nullable(None) => Ok(false),
+                    _ => Ok(false),
+                }
+            }
+            Self::And(predicates) => predicates
+                .iter()
+                .map(|predicate| predicate.matches(record, comparison))
+                .try_fold(true, |acc, matches| matches.map(|matches| acc && matches)),
+            Self::Or(predicates) => predicates
+                .iter()
+                .map(|predicate| predicate.matches(record, comparison))
+                .try_fold(false, |acc, matches| matches.map(|matches| acc || matches)),
+        }
+    }
+}
+
+/// Deltas for one base table in a committed batch.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TableDelta {
+    pub table: String,
+    /// Table-local discriminator selecting the descriptor for every encoded
+    /// payload in this homogeneous delta group.
+    pub variant_tag: u32,
+    pub descriptor: RecordDescriptor,
+    pub deltas: Vec<RecordDelta>,
+}
+
+/// Weighted change to one encoded record.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecordDelta {
+    pub record: Bytes,
+    pub weight: i64,
+}
+
+impl RecordDelta {
+    pub fn raw(&self) -> &[u8] {
+        &self.record
+    }
+
+    pub fn borrowed<'a>(&'a self, descriptor: &'a RecordDescriptor) -> BorrowedRecord<'a> {
+        BorrowedRecord::new(&self.record, descriptor)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct MultisinkSubscriptionState {
+    pub(super) sender: Sender<QueuedMultisinkDeltas>,
+    pub(super) receiver_liveness: Weak<()>,
+    pub(super) outputs: BTreeMap<String, CompiledNode>,
+    pub(super) target: MultisinkSubscriptionTarget,
+}
+
+#[derive(Clone, Debug)]
+pub(super) enum MultisinkSubscriptionTarget {
+    Direct,
+    RoutedShape {
+        shape_id: PreparedShapeId,
+        binding_key: BindingKey,
+    },
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct RoutedMultisinkShapeState {
+    pub(super) shape: String,
+    pub(super) binding_descriptor: RecordDescriptor,
+    pub(super) terminals: BTreeMap<String, RoutedMultisinkTerminalState>,
+    pub(super) auto_family_key: Option<AutoDirectFamilyKey>,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct RoutedMultisinkTerminalState {
+    pub(super) terminal: RoutedMultisinkTerminal,
+    pub(super) output: CompiledNode,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(super) struct BindingKey(pub(super) Vec<u8>);
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(super) struct AutoDirectFamilyKey {
+    pub(super) graph: GraphBuilder,
+    pub(super) binding_descriptor: RecordDescriptor,
+    pub(super) binding_field: String,
+    pub(super) public_fields: Vec<String>,
+}
+
+struct AutoDirectFamilyPlan {
+    pub(super) key: AutoDirectFamilyKey,
+    pub(super) graph: GraphBuilder,
+    pub(super) shape: String,
+    pub(super) binding_descriptor: RecordDescriptor,
+    pub(super) binding_field: String,
+    pub(super) binding_value: Value,
+    pub(super) public_fields: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct BindingSourceState {
+    pub(super) descriptor: RecordDescriptor,
+    pub(super) refcounts: HashMap<BindingKey, usize>,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct BindingDelta {
+    pub(super) shape: String,
+    pub(super) descriptor: RecordDescriptor,
+    pub(super) deltas: Vec<RecordDelta>,
+}
+
+/// Result of lowering a graph-builder fragment into the deduplicated graph.
+#[derive(Clone, Debug)]
+pub(super) struct CompiledNode {
+    pub(super) output: RecordDescriptor,
+    pub(super) node: NodeId,
+    /// The `TopBy` node that defines ordering of public terminal roots.
+    ///
+    /// This is explicit lowering metadata: walking graph ancestors is
+    /// ambiguous once a structured plan contains independently ordered nested
+    /// collections.
+    pub(super) root_ordering_node: Option<NodeId>,
+}
+
+/// Descriptor plus a batch of weighted encoded record changes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecordDeltas {
+    pub descriptor: RecordDescriptor,
+    pub deltas: Vec<RecordDelta>,
+}
+
+impl RecordDeltas {
+    pub(super) fn empty(descriptor: RecordDescriptor) -> Self {
+        Self {
+            descriptor,
+            deltas: Vec::new(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.deltas.is_empty()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (BorrowedRecord<'_>, i64)> {
+        self.deltas
+            .iter()
+            .map(|delta| (delta.borrowed(&self.descriptor), delta.weight))
+    }
+
+    pub fn to_values(&self) -> Result<Vec<(Vec<Value>, i64)>, records::Error> {
+        self.iter()
+            .map(|(record, weight)| record.to_values().map(|values| (values, weight)))
+            .collect()
+    }
+}
+
+pub(super) fn record_deltas_encoded_bytes(deltas: &RecordDeltas) -> usize {
+    deltas.deltas.iter().map(|delta| delta.record.len()).sum()
+}
+
+pub(super) fn multisink_deltas_record_count(deltas: &MultisinkDeltas) -> usize {
+    deltas
+        .sinks
+        .values()
+        .map(|records| records.deltas.len())
+        .sum()
+}
+
+pub(super) fn multisink_deltas_encoded_bytes(deltas: &MultisinkDeltas) -> usize {
+    deltas.sinks.values().map(record_deltas_encoded_bytes).sum()
+}
+
+fn descriptor_field_names(descriptor: &RecordDescriptor) -> Result<Vec<String>, IvmRuntimeError> {
+    descriptor
+        .fields()
+        .iter()
+        .map(|field| {
+            field
+                .name
+                .clone()
+                .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound("<unnamed>".to_owned()))
+        })
+        .collect()
+}
+
+pub(super) fn record_store_for_table<'a, S>(
+    storage: &'a S,
+    table: &'a TableSchema,
+    descriptor: &'a RecordDescriptor,
+) -> RecordStore<'a, S>
+where
+    S: OrderedKvStorage,
+{
+    RecordStore::new(storage, &table.name, descriptor)
+}
+
+fn validate_public_output_fields(
+    source: &RecordDescriptor,
+    public_output: &RecordDescriptor,
+) -> Result<(), IvmRuntimeError> {
+    for field in public_output.fields() {
+        let name = field
+            .name
+            .as_ref()
+            .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound("<unnamed>".to_owned()))?;
+        let index = source
+            .field_index(name)
+            .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound(name.clone()))?;
+        let source_field = source
+            .fields()
+            .get(index)
+            .ok_or(IvmRuntimeError::GraphFieldIndexOutOfBounds(index))?;
+        if !source_field
+            .value_type
+            .registry_compatible_with(&field.value_type)
+        {
+            return Err(IvmRuntimeError::GraphOutputMismatch);
+        }
+    }
+    Ok(())
+}
+
+fn validate_public_output_for_shape(
+    shape: &RoutedMultisinkShapeState,
+    sink: &str,
+    public_output: &RecordDescriptor,
+) -> Result<(), IvmRuntimeError> {
+    let terminal = shape
+        .terminals
+        .get(sink)
+        .ok_or_else(|| IvmRuntimeError::DuplicateMultisinkSink(sink.to_owned()))?;
+    validate_public_output_fields(&terminal.output.output, public_output)
+}
+
+fn bound_routed_multisink_graph(
+    terminal: &RoutedMultisinkTerminal,
+    binding_values: &[Value],
+) -> GraphBuilder {
+    let predicates = terminal
+        .route_fields
+        .iter()
+        .zip(&terminal.route_value_indices)
+        .map(|(field, index)| route_predicate(field, &binding_values[*index]))
+        .collect::<Vec<_>>();
+    let predicate = match predicates.as_slice() {
+        [] => None,
+        [predicate] => Some(predicate.clone()),
+        _ => Some(PredicateExpr::And(predicates).canonicalize()),
+    };
+    if let GraphBuilder::CollectBy { input, collect } = &terminal.graph {
+        // CollectBy is terminal-only. Route its flat input before rendering and
+        // remove hidden route columns from the collector's own projection,
+        // rather than appending filter/project consumers after the collector.
+        let mut collect = collect.as_ref().clone();
+        collect
+            .parent_fields
+            .retain(|field| terminal.public_fields.contains(&field.output_name));
+        collect
+            .tuple_fields
+            .retain(|field| terminal.public_fields.contains(&field.output_name));
+        let input = predicate
+            .map(|predicate| input.as_ref().clone().filter(predicate))
+            .unwrap_or_else(|| input.as_ref().clone());
+        return GraphBuilder::CollectBy {
+            input: Box::new(input),
+            collect: Box::new(collect),
+        };
+    }
+    let graph = predicate
+        .map(|predicate| terminal.graph.clone().filter(predicate))
+        .unwrap_or_else(|| terminal.graph.clone());
+    graph.project(terminal.public_fields.clone())
+}
+
+fn route_predicate(field: &str, value: &Value) -> PredicateExpr {
+    match value {
+        Value::Nullable(None) => PredicateExpr::is_null(field),
+        value => PredicateExpr::eq(field.to_owned(), value.clone()),
+    }
+}
+
+pub(super) fn count_builder_nodes(graph: &GraphBuilder) -> usize {
+    match graph {
+        GraphBuilder::Table { .. }
+        | GraphBuilder::InlineRecords { .. }
+        | GraphBuilder::Index { .. }
+        | GraphBuilder::FrontierSource { .. }
+        | GraphBuilder::BindingSource { .. } => 1,
+        GraphBuilder::Recursive { seed, step, .. } => {
+            1 + count_builder_nodes(seed) + count_builder_nodes(step)
+        }
+        GraphBuilder::Filter { input, .. }
+        | GraphBuilder::Project { input, .. }
+        | GraphBuilder::UnwrapNullable { input, .. }
+        | GraphBuilder::Unnest { input, .. }
+        | GraphBuilder::VariantProject { input, .. }
+        | GraphBuilder::ArgMaxBy { input, .. }
+        | GraphBuilder::ArgMinBy { input, .. }
+        | GraphBuilder::TopBy { input, .. }
+        | GraphBuilder::CollectBy { input, .. }
+        | GraphBuilder::Aggregate { input, .. } => 1 + count_builder_nodes(input),
+        GraphBuilder::Union { inputs } => 1 + inputs.iter().map(count_builder_nodes).sum::<usize>(),
+        GraphBuilder::Join { left, right, .. }
+        | GraphBuilder::SemiJoin { left, right, .. }
+        | GraphBuilder::AntiJoin { left, right, .. } => {
+            1 + count_builder_nodes(left) + count_builder_nodes(right)
+        }
+    }
+}
+
+pub(super) fn builder_contains_binding_source(graph: &GraphBuilder) -> bool {
+    match graph {
+        GraphBuilder::BindingSource { .. } => true,
+        GraphBuilder::Recursive { seed, step, .. } => {
+            builder_contains_binding_source(seed) || builder_contains_binding_source(step)
+        }
+        GraphBuilder::Filter { input, .. }
+        | GraphBuilder::Project { input, .. }
+        | GraphBuilder::UnwrapNullable { input, .. }
+        | GraphBuilder::Unnest { input, .. }
+        | GraphBuilder::VariantProject { input, .. }
+        | GraphBuilder::ArgMaxBy { input, .. }
+        | GraphBuilder::ArgMinBy { input, .. }
+        | GraphBuilder::TopBy { input, .. }
+        | GraphBuilder::CollectBy { input, .. }
+        | GraphBuilder::Aggregate { input, .. } => builder_contains_binding_source(input),
+        GraphBuilder::Union { inputs } => inputs.iter().any(builder_contains_binding_source),
+        GraphBuilder::Join { left, right, .. }
+        | GraphBuilder::SemiJoin { left, right, .. }
+        | GraphBuilder::AntiJoin { left, right, .. } => {
+            builder_contains_binding_source(left) || builder_contains_binding_source(right)
+        }
+        GraphBuilder::Table { .. }
+        | GraphBuilder::InlineRecords { .. }
+        | GraphBuilder::Index { .. }
+        | GraphBuilder::FrontierSource { .. } => false,
+    }
+}
+
+#[derive(Clone)]
+struct LiftedLiteralFilter {
+    pub(super) graph: GraphBuilder,
+    pub(super) value: LiteralValue,
+}
+
+const AUTO_DIRECT_BINDING_PREFIX: &str = "\0groove.auto_direct.binding.";
+
+fn auto_direct_binding_field(
+    graph: &GraphBuilder,
+    output: &RecordDescriptor,
+    runtime: &IvmRuntime,
+) -> Result<String, IvmRuntimeError> {
+    let mut occupied = HashSet::new();
+    collect_builder_field_names(graph, runtime, &mut occupied)?;
+    occupied.extend(
+        output
+            .fields()
+            .iter()
+            .filter_map(|field| field.name.as_ref().cloned()),
+    );
+    for index in 0.. {
+        let candidate = format!("{AUTO_DIRECT_BINDING_PREFIX}{index}");
+        if !occupied.contains(&candidate) {
+            return Ok(candidate);
+        }
+    }
+    unreachable!("unbounded hidden binding field search should always find a free name")
+}
+
+fn collect_builder_field_names(
+    graph: &GraphBuilder,
+    runtime: &IvmRuntime,
+    occupied: &mut HashSet<String>,
+) -> Result<(), IvmRuntimeError> {
+    let output = runtime.infer_builder_output(graph)?;
+    occupied.extend(
+        output
+            .fields()
+            .iter()
+            .filter_map(|field| field.name.as_ref().cloned()),
+    );
+    match graph {
+        GraphBuilder::Recursive { seed, step, .. } => {
+            collect_builder_field_names(seed, runtime, occupied)?;
+            collect_builder_field_names(step, runtime, occupied)?;
+        }
+        GraphBuilder::Filter { input, .. }
+        | GraphBuilder::Project { input, .. }
+        | GraphBuilder::UnwrapNullable { input, .. }
+        | GraphBuilder::Unnest { input, .. }
+        | GraphBuilder::VariantProject { input, .. }
+        | GraphBuilder::ArgMaxBy { input, .. }
+        | GraphBuilder::ArgMinBy { input, .. }
+        | GraphBuilder::TopBy { input, .. }
+        | GraphBuilder::CollectBy { input, .. }
+        | GraphBuilder::Aggregate { input, .. } => {
+            collect_builder_field_names(input, runtime, occupied)?;
+        }
+        GraphBuilder::Union { inputs } => {
+            for input in inputs {
+                collect_builder_field_names(input, runtime, occupied)?;
+            }
+        }
+        GraphBuilder::Join { left, right, .. }
+        | GraphBuilder::SemiJoin { left, right, .. }
+        | GraphBuilder::AntiJoin { left, right, .. } => {
+            collect_builder_field_names(left, runtime, occupied)?;
+            collect_builder_field_names(right, runtime, occupied)?;
+        }
+        GraphBuilder::Table { .. }
+        | GraphBuilder::InlineRecords { .. }
+        | GraphBuilder::Index { .. }
+        | GraphBuilder::FrontierSource { .. }
+        | GraphBuilder::BindingSource { .. } => {}
+    }
+    Ok(())
+}
+
+fn lift_literal_filter(
+    runtime: &IvmRuntime,
+    graph: &GraphBuilder,
+    binding_field: &str,
+) -> Result<Option<LiftedLiteralFilter>, IvmRuntimeError> {
+    match graph {
+        GraphBuilder::Filter {
+            input,
+            predicate,
+            comparison,
+        } => {
+            if let PredicateExpr::Eq { field, value } = predicate {
+                let joined =
+                    literal_filter_binding_join((**input).clone(), field, value, binding_field)?;
+                let input_output = runtime.infer_builder_output(input)?;
+                let mut fields = input_output
+                    .fields()
+                    .iter()
+                    .filter_map(|field| {
+                        let name = field.name.clone()?;
+                        Some(ProjectField::renamed(format!("left.{name}"), name))
+                    })
+                    .collect::<Vec<_>>();
+                fields.push(ProjectField::renamed(
+                    format!("right.{binding_field}"),
+                    binding_field.to_owned(),
+                ));
+                return Ok(Some(LiftedLiteralFilter {
+                    graph: joined.project_fields(fields),
+                    value: value.clone(),
+                }));
+            }
+            if let Some(lifted) = lift_literal_filter(runtime, input, binding_field)? {
+                return Ok(Some(LiftedLiteralFilter {
+                    graph: GraphBuilder::Filter {
+                        input: Box::new(lifted.graph),
+                        predicate: predicate.clone(),
+                        comparison: *comparison,
+                    },
+                    value: lifted.value,
+                }));
+            }
+            Ok(None)
+        }
+        GraphBuilder::Project { input, fields } => {
+            if let GraphBuilder::Join {
+                left,
+                right,
+                left_on,
+                right_on,
+                comparison,
+            } = input.as_ref()
+            {
+                if let Some(lifted) = lift_literal_filter(runtime, left, binding_field)? {
+                    let joined = GraphBuilder::Join {
+                        left: Box::new(lifted.graph),
+                        right: right.clone(),
+                        left_on: left_on.clone(),
+                        right_on: right_on.clone(),
+                        comparison: *comparison,
+                    };
+                    let mut fields =
+                        project_fields_against_rewritten_input(runtime, input, &joined, fields)?;
+                    append_binding_project_field(
+                        &mut fields,
+                        binding_field,
+                        binding_project_source(&joined, binding_field),
+                    );
+                    return Ok(Some(LiftedLiteralFilter {
+                        graph: joined.project_fields(fields),
+                        value: lifted.value,
+                    }));
+                }
+                if let Some(lifted) = lift_literal_filter(runtime, right, binding_field)? {
+                    let joined = GraphBuilder::Join {
+                        left: left.clone(),
+                        right: Box::new(lifted.graph),
+                        left_on: left_on.clone(),
+                        right_on: right_on.clone(),
+                        comparison: *comparison,
+                    };
+                    let mut fields =
+                        project_fields_against_rewritten_input(runtime, input, &joined, fields)?;
+                    append_binding_project_field(
+                        &mut fields,
+                        binding_field,
+                        binding_project_source(&joined, binding_field),
+                    );
+                    return Ok(Some(LiftedLiteralFilter {
+                        graph: joined.project_fields(fields),
+                        value: lifted.value,
+                    }));
+                }
+            }
+            if let GraphBuilder::Filter {
+                input: filtered_input,
+                predicate: PredicateExpr::Eq { field, value },
+                ..
+            } = input.as_ref()
+            {
+                let joined = literal_filter_binding_join(
+                    (**filtered_input).clone(),
+                    field,
+                    value,
+                    binding_field,
+                )?;
+                let input_output = runtime.infer_builder_output(filtered_input)?;
+                let mut fields = fields
+                    .iter()
+                    .map(|field| match &field.expression {
+                        ProjectExpr::Field(source) => {
+                            let source =
+                                project_source_from_joined_filter_input(&input_output, source)?;
+                            Ok(ProjectField::renamed(source, field.output_name.clone()))
+                        }
+                        ProjectExpr::Literal(value) => Ok(ProjectField::literal(
+                            field.output_name.clone(),
+                            value.clone(),
+                        )),
+                        ProjectExpr::TypedLiteral { value, value_type } => {
+                            Ok(ProjectField::literal_typed(
+                                field.output_name.clone(),
+                                value.clone(),
+                                value_type.clone(),
+                            ))
+                        }
+                        ProjectExpr::Null(value_type) => Ok(ProjectField::null_typed(
+                            field.output_name.clone(),
+                            value_type.clone(),
+                        )),
+                        ProjectExpr::Nullable(source) => {
+                            let source =
+                                project_source_from_joined_filter_input(&input_output, source)?;
+                            Ok(ProjectField::nullable(source, field.output_name.clone()))
+                        }
+                        ProjectExpr::NullableFlat(source) => {
+                            let source =
+                                project_source_from_joined_filter_input(&input_output, source)?;
+                            Ok(ProjectField::nullable_flat(
+                                source,
+                                field.output_name.clone(),
+                            ))
+                        }
+                        ProjectExpr::EnumTagRemap { source, tags } => {
+                            let source =
+                                project_source_from_joined_filter_input(&input_output, source)?;
+                            Ok(ProjectField::enum_tag_remap(
+                                source,
+                                field.output_name.clone(),
+                                tags.clone(),
+                            ))
+                        }
+                        ProjectExpr::EnumRemap { source, tags } => {
+                            let source =
+                                project_source_from_joined_filter_input(&input_output, source)?;
+                            Ok(ProjectField::enum_remap(
+                                source,
+                                field.output_name.clone(),
+                                tags.clone(),
+                            ))
+                        }
+                        ProjectExpr::RecursiveEnumRemap {
+                            source,
+                            target,
+                            remaps,
+                            omit_unrepresentable,
+                        } => {
+                            let source =
+                                project_source_from_joined_filter_input(&input_output, source)?;
+                            Ok(if *omit_unrepresentable {
+                                ProjectField::recursive_enum_remap_omitting_unrepresentable(
+                                    source,
+                                    field.output_name.clone(),
+                                    target.clone(),
+                                    remaps.clone(),
+                                )
+                            } else {
+                                ProjectField::recursive_enum_remap(
+                                    source,
+                                    field.output_name.clone(),
+                                    target.clone(),
+                                    remaps.clone(),
+                                )
+                            })
+                        }
+                    })
+                    .collect::<Result<Vec<_>, IvmRuntimeError>>()?;
+                fields.push(ProjectField::renamed(
+                    format!("right.{binding_field}"),
+                    binding_field.to_owned(),
+                ));
+                return Ok(Some(LiftedLiteralFilter {
+                    graph: joined.project_fields(fields),
+                    value: value.clone(),
+                }));
+            }
+            let Some(lifted) = lift_literal_filter(runtime, input, binding_field)? else {
+                return Ok(None);
+            };
+            let mut fields = fields.clone();
+            append_binding_project_field(
+                &mut fields,
+                binding_field,
+                binding_project_source(&lifted.graph, binding_field),
+            );
+            Ok(Some(LiftedLiteralFilter {
+                graph: GraphBuilder::Project {
+                    input: Box::new(lifted.graph),
+                    fields,
+                },
+                value: lifted.value,
+            }))
+        }
+        GraphBuilder::Join {
+            left,
+            right,
+            left_on,
+            right_on,
+            comparison,
+        } => {
+            if let Some(lifted) = lift_literal_filter(runtime, left, binding_field)? {
+                let original_output = runtime.infer_builder_output(graph)?;
+                let joined = GraphBuilder::Join {
+                    left: Box::new(lifted.graph),
+                    right: right.clone(),
+                    left_on: left_on.clone(),
+                    right_on: right_on.clone(),
+                    comparison: *comparison,
+                };
+                return Ok(Some(LiftedLiteralFilter {
+                    graph: project_to_output_with_binding(
+                        runtime,
+                        joined,
+                        &original_output,
+                        binding_field,
+                    )?,
+                    value: lifted.value,
+                }));
+            }
+            if let Some(lifted) = lift_literal_filter(runtime, right, binding_field)? {
+                let original_output = runtime.infer_builder_output(graph)?;
+                let joined = GraphBuilder::Join {
+                    left: left.clone(),
+                    right: Box::new(lifted.graph),
+                    left_on: left_on.clone(),
+                    right_on: right_on.clone(),
+                    comparison: *comparison,
+                };
+                return Ok(Some(LiftedLiteralFilter {
+                    graph: project_to_output_with_binding(
+                        runtime,
+                        joined,
+                        &original_output,
+                        binding_field,
+                    )?,
+                    value: lifted.value,
+                }));
+            }
+            Ok(None)
+        }
+        GraphBuilder::AntiJoin {
+            left,
+            right,
+            left_on,
+            right_on,
+            comparison,
+        } => {
+            let Some(lifted) = lift_literal_filter(runtime, left, binding_field)? else {
+                return Ok(None);
+            };
+            Ok(Some(LiftedLiteralFilter {
+                graph: GraphBuilder::AntiJoin {
+                    left: Box::new(lifted.graph),
+                    right: right.clone(),
+                    left_on: left_on.clone(),
+                    right_on: right_on.clone(),
+                    comparison: *comparison,
+                },
+                value: lifted.value,
+            }))
+        }
+        GraphBuilder::SemiJoin {
+            left,
+            right,
+            left_on,
+            right_on,
+            comparison,
+        } => {
+            let Some(lifted) = lift_literal_filter(runtime, left, binding_field)? else {
+                return Ok(None);
+            };
+            Ok(Some(LiftedLiteralFilter {
+                graph: GraphBuilder::SemiJoin {
+                    left: Box::new(lifted.graph),
+                    right: right.clone(),
+                    left_on: left_on.clone(),
+                    right_on: right_on.clone(),
+                    comparison: *comparison,
+                },
+                value: lifted.value,
+            }))
+        }
+        GraphBuilder::Recursive { .. } => Ok(None),
+        GraphBuilder::Union { .. } | GraphBuilder::VariantProject { .. } => Ok(None),
+        GraphBuilder::UnwrapNullable { input, field } => {
+            let Some(lifted) = lift_literal_filter(runtime, input, binding_field)? else {
+                return Ok(None);
+            };
+            Ok(Some(LiftedLiteralFilter {
+                graph: GraphBuilder::UnwrapNullable {
+                    input: Box::new(lifted.graph),
+                    field: field.clone(),
+                },
+                value: lifted.value,
+            }))
+        }
+        GraphBuilder::Unnest {
+            input,
+            array_field,
+            element_field,
+        } => {
+            let Some(lifted) = lift_literal_filter(runtime, input, binding_field)? else {
+                return Ok(None);
+            };
+            Ok(Some(LiftedLiteralFilter {
+                graph: GraphBuilder::Unnest {
+                    input: Box::new(lifted.graph),
+                    array_field: array_field.clone(),
+                    element_field: element_field.clone(),
+                },
+                value: lifted.value,
+            }))
+        }
+        GraphBuilder::ArgMaxBy {
+            input,
+            group_cols,
+            order_cols,
+        } => {
+            let Some(lifted) = lift_literal_filter(runtime, input, binding_field)? else {
+                return Ok(None);
+            };
+            let mut group_cols = group_cols.clone();
+            group_cols.push(FieldRef::name(binding_field));
+            Ok(Some(LiftedLiteralFilter {
+                graph: GraphBuilder::ArgMaxBy {
+                    input: Box::new(lifted.graph),
+                    group_cols,
+                    order_cols: order_cols.clone(),
+                },
+                value: lifted.value,
+            }))
+        }
+        GraphBuilder::ArgMinBy {
+            input,
+            group_cols,
+            order_cols,
+        } => {
+            let Some(lifted) = lift_literal_filter(runtime, input, binding_field)? else {
+                return Ok(None);
+            };
+            let mut group_cols = group_cols.clone();
+            group_cols.push(FieldRef::name(binding_field));
+            Ok(Some(LiftedLiteralFilter {
+                graph: GraphBuilder::ArgMinBy {
+                    input: Box::new(lifted.graph),
+                    group_cols,
+                    order_cols: order_cols.clone(),
+                },
+                value: lifted.value,
+            }))
+        }
+        GraphBuilder::TopBy {
+            input,
+            group_cols,
+            order_cols,
+            tie_cols,
+            offset,
+            limit,
+        } => {
+            let Some(lifted) = lift_literal_filter(runtime, input, binding_field)? else {
+                return Ok(None);
+            };
+            let mut group_cols = group_cols.clone();
+            group_cols.push(FieldRef::name(binding_field));
+            Ok(Some(LiftedLiteralFilter {
+                graph: GraphBuilder::TopBy {
+                    input: Box::new(lifted.graph),
+                    group_cols,
+                    order_cols: order_cols.clone(),
+                    tie_cols: tie_cols.clone(),
+                    offset: *offset,
+                    limit: *limit,
+                },
+                value: lifted.value,
+            }))
+        }
+        GraphBuilder::CollectBy { .. } => Ok(None),
+        GraphBuilder::Aggregate {
+            input,
+            group_cols,
+            aggregates,
+        } => {
+            let Some(lifted) = lift_literal_filter(runtime, input, binding_field)? else {
+                return Ok(None);
+            };
+            let mut group_cols = group_cols.clone();
+            group_cols.push(FieldRef::name(binding_field));
+            Ok(Some(LiftedLiteralFilter {
+                graph: GraphBuilder::Aggregate {
+                    input: Box::new(lifted.graph),
+                    group_cols,
+                    aggregates: aggregates.clone(),
+                },
+                value: lifted.value,
+            }))
+        }
+        GraphBuilder::Table { .. }
+        | GraphBuilder::InlineRecords { .. }
+        | GraphBuilder::Index { .. }
+        | GraphBuilder::FrontierSource { .. }
+        | GraphBuilder::BindingSource { .. } => Ok(None),
+    }
+}
+
+fn literal_filter_binding_join(
+    input: GraphBuilder,
+    field: &str,
+    value: &LiteralValue,
+    binding_field: &str,
+) -> Result<GraphBuilder, IvmRuntimeError> {
+    let value_type = value
+        .value_type()
+        .ok_or(IvmRuntimeError::UnsupportedOperator)?;
+    let binding = GraphBuilder::binding_source(
+        "__auto_direct_shape",
+        RecordDescriptor::new([(binding_field.to_owned(), value_type)]),
+    );
+    Ok(GraphBuilder::join(
+        input,
+        binding,
+        [field.to_owned()],
+        [binding_field.to_owned()],
+    ))
+}
+
+fn project_source_from_joined_filter_input(
+    input_output: &RecordDescriptor,
+    source: &FieldRef,
+) -> Result<String, IvmRuntimeError> {
+    Ok(format!("left.{}", field_ref_name(input_output, source)?))
+}
+
+fn project_fields_against_rewritten_input(
+    runtime: &IvmRuntime,
+    original_input: &GraphBuilder,
+    rewritten_input: &GraphBuilder,
+    fields: &[ProjectField],
+) -> Result<Vec<ProjectField>, IvmRuntimeError> {
+    let original_output = runtime.infer_builder_output(original_input)?;
+    let rewritten_output = runtime.infer_builder_output(rewritten_input)?;
+    fields
+        .iter()
+        .map(|field| {
+            let (field_ref, nullable_projection) = match &field.expression {
+                ProjectExpr::Field(field_ref) => (field_ref, None),
+                ProjectExpr::Nullable(field_ref) => (field_ref, Some(false)),
+                ProjectExpr::NullableFlat(field_ref) => (field_ref, Some(true)),
+                ProjectExpr::EnumTagRemap { source, tags } => {
+                    let source = field_ref_name(&original_output, source)?;
+                    if rewritten_output.field_index(&source).is_none() {
+                        return Err(IvmRuntimeError::GraphFieldNotFound(source));
+                    }
+                    return Ok(ProjectField::enum_tag_remap(
+                        source,
+                        field.output_name.clone(),
+                        tags.clone(),
+                    ));
+                }
+                ProjectExpr::EnumRemap { source, tags } => {
+                    let source = field_ref_name(&original_output, source)?;
+                    if rewritten_output.field_index(&source).is_none() {
+                        return Err(IvmRuntimeError::GraphFieldNotFound(source));
+                    }
+                    return Ok(ProjectField::enum_remap(
+                        source,
+                        field.output_name.clone(),
+                        tags.clone(),
+                    ));
+                }
+                ProjectExpr::RecursiveEnumRemap {
+                    source,
+                    target,
+                    remaps,
+                    omit_unrepresentable,
+                } => {
+                    let source = field_ref_name(&original_output, source)?;
+                    if rewritten_output.field_index(&source).is_none() {
+                        return Err(IvmRuntimeError::GraphFieldNotFound(source));
+                    }
+                    return Ok(if *omit_unrepresentable {
+                        ProjectField::recursive_enum_remap_omitting_unrepresentable(
+                            source,
+                            field.output_name.clone(),
+                            target.clone(),
+                            remaps.clone(),
+                        )
+                    } else {
+                        ProjectField::recursive_enum_remap(
+                            source,
+                            field.output_name.clone(),
+                            target.clone(),
+                            remaps.clone(),
+                        )
+                    });
+                }
+                ProjectExpr::Literal(_)
+                | ProjectExpr::TypedLiteral { .. }
+                | ProjectExpr::Null(_) => return Ok(field.clone()),
+            };
+            let source = field_ref_name(&original_output, field_ref)?;
+            if rewritten_output.field_index(&source).is_none() {
+                return Err(IvmRuntimeError::GraphFieldNotFound(source));
+            }
+            match nullable_projection {
+                None => Ok(ProjectField::renamed(source, field.output_name.clone())),
+                Some(false) => Ok(ProjectField::nullable(source, field.output_name.clone())),
+                Some(true) => Ok(ProjectField::nullable_flat(
+                    source,
+                    field.output_name.clone(),
+                )),
+            }
+        })
+        .collect()
+}
+
+fn project_to_output_with_binding(
+    runtime: &IvmRuntime,
+    graph: GraphBuilder,
+    original_output: &RecordDescriptor,
+    binding_field: &str,
+) -> Result<GraphBuilder, IvmRuntimeError> {
+    let lifted_output = runtime.infer_builder_output(&graph)?;
+    let mut fields = original_output
+        .fields()
+        .iter()
+        .map(|field| {
+            let name = field
+                .name
+                .clone()
+                .ok_or_else(|| IvmRuntimeError::GraphFieldNotFound("<unnamed>".to_owned()))?;
+            if lifted_output.field_index(&name).is_none() {
+                return Err(IvmRuntimeError::GraphFieldNotFound(name));
+            }
+            Ok(ProjectField::renamed(name.clone(), name))
+        })
+        .collect::<Result<Vec<_>, IvmRuntimeError>>()?;
+    append_binding_project_field(
+        &mut fields,
+        binding_field,
+        binding_project_source(&graph, binding_field),
+    );
+    Ok(GraphBuilder::Project {
+        input: Box::new(graph),
+        fields,
+    })
+}
+
+fn append_binding_project_field(
+    fields: &mut Vec<ProjectField>,
+    binding_field: &str,
+    source: String,
+) {
+    if !fields
+        .iter()
+        .any(|field| field.output_name == binding_field)
+    {
+        fields.push(ProjectField::renamed(source, binding_field.to_owned()));
+    }
+}
+
+fn binding_project_source(input: &GraphBuilder, binding_field: &str) -> String {
+    match input {
+        GraphBuilder::Join { left, right, .. }
+        | GraphBuilder::SemiJoin { left, right, .. }
+        | GraphBuilder::AntiJoin { left, right, .. } => {
+            if graph_outputs_binding(left, binding_field) {
+                format!("left.{binding_field}")
+            } else if graph_outputs_binding(right, binding_field) {
+                format!("right.{binding_field}")
+            } else {
+                binding_field.to_owned()
+            }
+        }
+        _ => binding_field.to_owned(),
+    }
+}
+
+fn graph_outputs_binding(graph: &GraphBuilder, binding_field: &str) -> bool {
+    match graph {
+        GraphBuilder::BindingSource { output, .. }
+        | GraphBuilder::FrontierSource { output, .. }
+        | GraphBuilder::InlineRecords { output, .. } => output.field_index(binding_field).is_some(),
+        GraphBuilder::Project { fields, .. } => fields
+            .iter()
+            .any(|field| field.output_name == binding_field),
+        GraphBuilder::Filter { input, .. }
+        | GraphBuilder::UnwrapNullable { input, .. }
+        | GraphBuilder::Unnest { input, .. }
+        | GraphBuilder::ArgMaxBy { input, .. }
+        | GraphBuilder::ArgMinBy { input, .. }
+        | GraphBuilder::TopBy { input, .. }
+        | GraphBuilder::CollectBy { input, .. }
+        | GraphBuilder::Aggregate { input, .. } => graph_outputs_binding(input, binding_field),
+        GraphBuilder::Recursive { seed, .. } => graph_outputs_binding(seed, binding_field),
+        GraphBuilder::Join { left, right, .. }
+        | GraphBuilder::SemiJoin { left, right, .. }
+        | GraphBuilder::AntiJoin { left, right, .. } => {
+            graph_outputs_binding(left, binding_field)
+                || graph_outputs_binding(right, binding_field)
+        }
+        GraphBuilder::Union { inputs } => inputs
+            .iter()
+            .any(|input| graph_outputs_binding(input, binding_field)),
+        GraphBuilder::Table { .. }
+        | GraphBuilder::Index { .. }
+        | GraphBuilder::VariantProject { .. } => false,
+    }
+}
+
+#[allow(dead_code)]
+fn propagate_binding_through_frontier(
+    graph: &GraphBuilder,
+    frontier: &FrontierName,
+    binding_field: &str,
+    binding_type: ValueType,
+) -> Option<GraphBuilder> {
+    match graph {
+        GraphBuilder::FrontierSource { binding, output } if binding == frontier => {
+            let fields = output
+                .fields()
+                .iter()
+                .filter_map(|field| Some((field.name.clone()?, field.value_type.clone())));
+            let fields = if output.field_index(binding_field).is_some() {
+                fields.collect::<Vec<_>>()
+            } else {
+                fields
+                    .chain([(binding_field.to_owned(), binding_type.clone())])
+                    .collect::<Vec<_>>()
+            };
+            Some(GraphBuilder::frontier_source(
+                binding.0.clone(),
+                RecordDescriptor::new(fields),
+            ))
+        }
+        GraphBuilder::Filter {
+            input,
+            predicate,
+            comparison,
+        } => {
+            let input =
+                propagate_binding_through_frontier(input, frontier, binding_field, binding_type)?;
+            Some(GraphBuilder::Filter {
+                input: Box::new(input),
+                predicate: predicate.clone(),
+                comparison: *comparison,
+            })
+        }
+        GraphBuilder::Project { input, fields } => {
+            let input =
+                propagate_binding_through_frontier(input, frontier, binding_field, binding_type)?;
+            let mut fields = fields.clone();
+            append_binding_project_field(
+                &mut fields,
+                binding_field,
+                binding_project_source(&input, binding_field),
+            );
+            Some(GraphBuilder::Project {
+                input: Box::new(input),
+                fields,
+            })
+        }
+        GraphBuilder::UnwrapNullable { input, field } => {
+            let input =
+                propagate_binding_through_frontier(input, frontier, binding_field, binding_type)?;
+            Some(GraphBuilder::UnwrapNullable {
+                input: Box::new(input),
+                field: field.clone(),
+            })
+        }
+        GraphBuilder::Unnest {
+            input,
+            array_field,
+            element_field,
+        } => {
+            let input =
+                propagate_binding_through_frontier(input, frontier, binding_field, binding_type)?;
+            Some(GraphBuilder::Unnest {
+                input: Box::new(input),
+                array_field: array_field.clone(),
+                element_field: element_field.clone(),
+            })
+        }
+        GraphBuilder::Join {
+            left,
+            right,
+            left_on,
+            right_on,
+            comparison,
+        } => {
+            let left = propagate_binding_through_frontier(
+                left,
+                frontier,
+                binding_field,
+                binding_type.clone(),
+            )
+            .unwrap_or_else(|| (**left).clone());
+            let right =
+                propagate_binding_through_frontier(right, frontier, binding_field, binding_type)
+                    .unwrap_or_else(|| (**right).clone());
+            Some(GraphBuilder::Join {
+                left: Box::new(left),
+                right: Box::new(right),
+                left_on: left_on.clone(),
+                right_on: right_on.clone(),
+                comparison: *comparison,
+            })
+        }
+        GraphBuilder::SemiJoin {
+            left,
+            right,
+            left_on,
+            right_on,
+            comparison,
+        } => {
+            let left =
+                propagate_binding_through_frontier(left, frontier, binding_field, binding_type)?;
+            Some(GraphBuilder::SemiJoin {
+                left: Box::new(left),
+                right: right.clone(),
+                left_on: left_on.clone(),
+                right_on: right_on.clone(),
+                comparison: *comparison,
+            })
+        }
+        GraphBuilder::AntiJoin {
+            left,
+            right,
+            left_on,
+            right_on,
+            comparison,
+        } => {
+            let left =
+                propagate_binding_through_frontier(left, frontier, binding_field, binding_type)?;
+            Some(GraphBuilder::AntiJoin {
+                left: Box::new(left),
+                right: right.clone(),
+                left_on: left_on.clone(),
+                right_on: right_on.clone(),
+                comparison: *comparison,
+            })
+        }
+        GraphBuilder::Table { .. }
+        | GraphBuilder::InlineRecords { .. }
+        | GraphBuilder::Index { .. }
+        | GraphBuilder::FrontierSource { .. }
+        | GraphBuilder::BindingSource { .. }
+        | GraphBuilder::Recursive { .. }
+        | GraphBuilder::ArgMaxBy { .. }
+        | GraphBuilder::ArgMinBy { .. }
+        | GraphBuilder::TopBy { .. }
+        | GraphBuilder::CollectBy { .. }
+        | GraphBuilder::Aggregate { .. }
+        | GraphBuilder::Union { .. }
+        | GraphBuilder::VariantProject { .. } => None,
+    }
+}
+
+fn replace_binding_shape(graph: GraphBuilder, shape: &str) -> GraphBuilder {
+    match graph {
+        GraphBuilder::BindingSource { output, .. } => GraphBuilder::binding_source(shape, output),
+        GraphBuilder::Recursive {
+            seed,
+            step,
+            frontier,
+            max_iters,
+        } => GraphBuilder::Recursive {
+            seed: Box::new(replace_binding_shape(*seed, shape)),
+            step: Box::new(replace_binding_shape(*step, shape)),
+            frontier,
+            max_iters,
+        },
+        GraphBuilder::Filter {
+            input,
+            predicate,
+            comparison,
+        } => GraphBuilder::Filter {
+            input: Box::new(replace_binding_shape(*input, shape)),
+            predicate,
+            comparison,
+        },
+        GraphBuilder::Project { input, fields } => GraphBuilder::Project {
+            input: Box::new(replace_binding_shape(*input, shape)),
+            fields,
+        },
+        GraphBuilder::UnwrapNullable { input, field } => GraphBuilder::UnwrapNullable {
+            input: Box::new(replace_binding_shape(*input, shape)),
+            field,
+        },
+        GraphBuilder::Unnest {
+            input,
+            array_field,
+            element_field,
+        } => GraphBuilder::Unnest {
+            input: Box::new(replace_binding_shape(*input, shape)),
+            array_field,
+            element_field,
+        },
+        GraphBuilder::ArgMaxBy {
+            input,
+            group_cols,
+            order_cols,
+        } => GraphBuilder::ArgMaxBy {
+            input: Box::new(replace_binding_shape(*input, shape)),
+            group_cols,
+            order_cols,
+        },
+        GraphBuilder::ArgMinBy {
+            input,
+            group_cols,
+            order_cols,
+        } => GraphBuilder::ArgMinBy {
+            input: Box::new(replace_binding_shape(*input, shape)),
+            group_cols,
+            order_cols,
+        },
+        GraphBuilder::TopBy {
+            input,
+            group_cols,
+            order_cols,
+            tie_cols,
+            offset,
+            limit,
+        } => GraphBuilder::TopBy {
+            input: Box::new(replace_binding_shape(*input, shape)),
+            group_cols,
+            order_cols,
+            tie_cols,
+            offset,
+            limit,
+        },
+        GraphBuilder::Aggregate {
+            input,
+            group_cols,
+            aggregates,
+        } => GraphBuilder::Aggregate {
+            input: Box::new(replace_binding_shape(*input, shape)),
+            group_cols,
+            aggregates,
+        },
+        GraphBuilder::Union { inputs } => GraphBuilder::Union {
+            inputs: inputs
+                .into_iter()
+                .map(|input| replace_binding_shape(input, shape))
+                .collect(),
+        },
+        GraphBuilder::Join {
+            left,
+            right,
+            left_on,
+            right_on,
+            comparison,
+        } => GraphBuilder::Join {
+            left: Box::new(replace_binding_shape(*left, shape)),
+            right: Box::new(replace_binding_shape(*right, shape)),
+            left_on,
+            right_on,
+            comparison,
+        },
+        GraphBuilder::SemiJoin {
+            left,
+            right,
+            left_on,
+            right_on,
+            comparison,
+        } => GraphBuilder::SemiJoin {
+            left: Box::new(replace_binding_shape(*left, shape)),
+            right: Box::new(replace_binding_shape(*right, shape)),
+            left_on,
+            right_on,
+            comparison,
+        },
+        GraphBuilder::AntiJoin {
+            left,
+            right,
+            left_on,
+            right_on,
+            comparison,
+        } => GraphBuilder::AntiJoin {
+            left: Box::new(replace_binding_shape(*left, shape)),
+            right: Box::new(replace_binding_shape(*right, shape)),
+            left_on,
+            right_on,
+            comparison,
+        },
+        graph => graph,
+    }
+}
+
+impl IvmRuntime {
+    pub fn subscribe_one_sink(
+        &mut self,
+        graph: GraphBuilder,
+        storage: &impl OrderedKvStorage,
+    ) -> Result<Subscription, IvmRuntimeError> {
+        if builder_contains_binding_source(&graph) {
+            return Err(IvmRuntimeError::BindingSourceRequiresPrepare);
+        }
+        if self.auto_direct_family_enabled
+            && let Some(plan) = self.plan_auto_direct_family(&graph)?
+        {
+            let shape_id = if let Some(shape_id) = self.auto_direct_families.get(&plan.key).copied()
+            {
+                shape_id
+            } else {
+                let shape = self.prepare_one_sink(
+                    plan.graph.clone(),
+                    plan.shape.clone(),
+                    plan.binding_descriptor,
+                    [plan.binding_field.clone()],
+                    storage,
+                )?;
+                if let Some(state) = self.prepared_shapes.get_mut(&shape.id()) {
+                    state.auto_family_key = Some(plan.key.clone());
+                    if let Some(terminal) = state.terminals.get_mut(DEFAULT_SINK) {
+                        terminal.terminal.public_fields = plan.public_fields.clone();
+                    }
+                }
+                self.auto_direct_families
+                    .insert(plan.key.clone(), shape.id());
+                shape.id()
+            };
+            return self.bind_shape_one_sink(shape_id, &[plan.binding_value], storage);
+        }
+        let multisink = self.subscribe([(DEFAULT_SINK, graph)], storage)?;
+        self.single_sink_subscription(multisink, DEFAULT_SINK)
+    }
+
+    pub fn subscribe<I, K, S>(
+        &mut self,
+        sinks: I,
+        storage: &S,
+    ) -> Result<MultisinkSubscription, IvmRuntimeError>
+    where
+        I: IntoIterator<Item = (K, GraphBuilder)>,
+        K: Into<String>,
+        S: OrderedKvStorage,
+    {
+        self.flush_pending_binding_retractions(storage)?;
+        let sinks = sinks
+            .into_iter()
+            .map(|(sink, graph)| (sink.into(), graph))
+            .collect::<Vec<_>>();
+        if sinks.is_empty() {
+            return Err(IvmRuntimeError::EmptyMultisinkSubscription);
+        }
+        let mut sink_names = HashSet::new();
+        for (sink, _) in &sinks {
+            if !sink_names.insert(sink.clone()) {
+                return Err(IvmRuntimeError::DuplicateMultisinkSink(sink.clone()));
+            }
+        }
+        if let Some((sink, _)) = sinks
+            .iter()
+            .find(|(_, graph)| builder_contains_binding_source(graph))
+        {
+            return Err(IvmRuntimeError::MultisinkSinkRequiresPrepare(sink.clone()));
+        }
+        self.logical_nodes_requested += sinks
+            .iter()
+            .map(|(_, graph)| count_builder_nodes(graph))
+            .sum::<usize>() as u64;
+        let mut outputs = BTreeMap::new();
+        for (sink, graph) in sinks {
+            let compiled = self.add_dedup_graph(&graph)?;
+            outputs.insert(sink, compiled);
+        }
+        let subscription_id = self.next_subscription_id();
+        let (sender, receiver) = mpsc::channel();
+        let receiver_liveness = Arc::new(());
+        for output in outputs.values() {
+            self.retain_as_subscription(subscription_id, output.node);
+        }
+        self.multisink_subscriptions.insert(
+            subscription_id,
+            MultisinkSubscriptionState {
+                sender,
+                receiver_liveness: Arc::downgrade(&receiver_liveness),
+                outputs: outputs.clone(),
+                target: MultisinkSubscriptionTarget::Direct,
+            },
+        );
+        let initial = match self.hydration_snapshots_for_subscription(&outputs, storage) {
+            Ok(initial) => initial,
+            Err(error) => {
+                self.unsubscribe(subscription_id);
+                return Err(error);
+            }
+        };
+        let queued = self.queued_multisink_deltas(initial);
+        let sent = self
+            .multisink_subscriptions
+            .get(&subscription_id)
+            .is_some_and(|subscription| subscription.sender.send(queued).is_ok());
+        if !sent {
+            self.unsubscribe(subscription_id);
+        }
+        Ok(MultisinkSubscription {
+            id: subscription_id,
+            receiver,
+            _receiver_liveness: receiver_liveness,
+        })
+    }
+
+    pub fn prepare<I, S>(
+        &mut self,
+        terminals: I,
+        binding_source_shape: impl Into<String>,
+        binding_descriptor: RecordDescriptor,
+        storage: &S,
+    ) -> Result<PreparedShape, IvmRuntimeError>
+    where
+        I: IntoIterator<Item = RoutedMultisinkTerminal>,
+        S: OrderedKvStorage,
+    {
+        self.flush_pending_binding_retractions(storage)?;
+        let terminals = terminals.into_iter().collect::<Vec<_>>();
+        if terminals.is_empty() {
+            return Err(IvmRuntimeError::EmptyMultisinkSubscription);
+        }
+        let mut sink_names = HashSet::new();
+        for terminal in &terminals {
+            if !sink_names.insert(terminal.sink.clone()) {
+                return Err(IvmRuntimeError::DuplicateMultisinkSink(
+                    terminal.sink.clone(),
+                ));
+            }
+            if terminal.route_fields.len() > binding_descriptor.fields().len() {
+                return Err(IvmRuntimeError::RoutedMultisinkRouteArityMismatch {
+                    sink: terminal.sink.clone(),
+                    expected: binding_descriptor.fields().len(),
+                    actual: terminal.route_fields.len(),
+                });
+            }
+            if terminal.route_value_indices.len() != terminal.route_fields.len() {
+                return Err(IvmRuntimeError::RoutedMultisinkRouteArityMismatch {
+                    sink: terminal.sink.clone(),
+                    expected: terminal.route_fields.len(),
+                    actual: terminal.route_value_indices.len(),
+                });
+            }
+            if let Some(index) = terminal
+                .route_value_indices
+                .iter()
+                .find(|index| **index >= binding_descriptor.fields().len())
+            {
+                return Err(IvmRuntimeError::GraphFieldIndexOutOfBounds(*index));
+            }
+            let output = self.infer_builder_output(&terminal.graph)?;
+            for field in terminal.route_fields.iter().chain(&terminal.public_fields) {
+                if output.field_index(field).is_none() {
+                    return Err(IvmRuntimeError::GraphFieldNotFound(field.clone()));
+                }
+            }
+        }
+        self.logical_nodes_requested += terminals
+            .iter()
+            .map(|terminal| count_builder_nodes(&terminal.graph))
+            .sum::<usize>() as u64;
+        let shape = binding_source_shape.into();
+        let shape_id = self.next_shape_id();
+        match self.binding_sources.entry(shape.clone()) {
+            std::collections::hash_map::Entry::Occupied(existing)
+                if existing.get().descriptor != binding_descriptor =>
+            {
+                return Err(IvmRuntimeError::BindingSourceDescriptorMismatch(shape));
+            }
+            std::collections::hash_map::Entry::Occupied(_) => {}
+            std::collections::hash_map::Entry::Vacant(vacant) => {
+                vacant.insert(BindingSourceState {
+                    descriptor: binding_descriptor,
+                    refcounts: HashMap::default(),
+                });
+            }
+        }
+        let mut terminal_states = BTreeMap::new();
+        for terminal in terminals {
+            let output = self.add_dedup_graph(&terminal.graph)?;
+            self.add_retainer(
+                output.node,
+                Retainer::PreparedShape(shape_id.retainer_key()),
+            );
+            terminal_states.insert(
+                terminal.sink.clone(),
+                RoutedMultisinkTerminalState { terminal, output },
+            );
+        }
+        self.prepared_shapes.insert(
+            shape_id,
+            RoutedMultisinkShapeState {
+                shape,
+                binding_descriptor,
+                terminals: terminal_states,
+                auto_family_key: None,
+            },
+        );
+        Ok(PreparedShape { id: shape_id })
+    }
+
+    pub fn bind_shape<S>(
+        &mut self,
+        shape_id: PreparedShapeId,
+        binding_values: &[Value],
+        storage: &S,
+    ) -> Result<MultisinkSubscription, IvmRuntimeError>
+    where
+        S: OrderedKvStorage,
+    {
+        self.bind_shape_with_public_fields(shape_id, binding_values, BTreeMap::new(), storage)
+    }
+
+    fn bind_shape_with_public_fields<S>(
+        &mut self,
+        shape_id: PreparedShapeId,
+        binding_values: &[Value],
+        public_fields: BTreeMap<String, Vec<String>>,
+        storage: &S,
+    ) -> Result<MultisinkSubscription, IvmRuntimeError>
+    where
+        S: OrderedKvStorage,
+    {
+        self.flush_pending_binding_retractions(storage)?;
+        let shape = self
+            .prepared_shapes
+            .get(&shape_id)
+            .ok_or(IvmRuntimeError::PreparedShapeNotFound(shape_id))?
+            .clone();
+        let binding_record = shape.binding_descriptor.create(binding_values)?;
+        let binding_key = BindingKey(binding_record);
+        let mut outputs = BTreeMap::new();
+        self.logical_nodes_requested += shape
+            .terminals
+            .values()
+            .map(|terminal| count_builder_nodes(&terminal.terminal.graph) + 2)
+            .sum::<usize>() as u64;
+        for (sink, terminal) in &shape.terminals {
+            let mut terminal = terminal.terminal.clone();
+            if let Some(fields) = public_fields.get(sink) {
+                terminal.public_fields = fields.clone();
+            }
+            let graph = bound_routed_multisink_graph(&terminal, binding_values);
+            let output = self.add_dedup_graph(&graph)?;
+            outputs.insert(sink.clone(), output);
+        }
+        let subscription_id = self.next_subscription_id();
+        for output in outputs.values() {
+            self.retain_as_subscription(subscription_id, output.node);
+        }
+        let binding_delta = match self.add_binding_ref(shape_id, binding_key.clone()) {
+            Ok(delta) => delta,
+            Err(error) => {
+                self.remove_multisink_retainers(subscription_id, &outputs);
+                return Err(error);
+            }
+        };
+        if !binding_delta.deltas.is_empty()
+            && let Err(error) = self.tick_with_params(Vec::new(), vec![binding_delta], storage)
+        {
+            self.remove_multisink_retainers(subscription_id, &outputs);
+            let _ = self.remove_binding_ref(shape_id, &binding_key);
+            return Err(error);
+        }
+        let (sender, receiver) = mpsc::channel();
+        let receiver_liveness = Arc::new(());
+        self.multisink_subscriptions.insert(
+            subscription_id,
+            MultisinkSubscriptionState {
+                sender,
+                receiver_liveness: Arc::downgrade(&receiver_liveness),
+                outputs: outputs.clone(),
+                target: MultisinkSubscriptionTarget::RoutedShape {
+                    shape_id,
+                    binding_key: binding_key.clone(),
+                },
+            },
+        );
+        let initial = match self.hydration_snapshots_for_subscription(&outputs, storage) {
+            Ok(initial) => initial,
+            Err(error) => {
+                self.unsubscribe(subscription_id);
+                return Err(error);
+            }
+        };
+        let queued = self.queued_multisink_deltas(initial);
+        let sent = self
+            .multisink_subscriptions
+            .get(&subscription_id)
+            .is_some_and(|subscription| subscription.sender.send(queued).is_ok());
+        if !sent {
+            self.unsubscribe(subscription_id);
+        }
+        Ok(MultisinkSubscription {
+            id: subscription_id,
+            receiver,
+            _receiver_liveness: receiver_liveness,
+        })
+    }
+
+    pub fn prepare_one_sink(
+        &mut self,
+        graph: GraphBuilder,
+        binding_source_shape: impl Into<String>,
+        binding_descriptor: RecordDescriptor,
+        output_key_fields: impl IntoIterator<Item = impl Into<String>>,
+        storage: &impl OrderedKvStorage,
+    ) -> Result<PreparedShape, IvmRuntimeError> {
+        // One-sink sugar: the ordinary prepared-shape API is represented as a
+        // routed multisink shape with a single default terminal.
+        let output = self.infer_builder_output(&graph)?;
+        let route_fields = output_key_fields
+            .into_iter()
+            .map(|field| {
+                let field = field.into();
+                output
+                    .field_index(&field)
+                    .ok_or_else(|| IvmRuntimeError::ShapeKeyFieldNotFound(field.clone()))?;
+                Ok::<_, IvmRuntimeError>(field)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let public_fields = descriptor_field_names(&output)?;
+        self.prepare(
+            [RoutedMultisinkTerminal::new(
+                DEFAULT_SINK,
+                graph,
+                route_fields,
+                public_fields,
+            )],
+            binding_source_shape,
+            binding_descriptor,
+            storage,
+        )
+    }
+
+    pub fn prepare_one_sink_with_routing(
+        &mut self,
+        output_graph: GraphBuilder,
+        routing_graph: GraphBuilder,
+        binding_source_shape: impl Into<String>,
+        binding_descriptor: RecordDescriptor,
+        routing_key_fields: impl IntoIterator<Item = impl Into<String>>,
+        storage: &impl OrderedKvStorage,
+    ) -> Result<PreparedShape, IvmRuntimeError> {
+        // One-sink sugar for callers that want to describe a clean public
+        // output separately from the route-carrying terminal graph.
+        let output = self.infer_builder_output(&output_graph)?;
+        let routing_output = self.infer_builder_output(&routing_graph)?;
+        validate_public_output_fields(&routing_output, &output)?;
+        let route_fields = routing_key_fields
+            .into_iter()
+            .map(|field| {
+                let field = field.into();
+                routing_output
+                    .field_index(&field)
+                    .ok_or_else(|| IvmRuntimeError::ShapeKeyFieldNotFound(field.clone()))?;
+                Ok::<_, IvmRuntimeError>(field)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let public_fields = descriptor_field_names(&output)?;
+        self.prepare(
+            [RoutedMultisinkTerminal::new(
+                DEFAULT_SINK,
+                routing_graph,
+                route_fields,
+                public_fields,
+            )],
+            binding_source_shape,
+            binding_descriptor,
+            storage,
+        )
+    }
+
+    pub fn bind_shape_one_sink<S>(
+        &mut self,
+        shape_id: PreparedShapeId,
+        binding_values: &[Value],
+        storage: &S,
+    ) -> Result<Subscription, IvmRuntimeError>
+    where
+        S: OrderedKvStorage,
+    {
+        let multisink = self.bind_shape(shape_id, binding_values, storage)?;
+        self.single_sink_subscription(multisink, DEFAULT_SINK)
+    }
+
+    pub(crate) fn bind_shape_one_sink_with_output<S>(
+        &mut self,
+        shape_id: PreparedShapeId,
+        binding_values: &[Value],
+        public_output: RecordDescriptor,
+        storage: &S,
+    ) -> Result<Subscription, IvmRuntimeError>
+    where
+        S: OrderedKvStorage,
+    {
+        validate_public_output_for_shape(
+            self.prepared_shapes
+                .get(&shape_id)
+                .ok_or(IvmRuntimeError::PreparedShapeNotFound(shape_id))?,
+            DEFAULT_SINK,
+            &public_output,
+        )?;
+        let public_fields = descriptor_field_names(&public_output)?;
+        let multisink = self.bind_shape_with_public_fields(
+            shape_id,
+            binding_values,
+            [(DEFAULT_SINK.to_owned(), public_fields)].into(),
+            storage,
+        )?;
+        self.single_sink_subscription(multisink, DEFAULT_SINK)
+    }
+
+    pub fn unsubscribe(&mut self, subscription_id: SubscriptionId) -> bool {
+        if let Some(subscription) = self.multisink_subscriptions.remove(&subscription_id) {
+            let removed = self.remove_multisink_retainers(subscription_id, &subscription.outputs);
+            if let MultisinkSubscriptionTarget::RoutedShape {
+                shape_id,
+                binding_key,
+            } = subscription.target
+                && let Some(param_delta) = self.remove_binding_ref(shape_id, &binding_key)
+                && !param_delta.deltas.is_empty()
+            {
+                self.pending_binding_retractions.push(param_delta);
+                self.remove_unreferenced_auto_family(shape_id);
+            }
+            return removed;
+        }
+
+        false
+    }
+
+    pub fn unsubscribe_with_storage<S>(
+        &mut self,
+        subscription_id: SubscriptionId,
+        storage: &S,
+    ) -> Result<bool, IvmRuntimeError>
+    where
+        S: OrderedKvStorage,
+    {
+        if let Some(subscription) = self.multisink_subscriptions.remove(&subscription_id) {
+            let removed = self.remove_multisink_retainers(subscription_id, &subscription.outputs);
+            if let MultisinkSubscriptionTarget::RoutedShape {
+                shape_id,
+                binding_key,
+            } = subscription.target
+                && let Some(param_delta) = self.remove_binding_ref(shape_id, &binding_key)
+                && !param_delta.deltas.is_empty()
+            {
+                self.tick_with_params(Vec::new(), vec![param_delta], storage)?;
+                self.remove_unreferenced_auto_family(shape_id);
+            }
+            return Ok(removed);
+        }
+
+        Ok(false)
+    }
+
+    pub(crate) fn prune_dropped_subscriptions_with_storage<S>(
+        &mut self,
+        storage: &S,
+    ) -> Result<usize, IvmRuntimeError>
+    where
+        S: OrderedKvStorage,
+    {
+        let dropped = self
+            .multisink_subscriptions
+            .iter()
+            .filter_map(|(id, state)| state.receiver_liveness.upgrade().is_none().then_some(*id))
+            .collect::<Vec<_>>();
+        for id in &dropped {
+            self.unsubscribe_with_storage(*id, storage)?;
+        }
+        Ok(dropped.len())
+    }
+
+    pub fn add_dedup_schema_indices(&mut self) -> Result<(), IvmRuntimeError> {
+        for table in self.schema.tables.clone() {
+            for index in &table.indices {
+                self.add_dedup_schema_index(&table, index)?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn subscription_output_node(&self, subscription_id: SubscriptionId) -> Option<NodeId> {
+        let subscription = self.multisink_subscriptions.get(&subscription_id)?;
+        if subscription.outputs.len() != 1 {
+            return None;
+        }
+        subscription
+            .outputs
+            .values()
+            .next()
+            .map(|output| output.node)
+    }
+
+    pub fn subscription_output(
+        &self,
+        subscription_id: SubscriptionId,
+    ) -> Option<&RecordDescriptor> {
+        let subscription = self.multisink_subscriptions.get(&subscription_id)?;
+        if subscription.outputs.len() != 1 {
+            return None;
+        }
+        subscription
+            .outputs
+            .values()
+            .next()
+            .map(|output| &output.output)
+    }
+
+    fn single_sink_subscription(
+        &self,
+        inner: MultisinkSubscription,
+        sink: &str,
+    ) -> Result<Subscription, IvmRuntimeError> {
+        let output = self
+            .subscription_output(inner.id())
+            .copied()
+            .ok_or(IvmRuntimeError::GraphOutputMismatch)?;
+        Ok(Subscription {
+            inner,
+            sink: sink.to_owned(),
+            output,
+        })
+    }
+
+    fn plan_auto_direct_family(
+        &self,
+        graph: &GraphBuilder,
+    ) -> Result<Option<AutoDirectFamilyPlan>, IvmRuntimeError> {
+        if builder_contains_recursive(graph) {
+            return Ok(None);
+        }
+        let original_output = self.infer_builder_output(graph)?;
+        let binding_field = auto_direct_binding_field(graph, &original_output, self)?;
+        let Some(lifted) = lift_literal_filter(self, graph, &binding_field)? else {
+            return Ok(None);
+        };
+        let shape_seed = "__auto_direct_shape".to_owned();
+        let graph = replace_binding_shape(lifted.graph, &shape_seed);
+        let shape_output = self.infer_builder_output(&graph)?;
+        validate_public_output_fields(&shape_output, &original_output)?;
+        let public_fields = descriptor_field_names(&original_output)?;
+        let mut hasher = DefaultHasher::new();
+        graph.hash(&mut hasher);
+        let shape = format!("auto_direct_{:016x}", hasher.finish());
+        let graph = replace_binding_shape(graph, &shape);
+        if shape_output.field_index(&binding_field).is_none() {
+            return Ok(None);
+        }
+        let binding_descriptor = RecordDescriptor::new([(
+            binding_field.clone(),
+            lifted
+                .value
+                .value_type()
+                .ok_or(IvmRuntimeError::UnsupportedOperator)?,
+        )]);
+        let key = AutoDirectFamilyKey {
+            graph: graph.clone(),
+            binding_descriptor,
+            binding_field: binding_field.clone(),
+            public_fields: public_fields.clone(),
+        };
+        Ok(Some(AutoDirectFamilyPlan {
+            key,
+            graph,
+            shape,
+            binding_descriptor,
+            binding_field,
+            binding_value: lifted.value.to_value(),
+            public_fields,
+        }))
+    }
+
+    fn infer_builder_output(
+        &self,
+        graph: &GraphBuilder,
+    ) -> Result<RecordDescriptor, IvmRuntimeError> {
+        let mut output_memo = HashMap::default();
+        self.infer_builder_output_cached(graph, &mut output_memo)
+    }
+
+    pub(super) fn infer_builder_output_cached(
+        &self,
+        graph: &GraphBuilder,
+        output_memo: &mut HashMap<usize, RecordDescriptor>,
+    ) -> Result<RecordDescriptor, IvmRuntimeError> {
+        let memo_key = graph as *const GraphBuilder as usize;
+        if let Some(output) = output_memo.get(&memo_key) {
+            return Ok(*output);
+        }
+        let output = self.infer_builder_output_uncached(graph, output_memo)?;
+        output_memo.insert(memo_key, output);
+        Ok(output)
+    }
+
+    fn infer_builder_output_uncached(
+        &self,
+        graph: &GraphBuilder,
+        output_memo: &mut HashMap<usize, RecordDescriptor>,
+    ) -> Result<RecordDescriptor, IvmRuntimeError> {
+        match graph {
+            GraphBuilder::Table {
+                table,
+                variant_projection,
+                ..
+            } => {
+                if let Some(target) = variant_projection {
+                    return self
+                        .variant_projections
+                        .get(&VariantProjectionKey {
+                            table: table.clone(),
+                            target: VariantProjectionTarget::Named(target.clone()),
+                        })
+                        .map(|projection| projection.output)
+                        .ok_or_else(|| IvmRuntimeError::VariantProjectionNotFound {
+                            table: table.clone(),
+                            target: target.clone(),
+                        });
+                }
+                let table_schema = self
+                    .schema
+                    .table(table)
+                    .ok_or_else(|| IvmRuntimeError::TableNotFound(table.clone()))?;
+                if table_schema.has_variants() {
+                    return Err(IvmRuntimeError::VariantProjectionRequired(table.clone()));
+                }
+                Ok(table_schema.record_schema())
+            }
+            GraphBuilder::InlineRecords { output, .. } => Ok(*output),
+            GraphBuilder::Index { .. } => Ok(index_record_descriptor()),
+            GraphBuilder::FrontierSource { output, .. }
+            | GraphBuilder::BindingSource { output, .. } => Ok(*output),
+            GraphBuilder::Filter { input, .. }
+            | GraphBuilder::ArgMaxBy { input, .. }
+            | GraphBuilder::ArgMinBy { input, .. }
+            | GraphBuilder::TopBy { input, .. } => {
+                self.infer_builder_output_cached(input, output_memo)
+            }
+            GraphBuilder::CollectBy { input, collect, .. } => {
+                let input = self.infer_builder_output_cached(input, output_memo)?;
+                match collect.mode {
+                    CollectByMode::Root => {
+                        collect_by_root_descriptor(&input, &collect.parent_fields)
+                    }
+                    CollectByMode::Collect if collect.slots.is_empty() => collect_by_descriptor(
+                        &input,
+                        &collect.parent_fields,
+                        &collect.child_fields,
+                        &collect.collection_field,
+                    ),
+                    CollectByMode::Collect => {
+                        collect_by_tree_descriptor(&input, &collect.parent_fields, &collect.slots)
+                    }
+                    CollectByMode::Expand if collect.slots.is_empty() => {
+                        collect_by_expand_descriptor(&input, &collect.tuple_fields)
+                    }
+                    CollectByMode::Expand => Err(IvmRuntimeError::InvalidCollectBy(
+                        "expand mode does not accept recursive collection slots".into(),
+                    )),
+                }
+            }
+            GraphBuilder::Aggregate {
+                input,
+                group_cols,
+                aggregates,
+            } => {
+                let input = self.infer_builder_output_cached(input, output_memo)?;
+                aggregate_descriptor(&input, group_cols, aggregates)
+            }
+            GraphBuilder::UnwrapNullable { input, field } => {
+                let input = self.infer_builder_output_cached(input, output_memo)?;
+                let field_idx = resolve_field_ref(&input, field)?;
+                unwrap_nullable_descriptor(&input, field_idx)
+            }
+            GraphBuilder::Unnest {
+                input,
+                array_field,
+                element_field,
+            } => {
+                let input = self.infer_builder_output_cached(input, output_memo)?;
+                let field_idx = resolve_field_ref(&input, array_field)?;
+                unnest_descriptor(&input, field_idx, element_field)
+            }
+            GraphBuilder::VariantProject { input, field, case } => {
+                let input = self.infer_builder_output_cached(input, output_memo)?;
+                variant_project_descriptor(&input, field, case)
+            }
+            GraphBuilder::Project { input, fields } => {
+                let input = self.infer_builder_output_cached(input, output_memo)?;
+                project_descriptor(&input, fields)
+            }
+            GraphBuilder::Union { inputs } => {
+                let mut output: Option<RecordDescriptor> = None;
+                for input in inputs {
+                    let next = self.infer_builder_output_cached(input, output_memo)?;
+                    if let Some(output) = output {
+                        if !output.registry_compatible_with(&next) {
+                            return Err(IvmRuntimeError::GraphOutputMismatch);
+                        }
+                    } else {
+                        output = Some(next);
+                    }
+                }
+                Ok(output.unwrap_or_default())
+            }
+            GraphBuilder::Join { left, right, .. } => {
+                let left = self.infer_builder_output_cached(left, output_memo)?;
+                let right = self.infer_builder_output_cached(right, output_memo)?;
+                Ok(join_descriptor(&left, &right))
+            }
+            GraphBuilder::SemiJoin { left, .. } => {
+                self.infer_builder_output_cached(left, output_memo)
+            }
+            GraphBuilder::AntiJoin { left, .. } => {
+                self.infer_builder_output_cached(left, output_memo)
+            }
+            GraphBuilder::Recursive { seed, step, .. } => {
+                let seed = self.infer_builder_output_cached(seed, output_memo)?;
+                let step = self.infer_builder_output_cached(step, output_memo)?;
+                if !seed.registry_compatible_with(&step) {
+                    return Err(IvmRuntimeError::GraphOutputMismatch);
+                }
+                Ok(seed)
+            }
+        }
+    }
+
+    pub(super) fn next_subscription_id(&mut self) -> SubscriptionId {
+        let id = SubscriptionId(self.next_subscription_id);
+        self.next_subscription_id += 1;
+        id
+    }
+
+    pub(super) fn next_shape_id(&mut self) -> PreparedShapeId {
+        let id = PreparedShapeId(self.next_shape_id);
+        self.next_shape_id += 1;
+        id
+    }
+
+    fn add_binding_ref(
+        &mut self,
+        shape_id: PreparedShapeId,
+        binding: BindingKey,
+    ) -> Result<BindingDelta, IvmRuntimeError> {
+        let shape = self.binding_source_shape_name(shape_id)?;
+        self.add_binding_ref_for_shape(&shape, binding)
+    }
+
+    fn add_binding_ref_for_shape(
+        &mut self,
+        shape: &str,
+        binding: BindingKey,
+    ) -> Result<BindingDelta, IvmRuntimeError> {
+        let source = self
+            .binding_sources
+            .get_mut(shape)
+            .ok_or_else(|| IvmRuntimeError::BindingSourceNotFound(shape.to_owned()))?;
+        let count = source.refcounts.entry(binding.clone()).or_default();
+        *count += 1;
+        Ok(BindingDelta {
+            shape: shape.to_owned(),
+            descriptor: source.descriptor,
+            deltas: if *count == 1 {
+                vec![RecordDelta {
+                    record: binding.0.into(),
+                    weight: 1,
+                }]
+            } else {
+                Vec::new()
+            },
+        })
+    }
+
+    fn remove_binding_ref(
+        &mut self,
+        shape_id: PreparedShapeId,
+        binding: &BindingKey,
+    ) -> Option<BindingDelta> {
+        let shape = self.binding_source_shape_name(shape_id).ok()?;
+        self.remove_binding_ref_for_shape(&shape, binding)
+    }
+
+    fn remove_binding_ref_for_shape(
+        &mut self,
+        shape: &str,
+        binding: &BindingKey,
+    ) -> Option<BindingDelta> {
+        let source = self.binding_sources.get_mut(shape)?;
+        let count = source.refcounts.get_mut(binding)?;
+        *count -= 1;
+        if *count > 0 {
+            return Some(BindingDelta {
+                shape: shape.to_owned(),
+                descriptor: source.descriptor,
+                deltas: Vec::new(),
+            });
+        }
+        source.refcounts.remove(binding);
+        Some(BindingDelta {
+            shape: shape.to_owned(),
+            descriptor: source.descriptor,
+            deltas: vec![RecordDelta {
+                record: binding.0.clone().into(),
+                weight: -1,
+            }],
+        })
+    }
+
+    fn binding_source_shape_name(
+        &self,
+        shape_id: PreparedShapeId,
+    ) -> Result<String, IvmRuntimeError> {
+        if let Some(shape) = self.prepared_shapes.get(&shape_id) {
+            return Ok(shape.shape.clone());
+        }
+        Err(IvmRuntimeError::PreparedShapeNotFound(shape_id))
+    }
+
+    pub(super) fn binding_snapshot_deltas(&self) -> HashMap<String, RecordDeltas> {
+        debug_assert!(
+            self.pending_binding_retractions.is_empty(),
+            "binding snapshots must not race queued binding retractions"
+        );
+        self.binding_sources
+            .iter()
+            .map(|(shape, source)| {
+                (
+                    shape.clone(),
+                    RecordDeltas {
+                        descriptor: source.descriptor,
+                        deltas: source
+                            .refcounts
+                            .keys()
+                            .map(|binding| RecordDelta {
+                                record: binding.0.clone().into(),
+                                weight: 1,
+                            })
+                            .collect(),
+                    },
+                )
+            })
+            .collect()
+    }
+
+    fn remove_unreferenced_auto_family(&mut self, shape_id: PreparedShapeId) {
+        let Some(shape) = self.prepared_shapes.get(&shape_id) else {
+            return;
+        };
+        let Some(key) = shape.auto_family_key.clone() else {
+            return;
+        };
+        if self
+            .multisink_subscriptions
+            .values()
+            .any(|subscription| matches!(subscription.target, MultisinkSubscriptionTarget::RoutedShape { shape_id: active, .. } if active == shape_id))
+        {
+            return;
+        }
+        let shape_name = shape.shape.clone();
+        let output_nodes = shape
+            .terminals
+            .values()
+            .map(|terminal| terminal.output.node)
+            .collect::<Vec<_>>();
+        self.prepared_shapes.remove(&shape_id);
+        self.binding_sources.remove(&shape_name);
+        self.auto_direct_families.remove(&key);
+        for output_node in output_nodes {
+            self.remove_retainer(
+                output_node,
+                &Retainer::PreparedShape(shape_id.retainer_key()),
+            );
+        }
+        for node in self.gc_ephemeral_nodes(0) {
+            self.remove_node_runtime(node);
+        }
+        self.prune_unreferenced_arrangements();
+    }
+
+    pub(super) fn advance_tick(&mut self) -> u64 {
+        self.current_tick += 1;
+        self.current_tick
+    }
+}

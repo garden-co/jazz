@@ -12,10 +12,7 @@ pub(super) struct ClosureLowering {
 }
 
 impl ClosureLowering {
-    pub(super) fn all_visible_members(
-        &self,
-        root_source: SourceId,
-    ) -> Vec<(SourceId, GraphBuilder)> {
+    fn all_visible_members(&self, root_source: SourceId) -> Vec<(SourceId, GraphBuilder)> {
         std::iter::once((root_source, self.visible_root.clone()))
             .chain(
                 self.result_members
