@@ -149,6 +149,7 @@ mod primary_storage;
 mod query;
 mod schema_admission;
 mod storage_helpers;
+mod storage_runtime;
 
 pub use batch::*;
 use encoding::*;
@@ -160,6 +161,8 @@ pub use storage_helpers::{
     EncodedKeyValue, PreparedShape, StorageReadBucket, StorageReadMetrics, StorageWriteBucket,
     StorageWriteMetrics,
 };
+#[doc(hidden)]
+pub use storage_runtime::PollableDatabase;
 
 #[derive(Debug, Error)]
 pub enum Error {

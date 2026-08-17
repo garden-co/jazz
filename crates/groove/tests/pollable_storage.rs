@@ -12,7 +12,7 @@ use groove::storage::pollable::{
 };
 use groove::storage::{Error, MemoryStorage, OwnedWriteOperation};
 use groove::{
-    db::{Database, GraphBuilder},
+    db::{Database, GraphBuilder, PollableDatabase},
     records::Value,
     schema::{ColumnSchema, ColumnType, DatabaseSchema, IntegerKeyType, PrimaryKey, TableSchema},
 };
@@ -48,6 +48,21 @@ impl OperationGate {
 struct ControlledStorage {
     storage: MemoryStorage,
     gate: OperationGate,
+}
+
+struct FailingCommitStorage;
+
+impl PollableOrderedKvStorage for FailingCommitStorage {
+    fn poll_request(
+        &mut self,
+        _request: &OwnedStorageRequest,
+        _context: &mut Context<'_>,
+    ) -> Poll<Result<OwnedStorageResponse, Error>> {
+        Poll::Ready(Err(Error::Backend {
+            backend: "controlled",
+            message: "injected commit failure".to_owned(),
+        }))
+    }
 }
 
 impl ControlledStorage {
@@ -166,18 +181,21 @@ fn pending_durable_commit_does_not_delay_local_query_or_subscription_visibility(
         ],
     )
     .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
-    let mut database = Database::new(schema, MemoryStorage::new(&["rows", "indices"])).unwrap();
+    let resident = Database::new(schema, MemoryStorage::new(&["rows", "indices"])).unwrap();
+    let (durable_storage, gate) = ControlledStorage::new(&["rows", "indices"]);
+    let mut database = PollableDatabase::new(resident, Box::new(durable_storage));
     let subscription = database
+        .resident_mut()
         .subscribe_one_sink(GraphBuilder::table("rows"))
         .unwrap();
     assert!(subscription.recv().unwrap().is_empty());
 
-    let mut batch = database.open_batch();
+    let mut batch = database.resident().open_batch();
     batch.insert(
         "rows",
         vec![Value::U64(1), Value::String("visible locally".into())],
     );
-    let persistence = database.commit_batch_for_async_persistence(batch).unwrap();
+    database.commit_batch(batch).unwrap();
 
     let local_delta = subscription.recv().unwrap().to_values().unwrap();
     assert_eq!(
@@ -187,21 +205,27 @@ fn pending_durable_commit_does_not_delay_local_query_or_subscription_visibility(
             1,
         )]
     );
-    let local_rows = database.primary_key_scan("rows", &[Value::U64(1)]).unwrap();
+    let local_rows = database
+        .resident()
+        .primary_key_scan("rows", &[Value::U64(1)])
+        .unwrap();
     assert_eq!(
         local_rows[0].get("value").unwrap(),
         Value::String("visible locally".into())
     );
 
-    let (mut durable_storage, gate) = ControlledStorage::new(&["rows", "indices"]);
-    let durable_commit =
-        OwnedStorageRequest::new(OwnedStorageOperation::Commit(persistence.into_operations()));
-    assert!(poll_request(&mut durable_storage, &durable_commit).is_pending());
+    let waker = Waker::from(Arc::new(NoopWake));
+    let mut context = Context::from_waker(&waker);
+    assert!(database.poll_persistence(&mut context).is_pending());
+    assert!(database.has_pending_persistence());
 
     // A suspended durable backend does not create a second core mode: the
     // already-open local subscription and resident one-shot state remain live.
     assert_eq!(
-        database.primary_key_scan("rows", &[Value::U64(1)]).unwrap()[0]
+        database
+            .resident()
+            .primary_key_scan("rows", &[Value::U64(1)])
+            .unwrap()[0]
             .get("value")
             .unwrap(),
         Value::String("visible locally".into())
@@ -209,7 +233,48 @@ fn pending_durable_commit_does_not_delay_local_query_or_subscription_visibility(
 
     gate.release();
     assert!(matches!(
-        poll_request(&mut durable_storage, &durable_commit),
-        Poll::Ready(Ok(OwnedStorageResponse::Committed))
+        database.poll_persistence(&mut context),
+        Poll::Ready(Ok(()))
+    ));
+    assert!(!database.has_pending_persistence());
+}
+
+#[test]
+fn failed_async_persistence_keeps_published_delta_but_poisons_later_database_use() {
+    let schema = DatabaseSchema::new([TableSchema::new(
+        "rows",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("value", ColumnType::String),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+    let resident = Database::new(schema, MemoryStorage::new(&["rows", "indices"])).unwrap();
+    let mut database = PollableDatabase::new(resident, Box::new(FailingCommitStorage));
+    let subscription = database
+        .resident_mut()
+        .subscribe_one_sink(GraphBuilder::table("rows"))
+        .unwrap();
+    assert!(subscription.recv().unwrap().is_empty());
+
+    let mut batch = database.resident().open_batch();
+    batch.insert(
+        "rows",
+        vec![Value::U64(1), Value::String("optimistic".into())],
+    );
+    database.commit_batch(batch).unwrap();
+    assert_eq!(subscription.recv().unwrap().to_values().unwrap().len(), 1);
+
+    let waker = Waker::from(Arc::new(NoopWake));
+    let mut context = Context::from_waker(&waker);
+    assert!(matches!(
+        database.poll_persistence(&mut context),
+        Poll::Ready(Err(_))
+    ));
+    assert!(matches!(
+        database
+            .resident()
+            .primary_key_scan("rows", &[Value::U64(1)]),
+        Err(groove::db::Error::DatabasePoisoned)
     ));
 }
