@@ -10,16 +10,19 @@ autotests = true
 default = ["rocksdb", "server", "transport-compression-zstd"]
 rocksdb = ["groove/rocksdb", "dep:rocksdb"]
 sqlite = ["dep:rusqlite"]
-client = ["server"]
-server = [
-  "dep:axum",
-  "dep:tracing-subscriber",
-  "dep:tower-http",
-  "dep:async-stream",
+native-websocket-transport = [
   "dep:reqwest",
   "dep:tokio",
   "dep:tokio-tungstenite",
   "dep:tungstenite",
+]
+client = ["native-websocket-transport"]
+server = [
+  "native-websocket-transport",
+  "dep:axum",
+  "dep:tracing-subscriber",
+  "dep:tower-http",
+  "dep:async-stream",
 ]
 sync-autopsy = []
 # Disabled-by-default counters for the cold-settle attribution bench. They do

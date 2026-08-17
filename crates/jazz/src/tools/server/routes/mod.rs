@@ -1381,9 +1381,9 @@ mod tests {
         let state = make_state_with_schema(v1.clone()).await;
         let app = make_test_router(state.clone());
         publish_schema_for_test(&app, v2).await;
-        let runtime_v1 = crate::tools::server::public_schema_convert::convert_public_schema(&v1)
+        let runtime_v1 = crate::tools::public_schema_convert::convert_public_schema(&v1)
             .expect("convert source schema");
-        let runtime_v2 = crate::tools::server::public_schema_convert::convert_public_schema(
+        let runtime_v2 = crate::tools::public_schema_convert::convert_public_schema(
             &state
                 .catalogue
                 .known_schema(&state.catalogue_store, &v2_hash)
@@ -1632,9 +1632,9 @@ mod tests {
         let state = make_state_with_schema(v1.clone()).await;
         let app = make_test_router(state.clone());
         publish_schema_for_test(&app, v2).await;
-        let runtime_v1 = crate::tools::server::public_schema_convert::convert_public_schema(&v1)
+        let runtime_v1 = crate::tools::public_schema_convert::convert_public_schema(&v1)
             .expect("convert source schema");
-        let runtime_v2 = crate::tools::server::public_schema_convert::convert_public_schema(
+        let runtime_v2 = crate::tools::public_schema_convert::convert_public_schema(
             &state
                 .catalogue
                 .known_schema(&state.catalogue_store, &v2_hash)

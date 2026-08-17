@@ -6,10 +6,14 @@ pub mod identity;
 pub mod metadata;
 #[cfg(feature = "server")]
 pub mod middleware;
+#[cfg(any(feature = "client", feature = "server"))]
+pub mod native_websocket_transport;
 mod object;
 pub mod policy_claims;
 pub(crate) mod public_api;
 pub mod public_schema;
+#[cfg(any(feature = "client", feature = "server", test))]
+pub(crate) mod public_schema_convert;
 pub mod schema_lens;
 #[cfg(feature = "server")]
 pub mod server;

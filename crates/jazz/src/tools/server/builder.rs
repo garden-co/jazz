@@ -16,11 +16,11 @@ use crate::tools::middleware::AuthConfig;
 use crate::tools::middleware::auth::{
     JWKS_CACHE_TTL, JWKS_MAX_STALE, JwksCache, JwtVerifier, StaticJwtVerifier,
 };
+use crate::tools::native_websocket_transport::WebSocketTransport;
+use crate::tools::native_websocket_transport::validate_catalogue_bootstrap_upstream_url;
 use crate::tools::public_schema::Schema;
 #[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
 use crate::tools::server::CatalogueRocksDbStorage;
-use crate::tools::server::core_websocket_transport::WebSocketTransport;
-use crate::tools::server::core_websocket_transport::validate_catalogue_bootstrap_upstream_url;
 use crate::tools::server::routes;
 use crate::tools::server::{
     CatalogueMemoryStorage, DynCatalogueStorage, ServerState, ServerTopology, StoredCatalogue,
@@ -298,7 +298,7 @@ impl ServerBuilder {
             return Ok(None);
         };
         let storage_config = storage_config?;
-        let schema = crate::tools::server::public_schema_convert::convert_public_schema(&schema)
+        let schema = crate::tools::public_schema_convert::convert_public_schema(&schema)
             .map_err(|error| format!("failed to build server shell schema: {error}"))?;
         Ok(Some(
             crate::tools::server::core_server_shell::ServerShellHandle::start_with_storage_config(
@@ -795,7 +795,7 @@ mod tests {
         .await
         .expect_err("downstream admission waits for the normal upstream route");
         assert!(
-            matches!(error, crate::tools::server::core_websocket_transport::WebSocketClientError::ServerRejected(ref message) if message.contains("bootstrapping") && message.contains("retry shortly")),
+            matches!(error, crate::tools::native_websocket_transport::WebSocketClientError::ServerRejected(ref message) if message.contains("bootstrapping") && message.contains("retry shortly")),
             "unready dynamic edge must give retryable admission failure: {error}"
         );
 
@@ -829,7 +829,7 @@ mod tests {
         .await
         .expect_err("wrong bootstrap credential must not obtain a catalogue");
         assert!(
-            matches!(error, crate::tools::server::core_websocket_transport::WebSocketClientError::ServerRejected(ref message) if message.contains("AuthFailed")),
+            matches!(error, crate::tools::native_websocket_transport::WebSocketClientError::ServerRejected(ref message) if message.contains("AuthFailed")),
             "unexpected bootstrap auth result: {error}"
         );
         core_task.abort();
@@ -861,7 +861,7 @@ mod tests {
         .await
         .expect_err("normal privileged client identity must not request bootstrap");
         assert!(
-            matches!(error, crate::tools::server::core_websocket_transport::WebSocketClientError::ServerRejected(ref message) if message.contains("AuthFailed")),
+            matches!(error, crate::tools::native_websocket_transport::WebSocketClientError::ServerRejected(ref message) if message.contains("AuthFailed")),
             "bootstrap identity boundary returned {error}"
         );
         core_task.abort();
@@ -894,7 +894,7 @@ mod tests {
         .await
         .expect_err("backend credential must not read an authority catalogue");
         assert!(
-            matches!(error, crate::tools::server::core_websocket_transport::WebSocketClientError::ServerRejected(ref message) if message.contains("AuthFailed")),
+            matches!(error, crate::tools::native_websocket_transport::WebSocketClientError::ServerRejected(ref message) if message.contains("AuthFailed")),
             "generic backend credential crossed bootstrap boundary: {error}"
         );
         core_task.abort();
@@ -1125,7 +1125,7 @@ mod tests {
         .await
         .expect_err("unready edge must not admit a downstream session");
         assert!(
-            matches!(error, crate::tools::server::core_websocket_transport::WebSocketClientError::ServerRejected(ref message) if message.contains("bootstrapping") && message.contains("retry shortly")),
+            matches!(error, crate::tools::native_websocket_transport::WebSocketClientError::ServerRejected(ref message) if message.contains("bootstrapping") && message.contains("retry shortly")),
             "unready edge must return an explicit retry-later diagnosis: {error}"
         );
         edge_task.abort();
