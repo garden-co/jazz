@@ -415,7 +415,7 @@ fn demand_driven_node_publishes_locally_before_one_atomic_durable_unit() {
 }
 
 #[test]
-fn cold_mergeable_preflight_suspends_before_resident_publication() {
+fn cold_mergeable_preparation_suspends_before_resident_publication() {
     let node_schema = schema();
     let column_families = node_schema.column_families();
     let refs = column_families

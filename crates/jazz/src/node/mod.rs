@@ -808,7 +808,7 @@ struct OpenTxState {
 /// demand-load storage; applying it is a no-suspension resident mutation.
 pub(crate) struct PreparedMergeableCommit {
     tx_id: TxId,
-    batch: DatabaseBatch,
+    batch: groove::db::PreparedDatabaseBatch,
     stored_versions: Vec<VersionRow>,
     made_by: AuthorId,
     permission_subject: AuthorId,

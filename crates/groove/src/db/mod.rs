@@ -72,6 +72,17 @@ pub struct PendingPersistenceBatch {
     operations: Vec<OwnedWriteOperation>,
 }
 
+/// Storage-resolved writes ready for one non-suspending resident IVM tick.
+///
+/// Construction performs no IVM evaluation and publication consumes the value
+/// exactly once. Async hosts retain this across the acquire/publish boundary so
+/// the raw batch cannot be reinterpreted after acquisition succeeds.
+#[doc(hidden)]
+#[must_use = "a prepared database batch must be published or discarded"]
+pub struct PreparedDatabaseBatch {
+    pending_writes: Vec<PendingTableWrite>,
+}
+
 /// Cloneable fail-closed capability attached to externally owned persistence.
 #[doc(hidden)]
 #[derive(Clone)]

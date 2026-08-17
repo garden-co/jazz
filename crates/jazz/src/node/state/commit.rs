@@ -304,7 +304,7 @@ where
             }
         }
         self.stage_recovery_checkpoint(&mut batch, made_at);
-        self.database.ensure_batch_storage_inputs(&batch)?;
+        let batch = self.database.prepare_batch_storage_inputs(&batch)?;
         Ok(PreparedMergeableCommit {
             tx_id,
             batch,
@@ -326,7 +326,7 @@ where
             permission_subject,
         } = prepared;
         self.clock.tx_time = self.clock.tx_time.max(tx_id.time);
-        self.commit_prepared_database_batch(batch)?;
+        self.publish_prepared_database_batch(batch)?;
         self.cache_tx_versions(tx_id, stored_versions.clone());
         if permission_subject != made_by {
             self.open_tx

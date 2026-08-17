@@ -279,14 +279,17 @@ impl DemandDrivenDatabase {
             self.persistence.as_mut(),
             &self.cache,
             context,
-            || self.database.ensure_batch_storage_inputs(pending_batch),
+            || self.database.prepare_batch_storage_inputs(pending_batch),
             missing_storage_input,
         ) {
             Poll::Pending => Poll::Pending,
             Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
-            Poll::Ready(Ok(())) => {
-                let batch = batch.take().expect("preflight retains commit batch");
-                Poll::Ready(self.database.commit_batch_for_async_persistence(batch))
+            Poll::Ready(Ok(prepared)) => {
+                batch.take().expect("preparation retains commit batch");
+                Poll::Ready(
+                    self.database
+                        .commit_prepared_batch_for_async_persistence(prepared),
+                )
             }
         }
     }

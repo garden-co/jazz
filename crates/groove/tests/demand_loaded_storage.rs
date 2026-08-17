@@ -193,12 +193,12 @@ fn write_preparation_loads_inputs_before_the_single_real_ivm_tick() {
     batch.insert("rows", vec![Value::U64(11), Value::String("input".into())]);
     let mut context = Context::from_waker(Waker::noop());
 
-    loop {
-        match database.ensure_batch_storage_inputs(&batch) {
-            Ok(()) => break,
+    let prepared = loop {
+        match database.prepare_batch_storage_inputs(&batch) {
+            Ok(prepared) => break prepared,
             Err(groove::db::Error::Storage(error)) => {
                 let groove::storage::Error::NotResident { request } = *error else {
-                    panic!("preflight failed for a reason other than missing input")
+                    panic!("preparation failed for a reason other than missing input")
                 };
                 let request = OwnedStorageRequest::new(*request);
                 let Poll::Ready(Ok(response)) = durable.poll_request(&request, &mut context) else {
@@ -206,14 +206,16 @@ fn write_preparation_loads_inputs_before_the_single_real_ivm_tick() {
                 };
                 cache.admit(request.operation().clone(), response).unwrap();
             }
-            Err(error) => panic!("unexpected preflight error: {error:?}"),
+            Err(error) => panic!("unexpected preparation error: {error:?}"),
         }
-    }
+    };
     assert!(
         subscription.try_recv().is_err(),
-        "preflight must not mutate or publish the real IVM"
+        "preparation must not mutate or publish the real IVM"
     );
-    database.commit_batch(batch).unwrap();
+    let _persistence = database
+        .commit_prepared_batch_for_async_persistence(prepared)
+        .unwrap();
     assert_eq!(subscription.recv().unwrap().to_values().unwrap().len(), 1);
 }
 

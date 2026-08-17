@@ -105,12 +105,25 @@ where
             .map(|receipt| receipt.expect("async persistence requested a receipt"))
     }
 
+    /// Publish one storage-resolved batch through the real resident IVM.
+    #[doc(hidden)]
+    pub fn commit_prepared_batch_for_async_persistence(
+        &mut self,
+        prepared: PreparedDatabaseBatch,
+    ) -> Result<PendingPersistenceBatch, Error> {
+        self.commit_pending_writes(prepared.pending_writes, true)
+            .map(|receipt| receipt.expect("async persistence requested a receipt"))
+    }
+
     /// Acquire every durable input that a subsequent live IVM tick can read.
     ///
     /// This deliberately does not evaluate the graph. The real runtime is
     /// ticked exactly once, after this storage-only preparation succeeds.
     #[doc(hidden)]
-    pub fn ensure_batch_storage_inputs(&self, batch: &DatabaseBatch) -> Result<(), Error> {
+    pub fn prepare_batch_storage_inputs(
+        &self,
+        batch: &DatabaseBatch,
+    ) -> Result<PreparedDatabaseBatch, Error> {
         self.ensure_not_poisoned()?;
         let pending_writes = self.pending_writes_from_operations(&batch.operations)?;
         let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
@@ -122,7 +135,7 @@ where
         for write in &pending_writes {
             self.owned_storage_operation_for_pending(write)?;
         }
-        Ok(())
+        Ok(PreparedDatabaseBatch { pending_writes })
     }
 
     /// Fail closed after a resident commit could not be durably persisted.
