@@ -272,6 +272,16 @@ impl<'a> TestingClient<'a> {
             TestingClientStorage::Memory => ClientStorage::Memory,
             TestingClientStorage::Persistent => ClientStorage::Persistent,
         };
+        if matches!(self.storage, TestingClientStorage::Persistent) {
+            #[cfg(feature = "rocksdb")]
+            {
+                context.storage_factory = Some(std::sync::Arc::new(
+                    jazz_storage_rocksdb::RocksDbStorageFactory,
+                ));
+            }
+            #[cfg(not(feature = "rocksdb"))]
+            panic!("persistent test clients require the rocksdb adapter feature");
+        }
 
         context
     }

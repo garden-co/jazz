@@ -8,6 +8,7 @@ members = [
   "crates/jazz-native-transport",
   "crates/jazz-cli",
   "crates/jazz-server",
+  "crates/jazz-storage-rocksdb",
   "crates/jazz-testkit",
   "crates/jazz-otel",
   "crates/jazz-sim",
@@ -33,6 +34,7 @@ groove = { path = "crates/groove", default-features = false }
 jazz = { path = "crates/jazz", default-features = false }
 jazz-compression = { path = "crates/jazz-compression", default-features = false }
 jazz-otel = { path = "crates/jazz-otel" }
+jazz-storage-rocksdb = { path = "crates/jazz-storage-rocksdb" }
 rustc-hash = "2.1.1"
 
 [patch.crates-io]

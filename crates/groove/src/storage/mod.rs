@@ -8,17 +8,14 @@
 //! families or raw ordered-KV operations.
 //!
 //! The storage layer deliberately does not know about schemas, query graphs,
-//! records beyond typed convenience wrappers, or Jazz semantics. The RocksDB
-//! implementation lives in [`rocksdb_storage`]; higher layers decide when a
-//! batch is durable and how storage writes relate to an IVM tick.
+//! records beyond typed convenience wrappers, or Jazz semantics. Physical
+//! adapters live in outward crates; higher layers decide when a batch is
+//! durable and how storage writes relate to an IVM tick.
 
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 mod key_codec;
 mod memory;
 mod opfs;
-#[cfg(feature = "rocksdb")]
-#[path = "rocksdb.rs"]
-pub mod rocksdb_storage;
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -28,12 +25,12 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub use memory::MemoryStorage;
+#[cfg(test)]
+pub type TestStorage = NativeBtreeStorage;
 #[cfg(target_arch = "wasm32")]
 pub use opfs::OpfsStorage;
 #[cfg(not(target_arch = "wasm32"))]
 pub use opfs::{BtreeSyncPolicy, NativeBtreeStorage};
-#[cfg(feature = "rocksdb")]
-pub use rocksdb_storage::{Durability, RocksDbMetrics, RocksDbStorage};
 
 pub type ColumnFamilyName = str;
 pub type Key = [u8];
@@ -78,7 +75,7 @@ impl StorageDelta {
         })
     }
 
-    pub(crate) fn encode(&self) -> Result<Vec<u8>, Error> {
+    pub fn encode(&self) -> Result<Vec<u8>, Error> {
         postcard::to_allocvec(&(self.kind, &self.payload))
             .map_err(|error| Error::InvalidStorageDelta(error.to_string()))
     }
@@ -90,8 +87,11 @@ impl StorageDelta {
     }
 }
 
-#[cfg(feature = "rocksdb")]
-pub(crate) fn compact_storage_delta_operand(
+/// Compact one encoded delta operand using the storage-level delta contract.
+///
+/// Ordered-KV adapters with native merge operators use this to implement the
+/// same delta semantics as the default read/modify/write path.
+pub fn compact_storage_delta_operand(
     template_operand: &[u8],
     merged_record: Vec<u8>,
 ) -> Result<Vec<u8>, Error> {
@@ -718,6 +718,140 @@ where
 /// Storage that can be reconstructed with an expanded table/column-family set.
 pub trait ReopenableStorage: OrderedKvStorage + Sized {
     fn reopen(self, column_families: &[&str]) -> Result<Self, Error>;
+}
+
+/// Object-safe form of [`ReopenableStorage`] used at runtime adapter
+/// boundaries.
+pub trait ErasedReopenableStorage: OrderedKvStorage + Send {
+    fn reopen_boxed(
+        self: Box<Self>,
+        column_families: &[&str],
+    ) -> Result<Box<dyn ErasedReopenableStorage>, Error>;
+}
+
+impl<S> ErasedReopenableStorage for S
+where
+    S: ReopenableStorage + Send + 'static,
+{
+    fn reopen_boxed(
+        self: Box<Self>,
+        column_families: &[&str],
+    ) -> Result<Box<dyn ErasedReopenableStorage>, Error> {
+        Ok(Box::new((*self).reopen(column_families)?))
+    }
+}
+
+/// Type-erased, reopenable ordered-KV backend.
+pub struct BoxedStorage {
+    inner: Box<dyn ErasedReopenableStorage>,
+}
+
+impl BoxedStorage {
+    pub fn new<S>(storage: S) -> Self
+    where
+        S: ReopenableStorage + Send + 'static,
+    {
+        Self {
+            inner: Box::new(storage),
+        }
+    }
+}
+
+impl OrderedKvStorage for BoxedStorage {
+    fn get(&self, cf: &ColumnFamilyName, key: &Key) -> Result<Option<Value>, Error> {
+        self.inner.get(cf, key)
+    }
+
+    fn set(&self, cf: &ColumnFamilyName, key: &Key, value: &[u8]) -> Result<(), Error> {
+        self.inner.set(cf, key, value)
+    }
+
+    fn delete(&self, cf: &ColumnFamilyName, key: &Key) -> Result<(), Error> {
+        self.inner.delete(cf, key)
+    }
+
+    fn close(&self) -> Result<(), Error> {
+        self.inner.close()
+    }
+
+    fn set_write_flush_cadence(&self, every: usize) -> Result<(), Error> {
+        self.inner.set_write_flush_cadence(every)
+    }
+
+    fn flush_write_boundary(&self) -> Result<(), Error> {
+        self.inner.flush_write_boundary()
+    }
+
+    fn approximate_class_bytes(&self, cf: &ColumnFamilyName) -> Result<Option<u64>, Error> {
+        self.inner.approximate_class_bytes(cf)
+    }
+
+    fn scan_range(
+        &self,
+        cf: &ColumnFamilyName,
+        start: &Key,
+        end: &Key,
+        visit: &mut ScanVisitor<'_>,
+    ) -> Result<(), Error> {
+        self.inner.scan_range(cf, start, end, visit)
+    }
+
+    fn scan_prefix(
+        &self,
+        cf: &ColumnFamilyName,
+        prefix: &Key,
+        visit: &mut ScanVisitor<'_>,
+    ) -> Result<(), Error> {
+        self.inner.scan_prefix(cf, prefix, visit)
+    }
+
+    fn scan_prefix_reverse(
+        &self,
+        cf: &ColumnFamilyName,
+        prefix: &Key,
+        visit: &mut ScanVisitor<'_>,
+    ) -> Result<(), Error> {
+        self.inner.scan_prefix_reverse(cf, prefix, visit)
+    }
+
+    fn last_with_prefix(
+        &self,
+        cf: &ColumnFamilyName,
+        prefix: &Key,
+    ) -> Result<Option<KeyValue>, Error> {
+        self.inner.last_with_prefix(cf, prefix)
+    }
+
+    fn last_with_prefix_before_or_at(
+        &self,
+        cf: &ColumnFamilyName,
+        prefix: &Key,
+        upper: &Key,
+    ) -> Result<Option<KeyValue>, Error> {
+        self.inner.last_with_prefix_before_or_at(cf, prefix, upper)
+    }
+
+    fn write_many(&self, operations: &[WriteOperation<'_>]) -> Result<(), Error> {
+        self.inner.write_many(operations)
+    }
+
+    fn column_family_names(&self) -> Option<Vec<String>> {
+        self.inner.column_family_names()
+    }
+}
+
+impl ReopenableStorage for BoxedStorage {
+    fn reopen(self, column_families: &[&str]) -> Result<Self, Error> {
+        Ok(Self {
+            inner: self.inner.reopen_boxed(column_families)?,
+        })
+    }
+}
+
+/// Opens a persistent ordered-KV backend at an exact target-owned path.
+pub trait StorageFactory: std::fmt::Debug + Send + Sync {
+    fn open(&self, path: &std::path::Path, column_families: &[&str])
+    -> Result<BoxedStorage, Error>;
 }
 
 /// Typed view over one storage column family.
@@ -1531,9 +1665,11 @@ pub enum Error {
     InvalidStorageDelta(String),
     #[error("record error: {0}")]
     Record(#[source] Box<crate::records::Error>),
-    #[cfg(feature = "rocksdb")]
-    #[error(transparent)]
-    RocksDb(#[from] ::rocksdb::Error),
+    #[error("{backend} storage error: {message}")]
+    Backend {
+        backend: &'static str,
+        message: String,
+    },
     #[error(transparent)]
     Opfs(#[from] opfs_btree::BTreeError),
 }
@@ -1935,7 +2071,8 @@ mod tests {
     #[test]
     fn get_set_and_delete_values() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let storage = RocksDbStorage::open(temp_dir.path(), &["records"]).unwrap();
+        let storage =
+            TestStorage::open(temp_dir.path().join("groove-test.btree"), &["records"]).unwrap();
 
         storage.set("records", b"a", b"one").unwrap();
         assert_eq!(storage.get("records", b"a").unwrap(), Some(b"one".to_vec()));
@@ -1945,12 +2082,12 @@ mod tests {
     }
 
     #[test]
-    fn wal_no_sync_durability_mode_keeps_wal_writes_enabled() {
+    fn native_durable_test_store_keeps_writes_enabled() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let storage = RocksDbStorage::open_with_durability(
-            temp_dir.path(),
+        let storage = TestStorage::open_with_sync_policy(
+            temp_dir.path().join("groove-test.btree"),
             &["records"],
-            Durability::WalNoSync,
+            BtreeSyncPolicy::OnClose,
         )
         .unwrap();
 
@@ -1960,24 +2097,10 @@ mod tests {
     }
 
     #[test]
-    fn rocksdb_approximate_class_bytes_reports_populated_family() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let storage = RocksDbStorage::open(temp_dir.path(), &["records"]).unwrap();
-
-        storage.set("records", b"a", b"one").unwrap();
-
-        assert!(
-            storage
-                .approximate_class_bytes("records")
-                .unwrap()
-                .is_some()
-        );
-    }
-
-    #[test]
     fn range_returns_ordered_values_between_start_and_end() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let storage = RocksDbStorage::open(temp_dir.path(), &["records"]).unwrap();
+        let storage =
+            TestStorage::open(temp_dir.path().join("groove-test.btree"), &["records"]).unwrap();
 
         storage.set("records", b"a", b"one").unwrap();
         storage.set("records", b"b", b"two").unwrap();
@@ -1995,7 +2118,8 @@ mod tests {
     #[test]
     fn prefix_returns_ordered_values_with_matching_prefix() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let storage = RocksDbStorage::open(temp_dir.path(), &["records"]).unwrap();
+        let storage =
+            TestStorage::open(temp_dir.path().join("groove-test.btree"), &["records"]).unwrap();
 
         storage.set("records", b"user:1", b"a").unwrap();
         storage.set("records", b"user:2", b"b").unwrap();
@@ -2013,7 +2137,8 @@ mod tests {
     #[test]
     fn prefix_handles_prefixes_without_a_finite_upper_bound() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let storage = RocksDbStorage::open(temp_dir.path(), &["records"]).unwrap();
+        let storage =
+            TestStorage::open(temp_dir.path().join("groove-test.btree"), &["records"]).unwrap();
 
         storage.set("records", &[0xfe], b"before").unwrap();
         storage.set("records", &[0xff, 0x00], b"a").unwrap();
@@ -2031,7 +2156,8 @@ mod tests {
     #[test]
     fn direct_operations_report_missing_column_families() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let storage = RocksDbStorage::open(temp_dir.path(), &["records"]).unwrap();
+        let storage =
+            TestStorage::open(temp_dir.path().join("groove-test.btree"), &["records"]).unwrap();
 
         assert!(matches!(
             storage.get("missing", b"a"),
@@ -2066,7 +2192,8 @@ mod tests {
     #[test]
     fn scans_visit_ordered_values_without_materializing_in_storage_api() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let storage = RocksDbStorage::open(temp_dir.path(), &["records"]).unwrap();
+        let storage =
+            TestStorage::open(temp_dir.path().join("groove-test.btree"), &["records"]).unwrap();
 
         storage.set("records", b"a", b"one").unwrap();
         storage.set("records", b"b", b"two").unwrap();
@@ -2092,7 +2219,11 @@ mod tests {
     #[test]
     fn write_many_writes_all_operations_atomically() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let storage = RocksDbStorage::open(temp_dir.path(), &["records", "indices"]).unwrap();
+        let storage = TestStorage::open(
+            temp_dir.path().join("groove-test.btree"),
+            &["records", "indices"],
+        )
+        .unwrap();
 
         storage
             .write_many(&[
@@ -2204,7 +2335,8 @@ mod tests {
     #[test]
     fn write_many_fails_without_writing_when_column_family_is_missing() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let storage = RocksDbStorage::open(temp_dir.path(), &["records"]).unwrap();
+        let storage =
+            TestStorage::open(temp_dir.path().join("groove-test.btree"), &["records"]).unwrap();
 
         let error = storage
             .write_many(&[
@@ -2220,7 +2352,8 @@ mod tests {
     #[test]
     fn write_many_can_mix_sets_and_deletes_atomically() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let storage = RocksDbStorage::open(temp_dir.path(), &["records"]).unwrap();
+        let storage =
+            TestStorage::open(temp_dir.path().join("groove-test.btree"), &["records"]).unwrap();
 
         storage.set("records", b"old", b"value").unwrap();
         storage
@@ -2612,7 +2745,8 @@ mod tests {
     #[test]
     fn record_store_writes_and_reads_typed_records() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let storage = RocksDbStorage::open(temp_dir.path(), &["records"]).unwrap();
+        let storage =
+            TestStorage::open(temp_dir.path().join("groove-test.btree"), &["records"]).unwrap();
         let descriptor = RecordDescriptor::new([("id", ValueType::U64)]);
         let store = RecordStore::new(&storage, "records", &descriptor);
         let key = b"1".as_slice();
@@ -2626,14 +2760,15 @@ mod tests {
     }
 
     #[test]
-    fn rocksdb_storage_conforms_to_delta_append_contract() {
+    fn native_durable_test_store_conforms_to_delta_append_contract() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let storage = RocksDbStorage::open(temp_dir.path(), &["records"]).unwrap();
+        let storage =
+            TestStorage::open(temp_dir.path().join("groove-test.btree"), &["records"]).unwrap();
         conformance::delta_append_current_winner_observes_merged_state(storage);
     }
 
     #[test]
-    fn rocksdb_delta_append_survives_reopen_with_pending_operands() {
+    fn native_durable_delta_append_survives_reopen() {
         fn record(time: u64, node: u8, payload: &[u8]) -> Vec<u8> {
             let mut bytes = Vec::new();
             bytes.extend(time.to_le_bytes());
@@ -2655,7 +2790,8 @@ mod tests {
 
         let temp_dir = tempfile::tempdir().unwrap();
         {
-            let storage = RocksDbStorage::open(temp_dir.path(), &["records"]).unwrap();
+            let storage =
+                TestStorage::open(temp_dir.path().join("groove-test.btree"), &["records"]).unwrap();
             storage
                 .write_many(&[WriteOperation::delta(
                     "records",
@@ -2671,7 +2807,8 @@ mod tests {
                 )])
                 .unwrap();
         }
-        let reopened = RocksDbStorage::open(temp_dir.path(), &["records"]).unwrap();
+        let reopened =
+            TestStorage::open(temp_dir.path().join("groove-test.btree"), &["records"]).unwrap();
         assert_eq!(
             reopened.get("records", b"row").unwrap(),
             Some(record(20, 2, b"newer"))

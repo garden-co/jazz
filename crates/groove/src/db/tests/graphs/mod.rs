@@ -5,7 +5,8 @@ use super::*;
 #[test]
 fn query_subscriptions_receive_filtered_projected_messages() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = RocksDbStorage::open(temp_dir.path(), &["albums"]).unwrap();
+    let storage =
+        TestStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
     let mut database = Database::new(albums_schema(), storage).unwrap();
     let subscription_id = database
         .subscribe_query(select_query(
@@ -39,7 +40,8 @@ fn query_subscriptions_receive_filtered_projected_messages() {
 #[test]
 fn query_projection_aliases_drive_output_schema() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = RocksDbStorage::open(temp_dir.path(), &["albums"]).unwrap();
+    let storage =
+        TestStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
     let mut database = Database::new(albums_schema(), storage).unwrap();
     let subscription_id = database
         .subscribe_query(select_query(
@@ -69,7 +71,8 @@ fn query_projection_aliases_drive_output_schema() {
 #[test]
 fn query_subscriptions_can_read_from_simple_ctes() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = RocksDbStorage::open(temp_dir.path(), &["albums"]).unwrap();
+    let storage =
+        TestStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
     let mut database = Database::new(albums_schema(), storage).unwrap();
     let cte = Cte::new(
         "recent",
@@ -113,7 +116,8 @@ fn query_subscriptions_can_read_from_simple_ctes() {
 #[test]
 fn query_subscriptions_support_literal_on_left_predicates() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = RocksDbStorage::open(temp_dir.path(), &["albums"]).unwrap();
+    let storage =
+        TestStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
     let mut database = Database::new(albums_schema(), storage).unwrap();
     let subscription_id = database
         .subscribe_query(select_query(
@@ -147,7 +151,11 @@ fn query_subscriptions_support_literal_on_left_predicates() {
 #[test]
 fn query_subscriptions_support_multi_key_inner_joins() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = RocksDbStorage::open(temp_dir.path(), &["albums", "artists"]).unwrap();
+    let storage = TestStorage::open(
+        temp_dir.path().join("groove-test.btree"),
+        &["albums", "artists"],
+    )
+    .unwrap();
     let mut database = Database::new(tenant_albums_artists_schema(), storage).unwrap();
     let join = TableRef::Join {
         left: Box::new(TableRef::named("albums").aliased("a")),
@@ -210,7 +218,11 @@ fn query_subscriptions_support_multi_key_inner_joins() {
 #[test]
 fn query_subscriptions_support_qualified_wildcards_after_join() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = RocksDbStorage::open(temp_dir.path(), &["albums", "artists"]).unwrap();
+    let storage = TestStorage::open(
+        temp_dir.path().join("groove-test.btree"),
+        &["albums", "artists"],
+    )
+    .unwrap();
     let mut database = Database::new(albums_artists_schema(), storage).unwrap();
     let join = TableRef::Join {
         left: Box::new(TableRef::named("albums").aliased("a")),

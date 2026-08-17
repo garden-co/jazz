@@ -28,11 +28,11 @@ mod testing;
 
 pub use builder::{BuiltServer, ServerBuilder, StorageBackend};
 pub(crate) use catalogue::{PermissionsHeadSummary, ServerCatalogue, StoredCatalogue};
-#[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
-pub(crate) use catalogue_storage::CatalogueRocksDbStorage;
 #[cfg(test)]
 pub(crate) use catalogue_storage::CatalogueStorage;
-pub(crate) use catalogue_storage::{CatalogueMemoryStorage, DynCatalogueStorage};
+pub(crate) use catalogue_storage::{
+    CatalogueKvStorage, CatalogueMemoryStorage, DynCatalogueStorage,
+};
 pub use shutdown::{ShutdownController, ShutdownPhase};
 #[cfg(feature = "embedded-server")]
 pub use testing::{JazzServer, JazzServerBuilder, ServerDataDir, TestJwtIssuer, TestJwtOptions};
@@ -81,6 +81,7 @@ pub struct ServerState {
     /// Sendable handle to the local-owner server shell for the websocket route.
     pub(crate) core_server_shell: StdRwLock<Option<core_server_shell::ServerShellHandle>>,
     pub(crate) core_server_shell_storage_config: Option<StorageConfig>,
+    pub(crate) storage_factory: Option<Arc<dyn crate::groove::storage::StorageFactory>>,
     /// Whether the current Edge shell generation has a fully installed,
     /// validated catalogue and local projection registry. A durable Ready
     /// generation remains usable offline; blank and refreshing generations do
@@ -250,8 +251,11 @@ impl ServerState {
         if let Some(existing) = core_server_shell.clone() {
             return Ok(existing);
         }
-        let started =
-            core_server_shell::ServerShellHandle::start_with_storage(schema, storage_config)?;
+        let started = core_server_shell::ServerShellHandle::start_with_storage(
+            schema,
+            storage_config,
+            self.storage_factory.clone(),
+        )?;
         *core_server_shell = Some(started.clone());
         Ok(started)
     }
@@ -279,6 +283,7 @@ impl ServerState {
         let started =
             core_server_shell::ServerShellHandle::start_dynamic_edge_with_catalogue_snapshot(
                 storage_config,
+                self.storage_factory.clone(),
                 edge_cache_budget,
                 snapshot,
             )?;
@@ -519,6 +524,7 @@ mod tests {
             jwt_verifier: None,
             core_server_shell: StdRwLock::new(None),
             core_server_shell_storage_config: None,
+            storage_factory: None,
             dynamic_edge_catalogue_ready: AtomicBool::new(true),
             shutdown: ShutdownController::new(timeout),
         })

@@ -4,6 +4,7 @@ use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use crate::db::WireTransportAdapter;
+use crate::groove::storage::StorageFactory;
 use crate::ids::AuthorId;
 use crate::node::EdgeCacheBudget;
 use crate::schema::JazzSchema;
@@ -20,20 +21,15 @@ use crate::tools::native_transport_connector::{NativeTransportConnector, NativeT
 #[allow(deprecated)]
 use crate::tools::native_websocket_transport::validate_catalogue_bootstrap_upstream_url;
 use crate::tools::public_schema::Schema;
-#[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
-use crate::tools::server::CatalogueRocksDbStorage;
 use crate::tools::server::routes;
 use crate::tools::server::{
-    CatalogueMemoryStorage, DynCatalogueStorage, ServerState, ServerTopology, StoredCatalogue,
+    CatalogueKvStorage, CatalogueMemoryStorage, DynCatalogueStorage, ServerState, ServerTopology,
+    StoredCatalogue,
 };
 #[cfg(test)]
 use crate::tools::sync::DurabilityTier;
 
-#[cfg(feature = "rocksdb")]
-const STORAGE_CACHE_SIZE_BYTES: usize = 64 * 1024 * 1024;
-#[cfg(feature = "rocksdb")]
 const CATALOGUE_ROCKSDB_DIR: &str = "catalogue.rocksdb";
-#[cfg(feature = "rocksdb")]
 const SERVER_SHELL_ROCKSDB_DIR: &str = "server-shell.rocksdb";
 const DEFAULT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -68,9 +64,9 @@ enum ServerSchemaMode {
 
 /// Storage backend selection for [`ServerBuilder::with_storage`].
 ///
-/// `Persistent` requires the RocksDB feature for durable server shell
-/// storage. SQLite remains a client/native storage backend, but is not a
-/// supported server shell backend.
+/// `Persistent` requires a target-owned [`StorageFactory`] supplied at the
+/// native composition boundary. SQLite remains a client/native storage
+/// backend, but is not a supported server shell backend.
 #[derive(Debug, Clone)]
 pub enum StorageBackend {
     InMemory,
@@ -79,10 +75,6 @@ pub enum StorageBackend {
     },
     #[cfg(feature = "sqlite")]
     Sqlite {
-        path: PathBuf,
-    },
-    #[cfg(feature = "rocksdb")]
-    RocksDb {
         path: PathBuf,
     },
 }
@@ -97,6 +89,7 @@ pub struct ServerBuilder {
     edge_cache_budget: Option<EdgeCacheBudget>,
     shutdown_timeout: Duration,
     native_transport_connector: Option<Arc<dyn NativeTransportConnector>>,
+    storage_factory: Option<Arc<dyn StorageFactory>>,
 }
 
 impl ServerBuilder {
@@ -116,6 +109,7 @@ impl ServerBuilder {
             edge_cache_budget: None,
             shutdown_timeout: DEFAULT_SHUTDOWN_TIMEOUT,
             native_transport_connector: None,
+            storage_factory: None,
         }
     }
 
@@ -146,6 +140,12 @@ impl ServerBuilder {
 
     pub fn with_storage(mut self, backend: StorageBackend) -> Self {
         self.storage_backend = backend;
+        self
+    }
+
+    /// Supply the target-owned durable storage adapter.
+    pub fn with_storage_factory(mut self, factory: Arc<dyn StorageFactory>) -> Self {
+        self.storage_factory = Some(factory);
         self
     }
 
@@ -226,6 +226,7 @@ impl ServerBuilder {
             http_client,
             core_server_shell: std::sync::RwLock::new(core_server_shell),
             core_server_shell_storage_config,
+            storage_factory: self.storage_factory.clone(),
             // A validated durable catalogue remains usable while its core is
             // offline. Blank edges have no such generation and stay behind
             // RetryLater until authenticated bootstrap completes.
@@ -300,6 +301,7 @@ impl ServerBuilder {
                 crate::tools::server::core_server_shell::ServerShellHandle::start_with_storage_config(
                     schema.clone(),
                     storage_config,
+                    self.storage_factory.clone(),
                     role,
                     self.edge_cache_budget,
                 )?,
@@ -314,6 +316,7 @@ impl ServerBuilder {
             if topology == ServerTopology::Edge {
                 return crate::tools::server::core_server_shell::ServerShellHandle::try_start_dynamic_edge_from_storage(
                     storage_config?,
+                    self.storage_factory.clone(),
                     self.edge_cache_budget,
                 );
             }
@@ -326,6 +329,7 @@ impl ServerBuilder {
             crate::tools::server::core_server_shell::ServerShellHandle::start_with_storage_config(
                 schema,
                 storage_config,
+                self.storage_factory.clone(),
                 role,
                 self.edge_cache_budget,
             )?,
@@ -339,21 +343,6 @@ impl ServerBuilder {
                 std::fs::create_dir_all(path)
                     .map_err(|e| format!("failed to create data dir '{}': {e}", path.display()))?;
 
-                #[cfg(feature = "rocksdb")]
-                {
-                    Ok(StorageConfig::RocksDb {
-                        path: path.join(SERVER_SHELL_ROCKSDB_DIR),
-                    })
-                }
-                #[cfg(not(feature = "rocksdb"))]
-                {
-                    Err("server shell persistent storage requires the rocksdb feature".to_owned())
-                }
-            }
-            #[cfg(feature = "rocksdb")]
-            StorageBackend::RocksDb { path } => {
-                std::fs::create_dir_all(path)
-                    .map_err(|e| format!("failed to create data dir '{}': {e}", path.display()))?;
                 Ok(StorageConfig::RocksDb {
                     path: path.join(SERVER_SHELL_ROCKSDB_DIR),
                 })
@@ -371,50 +360,24 @@ impl ServerBuilder {
                 std::fs::create_dir_all(path)
                     .map_err(|e| format!("failed to create data dir '{}': {e}", path.display()))?;
 
-                #[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
-                {
-                    let db_path = path.join(CATALOGUE_ROCKSDB_DIR);
-                    let storage = CatalogueRocksDbStorage::open(&db_path, STORAGE_CACHE_SIZE_BYTES)
-                        .map_err(|e| {
-                            format!(
-                                "failed to open catalogue storage '{}': {e:?}",
-                                db_path.display()
-                            )
-                        })?;
-                    Ok(Box::new(storage))
-                }
-                #[cfg(all(feature = "rocksdb", target_arch = "wasm32"))]
-                {
-                    Err("catalogue storage does not support rocksdb on wasm".to_owned())
-                }
-                #[cfg(not(all(feature = "rocksdb", not(target_arch = "wasm32"))))]
-                {
-                    Err("persistent catalogue storage requires the rocksdb feature".to_owned())
-                }
+                let factory = self.storage_factory.as_deref().ok_or_else(|| {
+                    "persistent catalogue storage requires a target-shell storage factory"
+                        .to_owned()
+                })?;
+                let db_path = path.join(CATALOGUE_ROCKSDB_DIR);
+                let storage = factory
+                    .open(&db_path, &[CatalogueKvStorage::COLUMN_FAMILY])
+                    .map_err(|error| {
+                        format!(
+                            "failed to open catalogue storage '{}': {error}",
+                            db_path.display()
+                        )
+                    })?;
+                Ok(Box::new(CatalogueKvStorage::new(storage)))
             }
             #[cfg(feature = "sqlite")]
             StorageBackend::Sqlite { .. } => {
                 Err("server catalogue storage does not support sqlite".to_owned())
-            }
-            #[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
-            StorageBackend::RocksDb { path } => {
-                std::fs::create_dir_all(path)
-                    .map_err(|e| format!("failed to create data dir '{}': {e}", path.display()))?;
-                let db_path = path.join(CATALOGUE_ROCKSDB_DIR);
-                let storage = CatalogueRocksDbStorage::open(&db_path, STORAGE_CACHE_SIZE_BYTES)
-                    .map_err(|e| {
-                        format!(
-                            "failed to open catalogue storage '{}': {e:?}",
-                            db_path.display()
-                        )
-                    })?;
-                Ok(Box::new(storage))
-            }
-            #[cfg(all(feature = "rocksdb", target_arch = "wasm32"))]
-            StorageBackend::RocksDb { path } => {
-                std::fs::create_dir_all(path)
-                    .map_err(|e| format!("failed to create data dir '{}': {e}", path.display()))?;
-                Err("catalogue storage does not support rocksdb on wasm".to_owned())
             }
             StorageBackend::InMemory => Ok(Box::new(CatalogueMemoryStorage::new())),
         }
@@ -1011,7 +974,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "rocksdb")]
     #[tokio::test]
     async fn dynamic_builder_starts_core_server_shell_from_rehydrated_catalogue_schema() {
         let data_dir = tempfile::TempDir::new().expect("temp data dir");
@@ -1027,7 +989,8 @@ mod tests {
         {
             let built = ServerBuilder::new(app_id)
                 .with_schema(schema)
-                .with_storage(StorageBackend::RocksDb {
+                .with_storage_factory(Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory))
+                .with_storage(StorageBackend::Persistent {
                     path: data_dir.path().to_path_buf(),
                 })
                 .build()
@@ -1047,7 +1010,8 @@ mod tests {
         }
 
         let rebuilt = ServerBuilder::new(app_id)
-            .with_storage(StorageBackend::RocksDb {
+            .with_storage_factory(Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory))
+            .with_storage(StorageBackend::Persistent {
                 path: data_dir.path().to_path_buf(),
             })
             .build()
@@ -1057,9 +1021,8 @@ mod tests {
         assert!(rebuilt.state.core_server_shell().is_some());
     }
 
-    #[cfg(feature = "rocksdb")]
     #[tokio::test]
-    async fn rocksdb_builder_starts_core_server_shell_with_catalogue_storage_after_restart() {
+    async fn persistent_adapter_starts_core_server_shell_with_catalogue_storage_after_restart() {
         let data_dir = tempfile::TempDir::new().expect("temp data dir");
         let app_id = AppId::from_name("rocksdb-server-shell-restart");
         let schema = crate::tools::public_schema::SchemaBuilder::new()
@@ -1073,7 +1036,8 @@ mod tests {
         let retained_state = {
             let built = ServerBuilder::new(app_id)
                 .with_schema(schema.clone())
-                .with_storage(StorageBackend::RocksDb {
+                .with_storage_factory(Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory))
+                .with_storage(StorageBackend::Persistent {
                     path: data_dir.path().to_path_buf(),
                 })
                 .build()
@@ -1097,7 +1061,8 @@ mod tests {
 
         let rebuilt = ServerBuilder::new(app_id)
             .with_schema(schema.clone())
-            .with_storage(StorageBackend::RocksDb {
+            .with_storage_factory(Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory))
+            .with_storage(StorageBackend::Persistent {
                 path: data_dir.path().to_path_buf(),
             })
             .build()
@@ -1115,7 +1080,8 @@ mod tests {
         {
             let dropped = ServerBuilder::new(app_id)
                 .with_schema(schema.clone())
-                .with_storage(StorageBackend::RocksDb {
+                .with_storage_factory(Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory))
+                .with_storage(StorageBackend::Persistent {
                     path: data_dir.path().to_path_buf(),
                 })
                 .build()
@@ -1126,7 +1092,8 @@ mod tests {
 
         let reopened_after_drop = ServerBuilder::new(app_id)
             .with_schema(schema)
-            .with_storage(StorageBackend::RocksDb {
+            .with_storage_factory(Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory))
+            .with_storage(StorageBackend::Persistent {
                 path: data_dir.path().to_path_buf(),
             })
             .build()
@@ -1140,9 +1107,8 @@ mod tests {
         drop(retained_state);
     }
 
-    #[cfg(feature = "rocksdb")]
     #[tokio::test]
-    async fn rocksdb_builder_reopens_after_first_shutdown_waiter_is_aborted() {
+    async fn persistent_adapter_reopens_after_first_shutdown_waiter_is_aborted() {
         let data_dir = tempfile::TempDir::new().expect("temp data dir");
         let app_id = AppId::from_name("rocksdb-server-shell-aborted-shutdown");
         let schema = crate::tools::public_schema::SchemaBuilder::new()
@@ -1153,7 +1119,8 @@ mod tests {
             .build();
         let built = ServerBuilder::new(app_id)
             .with_schema(schema.clone())
-            .with_storage(StorageBackend::RocksDb {
+            .with_storage_factory(Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory))
+            .with_storage(StorageBackend::Persistent {
                 path: data_dir.path().to_path_buf(),
             })
             .build()
@@ -1187,7 +1154,8 @@ mod tests {
 
         let reopened = ServerBuilder::new(app_id)
             .with_schema(schema)
-            .with_storage(StorageBackend::RocksDb {
+            .with_storage_factory(Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory))
+            .with_storage(StorageBackend::Persistent {
                 path: data_dir.path().to_path_buf(),
             })
             .build()
@@ -1199,9 +1167,8 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "rocksdb")]
     #[test]
-    fn rocksdb_builder_shutdown_survives_initiating_runtime_drop() {
+    fn persistent_adapter_shutdown_survives_initiating_runtime_drop() {
         let data_dir = tempfile::TempDir::new().expect("temp data dir");
         let app_id = AppId::from_name("rocksdb-server-shell-foreign-shutdown");
         let schema = crate::tools::public_schema::SchemaBuilder::new()
@@ -1219,7 +1186,8 @@ mod tests {
                 .block_on(
                     ServerBuilder::new(app_id)
                         .with_schema(schema.clone())
-                        .with_storage(StorageBackend::RocksDb {
+                        .with_storage_factory(Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory))
+                        .with_storage(StorageBackend::Persistent {
                             path: data_dir.path().to_path_buf(),
                         })
                         .build(),
@@ -1264,7 +1232,8 @@ mod tests {
             assert!(state.core_server_shell().is_none());
             ServerBuilder::new(app_id)
                 .with_schema(schema)
-                .with_storage(StorageBackend::RocksDb {
+                .with_storage_factory(Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory))
+                .with_storage(StorageBackend::Persistent {
                     path: data_dir.path().to_path_buf(),
                 })
                 .build()

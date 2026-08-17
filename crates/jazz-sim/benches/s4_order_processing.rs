@@ -10,7 +10,6 @@ use hdrhistogram::Histogram;
 use jazz::db::{Db, DbConfig, DbIdentity, ExclusiveTxOps, SeededRowIdSource, Transport};
 use jazz::groove::records::Value;
 use jazz::groove::schema::{ColumnSchema, ColumnType};
-use jazz::groove::storage::{Durability, RocksDbStorage};
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::node::{MergeableCommit, NodeState};
 use jazz::peer::PeerState;
@@ -20,6 +19,7 @@ use jazz::time::GlobalSeq;
 use jazz::tx::{DurabilityTier, Fate};
 use jazz::wire::TransportError;
 use jazz_sim::{PeerProfile, bench_profile, emit_json_line, metadata_fields, profiling};
+use jazz_storage_rocksdb::{Durability, RocksDbStorage};
 use rusqlite::{Connection, params};
 use serde_json::{Value as JsonValue, json};
 

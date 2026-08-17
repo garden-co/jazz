@@ -4,7 +4,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::tools::metadata::MetadataKey;
 use crate::tools::object::ObjectId;
-#[cfg(any(test, all(feature = "rocksdb", not(target_arch = "wasm32"))))]
 use crate::tools::{
     admin_catalogue_row_format::{decode_row, encode_row},
     public_api::types::{ColumnDescriptor, ColumnType, RowDescriptor, Value},
@@ -24,7 +23,6 @@ impl CatalogueEntry {
             .map(String::as_str)
     }
 
-    #[cfg(any(test, all(feature = "rocksdb", not(target_arch = "wasm32"))))]
     pub(crate) fn encode_storage_row(&self) -> Result<Vec<u8>, String> {
         let descriptor = storage_descriptor();
         let metadata_json = serde_json::to_vec(&self.metadata).map_err(|err| err.to_string())?;
@@ -35,7 +33,6 @@ impl CatalogueEntry {
         encode_row(&descriptor, &values).map_err(|err| err.to_string())
     }
 
-    #[cfg(any(test, all(feature = "rocksdb", not(target_arch = "wasm32"))))]
     pub(crate) fn decode_storage_row(object_id: ObjectId, bytes: &[u8]) -> Result<Self, String> {
         let descriptor = storage_descriptor();
         let values = decode_row(&descriptor, bytes).map_err(|err| err.to_string())?;
@@ -53,7 +50,6 @@ impl CatalogueEntry {
     }
 }
 
-#[cfg(any(test, all(feature = "rocksdb", not(target_arch = "wasm32"))))]
 fn storage_descriptor() -> RowDescriptor {
     RowDescriptor::new(vec![
         ColumnDescriptor::new("metadata", ColumnType::Bytea),

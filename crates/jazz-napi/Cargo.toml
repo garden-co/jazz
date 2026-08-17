@@ -5,7 +5,7 @@ edition = "2024"
 
 [features]
 default = ["rocksdb"]
-rocksdb = ["jazz/rocksdb"]
+rocksdb = ["dep:jazz-storage-rocksdb"]
 
 [lib]
 crate-type = ["cdylib"]
@@ -13,6 +13,7 @@ crate-type = ["cdylib"]
 [dependencies]
 jazz = { path = "../jazz", default-features = false, features = ["embedded-server"] }
 jazz-native-transport = { path = "../jazz-native-transport" }
+jazz-storage-rocksdb = { workspace = true, optional = true }
 jazz-otel.workspace = true
 tokio = { version = "1", features = ["rt", "rt-multi-thread"] }
 base64 = "0.22"

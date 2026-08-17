@@ -5,6 +5,7 @@ use std::thread;
 
 use crate::db::{CommitUnitTrust, ConnectionSessionContext, DbIdentity, RowCells, Transport};
 use crate::groove::records::Value;
+use crate::groove::storage::StorageFactory;
 use crate::ids::{AuthorId, BranchId, NodeUuid, RowUuid, SchemaVersionId};
 use crate::node::EdgeCacheBudget;
 use crate::protocol::{MigrationLens, SyncMessage};
@@ -60,6 +61,7 @@ impl ServerShellHandle {
     /// `None` so its owner can run the authenticated bootstrap exchange.
     pub(crate) fn try_start_dynamic_edge_from_storage(
         storage_config: StorageConfig,
+        storage_factory: Option<Arc<dyn StorageFactory>>,
         edge_cache_budget: Option<EdgeCacheBudget>,
     ) -> Result<Option<Self>, String> {
         let (jobs, receiver) = mpsc::channel::<ServerShellCommand>();
@@ -74,6 +76,7 @@ impl ServerShellHandle {
                         author: AuthorId::SYSTEM,
                     },
                     storage_config,
+                    storage_factory,
                     edge_cache_budget,
                 ) {
                     Ok(Some(shell)) => {
@@ -119,6 +122,7 @@ impl ServerShellHandle {
     /// downstream routes until this returns successfully.
     pub(crate) fn start_dynamic_edge_with_catalogue_snapshot(
         storage_config: StorageConfig,
+        storage_factory: Option<Arc<dyn StorageFactory>>,
         edge_cache_budget: Option<EdgeCacheBudget>,
         snapshot: crate::protocol::CatalogueSnapshot,
     ) -> Result<Self, String> {
@@ -135,6 +139,7 @@ impl ServerShellHandle {
                         author: AuthorId::SYSTEM,
                     },
                     storage_config,
+                    storage_factory,
                     edge_cache_budget,
                     snapshot,
                 ) {
@@ -238,10 +243,12 @@ impl ServerShellHandle {
     pub(crate) fn start_with_storage(
         schema: JazzSchema,
         storage_config: StorageConfig,
+        storage_factory: Option<Arc<dyn StorageFactory>>,
     ) -> Result<Self, String> {
         Self::start_with_storage_config_and_permissions(
             schema,
             storage_config,
+            storage_factory,
             NodeRole::Core,
             None,
             false,
@@ -251,12 +258,14 @@ impl ServerShellHandle {
     pub(crate) fn start_with_storage_config(
         schema: JazzSchema,
         storage_config: StorageConfig,
+        storage_factory: Option<Arc<dyn StorageFactory>>,
         role: NodeRole,
         edge_cache_budget: Option<EdgeCacheBudget>,
     ) -> Result<Self, String> {
         Self::start_with_storage_config_and_permissions(
             schema,
             storage_config,
+            storage_factory,
             role,
             edge_cache_budget,
             true,
@@ -266,6 +275,7 @@ impl ServerShellHandle {
     fn start_with_storage_config_and_permissions(
         schema: JazzSchema,
         storage_config: StorageConfig,
+        storage_factory: Option<Arc<dyn StorageFactory>>,
         role: NodeRole,
         edge_cache_budget: Option<EdgeCacheBudget>,
         permissions_ready: bool,
@@ -287,6 +297,10 @@ impl ServerShellHandle {
                 .with_row_id_seed(0x5e)
                 .with_runtime_schema_bootstrap()
                 .with_role(role);
+                let config = match storage_factory {
+                    Some(factory) => config.with_storage_factory(factory),
+                    None => config,
+                };
                 let config = match edge_cache_budget {
                     Some(budget) => config.with_edge_cache_budget(budget),
                     None => config,

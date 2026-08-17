@@ -35,6 +35,8 @@ mod client;
 
 #[cfg(feature = "client")]
 use std::path::PathBuf;
+#[cfg(feature = "client")]
+use std::sync::Arc;
 
 #[cfg(feature = "client")]
 use thiserror::Error;
@@ -75,6 +77,8 @@ pub struct AppContext {
     pub data_dir: PathBuf,
     /// Local storage backend.
     pub storage: ClientStorage,
+    /// Target-shell factory for persistent local storage.
+    pub storage_factory: Option<Arc<dyn crate::groove::storage::StorageFactory>>,
 
     // Authentication fields
     /// JWT token for frontend authentication.
@@ -98,6 +102,7 @@ impl AppContext {
             server_url: String::new(),
             data_dir: std::env::temp_dir(),
             storage: crate::tools::ClientStorage::Memory,
+            storage_factory: None,
             jwt_token: None,
             backend_secret: None,
             admin_secret: None,

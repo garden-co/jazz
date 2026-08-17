@@ -7,7 +7,6 @@ mod support;
 use hdrhistogram::Histogram;
 use jazz::groove::records::Value;
 use jazz::groove::schema::{ColumnSchema, ColumnType};
-use jazz::groove::storage::{Durability, RocksDbStorage};
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::node::{MergeableCommit, NodeState, SKEW_TOLERANCE_MS};
 use jazz::peer::PeerState;
@@ -16,6 +15,7 @@ use jazz::schema::{JazzSchema, Policy, TableSchema};
 use jazz::time::GlobalSeq;
 use jazz::tools::OpenBatchId;
 use jazz::tx::{DurabilityTier, Fate, RejectionReason, Transaction, TxId};
+use jazz_storage_rocksdb::{Durability, RocksDbStorage};
 use support::{emit_json_line, insert_node_metrics, phase_fields, reset_phase_counters};
 
 const TABLE: &str = "items";

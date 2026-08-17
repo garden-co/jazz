@@ -2,7 +2,6 @@ use std::collections::BTreeMap;
 
 use jazz::groove::records::Value;
 use jazz::groove::schema::{ColumnSchema, ColumnType};
-use jazz::groove::storage::{Durability, RocksDbStorage};
 use jazz::ids::{AuthorId, NodeUuid};
 use jazz::node::{CurrentRow, NodeState};
 use jazz::peer::PeerState;
@@ -16,6 +15,7 @@ use jazz_sim::{
     DeterministicDriver, DriverContext, NodeRole, PeerProfile, ThreadedDriver, Topology,
     emit_json_line, metadata_fields,
 };
+use jazz_storage_rocksdb::{Durability, RocksDbStorage};
 use serde_json::{Value as JsonValue, json};
 
 const USERS: &str = "users";

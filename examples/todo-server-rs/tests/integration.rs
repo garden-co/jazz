@@ -91,6 +91,9 @@ async fn setup_test_app_with_path(data_dir: PathBuf) -> Router {
         server_url: String::new(),
         data_dir,
         storage: ClientStorage::Persistent,
+        storage_factory: Some(std::sync::Arc::new(
+            jazz_storage_rocksdb::RocksDbStorageFactory,
+        )),
         jwt_token: None,
         backend_secret: None,
         admin_secret: None,
@@ -457,6 +460,9 @@ async fn test_local_persistence() {
             server_url: String::new(),
             data_dir: data_path.clone(),
             storage: ClientStorage::Persistent,
+            storage_factory: Some(std::sync::Arc::new(
+                jazz_storage_rocksdb::RocksDbStorageFactory,
+            )),
             jwt_token: None,
             backend_secret: None,
             admin_secret: None,
@@ -487,6 +493,9 @@ async fn test_local_persistence() {
             server_url: String::new(),
             data_dir: data_path,
             storage: ClientStorage::Persistent,
+            storage_factory: Some(std::sync::Arc::new(
+                jazz_storage_rocksdb::RocksDbStorageFactory,
+            )),
             jwt_token: None,
             backend_secret: None,
             admin_secret: None,
@@ -769,6 +778,9 @@ async fn test_server_resync() {
             server_url: server.base_url(),
             data_dir: data_path.clone(),
             storage: ClientStorage::Persistent,
+            storage_factory: Some(std::sync::Arc::new(
+                jazz_storage_rocksdb::RocksDbStorageFactory,
+            )),
             jwt_token: Some(make_test_jwt("client1-user")),
             backend_secret: None,
             admin_secret: None,
@@ -829,6 +841,9 @@ async fn test_server_resync() {
             server_url: server.base_url(),
             data_dir: data_path,
             storage: ClientStorage::Persistent,
+            storage_factory: Some(std::sync::Arc::new(
+                jazz_storage_rocksdb::RocksDbStorageFactory,
+            )),
             jwt_token: Some(make_test_jwt("client2-user")),
             backend_secret: None,
             admin_secret: None, // Intentionally no admin - server already has schema

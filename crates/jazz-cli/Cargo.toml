@@ -7,7 +7,7 @@ autotests = true
 
 [features]
 default = ["rocksdb", "transport-compression-zstd"]
-rocksdb = ["jazz/rocksdb"]
+rocksdb = ["dep:jazz-storage-rocksdb"]
 sqlite = ["jazz/sqlite"]
 transport-compression-lz4 = ["jazz/transport-compression-lz4"]
 transport-compression-zstd = ["jazz/transport-compression-zstd"]
@@ -18,6 +18,7 @@ test = ["jazz/test"]
 [dependencies]
 jazz = { workspace = true, default-features = false, features = ["server"] }
 jazz-server = { path = "../jazz-server" }
+jazz-storage-rocksdb = { workspace = true, optional = true }
 jazz-otel = { workspace = true, optional = true }
 axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "tokio"] }
 clap = { version = "4", features = ["derive", "env"] }

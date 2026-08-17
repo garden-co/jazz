@@ -18,10 +18,24 @@ use rocksdb::{
 };
 use serde::Serialize;
 
-use super::{
-    ColumnFamilyName, Error, Key, OrderedKvStorage, ScanVisitor, Value, WriteOperation,
-    apply_storage_delta, compact_storage_delta_operand,
+use groove::storage::{
+    BoxedStorage, ColumnFamilyName, Error, Key, KeyValue, OrderedKvStorage, ReopenableStorage,
+    ScanVisitor, StorageFactory, Value, WriteOperation, apply_storage_delta,
+    compact_storage_delta_operand,
 };
+
+trait RocksResultExt<T> {
+    fn storage(self) -> Result<T, Error>;
+}
+
+impl<T> RocksResultExt<T> for Result<T, rocksdb::Error> {
+    fn storage(self) -> Result<T, Error> {
+        self.map_err(|error| Error::Backend {
+            backend: "rocksdb",
+            message: error.to_string(),
+        })
+    }
+}
 
 const ROCKSDB_BLOCK_CACHE_BYTES: usize = 256 * 1024 * 1024;
 const ROCKSDB_WRITE_BUFFER_MANAGER_BYTES: usize = 256 * 1024 * 1024;
@@ -56,6 +70,25 @@ pub struct RocksDbStorage {
     db: DB,
     write_options: WriteOptions,
     write_flush_cadence: RefCell<Option<WriteFlushCadence>>,
+}
+
+/// Opens a native persistent store at the exact shell-provided path.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RocksDbStorageFactory;
+
+impl StorageFactory for RocksDbStorageFactory {
+    fn open(&self, path: &Path, column_families: &[&str]) -> Result<BoxedStorage, Error> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| Error::Backend {
+                backend: "rocksdb",
+                message: error.to_string(),
+            })?;
+        }
+        Ok(BoxedStorage::new(RocksDbStorage::open(
+            path,
+            column_families,
+        )?))
+    }
 }
 
 /// A best-effort, allocation-free snapshot of the RocksDB counters that are
@@ -140,7 +173,7 @@ impl RocksDbStorage {
                 )
             });
 
-        let db = DB::open_cf_descriptors(&options, &path, descriptors)?;
+        let db = DB::open_cf_descriptors(&options, &path, descriptors).storage()?;
 
         let mut write_options = WriteOptions::default();
         write_options.disable_wal(false);
@@ -180,13 +213,14 @@ impl RocksDbStorage {
                 continue;
             };
             let property = |property| self.db.property_int_value_cf(handle, property);
-            total_sst.push(property(properties::TOTAL_SST_FILES_SIZE)?);
-            live_sst.push(property(properties::LIVE_SST_FILES_SIZE)?);
-            live_data.push(property(properties::ESTIMATE_LIVE_DATA_SIZE)?);
-            memtables.push(property(properties::SIZE_ALL_MEM_TABLES)?);
-            pending_compaction.push(property(properties::ESTIMATE_PENDING_COMPACTION_BYTES)?);
-            flush_pending.push(property(properties::MEM_TABLE_FLUSH_PENDING)?);
-            compaction_pending.push(property(properties::COMPACTION_PENDING)?);
+            total_sst.push(property(properties::TOTAL_SST_FILES_SIZE).storage()?);
+            live_sst.push(property(properties::LIVE_SST_FILES_SIZE).storage()?);
+            live_data.push(property(properties::ESTIMATE_LIVE_DATA_SIZE).storage()?);
+            memtables.push(property(properties::SIZE_ALL_MEM_TABLES).storage()?);
+            pending_compaction
+                .push(property(properties::ESTIMATE_PENDING_COMPACTION_BYTES).storage()?);
+            flush_pending.push(property(properties::MEM_TABLE_FLUSH_PENDING).storage()?);
+            compaction_pending.push(property(properties::COMPACTION_PENDING).storage()?);
         }
         let global = |property| self.db.property_int_value(property);
         Ok(RocksDbMetrics {
@@ -195,8 +229,8 @@ impl RocksDbStorage {
             estimated_live_data_bytes: sum_available(&live_data),
             memtable_bytes: sum_available(&memtables),
             pending_compaction_bytes: sum_available(&pending_compaction),
-            running_flushes: global(properties::NUM_RUNNING_FLUSHES)?,
-            running_compactions: global(properties::NUM_RUNNING_COMPACTIONS)?,
+            running_flushes: global(properties::NUM_RUNNING_FLUSHES).storage()?,
+            running_compactions: global(properties::NUM_RUNNING_COMPACTIONS).storage()?,
             flush_pending: any_available(&flush_pending),
             compaction_pending: any_available(&compaction_pending),
         })
@@ -321,7 +355,7 @@ impl RocksDbClassProfile {
     }
 }
 
-impl super::ReopenableStorage for RocksDbStorage {
+impl ReopenableStorage for RocksDbStorage {
     fn reopen(self, column_families: &[&str]) -> Result<Self, Error> {
         if column_families
             .iter()
@@ -338,32 +372,59 @@ impl super::ReopenableStorage for RocksDbStorage {
 
 impl OrderedKvStorage for RocksDbStorage {
     fn get(&self, cf: &ColumnFamilyName, key: &Key) -> Result<Option<Value>, Error> {
-        Ok(self.db.get_cf(self.cf_handle(cf)?, key)?)
+        if cf == "default" {
+            self.db.get(key).storage()
+        } else {
+            self.db.get_cf(self.cf_handle(cf)?, key).storage()
+        }
     }
 
     fn approximate_class_bytes(&self, cf: &ColumnFamilyName) -> Result<Option<u64>, Error> {
+        if cf == "default" {
+            let sst = self
+                .db
+                .property_int_value(properties::TOTAL_SST_FILES_SIZE)
+                .storage()?
+                .unwrap_or(0);
+            let mem = self
+                .db
+                .property_int_value(properties::SIZE_ALL_MEM_TABLES)
+                .storage()?
+                .unwrap_or(0);
+            return Ok(Some(sst.saturating_add(mem)));
+        }
         let handle = self.cf_handle(cf)?;
         let sst = self
             .db
-            .property_int_value_cf(handle, properties::TOTAL_SST_FILES_SIZE)?
+            .property_int_value_cf(handle, properties::TOTAL_SST_FILES_SIZE)
+            .storage()?
             .unwrap_or(0);
         let mem = self
             .db
-            .property_int_value_cf(handle, properties::SIZE_ALL_MEM_TABLES)?
+            .property_int_value_cf(handle, properties::SIZE_ALL_MEM_TABLES)
+            .storage()?
             .unwrap_or(0);
         Ok(Some(sst.saturating_add(mem)))
     }
 
     fn set(&self, cf: &ColumnFamilyName, key: &Key, value: &[u8]) -> Result<(), Error> {
-        Ok(self
-            .db
-            .put_cf_opt(self.cf_handle(cf)?, key, value, &self.write_options)?)
+        if cf == "default" {
+            self.db.put_opt(key, value, &self.write_options).storage()
+        } else {
+            self.db
+                .put_cf_opt(self.cf_handle(cf)?, key, value, &self.write_options)
+                .storage()
+        }
     }
 
     fn delete(&self, cf: &ColumnFamilyName, key: &Key) -> Result<(), Error> {
-        Ok(self
-            .db
-            .delete_cf_opt(self.cf_handle(cf)?, key, &self.write_options)?)
+        if cf == "default" {
+            self.db.delete_opt(key, &self.write_options).storage()
+        } else {
+            self.db
+                .delete_cf_opt(self.cf_handle(cf)?, key, &self.write_options)
+                .storage()
+        }
     }
 
     fn set_write_flush_cadence(&self, every: usize) -> Result<(), Error> {
@@ -373,7 +434,7 @@ impl OrderedKvStorage for RocksDbStorage {
     }
 
     fn flush_write_boundary(&self) -> Result<(), Error> {
-        self.db.flush_wal(true)?;
+        self.db.flush_wal(true).storage()?;
         if let Some(cadence) = self.write_flush_cadence.borrow_mut().as_mut() {
             cadence.pending = 0;
         }
@@ -390,12 +451,14 @@ impl OrderedKvStorage for RocksDbStorage {
         let mut options = ReadOptions::default();
         options.set_iterate_upper_bound(end.to_vec());
 
-        for item in self.db.iterator_cf_opt(
-            self.cf_handle(cf)?,
-            options,
-            IteratorMode::From(start, Direction::Forward),
-        ) {
-            let (key, value) = item?;
+        let mode = IteratorMode::From(start, Direction::Forward);
+        let iterator = if cf == "default" {
+            self.db.iterator_opt(mode, options)
+        } else {
+            self.db.iterator_cf_opt(self.cf_handle(cf)?, options, mode)
+        };
+        for item in iterator {
+            let (key, value) = item.storage()?;
             visit(&key, &value)?;
         }
         Ok(())
@@ -409,11 +472,14 @@ impl OrderedKvStorage for RocksDbStorage {
     ) -> Result<(), Error> {
         let mut upper_bound = prefix.to_vec();
         if !advance_prefix_upper_bound(&mut upper_bound) {
-            for item in self.db.iterator_cf(
-                self.cf_handle(cf)?,
-                IteratorMode::From(prefix, Direction::Forward),
-            ) {
-                let (key, value) = item?;
+            let mode = IteratorMode::From(prefix, Direction::Forward);
+            let iterator = if cf == "default" {
+                self.db.iterator(mode)
+            } else {
+                self.db.iterator_cf(self.cf_handle(cf)?, mode)
+            };
+            for item in iterator {
+                let (key, value) = item.storage()?;
                 if !key.starts_with(prefix) {
                     break;
                 }
@@ -425,12 +491,14 @@ impl OrderedKvStorage for RocksDbStorage {
         let mut options = ReadOptions::default();
         options.set_iterate_upper_bound(upper_bound);
 
-        for item in self.db.iterator_cf_opt(
-            self.cf_handle(cf)?,
-            options,
-            IteratorMode::From(prefix, Direction::Forward),
-        ) {
-            let (key, value) = item?;
+        let mode = IteratorMode::From(prefix, Direction::Forward);
+        let iterator = if cf == "default" {
+            self.db.iterator_opt(mode, options)
+        } else {
+            self.db.iterator_cf_opt(self.cf_handle(cf)?, options, mode)
+        };
+        for item in iterator {
+            let (key, value) = item.storage()?;
             visit(&key, &value)?;
         }
         Ok(())
@@ -442,14 +510,16 @@ impl OrderedKvStorage for RocksDbStorage {
         prefix: &Key,
         visit: &mut ScanVisitor<'_>,
     ) -> Result<(), Error> {
-        let handle = self.cf_handle(cf)?;
         let mut upper_bound = prefix.to_vec();
         if advance_prefix_upper_bound(&mut upper_bound) {
-            for item in self
-                .db
-                .iterator_cf(handle, IteratorMode::From(&upper_bound, Direction::Reverse))
-            {
-                let (key, value) = item?;
+            let mode = IteratorMode::From(&upper_bound, Direction::Reverse);
+            let iterator = if cf == "default" {
+                self.db.iterator(mode)
+            } else {
+                self.db.iterator_cf(self.cf_handle(cf)?, mode)
+            };
+            for item in iterator {
+                let (key, value) = item.storage()?;
                 if key.starts_with(prefix) {
                     visit(&key, &value)?;
                 } else if key.as_ref() < prefix {
@@ -459,8 +529,13 @@ impl OrderedKvStorage for RocksDbStorage {
             return Ok(());
         }
 
-        for item in self.db.iterator_cf(handle, IteratorMode::End) {
-            let (key, value) = item?;
+        let iterator = if cf == "default" {
+            self.db.iterator(IteratorMode::End)
+        } else {
+            self.db.iterator_cf(self.cf_handle(cf)?, IteratorMode::End)
+        };
+        for item in iterator {
+            let (key, value) = item.storage()?;
             if key.starts_with(prefix) {
                 visit(&key, &value)?;
             } else if key.as_ref() < prefix {
@@ -474,16 +549,20 @@ impl OrderedKvStorage for RocksDbStorage {
         &self,
         cf: &ColumnFamilyName,
         prefix: &Key,
-    ) -> Result<Option<super::KeyValue>, Error> {
-        let handle = self.cf_handle(cf)?;
+    ) -> Result<Option<KeyValue>, Error> {
         let mut upper_bound = prefix.to_vec();
         let iterator_mode = if advance_prefix_upper_bound(&mut upper_bound) {
             IteratorMode::From(&upper_bound, Direction::Reverse)
         } else {
             IteratorMode::End
         };
-        for item in self.db.iterator_cf(handle, iterator_mode) {
-            let (key, value) = item?;
+        let iterator = if cf == "default" {
+            self.db.iterator(iterator_mode)
+        } else {
+            self.db.iterator_cf(self.cf_handle(cf)?, iterator_mode)
+        };
+        for item in iterator {
+            let (key, value) = item.storage()?;
             if key.starts_with(prefix) {
                 return Ok(Some((key.to_vec(), value.to_vec())));
             }
@@ -499,13 +578,15 @@ impl OrderedKvStorage for RocksDbStorage {
         cf: &ColumnFamilyName,
         prefix: &Key,
         upper: &Key,
-    ) -> Result<Option<super::KeyValue>, Error> {
-        let handle = self.cf_handle(cf)?;
-        for item in self
-            .db
-            .iterator_cf(handle, IteratorMode::From(upper, Direction::Reverse))
-        {
-            let (key, value) = item?;
+    ) -> Result<Option<KeyValue>, Error> {
+        let mode = IteratorMode::From(upper, Direction::Reverse);
+        let iterator = if cf == "default" {
+            self.db.iterator(mode)
+        } else {
+            self.db.iterator_cf(self.cf_handle(cf)?, mode)
+        };
+        for item in iterator {
+            let (key, value) = item.storage()?;
             if key.starts_with(prefix) {
                 return Ok(Some((key.to_vec(), value.to_vec())));
             }
@@ -522,13 +603,25 @@ impl OrderedKvStorage for RocksDbStorage {
         for operation in operations {
             match operation {
                 WriteOperation::Set { cf, key, value } => {
-                    batch.put_cf(self.cf_handle(cf)?, key, value);
+                    if *cf == "default" {
+                        batch.put(key, value);
+                    } else {
+                        batch.put_cf(self.cf_handle(cf)?, key, value);
+                    }
                 }
                 WriteOperation::Delete { cf, key } => {
-                    batch.delete_cf(self.cf_handle(cf)?, key);
+                    if *cf == "default" {
+                        batch.delete(key);
+                    } else {
+                        batch.delete_cf(self.cf_handle(cf)?, key);
+                    }
                 }
                 WriteOperation::Delta { cf, key, delta } => {
-                    batch.merge_cf(self.cf_handle(cf)?, key, delta.encode()?);
+                    if *cf == "default" {
+                        batch.merge(key, delta.encode()?);
+                    } else {
+                        batch.merge_cf(self.cf_handle(cf)?, key, delta.encode()?);
+                    }
                 }
             }
         }
@@ -543,13 +636,13 @@ impl OrderedKvStorage for RocksDbStorage {
                     false
                 }
             }
-            None => return Ok(self.db.write_opt(&batch, &self.write_options)?),
+            None => return self.db.write_opt(&batch, &self.write_options).storage(),
         };
         let mut write_options = WriteOptions::default();
         write_options.disable_wal(false);
-        self.db.write_opt(&batch, &write_options)?;
+        self.db.write_opt(&batch, &write_options).storage()?;
         if should_flush {
-            self.db.flush_wal(true)?;
+            self.db.flush_wal(true).storage()?;
         }
         Ok(())
     }
@@ -608,7 +701,7 @@ fn advance_prefix_upper_bound(prefix: &mut [u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{
+    use crate::{
         CLASS_AHEAD_CURRENT_CF, CLASS_CHANGES_CF, CLASS_GLOBAL_CURRENT_CF, CLASS_HISTORY_CF,
         CLASS_INDICES_CF, CLASS_META_CF, CLASS_REGISTER_CF, RocksDbClassProfile, RocksDbStorage,
         any_available, rocksdb_class_profile, sum_available,
@@ -655,8 +748,23 @@ mod tests {
     }
 
     #[test]
+    fn approximate_class_bytes_reports_populated_family() {
+        use groove::storage::OrderedKvStorage;
+
+        let dir = tempfile::tempdir().unwrap();
+        let storage = RocksDbStorage::open(dir.path(), &["records"]).unwrap();
+        storage.set("records", b"a", b"one").unwrap();
+        assert!(
+            storage
+                .approximate_class_bytes("records")
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
     fn metrics_include_memtable_bytes_written_to_each_column_family() {
-        use crate::storage::OrderedKvStorage;
+        use groove::storage::OrderedKvStorage;
 
         let dir = tempfile::tempdir().unwrap();
         let storage = RocksDbStorage::open(dir.path(), &["left", "right"]).unwrap();

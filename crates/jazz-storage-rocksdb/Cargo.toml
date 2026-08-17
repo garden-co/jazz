@@ -1,0 +1,15 @@
+[package]
+name = "jazz-storage-rocksdb"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+groove.workspace = true
+rocksdb = { package = "rust-rocksdb", version = "0.48.0", default-features = false, features = [
+  "lz4",
+  "zstd",
+] }
+serde = { version = "1.0.228", features = ["derive"] }
+
+[dev-dependencies]
+tempfile = "3.27.0"

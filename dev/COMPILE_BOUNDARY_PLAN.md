@@ -266,3 +266,32 @@ Stop when a slice creates more feature variants than it removes, requires broad
 visibility expansion, or makes compatibility ownership less clear. Retain
 independent improvements such as testkit separation, cache normalization, or
 server/CLI boundaries when useful alone.
+
+## GitHub outage publication queue (2026-08-17)
+
+Publish the local work as one native stack when GitHub is available again.
+Every adapter migration is atomic: move the implementation, migrate all
+first-party composition, and delete the former path/feature in the same PR.
+Do not publish compatibility-forwarding or duplicated-implementation steps.
+
+1. `refactor: extract RocksDB storage adapter`
+   - Base: `codex/jazz-core-engine-swap` after PR #1628.
+   - Owns the erased ordered-KV wrapper/factory, `jazz-storage-rocksdb`, all
+     first-party storage injection, and removal of RocksDB from Jazz/Groove.
+2. `refactor: complete native transport composition`
+   - Base: RocksDB extraction PR.
+   - Migrates all native callers and deletes Jazz's compatibility WebSocket
+     implementation and transport features.
+3. `refactor: define server runtime facade`
+   - Base: native transport PR.
+   - Introduces only the narrow semantic operations required by an outward
+     server shell; it does not widen Node/Db internals.
+4. `refactor: move server implementation to jazz-server`
+   - Base: server-facade PR.
+   - Moves Axum routes, WebSocket serving, external JWT verification, JWK/HTTP
+     work, and server state orchestration, then deletes the Jazz-owned paths.
+5. `refactor: collapse semantic-core features`
+   - Base: server extraction PR.
+   - Removes obsolete client/server/embedded/test and adapter-forwarding
+     features, establishes the canonical featureless build matrix, and records
+     the stop/reassessment decision.

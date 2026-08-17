@@ -6,7 +6,7 @@ use groove::records::{RecordDescriptor, Value};
 use groove::schema::{
     ColumnSchema, ColumnType, DatabaseSchema, IntegerKeyType, PrimaryKey, TableSchema,
 };
-use groove::storage::RocksDbStorage;
+use jazz_storage_rocksdb::RocksDbStorage;
 
 fn edges_schema() -> DatabaseSchema {
     DatabaseSchema::new([TableSchema::new(

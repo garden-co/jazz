@@ -2,7 +2,6 @@ use std::collections::BTreeMap;
 
 use jazz::groove::records::Value;
 use jazz::groove::schema::{ColumnSchema, ColumnType};
-use jazz::groove::storage::RocksDbStorage;
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::node::{MergeableCommit, NodeState, SKEW_TOLERANCE_MS};
 use jazz::peer::{PeerRole, PeerState};
@@ -11,6 +10,7 @@ use jazz::query::{Query, claim, col, eq, param};
 use jazz::schema::{JazzSchema, Policy, TableSchema};
 use jazz::tools::OpenBatchId;
 use jazz::tx::{DeletionEvent, DurabilityTier, Fate, RejectionReason, TxId};
+use jazz_storage_rocksdb::RocksDbStorage;
 
 fn node(byte: u8) -> NodeUuid {
     NodeUuid::from_bytes([byte; 16])

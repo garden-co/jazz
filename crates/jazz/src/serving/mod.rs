@@ -14,6 +14,7 @@ use std::fmt;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use crate::db::{
@@ -21,9 +22,7 @@ use crate::db::{
     PeerConnection, ResumeCursor, RowCells, SeededRowIdSource, Transport, WireTransportAdapter,
 };
 use crate::groove::records::Value;
-use crate::groove::storage::MemoryStorage;
-#[cfg(feature = "rocksdb")]
-use crate::groove::storage::RocksDbStorage;
+use crate::groove::storage::{BoxedStorage, MemoryStorage, StorageFactory};
 use crate::ids::{AuthorId, BranchId, MigrationLensId, RowUuid, SchemaVersionId};
 use crate::node::EdgeCacheBudget;
 use crate::protocol::{
@@ -79,7 +78,7 @@ pub struct ServerSessionResume {
 }
 
 /// Configuration for starting an in-memory executable server shell.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone)]
 pub struct InMemoryServerShellConfig {
     /// Schema served by the in-memory database.
     pub schema: JazzSchema,
@@ -95,6 +94,8 @@ pub struct InMemoryServerShellConfig {
     /// catalogue if the opened store does not already carry a durable write
     /// pointer for it.
     pub bootstrap_runtime_schema: bool,
+    /// Target-shell factory used when [`StorageConfig`] selects durable storage.
+    pub storage_factory: Option<Arc<dyn StorageFactory>>,
 }
 
 impl InMemoryServerShellConfig {
@@ -107,6 +108,7 @@ impl InMemoryServerShellConfig {
             edge_cache_budget: None,
             role: NodeRole::Core,
             bootstrap_runtime_schema: false,
+            storage_factory: None,
         }
     }
 
@@ -128,6 +130,12 @@ impl InMemoryServerShellConfig {
         self
     }
 
+    /// Supply the target-owned durable storage adapter.
+    pub fn with_storage_factory(mut self, factory: Arc<dyn StorageFactory>) -> Self {
+        self.storage_factory = Some(factory);
+        self
+    }
+
     /// Ensure the constructor schema is present in the runtime catalogue at
     /// startup. Product `JazzServer` uses this for pre-seeded stores opened
     /// from a data directory; low-level loopback shells leave it disabled so
@@ -135,6 +143,23 @@ impl InMemoryServerShellConfig {
     pub fn with_runtime_schema_bootstrap(mut self) -> Self {
         self.bootstrap_runtime_schema = true;
         self
+    }
+}
+
+impl fmt::Debug for InMemoryServerShellConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("InMemoryServerShellConfig")
+            .field("schema", &self.schema)
+            .field("identity", &self.identity)
+            .field("row_id_seed", &self.row_id_seed)
+            .field("edge_cache_budget", &self.edge_cache_budget)
+            .field("role", &self.role)
+            .field("bootstrap_runtime_schema", &self.bootstrap_runtime_schema)
+            .field(
+                "storage_factory",
+                &self.storage_factory.as_ref().map(|_| "configured"),
+            )
+            .finish()
     }
 }
 
@@ -209,9 +234,8 @@ pub struct AbiTransportDiagnostics {
 }
 
 enum ShellDb {
-    Memory(Db<MemoryStorage>),
-    #[cfg(feature = "rocksdb")]
-    Rocks(Db<RocksDbStorage>),
+    Memory(Db<BoxedStorage>),
+    Durable(Db<BoxedStorage>),
 }
 
 struct ServerSessionState {
@@ -223,9 +247,8 @@ struct ServerSessionState {
 }
 
 enum ShellPeerConnection {
-    Memory(Rc<RefCell<PeerConnection<MemoryStorage>>>),
-    #[cfg(feature = "rocksdb")]
-    Rocks(Rc<RefCell<PeerConnection<RocksDbStorage>>>),
+    Memory(Rc<RefCell<PeerConnection<BoxedStorage>>>),
+    Durable(Rc<RefCell<PeerConnection<BoxedStorage>>>),
 }
 
 #[derive(Clone, Debug, Default)]
@@ -254,8 +277,7 @@ impl fmt::Debug for ShellDb {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Memory(_) => f.write_str("ShellDb::Memory(..)"),
-            #[cfg(feature = "rocksdb")]
-            Self::Rocks(_) => f.write_str("ShellDb::Rocks(..)"),
+            Self::Durable(_) => f.write_str("ShellDb::Durable(..)"),
         }
     }
 }
@@ -275,6 +297,7 @@ impl ShellDb {
     fn open_catalogue_uninitialized_edge(
         identity: DbIdentity,
         storage_config: StorageConfig,
+        storage_factory: Option<&dyn StorageFactory>,
         row_id_seed: Option<u64>,
     ) -> ShellResult<Self> {
         let schema = JazzSchema::new([]);
@@ -282,7 +305,11 @@ impl ShellDb {
             StorageConfig::InMemory => {
                 let refs = schema.column_families();
                 let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
-                let mut config = DbConfig::new(schema, MemoryStorage::new(&refs), identity);
+                let mut config = DbConfig::new(
+                    schema,
+                    BoxedStorage::new(MemoryStorage::new(&refs)),
+                    identity,
+                );
                 if let Some(seed) = row_id_seed {
                     config = config.with_id_source(SeededRowIdSource::new(seed));
                 }
@@ -290,29 +317,26 @@ impl ShellDb {
                     Db::open_catalogue_uninitialized_edge(config),
                 )?))
             }
-            #[cfg(feature = "rocksdb")]
             StorageConfig::RocksDb { path } => {
                 let refs = schema.column_families();
                 let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
+                let factory = storage_factory.ok_or_else(|| {
+                    ShellError::Storage(
+                        "durable server storage requires a target-shell storage factory".into(),
+                    )
+                })?;
                 let mut config = DbConfig::new(
                     schema,
-                    RocksDbStorage::open(path, &refs).map_err(db_storage_error)?,
+                    factory.open(&path, &refs).map_err(db_storage_error)?,
                     identity,
                 );
                 if let Some(seed) = row_id_seed {
                     config = config.with_id_source(SeededRowIdSource::new(seed));
                 }
-                Ok(Self::Rocks(crate::db::block_on(
+                Ok(Self::Durable(crate::db::block_on(
                     Db::open_catalogue_uninitialized_edge(config),
                 )?))
             }
-            #[cfg(not(feature = "rocksdb"))]
-            StorageConfig::RocksDb { .. } | StorageConfig::SQLite { .. } => {
-                Err(ShellError::UnsupportedStorage {
-                    storage: storage_config,
-                })
-            }
-            #[cfg(feature = "rocksdb")]
             StorageConfig::SQLite { .. } => Err(ShellError::UnsupportedStorage {
                 storage: storage_config,
             }),
@@ -327,8 +351,7 @@ impl ShellDb {
             Self::Memory(db) => db
                 .apply_trusted_catalogue_snapshot(snapshot)
                 .map_err(Into::into),
-            #[cfg(feature = "rocksdb")]
-            Self::Rocks(db) => db
+            Self::Durable(db) => db
                 .apply_trusted_catalogue_snapshot(snapshot)
                 .map_err(Into::into),
         }
@@ -337,8 +360,7 @@ impl ShellDb {
     fn trusted_catalogue_snapshot(&self) -> ShellResult<crate::protocol::CatalogueSnapshot> {
         match self {
             Self::Memory(db) => db.trusted_catalogue_snapshot().map_err(Into::into),
-            #[cfg(feature = "rocksdb")]
-            Self::Rocks(db) => db.trusted_catalogue_snapshot().map_err(Into::into),
+            Self::Durable(db) => db.trusted_catalogue_snapshot().map_err(Into::into),
         }
     }
 
@@ -349,32 +371,28 @@ impl ShellDb {
     ) {
         match self {
             Self::Memory(db) => db.set_catalogue_activation_failpoint(failpoint),
-            #[cfg(feature = "rocksdb")]
-            Self::Rocks(db) => db.set_catalogue_activation_failpoint(failpoint),
+            Self::Durable(db) => db.set_catalogue_activation_failpoint(failpoint),
         }
     }
 
     fn trusted_current_catalogue_schema(&self) -> ShellResult<JazzSchema> {
         match self {
             Self::Memory(db) => db.trusted_current_catalogue_schema().map_err(Into::into),
-            #[cfg(feature = "rocksdb")]
-            Self::Rocks(db) => db.trusted_current_catalogue_schema().map_err(Into::into),
+            Self::Durable(db) => db.trusted_current_catalogue_schema().map_err(Into::into),
         }
     }
 
     fn catalogue_bootstrap_is_ready(&self) -> bool {
         match self {
             Self::Memory(db) => db.catalogue_bootstrap_is_ready(),
-            #[cfg(feature = "rocksdb")]
-            Self::Rocks(db) => db.catalogue_bootstrap_is_ready(),
+            Self::Durable(db) => db.catalogue_bootstrap_is_ready(),
         }
     }
 
     fn select_schema_view(&mut self, schema: JazzSchema) -> ShellResult<()> {
         match self {
             Self::Memory(db) => *db = db.register_schema_view(schema)?,
-            #[cfg(feature = "rocksdb")]
-            Self::Rocks(db) => *db = db.register_schema_view(schema)?,
+            Self::Durable(db) => *db = db.register_schema_view(schema)?,
         }
         Ok(())
     }
@@ -397,8 +415,7 @@ impl ShellDb {
                 )
                 .map(|_| ())
                 .map_err(Into::into),
-            #[cfg(feature = "rocksdb")]
-            Self::Rocks(db) => db
+            Self::Durable(db) => db
                 .seed_branch_mergeable_for_bootstrap(
                     branch,
                     &table,
@@ -414,72 +431,63 @@ impl ShellDb {
     fn create_branch_for_test(&self, branch: BranchId) -> ShellResult<()> {
         match self {
             Self::Memory(db) => db.create_branch_with_id(branch).map_err(Into::into),
-            #[cfg(feature = "rocksdb")]
-            Self::Rocks(db) => db.create_branch_with_id(branch).map_err(Into::into),
+            Self::Durable(db) => db.create_branch_with_id(branch).map_err(Into::into),
         }
     }
 
     fn set_edge_cache_budget(&self, budget: Option<EdgeCacheBudget>) {
         match self {
             Self::Memory(db) => db.set_edge_cache_budget(budget),
-            #[cfg(feature = "rocksdb")]
-            Self::Rocks(db) => db.set_edge_cache_budget(budget),
+            Self::Durable(db) => db.set_edge_cache_budget(budget),
         }
     }
 
     fn current_write_schema(&self) -> ShellResult<CurrentWriteSchema> {
         match self {
             Self::Memory(db) => db.current_write_schema().map_err(Into::into),
-            #[cfg(feature = "rocksdb")]
-            Self::Rocks(db) => db.current_write_schema().map_err(Into::into),
+            Self::Durable(db) => db.current_write_schema().map_err(Into::into),
         }
     }
 
     fn catalogue_schema(&self, schema: SchemaVersionId) -> Option<JazzSchema> {
         match self {
             Self::Memory(db) => db.catalogue_schema(schema),
-            #[cfg(feature = "rocksdb")]
-            Self::Rocks(db) => db.catalogue_schema(schema),
+            Self::Durable(db) => db.catalogue_schema(schema),
         }
     }
 
     fn active_catalogue_seq(&self) -> u64 {
         match self {
             Self::Memory(db) => db.active_catalogue_seq(),
-            #[cfg(feature = "rocksdb")]
-            Self::Rocks(db) => db.active_catalogue_seq(),
+            Self::Durable(db) => db.active_catalogue_seq(),
         }
     }
 
     fn catalogue_lens(&self, lens: MigrationLensId) -> Option<MigrationLens> {
         match self {
             Self::Memory(db) => db.catalogue_lens(lens),
-            #[cfg(feature = "rocksdb")]
-            Self::Rocks(db) => db.catalogue_lens(lens),
+            Self::Durable(db) => db.catalogue_lens(lens),
         }
     }
 
     fn connect_upstream(&self, transport: Box<dyn Transport>) -> ShellPeerConnection {
         match self {
             Self::Memory(db) => ShellPeerConnection::Memory(db.connect_upstream(transport)),
-            #[cfg(feature = "rocksdb")]
-            Self::Rocks(db) => ShellPeerConnection::Rocks(db.connect_upstream(transport)),
+            Self::Durable(db) => ShellPeerConnection::Durable(db.connect_upstream(transport)),
         }
     }
 
     fn publish_schema(&self, schema: SchemaVersion) -> ShellResult<Vec<SyncMessage>> {
         match self {
             Self::Memory(db) => db.publish_schema(schema).map_err(Into::into),
-            #[cfg(feature = "rocksdb")]
-            Self::Rocks(db) => db.publish_schema(schema).map_err(Into::into),
+            Self::Durable(db) => db.publish_schema(schema).map_err(Into::into),
         }
     }
 
     fn publish_lens(&self, lens: MigrationLens) -> ShellResult<Vec<SyncMessage>> {
         match self {
             Self::Memory(db) => db.publish_lens(lens).map_err(Into::into),
-            #[cfg(feature = "rocksdb")]
-            Self::Rocks(db) => db.publish_lens(lens).map_err(Into::into),
+            Self::Durable(db) => db.publish_lens(lens).map_err(Into::into),
         }
     }
 
@@ -492,8 +500,7 @@ impl ShellDb {
             Self::Memory(db) => db
                 .publish_schema_with_lens(catalogue_seq, publication)
                 .map_err(Into::into),
-            #[cfg(feature = "rocksdb")]
-            Self::Rocks(db) => db
+            Self::Durable(db) => db
                 .publish_schema_with_lens(catalogue_seq, publication)
                 .map_err(Into::into),
         }
@@ -505,16 +512,14 @@ impl ShellDb {
     ) -> ShellResult<Vec<SyncMessage>> {
         match self {
             Self::Memory(db) => db.set_current_write_schema(pointer).map_err(Into::into),
-            #[cfg(feature = "rocksdb")]
-            Self::Rocks(db) => db.set_current_write_schema(pointer).map_err(Into::into),
+            Self::Durable(db) => db.set_current_write_schema(pointer).map_err(Into::into),
         }
     }
 
     fn set_permissions_ready(&self, ready: bool) -> ShellResult<()> {
         match self {
             Self::Memory(db) => db.set_permissions_ready(ready).map_err(Into::into),
-            #[cfg(feature = "rocksdb")]
-            Self::Rocks(db) => db.set_permissions_ready(ready).map_err(Into::into),
+            Self::Durable(db) => db.set_permissions_ready(ready).map_err(Into::into),
         }
     }
 
@@ -532,12 +537,10 @@ impl ShellDb {
             (Self::Memory(db), None) => ShellPeerConnection::Memory(
                 db.accept_subscriber_with_claims(transport, identity, claims),
             ),
-            #[cfg(feature = "rocksdb")]
-            (Self::Rocks(db), Some(cursor)) => ShellPeerConnection::Rocks(
+            (Self::Durable(db), Some(cursor)) => ShellPeerConnection::Durable(
                 db.accept_subscriber_with_resume(transport, identity, cursor),
             ),
-            #[cfg(feature = "rocksdb")]
-            (Self::Rocks(db), None) => ShellPeerConnection::Rocks(
+            (Self::Durable(db), None) => ShellPeerConnection::Durable(
                 db.accept_subscriber_with_claims(transport, identity, claims),
             ),
         }
@@ -554,8 +557,7 @@ impl ShellDb {
             Self::Memory(db) => ShellPeerConnection::Memory(
                 db.accept_subscriber_with_claims_and_trust(transport, identity, claims, trust),
             ),
-            #[cfg(feature = "rocksdb")]
-            Self::Rocks(db) => ShellPeerConnection::Rocks(
+            Self::Durable(db) => ShellPeerConnection::Durable(
                 db.accept_subscriber_with_claims_and_trust(transport, identity, claims, trust),
             ),
         }
@@ -571,8 +573,7 @@ impl ShellDb {
             Self::Memory(db) => ShellPeerConnection::Memory(
                 db.accept_edge_authority_subscriber_with_claims(transport, identity, claims),
             ),
-            #[cfg(feature = "rocksdb")]
-            Self::Rocks(db) => ShellPeerConnection::Rocks(
+            Self::Durable(db) => ShellPeerConnection::Durable(
                 db.accept_edge_authority_subscriber_with_claims(transport, identity, claims),
             ),
         }
@@ -583,11 +584,9 @@ impl ShellDb {
             (Self::Memory(db), ShellPeerConnection::Memory(connection)) => {
                 db.detach_connection(connection)
             }
-            #[cfg(feature = "rocksdb")]
-            (Self::Rocks(db), ShellPeerConnection::Rocks(connection)) => {
+            (Self::Durable(db), ShellPeerConnection::Durable(connection)) => {
                 db.detach_connection(connection)
             }
-            #[cfg(feature = "rocksdb")]
             _ => false,
         }
     }
@@ -595,8 +594,7 @@ impl ShellDb {
     fn tick_stats(&self) -> ShellResult<crate::db::DbTickStats> {
         match self {
             Self::Memory(db) => db.tick_stats().map_err(Into::into),
-            #[cfg(feature = "rocksdb")]
-            Self::Rocks(db) => db.tick_stats().map_err(Into::into),
+            Self::Durable(db) => db.tick_stats().map_err(Into::into),
         }
     }
 
@@ -612,8 +610,7 @@ impl ShellDb {
                 .seed_settled_mergeable_for_bootstrap(&table, row_id, author, cells)
                 .map(|_| ())
                 .map_err(Into::into),
-            #[cfg(feature = "rocksdb")]
-            Self::Rocks(db) => db
+            Self::Durable(db) => db
                 .seed_settled_mergeable_for_bootstrap(&table, row_id, author, cells)
                 .map(|_| ())
                 .map_err(Into::into),
@@ -625,16 +622,14 @@ impl ShellPeerConnection {
     fn take_resume_cursor(&self) -> Option<ResumeCursor> {
         match self {
             Self::Memory(connection) => connection.borrow_mut().take_resume_cursor(),
-            #[cfg(feature = "rocksdb")]
-            Self::Rocks(connection) => connection.borrow_mut().take_resume_cursor(),
+            Self::Durable(connection) => connection.borrow_mut().take_resume_cursor(),
         }
     }
 
     fn last_resume_bytes(&self) -> Option<usize> {
         match self {
             Self::Memory(connection) => connection.borrow().last_resume_bytes(),
-            #[cfg(feature = "rocksdb")]
-            Self::Rocks(connection) => connection.borrow().last_resume_bytes(),
+            Self::Durable(connection) => connection.borrow().last_resume_bytes(),
         }
     }
 }
@@ -654,36 +649,38 @@ impl InMemoryServerShell {
         let role = config.role;
         let bootstrap_runtime_schema = config.bootstrap_runtime_schema;
         let bootstrap_schema = config.schema.clone();
+        let storage_factory = config.storage_factory.clone();
         let db = match &storage_config {
             StorageConfig::InMemory => {
                 let refs = config.schema.column_families();
                 let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
-                let mut db_config =
-                    DbConfig::new(config.schema, MemoryStorage::new(&refs), config.identity);
-                if let Some(row_id_seed) = config.row_id_seed {
-                    db_config = db_config.with_id_source(SeededRowIdSource::new(row_id_seed));
-                }
-                ShellDb::Memory(crate::db::block_on(Db::open_history_complete(db_config))?)
-            }
-            #[cfg(feature = "rocksdb")]
-            StorageConfig::RocksDb { path } => {
-                let refs = config.schema.column_families();
-                let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
                 let mut db_config = DbConfig::new(
                     config.schema,
-                    RocksDbStorage::open(path, &refs).map_err(db_storage_error)?,
+                    BoxedStorage::new(MemoryStorage::new(&refs)),
                     config.identity,
                 );
                 if let Some(row_id_seed) = config.row_id_seed {
                     db_config = db_config.with_id_source(SeededRowIdSource::new(row_id_seed));
                 }
-                ShellDb::Rocks(crate::db::block_on(Db::open_history_complete(db_config))?)
+                ShellDb::Memory(crate::db::block_on(Db::open_history_complete(db_config))?)
             }
-            #[cfg(not(feature = "rocksdb"))]
-            StorageConfig::RocksDb { .. } => {
-                return Err(ShellError::UnsupportedStorage {
-                    storage: storage_config,
-                });
+            StorageConfig::RocksDb { path } => {
+                let refs = config.schema.column_families();
+                let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
+                let factory = storage_factory.as_deref().ok_or_else(|| {
+                    ShellError::Storage(
+                        "durable server storage requires a target-shell storage factory".into(),
+                    )
+                })?;
+                let mut db_config = DbConfig::new(
+                    config.schema,
+                    factory.open(path, &refs).map_err(db_storage_error)?,
+                    config.identity,
+                );
+                if let Some(row_id_seed) = config.row_id_seed {
+                    db_config = db_config.with_id_source(SeededRowIdSource::new(row_id_seed));
+                }
+                ShellDb::Durable(crate::db::block_on(Db::open_history_complete(db_config))?)
             }
             StorageConfig::SQLite { .. } => {
                 return Err(ShellError::UnsupportedStorage {
@@ -715,6 +712,7 @@ impl InMemoryServerShell {
     pub fn start_dynamic_edge_with_catalogue_snapshot(
         identity: DbIdentity,
         storage_config: StorageConfig,
+        storage_factory: Option<Arc<dyn StorageFactory>>,
         edge_cache_budget: Option<EdgeCacheBudget>,
         snapshot: crate::protocol::CatalogueSnapshot,
     ) -> ShellResult<Self> {
@@ -725,7 +723,12 @@ impl InMemoryServerShell {
             .find(|schema| schema.id == active_schema)
             .map(|schema| schema.schema.clone())
             .ok_or(ShellError::MissingEvent("trusted snapshot active schema"))?;
-        let db = ShellDb::open_catalogue_uninitialized_edge(identity, storage_config, Some(0x5e))?;
+        let db = ShellDb::open_catalogue_uninitialized_edge(
+            identity,
+            storage_config,
+            storage_factory.as_deref(),
+            Some(0x5e),
+        )?;
         db.apply_trusted_catalogue_snapshot(snapshot)?;
         let mut db = db;
         db.select_schema_view(active_schema_payload)?;
@@ -749,9 +752,15 @@ impl InMemoryServerShell {
     pub fn try_start_dynamic_edge_from_storage(
         identity: DbIdentity,
         storage_config: StorageConfig,
+        storage_factory: Option<Arc<dyn StorageFactory>>,
         edge_cache_budget: Option<EdgeCacheBudget>,
     ) -> ShellResult<Option<Self>> {
-        let db = ShellDb::open_catalogue_uninitialized_edge(identity, storage_config, Some(0x5e))?;
+        let db = ShellDb::open_catalogue_uninitialized_edge(
+            identity,
+            storage_config,
+            storage_factory.as_deref(),
+            Some(0x5e),
+        )?;
         if !db.catalogue_bootstrap_is_ready() {
             return Ok(None);
         }
@@ -1487,7 +1496,6 @@ fn catalogue_acks_from_messages(messages: Vec<SyncMessage>) -> Vec<CatalogueAck>
         .collect()
 }
 
-#[cfg(feature = "rocksdb")]
 fn db_storage_error(error: impl fmt::Display) -> ShellError {
     ShellError::Storage(error.to_string())
 }
@@ -1993,7 +2001,6 @@ mod tests {
         )])
     }
 
-    #[cfg(feature = "rocksdb")]
     #[test]
     fn permission_payload_updates_keep_structural_genesis_and_survive_reopen() {
         let structural = JazzSchema::new([TableSchema::new(
@@ -2019,7 +2026,10 @@ mod tests {
             author: AuthorId::SYSTEM,
         };
         let config = InMemoryServerShellConfig::new(structural.clone(), identity)
-            .with_runtime_schema_bootstrap();
+            .with_runtime_schema_bootstrap()
+            .with_storage_factory(std::sync::Arc::new(
+                jazz_storage_rocksdb::RocksDbStorageFactory,
+            ));
         let mut shell = InMemoryServerShell::start_with_storage(
             config.clone(),
             StorageConfig::RocksDb {

@@ -262,6 +262,9 @@ fn make_context(
         server_url,
         data_dir,
         storage: ClientStorage::Persistent,
+        storage_factory: Some(std::sync::Arc::new(
+            jazz_storage_rocksdb::RocksDbStorageFactory,
+        )),
         jwt_token: Some(jwt_token),
         backend_secret: None,
         admin_secret: None,
@@ -464,6 +467,7 @@ async fn memory_storage_client_does_not_persist_local_state_to_disk_impl() {
         server_url: String::new(),
         data_dir: data_dir.path().to_path_buf(),
         storage: ClientStorage::Memory,
+        storage_factory: None,
         jwt_token: None,
         backend_secret: None,
         admin_secret: None,

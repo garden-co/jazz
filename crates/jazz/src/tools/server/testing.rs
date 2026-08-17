@@ -31,7 +31,7 @@ pub struct JazzServerBuilder {
     data_dir: Option<PathBuf>,
     schema: Option<Schema>,
     persistent_storage: bool,
-    rocksdb_storage: bool,
+    storage_factory: Option<Arc<dyn crate::groove::storage::StorageFactory>>,
     admin_secret: Option<String>,
     backend_secret: Option<String>,
     upstream_url: Option<String>,
@@ -81,11 +81,12 @@ impl JazzServerBuilder {
         self
     }
 
-    /// Use RocksDB as the server storage backend, regardless of which other
-    /// storage features are compiled in.  Implies persistent storage.
-    #[cfg(feature = "rocksdb")]
-    pub fn with_rocksdb_storage(mut self) -> Self {
-        self.rocksdb_storage = true;
+    /// Supply the target-owned adapter used by persistent test storage.
+    pub fn with_storage_factory(
+        mut self,
+        factory: Arc<dyn crate::groove::storage::StorageFactory>,
+    ) -> Self {
+        self.storage_factory = Some(factory);
         self.persistent_storage = true;
         self
     }
@@ -260,7 +261,7 @@ impl JazzServer {
             data_dir,
             schema,
             persistent_storage,
-            rocksdb_storage,
+            storage_factory,
             admin_secret,
             backend_secret,
             upstream_url,
@@ -307,18 +308,17 @@ impl JazzServer {
             .with_native_transport_connector(Arc::new(
                 crate::tools::native_websocket_transport::NativeWebSocketConnector,
             ));
+        if let Some(factory) = storage_factory {
+            server_builder = server_builder.with_storage_factory(factory);
+        }
         if let Some(upstream_url) = upstream_url {
             server_builder = server_builder.with_upstream_url(upstream_url);
         }
         if let Some(edge_cache_budget) = edge_cache_budget {
             server_builder = server_builder.with_edge_cache_budget(edge_cache_budget);
         }
-        let mut server_builder = apply_storage_mode(
-            server_builder,
-            storage_data_dir,
-            persistent_storage,
-            rocksdb_storage,
-        );
+        let mut server_builder =
+            apply_storage_mode(server_builder, storage_data_dir, persistent_storage);
 
         if let Some(schema) = schema {
             server_builder = server_builder.with_schema(schema);
@@ -488,6 +488,7 @@ impl JazzServer {
             server_url: self.base_url(),
             data_dir,
             storage: crate::tools::ClientStorage::Memory,
+            storage_factory: None,
             jwt_token: Some(jwt_token),
             backend_secret: Some(self.backend_secret().to_string()),
             admin_secret: None,
@@ -630,12 +631,7 @@ fn apply_storage_mode(
     builder: ServerBuilder,
     data_dir: PathBuf,
     persistent: bool,
-    #[allow(unused_variables)] rocksdb: bool,
 ) -> ServerBuilder {
-    #[cfg(feature = "rocksdb")]
-    if rocksdb {
-        return builder.with_storage(StorageBackend::RocksDb { path: data_dir });
-    }
     if persistent {
         builder.with_storage(StorageBackend::Persistent { path: data_dir })
     } else {

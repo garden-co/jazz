@@ -5,7 +5,11 @@ use super::*;
 #[test]
 fn parameterized_shape_hydrates_and_routes_by_param() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = RocksDbStorage::open(temp_dir.path(), &["albums", "artists"]).unwrap();
+    let storage = TestStorage::open(
+        temp_dir.path().join("groove-test.btree"),
+        &["albums", "artists"],
+    )
+    .unwrap();
     let mut database = Database::new(albums_artists_schema(), storage).unwrap();
 
     let mut batch = database.open_batch();
@@ -93,7 +97,11 @@ fn parameterized_shape_hydrates_and_routes_by_param() {
 #[test]
 fn parameterized_shape_uses_set_semantics_with_duplicate_param_refcounts() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = RocksDbStorage::open(temp_dir.path(), &["albums", "artists"]).unwrap();
+    let storage = TestStorage::open(
+        temp_dir.path().join("groove-test.btree"),
+        &["albums", "artists"],
+    )
+    .unwrap();
     let mut database = Database::new(albums_artists_schema(), storage).unwrap();
 
     let mut batch = database.open_batch();
@@ -171,7 +179,11 @@ fn parameterized_shape_uses_set_semantics_with_duplicate_param_refcounts() {
 #[test]
 fn prepared_subscription_lowers_parameter_predicates_to_shape_subscriptions() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = RocksDbStorage::open(temp_dir.path(), &["albums", "artists"]).unwrap();
+    let storage = TestStorage::open(
+        temp_dir.path().join("groove-test.btree"),
+        &["albums", "artists"],
+    )
+    .unwrap();
     let mut database = Database::new(albums_artists_schema(), storage).unwrap();
 
     let mut batch = database.open_batch();
@@ -288,7 +300,8 @@ fn prepared_subscription_lowers_parameter_predicates_to_shape_subscriptions() {
 #[test]
 fn prepared_subscription_filters_not_equal_parameter_predicates() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = RocksDbStorage::open(temp_dir.path(), &["albums"]).unwrap();
+    let storage =
+        TestStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
     let mut database = Database::new(albums_schema(), storage).unwrap();
 
     let mut batch = database.open_batch();
@@ -375,7 +388,11 @@ fn prepared_subscription_filters_not_equal_parameter_predicates() {
 #[test]
 fn prepare_query_requires_parameters_and_only_lowers_parameter_equalities() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = RocksDbStorage::open(temp_dir.path(), &["albums", "artists"]).unwrap();
+    let storage = TestStorage::open(
+        temp_dir.path().join("groove-test.btree"),
+        &["albums", "artists"],
+    )
+    .unwrap();
     let mut database = Database::new(albums_artists_schema(), storage).unwrap();
 
     let no_parameters = select_query(
@@ -430,7 +447,8 @@ fn prepare_query_requires_parameters_and_only_lowers_parameter_equalities() {
 #[test]
 fn select_literal_and_null_projections_remain_unsupported_by_query_planner() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = RocksDbStorage::open(temp_dir.path(), &["albums"]).unwrap();
+    let storage =
+        TestStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
     let mut database = Database::new(albums_schema(), storage).unwrap();
 
     for expr in [Expr::Null, Expr::Literal(Value::String("x".to_owned()))] {
@@ -449,7 +467,11 @@ fn select_literal_and_null_projections_remain_unsupported_by_query_planner() {
 #[test]
 fn prepared_subscription_validates_named_bindings() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = RocksDbStorage::open(temp_dir.path(), &["albums", "artists"]).unwrap();
+    let storage = TestStorage::open(
+        temp_dir.path().join("groove-test.btree"),
+        &["albums", "artists"],
+    )
+    .unwrap();
     let mut database = Database::new(albums_artists_schema(), storage).unwrap();
     let prepared = database
         .prepare_query(select_query(
@@ -478,7 +500,11 @@ fn prepared_subscription_validates_named_bindings() {
 #[test]
 fn graph_level_prepare_rejects_output_key_fields_not_in_output_descriptor() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = RocksDbStorage::open(temp_dir.path(), &["albums", "artists"]).unwrap();
+    let storage = TestStorage::open(
+        temp_dir.path().join("groove-test.btree"),
+        &["albums", "artists"],
+    )
+    .unwrap();
     let mut database = Database::new(albums_artists_schema(), storage).unwrap();
     let binding_descriptor = RecordDescriptor::new([("artist_id", ColumnType::U64.clone())]);
     let graph = GraphBuilder::join(
@@ -503,7 +529,11 @@ fn graph_level_prepare_rejects_output_key_fields_not_in_output_descriptor() {
 #[test]
 fn prepared_shapes_retain_output_graph_nodes_without_subscribers() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = RocksDbStorage::open(temp_dir.path(), &["albums", "artists"]).unwrap();
+    let storage = TestStorage::open(
+        temp_dir.path().join("groove-test.btree"),
+        &["albums", "artists"],
+    )
+    .unwrap();
     let mut database = Database::new(albums_artists_schema(), storage).unwrap();
     let binding_descriptor = RecordDescriptor::new([("artist_id", ColumnType::U64.clone())]);
     let graph = GraphBuilder::join(
@@ -546,7 +576,11 @@ fn prepared_shapes_retain_output_graph_nodes_without_subscribers() {
 #[test]
 fn prepared_subscription_matches_literal_subscription_without_param_columns() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = RocksDbStorage::open(temp_dir.path(), &["albums", "artists"]).unwrap();
+    let storage = TestStorage::open(
+        temp_dir.path().join("groove-test.btree"),
+        &["albums", "artists"],
+    )
+    .unwrap();
     let mut database = Database::new(albums_artists_schema(), storage).unwrap();
     let mut batch = database.open_batch();
     batch.insert(
@@ -620,7 +654,11 @@ fn prepared_subscriptions_match_literal_subscriptions_under_seeded_interleavings
 
 fn run_prepared_literal_oracle(mut seed: u64) {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = RocksDbStorage::open(temp_dir.path(), &["albums", "artists"]).unwrap();
+    let storage = TestStorage::open(
+        temp_dir.path().join("groove-test.btree"),
+        &["albums", "artists"],
+    )
+    .unwrap();
     let mut database = Database::new(albums_artists_schema(), storage).unwrap();
     let param_query = select_query(
         Select::new([
@@ -739,7 +777,11 @@ fn drain_literal_album_rows(
 #[test]
 fn binding_sources_are_rejected_outside_prepared_shapes() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = RocksDbStorage::open(temp_dir.path(), &["albums", "artists"]).unwrap();
+    let storage = TestStorage::open(
+        temp_dir.path().join("groove-test.btree"),
+        &["albums", "artists"],
+    )
+    .unwrap();
     let mut database = Database::new(albums_artists_schema(), storage).unwrap();
 
     assert!(
@@ -752,7 +794,11 @@ fn binding_sources_are_rejected_outside_prepared_shapes() {
 #[test]
 fn duplicate_join_subscriptions_share_state_without_double_applying_deltas() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = RocksDbStorage::open(temp_dir.path(), &["albums", "artists"]).unwrap();
+    let storage = TestStorage::open(
+        temp_dir.path().join("groove-test.btree"),
+        &["albums", "artists"],
+    )
+    .unwrap();
     let mut database = Database::new(albums_artists_schema(), storage).unwrap();
     let graph = GraphBuilder::join(
         GraphBuilder::table("albums"),

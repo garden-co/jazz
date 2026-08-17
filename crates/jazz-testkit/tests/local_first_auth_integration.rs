@@ -70,6 +70,11 @@ fn local_first_context(
     ctx.backend_secret = None;
     ctx.admin_secret = None;
     ctx.storage = storage;
+    if storage == ClientStorage::Persistent {
+        ctx.storage_factory = Some(std::sync::Arc::new(
+            jazz_storage_rocksdb::RocksDbStorageFactory,
+        ));
+    }
     ctx
 }
 

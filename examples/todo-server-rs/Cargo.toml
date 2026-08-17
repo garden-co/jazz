@@ -9,6 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 jazz = { path = "../../crates/jazz", default-features = false, features = ["client"] }
+jazz-storage-rocksdb = { path = "../../crates/jazz-storage-rocksdb" }
 
 tokio = { version = "1", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
@@ -24,7 +25,6 @@ mimalloc = { version = "0.1", default-features = false }
 
 [dev-dependencies]
 jazz = { path = "../../crates/jazz", default-features = false, features = [
-  "rocksdb",
   "test-utils",
 ] }
 tempfile = "3"

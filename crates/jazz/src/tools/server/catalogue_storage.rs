@@ -1,9 +1,7 @@
 use std::collections::BTreeMap;
-#[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
-use std::path::Path;
-#[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
 use std::sync::Mutex;
 
+use crate::groove::storage::{BoxedStorage, OrderedKvStorage};
 use crate::tools::object::ObjectId;
 use crate::tools::server::catalogue_entry::CatalogueEntry;
 
@@ -68,49 +66,33 @@ impl CatalogueStorage for CatalogueMemoryStorage {
     }
 }
 
-#[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
-pub(crate) struct CatalogueRocksDbStorage {
-    db: Mutex<Option<rocksdb::DB>>,
+pub(crate) struct CatalogueKvStorage {
+    storage: Mutex<Option<BoxedStorage>>,
 }
 
-#[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
-impl CatalogueRocksDbStorage {
+impl CatalogueKvStorage {
+    // Keep the original catalogue RocksDB layout: entries lived in the default
+    // column family under `cat:` keys before storage became adapter-driven.
+    pub(crate) const COLUMN_FAMILY: &'static str = "default";
     const ENTRY_PREFIX: &'static [u8] = b"cat:";
 
-    pub(crate) fn open(
-        path: impl AsRef<Path>,
-        cache_size_bytes: usize,
-    ) -> CatalogueStorageResult<Self> {
-        let mut block_opts = rocksdb::BlockBasedOptions::default();
-        block_opts.set_bloom_filter(10.0, false);
-        let cache = rocksdb::Cache::new_lru_cache(cache_size_bytes);
-        block_opts.set_block_cache(&cache);
-
-        let mut opts = rocksdb::Options::default();
-        opts.create_if_missing(true);
-        opts.set_block_based_table_factory(&block_opts);
-        opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
-        opts.set_bottommost_compression_type(rocksdb::DBCompressionType::Zstd);
-
-        let db = rocksdb::DB::open(&opts, path.as_ref()).map_err(|error| {
-            CatalogueStorageError::IoError(format!("catalogue rocksdb open: {error}"))
-        })?;
-        Ok(Self {
-            db: Mutex::new(Some(db)),
-        })
+    pub(crate) fn new(storage: BoxedStorage) -> Self {
+        Self {
+            storage: Mutex::new(Some(storage)),
+        }
     }
 
-    fn with_db<T>(
+    fn with_storage<T>(
         &self,
-        f: impl FnOnce(&rocksdb::DB) -> CatalogueStorageResult<T>,
+        operation: impl FnOnce(&BoxedStorage) -> CatalogueStorageResult<T>,
     ) -> CatalogueStorageResult<T> {
-        let db = self.db.lock().map_err(|_| {
-            CatalogueStorageError::IoError("catalogue rocksdb mutex poisoned".to_string())
+        let storage = self.storage.lock().map_err(|_| {
+            CatalogueStorageError::IoError("catalogue storage mutex poisoned".to_owned())
         })?;
-        let db = db.as_ref().ok_or_else(|| {
-            CatalogueStorageError::IoError("catalogue rocksdb storage already closed".to_string())
+        let storage = storage.as_ref().ok_or_else(|| {
+            CatalogueStorageError::IoError("catalogue storage already closed".to_owned())
         })?;
-        f(db)
+        operation(storage)
     }
 
     fn entry_key(object_id: ObjectId) -> Vec<u8> {
@@ -121,82 +103,121 @@ impl CatalogueRocksDbStorage {
     }
 }
 
-#[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
-impl CatalogueStorage for CatalogueRocksDbStorage {
+impl CatalogueStorage for CatalogueKvStorage {
     fn scan_catalogue_entries(&self) -> CatalogueStorageResult<Vec<CatalogueEntry>> {
-        self.with_db(|db| {
-            let mut read_opts = rocksdb::ReadOptions::default();
-            read_opts.set_iterate_upper_bound(b"cat;".to_vec());
-            let iter = db.iterator_opt(
-                rocksdb::IteratorMode::From(Self::ENTRY_PREFIX, rocksdb::Direction::Forward),
-                read_opts,
-            );
-            let mut entries = Vec::new();
-            for item in iter {
-                let (key, value) = item.map_err(|error| {
-                    CatalogueStorageError::IoError(format!("catalogue rocksdb iter: {error}"))
-                })?;
-                let Some(hex_id) = key.strip_prefix(Self::ENTRY_PREFIX) else {
-                    continue;
-                };
-                let uuid = uuid::Uuid::parse_str(std::str::from_utf8(hex_id).map_err(|error| {
-                    CatalogueStorageError::IoError(format!("catalogue rocksdb key utf8: {error}"))
-                })?)
-                .map_err(|error| {
-                    CatalogueStorageError::IoError(format!("catalogue rocksdb key uuid: {error}"))
-                })?;
-                let object_id = ObjectId::from_uuid(uuid);
-                let entry =
-                    CatalogueEntry::decode_storage_row(object_id, &value).map_err(|error| {
-                        CatalogueStorageError::IoError(format!("decode catalogue entry: {error}"))
-                    })?;
-                entries.push(entry);
-            }
-            entries.sort_by_key(|entry| entry.object_id);
-            Ok(entries)
-        })
+        let mut entries = Vec::new();
+        self.with_storage(|storage| {
+            storage
+                .scan_prefix(
+                    Self::COLUMN_FAMILY,
+                    Self::ENTRY_PREFIX,
+                    &mut |key, value| {
+                        let Some(hex_id) = key.strip_prefix(Self::ENTRY_PREFIX) else {
+                            return Ok(());
+                        };
+                        let uuid = uuid::Uuid::parse_str(std::str::from_utf8(hex_id).map_err(
+                            |error| crate::groove::storage::Error::Backend {
+                                backend: "catalogue",
+                                message: format!("catalogue key utf8: {error}"),
+                            },
+                        )?)
+                        .map_err(|error| {
+                            crate::groove::storage::Error::Backend {
+                                backend: "catalogue",
+                                message: format!("catalogue key uuid: {error}"),
+                            }
+                        })?;
+                        let object_id = ObjectId::from_uuid(uuid);
+                        let entry = CatalogueEntry::decode_storage_row(object_id, value).map_err(
+                            |error| crate::groove::storage::Error::Backend {
+                                backend: "catalogue",
+                                message: format!("decode catalogue entry: {error}"),
+                            },
+                        )?;
+                        entries.push(entry);
+                        Ok(())
+                    },
+                )
+                .map_err(storage_error)
+        })?;
+        entries.sort_by_key(|entry| entry.object_id);
+        Ok(entries)
     }
 
     fn upsert_catalogue_entry(&mut self, entry: &CatalogueEntry) -> CatalogueStorageResult<()> {
-        self.with_db(|db| {
-            let bytes = entry.encode_storage_row().map_err(|error| {
-                CatalogueStorageError::IoError(format!("encode catalogue entry: {error}"))
-            })?;
-            db.put(Self::entry_key(entry.object_id), bytes)
-                .map_err(|error| {
-                    CatalogueStorageError::IoError(format!("catalogue rocksdb put: {error}"))
-                })
+        let bytes = entry.encode_storage_row().map_err(|error| {
+            CatalogueStorageError::IoError(format!("encode catalogue entry: {error}"))
+        })?;
+        self.with_storage(|storage| {
+            storage
+                .set(
+                    Self::COLUMN_FAMILY,
+                    &Self::entry_key(entry.object_id),
+                    &bytes,
+                )
+                .map_err(storage_error)
         })
     }
 
     fn flush(&self) -> CatalogueStorageResult<()> {
-        self.with_db(|db| {
-            db.flush().map_err(|error| {
-                CatalogueStorageError::IoError(format!("catalogue rocksdb flush: {error}"))
-            })
-        })
+        self.with_storage(|storage| storage.flush_write_boundary().map_err(storage_error))
     }
 
     fn flush_wal(&self) -> CatalogueStorageResult<()> {
-        self.with_db(|db| {
-            db.flush_wal(true).map_err(|error| {
-                CatalogueStorageError::IoError(format!("catalogue rocksdb flush_wal: {error}"))
-            })
-        })
+        self.with_storage(|storage| storage.flush_write_boundary().map_err(storage_error))
     }
 
     fn close(&self) -> CatalogueStorageResult<()> {
-        let Some(db) = self
-            .db
+        let storage = self
+            .storage
             .lock()
             .map_err(|_| {
-                CatalogueStorageError::IoError("catalogue rocksdb mutex poisoned".to_string())
+                CatalogueStorageError::IoError("catalogue storage mutex poisoned".to_owned())
             })?
-            .take()
-        else {
-            return Ok(());
-        };
-        drop(db);
+            .take();
+        if let Some(storage) = storage {
+            storage.flush_write_boundary().map_err(storage_error)?;
+            drop(storage);
+        }
         Ok(())
+    }
+}
+
+fn storage_error(error: crate::groove::storage::Error) -> CatalogueStorageError {
+    CatalogueStorageError::IoError(error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::groove::storage::{OrderedKvStorage, StorageFactory};
+
+    #[test]
+    fn adapter_catalogue_reads_the_pre_extraction_default_cf_layout() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("catalogue.rocksdb");
+        let object_id = ObjectId::from_uuid(uuid::Uuid::from_bytes([0x4a; 16]));
+        let entry = CatalogueEntry {
+            object_id,
+            metadata: std::collections::HashMap::from([("type".to_owned(), "table".to_owned())]),
+            content: b"legacy-catalogue-row".to_vec(),
+        };
+
+        {
+            let legacy = jazz_storage_rocksdb::RocksDbStorage::open(&path, &["default"]).unwrap();
+            legacy
+                .set(
+                    "default",
+                    &CatalogueKvStorage::entry_key(object_id),
+                    &entry.encode_storage_row().unwrap(),
+                )
+                .unwrap();
+        }
+
+        let storage = jazz_storage_rocksdb::RocksDbStorageFactory
+            .open(&path, &[CatalogueKvStorage::COLUMN_FAMILY])
+            .unwrap();
+        let catalogue = CatalogueKvStorage::new(storage);
+        assert_eq!(catalogue.scan_catalogue_entries().unwrap(), vec![entry]);
     }
 }

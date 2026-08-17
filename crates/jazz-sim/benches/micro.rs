@@ -5,7 +5,6 @@ use std::time::{Duration, Instant};
 use hdrhistogram::Histogram;
 use jazz::groove::records::Value;
 use jazz::groove::schema::{ColumnSchema, ColumnType};
-use jazz::groove::storage::{Durability, RocksDbStorage};
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::node::{MergeableCommit, NodeState, SKEW_TOLERANCE_MS};
 use jazz::protocol::{SyncMessage, VersionRecord};
@@ -14,6 +13,7 @@ use jazz::time::TxTime;
 use jazz::tools::OpenBatchId;
 use jazz::tx::{BranchLineage, DeletionEvent, DurabilityTier, Fate, Transaction};
 use jazz_sim::{emit_json_line, metadata_fields};
+use jazz_storage_rocksdb::{Durability, RocksDbStorage};
 use serde_json::{Map, Value as JsonValue, json};
 
 const TABLE: &str = "items";

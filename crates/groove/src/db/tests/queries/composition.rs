@@ -5,7 +5,11 @@ use super::*;
 #[test]
 fn arg_max_by_feeds_join_and_anti_join() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = RocksDbStorage::open(temp_dir.path(), &["history", "rows", "blockers"]).unwrap();
+    let storage = TestStorage::open(
+        temp_dir.path().join("groove-test.btree"),
+        &["history", "rows", "blockers"],
+    )
+    .unwrap();
     let mut database = Database::new(history_schema(), storage).unwrap();
 
     let visible = database
@@ -66,7 +70,11 @@ fn arg_max_by_feeds_join_and_anti_join() {
 #[test]
 fn arg_max_by_routes_through_prepared_bindings() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = RocksDbStorage::open(temp_dir.path(), &["history", "rows", "blockers"]).unwrap();
+    let storage = TestStorage::open(
+        temp_dir.path().join("groove-test.btree"),
+        &["history", "rows", "blockers"],
+    )
+    .unwrap();
     let mut database = Database::new(history_schema(), storage).unwrap();
     let params = RecordDescriptor::new([("row", ColumnType::U64.clone())]);
     let shape = database
@@ -119,7 +127,11 @@ fn arg_max_by_matches_naive_oracle_across_seeded_mutations() {
     }
 
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = RocksDbStorage::open(temp_dir.path(), &["history", "rows", "blockers"]).unwrap();
+    let storage = TestStorage::open(
+        temp_dir.path().join("groove-test.btree"),
+        &["history", "rows", "blockers"],
+    )
+    .unwrap();
     let mut database = Database::new(history_schema(), storage).unwrap();
     let mut rng = Lcg(0x0bad_cafe_1234_5678);
     let mut model = std::collections::BTreeMap::<(u64, u64, u64), String>::new();
@@ -180,7 +192,11 @@ fn arg_max_by_matches_naive_oracle_across_seeded_mutations() {
 #[test]
 fn arg_max_by_tracks_union_of_filtered_sources() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = RocksDbStorage::open(temp_dir.path(), &["history", "history_shadow"]).unwrap();
+    let storage = TestStorage::open(
+        temp_dir.path().join("groove-test.btree"),
+        &["history", "history_shadow"],
+    )
+    .unwrap();
     let mut database = Database::new(two_history_tables_schema(), storage).unwrap();
     let graph = GraphBuilder::arg_max_by(
         GraphBuilder::union([
@@ -235,7 +251,11 @@ fn arg_max_by_tracks_union_of_filtered_sources() {
 #[test]
 fn arg_max_by_tracks_join_filter_input() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = RocksDbStorage::open(temp_dir.path(), &["history", "rows", "blockers"]).unwrap();
+    let storage = TestStorage::open(
+        temp_dir.path().join("groove-test.btree"),
+        &["history", "rows", "blockers"],
+    )
+    .unwrap();
     let mut database = Database::new(history_schema(), storage).unwrap();
     let joined_history = GraphBuilder::join(
         GraphBuilder::table("history"),
@@ -296,7 +316,8 @@ fn arg_max_by_tracks_join_filter_input() {
 #[test]
 fn predicate_or_filter_matches_either_branch() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = RocksDbStorage::open(temp_dir.path(), &["albums"]).unwrap();
+    let storage =
+        TestStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
     let mut database = Database::new(albums_schema(), storage).unwrap();
     let graph = GraphBuilder::table("albums").filter(
         PredicateExpr::Or(vec![
@@ -344,7 +365,11 @@ fn predicate_or_filter_matches_either_branch() {
 #[test]
 fn arg_max_by_rejects_unsupported_inputs_and_bad_primary_keys() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = RocksDbStorage::open(temp_dir.path(), &["history", "rows", "blockers"]).unwrap();
+    let storage = TestStorage::open(
+        temp_dir.path().join("groove-test.btree"),
+        &["history", "rows", "blockers"],
+    )
+    .unwrap();
     let mut database = Database::new(history_schema(), storage).unwrap();
 
     let err = database
@@ -375,7 +400,11 @@ fn arg_max_by_rejects_unsupported_inputs_and_bad_primary_keys() {
 #[test]
 fn unwrap_nullable_can_feed_join_key() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = RocksDbStorage::open(temp_dir.path(), &["tracks", "albums", "indices"]).unwrap();
+    let storage = TestStorage::open(
+        temp_dir.path().join("groove-test.btree"),
+        &["tracks", "albums", "indices"],
+    )
+    .unwrap();
     let mut tracks_schema = indexed_tracks_schema();
     let mut albums_schema = albums_schema();
     let mut database = Database::new(
@@ -433,7 +462,11 @@ fn unwrap_nullable_can_feed_join_key() {
 #[test]
 fn unwrap_nullable_can_feed_prepared_binding_join_key() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = RocksDbStorage::open(temp_dir.path(), &["tracks", "indices"]).unwrap();
+    let storage = TestStorage::open(
+        temp_dir.path().join("groove-test.btree"),
+        &["tracks", "indices"],
+    )
+    .unwrap();
     let mut database = Database::new(indexed_tracks_schema(), storage).unwrap();
 
     let mut batch = database.open_batch();
@@ -472,8 +505,11 @@ fn unwrap_nullable_can_feed_prepared_binding_join_key() {
 #[test]
 fn prepared_binding_join_hydrates_anti_join_input() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage =
-        RocksDbStorage::open(temp_dir.path(), &["tracks", "blockers", "indices"]).unwrap();
+    let storage = TestStorage::open(
+        temp_dir.path().join("groove-test.btree"),
+        &["tracks", "blockers", "indices"],
+    )
+    .unwrap();
     let schema = DatabaseSchema::new([
         indexed_tracks_schema().tables.remove(0),
         TableSchema::new("blockers", [ColumnSchema::new("id", ColumnType::U64)])
@@ -522,7 +558,11 @@ fn prepared_binding_join_hydrates_anti_join_input() {
 #[test]
 fn prepared_binding_join_hydrates_filtered_unwrapped_anti_join_input() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = RocksDbStorage::open(temp_dir.path(), &["items", "blockers", "indices"]).unwrap();
+    let storage = TestStorage::open(
+        temp_dir.path().join("groove-test.btree"),
+        &["items", "blockers", "indices"],
+    )
+    .unwrap();
     let schema = DatabaseSchema::new([
         TableSchema::new(
             "items",

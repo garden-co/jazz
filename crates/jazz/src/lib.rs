@@ -31,15 +31,12 @@
 //! use jazz::tx::{DeletionEvent, DurabilityTier};
 //! use jazz::groove::records::Value;
 //! use jazz::groove::schema::{ColumnSchema, ColumnType};
-//! use jazz::groove::storage::RocksDbStorage;
+//! use jazz::groove::storage::MemoryStorage;
 //!
-//! fn open_node(node: NodeUuid, schema: JazzSchema) -> (tempfile::TempDir, NodeState<RocksDbStorage>) {
-//!     let dir = tempfile::tempdir().unwrap();
+//! fn open_node(node: NodeUuid, schema: JazzSchema) -> NodeState<MemoryStorage> {
 //!     let cfs = schema.column_families();
 //!     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
-//!     let storage = RocksDbStorage::open(dir.path(), &refs).unwrap();
-//!     let node = NodeState::new(node, schema, storage).unwrap();
-//!     (dir, node)
+//!     NodeState::new(node, schema, MemoryStorage::new(&refs)).unwrap()
 //! }
 //!
 //! let owner = AuthorId::from_bytes([0xa1; 16]);
@@ -53,8 +50,8 @@
 //! .with_read_policy(Policy::owner_only("todos", "owner"))
 //! .with_write_policy(Policy::owner_only("todos", "owner"))]);
 //!
-//! let (_writer_dir, mut writer) = open_node(NodeUuid::from_bytes([1; 16]), schema.clone());
-//! let (_core_dir, mut core) = open_node(NodeUuid::from_bytes([9; 16]), schema.clone());
+//! let mut writer = open_node(NodeUuid::from_bytes([1; 16]), schema.clone());
+//! let mut core = open_node(NodeUuid::from_bytes([9; 16]), schema.clone());
 //! let row = RowUuid::from_bytes([7; 16]);
 //! let cells = BTreeMap::from([
 //!     ("title".to_owned(), Value::String("draft".to_owned())),

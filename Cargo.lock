@@ -1380,11 +1380,11 @@ dependencies = [
  "hdrhistogram",
  "internment",
  "jazz-benchmark-guard",
+ "jazz-storage-rocksdb",
  "opfs-btree",
  "paste",
  "postcard",
  "rusqlite",
- "rust-rocksdb",
  "rustc-hash",
  "serde",
  "serde_json",
@@ -1890,6 +1890,7 @@ dependencies = [
  "internment",
  "jazz-benchmark-guard",
  "jazz-compression",
+ "jazz-storage-rocksdb",
  "jazz-testkit",
  "jsonschema",
  "jsonwebtoken",
@@ -1898,7 +1899,6 @@ dependencies = [
  "rand 0.8.5",
  "rcgen",
  "reqwest",
- "rust-rocksdb",
  "serde",
  "serde_bytes",
  "serde_json",
@@ -1931,6 +1931,7 @@ dependencies = [
  "jazz",
  "jazz-otel",
  "jazz-server",
+ "jazz-storage-rocksdb",
  "jazz-testkit",
  "jsonwebtoken",
  "libc",
@@ -1965,6 +1966,7 @@ dependencies = [
  "jazz",
  "jazz-native-transport",
  "jazz-otel",
+ "jazz-storage-rocksdb",
  "mimalloc-safe",
  "napi",
  "napi-build",
@@ -2023,6 +2025,7 @@ dependencies = [
  "jazz",
  "jazz-native-transport",
  "jazz-otel",
+ "jazz-storage-rocksdb",
  "opentelemetry",
  "tokio",
  "tracing",
@@ -2038,6 +2041,7 @@ dependencies = [
  "hdrhistogram",
  "jazz",
  "jazz-benchmark-guard",
+ "jazz-storage-rocksdb",
  "libc",
  "postcard",
  "pprof",
@@ -2056,10 +2060,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "jazz-storage-rocksdb"
+version = "0.1.0"
+dependencies = [
+ "groove",
+ "rust-rocksdb",
+ "serde",
+ "tempfile",
+]
+
+[[package]]
 name = "jazz-testkit"
 version = "0.1.0"
 dependencies = [
  "jazz",
+ "jazz-storage-rocksdb",
  "jsonwebtoken",
  "reqwest",
  "serde",

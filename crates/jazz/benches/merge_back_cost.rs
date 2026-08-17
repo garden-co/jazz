@@ -5,12 +5,12 @@ mod support;
 
 use jazz::groove::records::Value;
 use jazz::groove::schema::{ColumnSchema, ColumnType};
-use jazz::groove::storage::{Durability, RocksDbStorage};
 use jazz::ids::{BranchId, NodeUuid, RowUuid};
 use jazz::node::{MergeableCommit, NodeState};
 use jazz::query::Query;
 use jazz::schema::{JazzSchema, TableSchema};
 use jazz::tx::DurabilityTier;
+use jazz_storage_rocksdb::{Durability, RocksDbStorage};
 use support::{emit_json_line, env_usize, insert_node_metrics, phase_fields, reset_phase_counters};
 
 const TABLE: &str = "todos";

@@ -58,7 +58,7 @@ use jazz::groove::records::{
 };
 use jazz::groove::storage::{
     MemoryStorage as CoreMemoryStorage, OrderedKvStorage as CoreOrderedKvStorage,
-    ReopenableStorage as CoreReopenableStorage, RocksDbStorage as CoreRocksDbStorage,
+    ReopenableStorage as CoreReopenableStorage,
 };
 use jazz::ids::{AuthorId as CoreAuthorId, NodeUuid as CoreNodeUuid, RowUuid as CoreRowUuid};
 use jazz::query::{
@@ -78,6 +78,7 @@ use jazz::wire::{
     TransportError, WireAuthorityEndpoint as CoreWireAuthorityEndpoint,
     WireTransport as CoreWireTransport,
 };
+use jazz_storage_rocksdb::RocksDbStorage as CoreRocksDbStorage;
 
 #[derive(Clone, Debug, Deserialize)]
 struct CoreOpenDbConfig {
@@ -2850,9 +2851,13 @@ impl JazzServer {
         } else {
             #[cfg(feature = "rocksdb")]
             {
-                server_builder = server_builder.with_storage(StorageBackend::RocksDb {
-                    path: data_dir.clone().into(),
-                });
+                server_builder = server_builder
+                    .with_storage_factory(std::sync::Arc::new(
+                        jazz_storage_rocksdb::RocksDbStorageFactory,
+                    ))
+                    .with_storage(StorageBackend::Persistent {
+                        path: data_dir.clone().into(),
+                    });
             }
             #[cfg(not(feature = "rocksdb"))]
             {

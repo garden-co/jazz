@@ -57,6 +57,9 @@ pub async fn run(
         builder.with_storage(StorageBackend::InMemory).build().await
     } else {
         builder
+            .with_storage_factory(std::sync::Arc::new(
+                jazz_storage_rocksdb::RocksDbStorageFactory,
+            ))
             .with_storage(StorageBackend::Persistent {
                 path: data_dir.into(),
             })

@@ -6,12 +6,11 @@ use jazz::db::{Db, DbConfig, DbIdentity, Propagation, ReadOpts, SubscriptionEven
 use jazz::groove::records::Value;
 use jazz::groove::schema::{ColumnSchema, ColumnType};
 use jazz::groove::storage::MemoryStorage;
-#[cfg(feature = "rocksdb")]
-use jazz::groove::storage::RocksDbStorage;
 use jazz::ids::{AuthorId, NodeUuid};
 use jazz::query::{OrderDirection, Query, col, eq, lit};
 use jazz::schema::{JazzSchema, TableSchema};
 use jazz::tx::{DurabilityTier, Fate};
+use jazz_storage_rocksdb::RocksDbStorage;
 use jazz_testkit::duplex_transport::duplex;
 
 fn schema() -> JazzSchema {
@@ -89,7 +88,6 @@ fn assert_truthful_empty_local_opening(event: Option<SubscriptionEvent>) {
     assert!(removed.is_empty());
 }
 
-#[cfg(feature = "rocksdb")]
 fn open_persistent_worker(
     path: &std::path::Path,
     node: u8,
@@ -960,7 +958,6 @@ fn worker_relay_forwards_authority_rejection_to_browser_client() {
     ));
 }
 
-#[cfg(feature = "rocksdb")]
 #[test]
 fn reopened_worker_replays_pending_commit_before_later_fate() {
     let schema = schema();
@@ -1022,7 +1019,6 @@ fn reopened_worker_replays_pending_commit_before_later_fate() {
     );
 }
 
-#[cfg(feature = "rocksdb")]
 #[test]
 fn reopened_worker_routes_later_rejection_to_same_main_thread_identity() {
     let schema = schema();

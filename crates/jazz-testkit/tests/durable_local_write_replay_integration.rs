@@ -35,6 +35,9 @@ async fn persistent_restart_replays_pending_write_with_valid_token_impl() {
     context.admin_secret = None;
     context.client_id = Some(ClientId::new());
     context.storage = ClientStorage::Persistent;
+    context.storage_factory = Some(std::sync::Arc::new(
+        jazz_storage_rocksdb::RocksDbStorageFactory,
+    ));
 
     // Keep the initial write offline so only the reopened client can deliver
     // it. The context still carries the helper's ordinary long-lived JWT.

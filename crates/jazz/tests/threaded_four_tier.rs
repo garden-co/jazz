@@ -5,7 +5,6 @@ use std::time::Duration;
 
 use jazz::groove::records::Value;
 use jazz::groove::schema::{ColumnSchema, ColumnType};
-use jazz::groove::storage::RocksDbStorage;
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::node::{CurrentRow, MergeableCommit, NodeState, SKEW_TOLERANCE_MS};
 use jazz::peer::{PeerMetrics, PeerState};
@@ -17,6 +16,7 @@ use jazz::wire::{
     FEATURE_SYNC_MESSAGE_PAYLOAD, WIRE_PROTOCOL_VERSION, WireEnvelope, WireFrame, decode_frame,
     decode_sync_message, encode_frame, encode_sync_message,
 };
+use jazz_storage_rocksdb::RocksDbStorage;
 
 const TABLE: &str = "todos";
 const REFRESH_EVERY: usize = 25;
