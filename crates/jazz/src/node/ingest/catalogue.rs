@@ -470,7 +470,7 @@ where
             }
             let mut batch = self.database.open_batch();
             Self::write_active_schema_lineage_to_batch(&mut batch, &staged)?;
-            if self.database.commit_batch(batch).is_err() {
+            if self.commit_database_batch(batch).is_err() {
                 self.remove_staged_schema_lineage_from_memory(&staged);
                 self.catalogue_activation_failed = true;
                 return Err(Error::CatalogueActivationFailed);

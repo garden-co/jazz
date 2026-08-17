@@ -264,7 +264,7 @@ where
                 );
             }
         }
-        self.database.commit_batch(batch)?;
+        self.commit_database_batch(batch)?;
         self.cache_tx_versions(tx_id, stored_versions.clone());
         if permission_subject != made_by {
             self.open_tx

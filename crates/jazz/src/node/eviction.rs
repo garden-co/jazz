@@ -212,13 +212,13 @@ where
             );
             batch_deletes += 1;
             if low_water_bytes.is_some() {
-                self.database.commit_batch(batch)?;
+                self.commit_database_batch(batch)?;
                 remaining_bytes = self.edge_cache_metered_bytes()?.unwrap_or(remaining_bytes);
                 batch = self.database.open_batch();
             }
         }
         if batch_deletes > 0 && low_water_bytes.is_none() {
-            self.database.commit_batch(batch)?;
+            self.commit_database_batch(batch)?;
         }
         for tx_id in evicted_tx_ids {
             self.invalidate_tx_version_tables_cache(tx_id);

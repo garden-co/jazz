@@ -821,7 +821,7 @@ where
         if !receiver_batch.is_empty() {
             self.sync_metrics.receiver_bulk_ingest_commits += 1;
             self.sync_metrics.receiver_bulk_bundle_ingests += receiver_batch_bundle_count;
-            self.database.commit_batch(receiver_batch)?;
+            self.commit_database_batch(receiver_batch)?;
             for tx_id in &receiver_batch_tx_ids {
                 self.invalidate_tx_version_tables_cache(*tx_id);
             }

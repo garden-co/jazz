@@ -836,7 +836,7 @@ where
                 branch_record,
             );
         }
-        self.database.commit_batch(batch)?;
+        self.commit_database_batch(batch)?;
         self.cache_tx_version_tables(tx_id, transaction_tables);
         Ok(tx_id)
     }
@@ -1963,7 +1963,7 @@ where
                 Value::Bool(metadata_pending),
             ],
         );
-        self.database.commit_batch(batch)?;
+        self.commit_database_batch(batch)?;
         if metadata_pending {
             self.branches
                 .pending_metadata_uploads
@@ -2030,7 +2030,7 @@ where
             "jazz_branch_partitions",
             vec![Value::U64(table_id.0), Value::Uuid(branch_id.0)],
         );
-        self.database.commit_batch(batch)?;
+        self.commit_database_batch(batch)?;
         if let Err(sync_error) = self.synchronize_physical_version_tables() {
             self.branches
                 .branch_partitions
@@ -2043,7 +2043,7 @@ where
                     PrimaryKeyValue::Uuid(branch_id.0),
                 ]),
             );
-            self.database.commit_batch(rollback)?;
+            self.commit_database_batch(rollback)?;
             return Err(sync_error);
         }
         Ok(())

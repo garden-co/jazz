@@ -50,7 +50,7 @@ where
                 durability,
                 update_current_indexes,
             )?;
-            self.database.commit_batch(batch)?;
+            self.commit_database_batch(batch)?;
             let mut staged_global_seqs = Vec::new();
             let mut cleanup_batch = self.database.open_batch();
             self.finalize_staged_transaction_ingest(
@@ -61,7 +61,7 @@ where
                 &mut staged_global_seqs,
             )?;
             if !cleanup_batch.is_empty() {
-                self.database.commit_batch(cleanup_batch)?;
+                self.commit_database_batch(cleanup_batch)?;
                 self.persist_storage_consistency_marker_through(tx_id.time)?;
             }
             Ok(())
@@ -445,7 +445,7 @@ where
                 DurabilityTier::Local,
             ),
         );
-        self.database.commit_batch(batch)?;
+        self.commit_database_batch(batch)?;
         Ok(())
     }
 }

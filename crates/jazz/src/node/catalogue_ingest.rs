@@ -124,7 +124,7 @@ where
                 ],
             );
         }
-        if self.database.commit_batch(batch).is_err() {
+        if self.commit_database_batch(batch).is_err() {
             self.catalogue = previous_catalogue;
             self.catalogue_activation_failed = true;
             return Err(Error::CatalogueActivationFailed);

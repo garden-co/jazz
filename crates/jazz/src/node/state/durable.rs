@@ -2,6 +2,19 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
+    /// Commit one complete node-owned Groove batch.
+    ///
+    /// Every Jazz storage mutation routes through this seam so the async
+    /// migration has one place to retain persistence ownership and gate
+    /// durable protocol consequences. Local-current publication remains a
+    /// separate decision at the Db facade.
+    pub(super) fn commit_database_batch(
+        &mut self,
+        batch: DatabaseBatch,
+    ) -> Result<(), GrooveDbError> {
+        self.database.commit_batch(batch)
+    }
+
     /// Return local synchronization counters.
     pub fn sync_metrics(&self) -> &SyncMetrics {
         &self.sync_metrics
@@ -743,7 +756,7 @@ where
                 );
             }
         }
-        self.database.commit_batch(batch)?;
+        self.commit_database_batch(batch)?;
         self.rejections.rejected_transactions.remove(&tx_id);
         Ok(())
     }

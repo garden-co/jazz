@@ -140,7 +140,7 @@ where
         } else {
             None
         };
-        self.database.commit_batch(batch)?;
+        self.commit_database_batch(batch)?;
         *terminal_fate_persisted = !matches!(stored.fate, Fate::Pending);
         if matches!(stored.fate, Fate::Rejected(_)) || stored.global_seq.is_some() {
             self.persist_storage_consistency_marker_through(tx_id.time)?;
