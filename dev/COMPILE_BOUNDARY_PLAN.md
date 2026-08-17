@@ -101,6 +101,13 @@ instead of Jazz's integration-test umbrella. This keeps the embedded native
 server/client/SQLite surface it actually exposes without compiling sync-autopsy
 instrumentation into the production binding artifact.
 
+`jazz-testkit` now distinguishes its featureless duplex-transport base from
+public client/server scenarios and their native adapters. Direct testkit runs
+default to the full scenario harness, RocksDB, and zstd as before, while Jazz's
+white-box dev-dependency disables those defaults. Its retained engine tests can
+use the duplex transport without re-enabling server, client, SQLite, RocksDB,
+or compression through feature unification.
+
 ### Tests
 
 - Move `TestingClient`, `TestJwtIssuer`, reusable fixtures, simulation helpers,

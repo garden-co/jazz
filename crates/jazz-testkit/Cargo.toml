@@ -3,8 +3,14 @@ name = "jazz-testkit"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = ["scenarios", "rocksdb", "transport-compression-zstd"]
+scenarios = ["jazz/test-utils"]
+rocksdb = ["scenarios", "jazz/rocksdb"]
+transport-compression-zstd = ["jazz/transport-compression-zstd"]
+
 [dependencies]
-jazz = { workspace = true, features = ["test"] }
+jazz.workspace = true
 jsonwebtoken = { version = "10.4", default-features = false, features = ["rust_crypto", "use_pem"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
