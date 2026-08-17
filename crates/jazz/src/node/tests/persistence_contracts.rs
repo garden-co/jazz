@@ -220,6 +220,7 @@ fn async_authority_ingest_owns_complete_persistence_before_fate_publication() {
 struct GatedAuthorityStorage {
     inner: MemoryStorage,
     released: std::rc::Rc<std::cell::Cell<bool>>,
+    cancellations: std::rc::Rc<std::cell::Cell<usize>>,
 }
 
 impl groove::storage::pollable::PollableOrderedKvStorage for GatedAuthorityStorage {
@@ -244,6 +245,8 @@ impl groove::storage::pollable::PollableOrderedKvStorage for GatedAuthorityStora
         &mut self,
         _request: groove::storage::pollable::StorageRequestId,
     ) -> Result<(), groove::storage::Error> {
+        self.cancellations
+            .set(self.cancellations.get().saturating_add(1));
         Ok(())
     }
 }
@@ -252,6 +255,79 @@ struct PersistenceTestWake;
 
 impl std::task::Wake for PersistenceTestWake {
     fn wake(self: std::sync::Arc<Self>) {}
+}
+
+#[test]
+fn pollable_node_open_acquires_inputs_then_durably_finalizes_once() {
+    let node_schema = schema();
+    let column_families = node_schema.column_families();
+    let refs = column_families
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let durable = MemoryStorage::new(&refs);
+    let released = std::rc::Rc::new(std::cell::Cell::new(false));
+    let backend = GatedAuthorityStorage {
+        inner: durable.clone(),
+        released: std::rc::Rc::clone(&released),
+        cancellations: std::rc::Rc::new(std::cell::Cell::new(0)),
+    };
+    let mut opening = PollableNodeOpen::new(node(0xd2), node_schema.clone(), Box::new(backend));
+    let waker = std::sync::Arc::new(PersistenceTestWake).into();
+    let mut context = std::task::Context::from_waker(&waker);
+
+    assert!(opening.poll(&mut context).is_pending());
+    released.set(true);
+    let std::task::Poll::Ready(Ok(mut opened)) = opening.poll(&mut context) else {
+        panic!("released node opening must acquire, construct, and finalize")
+    };
+    assert!(opened.current_rows("todos", DurabilityTier::Local).is_ok());
+    drop(opened);
+
+    NodeState::new(node(0xd2), node_schema, durable)
+        .expect("a ready pollable node must have durably finalized its catalogue metadata");
+}
+
+#[test]
+fn dropping_pollable_node_open_cancels_its_exact_pending_input() {
+    let node_schema = schema();
+    let column_families = node_schema.column_families();
+    let refs = column_families
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let cancellations = std::rc::Rc::new(std::cell::Cell::new(0));
+    let backend = GatedAuthorityStorage {
+        inner: MemoryStorage::new(&refs),
+        released: std::rc::Rc::new(std::cell::Cell::new(false)),
+        cancellations: std::rc::Rc::clone(&cancellations),
+    };
+    let mut opening = PollableNodeOpen::new(node(0xd4), node_schema, Box::new(backend));
+    let waker = std::sync::Arc::new(PersistenceTestWake).into();
+    let mut context = std::task::Context::from_waker(&waker);
+
+    assert!(opening.poll(&mut context).is_pending());
+    drop(opening);
+    assert_eq!(cancellations.get(), 1);
+}
+
+#[test]
+fn immediate_storage_inherits_first_poll_node_readiness() {
+    let node_schema = schema();
+    let column_families = node_schema.column_families();
+    let refs = column_families
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let mut opening = PollableNodeOpen::new(
+        node(0xd3),
+        node_schema,
+        Box::new(MemoryStorage::new(&refs)),
+    );
+    let waker = std::sync::Arc::new(PersistenceTestWake).into();
+    let mut context = std::task::Context::from_waker(&waker);
+
+    assert!(matches!(opening.poll(&mut context), std::task::Poll::Ready(Ok(_))));
 }
 
 fn persistence_storage_for(pending: &PendingAuthorityPublication) -> MemoryStorage {
@@ -299,6 +375,7 @@ fn authority_scheduler_releases_fate_only_after_async_storage_completion() {
     let storage = GatedAuthorityStorage {
         inner: persistence_storage_for(&pending),
         released: std::rc::Rc::clone(&released),
+        cancellations: std::rc::Rc::new(std::cell::Cell::new(0)),
     };
     let mut scheduler = AuthorityPersistenceScheduler::new(Box::new(storage));
     scheduler.enqueue(pending);

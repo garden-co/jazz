@@ -178,7 +178,7 @@ pub use storage_helpers::{
 };
 #[doc(hidden)]
 pub use storage_runtime::{
-    DemandDrivenDatabase, PersistenceQueue, PersistenceUnitId, PollableDatabase,
+    DemandDrivenDatabase, PersistenceQueue, PersistenceUnitId, PollableDatabase, StorageAcquisition,
 };
 
 #[derive(Debug, Error)]

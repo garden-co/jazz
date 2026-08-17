@@ -191,12 +191,22 @@ same atomic unit as the transaction. Existing stores may perform an explicit,
 versioned one-time migration before becoming ready; that migration is not the
 steady-state open contract.
 
-Node opening itself is a pollable state machine. A cache miss advances an owned
-storage request and resumes the same phase. Mutationful finalization (creating
-genesis, assigning aliases, repairing a marker) begins only after its read set
-has been acquired, then publishes one owned durable unit. Retrying a constructor
-from scratch after a cache miss is not acceptable because partially applied
-in-memory writes could be replayed or assigned different identities.
+Node opening itself is a pollable state machine built from restartable resident
+storage transactions. An attempt sees one admitted working set, isolates every
+write it makes, and either:
+
+- reports one exact missing durable input and is discarded;
+- fails without publishing state; or
+- succeeds, becomes the node's resident state, and submits its complete metadata
+  write set as one durable unit before readiness is published.
+
+This is transaction retry, not mutationful constructor replay: failed attempts
+cannot affect the admitted cache, the future node, subscriptions, or durable
+storage. The transaction abstraction owns this rule so individual recovery
+functions remain ordinary synchronous code. Its initial implementation may
+snapshot the resident store; a copy-on-write overlay is an optimization behind
+the same boundary. Immediate storage inherits first-poll readiness because all
+requested inputs and the final commit complete in that poll.
 
 ## Resident current-state requirement
 

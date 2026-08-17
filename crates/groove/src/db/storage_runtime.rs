@@ -154,19 +154,26 @@ pub struct DemandDrivenDatabase {
 /// from making progress. The evaluator remains synchronous; this driver
 /// admits the missing input and reruns the operation from its explicit
 /// pre-publication boundary.
+#[doc(hidden)]
 #[derive(Default)]
-struct StorageAcquisition {
+pub struct StorageAcquisition {
     pending: Option<OwnedStorageRequest>,
 }
 
 impl StorageAcquisition {
-    fn poll<T>(
+    /// Poll one restartable resident operation, acquiring exact durable inputs
+    /// until it can complete synchronously.
+    pub fn poll<T, E>(
         &mut self,
         persistence: &mut dyn PollableOrderedKvStorage,
         cache: &crate::storage::DemandLoadedStorage,
         context: &mut Context<'_>,
-        mut attempt: impl FnMut() -> Result<T, Error>,
-    ) -> Poll<Result<T, Error>> {
+        mut attempt: impl FnMut() -> Result<T, E>,
+        missing_input: impl Fn(E) -> Result<OwnedStorageOperation, E>,
+    ) -> Poll<Result<T, E>>
+    where
+        E: From<crate::storage::Error>,
+    {
         loop {
             if let Some(request) = self.pending.as_ref() {
                 match persistence.poll_request(request, context) {
@@ -176,14 +183,16 @@ impl StorageAcquisition {
                             .pending
                             .take()
                             .expect("polled acquisition request remains pending");
-                        cache.admit(request.operation().clone(), response)?;
+                        cache
+                            .admit(request.operation().clone(), response)
+                            .map_err(E::from)?;
                     }
-                    Poll::Ready(Err(error)) => return Poll::Ready(Err(error.into())),
+                    Poll::Ready(Err(error)) => return Poll::Ready(Err(E::from(error))),
                 }
             }
             match attempt() {
                 Ok(value) => return Poll::Ready(Ok(value)),
-                Err(error) => match missing_storage_input(error) {
+                Err(error) => match missing_input(error) {
                     Ok(request) => {
                         self.pending = Some(OwnedStorageRequest::new(request));
                     }
@@ -191,6 +200,17 @@ impl StorageAcquisition {
                 },
             }
         }
+    }
+
+    /// Cancel any backend work retained for the suspended operation.
+    pub fn cancel(
+        &mut self,
+        persistence: &mut dyn PollableOrderedKvStorage,
+    ) -> Result<(), crate::storage::Error> {
+        if let Some(request) = self.pending.take() {
+            persistence.cancel_request(request.id())?;
+        }
+        Ok(())
     }
 }
 
@@ -233,10 +253,13 @@ impl DemandDrivenDatabase {
         context: &mut Context<'_>,
         mut read: impl FnMut(&Database<crate::storage::DemandLoadedStorage>) -> Result<T, Error>,
     ) -> Poll<Result<T, Error>> {
-        self.acquisition
-            .poll(self.persistence.as_mut(), &self.cache, context, || {
-                read(&self.database)
-            })
+        self.acquisition.poll(
+            self.persistence.as_mut(),
+            &self.cache,
+            context,
+            || read(&self.database),
+            missing_storage_input,
+        )
     }
 
     /// Poll prerequisite durable reads, then execute exactly one real resident
@@ -252,11 +275,13 @@ impl DemandDrivenDatabase {
         let pending_batch = batch
             .as_ref()
             .expect("commit batch is consumed exactly once after Ready");
-        match self
-            .acquisition
-            .poll(self.persistence.as_mut(), &self.cache, context, || {
-                self.database.preflight_batch_storage_inputs(pending_batch)
-            }) {
+        match self.acquisition.poll(
+            self.persistence.as_mut(),
+            &self.cache,
+            context,
+            || self.database.preflight_batch_storage_inputs(pending_batch),
+            missing_storage_input,
+        ) {
             Poll::Pending => Poll::Pending,
             Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
             Poll::Ready(Ok(())) => {
@@ -277,11 +302,13 @@ impl DemandDrivenDatabase {
         let pending_graph = graph
             .as_ref()
             .expect("subscription graph is consumed exactly once after Ready");
-        match self
-            .acquisition
-            .poll(self.persistence.as_mut(), &self.cache, context, || {
-                self.database.subscribe_one_sink(pending_graph.clone())
-            }) {
+        match self.acquisition.poll(
+            self.persistence.as_mut(),
+            &self.cache,
+            context,
+            || self.database.subscribe_one_sink(pending_graph.clone()),
+            missing_storage_input,
+        ) {
             Poll::Pending => Poll::Pending,
             Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
             Poll::Ready(Ok(subscription)) => {

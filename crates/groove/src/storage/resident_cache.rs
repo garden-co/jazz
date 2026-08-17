@@ -5,8 +5,8 @@ use std::collections::BTreeSet;
 
 use super::pollable::{OwnedScanRequest, OwnedStorageOperation, OwnedStorageResponse};
 use super::{
-    ColumnFamilyName, Error, Key, MemoryStorage, OrderedKvStorage, ScanVisitor, Value,
-    WriteOperation, apply_storage_delta,
+    ColumnFamilyName, Error, Key, MemoryStorage, OrderedKvStorage, OwnedWriteOperation,
+    ReopenableStorage, ScanVisitor, Value, WriteOperation, apply_storage_delta,
 };
 
 /// Synchronous working set that reports exact missing storage inputs instead
@@ -22,10 +22,11 @@ pub struct DemandLoadedStorage {
     state: std::rc::Rc<RefCell<DemandState>>,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct DemandState {
     admitted: Vec<OwnedStorageOperation>,
     dirty_keys: BTreeSet<(String, Vec<u8>)>,
+    pending_writes: Vec<OwnedWriteOperation>,
 }
 
 impl DemandLoadedStorage {
@@ -34,6 +35,43 @@ impl DemandLoadedStorage {
             cache: MemoryStorage::new(column_families),
             state: std::rc::Rc::new(RefCell::new(DemandState::default())),
         }
+    }
+
+    /// Begin an isolated, restartable storage transaction over the resident set.
+    ///
+    /// Reads observe the inputs admitted so far. Writes are applied only to the
+    /// transaction's private working set and accumulated as one durable commit.
+    /// The caller may discard the transaction after [`Error::NotResident`] and
+    /// retry after admitting the requested input, or publish the successful
+    /// transaction as its new resident view.
+    ///
+    /// This currently snapshots the resident memory store. Keeping that detail
+    /// behind this boundary lets the implementation become copy-on-write later
+    /// without changing restartable core operations.
+    pub fn begin_transaction(&self) -> Result<Self, Error> {
+        let column_families = self.cache.column_family_names().unwrap_or_default();
+        let refs = column_families
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        let fork = Self::new(&refs);
+        for column_family in column_families {
+            for (key, value) in self.cache.prefix(&column_family, &[])? {
+                fork.cache.set(&column_family, &key, &value)?;
+            }
+        }
+        let state = self.state.borrow();
+        *fork.state.borrow_mut() = DemandState {
+            admitted: state.admitted.clone(),
+            dirty_keys: state.dirty_keys.clone(),
+            pending_writes: Vec::new(),
+        };
+        Ok(fork)
+    }
+
+    /// Take writes applied synchronously to the resident working set.
+    pub fn take_pending_writes(&self) -> Vec<OwnedWriteOperation> {
+        std::mem::take(&mut self.state.borrow_mut().pending_writes)
     }
 
     /// Admit one completed durable read into the working set.
@@ -163,12 +201,27 @@ impl OrderedKvStorage for DemandLoadedStorage {
     fn set(&self, cf: &ColumnFamilyName, key: &Key, value: &[u8]) -> Result<(), Error> {
         self.cache.set(cf, key, value)?;
         self.mark_dirty(cf, key);
+        self.state
+            .borrow_mut()
+            .pending_writes
+            .push(OwnedWriteOperation::Set {
+                cf: cf.to_owned(),
+                key: key.to_vec(),
+                value: value.to_vec(),
+            });
         Ok(())
     }
 
     fn delete(&self, cf: &ColumnFamilyName, key: &Key) -> Result<(), Error> {
         self.cache.delete(cf, key)?;
         self.mark_dirty(cf, key);
+        self.state
+            .borrow_mut()
+            .pending_writes
+            .push(OwnedWriteOperation::Delete {
+                cf: cf.to_owned(),
+                key: key.to_vec(),
+            });
         Ok(())
     }
 
@@ -226,5 +279,15 @@ impl OrderedKvStorage for DemandLoadedStorage {
 
     fn column_family_names(&self) -> Option<Vec<String>> {
         self.cache.column_family_names()
+    }
+}
+
+impl ReopenableStorage for DemandLoadedStorage {
+    fn reopen(self, column_families: &[&str]) -> Result<Self, Error> {
+        let Self { cache, state } = self;
+        Ok(Self {
+            cache: cache.reopen(column_families)?,
+            state,
+        })
     }
 }
