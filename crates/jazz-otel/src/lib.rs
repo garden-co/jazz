@@ -11,8 +11,48 @@ use opentelemetry_otlp::{Protocol, WithExportConfig};
 use opentelemetry_sdk::logs::SdkLoggerProvider;
 use opentelemetry_sdk::metrics::SdkMeterProvider;
 use opentelemetry_sdk::trace::SdkTracerProvider;
+use std::sync::OnceLock;
+use tracing_subscriber::layer::SubscriberExt as _;
 
 const DEFAULT_SERVICE_NAME: &str = "jazz-server";
+
+// A process-global tracing subscriber must retain its provider for the life of
+// the process. Keep both the one-time installation boundary and that ownership
+// in the telemetry adapter rather than duplicating OTel SDK types in shells.
+static PROCESS_TRACER_PROVIDER: OnceLock<SdkTracerProvider> = OnceLock::new();
+static PROCESS_TRACING_INIT: OnceLock<()> = OnceLock::new();
+
+/// Installs process-global OTLP tracing once, retaining the provider for the
+/// process lifetime. Later calls are intentionally no-ops: Rust permits only
+/// one global tracing subscriber.
+///
+/// `directives` lets a thin process shell add its own default targets without
+/// depending directly on `opentelemetry_sdk` or assembling subscriber layers.
+pub fn init_process_tracing_with_endpoint_once(
+    service_name: &str,
+    collector_url: &str,
+    directives: &[&str],
+) {
+    PROCESS_TRACING_INIT.get_or_init(|| {
+        let endpoint = normalize_otlp_traces_endpoint(collector_url);
+        let provider = init_tracer_provider_with_endpoint(service_name, Some(&endpoint));
+        let otel_layer = layer(&provider);
+        let mut filter = tracing_subscriber::EnvFilter::from_default_env();
+        for directive in directives {
+            filter = filter.add_directive(directive.parse().unwrap_or_else(|error| {
+                panic!("invalid tracing directive {directive:?}: {error}")
+            }));
+        }
+
+        if tracing::subscriber::set_global_default(
+            tracing_subscriber::registry().with(filter).with(otel_layer),
+        )
+        .is_ok()
+        {
+            let _ = PROCESS_TRACER_PROVIDER.set(provider);
+        }
+    });
+}
 
 /// Resolve the service name from `OTEL_SERVICE_NAME`, falling back to
 /// `DEFAULT_SERVICE_NAME`. Used by the env-driven provider builders. The

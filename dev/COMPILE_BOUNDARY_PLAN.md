@@ -84,6 +84,11 @@ Core depends only on lightweight instrumentation vocabulary such as `tracing`.
 `jazz-otel` owns OpenTelemetry SDKs, exporters, subscribers, and Tokio runtime
 integration. Executable and binding shells opt into it.
 
+Progress: the NAPI shell now delegates process-global subscriber assembly and
+tracer-provider lifetime ownership to `jazz-otel`; it no longer depends
+directly on `opentelemetry_sdk` or `tracing-subscriber`. Shell-specific default
+filter directives remain explicit inputs to the adapter boundary.
+
 ### Tests
 
 - Move `TestingClient`, `TestJwtIssuer`, reusable fixtures, simulation helpers,

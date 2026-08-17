@@ -36,7 +36,7 @@ use serde_json::Value as JsonValue;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::rc::Rc;
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use base64::Engine;
@@ -2707,34 +2707,15 @@ fn parse_jazz_server_start_options(options: JsonValue) -> napi::Result<JazzServe
         .map_err(|error| napi::Error::from_reason(format!("Invalid JazzServer options: {error}")))
 }
 
-static JAZZ_SERVER_OTEL_PROVIDER: OnceLock<opentelemetry_sdk::trace::SdkTracerProvider> =
-    OnceLock::new();
-static JAZZ_SERVER_TELEMETRY_INIT: OnceLock<()> = OnceLock::new();
-
 fn init_jazz_server_telemetry(collector_url: Option<&str>) {
     let Some(collector_url) = collector_url else {
         return;
     };
-
-    JAZZ_SERVER_TELEMETRY_INIT.get_or_init(|| {
-        use tracing_subscriber::layer::SubscriberExt as _;
-
-        let endpoint = jazz_otel::normalize_otlp_traces_endpoint(collector_url);
-        let provider =
-            jazz_otel::init_tracer_provider_with_endpoint("jazz-server", Some(&endpoint));
-        let otel_layer = jazz_otel::layer(&provider);
-        let filter = tracing_subscriber::EnvFilter::from_default_env()
-            .add_directive("jazz_tools=trace".parse().expect("valid tracing directive"))
-            .add_directive("tower_http=debug".parse().expect("valid tracing directive"));
-
-        if tracing::subscriber::set_global_default(
-            tracing_subscriber::registry().with(filter).with(otel_layer),
-        )
-        .is_ok()
-        {
-            let _ = JAZZ_SERVER_OTEL_PROVIDER.set(provider);
-        }
-    });
+    jazz_otel::init_process_tracing_with_endpoint_once(
+        "jazz-server",
+        collector_url,
+        &["jazz_tools=trace", "tower_http=debug"],
+    );
 }
 
 #[napi]
