@@ -1,5 +1,3 @@
-#![cfg(feature = "test")]
-
 use jazz_testkit as support;
 
 use std::collections::BTreeSet;

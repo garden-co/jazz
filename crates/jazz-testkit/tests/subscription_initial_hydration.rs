@@ -1,5 +1,3 @@
-#![cfg(feature = "test")]
-
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 

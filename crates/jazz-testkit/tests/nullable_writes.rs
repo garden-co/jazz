@@ -1,5 +1,3 @@
-#![cfg(feature = "test-utils")]
-
 use jazz::row_input;
 use jazz::tools::{
     ColumnType, JazzClient, ObjectId, QueryBuilder, Schema, SchemaBuilder, TableSchema, Value,

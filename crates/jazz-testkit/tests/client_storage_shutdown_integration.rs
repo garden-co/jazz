@@ -1,5 +1,3 @@
-#![cfg(feature = "test")]
-
 //! Public-API coverage that a connected persistent client releases its local
 //! storage when it shuts down.
 
