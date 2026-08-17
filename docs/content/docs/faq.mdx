@@ -1,7 +1,7 @@
 ---
 title: FAQ
 description: Frequently asked questions about Jazz.
-reviewedAt: "f6535a533"
+reviewedAt: "836d8e853"
 ---
 
 import { Accordion, Accordions } from "fumadocs-ui/components/accordion";
@@ -38,7 +38,7 @@ This is useful when iterating on your schema during development.
 
 <Accordion id="undefined-vs-empty-array" title="Why does useAll return undefined?">
 
-`useAll` and `QuerySubscription` return `undefined` until the first response arrives from the requested tier. After that, the value is an array&hairsp;—&hairsp;empty (`[]`) if no rows match, or populated. See [The undefined loading state](/docs/reading/queries#the-undefined-loading-state) for details.
+`useAll` and `QuerySubscription` return `undefined` until the first response arrives from the requested tier. After that, the value is an array&hairsp;—&hairsp;empty (`[]`) if no rows match, or populated. See [The loading state](/docs/reading/queries#the-loading-state) for details.
 
 </Accordion>
 

@@ -1,7 +1,7 @@
 ---
 title: Writing Data
 description: Insert, update, and delete APIs with local-first execution, framework context hooks, and an intro to durability tiers.
-reviewedAt: "4059cdef"
+reviewedAt: "836d8e853"
 ---
 
 ## Local-first writes
@@ -91,6 +91,8 @@ await write.wait({ tier: "edge" });
 
 Trying to insert, update or delete an already deleted row will fail. Use `restore(...)` to make a soft-deleted row visible again.
 `restore` requires providing new data for the restored row (missing fields will use schema defaults, if they exist).
+Deleted rows are omitted from queries by default. Add `includeDeleted()` when you need to find a
+row before restoring it.
 
 <include cwd lang="ts">
   ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-restore-ts
@@ -227,24 +229,28 @@ Transactions can read their own local writes through `all(...)` and `one(...)` b
 When using `transaction`, changes are automatically committed once the callback finishes running and,
 if an error is thrown inside the callback, the open transaction is rolled back instead of committed.
 
-Alternatively, you can use `beginTransaction` to get a transaction object.
-This can be useful when making writes across multiple contexts. In this case however, you need to commit or rollback
-the transaction explicitly.
+Use `beginTransaction()` when you need to keep a mergeable transaction open across multiple
+contexts. You must commit or roll back a manually opened transaction yourself.
 
 ```ts
-let transaction: DbTransaction;
-beforeEach(() => {
-  transaction = db.beginTransaction();
-});
+const transaction = db.beginTransaction();
+transaction.insert(app.todos, { title: "Grouped write", done: false });
+transaction.update(app.todos, todoId, { done: true });
 
-afterEach(() => {
-  // Writes performed in tests will be rolled back at the end,
-  // preventing tests from interfering with each other
-  transaction.rollback();
-});
+const committed = await transaction.commit();
+await committed.wait({ tier: "edge" });
+```
 
-it("tasks have a title", () => {
-  const task = transaction.insert(app.todos, { title: "Test task", done: false });
-  expect(task.title).toEqual("Test task");
-});
+Call `await transaction.rollback()` instead of `commit()` if you need to abandon the transaction.
+
+Use `beginExclusiveTransaction()` when you need the same manual control over an exclusive
+transaction. Its commit handle waits for the authority to accept or reject the transaction, so
+`wait()` does not take a durability tier.
+
+```ts
+const transaction = db.beginExclusiveTransaction();
+transaction.insert(app.todos, { title: "Sealed write", done: false });
+
+const committed = await transaction.commit();
+await committed.wait();
 ```

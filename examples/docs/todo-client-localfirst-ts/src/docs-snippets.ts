@@ -158,6 +158,10 @@ export async function readTodoTitlesWithSelectedProject(db: Db) {
 // #endregion reading-select-ts
 
 // #region dry-run-permissions-ts
+export async function canReadTodo(db: Db, todoId: string) {
+  return db.canRead(app.todos, todoId);
+}
+
 export async function readTodosWithDeletePermission(db: Db) {
   const todos = await db.all(app.todos.select("id", "title").orderBy("title", "asc"));
   const advice = await Promise.all(todos.map((todo) => db.canDelete(app.todos, todo.id)));
@@ -238,8 +242,11 @@ export async function writeTodoCrud(db: Db, todoId: string) {
 // #endregion writing-crud-ts
 
 // #region writing-restore-ts
-export function restoreDeletedTodo(db: Db, todoId: string) {
+export async function restoreDeletedTodo(db: Db, todoId: string) {
   db.delete(app.todos, todoId);
+
+  const deletedTodo = await db.one(app.todos.where({ id: todoId }).includeDeleted());
+  if (!deletedTodo) throw new Error("Deleted todo not found");
 
   const { value: restored } = db.restore(app.todos, todoId, {
     title: "Restored task",
