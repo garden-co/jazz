@@ -300,7 +300,10 @@ describe("Db transactions", () => {
   it("commits an empty exclusive transaction opened at begin", async () => {
     await allTodos();
     const tx = db.beginExclusiveTransaction();
-    await expect(tx.commit()).resolves.toBeDefined();
+    await expect(tx.commit()).resolves.toMatchObject({
+      value: undefined,
+      wait: expect.any(Function),
+    });
   });
 
   it("rejects exclusive transaction operations after commit", async () => {
@@ -431,7 +434,8 @@ describe("Db mergeable transactions", () => {
     try {
       const tx = sessionDb.beginTransaction();
       tx.insert(app.todos, { title: "Session-scoped transaction", done: false });
-      await tx.commit();
+      const result = await tx.commit();
+      expect(result).toMatchObject({ value: undefined, wait: expect.any(Function) });
       await expect(sessionDb.all(app.todos.where({}), { tier: "local" })).resolves.toEqual([
         { id: expect.any(String), title: "Session-scoped transaction", done: false },
       ]);

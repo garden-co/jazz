@@ -30,7 +30,9 @@ describe("TS Upsert API", () => {
 
   it("can wait for upserts to be persisted up to a specific durability tier", async () => {
     const id = "00000000-0000-0000-0000-000000000000";
-    await db.upsert(app.projects, id, { name: "Test Project" }).wait({ tier: "local" });
+    const result = db.upsert(app.projects, id, { name: "Test Project" });
+    expect(result).toMatchObject({ value: undefined, wait: expect.any(Function) });
+    await result.wait({ tier: "local" });
 
     const project = await db.one(app.projects.where({ id: { eq: id } }), { tier: "local" });
     expect(project).toEqual({
