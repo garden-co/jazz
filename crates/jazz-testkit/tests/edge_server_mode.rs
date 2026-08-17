@@ -1,4 +1,4 @@
-#![cfg(feature = "test")]
+#![allow(clippy::enum_variant_names)]
 
 use jazz_testkit as support;
 

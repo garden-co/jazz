@@ -1,5 +1,3 @@
-#![cfg(feature = "test")]
-
 //! Durable local writes are an upload backlog, not merely local visibility.
 
 use jazz_testkit as support;

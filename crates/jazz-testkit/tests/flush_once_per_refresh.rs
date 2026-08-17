@@ -1,5 +1,3 @@
-#![cfg(feature = "test")]
-
 use std::time::{Duration, Instant};
 
 use jazz::row_input;

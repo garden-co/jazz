@@ -1,4 +1,4 @@
-#![cfg(feature = "test")]
+#![allow(dead_code, clippy::redundant_pattern_matching)]
 
 //! E2E catalogue sync integration test.
 //!

@@ -1,4 +1,4 @@
-#![cfg(feature = "test")]
+#![allow(clippy::type_complexity)]
 
 use jazz_testkit as support;
 

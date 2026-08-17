@@ -1,4 +1,4 @@
-#![cfg(feature = "test")]
+#![allow(clippy::arc_with_non_send_sync, clippy::collapsible_if)]
 
 use jazz_testkit as support;
 

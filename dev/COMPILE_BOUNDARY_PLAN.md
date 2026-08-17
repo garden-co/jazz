@@ -104,6 +104,10 @@ are migrated outward incrementally. The first outward cluster covers public
 claims, inherited policies, policy-aware branches, authorization across schema
 renames, scope revocation, and local-first authentication; these seven binaries
 now compile and run under `jazz-testkit` rather than Jazz's core test inventory.
+The remaining public client/server, HTTP admission, synchronization, schema
+evolution, persistence, subscription, and transaction scenarios followed as
+one migration. Direct `Db`, Node, peer, wire, IVM, and storage contract targets
+remain under Jazz even when Cargo represents them as integration binaries.
 
 ## Proposed feature model
 

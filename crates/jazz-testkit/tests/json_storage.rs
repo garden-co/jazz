@@ -1,5 +1,3 @@
-#![cfg(feature = "test")]
-
 //! Regression coverage retained from the pre-engine-swap JSON integration
 //! suite. JSON is physically stored as text, but its public schema contract
 //! must still be enforced at every write boundary.

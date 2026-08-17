@@ -193,55 +193,11 @@ harness = false
 required-features = ["testing"]
 
 [[test]]
-name = "aggregate_subscriptions"
-required-features = ["test-utils"]
-
-[[test]]
-name = "transactions"
-required-features = ["test-utils"]
-
-[[test]]
-name = "edge_server_mode"
-required-features = ["test"]
-
-[[test]]
-name = "bigint_integration"
-required-features = ["test"]
-
-[[test]]
-name = "nullable_writes"
-required-features = ["test-utils"]
-
-[[test]]
-name = "query_membership_filters"
-required-features = ["test"]
-
-[[test]]
-name = "flush_once_per_refresh"
-required-features = ["test"]
-
-[[test]]
 name = "parameterized_subscription_routing"
 required-features = ["test"]
 
 [[test]]
 name = "authorization_scope_reentry"
-required-features = ["test"]
-
-[[test]]
-name = "catalogue_sync_integration"
-required-features = ["test"]
-
-[[test]]
-name = "history_conflict"
-required-features = ["test"]
-
-[[test]]
-name = "clients_sync"
-required-features = ["test"]
-
-[[test]]
-name = "gset_merge"
 required-features = ["test"]
 
 [[example]]
