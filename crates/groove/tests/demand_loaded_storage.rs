@@ -49,6 +49,28 @@ fn schema() -> DatabaseSchema {
     .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))])
 }
 
+fn referencing_schema() -> DatabaseSchema {
+    DatabaseSchema::new([
+        TableSchema::new(
+            "rows",
+            [
+                ColumnSchema::new("id", ColumnType::U64),
+                ColumnSchema::new("related_id", ColumnType::U64),
+                ColumnSchema::new("value", ColumnType::String),
+            ],
+        )
+        .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64)),
+        TableSchema::new(
+            "related",
+            [
+                ColumnSchema::new("id", ColumnType::U64),
+                ColumnSchema::new("label", ColumnType::String),
+            ],
+        )
+        .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64)),
+    ])
+}
+
 #[test]
 fn query_requests_only_its_missing_range_then_retries_from_cache() {
     let schema = schema();
@@ -258,4 +280,69 @@ fn opened_subscription_inherits_synchronous_write_visibility_over_async_storage(
         database.poll_persistence(&mut context),
         Poll::Ready(Ok(()))
     ));
+}
+
+#[test]
+fn direct_write_is_synchronous_while_an_unloaded_reference_may_suspend() {
+    let schema = referencing_schema();
+    let released = Rc::new(Cell::new(true));
+    let polls = Rc::new(Cell::new(0));
+    let durable = GatedStorage {
+        inner: MemoryStorage::new(&["rows", "related", "indices"]),
+        released: Rc::clone(&released),
+        polls,
+    };
+    let mut database = DemandDrivenDatabase::new(schema, Box::new(durable)).unwrap();
+    let mut context = Context::from_waker(Waker::noop());
+
+    // Opening the direct-row view loads only that source. The related source
+    // deliberately remains absent from the working set.
+    let Poll::Ready(Ok(_)) = database.poll_read(&mut context, |database| {
+        database.primary_key_scan("rows", &[])
+    }) else {
+        panic!("released direct-row opening must load its range")
+    };
+    let subscription = database
+        .resident_mut()
+        .subscribe_one_sink(GraphBuilder::table("rows"))
+        .unwrap();
+    assert!(subscription.recv().unwrap().is_empty());
+
+    released.set(false);
+    let mut batch = Some(database.resident().open_batch());
+    batch.as_mut().unwrap().insert(
+        "rows",
+        vec![
+            Value::U64(21),
+            Value::U64(99),
+            Value::String("direct".into()),
+        ],
+    );
+    let Poll::Ready(Ok(persistence)) = database.poll_commit_batch(&mut context, &mut batch) else {
+        panic!("a direct write over its resident source must be first-poll ready")
+    };
+    assert_eq!(
+        subscription.recv().unwrap().to_values().unwrap().len(),
+        1,
+        "the direct-row callback must fire before the referenced row is loaded"
+    );
+    assert_eq!(
+        database
+            .resident()
+            .primary_key_scan("rows", &[Value::U64(21)])
+            .unwrap()
+            .len(),
+        1,
+        "a new direct one-shot must immediately see the write"
+    );
+
+    assert!(
+        database
+            .poll_read(&mut context, |database| database
+                .primary_key_scan("related", &[Value::U64(99)]))
+            .is_pending(),
+        "expanding through an unloaded reference is allowed to suspend"
+    );
+    database.enqueue_persistence(persistence);
+    assert!(database.poll_persistence(&mut context).is_pending());
 }
