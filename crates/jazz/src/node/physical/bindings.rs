@@ -1,0 +1,248 @@
+pub(super) fn allocate_provisional_physical_mapping(
+    schema: &JazzSchema,
+    next_table_id: &mut u64,
+    next_column_id: &mut u64,
+) -> Result<SchemaPhysicalMapping, Error> {
+    let mut tables = BTreeMap::new();
+    for table in &schema.tables {
+        let table_id = PhysicalTableId(*next_table_id);
+        *next_table_id = next_table_id
+            .checked_add(1)
+            .ok_or(Error::InvalidStoredValue("physical table id exhausted"))?;
+        let mut columns = BTreeMap::new();
+        for column in &table.columns {
+            let column_id = PhysicalColumnId(*next_column_id);
+            *next_column_id = next_column_id
+                .checked_add(1)
+                .ok_or(Error::InvalidStoredValue("physical column id exhausted"))?;
+            columns.insert(column.name.clone(), column_id);
+        }
+        tables.insert(
+            table.name.clone(),
+            TablePhysicalMapping {
+                table_id,
+                columns,
+                variant_cases: Vec::new(),
+                scalar_enum_cases: BTreeMap::new(),
+                payload_enum_cases: BTreeMap::new(),
+                nested_scalar_enum_cases: BTreeMap::new(),
+                nested_payload_enum_cases: BTreeMap::new(),
+            },
+        );
+    }
+    Ok(SchemaPhysicalMapping { tables })
+}
+
+/// Allocate and retain the single hidden Groove row case for one Jazz layout.
+/// Allocation consults the whole physical-table lineage; nested column enums
+/// have their own registries and never multiply these row cases.
+pub(super) fn allocate_physical_variant_cases(
+    mappings: &mut BTreeMap<SchemaVersionId, SchemaPhysicalMapping>,
+    aliases: &BTreeMap<SchemaVersionId, SchemaVersionAlias>,
+    schema_version: SchemaVersionId,
+    logical_table: &str,
+    fields: BTreeSet<String>,
+) -> Result<Vec<PhysicalVariantCase>, Error> {
+    let target = mappings
+        .get(&schema_version)
+        .and_then(|mapping| mapping.tables.get(logical_table))
+        .ok_or(Error::InvalidStoredValue(
+            "variant-case target physical mapping missing",
+        ))?;
+    let table_id = target.table_id;
+    let target_columns = target.columns.keys().cloned().collect::<BTreeSet<_>>();
+    if !fields.is_subset(&target_columns) {
+        return Err(Error::InvalidStoredValue(
+            "physical table variant contains an unknown field",
+        ));
+    }
+    if let Some(existing) = target.variant_cases.first() {
+        if target.variant_cases.len() != 1 || existing.fields != fields {
+            return Err(Error::InvalidStoredValue(
+                "physical table variant case definition changed",
+            ));
+        }
+        return Ok(target.variant_cases.clone());
+    }
+
+    let mut used = BTreeMap::<u32, SchemaVersionId>::new();
+    for (candidate_schema, mapping) in mappings.iter() {
+        let Some((_, table)) = mapping
+            .tables
+            .iter()
+            .find(|(_, table)| table.table_id == table_id)
+        else {
+            continue;
+        };
+        if table.variant_cases.is_empty() {
+            // The target mapping is still provisional: its alias has never
+            // been written as a row tag, and is replaced by the cases below.
+            if *candidate_schema == schema_version {
+                continue;
+            }
+            let alias = aliases
+                .get(candidate_schema)
+                .copied()
+                .ok_or(Error::InvalidStoredValue(
+                    "variant-case schema alias missing",
+                ))?;
+            let tag = groove_variant_tag(alias)?;
+            if used.insert(tag, *candidate_schema).is_some() {
+                return Err(Error::InvalidStoredValue(
+                    "physical table variant tag collision",
+                ));
+            }
+        } else if table.variant_cases.len() != 1
+            || used
+                .insert(table.variant_cases[0].tag, *candidate_schema)
+                .is_some()
+        {
+            return Err(Error::InvalidStoredValue(
+                "physical table variant tag collision",
+            ));
+        }
+    }
+    let tag = groove_variant_tag(*aliases.get(&schema_version).ok_or(
+        Error::InvalidStoredValue("variant-case schema alias missing"),
+    )?)?;
+    if used.contains_key(&tag) {
+        return Err(Error::InvalidStoredValue(
+            "physical table variant tag collision",
+        ));
+    }
+    let allocated = vec![PhysicalVariantCase { tag, fields }];
+    mappings
+        .get_mut(&schema_version)
+        .and_then(|mapping| mapping.tables.get_mut(logical_table))
+        .ok_or(Error::InvalidStoredValue(
+            "variant-case target physical mapping missing",
+        ))?
+        .variant_cases = allocated.clone();
+    Ok(allocated)
+}
+
+pub(super) fn validate_physical_variant_cases(
+    mappings: &BTreeMap<SchemaVersionId, SchemaPhysicalMapping>,
+    aliases: &BTreeMap<SchemaVersionId, SchemaVersionAlias>,
+) -> Result<(), Error> {
+    let mut by_table = BTreeMap::<PhysicalTableId, BTreeMap<u32, SchemaVersionId>>::new();
+    for (schema_version, mapping) in mappings {
+        for table in mapping.tables.values() {
+            let tag = if table.variant_cases.is_empty() {
+                groove_variant_tag(*aliases.get(schema_version).ok_or(
+                    Error::InvalidStoredValue("variant-case schema alias missing"),
+                )?)?
+            } else {
+                if table.variant_cases.len() != 1 {
+                    return Err(Error::InvalidStoredValue(
+                        "physical table layout has multiple row cases",
+                    ));
+                }
+                table.variant_cases[0].tag
+            };
+            let tags = by_table.entry(table.table_id).or_default();
+            if tags.insert(tag, *schema_version).is_some() {
+                return Err(Error::InvalidStoredValue(
+                    "physical table variant tag collision",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn physical_history_binding(
+    catalogue_schemas: &BTreeMap<SchemaVersionId, SchemaVersion>,
+    schema_version_aliases: &BTreeMap<SchemaVersionId, SchemaVersionAlias>,
+    physical_mappings: &BTreeMap<SchemaVersionId, SchemaPhysicalMapping>,
+    schema_version: SchemaVersionId,
+    logical_table: &str,
+) -> Result<PhysicalHistoryBinding, Error> {
+    let schema = catalogue_schemas
+        .get(&schema_version)
+        .ok_or(Error::InvalidStoredValue("physical history schema missing"))?;
+    let table = schema
+        .schema
+        .tables
+        .iter()
+        .find(|table| table.name == logical_table)
+        .ok_or_else(|| Error::TableNotFound(logical_table.to_owned()))?;
+    let mapping = physical_mappings
+        .get(&schema_version)
+        .and_then(|mapping| mapping.tables.get(logical_table))
+        .ok_or(Error::InvalidStoredValue(
+            "physical history table mapping missing",
+        ))?;
+    let alias =
+        schema_version_aliases
+            .get(&schema_version)
+            .copied()
+            .ok_or(Error::InvalidStoredValue(
+                "physical history schema alias missing",
+            ))?;
+    Ok(PhysicalHistoryBinding {
+        storage_table: physical_history_table_name(mapping.table_id),
+        descriptor: physical_history_descriptor(table, mapping, alias)?,
+    })
+}
+
+pub(super) fn physical_current_binding(
+    catalogue_schemas: &BTreeMap<SchemaVersionId, SchemaVersion>,
+    physical_mappings: &BTreeMap<SchemaVersionId, SchemaPhysicalMapping>,
+    schema_version: SchemaVersionId,
+    logical_table: &str,
+    class: PhysicalCurrentClass,
+) -> Result<PhysicalHistoryBinding, Error> {
+    let schema = catalogue_schemas
+        .get(&schema_version)
+        .ok_or(Error::InvalidStoredValue("physical current schema missing"))?;
+    let table = schema
+        .schema
+        .tables
+        .iter()
+        .find(|table| table.name == logical_table)
+        .ok_or_else(|| Error::TableNotFound(logical_table.to_owned()))?;
+    let mapping = physical_mappings
+        .get(&schema_version)
+        .and_then(|mapping| mapping.tables.get(logical_table))
+        .ok_or(Error::InvalidStoredValue(
+            "physical current table mapping missing",
+        ))?;
+    let storage_table = match class {
+        PhysicalCurrentClass::Global => physical_global_current_table_name(mapping.table_id),
+        PhysicalCurrentClass::Ahead => physical_ahead_current_table_name(mapping.table_id),
+    };
+    Ok(PhysicalHistoryBinding {
+        storage_table,
+        descriptor: physical_current_descriptor(table, mapping)?,
+    })
+}
+
+pub(super) fn physical_rejected_version_binding(
+    catalogue_schemas: &BTreeMap<SchemaVersionId, SchemaVersion>,
+    physical_mappings: &BTreeMap<SchemaVersionId, SchemaPhysicalMapping>,
+    schema_version: SchemaVersionId,
+    logical_table: &str,
+) -> Result<PhysicalHistoryBinding, Error> {
+    let schema = catalogue_schemas
+        .get(&schema_version)
+        .ok_or(Error::InvalidStoredValue(
+            "physical rejected-version schema missing",
+        ))?;
+    let table = schema
+        .schema
+        .tables
+        .iter()
+        .find(|table| table.name == logical_table)
+        .ok_or_else(|| Error::TableNotFound(logical_table.to_owned()))?;
+    let mapping = physical_mappings
+        .get(&schema_version)
+        .and_then(|mapping| mapping.tables.get(logical_table))
+        .ok_or(Error::InvalidStoredValue(
+            "physical rejected-version table mapping missing",
+        ))?;
+    Ok(PhysicalHistoryBinding {
+        storage_table: physical_rejected_versions_table_name(mapping.table_id),
+        descriptor: physical_rejected_version_descriptor(table, mapping)?,
+    })
+}
