@@ -297,9 +297,7 @@ fn pollable_node_open_acquires_inputs_then_durably_finalizes_once() {
         panic!("released node opening must acquire, construct, and finalize")
     };
     assert!(matches!(
-        opened.poll_query(&mut context, |node| {
-            node.current_rows("todos", DurabilityTier::None)
-        }),
+        opened.poll_current_rows(&mut context, "todos", DurabilityTier::None),
         std::task::Poll::Ready(Ok(_))
     ));
     drop(opened);
@@ -387,9 +385,9 @@ fn demand_driven_node_publishes_locally_before_one_atomic_durable_unit() {
         runtime.poll_mergeable_commit(&mut context, &commit),
         std::task::Poll::Ready(Ok(_))
     ));
-    let std::task::Poll::Ready(Ok(rows)) = runtime.poll_query(&mut context, |node| {
-        node.current_rows("todos", DurabilityTier::None)
-    }) else {
+    let std::task::Poll::Ready(Ok(rows)) =
+        runtime.poll_current_rows(&mut context, "todos", DurabilityTier::None)
+    else {
         panic!("the published local row must be synchronously queryable")
     };
     assert_eq!(rows.len(), 1);
@@ -486,9 +484,9 @@ fn cold_mergeable_preparation_suspends_before_resident_publication() {
         }
     }
     assert!(published, "the admitted write did not publish");
-    let std::task::Poll::Ready(Ok(rows)) = runtime.poll_query(&mut context, |node| {
-        node.current_rows("todos", DurabilityTier::None)
-    }) else {
+    let std::task::Poll::Ready(Ok(rows)) =
+        runtime.poll_current_rows(&mut context, "todos", DurabilityTier::None)
+    else {
         panic!("published local row must be resident without another await")
     };
     assert_eq!(rows.len(), 1);
@@ -533,9 +531,7 @@ fn demand_driven_node_poisoned_after_durable_commit_failure() {
         std::task::Poll::Ready(Err(Error::Storage(_)))
     ));
     assert!(matches!(
-        runtime.poll_query(&mut context, |node| {
-            node.current_rows("todos", DurabilityTier::None)
-        }),
+        runtime.poll_current_rows(&mut context, "todos", DurabilityTier::None),
         std::task::Poll::Ready(Err(Error::Groove(
             groove::db::Error::DatabasePoisoned
         )))

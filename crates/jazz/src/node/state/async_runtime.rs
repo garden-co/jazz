@@ -60,7 +60,7 @@ impl DemandDrivenNode {
     /// Immediate storage drives acquisition and publication in the first poll;
     /// a genuinely asynchronous backend returns `Pending` without invoking
     /// `publish`.
-    pub fn poll_local_operation<P, T>(
+    fn poll_local_operation<P, T>(
         &mut self,
         context: &mut std::task::Context<'_>,
         mut prepare: impl FnMut(
@@ -117,7 +117,7 @@ impl DemandDrivenNode {
     /// Poll a restartable query or subscription operation. It may suspend only
     /// while acquiring a missing durable input; once ready, evaluation runs on
     /// the same resident node used by local writes.
-    pub fn poll_query<T>(
+    fn poll_query<T>(
         &mut self,
         context: &mut std::task::Context<'_>,
         mut operation: impl FnMut(
@@ -140,6 +140,27 @@ impl DemandDrivenNode {
             std::task::Poll::Pending => {}
         }
         result
+    }
+
+    /// Poll one current-table read without exposing the mutable resident node
+    /// across the asynchronous storage boundary.
+    pub fn poll_current_rows(
+        &mut self,
+        context: &mut std::task::Context<'_>,
+        table: &str,
+        tier: DurabilityTier,
+    ) -> std::task::Poll<Result<Vec<CurrentRow>, Error>> {
+        self.poll_query(context, |node| node.current_rows(table, tier))
+    }
+
+    /// Poll one immutable row-history read through the same acquisition owner.
+    pub fn poll_row_history(
+        &mut self,
+        context: &mut std::task::Context<'_>,
+        table: &str,
+        row: RowUuid,
+    ) -> std::task::Poll<Result<Vec<HistoryEntry>, Error>> {
+        self.poll_query(context, |node| node.row_history(table, row))
     }
 
     /// Poll the oldest durable batch. Later batches cannot overtake it.

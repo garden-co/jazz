@@ -801,9 +801,9 @@ pub async fn verify_indexeddb_node_lifecycle(page_store: JsValue) -> Result<JsVa
     futures::future::poll_fn(|context| runtime.poll_mergeable_commit(context, &commit))
         .await
         .map_err(|error| JsValue::from_str(&error.to_string()))?;
-    let std::task::Poll::Ready(rows) = runtime.poll_query(&mut context, |node| {
-        node.current_rows("todos", DurabilityTier::None)
-    }) else {
+    let std::task::Poll::Ready(rows) =
+        runtime.poll_current_rows(&mut context, "todos", DurabilityTier::None)
+    else {
         return Err(JsValue::from_str(
             "one-shot local read suspended after its direct row was published",
         ));
@@ -833,18 +833,15 @@ pub async fn verify_indexeddb_node_lifecycle(page_store: JsValue) -> Result<JsVa
         .await
         .map_err(|error| JsValue::from_str(&error.to_string()))?;
     let rows = futures::future::poll_fn(|context| {
-        reopened.poll_query(context, |node| {
-            node.current_rows("todos", DurabilityTier::None)
-        })
+        reopened.poll_current_rows(context, "todos", DurabilityTier::None)
     })
     .await
     .map_err(|error| JsValue::from_str(&error.to_string()))?;
     if rows.len() != 1 || rows[0].row_uuid() != row {
-        let history = futures::future::poll_fn(|context| {
-            reopened.poll_query(context, |node| node.row_history("todos", row))
-        })
-        .await
-        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        let history =
+            futures::future::poll_fn(|context| reopened.poll_row_history(context, "todos", row))
+                .await
+                .map_err(|error| JsValue::from_str(&error.to_string()))?;
         return Err(JsValue::from_str(&format!(
             "pollable Jazz node did not reconstruct its IndexedDB row (current={}, history={})",
             rows.len(),
