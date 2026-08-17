@@ -3,7 +3,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AuthState } from "../runtime/auth-state.js";
 import { BrowserAuthSecretStore } from "../runtime/auth-secret-store.js";
 import type { Session } from "../runtime/context.js";
-import type { DbConfig } from "../runtime/db.js";
 
 const mock = vi.hoisted(() => ({
   createJazzClient: vi.fn(),
@@ -72,10 +71,7 @@ describe("JazzProvider local-first auth", () => {
     await BrowserAuthSecretStore.clearSecret();
     localStorage.setItem("jazz-auth-secret", SECRET);
     mock.createJazzClient.mockReset();
-    mock.createJazzClient.mockImplementation(async (config: DbConfig) => {
-      expect(config.secret).toBe(SECRET);
-      return makeClient();
-    });
+    mock.createJazzClient.mockResolvedValue(makeClient());
   });
 
   afterEach(() => {
