@@ -1980,6 +1980,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "jazz",
+ "jazz-native-transport",
  "jazz-otel",
  "mimalloc-safe",
  "napi",
@@ -1993,6 +1994,22 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+]
+
+[[package]]
+name = "jazz-native-transport"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "futures",
+ "hex",
+ "jazz",
+ "postcard",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite",
 ]
 
 [[package]]
@@ -2022,6 +2039,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "jazz",
+ "jazz-native-transport",
  "jazz-otel",
  "opentelemetry",
  "tokio",

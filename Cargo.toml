@@ -4,6 +4,7 @@ members = [
   "crates/benchmark-guard",
   "crates/groove",
   "crates/jazz",
+  "crates/jazz-native-transport",
   "crates/jazz-cli",
   "crates/jazz-server",
   "crates/jazz-otel",

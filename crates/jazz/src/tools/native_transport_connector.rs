@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 use crate::db::ConnectionSessionContext;
 use crate::ids::AuthorId;
+use crate::protocol::CatalogueSnapshot;
 use crate::tools::AppId;
 use crate::tools::websocket_prelude_auth::AuthConfig;
 use crate::wire::WireTransport;
@@ -51,15 +52,22 @@ impl std::fmt::Debug for NativeTransportRequest {
 /// with the transport prevents an adapter from asserting identity in semantic
 /// messages or requiring server-private admission APIs.
 pub struct ConnectedNativeTransport {
-    pub transport: Box<dyn WireTransport>,
+    pub transport: Box<dyn WireTransport + Send>,
     pub protocol_version: u16,
     pub features: u64,
     pub session_context: Option<ConnectionSessionContext>,
 }
 
 /// Future returned by a target-specific native connector.
-pub type NativeTransportFuture =
-    Pin<Box<dyn Future<Output = Result<ConnectedNativeTransport, NativeTransportError>> + 'static>>;
+pub type NativeTransportFuture = Pin<
+    Box<
+        dyn Future<Output = Result<ConnectedNativeTransport, NativeTransportError>>
+            + Send
+            + 'static,
+    >,
+>;
+pub type NativeCatalogueBootstrapFuture =
+    Pin<Box<dyn Future<Output = Result<CatalogueSnapshot, NativeTransportError>> + Send + 'static>>;
 
 /// Error at the target/socket boundary, before a core peer has been attached.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -78,8 +86,15 @@ impl std::error::Error for NativeTransportError {}
 /// The factory is passed at consumer composition points rather than registered
 /// globally. CLI/server/NAPI therefore choose an adapter explicitly, and tests
 /// can use an in-memory transport without compiling Tokio or TLS into core.
-pub trait NativeTransportConnector {
+pub trait NativeTransportConnector: Send + Sync {
     fn connect(&self, request: NativeTransportRequest) -> NativeTransportFuture;
+
+    /// Fetch the authenticated, snapshot-only catalogue exchange used before
+    /// an edge attaches its ordinary upstream peer.
+    fn bootstrap_catalogue(
+        &self,
+        request: NativeTransportRequest,
+    ) -> NativeCatalogueBootstrapFuture;
 }
 
 #[cfg(test)]
@@ -111,6 +126,17 @@ mod tests {
                     features: 0,
                     session_context: None,
                 })
+            })
+        }
+
+        fn bootstrap_catalogue(
+            &self,
+            _request: NativeTransportRequest,
+        ) -> NativeCatalogueBootstrapFuture {
+            Box::pin(async {
+                Err(NativeTransportError(
+                    "not used in this contract test".to_owned(),
+                ))
             })
         }
     }

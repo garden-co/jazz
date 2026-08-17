@@ -78,6 +78,13 @@ axum = { version = "0.8.9", default-features = false, features = [
   "tracing",
   "ws",
 ], optional = true }
+bytes = { version = "1", optional = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
+tower-http = { version = "0.6.8", default-features = false, features = [
+  "cors",
+  "trace",
+], optional = true }
+async-stream = { version = "0.3", optional = true }
 tokio-tungstenite = { version = "0.29", default-features = false, features = [
   "connect",
   "rustls-tls-native-roots",
@@ -86,13 +93,6 @@ tokio-tungstenite = { version = "0.29", default-features = false, features = [
 tungstenite = { version = "0.29", default-features = false, features = [
   "handshake",
 ], optional = true }
-bytes = { version = "1", optional = true }
-tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
-tower-http = { version = "0.6.8", default-features = false, features = [
-  "cors",
-  "trace",
-], optional = true }
-async-stream = { version = "0.3", optional = true }
 jsonwebtoken = { version = "10.4", default-features = false, features = ["rust_crypto", "use_pem"] }
 base64 = "0.22"
 ed25519-dalek = { version = "2", features = ["rand_core"] }

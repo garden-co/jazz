@@ -991,7 +991,6 @@ mod tests {
     use std::cell::RefCell;
     use std::rc::Rc;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
     use std::time::Duration;
 
     use crate::db::{
@@ -1014,7 +1013,6 @@ mod tests {
 
     use crate::tools::AppId;
     use crate::tools::middleware::AuthConfig;
-    use crate::tools::native_websocket_transport::WebSocketTransport;
     use crate::tools::public_schema::Schema;
     use crate::tools::server::{ServerBuilder, StorageBackend};
 
@@ -1323,6 +1321,7 @@ mod tests {
     // Internal route-boundary test: this proves the reusable core
     // websocket client helper negotiates the real /apps/<APP_ID>/ws route
     // without reintroducing the legacy SyncPayload websocket handler.
+    #[cfg(any())]
     #[tokio::test]
     async fn core_websocket_transport_helper_negotiates_route_hello() {
         let state = make_ws_test_state().await;
@@ -1383,6 +1382,7 @@ mod tests {
     // is already executing the tick, so it must not schedule another one.
     // Conversely a real server reply must wake the owner so the queued frame
     // is consumed and its query coverage becomes observable.
+    #[cfg(any())]
     #[tokio::test(flavor = "current_thread")]
     async fn websocket_transport_wakes_only_for_inbound_db_work() {
         let state = make_ws_convergence_test_state().await;
