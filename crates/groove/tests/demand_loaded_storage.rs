@@ -224,7 +224,7 @@ fn opened_subscription_inherits_synchronous_write_visibility_over_async_storage(
         .as_mut()
         .unwrap()
         .insert("rows", vec![Value::U64(12), Value::String("typed".into())]);
-    let Poll::Ready(Ok(_persistence)) = database.poll_commit_batch(&mut context, &mut batch) else {
+    let Poll::Ready(Ok(persistence)) = database.poll_commit_batch(&mut context, &mut batch) else {
         panic!("the opened working set must make the local write first-poll ready")
     };
     assert!(batch.is_none());
@@ -242,4 +242,20 @@ fn opened_subscription_inherits_synchronous_write_visibility_over_async_storage(
         1,
         "a new one-shot must synchronously observe the resident write"
     );
+    database.enqueue_persistence(persistence);
+    assert!(database.poll_persistence(&mut context).is_pending());
+    assert_eq!(
+        database
+            .resident()
+            .primary_key_scan("rows", &[Value::U64(12)])
+            .unwrap()
+            .len(),
+        1,
+        "pending durability cannot hide already-published local state"
+    );
+    released.set(true);
+    assert!(matches!(
+        database.poll_persistence(&mut context),
+        Poll::Ready(Ok(()))
+    ));
 }

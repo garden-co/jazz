@@ -147,6 +147,7 @@ pub struct DemandDrivenDatabase {
     cache: crate::storage::DemandLoadedStorage,
     persistence: Box<dyn PollableOrderedKvStorage>,
     pending_read: Option<OwnedStorageRequest>,
+    pending_persistence: VecDeque<OwnedStorageRequest>,
 }
 
 impl DemandDrivenDatabase {
@@ -163,6 +164,7 @@ impl DemandDrivenDatabase {
             cache,
             persistence,
             pending_read: None,
+            pending_persistence: VecDeque::new(),
         })
     }
 
@@ -242,6 +244,41 @@ impl DemandDrivenDatabase {
                 Err(error) => return Poll::Ready(Err(error)),
             }
         }
+    }
+
+    /// Enqueue a resident-visible commit for ordered durable persistence.
+    #[doc(hidden)]
+    pub fn enqueue_persistence(&mut self, batch: PendingPersistenceBatch) {
+        self.pending_persistence.push_back(OwnedStorageRequest::new(
+            OwnedStorageOperation::Commit(batch.into_operations()),
+        ));
+    }
+
+    /// Poll queued durable writes in FIFO order. Immediate backends drain in
+    /// this call; asynchronous backends retain the queue head across wakeups.
+    #[doc(hidden)]
+    pub fn poll_persistence(&mut self, context: &mut Context<'_>) -> Poll<Result<(), Error>> {
+        while let Some(request) = self.pending_persistence.front() {
+            match self.persistence.poll_request(request, context) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Ok(OwnedStorageResponse::Committed)) => {
+                    self.pending_persistence.pop_front();
+                }
+                Poll::Ready(Ok(response)) => {
+                    self.database.mark_async_persistence_failed();
+                    return Poll::Ready(Err(crate::storage::Error::Backend {
+                        backend: "pollable",
+                        message: format!("commit returned unexpected response {response:?}"),
+                    }
+                    .into()));
+                }
+                Poll::Ready(Err(error)) => {
+                    self.database.mark_async_persistence_failed();
+                    return Poll::Ready(Err(error.into()));
+                }
+            }
+        }
+        Poll::Ready(Ok(()))
     }
 
     #[doc(hidden)]

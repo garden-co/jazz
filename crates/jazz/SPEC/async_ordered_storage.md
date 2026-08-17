@@ -25,6 +25,26 @@ previously unhydrated server-side reads may also await. This permits loaders,
 Suspense, and skeleton states during acquisition while preserving synchronous
 controlled-input updates after readiness.
 
+### Residently decidable visibility
+
+The synchronous guarantee covers the directly written rows and every derived
+result whose dependencies are already resident. It does not require the core
+to invent absence for an unfilled cache or synchronously fetch a newly
+referenced row:
+
+- changing `post.title` synchronously updates an opened direct `posts` query;
+- changing `post.author_id` synchronously updates an include or join when that
+  author and the relevant query sources are already resident;
+- when the new author is not resident, the direct post remains immediately
+  visible but the include/join may remain pending until its exact dependency is
+  fetched;
+- an opened query therefore inherits synchronous updates only to the extent
+  that the update is decidable from its admitted resident working set.
+
+This is a weakening only for newly introduced, unloaded dependencies. It is
+not permission to delay a direct written row, to treat an unknown cache entry
+as missing, or to make an already-resident join asynchronous.
+
 ## One core, inherited readiness
 
 The storage contract is pollable everywhere. An immediate backend satisfies the
