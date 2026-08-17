@@ -162,6 +162,42 @@ collapsed into one owned persistent batch. If a backend cannot support that,
 the first batch must contain a durable `finalizing(tx)` record and reopen must
 complete or suppress it before serving peers.
 
+### Query-driven node opening
+
+Making storage pollable must not turn the current synchronous reopen procedure
+into one asynchronous full-store hydration. A node may await the small durable
+control plane required to identify and safely advance its state, but row and
+query state is loaded by the operation that asks for it.
+
+The current open path mixes these classes and must be separated:
+
+- catalogue genesis, active lineage payloads, the current schema pointer,
+  physical mappings, the node's own alias, clock/global-sequence summaries, and
+  clean/consistency markers are startup control state;
+- complete node-alias and branch catalogues should be point- or prefix-loaded
+  when a referenced identity or branch is used, apart from the small identities
+  required to finish opening;
+- pending-edge and locally rejected-transaction recovery should be driven by
+  the retry/sync operation that consumes those records;
+- settled result members, program facts, authorization progress, and known
+  state should be loaded for one `BindingViewKey` when that binding is opened;
+- ahead-current winners should be loaded for the requested physical table and
+  row/range, not rebuilt for every physical table at startup;
+- application history/current tables are always query-driven.
+
+Clock and global-watermark reconstruction cannot depend on scanning all
+transactions. New writes maintain compact durable high-water summaries in the
+same atomic unit as the transaction. Existing stores may perform an explicit,
+versioned one-time migration before becoming ready; that migration is not the
+steady-state open contract.
+
+Node opening itself is a pollable state machine. A cache miss advances an owned
+storage request and resumes the same phase. Mutationful finalization (creating
+genesis, assigning aliases, repairing a marker) begins only after its read set
+has been acquired, then publishes one owned durable unit. Retrying a constructor
+from scratch after a cache miss is not acceptable because partially applied
+in-memory writes could be replayed or assigned different identities.
+
 ## Resident current-state requirement
 
 An overlay containing only the newest row is insufficient for an immediate new
