@@ -37,7 +37,7 @@ include!("mergeable_open_transactions.rs");
 include!("policies_rls/mod.rs");
 include!("persistence_contracts.rs");
 include!("write_policy_lowering.rs");
-include!("sync.rs");
+include!("sync/mod.rs");
 include!("m3_differential.rs");
 include!("counter_merge.rs");
 include!("merge_heads.rs");
