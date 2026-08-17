@@ -4,7 +4,6 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll};
 
-use crate::storage::MemoryStorage;
 use crate::storage::pollable::{
     OwnedStorageOperation, OwnedStorageRequest, OwnedStorageResponse, PollableOrderedKvStorage,
 };
@@ -134,97 +133,6 @@ where
 {
     resident: Database<S>,
     persistence: PersistenceQueue,
-}
-
-/// Pollable initial hydration into the same resident database used after open.
-///
-/// Only this opening phase may suspend reads. Once it returns `Ready`, all
-/// query evaluation is backed by the hydrated resident [`MemoryStorage`].
-#[doc(hidden)]
-#[must_use = "database opening must be polled to completion"]
-pub struct PollableDatabaseOpen {
-    schema: Option<crate::schema::DatabaseSchema>,
-    persistence: Option<Box<dyn PollableOrderedKvStorage>>,
-    resident: MemoryStorage,
-    column_families: Vec<String>,
-    next_family: usize,
-    request: Option<OwnedStorageRequest>,
-}
-
-impl PollableDatabaseOpen {
-    #[doc(hidden)]
-    pub fn new(
-        schema: crate::schema::DatabaseSchema,
-        persistence: Box<dyn PollableOrderedKvStorage>,
-    ) -> Self {
-        let column_families = schema
-            .column_families()
-            .into_iter()
-            .map(str::to_owned)
-            .collect::<Vec<_>>();
-        let refs = column_families
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>();
-        Self {
-            schema: Some(schema),
-            persistence: Some(persistence),
-            resident: MemoryStorage::new(&refs),
-            column_families,
-            next_family: 0,
-            request: None,
-        }
-    }
-
-    #[doc(hidden)]
-    pub fn poll_open(
-        &mut self,
-        context: &mut Context<'_>,
-    ) -> Poll<Result<PollableDatabase<MemoryStorage>, Error>> {
-        loop {
-            let Some(column_family) = self.column_families.get(self.next_family) else {
-                let schema = self.schema.take().expect("database open completes once");
-                let persistence = self
-                    .persistence
-                    .take()
-                    .expect("database open retains persistence until completion");
-                let resident = Database::new(schema, self.resident.clone())?;
-                return Poll::Ready(Ok(PollableDatabase::new(resident, persistence)));
-            };
-            let request = self.request.get_or_insert_with(|| {
-                OwnedStorageRequest::new(OwnedStorageOperation::Scan(
-                    crate::storage::pollable::OwnedScanRequest::prefix(
-                        column_family.clone(),
-                        Vec::new(),
-                    ),
-                ))
-            });
-            let persistence = self
-                .persistence
-                .as_mut()
-                .expect("database open retains persistence until completion");
-            match persistence.poll_request(request, context) {
-                Poll::Pending => return Poll::Pending,
-                Poll::Ready(Ok(OwnedStorageResponse::Rows(rows))) => {
-                    for (key, value) in rows {
-                        self.resident.set(column_family, &key, &value)?;
-                    }
-                    self.request = None;
-                    self.next_family += 1;
-                }
-                Poll::Ready(Ok(response)) => {
-                    return Poll::Ready(Err(crate::storage::Error::Backend {
-                        backend: "pollable",
-                        message: format!(
-                            "hydration scan returned unexpected response {response:?}"
-                        ),
-                    }
-                    .into()));
-                }
-                Poll::Ready(Err(error)) => return Poll::Ready(Err(error.into())),
-            }
-        }
-    }
 }
 
 impl<S> PollableDatabase<S>

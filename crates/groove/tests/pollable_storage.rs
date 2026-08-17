@@ -12,7 +12,7 @@ use groove::storage::pollable::{
 };
 use groove::storage::{Error, MemoryStorage, OwnedWriteOperation};
 use groove::{
-    db::{Database, GraphBuilder, PersistenceQueue, PollableDatabase, PollableDatabaseOpen},
+    db::{Database, GraphBuilder, PersistenceQueue, PollableDatabase},
     records::Value,
     schema::{ColumnSchema, ColumnType, DatabaseSchema, IntegerKeyType, PrimaryKey, TableSchema},
 };
@@ -453,48 +453,4 @@ fn multi_batch_unit_completes_only_after_its_final_durable_batch() {
         queue.poll(&mut context),
         Poll::Ready(Ok(completed)) if completed == vec![unit]
     ));
-}
-
-#[test]
-fn initial_hydration_may_pend_but_open_database_reads_are_resident() {
-    let schema = DatabaseSchema::new([TableSchema::new(
-        "rows",
-        [
-            ColumnSchema::new("id", ColumnType::U64),
-            ColumnSchema::new("value", ColumnType::String),
-        ],
-    )
-    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
-    let durable = MemoryStorage::new(&["rows", "indices"]);
-    let mut seeded = Database::new(schema.clone(), durable).unwrap();
-    let mut batch = seeded.open_batch();
-    batch.insert(
-        "rows",
-        vec![Value::U64(7), Value::String("hydrated".into())],
-    );
-    seeded.commit_batch(batch).unwrap();
-    let durable = seeded.into_storage();
-    let gate = OperationGate::default();
-    let storage = ControlledStorage {
-        storage: durable,
-        gate: gate.clone(),
-    };
-    let mut opening = PollableDatabaseOpen::new(schema, Box::new(storage));
-    let waker = Waker::from(Arc::new(NoopWake));
-    let mut context = Context::from_waker(&waker);
-
-    assert!(opening.poll_open(&mut context).is_pending());
-    gate.release();
-    let Poll::Ready(Ok(database)) = opening.poll_open(&mut context) else {
-        panic!("released hydration must complete")
-    };
-    assert_eq!(
-        database
-            .resident()
-            .primary_key_scan("rows", &[Value::U64(7)])
-            .unwrap()[0]
-            .get("value")
-            .unwrap(),
-        Value::String("hydrated".into())
-    );
 }
