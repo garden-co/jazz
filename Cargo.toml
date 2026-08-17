@@ -7,6 +7,7 @@ members = [
   "crates/jazz-native-transport",
   "crates/jazz-cli",
   "crates/jazz-server",
+  "crates/jazz-testkit",
   "crates/jazz-otel",
   "crates/jazz-sim",
   "crates/opfs-btree",

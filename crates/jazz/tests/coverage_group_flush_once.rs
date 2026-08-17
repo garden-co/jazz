@@ -1,10 +1,6 @@
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
-#[path = "support/duplex_transport.rs"]
-mod duplex_transport;
-
-use duplex_transport::duplex;
 use jazz::block_on;
 use jazz::db::{Db, DbConfig, DbIdentity, LocalUpdates, Propagation, ReadOpts, SeededRowIdSource};
 use jazz::groove::records::Value;
@@ -14,6 +10,7 @@ use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::query::{Query, col, eq, lit};
 use jazz::schema::{JazzSchema, Policy, TableSchema};
 use jazz::tx::DurabilityTier;
+use jazz_testkit::duplex_transport::duplex;
 
 fn schema() -> JazzSchema {
     JazzSchema::new([TableSchema::new(

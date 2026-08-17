@@ -1,6 +1,6 @@
 #![cfg(feature = "test-utils")]
 
-mod support;
+use jazz_testkit as support;
 
 use std::time::{Duration, Instant};
 

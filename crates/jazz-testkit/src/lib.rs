@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use uuid::Uuid;
 
+pub mod duplex_transport;
 mod permissions;
 
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(50);
@@ -35,6 +36,7 @@ pub use permissions::{
     publish_allow_all_permissions, publish_permissions,
 };
 
+#[cfg(test)]
 fn split_base_url(server_url: &str) -> Result<(String, String), Box<dyn std::error::Error>> {
     let mut url = reqwest::Url::parse(server_url)?;
     let route_prefix = match url.path().trim_end_matches('/') {

@@ -39,6 +39,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
 base64 = "0.22"
+jazz-testkit = { path = "../jazz-testkit" }
 futures-util = "0.3"
 jsonwebtoken = { version = "10.4", default-features = false, features = ["rust_crypto", "use_pem"] }
 libc = "0.2"

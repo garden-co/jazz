@@ -9,7 +9,7 @@
 //! Narrow auth assertions (wrong audience, expired token, disabled flag) are
 //! covered closer to the auth implementation.
 
-mod support;
+use jazz_testkit as support;
 
 use std::collections::HashMap;
 use std::time::Duration;

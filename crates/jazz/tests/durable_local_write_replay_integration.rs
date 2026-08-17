@@ -2,7 +2,7 @@
 
 //! Durable local writes are an upload backlog, not merely local visibility.
 
-mod support;
+use jazz_testkit as support;
 
 use jazz::row_input;
 use jazz::tools::server::JazzServer;

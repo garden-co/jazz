@@ -3,7 +3,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-mod support;
+use jazz_testkit as support;
 
 use jazz::protocol_limits::MAX_WIRE_FRAME_BYTES;
 use jazz::row_input;
