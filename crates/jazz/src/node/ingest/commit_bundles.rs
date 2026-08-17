@@ -29,6 +29,7 @@ where
             Ok(responses) => Ok(PendingAuthorityPublication {
                 persistence: self.finish_persistence_unit(mark),
                 responses,
+                poison: self.database.async_persistence_poison(),
             }),
             Err(error) => {
                 // The Groove durable-publication scope has already poisoned a

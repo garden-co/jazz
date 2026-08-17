@@ -967,7 +967,10 @@ where
 #[doc(hidden)]
 pub struct AuthorityPersistenceScheduler {
     persistence: groove::db::PersistenceQueue,
-    responses: BTreeMap<groove::db::PersistenceUnitId, Vec<SyncMessage>>,
+    responses: BTreeMap<
+        groove::db::PersistenceUnitId,
+        (Vec<SyncMessage>, groove::db::AsyncPersistencePoison),
+    >,
 }
 
 impl AuthorityPersistenceScheduler {
@@ -983,10 +986,10 @@ impl AuthorityPersistenceScheduler {
     /// responses to the transport.
     #[doc(hidden)]
     pub fn enqueue(&mut self, pending: PendingAuthorityPublication) {
-        let (batches, responses) = pending.into_parts();
+        let (batches, responses, poison) = pending.into_parts();
         let unit = self.persistence.enqueue_unit(batches);
         assert!(
-            self.responses.insert(unit, responses).is_none(),
+            self.responses.insert(unit, (responses, poison)).is_none(),
             "persistence unit ids are unique"
         );
     }
@@ -1003,16 +1006,18 @@ impl AuthorityPersistenceScheduler {
             std::task::Poll::Ready(Ok(completed)) => {
                 let mut publish = Vec::new();
                 for unit in completed {
-                    publish.extend(
-                        self.responses
-                            .remove(&unit)
-                            .expect("completed persistence unit has quarantined responses"),
-                    );
+                    let (responses, _poison) = self
+                        .responses
+                        .remove(&unit)
+                        .expect("completed persistence unit has quarantined responses");
+                    publish.extend(responses);
                 }
                 std::task::Poll::Ready(Ok(publish))
             }
             std::task::Poll::Ready(Err(error)) => {
-                self.responses.clear();
+                for (_, poison) in std::mem::take(&mut self.responses).into_values() {
+                    poison.poison();
+                }
                 std::task::Poll::Ready(Err(error.into()))
             }
         }
@@ -1027,7 +1032,9 @@ impl AuthorityPersistenceScheduler {
     /// cancellation, including when a backend reports ambiguous completion.
     #[doc(hidden)]
     pub fn cancel_all(&mut self) -> Result<(), Error> {
-        self.responses.clear();
+        for (_, poison) in std::mem::take(&mut self.responses).into_values() {
+            poison.poison();
+        }
         self.persistence.cancel_all().map_err(Error::from)
     }
 }

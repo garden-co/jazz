@@ -265,7 +265,7 @@ where
             .ivm_runtime
             .register_table_index(table, index, &self.storage)
         {
-            self.poisoned = true;
+            self.poisoned.store(true, Ordering::Release);
             return Err(Error::IvmRuntime(error));
         }
         Ok(())

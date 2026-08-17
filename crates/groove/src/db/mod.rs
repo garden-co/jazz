@@ -12,6 +12,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::str;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use web_time::{Duration, Instant};
@@ -54,7 +55,7 @@ pub struct Database<S> {
     /// remaining one externally atomic publication. Notifications stay queued
     /// until the outermost host scope completes.
     durable_publication_state: Arc<Mutex<DurablePublicationState>>,
-    poisoned: bool,
+    poisoned: Arc<AtomicBool>,
 }
 
 /// Owned durable-storage work produced by a synchronously visible local commit.
@@ -69,6 +70,20 @@ pub struct Database<S> {
 #[must_use = "the pending persistence batch must be committed or failed"]
 pub struct PendingPersistenceBatch {
     operations: Vec<OwnedWriteOperation>,
+}
+
+/// Cloneable fail-closed capability attached to externally owned persistence.
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct AsyncPersistencePoison {
+    poisoned: Arc<AtomicBool>,
+}
+
+impl AsyncPersistencePoison {
+    #[doc(hidden)]
+    pub fn poison(&self) {
+        self.poisoned.store(true, Ordering::Release);
+    }
 }
 
 impl PendingPersistenceBatch {

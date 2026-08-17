@@ -841,14 +841,21 @@ pub enum CommitUnitTrust {
 pub struct PendingAuthorityPublication {
     persistence: Vec<PendingPersistenceBatch>,
     responses: Vec<SyncMessage>,
+    poison: groove::db::AsyncPersistencePoison,
 }
 
 impl PendingAuthorityPublication {
     /// Consume the unit into its ordered durable batches and quarantined wire
     /// responses. Responses may be sent only after every batch succeeds.
     #[doc(hidden)]
-    pub fn into_parts(self) -> (Vec<PendingPersistenceBatch>, Vec<SyncMessage>) {
-        (self.persistence, self.responses)
+    pub fn into_parts(
+        self,
+    ) -> (
+        Vec<PendingPersistenceBatch>,
+        Vec<SyncMessage>,
+        groove::db::AsyncPersistencePoison,
+    ) {
+        (self.persistence, self.responses, self.poison)
     }
 }
 

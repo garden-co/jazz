@@ -53,7 +53,7 @@ where
             last_tick_metrics: None,
             storage_read_metrics: RefCell::new(StorageReadMetrics::default()),
             durable_publication_state: Arc::new(Mutex::new(DurablePublicationState::default())),
-            poisoned: false,
+            poisoned: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -87,6 +87,15 @@ where
         self.ensure_not_poisoned()
     }
 
+    /// Return a capability that poisons this database after externally owned
+    /// asynchronous persistence fails or becomes ambiguous.
+    #[doc(hidden)]
+    pub fn async_persistence_poison(&self) -> AsyncPersistencePoison {
+        AsyncPersistencePoison {
+            poisoned: Arc::clone(&self.poisoned),
+        }
+    }
+
     pub(super) fn settle_durable_publication_scopes(&mut self) {
         let state = self
             .durable_publication_state
@@ -97,7 +106,7 @@ where
         drop(state);
         if aborted {
             self.ivm_runtime.discard_staged_subscription_notifications();
-            self.poisoned = true;
+            self.poisoned.store(true, Ordering::Release);
         } else if depth == 0 {
             self.ivm_runtime.publish_staged_subscription_notifications();
         }

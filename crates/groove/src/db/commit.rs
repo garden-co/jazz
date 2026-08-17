@@ -109,7 +109,7 @@ where
     #[doc(hidden)]
     pub fn mark_async_persistence_failed(&mut self) {
         self.ivm_runtime.discard_staged_subscription_notifications();
-        self.poisoned = true;
+        self.poisoned.store(true, Ordering::Release);
     }
 
     pub fn update_raw(
@@ -188,7 +188,7 @@ where
             // policy is to make the Database instance fatal on final commit
             // failure rather than serve possibly torn in-memory state.
             self.ivm_runtime.discard_staged_subscription_notifications();
-            self.poisoned = true;
+            self.poisoned.store(true, Ordering::Release);
             return Err(Error::from(error));
         }
         if self
@@ -352,7 +352,7 @@ where
     }
 
     pub(super) fn ensure_not_poisoned(&self) -> Result<(), Error> {
-        if self.poisoned
+        if self.poisoned.load(Ordering::Acquire)
             || self
                 .durable_publication_state
                 .lock()
