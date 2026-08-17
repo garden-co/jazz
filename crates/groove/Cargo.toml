@@ -4,8 +4,11 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-default = ["rocksdb"]
+default = []
 rocksdb = ["dep:rocksdb"]
+# Canonical Groove tests retain durable-backend coverage explicitly rather
+# than relying on a production default feature.
+test = ["rocksdb"]
 cold-settle-attribution = []
 
 [dependencies]

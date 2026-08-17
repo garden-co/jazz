@@ -200,6 +200,12 @@ Actual shells select storage, compression, client, and server capabilities
 explicitly; the remaining work is extracting the Axum/server implementation
 without widening its private state into a public compatibility API.
 
+Groove is also featureless by default. Canonical tests and native Jazz shells
+select its existing RocksDB adapter explicitly, so checking the semantic
+storage/query core no longer compiles RocksDB or its native C++ dependency.
+The implementation remains at its established public path until a source-
+compatible adapter/facade split can replace it without a dependency cycle.
+
 ### Lane 4: storage, compression, and telemetry adapters
 
 Move RocksDB, compression implementations, and OTLP exporters to shell-selected
