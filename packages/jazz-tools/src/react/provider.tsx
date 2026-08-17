@@ -10,6 +10,7 @@ import {
   type CreateJazzClient,
 } from "../react-core/provider.js";
 import { createJazzClient, type JazzClient as CreatedJazzClient } from "./create-jazz-client.js";
+import { useLocalFirstAuth } from "./use-local-first-auth.js";
 
 // In dev builds, pull in a generated module that withJazz (next.ts/vite.ts/...)
 // rewrites on every schema push. The bundler tracks this as a dependency of the
@@ -38,8 +39,7 @@ function DevToolsAutoAttach() {
   return null;
 }
 
-export type JazzProviderProps = {
-  config: DbConfig;
+type JazzProviderCommonProps = {
   fallback?: ReactNode;
   children: ReactNode;
   onJWTExpired?: () => Promise<string | null | undefined>;
@@ -47,13 +47,31 @@ export type JazzProviderProps = {
   autoAttachDevTools?: boolean;
 };
 
-export function JazzProvider({
+type LocalFirstDbConfig = Omit<DbConfig, "secret" | "jwtToken" | "cookieSession">;
+
+export type JazzProviderProps = JazzProviderCommonProps &
+  (
+    | {
+        config: DbConfig;
+        auth?: undefined;
+      }
+    | {
+        config: LocalFirstDbConfig;
+        auth: "local-first";
+      }
+  );
+
+type ConfiguredJazzProviderProps = JazzProviderCommonProps & {
+  config: DbConfig;
+};
+
+function ConfiguredJazzProvider({
   config,
   fallback,
   children,
   onJWTExpired,
   autoAttachDevTools,
-}: JazzProviderProps) {
+}: ConfiguredJazzProviderProps) {
   const createClient: CreateJazzClient = (nextConfig) =>
     createJazzClient(nextConfig) as Promise<CreatedJazzClient>;
   const shouldAutoAttach = process.env.NODE_ENV !== "production" && autoAttachDevTools !== false;
@@ -78,6 +96,29 @@ export function JazzProvider({
       {children}
     </CoreJazzProvider>
   );
+}
+
+function LocalFirstJazzProvider({
+  config,
+  ...props
+}: {
+  config: LocalFirstDbConfig;
+} & JazzProviderCommonProps) {
+  const { secret, isLoading } = useLocalFirstAuth();
+
+  if (isLoading || !secret) return <>{props.fallback ?? null}</>;
+
+  return <ConfiguredJazzProvider {...props} config={{ ...config, secret }} />;
+}
+
+export function JazzProvider(props: JazzProviderProps) {
+  if (props.auth === "local-first") {
+    const { auth: _auth, ...localFirstProps } = props;
+    return <LocalFirstJazzProvider {...localFirstProps} />;
+  }
+
+  const { auth: _auth, ...configuredProps } = props;
+  return <ConfiguredJazzProvider {...configuredProps} />;
 }
 
 export function useJazzClient(): JazzClientContextValue {
