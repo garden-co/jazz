@@ -680,6 +680,37 @@ impl Clock {
         }
         Ok(global_seq)
     }
+
+    /// Record one accepted authority sequence and return every newly
+    /// contiguous sequence above the prior watermark.
+    ///
+    /// Fate preparation applies this to a cloned clock. The real clock is
+    /// replaced only after the prepared storage batch publishes, so a cold
+    /// read or failed preparation cannot advance observable authority state.
+    fn record_applied_global_seq(&mut self, global_seq: GlobalSeq) -> Vec<GlobalSeq> {
+        if global_seq == GlobalSeq(u64::MAX) {
+            self.next_global_seq = global_seq;
+            self.global_seq_exhausted = true;
+        } else if !self.global_seq_exhausted {
+            self.next_global_seq = self.next_global_seq.max(global_seq.next());
+        }
+        if global_seq <= self.applied_global_watermark {
+            return Vec::new();
+        }
+        self.applied_global_above_watermark.insert(global_seq);
+        let mut advanced = Vec::new();
+        while let Some(next) = self
+            .applied_global_watermark
+            .0
+            .checked_add(1)
+            .map(GlobalSeq)
+            && self.applied_global_above_watermark.remove(&next)
+        {
+            self.applied_global_watermark = next;
+            advanced.push(next);
+        }
+        advanced
+    }
 }
 
 /// Payloads parked until missing schema or catalogue context arrives.

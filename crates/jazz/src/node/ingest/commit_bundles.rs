@@ -1177,7 +1177,7 @@ where
             .map(|(stored, global_seq)| (stored.clone(), *global_seq))
             .collect::<Vec<_>>();
         for global_seq in &applied_global_seqs {
-            self.record_applied_global_seq(*global_seq);
+            self.clock.record_applied_global_seq(*global_seq);
         }
         self.commit_database_batch(batch)?;
         if let Some(tx_time) = loaded_tx_ids.iter().map(|tx_id| tx_id.time).max() {

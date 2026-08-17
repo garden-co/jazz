@@ -14,6 +14,11 @@ const CLEAN_CLOSE_MARKER_VERSION: u64 = 1;
 const STORAGE_CONSISTENCY_MARKER_NAME: &str = "settled-ahead-current-clean-through";
 const STORAGE_CONSISTENCY_MARKER_VERSION: u64 = 1;
 
+pub(super) enum PreparedStorageConsistencyMarker {
+    Unchanged,
+    Write(TxTime),
+}
+
 impl<S> NodeState<S>
 where
     S: ResidentStorage,
@@ -56,6 +61,14 @@ where
         &self,
         tx_time: TxTime,
     ) -> Result<(), Error> {
+        let prepared = self.prepare_storage_consistency_marker_through(tx_time)?;
+        self.publish_storage_consistency_marker(prepared)
+    }
+
+    pub(super) fn prepare_storage_consistency_marker_through(
+        &self,
+        tx_time: TxTime,
+    ) -> Result<PreparedStorageConsistencyMarker, Error> {
         let store = self
             .database
             .direct_record_store(STORAGE_CONSISTENCY_MARKERS_STORE)?;
@@ -69,8 +82,22 @@ where
             && let Value::U64(existing) = record.get_idx(2)?
             && existing >= tx_time.0
         {
-            return Ok(());
+            return Ok(PreparedStorageConsistencyMarker::Unchanged);
         }
+        Ok(PreparedStorageConsistencyMarker::Write(tx_time))
+    }
+
+    pub(super) fn publish_storage_consistency_marker(
+        &self,
+        prepared: PreparedStorageConsistencyMarker,
+    ) -> Result<(), Error> {
+        let PreparedStorageConsistencyMarker::Write(tx_time) = prepared else {
+            return Ok(());
+        };
+        let store = self
+            .database
+            .direct_record_store(STORAGE_CONSISTENCY_MARKERS_STORE)?;
+        let key = storage_consistency_marker_key();
         store.set(
             &key,
             &[
@@ -360,7 +387,7 @@ where
             receipt.global_sequence_records_scanned = global_sequence_records_scanned;
         }
         for global_seq in accepted_global_seqs {
-            self.record_applied_global_seq(global_seq);
+            self.clock.record_applied_global_seq(global_seq);
         }
         #[cfg(feature = "testing")]
         if let (Some(receipt), Some(started)) = (&mut receipt, started) {

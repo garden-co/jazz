@@ -7,6 +7,7 @@
 //! protocol sync loop. Trusted catalogue snapshot activation lives in the
 //! sibling [`super::catalogue_ingest`] module.
 
+use super::recovery::PreparedStorageConsistencyMarker;
 use super::*;
 use crate::protocol::{CatalogueAck, LensOp, SchemaLineagePublication, VersionBundleRef};
 use crate::protocol_limits::{

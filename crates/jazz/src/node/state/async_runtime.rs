@@ -41,7 +41,13 @@ pub struct DemandDrivenNode {
     acquisition: groove::db::StorageAcquisition,
     pending_persistence:
         std::collections::VecDeque<groove::storage::async_ordered::OwnedStorageRequest>,
+    pending_fate: Option<PendingFateApplication>,
     persistence_failed: bool,
+}
+
+struct PendingFateApplication {
+    root: ingest::FateUpdateRequest,
+    steps: std::collections::VecDeque<ingest::FateUpdateRequest>,
 }
 
 impl DemandDrivenNode {
@@ -127,6 +133,92 @@ impl DemandDrivenNode {
             |node| node.prepare_branch_creation(branch_id, created_by),
             |node, prepared| node.publish_branch_creation(prepared),
         )
+    }
+
+    /// Apply one authority fate, including any causally rejected descendants.
+    ///
+    /// Each step acquires its cold inputs before publication. Cascade steps are
+    /// retained across polls and prepared only after their parent publishes,
+    /// so current-row and rejection indexes are never planned against stale
+    /// resident state.
+    pub fn poll_apply_fate_update(
+        &mut self,
+        context: &mut std::task::Context<'_>,
+        tx_id: TxId,
+        fate: Fate,
+        global_seq: Option<GlobalSeq>,
+        durability: Option<DurabilityTier>,
+    ) -> std::task::Poll<Result<(), Error>> {
+        if let Err(error) = self.ensure_persistence_usable() {
+            return std::task::Poll::Ready(Err(error));
+        }
+        let root = ingest::FateUpdateRequest {
+            tx_id,
+            fate,
+            global_seq,
+            durability,
+        };
+        match &self.pending_fate {
+            Some(pending) if pending.root != root => {
+                return std::task::Poll::Ready(Err(Error::InvalidStoredValue(
+                    "a different fate update was polled while one is pending",
+                )));
+            }
+            None => {
+                self.pending_fate = Some(PendingFateApplication {
+                    root: root.clone(),
+                    steps: std::collections::VecDeque::from([root]),
+                });
+            }
+            Some(_) => {}
+        }
+        loop {
+            let request = self
+                .pending_fate
+                .as_ref()
+                .and_then(|pending| pending.steps.front())
+                .cloned()
+                .expect("an active fate application retains a step");
+            let prepared = match self.acquisition.poll(
+                self.persistence.as_mut(),
+                &self.cache,
+                context,
+                || self.node.prepare_fate_update(request.clone()),
+                missing_node_open_input,
+            ) {
+                std::task::Poll::Pending => return std::task::Poll::Pending,
+                std::task::Poll::Ready(Err(error)) => {
+                    self.pending_fate = None;
+                    self.discard_failed_operation_writes();
+                    return std::task::Poll::Ready(Err(error));
+                }
+                std::task::Poll::Ready(Ok(prepared)) => prepared,
+            };
+            match self.node.publish_prepared_fate_update(prepared) {
+                Ok(cascades) => {
+                    self.collect_persistence_unit();
+                    let pending = self
+                        .pending_fate
+                        .as_mut()
+                        .expect("published fate retains its operation");
+                    pending.steps.pop_front();
+                    pending.steps.extend(cascades);
+                    if pending.steps.is_empty() {
+                        self.pending_fate = None;
+                        return std::task::Poll::Ready(Ok(()));
+                    }
+                }
+                Err(error) => {
+                    self.pending_fate = None;
+                    if is_not_resident(&error) {
+                        self.fail_persistence();
+                    } else {
+                        self.discard_failed_operation_writes();
+                    }
+                    return std::task::Poll::Ready(Err(error));
+                }
+            }
+        }
     }
 
     /// Poll a restartable query or subscription operation. It may suspend only
@@ -318,6 +410,7 @@ impl PollableNodeOpen {
                 .expect("ready node takes its persistence session"),
             acquisition: groove::db::StorageAcquisition::default(),
             pending_persistence: std::collections::VecDeque::new(),
+            pending_fate: None,
             persistence_failed: false,
         }
     }

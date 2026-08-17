@@ -1,3 +1,24 @@
+pub(crate) struct PreparedFateUpdate {
+    tx_id: TxId,
+    stored: StoredTransaction,
+    next_clock: Clock,
+    batch: groove::db::PreparedDatabaseBatch,
+    consistency_marker: PreparedStorageConsistencyMarker,
+    rejected_payload: Option<RejectedTransaction>,
+    #[cfg(test)]
+    content_versions: Vec<VersionRow>,
+    #[cfg(test)]
+    global_current_update_versions: Vec<(VersionRow, GlobalSeq)>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct FateUpdateRequest {
+    pub(super) tx_id: TxId,
+    pub(super) fate: Fate,
+    pub(super) global_seq: Option<GlobalSeq>,
+    pub(super) durability: Option<DurabilityTier>,
+}
+
 impl<S> NodeState<S>
 where
     S: ResidentStorage,
@@ -15,28 +36,42 @@ where
             global_seq.is_none() || durability == Some(DurabilityTier::Global),
             "a global sequence requires Global durability"
         );
-        let mut terminal_fate_persisted = false;
-        let result = self.apply_fate_update_once(
+        let mut pending = VecDeque::from([FateUpdateRequest {
             tx_id,
             fate,
             global_seq,
             durability,
-            &mut terminal_fate_persisted,
-        );
-        if terminal_fate_persisted {
-            self.open_tx.local_permission_subjects.remove(&tx_id);
+        }]);
+        while let Some(request) = pending.pop_front() {
+            let prepared = self.prepare_fate_update_with_storage(request, false)?;
+            pending.extend(self.publish_prepared_fate_update(prepared)?);
         }
-        result
+        Ok(())
     }
 
-    fn apply_fate_update_once(
+    pub(crate) fn prepare_fate_update(
         &mut self,
-        tx_id: TxId,
-        fate: Fate,
-        global_seq: Option<GlobalSeq>,
-        durability: Option<DurabilityTier>,
-        terminal_fate_persisted: &mut bool,
-    ) -> Result<(), Error> {
+        request: FateUpdateRequest,
+    ) -> Result<PreparedFateUpdate, Error> {
+        self.prepare_fate_update_with_storage(request, true)
+    }
+
+    fn prepare_fate_update_with_storage(
+        &mut self,
+        request: FateUpdateRequest,
+        acquire_tick_storage: bool,
+    ) -> Result<PreparedFateUpdate, Error> {
+        self.require_catalogue_ready()?;
+        let FateUpdateRequest {
+            tx_id,
+            fate,
+            global_seq,
+            durability,
+        } = request;
+        debug_assert!(
+            global_seq.is_none() || durability == Some(DurabilityTier::Global),
+            "a global sequence requires Global durability"
+        );
         let mut stored = self
             .query_transaction(tx_id)?
             .ok_or(Error::MissingTransaction(tx_id))?;
@@ -53,10 +88,11 @@ where
         if matches!(stored.fate, Fate::Rejected(_)) {
             self.ensure_child_edge_closure_loaded(tx_id)?;
         }
+        let mut next_clock = self.clock.clone();
         let advanced_global_seqs = if matches!(stored.fate, Fate::Accepted)
             && let Some(global_seq) = stored.global_seq
         {
-            self.record_applied_global_seq(global_seq)
+            next_clock.record_applied_global_seq(global_seq)
         } else {
             Vec::new()
         };
@@ -143,14 +179,71 @@ where
         } else {
             None
         };
-        self.commit_database_batch(batch)?;
-        *terminal_fate_persisted = !matches!(stored.fate, Fate::Pending);
-        if matches!(stored.fate, Fate::Rejected(_)) || stored.global_seq.is_some() {
-            self.persist_storage_consistency_marker_through(tx_id.time)?;
+        #[cfg(test)]
+        for (table, row_uuid) in content_versions
+            .iter()
+            .map(|version| (version.table(), version.row_uuid()))
+            .collect::<BTreeSet<_>>()
+        {
+            // The post-publication invariant checks below deliberately rescan
+            // complete row history. A demand-loaded test runtime must acquire
+            // those diagnostic-only inputs before crossing publication just
+            // like production inputs; assertions may never introduce a cold
+            // read after resident state has advanced.
+            self.query_row_versions(table, row_uuid)?;
+        }
+        self.stage_recovery_checkpoint_for_clock(&mut batch, self.clock.tx_time, &next_clock);
+        let batch = if acquire_tick_storage {
+            self.database.prepare_batch_storage_inputs(&batch)?
+        } else {
+            self.database.prepare_resident_batch(&batch)?
+        };
+        let consistency_marker = if matches!(stored.fate, Fate::Rejected(_))
+            || stored.global_seq.is_some()
+        {
+            self.prepare_storage_consistency_marker_through(tx_id.time)?
+        } else {
+            PreparedStorageConsistencyMarker::Unchanged
+        };
+        Ok(PreparedFateUpdate {
+            tx_id,
+            stored,
+            next_clock,
+            batch,
+            consistency_marker,
+            rejected_payload,
+            #[cfg(test)]
+            content_versions,
+            #[cfg(test)]
+            global_current_update_versions,
+        })
+    }
+
+    pub(crate) fn publish_prepared_fate_update(
+        &mut self,
+        prepared: PreparedFateUpdate,
+    ) -> Result<Vec<FateUpdateRequest>, Error> {
+        let PreparedFateUpdate {
+            tx_id,
+            stored,
+            next_clock,
+            batch,
+            consistency_marker,
+            rejected_payload,
+            #[cfg(test)]
+            content_versions,
+            #[cfg(test)]
+            global_current_update_versions,
+        } = prepared;
+        self.publish_prepared_database_batch(batch)?;
+        self.clock = next_clock;
+        self.publish_storage_consistency_marker(consistency_marker)?;
+        if !matches!(stored.fate, Fate::Pending) {
+            self.open_tx.local_permission_subjects.remove(&tx_id);
         }
         #[cfg(test)]
         {
-            if root_target {
+            if stored.tx.target_lineage == crate::tx::BranchLineage::Root {
                 let rows = content_versions
                     .iter()
                     .map(|version| (version.table().to_owned(), version.row_uuid()))
@@ -169,13 +262,14 @@ where
         }
         let accepted_final = matches!(stored.fate, Fate::Accepted);
         let rejected_root = rejected_root_for(&stored.fate, tx_id);
+        let mut cascades = Vec::new();
         if accepted_final {
             self.rejections.child_txs_by_parent.remove(&tx_id);
             self.prune_child_edges(tx_id);
         } else if let Some(root) = rejected_root {
             self.prune_child_edges(tx_id);
-            let cascades = self.local_cascade_descendants(tx_id, root)?;
-            for descendant in cascades {
+            let descendants = self.local_cascade_descendants(tx_id, root)?;
+            for descendant in descendants {
                 // Authority-side parking resolves parents before children, so
                 // a locally cascaded descendant should still be speculative.
                 let descendant_fate = self.query_transaction(descendant)?.map(|tx| tx.fate);
@@ -187,15 +281,15 @@ where
                                 if *existing == root
                         )
                 );
-                self.apply_fate_update(
-                    descendant,
-                    Fate::Rejected(RejectionReason::Cascade { root }),
-                    None,
-                    None,
-                )?;
+                cascades.push(FateUpdateRequest {
+                    tx_id: descendant,
+                    fate: Fate::Rejected(RejectionReason::Cascade { root }),
+                    global_seq: None,
+                    durability: None,
+                });
             }
         }
-        Ok(())
+        Ok(cascades)
     }
 
     /// Return locally visible current cells for one row.

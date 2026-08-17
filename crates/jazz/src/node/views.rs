@@ -820,7 +820,7 @@ where
         }
         if !receiver_batch.is_empty() {
             for global_seq in &receiver_batch_global_seqs {
-                self.record_applied_global_seq(*global_seq);
+                self.clock.record_applied_global_seq(*global_seq);
             }
             self.sync_metrics.receiver_bulk_ingest_commits += 1;
             self.sync_metrics.receiver_bulk_bundle_ingests += receiver_batch_bundle_count;

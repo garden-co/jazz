@@ -21,17 +21,26 @@ where
         batch: &mut DatabaseBatch,
         tx_time: TxTime,
     ) {
+        self.stage_recovery_checkpoint_for_clock(batch, tx_time, &self.clock);
+    }
+
+    fn stage_recovery_checkpoint_for_clock(
+        &self,
+        batch: &mut DatabaseBatch,
+        tx_time: TxTime,
+        clock: &Clock,
+    ) {
         batch.update(
             "jazz_node_recovery_state",
             vec![
                 Value::Uuid(self.node_uuid.0),
                 Value::U64(1),
                 Value::U64(tx_time.0),
-                Value::U64(self.clock.next_global_seq.0),
-                Value::U64(u64::from(self.clock.global_seq_exhausted)),
-                Value::U64(self.clock.applied_global_watermark.0),
+                Value::U64(clock.next_global_seq.0),
+                Value::U64(u64::from(clock.global_seq_exhausted)),
+                Value::U64(clock.applied_global_watermark.0),
                 Value::Bytes(encode_global_sequences(
-                    &self.clock.applied_global_above_watermark,
+                    &clock.applied_global_above_watermark,
                 )),
             ],
         );

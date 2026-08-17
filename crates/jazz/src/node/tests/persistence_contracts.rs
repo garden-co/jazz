@@ -576,6 +576,150 @@ fn prepared_branch_creation_publishes_metadata_before_async_durability() {
 }
 
 #[test]
+fn prepared_fate_publishes_resident_tier_before_async_durability() {
+    let node_schema = schema();
+    let column_families = node_schema.column_families();
+    let refs = column_families.iter().map(String::as_str).collect::<Vec<_>>();
+    let released = std::rc::Rc::new(std::cell::Cell::new(true));
+    let backend = GatedAuthorityStorage {
+        inner: groove::storage::async_ordered::ImmediateStorage::new(MemoryStorage::new(&refs)),
+        released: std::rc::Rc::clone(&released),
+        cancellations: std::rc::Rc::new(std::cell::Cell::new(0)),
+        committed_units: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
+        fail_commits: std::rc::Rc::new(std::cell::Cell::new(false)),
+    };
+    let mut opening = PollableNodeOpen::new(node(0xda), node_schema, Box::new(backend));
+    let waker = std::sync::Arc::new(PersistenceTestWake).into();
+    let mut context = std::task::Context::from_waker(&waker);
+    let std::task::Poll::Ready(Ok(mut runtime)) = opening.poll(&mut context) else {
+        panic!("released backend must open in its first poll")
+    };
+    let commit = MergeableCommit::new("todos", row(0xda), 10).cells(title_cells("accepted"));
+    let std::task::Poll::Ready(Ok(tx_id)) =
+        runtime.poll_mergeable_commit(&mut context, &commit)
+    else {
+        panic!("resident local write must publish in its first poll")
+    };
+    let std::task::Poll::Ready(Ok(edge_rows)) =
+        runtime.poll_current_rows(&mut context, "todos", DurabilityTier::Edge)
+    else {
+        panic!("resident Edge read must not suspend")
+    };
+    assert!(edge_rows.is_empty());
+
+    released.set(false);
+    assert!(matches!(
+        runtime.poll_apply_fate_update(
+            &mut context,
+            tx_id,
+            Fate::Accepted,
+            None,
+            Some(DurabilityTier::Edge),
+        ),
+        std::task::Poll::Ready(Ok(()))
+    ));
+    let std::task::Poll::Ready(Ok(edge_rows)) =
+        runtime.poll_current_rows(&mut context, "todos", DurabilityTier::Edge)
+    else {
+        panic!("published fate must keep its current table resident")
+    };
+    assert_eq!(
+        edge_rows.len(),
+        1,
+        "the publishing poll must expose the accepted row at its new tier"
+    );
+    assert!(
+        runtime.poll_persistence(&mut context).is_pending(),
+        "resident authority visibility must not wait for async durability"
+    );
+}
+
+#[test]
+fn cold_fate_preparation_suspends_before_authority_publication() {
+    let node_schema = schema();
+    let column_families = node_schema.column_families();
+    let refs = column_families.iter().map(String::as_str).collect::<Vec<_>>();
+    let durable = MemoryStorage::new(&refs);
+    let released = std::rc::Rc::new(std::cell::Cell::new(true));
+    let committed_units = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let make_backend = || GatedAuthorityStorage {
+        inner: groove::storage::async_ordered::ImmediateStorage::new(durable.clone()),
+        released: std::rc::Rc::clone(&released),
+        cancellations: std::rc::Rc::new(std::cell::Cell::new(0)),
+        committed_units: std::rc::Rc::clone(&committed_units),
+        fail_commits: std::rc::Rc::new(std::cell::Cell::new(false)),
+    };
+    let waker = std::sync::Arc::new(PersistenceTestWake).into();
+    let mut context = std::task::Context::from_waker(&waker);
+
+    let mut opening = PollableNodeOpen::new(
+        node(0xdc),
+        node_schema.clone(),
+        Box::new(make_backend()),
+    );
+    let std::task::Poll::Ready(Ok(mut bootstrap)) = opening.poll(&mut context) else {
+        panic!("released backend must open in its first poll")
+    };
+    let commit = MergeableCommit::new("todos", row(0xdc), 10).cells(title_cells("cold fate"));
+    let std::task::Poll::Ready(Ok(tx_id)) =
+        bootstrap.poll_mergeable_commit(&mut context, &commit)
+    else {
+        panic!("bootstrap write must publish")
+    };
+    assert!(matches!(
+        bootstrap.poll_persistence(&mut context),
+        std::task::Poll::Ready(Ok(()))
+    ));
+    drop(bootstrap);
+
+    let mut opening = PollableNodeOpen::new(node(0xdc), node_schema, Box::new(make_backend()));
+    let std::task::Poll::Ready(Ok(mut runtime)) = opening.poll(&mut context) else {
+        panic!("checkpointed backend must reopen in its first poll")
+    };
+    committed_units.borrow_mut().clear();
+    released.set(false);
+    assert!(runtime
+        .poll_apply_fate_update(
+            &mut context,
+            tx_id,
+            Fate::Accepted,
+            None,
+            Some(DurabilityTier::Edge),
+        )
+        .is_pending());
+    assert!(
+        committed_units.borrow().is_empty(),
+        "cold fate acquisition must not publish a durable or resident update"
+    );
+
+    released.set(true);
+    let mut published = false;
+    for _ in 0..32 {
+        match runtime.poll_apply_fate_update(
+            &mut context,
+            tx_id,
+            Fate::Accepted,
+            None,
+            Some(DurabilityTier::Edge),
+        ) {
+            std::task::Poll::Pending => {}
+            std::task::Poll::Ready(Ok(())) => {
+                published = true;
+                break;
+            }
+            std::task::Poll::Ready(Err(error)) => panic!("prepared fate failed: {error}"),
+        }
+    }
+    assert!(published, "released fate inputs did not publish");
+    let std::task::Poll::Ready(Ok(rows)) =
+        runtime.poll_current_rows(&mut context, "todos", DurabilityTier::Edge)
+    else {
+        panic!("published accepted row must be resident")
+    };
+    assert_eq!(rows.len(), 1);
+}
+
+#[test]
 fn demand_driven_node_poisoned_after_durable_commit_failure() {
     let node_schema = schema();
     let column_families = node_schema.column_families();

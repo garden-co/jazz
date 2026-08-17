@@ -869,32 +869,6 @@ where
             .ok_or(Error::MissingOpenBatch(tx_id))
     }
 
-    pub(super) fn record_applied_global_seq(&mut self, global_seq: GlobalSeq) -> Vec<GlobalSeq> {
-        if global_seq == GlobalSeq(u64::MAX) {
-            self.clock.next_global_seq = global_seq;
-            self.clock.global_seq_exhausted = true;
-        } else if !self.clock.global_seq_exhausted {
-            self.clock.next_global_seq = self.clock.next_global_seq.max(global_seq.next());
-        }
-        if global_seq <= self.clock.applied_global_watermark {
-            return Vec::new();
-        }
-        self.clock.applied_global_above_watermark.insert(global_seq);
-        let mut advanced = Vec::new();
-        while let Some(next) = self
-            .clock
-            .applied_global_watermark
-            .0
-            .checked_add(1)
-            .map(GlobalSeq)
-            && self.clock.applied_global_above_watermark.remove(&next)
-        {
-            self.clock.applied_global_watermark = next;
-            advanced.push(next);
-        }
-        advanced
-    }
-
     fn transaction_ids_for_global_seq(
         &mut self,
         global_seq: GlobalSeq,

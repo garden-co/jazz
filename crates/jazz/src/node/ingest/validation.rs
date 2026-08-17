@@ -264,7 +264,7 @@ where
             && let Some(global_seq) = global_seq
         {
             staged_global_seqs.push(global_seq);
-            let advanced_global_seqs = self.record_applied_global_seq(global_seq);
+            let advanced_global_seqs = self.clock.record_applied_global_seq(global_seq);
             self.cleanup_fated_ahead_current_for_tx(batch, tx_id)?;
             if !advanced_global_seqs.is_empty() {
                 for advanced in advanced_global_seqs
