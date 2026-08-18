@@ -864,6 +864,19 @@ pub(crate) struct PreparedExclusiveCommit {
     versions: Vec<VersionRecord>,
 }
 
+/// Durable settled-view state decoded without changing the live query runtime.
+///
+/// Async ingress prepares these values before publishing any canonical rows or
+/// maintained-view state, so a cold prefix read cannot strand a half-applied
+/// receiver frame.
+pub(crate) struct PreparedKnownStateFact {
+    binding_view_key: BindingViewKey,
+    settled_through: Option<GlobalSeq>,
+    authorization_progress: Option<u64>,
+    members: Vec<ResultMemberEntry>,
+    facts: Vec<ViewFactEntry>,
+}
+
 /// Rejection records and derived indexes used for pending-cascade handling.
 #[derive(Clone, Debug, Default)]
 struct RejectionTracking {

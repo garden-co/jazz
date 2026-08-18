@@ -428,8 +428,18 @@ where
                 .get(&binding_view_key)
                 .copied());
         }
+        let prepared = self.prepare_known_state_fact(binding_view_key)?;
+        Ok(self.publish_prepared_known_state_fact(prepared))
+    }
+
+    /// Read and decode one binding view's durable settled state without
+    /// changing the resident query runtime.
+    pub(crate) fn prepare_known_state_fact(
+        &self,
+        binding_view_key: BindingViewKey,
+    ) -> Result<PreparedKnownStateFact, Error> {
         let store = self.database.direct_record_store(KNOWN_STATE_FACTS_STORE)?;
-        let settled_through = store
+        let known_state = store
             .get(&known_state_fact_key(binding_view_key))?
             .map(|record| {
                 let settled_through = match record.get_idx(0)? {
@@ -440,17 +450,16 @@ where
                         ));
                     }
                 };
-                self.query
-                    .settled_through_by_binding_view
-                    .insert(binding_view_key, settled_through);
-                if let Value::U64(progress) = record.get_idx(1)?
-                    && progress != u64::MAX
-                {
-                    self.query
-                        .authorization_progress_by_binding_view
-                        .insert(binding_view_key, progress);
-                }
-                Ok(settled_through)
+                let authorization_progress = match record.get_idx(1)? {
+                    Value::U64(u64::MAX) => None,
+                    Value::U64(progress) => Some(progress),
+                    _ => {
+                        return Err(Error::InvalidStoredValue(
+                            "known-state authorization progress must be u64",
+                        ));
+                    }
+                };
+                Ok((settled_through, authorization_progress))
             })
             .transpose()?;
 
@@ -458,7 +467,7 @@ where
         let store = self
             .database
             .direct_record_store(SETTLED_RESULT_MEMBERS_STORE)?;
-        let members = store
+        let member_bytes = store
             .prefix_entries(&prefix)?
             .into_iter()
             .map(|entry| match entry.key.get(3) {
@@ -469,38 +478,92 @@ where
             })
             .collect::<Result<Vec<_>, _>>()?;
         drop(store);
-        for member_bytes in members {
-            let member = postcard::from_bytes::<ResultMemberEntry>(&member_bytes).map_err(|_| {
-                Error::InvalidStoredValue("settled result member payload must decode")
-            })?;
-            self.insert_settled_result_member_indexed(binding_view_key, member);
-        }
+        let members = member_bytes
+            .into_iter()
+            .map(|bytes| {
+                postcard::from_bytes::<ResultMemberEntry>(&bytes).map_err(|_| {
+                    Error::InvalidStoredValue("settled result member payload must decode")
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
 
         let store = self
             .database
             .direct_record_store(SETTLED_PROGRAM_FACTS_STORE)?;
-        for entry in store.prefix_entries(&prefix)? {
-            let fact_bytes = match entry.key.get(3) {
-                Some(Value::Bytes(bytes)) if entry.key.len() == 4 => bytes,
-                _ => {
-                    return Err(Error::InvalidStoredValue(
-                        "settled program fact payload must be bytes",
-                    ));
-                }
-            };
-            let fact = postcard::from_bytes::<ViewFactEntry>(fact_bytes).map_err(|_| {
-                Error::InvalidStoredValue("settled program fact payload must decode")
-            })?;
+        let facts = store
+            .prefix_entries(&prefix)?
+            .into_iter()
+            .map(|entry| {
+                let fact_bytes = match entry.key.get(3) {
+                    Some(Value::Bytes(bytes)) if entry.key.len() == 4 => bytes,
+                    _ => {
+                        return Err(Error::InvalidStoredValue(
+                            "settled program fact payload must be bytes",
+                        ));
+                    }
+                };
+                postcard::from_bytes::<ViewFactEntry>(fact_bytes).map_err(|_| {
+                    Error::InvalidStoredValue("settled program fact payload must decode")
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(PreparedKnownStateFact {
+            binding_view_key,
+            settled_through: known_state.map(|state| state.0),
+            authorization_progress: known_state.and_then(|state| state.1),
+            members,
+            facts,
+        })
+    }
+
+    /// Install a previously decoded settled-view snapshot into the live query
+    /// indexes. This phase performs no durable reads.
+    pub(crate) fn publish_prepared_known_state_fact(
+        &mut self,
+        prepared: PreparedKnownStateFact,
+    ) -> Option<GlobalSeq> {
+        let PreparedKnownStateFact {
+            binding_view_key,
+            settled_through,
+            authorization_progress,
+            members,
+            facts,
+        } = prepared;
+        if self
+            .query
+            .known_state_loaded_binding_views
+            .contains(&binding_view_key)
+        {
+            return self
+                .query
+                .settled_through_by_binding_view
+                .get(&binding_view_key)
+                .copied();
+        }
+        if let Some(settled_through) = settled_through {
+            self.query
+                .settled_through_by_binding_view
+                .insert(binding_view_key, settled_through);
+        }
+        if let Some(progress) = authorization_progress {
+            self.query
+                .authorization_progress_by_binding_view
+                .insert(binding_view_key, progress);
+        }
+        for member in members {
+            self.insert_settled_result_member_indexed(binding_view_key, member);
+        }
+        if !facts.is_empty() {
             self.query
                 .settled_program_facts
                 .entry(binding_view_key)
                 .or_default()
-                .insert(fact);
+                .extend(facts);
         }
         self.query
             .known_state_loaded_binding_views
             .insert(binding_view_key);
-        Ok(settled_through)
+        settled_through
     }
 
     pub(crate) fn clear_all_known_state_facts(&mut self) -> Result<(), Error> {
