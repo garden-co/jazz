@@ -164,6 +164,60 @@ impl DemandDrivenDb {
         std::future::poll_fn(|context| self.poll_all(context, prepared, opts.clone())).await
     }
 
+    /// Poll a structured relation snapshot through exact durable acquisition.
+    #[doc(hidden)]
+    pub fn poll_relation_snapshot(
+        &mut self,
+        context: &mut Context<'_>,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+    ) -> Poll<Result<RelationSnapshot, Error>> {
+        if let Err(error) = ensure_supported_read_view(&opts) {
+            return Poll::Ready(Err(error));
+        }
+        if opts.include_deleted {
+            return Poll::Ready(Err(Error::new(
+                ErrorCode::Query,
+                "relation snapshots do not support include_deleted yet",
+            )));
+        }
+        let database = &self.database;
+        let author = database.identity.author;
+        match self.runtime.poll_resident_operation(context, || {
+            database.relation_snapshot_resident(
+                prepared,
+                &opts,
+                author,
+                QueryAuthorizationMode::ClientLocal,
+            )
+        }) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(result) => Poll::Ready(result.map_err(Into::into)),
+        }
+    }
+
+    /// Read a structured relation snapshot, suspending only for cold inputs.
+    #[doc(hidden)]
+    pub async fn relation_snapshot(
+        &mut self,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+    ) -> Result<RelationSnapshot, Error> {
+        std::future::poll_fn(|context| self.poll_relation_snapshot(context, prepared, opts.clone()))
+            .await
+    }
+
+    /// Materialize the canonical public result tree from an acquired snapshot.
+    #[doc(hidden)]
+    pub async fn result_tree(
+        &mut self,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+    ) -> Result<ResultTree, Error> {
+        let snapshot = self.relation_snapshot(prepared, opts).await?;
+        materialize_result_tree(prepared.shape.query(), snapshot)
+    }
+
     /// Poll a high-level subscription opening through query-driven durable
     /// loading. A suspended attempt cannot leave a registered Groove
     /// subscription or public Jazz subscription state behind.

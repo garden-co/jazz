@@ -425,6 +425,64 @@ fn demand_driven_db_acquires_cold_subscription_before_registering_it() {
     assert!(owner.poll_persistence(&mut context).is_pending());
 }
 
+#[test]
+fn demand_driven_db_acquires_cold_relation_snapshot() {
+    let node_schema = schema();
+    let column_families = node_schema.column_families();
+    let refs = column_families.iter().map(String::as_str).collect::<Vec<_>>();
+    let durable = MemoryStorage::new(&refs);
+    let identity = crate::db::DbIdentity {
+        node: node(0xcb),
+        author: AuthorId::from_bytes([0xcb; 16]),
+    };
+    let seeded = crate::db::block_on(crate::db::Db::open(crate::db::DbConfig {
+        schema: node_schema.clone(),
+        storage: durable.clone(),
+        identity,
+        id_source: Some(Box::new(crate::db::SeededRowIdSource::new(0xcb))),
+    }))
+    .unwrap();
+    seeded.insert("todos", title_cells("relation seed")).unwrap();
+    drop(seeded);
+
+    let released = std::rc::Rc::new(std::cell::Cell::new(true));
+    let storage = GatedAuthorityStorage {
+        inner: groove::storage::async_ordered::ImmediateStorage::new(durable),
+        released: std::rc::Rc::clone(&released),
+        cancellations: std::rc::Rc::new(std::cell::Cell::new(0)),
+        committed_units: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
+        fail_commits: std::rc::Rc::new(std::cell::Cell::new(false)),
+    };
+    let mut opening = crate::db::PollableDbOpen::new(node_schema, identity, Box::new(storage));
+    let waker = std::task::Waker::from(std::sync::Arc::new(PersistenceTestWake));
+    let mut context = std::task::Context::from_waker(&waker);
+    let std::task::Poll::Ready(Ok(mut owner)) = opening.poll(&mut context) else {
+        panic!("released metadata reads must open the database")
+    };
+    let prepared = owner
+        .database()
+        .prepare_query(&owner.database().table("todos"))
+        .unwrap();
+    let opts = crate::db::ReadOpts {
+        tier: DurabilityTier::None,
+        local_updates: crate::db::LocalUpdates::Immediate,
+        propagation: crate::db::Propagation::LocalOnly,
+        ..crate::db::ReadOpts::default()
+    };
+    released.set(false);
+    assert!(owner
+        .poll_relation_snapshot(&mut context, &prepared, opts.clone())
+        .is_pending());
+    released.set(true);
+    let std::task::Poll::Ready(Ok(snapshot)) =
+        owner.poll_relation_snapshot(&mut context, &prepared, opts)
+    else {
+        panic!("released relation inputs must finish materialization")
+    };
+    assert_eq!(snapshot.root_count, 1);
+    assert_eq!(snapshot.rows.len(), 1);
+}
+
 struct PersistenceTestWake;
 
 impl std::task::Wake for PersistenceTestWake {

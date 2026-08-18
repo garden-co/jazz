@@ -353,18 +353,13 @@ where
                 "relation snapshots do not support include_deleted yet",
             ));
         }
-        let tier = effective_read_tier(&opts);
-        self.node
-            .node
-            .borrow_mut()
-            .query_relation_snapshot_for_client(
-                &prepared.shape,
-                &prepared.binding,
-                tier,
-                self.identity.author,
-                &opts.read_view,
-            )
-            .map_err(Into::into)
+        self.relation_snapshot_resident(
+            prepared,
+            &opts,
+            self.identity.author,
+            QueryAuthorizationMode::ClientLocal,
+        )
+        .map_err(Into::into)
     }
 
     /// Tier-gated one-shot relation read evaluated as `author`.
@@ -381,18 +376,41 @@ where
                 "relation snapshots do not support include_deleted yet",
             ));
         }
-        let tier = effective_read_tier(&opts);
-        self.node
-            .node
-            .borrow_mut()
-            .query_relation_snapshot_for_serving_in_read_view(
+        self.relation_snapshot_resident(
+            prepared,
+            &opts,
+            author,
+            QueryAuthorizationMode::TrustedServing,
+        )
+        .map_err(Into::into)
+    }
+
+    pub(super) fn relation_snapshot_resident(
+        &self,
+        prepared: &PreparedQuery,
+        opts: &ReadOpts,
+        author: AuthorId,
+        authorization_mode: QueryAuthorizationMode,
+    ) -> Result<RelationSnapshot, crate::node::Error> {
+        let tier = effective_read_tier(opts);
+        let mut node = self.node.node.borrow_mut();
+        match authorization_mode {
+            QueryAuthorizationMode::ClientLocal => node.query_relation_snapshot_for_client(
                 &prepared.shape,
                 &prepared.binding,
                 tier,
                 author,
                 &opts.read_view,
-            )
-            .map_err(Into::into)
+            ),
+            QueryAuthorizationMode::TrustedServing => node
+                .query_relation_snapshot_for_serving_in_read_view(
+                    &prepared.shape,
+                    &prepared.binding,
+                    tier,
+                    author,
+                    &opts.read_view,
+                ),
+        }
     }
 
     /// Tier-gated canonical structured result read.
