@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 
-# The dedicated runner has four CPUs. Turbo gets at most two test tasks while
-# the jazz-tools browser suite gets the remaining capacity; both reuse the one
-# artifact build completed by the workflow before this script starts.
+# Browser packages and the jazz-tools browser suite each launch Chromium and
+# native WASM workers. Give each suite exclusive browser capacity: even one
+# workspace browser beside jazz-tools can starve websocket/worker progress past
+# semantic deadlines while every isolated receipt is healthy. Both phases reuse
+# the one artifact build completed by the workflow.
 set -u
 
-node_tests_command=${JAZZ_NODE_TEST_COMMAND:-"pnpm test --filter=!moon-lander-react --filter=!@jazz/rust --filter=!auth-simple-chat --filter=!auth-workos-chat --filter=!auth-betterauth-chat --filter=!chat-react --filter=!world-tour --filter=!jazz-rn --concurrency=2"}
+node_tests_command=${JAZZ_NODE_TEST_COMMAND:-"pnpm test --filter=!moon-lander-react --filter=!@jazz/rust --filter=!auth-simple-chat --filter=!auth-workos-chat --filter=!auth-betterauth-chat --filter=!chat-react --filter=!world-tour --filter=!jazz-rn --concurrency=1"}
 browser_tests_command=${JAZZ_BROWSER_TEST_COMMAND:-"pnpm --filter jazz-tools test:browser"}
 node_tests_pid=""
 browser_tests_pid=""
@@ -37,11 +39,11 @@ trap 'interrupt 143' TERM
 
 setsid bash -c "${node_tests_command}" >"${node_tests_log}" 2>&1 &
 node_tests_pid=$!
-setsid bash -c "${browser_tests_command}" >"${browser_tests_log}" 2>&1 &
-browser_tests_pid=$!
-
 wait "${node_tests_pid}"
 node_tests_status=$?
+
+setsid bash -c "${browser_tests_command}" >"${browser_tests_log}" 2>&1 &
+browser_tests_pid=$!
 wait "${browser_tests_pid}"
 browser_tests_status=$?
 trap - INT TERM

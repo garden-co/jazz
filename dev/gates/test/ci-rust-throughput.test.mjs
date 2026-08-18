@@ -28,6 +28,9 @@ const otherWorkflows = fs
   .filter((name) => name.endsWith(".yml") && name !== "ci.yml")
   .map((name) => fs.readFileSync(path.join(root, ".github/workflows", name), "utf8"));
 const packageJson = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
+const indexedDbPackageJson = JSON.parse(
+  fs.readFileSync(path.join(root, "crates/jazz-storage-indexeddb/package.json"), "utf8"),
+);
 const toolBundleValidator = fs.readFileSync(
   path.join(root, "dev/ci/validate-tool-bundle.mjs"),
   "utf8",
@@ -523,20 +526,28 @@ test("CI runs the workflow contract test through its package script", () => {
   assert.match(lint, /run: pnpm test:ci-workflow/);
 });
 
-test("TypeScript CI overlaps independent Node and browser suites after one artifact build", () => {
+test("TypeScript CI gives browser suites exclusive capacity after one artifact build", () => {
   const typescript = job("test-ts");
   const runner = fs.readFileSync(path.join(root, "dev/gates/run-ts-tests.sh"), "utf8");
   assert.match(
     typescript,
     /name: Build correctness-test artifacts\s+run: pnpm build:test-artifacts/,
   );
-  assert.match(typescript, /name: Run Node and browser test suites in parallel/);
+  assert.match(
+    typescript,
+    /name: Run Node and browser test suites with exclusive browser capacity/,
+  );
   assert.match(typescript, /run: dev\/gates\/run-ts-tests\.sh/);
-  assert.match(runner, /--concurrency=2/);
+  assert.match(runner, /--concurrency=1/);
   assert.match(runner, /setsid bash -c "\$\{node_tests_command\}" >"\$\{node_tests_log\}" 2>&1 &/);
   assert.match(
     runner,
     /setsid bash -c "\$\{browser_tests_command\}" >"\$\{browser_tests_log\}" 2>&1 &/,
+  );
+  assert.ok(
+    runner.indexOf('wait "${node_tests_pid}"') <
+      runner.indexOf('setsid bash -c "${browser_tests_command}"'),
+    "workspace tests must finish before the jazz-tools browser suite starts",
   );
   assert.match(runner, /trap 'interrupt 130' INT/);
   assert.match(runner, /trap 'interrupt 143' TERM/);
@@ -553,7 +564,29 @@ test("TypeScript CI overlaps independent Node and browser suites after one artif
   assert.doesNotMatch(typescript, /rust-components: clippy,rustfmt/);
 });
 
-test("parallel TypeScript runner waits for both suites and combines their failures", () => {
+test("TypeScript CI rebuilds and runs the real IndexedDB async-storage proof", () => {
+  assert.equal(indexedDbPackageJson.scripts.test, "pnpm build:test && pnpm test:browser");
+  assert.equal(
+    indexedDbPackageJson.scripts["build:test"],
+    "wasm-pack build --target web --out-dir test/pkg --dev",
+  );
+  const discovery = spawnSync(
+    "pnpm",
+    [
+      "--filter",
+      "@jazz/storage-indexeddb",
+      "exec",
+      "node",
+      "-e",
+      "process.stdout.write(process.cwd())",
+    ],
+    { cwd: root, encoding: "utf8" },
+  );
+  assert.equal(discovery.status, 0, discovery.stderr);
+  assert.equal(discovery.stdout, path.join(root, "crates/jazz-storage-indexeddb"));
+});
+
+test("TypeScript runner waits for both suites and combines their failures", () => {
   const runner = path.join(root, "dev/gates/run-ts-tests.sh");
   const cases = [
     { node: 0, browser: 0, expected: 0 },
@@ -583,7 +616,7 @@ test("parallel TypeScript runner waits for both suites and combines their failur
   }
 });
 
-test("parallel TypeScript runner terminates both child process groups", async () => {
+test("TypeScript runner terminates its active child process group", async () => {
   const fixture = fs.mkdtempSync(path.join(os.tmpdir(), "jazz-ts-ci-interrupt-"));
   const nodeMarker = path.join(fixture, "node-orphan");
   const browserMarker = path.join(fixture, "browser-orphan");

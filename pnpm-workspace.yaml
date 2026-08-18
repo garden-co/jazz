@@ -14,6 +14,7 @@ packages:
   - crates
   - crates/jazz-wasm
   - crates/jazz-napi
+  - crates/jazz-storage-indexeddb
 
 catalogs:
   default:

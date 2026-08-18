@@ -265,7 +265,7 @@ jobs:
       # Both suites consume the already-built artifacts and do not write shared
       # outputs. Running them together avoids extending the PR critical path
       # while retaining the complete Node and browser coverage in this gate.
-      - name: Run Node and browser test suites in parallel
+      - name: Run Node and browser test suites with exclusive browser capacity
         run: dev/gates/run-ts-tests.sh
       - name: Report sccache statistics
         if: always()

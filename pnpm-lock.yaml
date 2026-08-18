@@ -172,6 +172,12 @@ importers:
         specifier: catalog:default
         version: 6.0.2
 
+  crates/jazz-storage-indexeddb:
+    devDependencies:
+      playwright:
+        specifier: ^1.58.2
+        version: 1.58.2
+
   crates/jazz-wasm: {}
 
   dev/local-telemetry/web:
