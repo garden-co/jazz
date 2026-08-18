@@ -24,7 +24,7 @@ function makeHarness() {
   let subscribedQuery: QueryBuilder<Todo> | undefined;
   let callback: ((delta: SubscriptionDelta<Todo>) => void) | undefined;
   const db = {
-    getAuthState: () => ({ authMode: "local-first", session: null }),
+    getAuthState: () => ({ authMode: "local-first" as const, session: null }),
     onAuthChanged: () => () => {},
     updateAuthToken: () => {},
     subscribeAll: (query: QueryBuilder<Todo>, next: (delta: SubscriptionDelta<Todo>) => void) => {
