@@ -378,7 +378,7 @@ fn authority_runtime(
     let refs = column_families.iter().map(String::as_str).collect::<Vec<_>>();
     let durable = MemoryStorage::new(&refs);
     let storage = CommitGatedAuthorityStorage {
-        inner: groove::storage::async_ordered::ImmediateStorage::new(durable.clone()),
+        inner: groove::storage::async_ordered::ImmediateStorage::new(durable),
         released,
         fail,
         completed: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
@@ -1456,7 +1456,7 @@ fn cold_mergeable_preparation_suspends_before_resident_publication() {
     drop(bootstrap);
 
     let backend = GatedAuthorityStorage {
-        inner: groove::storage::async_ordered::ImmediateStorage::new(durable),
+        inner: groove::storage::async_ordered::ImmediateStorage::new(durable.clone()),
         released: std::rc::Rc::clone(&released),
         cancellations: std::rc::Rc::new(std::cell::Cell::new(0)),
         committed_units: std::rc::Rc::clone(&committed_units),
@@ -1974,7 +1974,7 @@ fn cold_relay_ingress_suspends_and_withholds_callbacks_until_durable() {
 
     let released = std::rc::Rc::new(std::cell::Cell::new(true));
     let backend = GatedAuthorityStorage {
-        inner: groove::storage::async_ordered::ImmediateStorage::new(durable),
+        inner: groove::storage::async_ordered::ImmediateStorage::new(durable.clone()),
         released: std::rc::Rc::clone(&released),
         cancellations: std::rc::Rc::new(std::cell::Cell::new(0)),
         committed_units: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
@@ -2019,6 +2019,27 @@ fn cold_relay_ingress_suspends_and_withholds_callbacks_until_durable() {
         .expect("durable relay ingress must publish its transaction");
     assert_eq!(stored.fate, Fate::Pending);
     assert_eq!(stored.durability, DurabilityTier::Local);
+
+    drop(history);
+    drop(relay);
+    let mut reopening = DemandDrivenNodeOpen::new(
+        node(0xcb),
+        schema(),
+        Box::new(groove::storage::async_ordered::ImmediateStorage::new(durable)),
+    );
+    let std::task::Poll::Ready(Ok(mut reopened)) = reopening.poll(&mut context) else {
+        panic!("durable relay must reopen")
+    };
+    let replay = loop {
+        match reopened.poll_ingest_relay_commit_unit(&mut context, tx.clone(), versions.clone()) {
+            std::task::Poll::Pending => {}
+            ready => break ready,
+        }
+    };
+    assert!(
+        matches!(replay, std::task::Poll::Ready(Ok(()))),
+        "replaying the resident transaction after reopen must be idempotent: {replay:?}"
+    );
 }
 
 #[test]

@@ -1132,7 +1132,8 @@ where
         // ahead-current key during node startup.
         if !self
             .database
-            .primary_key_scan_raw(
+            .primary_key_scan_raw_in_batch(
+                batch,
                 &storage_table,
                 &[
                     Value::Uuid(version.row_uuid().0),
