@@ -807,9 +807,9 @@ impl DemandDrivenDb {
                     }
                 }
                 // Completion re-stages the original ViewUpdate at the head of
-                // this same link. Yield before the legacy node tick can consume
-                // it; the next owner poll acquires and publishes it through the
-                // typed receiver boundary.
+                // this same link. Yield before the synchronous resident peer
+                // tick can consume it; the next owner poll acquires and
+                // publishes it through the typed receiver boundary.
                 if connections
                     .iter()
                     .any(|connection| connection.borrow().has_externally_applied_inbound())
@@ -935,8 +935,8 @@ impl DemandDrivenDb {
         {
             // Typed async ingress has already mutated the resident query
             // state. Publish that invalidation before acquiring subscriber
-            // outputs; the legacy synchronous tick runs after acquisition and
-            // is therefore too late to arm this owner poll.
+            // outputs; the synchronous resident peer tick runs after
+            // acquisition and is therefore too late to arm this owner poll.
             self.database.node.mark_subscriber_connections_dirty();
         }
 

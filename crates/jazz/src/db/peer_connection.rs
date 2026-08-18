@@ -26,8 +26,8 @@ where
 {
     pub(super) transport: Box<dyn Transport>,
     pub(super) staged_inbound: VecDeque<StagedInboundMessage>,
-    /// Demand-driven owners consume durable ingress frames before the legacy
-    /// synchronous tick is allowed to observe them.
+    /// Demand-driven owners consume durable ingress frames before the
+    /// synchronous resident peer tick is allowed to observe them.
     pub(super) external_durable_ingress: bool,
     pub(super) externally_applied_inbound: bool,
     pub(super) prepared_subscriber_authority_tx: Option<TxId>,
