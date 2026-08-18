@@ -1,5 +1,6 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, expectTypeOf, it, vi } from "vitest";
 import { flushSync } from "svelte";
+import type { QueryBuilder } from "../shared/index.js";
 import "./test-helpers.svelte.js";
 
 const mocks = vi.hoisted(() => {
@@ -226,6 +227,41 @@ describe("svelte/QuerySubscription", () => {
     expect(withoutTier.current).toBeUndefined();
     expect(withTier.current).toBeUndefined();
 
+    cleanup();
+  });
+
+  it("one mode exposes a nullable row, strips the binding option, and reacts", async () => {
+    type Todo = { id: string; title: string };
+    let onDelta!: (delta: { all: Todo[]; delta: never[] }) => void;
+    mocks.getCacheEntry.mockReturnValue({
+      state: { status: "fulfilled" as const, data: [] },
+      subscribe: (callbacks: any) => {
+        onDelta = callbacks.onDelta;
+        return mocks.unsubscribe;
+      },
+    } as any);
+
+    const query = makeQuery("one") as QueryBuilder<Todo>;
+    const createSubscription = () =>
+      new QuerySubscription(query, {
+        one: true,
+        tier: "edge",
+      });
+    let subscription!: ReturnType<typeof createSubscription>;
+    const cleanup = $effect.root(() => {
+      subscription = createSubscription();
+    });
+    await settle();
+
+    expectTypeOf(subscription.current).toEqualTypeOf<Todo | null | undefined>();
+    expect(subscription.current).toBeNull();
+    expect(mocks.makeQueryKey).toHaveBeenCalledWith(query, { tier: "edge" });
+
+    onDelta({ all: [{ id: "1", title: "first" }], delta: [] });
+    expect(subscription.current).toEqual({ id: "1", title: "first" });
+
+    onDelta({ all: [], delta: [] });
+    expect(subscription.current).toBeNull();
     cleanup();
   });
 });
