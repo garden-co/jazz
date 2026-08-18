@@ -20,33 +20,7 @@ use super::{
 pub struct DemandLoadedStorage {
     cache: MemoryStorage,
     state: std::rc::Rc<RefCell<DemandState>>,
-    demand_collector: std::rc::Rc<RefCell<DemandCollector>>,
     transaction: Option<std::rc::Rc<ResidentTransaction>>,
-}
-
-#[derive(Default)]
-struct DemandCollector {
-    active: bool,
-    seen: BTreeSet<DemandIdentity>,
-    ordered: Vec<OwnedStorageOperation>,
-}
-
-#[derive(PartialEq, Eq, PartialOrd, Ord)]
-enum DemandIdentity {
-    Get(String, Vec<u8>),
-    Scan(OwnedScanRequest),
-}
-
-impl DemandIdentity {
-    fn from_operation(operation: &OwnedStorageOperation) -> Option<Self> {
-        match operation {
-            OwnedStorageOperation::Get { column_family, key } => {
-                Some(Self::Get(column_family.clone(), key.clone()))
-            }
-            OwnedStorageOperation::Scan(scan) => Some(Self::Scan(scan.clone())),
-            _ => None,
-        }
-    }
 }
 
 /// Undo journal for the node-open preparation transaction.
@@ -64,6 +38,7 @@ struct ResidentTransaction {
 }
 
 type OriginalValues = BTreeMap<(String, Vec<u8>), Option<Value>>;
+type ResidentRanges = BTreeMap<String, BTreeMap<Vec<u8>, Vec<u8>>>;
 
 impl ResidentTransaction {
     fn record_original(&self, cf: &str, key: &[u8]) -> Result<(), Error> {
@@ -128,8 +103,8 @@ struct ResidentAdmissions {
     exact_scans: BTreeSet<OwnedScanRequest>,
     inherited_prefixes: std::rc::Rc<BTreeSet<(String, Vec<u8>)>>,
     prefixes: BTreeSet<(String, Vec<u8>)>,
-    inherited_ranges: std::rc::Rc<BTreeMap<String, BTreeMap<Vec<u8>, Vec<u8>>>>,
-    ranges: BTreeMap<String, BTreeMap<Vec<u8>, Vec<u8>>>,
+    inherited_ranges: std::rc::Rc<ResidentRanges>,
+    ranges: ResidentRanges,
 }
 
 impl ResidentAdmissions {
@@ -251,23 +226,8 @@ impl DemandLoadedStorage {
         Self {
             cache: MemoryStorage::new(column_families),
             state: std::rc::Rc::new(RefCell::new(state)),
-            demand_collector: Default::default(),
             transaction: None,
         }
-    }
-
-    pub(crate) fn begin_demand_collection(&self) {
-        let mut collector = self.demand_collector.borrow_mut();
-        collector.active = true;
-        collector.seen.clear();
-        collector.ordered.clear();
-    }
-
-    pub(crate) fn take_collected_demands(&self) -> Vec<OwnedStorageOperation> {
-        let mut collector = self.demand_collector.borrow_mut();
-        collector.active = false;
-        collector.seen.clear();
-        std::mem::take(&mut collector.ordered)
     }
 
     /// Begin an isolated, restartable storage transaction over the resident set.
@@ -301,7 +261,6 @@ impl DemandLoadedStorage {
                 pending_writes: Vec::new(),
                 pending_column_families: state.pending_column_families.clone(),
             })),
-            demand_collector: std::rc::Rc::clone(&self.demand_collector),
             transaction: Some(std::rc::Rc::new(ResidentTransaction {
                 cache: self.cache.clone(),
                 original_values: RefCell::new(BTreeMap::new()),
@@ -380,20 +339,12 @@ impl DemandLoadedStorage {
         Ok(())
     }
 
-    fn require(&self, request: OwnedStorageOperation) -> Result<bool, Error> {
+    fn require(&self, request: OwnedStorageOperation) -> Result<(), Error> {
         if self.state.borrow().admissions.covers(&request) {
-            Ok(true)
-        } else if self.demand_collector.borrow().active {
-            let mut collector = self.demand_collector.borrow_mut();
-            if DemandIdentity::from_operation(&request)
-                .is_some_and(|identity| collector.seen.insert(identity))
-            {
-                collector.ordered.push(request);
-            }
-            Ok(false)
+            Ok(())
         } else {
             Err(Error::NotResident {
-                request: Box::new(request),
+                requests: vec![request],
             })
         }
     }
@@ -419,16 +370,14 @@ impl DemandLoadedStorage {
 
 impl OrderedKvStorage for DemandLoadedStorage {
     fn require_resident(&self, operation: &OwnedStorageOperation) -> Result<(), Error> {
-        self.require(operation.clone()).map(|_| ())
+        self.require(operation.clone())
     }
 
     fn get(&self, cf: &ColumnFamilyName, key: &Key) -> Result<Option<Value>, Error> {
-        if !self.require(OwnedStorageOperation::Get {
+        self.require(OwnedStorageOperation::Get {
             column_family: cf.to_owned(),
             key: key.to_vec(),
-        })? {
-            return Ok(None);
-        }
+        })?;
         self.cache.get(cf, key)
     }
 
@@ -472,11 +421,9 @@ impl OrderedKvStorage for DemandLoadedStorage {
         end: &Key,
         visit: &mut ScanVisitor<'_>,
     ) -> Result<(), Error> {
-        if !self.require(OwnedStorageOperation::Scan(OwnedScanRequest::range(
+        self.require(OwnedStorageOperation::Scan(OwnedScanRequest::range(
             cf, start, end,
-        )))? {
-            return Ok(());
-        }
+        )))?;
         self.cache.scan_range(cf, start, end, visit)
     }
 
@@ -486,11 +433,9 @@ impl OrderedKvStorage for DemandLoadedStorage {
         prefix: &Key,
         visit: &mut ScanVisitor<'_>,
     ) -> Result<(), Error> {
-        if !self.require(OwnedStorageOperation::Scan(OwnedScanRequest::prefix(
+        self.require(OwnedStorageOperation::Scan(OwnedScanRequest::prefix(
             cf, prefix,
-        )))? {
-            return Ok(());
-        }
+        )))?;
         self.cache.scan_prefix(cf, prefix, visit)
     }
 
@@ -500,11 +445,9 @@ impl OrderedKvStorage for DemandLoadedStorage {
         prefix: &Key,
         visit: &mut ScanVisitor<'_>,
     ) -> Result<(), Error> {
-        if !self.require(OwnedStorageOperation::Scan(
+        self.require(OwnedStorageOperation::Scan(
             OwnedScanRequest::prefix(cf, prefix).reverse(),
-        ))? {
-            return Ok(());
-        }
+        ))?;
         self.cache.scan_prefix_reverse(cf, prefix, visit)
     }
 
@@ -533,7 +476,6 @@ impl ReopenableStorage for DemandLoadedStorage {
         let Self {
             cache,
             state,
-            demand_collector,
             transaction,
         } = self;
         state
@@ -543,7 +485,6 @@ impl ReopenableStorage for DemandLoadedStorage {
         Ok(Self {
             cache: cache.reopen(column_families)?,
             state,
-            demand_collector,
             transaction,
         })
     }

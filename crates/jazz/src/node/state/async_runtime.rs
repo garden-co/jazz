@@ -189,7 +189,7 @@ impl DemandDrivenNode {
         mut operation: impl FnMut() -> Result<T, E>,
         missing_input: impl Fn(
             E,
-        ) -> Result<groove::storage::async_ordered::OwnedStorageOperation, E>,
+        ) -> Result<Vec<groove::storage::async_ordered::OwnedStorageOperation>, E>,
     ) -> std::task::Poll<Result<T, E>>
     where
         E: From<Error> + From<groove::storage::Error>,
@@ -1451,10 +1451,9 @@ impl DemandDrivenNode {
         &mut self,
         context: &mut std::task::Context<'_>,
         operation: impl FnMut() -> Result<T, E>,
-        missing_input: impl Fn(E) -> Result<
-            groove::storage::async_ordered::OwnedStorageOperation,
+        missing_input: impl Fn(
             E,
-        >,
+        ) -> Result<Vec<groove::storage::async_ordered::OwnedStorageOperation>, E>,
     ) -> std::task::Poll<Result<T, E>>
     where
         E: From<Error> + From<groove::storage::Error>,
@@ -2144,16 +2143,16 @@ fn construct_demand_driven_node(
 
 pub(crate) fn missing_node_open_input(
     error: Error,
-) -> Result<groove::storage::async_ordered::OwnedStorageOperation, Error> {
+) -> Result<Vec<groove::storage::async_ordered::OwnedStorageOperation>, Error> {
     match error {
-        Error::Storage(groove::storage::Error::NotResident { request }) => Ok(*request),
+        Error::Storage(groove::storage::Error::NotResident { requests }) => Ok(requests),
         Error::Groove(groove::db::Error::Storage(error)) => match *error {
-            groove::storage::Error::NotResident { request } => Ok(*request),
+            groove::storage::Error::NotResident { requests } => Ok(requests),
             error => Err(Error::Storage(error)),
         },
         Error::Groove(groove::db::Error::IvmRuntime(
-            groove::ivm::IvmRuntimeError::Storage(groove::storage::Error::NotResident { request }),
-        )) => Ok(*request),
+            groove::ivm::IvmRuntimeError::Storage(groove::storage::Error::NotResident { requests }),
+        )) => Ok(requests),
         error => Err(error),
     }
 }

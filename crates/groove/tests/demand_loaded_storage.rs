@@ -2,7 +2,8 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::task::{Context, Poll, Waker};
 
-use groove::db::{Database, DemandDrivenDatabase, GraphBuilder};
+use groove::db::{Database, DemandDrivenDatabase, GraphBuilder, PredicateExpr};
+use groove::ivm::{LiteralValue, StaticScanSpec};
 use groove::records::Value;
 use groove::schema::{
     ColumnSchema, ColumnType, DatabaseSchema, IndexSchema, IntegerKeyType, PrimaryKey, TableSchema,
@@ -169,10 +170,11 @@ fn query_requests_only_its_missing_range_then_retries_from_cache() {
     let groove::db::Error::Storage(error) = error else {
         panic!("query miss must retain its storage demand")
     };
-    let groove::storage::Error::NotResident { request } = *error else {
+    let groove::storage::Error::NotResident { mut requests } = *error else {
         panic!("query miss must be an owned storage request")
     };
-    let request = OwnedStorageRequest::new(*request);
+    assert_eq!(requests.len(), 1);
+    let request = OwnedStorageRequest::new(requests.pop().unwrap());
     let mut context = Context::from_waker(Waker::noop());
     let Poll::Ready(Ok(response)) = durable.poll_request(&request, &mut context) else {
         panic!("memory durability must answer through the same first-poll path")
@@ -185,6 +187,27 @@ fn query_requests_only_its_missing_range_then_retries_from_cache() {
         rows[0].get("value").unwrap(),
         Value::String("durable".into())
     );
+}
+
+#[test]
+fn independent_graph_sources_report_one_cold_frontier() {
+    const SOURCES: usize = 128;
+    let cache = DemandLoadedStorage::new(&["rows", "indices"]);
+    let mut database = Database::new(schema(), cache).unwrap();
+    let graph = GraphBuilder::union((0..SOURCES).map(|index| {
+        GraphBuilder::table_scan(
+            "rows",
+            StaticScanSpec::Point(vec![LiteralValue::U64(index as u64)]),
+        )
+    }));
+
+    let groove::db::Error::IvmRuntime(groove::ivm::IvmRuntimeError::Storage(
+        groove::storage::Error::NotResident { requests },
+    )) = database.query_graph(graph).unwrap_err()
+    else {
+        panic!("cold independent sources must report their blocked frontier")
+    };
+    assert_eq!(requests.len(), SOURCES);
 }
 
 #[test]
@@ -308,10 +331,11 @@ fn write_preparation_loads_inputs_before_the_single_real_ivm_tick() {
         match database.prepare_batch_storage_inputs(&batch) {
             Ok(prepared) => break prepared,
             Err(groove::db::Error::Storage(error)) => {
-                let groove::storage::Error::NotResident { request } = *error else {
+                let groove::storage::Error::NotResident { mut requests } = *error else {
                     panic!("preparation failed for a reason other than missing input")
                 };
-                let request = OwnedStorageRequest::new(*request);
+                assert_eq!(requests.len(), 1);
+                let request = OwnedStorageRequest::new(requests.pop().unwrap());
                 let Poll::Ready(Ok(response)) = durable.poll_request(&request, &mut context) else {
                     panic!("memory input fetch must be immediately ready")
                 };
@@ -350,12 +374,12 @@ fn write_preparation_declares_durable_index_inputs_without_ticking() {
         panic!("a cold durable index must be acquired before the live tick")
     };
     let groove::db::Error::IvmRuntime(groove::ivm::IvmRuntimeError::Storage(
-        groove::storage::Error::NotResident { request },
+        groove::storage::Error::NotResident { requests },
     )) = error
     else {
         panic!("preparation must report the exact missing durable index input")
     };
-    let OwnedStorageOperation::Scan(scan) = request.as_ref() else {
+    let [OwnedStorageOperation::Scan(scan)] = requests.as_slice() else {
         panic!("a durable index closure must be acquired as an ordered scan")
     };
     assert_eq!(scan.column_family, "indices");
@@ -365,7 +389,10 @@ fn write_preparation_declares_durable_index_inputs_without_ticking() {
     );
 
     cache
-        .admit(*request, OwnedStorageResponse::Rows(Vec::new()))
+        .admit(
+            requests.into_iter().next().unwrap(),
+            OwnedStorageResponse::Rows(Vec::new()),
+        )
         .unwrap();
     let _prepared = database.prepare_batch_storage_inputs(&batch).unwrap();
     assert!(database.last_tick_metrics().is_none());
@@ -449,6 +476,40 @@ fn opened_subscription_inherits_synchronous_write_visibility_over_async_storage(
         database.poll_persistence(&mut context),
         Poll::Ready(Ok(()))
     ));
+}
+
+#[test]
+fn cold_auto_prepared_subscription_does_not_publish_or_retain_a_binding() {
+    let released = Rc::new(Cell::new(false));
+    let durable = GatedStorage {
+        inner: ImmediateStorage::new(MemoryStorage::new(&["rows", "indices"])),
+        released: Rc::clone(&released),
+        polls: Rc::new(Cell::new(0)),
+        cancellations: Rc::new(Cell::new(0)),
+    };
+    let mut database = DemandDrivenDatabase::new(schema(), Box::new(durable)).unwrap();
+    let mut context = Context::from_waker(Waker::noop());
+    let mut graph =
+        Some(GraphBuilder::table("rows").filter(PredicateExpr::eq("id", Value::U64(7))));
+
+    assert!(
+        database
+            .poll_subscribe_one_sink(&mut context, &mut graph)
+            .is_pending()
+    );
+    let stats = database.resident().runtime_stats();
+    assert_eq!(stats.active_subscriptions, 0);
+    assert_eq!(stats.active_shape_params, 0);
+
+    released.set(true);
+    let Poll::Ready(Ok(subscription)) = database.poll_subscribe_one_sink(&mut context, &mut graph)
+    else {
+        panic!("released prepared subscription must publish exactly once")
+    };
+    assert!(subscription.recv().unwrap().is_empty());
+    let stats = database.resident().runtime_stats();
+    assert_eq!(stats.active_subscriptions, 1);
+    assert_eq!(stats.active_shape_params, 1);
 }
 
 #[test]

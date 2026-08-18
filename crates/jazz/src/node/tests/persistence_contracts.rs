@@ -419,12 +419,12 @@ fn cold_retry_poisoned_when_acquisition_attempt_publishes_before_suspending() {
         )?;
         node.publish_prepared_mergeable_commit(prepared)?;
         Err::<(), _>(Error::Storage(groove::storage::Error::NotResident {
-            request: Box::new(
+            requests: vec![
                 groove::storage::async_ordered::OwnedStorageOperation::Get {
                     column_family: "jazz_transactions".to_owned(),
                     key: vec![0xff],
                 },
-            ),
+            ],
         }))
     });
 
@@ -476,12 +476,12 @@ fn cold_acquisition_waits_behind_older_resident_publication() {
 
     let result = runtime.poll_acquire_resident(&mut context, |_node| {
         Err::<(), _>(Error::Storage(groove::storage::Error::NotResident {
-            request: Box::new(
+            requests: vec![
                 groove::storage::async_ordered::OwnedStorageOperation::Get {
                     column_family: "jazz_transactions".to_owned(),
                     key: vec![0xc8],
                 },
-            ),
+            ],
         }))
     });
     assert!(matches!(result, std::task::Poll::Pending));

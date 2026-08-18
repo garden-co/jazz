@@ -446,5 +446,45 @@ pub enum IvmRuntimeError {
     UnsupportedOperator,
 }
 
+pub(super) fn merge_blocked_evaluations<T>(
+    evaluations: impl IntoIterator<Item = Result<T, IvmRuntimeError>>,
+) -> Result<Vec<T>, IvmRuntimeError> {
+    let mut values = Vec::new();
+    let mut demands = Vec::new();
+    let mut seen_demands = HashSet::new();
+    for evaluation in evaluations {
+        match evaluation {
+            Ok(value) if demands.is_empty() => values.push(value),
+            Ok(_) => {}
+            Err(IvmRuntimeError::Storage(crate::storage::Error::NotResident { requests })) => {
+                for request in requests {
+                    if seen_demands.insert(request.clone()) {
+                        demands.push(request);
+                    }
+                }
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    if demands.is_empty() {
+        Ok(values)
+    } else {
+        Err(IvmRuntimeError::Storage(
+            crate::storage::Error::NotResident { requests: demands },
+        ))
+    }
+}
+
+pub(super) fn merge_blocked_pair<T>(
+    left: Result<T, IvmRuntimeError>,
+    right: Result<T, IvmRuntimeError>,
+) -> Result<[T; 2], IvmRuntimeError> {
+    let mut values = merge_blocked_evaluations([left, right])?.into_iter();
+    Ok([
+        values.next().expect("merged pair retains left value"),
+        values.next().expect("merged pair retains right value"),
+    ])
+}
+
 #[cfg(test)]
 mod tests;

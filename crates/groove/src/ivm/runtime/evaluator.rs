@@ -705,15 +705,18 @@ where
                     .inputs
                     .iter()
                     .map(|input| self.update_node(*input))
-                    .collect::<Result<Vec<_>, _>>()?;
+                    .collect::<Vec<_>>();
+                let inputs = merge_blocked_evaluations(inputs)?;
                 NodeState::update_union(output_desc, inputs)
             }
             OpType::Join(join) => {
                 let [left_input, right_input] = graph_node.descriptor.inputs.as_slice() else {
                     return Err(IvmRuntimeError::GraphInputArityMismatch(node));
                 };
-                let left = self.update_node(*left_input)?;
-                let right = self.update_node(*right_input)?;
+                let [left, right] = merge_blocked_pair(
+                    self.update_node(*left_input),
+                    self.update_node(*right_input),
+                )?;
                 self.update_join(
                     node,
                     join,
@@ -728,8 +731,10 @@ where
                 let [left_input, right_input] = graph_node.descriptor.inputs.as_slice() else {
                     return Err(IvmRuntimeError::GraphInputArityMismatch(node));
                 };
-                let left = self.update_node(*left_input)?;
-                let right = self.update_node(*right_input)?;
+                let [left, right] = merge_blocked_pair(
+                    self.update_node(*left_input),
+                    self.update_node(*right_input),
+                )?;
                 self.update_semi_join(
                     node,
                     join,
@@ -744,8 +749,10 @@ where
                 let [left_input, right_input] = graph_node.descriptor.inputs.as_slice() else {
                     return Err(IvmRuntimeError::GraphInputArityMismatch(node));
                 };
-                let left = self.update_node(*left_input)?;
-                let right = self.update_node(*right_input)?;
+                let [left, right] = merge_blocked_pair(
+                    self.update_node(*left_input),
+                    self.update_node(*right_input),
+                )?;
                 self.update_anti_join(
                     node,
                     join,

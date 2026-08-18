@@ -16,8 +16,8 @@ use crate::storage::OrderedKvStorage;
 use super::{
     ArrangementUpdateMode, AsOf, EvalContext, GraphRuntimeView, IvmRuntimeError, NodeState,
     RecordDelta, RecordDeltas, ScopeId, StaticScanBounds, SubTick, TableDelta, VariantProjection,
-    VariantProjectionKey, consolidate_deltas, plan_expr_names, project_binding_source_deltas,
-    scan_bounds,
+    VariantProjectionKey, consolidate_deltas, merge_blocked_evaluations, merge_blocked_pair,
+    plan_expr_names, project_binding_source_deltas, scan_bounds,
 };
 
 #[derive(Clone, Debug, Default)]
@@ -379,6 +379,8 @@ pub(super) fn snapshot_table_deltas(
     let mut tables = std::collections::HashSet::<TableSnapshotSource>::new();
     collect_table_sources(graph, root, &mut tables)?;
     let mut output = Vec::new();
+    let mut blocked = Vec::new();
+    let mut seen_blocked = std::collections::HashSet::new();
     for source in tables {
         let table_schema = schema
             .table(&source.table)
@@ -390,16 +392,28 @@ pub(super) fn snapshot_table_deltas(
             stored_records.push(record.to_vec());
             Ok(())
         };
-        match &source.scan {
-            None => store.scan_prefix(b"", &mut visit)?,
+        let scan_result = match &source.scan {
+            None => store.scan_prefix(b"", &mut visit),
             Some(scan) => match scan_bounds(scan)? {
-                StaticScanBounds::Prefix(prefix) => store.scan_prefix(&prefix, &mut visit)?,
+                StaticScanBounds::Prefix(prefix) => store.scan_prefix(&prefix, &mut visit),
                 StaticScanBounds::Range { start, end } => {
                     if start < end {
-                        store.scan_range(&start, &end, &mut visit)?;
+                        store.scan_range(&start, &end, &mut visit)
+                    } else {
+                        Ok(())
                     }
                 }
             },
+        };
+        if let Err(crate::storage::Error::NotResident { requests }) = scan_result {
+            for request in requests {
+                if seen_blocked.insert(request.clone()) {
+                    blocked.push(request);
+                }
+            }
+            continue;
+        } else {
+            scan_result?;
         }
         let mut by_variant = HashMap::<(u32, RecordDescriptor), Vec<RecordDelta>>::default();
         for stored in stored_records {
@@ -428,6 +442,9 @@ pub(super) fn snapshot_table_deltas(
                     deltas,
                 }),
         );
+    }
+    if !blocked.is_empty() {
+        return Err(crate::storage::Error::NotResident { requests: blocked }.into());
     }
     Ok(output)
 }
@@ -789,7 +806,8 @@ where
                     .inputs
                     .iter()
                     .map(|input| self.eval_node(*input))
-                    .collect::<Result<Vec<_>, _>>()?;
+                    .collect::<Vec<_>>();
+                let inputs = merge_blocked_evaluations(inputs)?;
                 NodeState::update_union(
                     output_desc,
                     inputs.into_iter().map(std::sync::Arc::new).collect(),
@@ -803,8 +821,9 @@ where
                 let [left, right] = graph_node.descriptor.inputs.as_slice() else {
                     return Err(IvmRuntimeError::GraphInputArityMismatch(node));
                 };
-                let left = self.eval_node(*left)?;
-                let right = self.eval_node(*right)?;
+                let left_result = self.eval_node(*left);
+                let right_result = self.eval_node(*right);
+                let [left, right] = merge_blocked_pair(left_result, right_result)?;
                 let left_on = plan_expr_names(&join.left_key);
                 let right_on = plan_expr_names(&join.right_key);
                 let mut right_by_key =
@@ -859,8 +878,9 @@ where
                 let [left, right] = graph_node.descriptor.inputs.as_slice() else {
                     return Err(IvmRuntimeError::GraphInputArityMismatch(node));
                 };
-                let left = self.eval_node(*left)?;
-                let right = self.eval_node(*right)?;
+                let left_result = self.eval_node(*left);
+                let right_result = self.eval_node(*right);
+                let [left, right] = merge_blocked_pair(left_result, right_result)?;
                 let join_state = super::join::AntiJoinState;
                 let left_on = plan_expr_names(&join.left_key);
                 let right_on = plan_expr_names(&join.right_key);

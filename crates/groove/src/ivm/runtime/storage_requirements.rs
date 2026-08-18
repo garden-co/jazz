@@ -24,10 +24,25 @@ impl TickStorageRequirements {
     where
         S: OrderedKvStorage,
     {
+        let mut blocked = Vec::new();
+        let mut seen_blocked = std::collections::HashSet::new();
         for scan in &self.scans {
-            storage.require_resident(
+            match storage.require_resident(
                 &crate::storage::async_ordered::OwnedStorageOperation::Scan(scan.clone()),
-            )?;
+            ) {
+                Ok(()) => {}
+                Err(crate::storage::Error::NotResident { requests }) => {
+                    for request in requests {
+                        if seen_blocked.insert(request.clone()) {
+                            blocked.push(request);
+                        }
+                    }
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+        if !blocked.is_empty() {
+            return Err(crate::storage::Error::NotResident { requests: blocked }.into());
         }
         Ok(())
     }

@@ -477,7 +477,7 @@ where
             QueryCompileError::Unsupported(report) => Error::QueryCapability(format!("{report:?}")),
             QueryCompileError::DeferredStorage(request) => {
                 Error::Storage(groove::storage::Error::NotResident {
-                    request: Box::new(request),
+                    requests: vec![request],
                 })
             }
         })

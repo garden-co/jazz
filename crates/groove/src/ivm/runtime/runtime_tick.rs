@@ -444,20 +444,34 @@ impl IvmRuntime {
     where
         S: OrderedKvStorage,
     {
+        let evaluations = outputs
+            .iter()
+            .map(|(sink, output)| {
+                let ordering = output
+                    .root_ordering_node
+                    .map(|node| self.hydration_snapshot(node, storage, mode))
+                    .transpose();
+                let records = self.hydration_snapshot(output.node, storage, mode);
+                match (ordering, records) {
+                    (Ok(ordering), Ok(records)) => {
+                        Ok((sink.clone(), output.output, ordering, records))
+                    }
+                    (ordering, records) => {
+                        merge_blocked_evaluations([ordering.map(|_| ()), records.map(|_| ())])?;
+                        unreachable!("an errored hydration pair cannot merge as Ready")
+                    }
+                }
+            })
+            .collect::<Vec<_>>();
         let mut sinks = BTreeMap::new();
-        for (sink, output) in outputs {
-            let ordering = output
-                .root_ordering_node
-                .map(|node| self.hydration_snapshot(node, storage, mode))
-                .transpose()?;
-            let mut records = self.hydration_snapshot(output.node, storage, mode)?;
-            if !records.descriptor.registry_compatible_with(&output.output) {
+        for (sink, output, ordering, mut records) in merge_blocked_evaluations(evaluations)? {
+            if !records.descriptor.registry_compatible_with(&output) {
                 return Err(IvmRuntimeError::GraphOutputMismatch);
             }
             if let Some(ordering) = &ordering {
                 order_terminal_snapshot(&mut records, ordering)?;
             }
-            sinks.insert(sink.clone(), records);
+            sinks.insert(sink, records);
         }
         Ok(MultisinkDeltas {
             sinks,

@@ -1627,6 +1627,19 @@ impl IvmRuntime {
             let compiled = self.add_dedup_graph(&graph)?;
             outputs.insert(sink, compiled);
         }
+        // Hydration is the restartable prepare phase. It may report a cold
+        // storage frontier, so no subscription identity, retainer, channel, or
+        // externally visible registration may exist until it succeeds.
+        let initial = match self.hydration_snapshots_for_subscription(&outputs, storage) {
+            Ok(initial) => initial,
+            Err(error) => {
+                for node in self.gc_ephemeral_nodes(0) {
+                    self.remove_node_runtime(node);
+                }
+                self.prune_unreferenced_arrangements();
+                return Err(error);
+            }
+        };
         let subscription_id = self.next_subscription_id();
         let (sender, receiver) = mpsc::channel();
         let receiver_liveness = Arc::new(());
@@ -1642,13 +1655,6 @@ impl IvmRuntime {
                 target: MultisinkSubscriptionTarget::Direct,
             },
         );
-        let initial = match self.hydration_snapshots_for_subscription(&outputs, storage) {
-            Ok(initial) => initial,
-            Err(error) => {
-                self.unsubscribe(subscription_id);
-                return Err(error);
-            }
-        };
         let queued = self.queued_multisink_deltas(initial);
         let sent = self
             .multisink_subscriptions
@@ -1822,6 +1828,19 @@ impl IvmRuntime {
             let _ = self.remove_binding_ref(shape_id, &binding_key);
             return Err(error);
         }
+        let initial = match self.hydration_snapshots_for_subscription(&outputs, storage) {
+            Ok(initial) => initial,
+            Err(error) => {
+                self.remove_multisink_retainers(subscription_id, &outputs);
+                if let Some(param_delta) = self.remove_binding_ref(shape_id, &binding_key)
+                    && !param_delta.deltas.is_empty()
+                {
+                    self.pending_binding_retractions.push(param_delta);
+                    self.remove_unreferenced_auto_family(shape_id);
+                }
+                return Err(error);
+            }
+        };
         let (sender, receiver) = mpsc::channel();
         let receiver_liveness = Arc::new(());
         self.multisink_subscriptions.insert(
@@ -1836,13 +1855,6 @@ impl IvmRuntime {
                 },
             },
         );
-        let initial = match self.hydration_snapshots_for_subscription(&outputs, storage) {
-            Ok(initial) => initial,
-            Err(error) => {
-                self.unsubscribe(subscription_id);
-                return Err(error);
-            }
-        };
         let queued = self.queued_multisink_deltas(initial);
         let sent = self
             .multisink_subscriptions

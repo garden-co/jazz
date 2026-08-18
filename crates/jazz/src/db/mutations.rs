@@ -434,7 +434,7 @@ impl MutationPrepareError {
 
     pub(super) fn missing_input(
         self,
-    ) -> Result<groove::storage::async_ordered::OwnedStorageOperation, Self> {
+    ) -> Result<Vec<groove::storage::async_ordered::OwnedStorageOperation>, Self> {
         match self {
             Self::Node(error) => crate::node::missing_node_open_input(error).map_err(Self::Node),
             error => Err(error),

@@ -49,13 +49,13 @@ pub type ScanVisitor<'visitor> =
 
 /// Typed storage delta appended through backends that can durably merge without
 /// first reading the existing value.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct StorageDelta {
     pub kind: StorageDeltaKind,
     pub payload: Vec<u8>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum StorageDeltaKind {
     CurrentWinnerV1,
 }
@@ -1067,7 +1067,7 @@ pub enum WriteOperation<'a> {
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum OwnedWriteOperation {
     Set {
         cf: String,
@@ -1757,9 +1757,9 @@ impl<'a> WriteOperation<'a> {
 
 #[derive(Debug, Error)]
 pub enum Error {
-    #[error("ordered storage input is not resident: {request:?}")]
+    #[error("ordered storage inputs are not resident: {requests:?}")]
     NotResident {
-        request: Box<async_ordered::OwnedStorageOperation>,
+        requests: Vec<async_ordered::OwnedStorageOperation>,
     },
     #[error("column family not found: {0}")]
     ColumnFamilyNotFound(String),

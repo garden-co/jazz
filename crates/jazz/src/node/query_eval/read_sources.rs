@@ -1753,10 +1753,10 @@ fn source_resolution_error_from_node(
     error: Error,
 ) -> SourceResolutionError {
     match missing_node_open_input(error) {
-        Ok(operation) => SourceResolutionError {
+        Ok(operations) => SourceResolutionError {
             request: Box::new(request.clone()),
             gap,
-            deferred_storage: Some(operation),
+            deferred_storage: operations.into_iter().next(),
         },
         Err(_) => source_resolution_error(request, gap),
     }
