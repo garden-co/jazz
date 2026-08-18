@@ -133,13 +133,29 @@ impl DemandDrivenNode {
         if let Err(error) = self.ensure_persistence_usable() {
             return std::task::Poll::Ready(Err(error));
         }
-        self.acquisition.poll(
+        let result = self.acquisition.poll(
             self.persistence.as_mut(),
             &self.cache,
             context,
             || prepare(&mut self.node.borrow_mut()),
             missing_node_open_input,
-        )
+        );
+        match result {
+            std::task::Poll::Pending => match self.ensure_acquisition_attempt_clean() {
+                Ok(()) => std::task::Poll::Pending,
+                Err(error) => std::task::Poll::Ready(Err(error)),
+            },
+            std::task::Poll::Ready(Err(error)) => {
+                self.discard_failed_operation_writes();
+                std::task::Poll::Ready(Err(error))
+            }
+            std::task::Poll::Ready(Ok(prepared)) => {
+                match self.ensure_acquisition_attempt_clean() {
+                    Ok(()) => std::task::Poll::Ready(Ok(prepared)),
+                    Err(error) => std::task::Poll::Ready(Err(error)),
+                }
+            }
+        }
     }
 
     /// Access the synchronously resident Jazz core.
@@ -189,13 +205,21 @@ impl DemandDrivenNode {
             || prepare(&mut self.node.borrow_mut()),
             missing_node_open_input,
         ) {
-            std::task::Poll::Pending => return std::task::Poll::Pending,
+            std::task::Poll::Pending => {
+                return match self.ensure_acquisition_attempt_clean() {
+                    Ok(()) => std::task::Poll::Pending,
+                    Err(error) => std::task::Poll::Ready(Err(error)),
+                };
+            }
             std::task::Poll::Ready(Err(error)) => {
                 self.discard_failed_operation_writes();
                 return std::task::Poll::Ready(Err(error));
             }
             std::task::Poll::Ready(Ok(prepared)) => prepared,
         };
+        if let Err(error) = self.ensure_acquisition_attempt_clean() {
+            return std::task::Poll::Ready(Err(error));
+        }
         let result = publish(&mut self.node.borrow_mut(), prepared);
         match &result {
             Ok(_) => self.collect_persistence_unit(),
@@ -1417,7 +1441,11 @@ impl DemandDrivenNode {
         match &result {
             std::task::Poll::Ready(Ok(_)) => self.collect_persistence_unit(),
             std::task::Poll::Ready(Err(_)) => self.discard_failed_operation_writes(),
-            std::task::Poll::Pending => {}
+            std::task::Poll::Pending => {
+                if let Err(error) = self.ensure_acquisition_attempt_clean() {
+                    return std::task::Poll::Ready(Err(error.into()));
+                }
+            }
         }
         result
     }
@@ -1730,6 +1758,24 @@ impl DemandDrivenNode {
             // runtime from accepting dependent work until a clean reopen.
             self.fail_persistence();
         }
+    }
+
+    fn ensure_acquisition_attempt_clean(&mut self) -> Result<(), Error> {
+        let node = self.node.borrow();
+        let writes = node.database.take_demand_loaded_pending_writes();
+        let column_families = node
+            .database
+            .take_demand_loaded_pending_column_families();
+        drop(node);
+        if writes.is_empty() && column_families.is_empty() {
+            return Ok(());
+        }
+        // A cold miss makes the attempt replayable. Any durable mutation from
+        // that attempt means its in-memory effects may also be partial, so the
+        // only safe outcome is to poison this owner and require recovery from
+        // the last coherent durable boundary.
+        self.fail_persistence();
+        Err(Error::Groove(groove::db::Error::DatabasePoisoned))
     }
 
     fn ensure_persistence_usable(&self) -> Result<(), Error> {

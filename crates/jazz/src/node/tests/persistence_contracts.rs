@@ -393,6 +393,56 @@ fn authority_runtime(
 }
 
 #[test]
+fn cold_retry_poisoned_when_acquisition_attempt_publishes_before_suspending() {
+    let released = std::rc::Rc::new(std::cell::Cell::new(true));
+    let node_schema = schema();
+    let refs = node_schema.column_families();
+    let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage = GatedAuthorityStorage {
+        inner: groove::storage::async_ordered::ImmediateStorage::new(MemoryStorage::new(&refs)),
+        released: std::rc::Rc::clone(&released),
+        cancellations: std::rc::Rc::new(std::cell::Cell::new(0)),
+        committed_units: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
+        fail_commits: std::rc::Rc::new(std::cell::Cell::new(false)),
+    };
+    let waker = std::task::Waker::from(std::sync::Arc::new(PersistenceTestWake));
+    let mut context = std::task::Context::from_waker(&waker);
+    let mut opening = DemandDrivenNodeOpen::new(node(0xcf), node_schema, Box::new(storage));
+    let std::task::Poll::Ready(Ok(mut runtime)) = opening.poll(&mut context) else {
+        panic!("released backend opens synchronously")
+    };
+    released.set(false);
+
+    let result = runtime.poll_acquire_resident(&mut context, |node| {
+        let prepared = node.prepare_current_mergeable_commit(
+            MergeableCommit::new("todos", row(0xcf), 1).cells(title_cells("must roll back")),
+        )?;
+        node.publish_prepared_mergeable_commit(prepared)?;
+        Err::<(), _>(Error::Storage(groove::storage::Error::NotResident {
+            request: Box::new(
+                groove::storage::async_ordered::OwnedStorageOperation::Get {
+                    column_family: "jazz_transactions".to_owned(),
+                    key: vec![0xff],
+                },
+            ),
+        }))
+    });
+
+    assert!(matches!(
+        result,
+        std::task::Poll::Ready(Err(Error::Groove(
+            groove::db::Error::DatabasePoisoned
+        )))
+    ), "unexpected guarded retry result: {result:?}");
+    assert!(matches!(
+        runtime.poll_current_rows(&mut context, "todos", DurabilityTier::None),
+        std::task::Poll::Ready(Err(Error::Groove(
+            groove::db::Error::DatabasePoisoned
+        )))
+    ));
+}
+
+#[test]
 fn demand_driven_db_preserves_synchronous_facade_visibility_before_durability() {
     let released = std::rc::Rc::new(std::cell::Cell::new(true));
     let failed = std::rc::Rc::new(std::cell::Cell::new(false));
