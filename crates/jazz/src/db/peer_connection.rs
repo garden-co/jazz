@@ -30,6 +30,7 @@ where
     /// synchronous tick is allowed to observe them.
     pub(super) external_durable_ingress: bool,
     pub(super) externally_applied_inbound: bool,
+    pub(super) prepared_subscriber_authority_tx: Option<TxId>,
     pub(super) node: Rc<RefCell<NodeState<S>>>,
     pub(super) subscriptions: SubscriptionList,
     pub(super) upstream_subscription_owners: UpstreamSubscriptionOwners,
@@ -315,6 +316,69 @@ where
         owns_route.then_some((*tx_id, fate.clone(), *global_seq, *durability))
     }
 
+    pub(super) fn staged_subscriber_authority_commit(
+        &self,
+    ) -> Option<(
+        crate::tx::Transaction,
+        Vec<crate::protocol::VersionRecord>,
+        CommitUnitIngestContext,
+    )> {
+        let ConnectionLink::Subscriber {
+            peer,
+            ingest_context,
+            local_receiver: false,
+            ..
+        } = &self.link
+        else {
+            return None;
+        };
+        if ingest_context.edge_authority && matches!(peer.role(), PeerRole::ClientLink { .. }) {
+            return None;
+        }
+        if !subscriber_permissions_ready(
+            self.node.borrow().permissions_ready(),
+            ingest_context.trust,
+        ) {
+            return None;
+        }
+        let staged = self.staged_inbound.front()?;
+        let SyncMessage::CommitUnit { tx, versions } = &staged.message else {
+            return None;
+        };
+        Some((tx.clone(), versions.clone(), *ingest_context))
+    }
+
+    pub(super) fn staged_subscriber_authority_is_prepared(&self, tx_id: TxId) -> bool {
+        self.prepared_subscriber_authority_tx == Some(tx_id)
+    }
+
+    pub(super) fn prepare_staged_subscriber_authority<S2>(
+        &mut self,
+        node: &mut NodeState<S2>,
+        tx_id: TxId,
+        versions: &[crate::protocol::VersionRecord],
+    ) -> Result<(), crate::node::Error>
+    where
+        S2: ResidentStorage,
+    {
+        if self.prepared_subscriber_authority_tx == Some(tx_id) {
+            return Ok(());
+        }
+        let ConnectionLink::Subscriber {
+            peer,
+            ingest_context,
+            ..
+        } = &mut self.link
+        else {
+            return Err(crate::node::Error::UnsupportedSyncMessage(
+                "authority preparation requires a subscriber link",
+            ));
+        };
+        peer.prove_terminal_commit_authorization(node, ingest_context.identity, versions)?;
+        self.prepared_subscriber_authority_tx = Some(tx_id);
+        Ok(())
+    }
+
     pub(super) fn staged_ready_view_update(&self) -> Option<(SyncMessage, ViewUpdateParts)> {
         let ConnectionLink::Upstream { branch_views, .. } = &self.link else {
             return None;
@@ -468,6 +532,44 @@ where
         if kind == SubscriberRelayKind::EdgeMergeable {
             remove_edge_fate_route(&self.edge_fate_routes, tx_id, &self.downstream_fates);
         }
+    }
+
+    pub(super) fn complete_staged_subscriber_authority_commit(
+        &mut self,
+        tx_id: TxId,
+        responses: Vec<SyncMessage>,
+    ) {
+        let staged = self
+            .staged_inbound
+            .pop_front()
+            .expect("completed subscriber authority ingress retains its staged frame");
+        debug_assert!(matches!(
+            &staged.message,
+            SyncMessage::CommitUnit { tx, .. } if tx.tx_id == tx_id
+        ));
+        debug_assert_eq!(self.prepared_subscriber_authority_tx, Some(tx_id));
+        self.prepared_subscriber_authority_tx = None;
+        let ConnectionLink::Subscriber { outbox, .. } = &self.link else {
+            unreachable!("subscriber authority completion retains its link")
+        };
+        self.downstream_fates.borrow_mut().extend(responses);
+        let mut outbox = outbox.borrow_mut();
+        if !outbox.iter().any(|pending| pending.tx_id == tx_id) {
+            outbox.push(PendingUpload {
+                tx_id,
+                unit: Some(staged.message),
+            });
+        }
+        drop(outbox);
+        handle_write_state_update(
+            &self.node,
+            &self.write_state_waiters,
+            &self.mutation_errors,
+            &self.scheduler,
+            tx_id,
+        );
+        schedule_tick_in(&self.scheduler, TickUrgency::Deferred);
+        self.externally_applied_inbound = true;
     }
 
     pub(super) fn complete_staged_owned_fate(&mut self, tx_id: TxId) {

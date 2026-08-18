@@ -45,6 +45,25 @@ impl PollableDbOpen {
     }
 
     #[doc(hidden)]
+    pub fn new_history_complete(
+        schema: JazzSchema,
+        identity: DbIdentity,
+        persistence: Box<dyn groove::storage::async_ordered::OrderedKvStorage>,
+    ) -> Self {
+        Self {
+            opening: Some(PollableNodeOpen::new_history_complete(
+                identity.node,
+                schema.clone(),
+                persistence,
+            )),
+            runtime: None,
+            schema,
+            identity,
+            id_source: None,
+        }
+    }
+
+    #[doc(hidden)]
     pub fn with_id_source(mut self, id_source: impl RowIdSource + 'static) -> Self {
         self.id_source = Some(Box::new(id_source));
         self
@@ -319,6 +338,38 @@ impl DemandDrivenDb {
                     Poll::Ready(Ok(())) => connection
                         .borrow_mut()
                         .complete_staged_subscriber_relay_commit(tx_id, kind),
+                }
+                continue;
+            }
+            let subscriber_authority = connection.borrow().staged_subscriber_authority_commit();
+            if let Some((tx, versions, ingest_context)) = subscriber_authority {
+                let tx_id = tx.tx_id;
+                if !connection
+                    .borrow()
+                    .staged_subscriber_authority_is_prepared(tx_id)
+                {
+                    match self.runtime.poll_acquire_resident(context, |node| {
+                        connection
+                            .borrow_mut()
+                            .prepare_staged_subscriber_authority(node, tx_id, &versions)
+                    }) {
+                        Poll::Pending => return Poll::Pending,
+                        Poll::Ready(Err(error)) => return Poll::Ready(Err(error.into())),
+                        Poll::Ready(Ok(())) => {}
+                    }
+                }
+                match self.runtime.poll_ingest_commit_unit(
+                    context,
+                    tx,
+                    versions,
+                    u64::MAX - crate::node::SKEW_TOLERANCE_MS,
+                    Some(ingest_context),
+                ) {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(Err(error)) => return Poll::Ready(Err(error.into())),
+                    Poll::Ready(Ok(responses)) => connection
+                        .borrow_mut()
+                        .complete_staged_subscriber_authority_commit(tx_id, responses),
                 }
                 continue;
             }

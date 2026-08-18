@@ -2360,6 +2360,80 @@ fn edge_subscriber_acknowledges_and_relays_only_after_durable_commit() {
 }
 
 #[test]
+fn authority_subscriber_releases_terminal_fate_only_after_durable_commit() {
+    let (mut writer, _) = fail_write_many_node();
+    let (tx_id, unit) = writer
+        .commit_mergeable_unit(
+            MergeableCommit::new("todos", row(0xd3), 10).cells(title_cells("authority subscriber")),
+        )
+        .unwrap();
+    let SyncMessage::CommitUnit { tx, versions } = unit else {
+        panic!("writer must produce a commit unit")
+    };
+    let writer_id = tx.made_by;
+    let unit = SyncMessage::CommitUnit { tx, versions };
+    let node_schema = schema();
+    let column_families = node_schema.column_families();
+    let refs = column_families.iter().map(String::as_str).collect::<Vec<_>>();
+    let released = std::rc::Rc::new(std::cell::Cell::new(true));
+    let storage = CommitGatedAuthorityStorage {
+        inner: groove::storage::async_ordered::ImmediateStorage::new(MemoryStorage::new(&refs)),
+        released: std::rc::Rc::clone(&released),
+        fail: std::rc::Rc::new(std::cell::Cell::new(false)),
+        completed: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
+    };
+    let identity = crate::db::DbIdentity {
+        node: node(0xd3),
+        author: AuthorId::SYSTEM,
+    };
+    let mut opening =
+        crate::db::PollableDbOpen::new_history_complete(node_schema, identity, Box::new(storage));
+    let waker = std::task::Waker::from(std::sync::Arc::new(PersistenceTestWake));
+    let mut context = std::task::Context::from_waker(&waker);
+    let std::task::Poll::Ready(Ok(mut authority)) = opening.poll(&mut context) else {
+        panic!("commit-only gate must open the demand-driven authority")
+    };
+    let outbound = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let _subscriber = authority.accept_subscriber(
+        Box::new(QueuedInboundTransport {
+            inbound: std::rc::Rc::new(std::cell::RefCell::new(
+                std::collections::VecDeque::from([unit]),
+            )),
+            outbound: std::rc::Rc::clone(&outbound),
+            session_context: None,
+        }),
+        writer_id,
+    );
+
+    released.set(false);
+    assert!(authority.poll_tick(&mut context).is_pending());
+    assert!(outbound.borrow().is_empty());
+
+    released.set(true);
+    let mut completed = false;
+    for _ in 0..16 {
+        match authority.poll_tick(&mut context) {
+            std::task::Poll::Pending => assert!(outbound.borrow().is_empty()),
+            std::task::Poll::Ready(Ok(_)) => {
+                completed = true;
+                break;
+            }
+            std::task::Poll::Ready(Err(error)) => panic!("authority subscriber failed: {error}"),
+        }
+    }
+    assert!(completed);
+    assert!(outbound.borrow().iter().any(|message| matches!(
+        message,
+        SyncMessage::FateUpdate {
+            tx_id: acknowledged,
+            fate: Fate::Accepted,
+            durability: Some(DurabilityTier::Global),
+            ..
+        } if *acknowledged == tx_id
+    )));
+}
+
+#[test]
 fn immediate_authority_storage_completes_through_the_same_first_poll() {
     let (mut writer, _) = fail_write_many_node();
     let (tx_id, unit) = writer

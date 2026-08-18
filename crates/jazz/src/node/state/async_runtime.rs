@@ -97,6 +97,25 @@ struct PendingPeerBranchMetadata {
 }
 
 impl DemandDrivenNode {
+    pub(crate) fn poll_acquire_resident<T>(
+        &mut self,
+        context: &mut std::task::Context<'_>,
+        mut prepare: impl FnMut(
+            &mut NodeState<groove::storage::DemandLoadedStorage>,
+        ) -> Result<T, Error>,
+    ) -> std::task::Poll<Result<T, Error>> {
+        if let Err(error) = self.ensure_persistence_usable() {
+            return std::task::Poll::Ready(Err(error));
+        }
+        self.acquisition.poll(
+            self.persistence.as_mut(),
+            &self.cache,
+            context,
+            || prepare(&mut self.node.borrow_mut()),
+            missing_node_open_input,
+        )
+    }
+
     /// Access the synchronously resident Jazz core.
     pub fn resident(
         &self,
