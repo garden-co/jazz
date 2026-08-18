@@ -77,6 +77,50 @@ fn view_updates_ship_current_versions_to_downstream_nodes() {
         BTreeMap::from([(row, title_cells("replicate me"))])
     );
 }
+
+#[test]
+fn global_read_drops_its_pending_local_replica_and_accepts_the_authoritative_winner() {
+    let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
+    let (_other_dir, mut other) = open_node_with_uuid(node(2));
+    let (_core_dir, mut core) = open_node_with_uuid(node(9));
+    let target = row(0x72);
+
+    let (_pending, pending_unit) = writer
+        .commit_mergeable_unit(
+            MergeableCommit::new("todos", target, 10).cells(title_cells("pending local")),
+        )
+        .unwrap();
+    assert_eq!(writer.current_rows("todos", DurabilityTier::Local).unwrap().len(), 1);
+    assert!(writer
+        .current_rows("todos", DurabilityTier::Global)
+        .unwrap()
+        .is_empty());
+
+    let [pending_fate] = core
+        .apply_sync_message(pending_unit)
+        .unwrap()
+        .try_into()
+        .unwrap();
+    writer.apply_sync_message(pending_fate).unwrap();
+
+    let (_, authoritative_unit) = other
+        .commit_mergeable_unit(
+            MergeableCommit::new("todos", target, 20).cells(title_cells("authoritative remote")),
+        )
+        .unwrap();
+    core.apply_sync_message(authoritative_unit).unwrap();
+
+    let mut link = PeerState::client_link(AuthorId::SYSTEM);
+    let update = link.current_rows_update(&mut core, "todos").unwrap();
+    writer.apply_sync_message(update).unwrap();
+
+    let rows = writer.current_rows("todos", DurabilityTier::Global).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].cell(writer.table("todos").unwrap(), "title"),
+        Some(Value::String("authoritative remote".to_owned()))
+    );
+}
 #[test]
 fn view_updates_use_peer_payload_inventory_refs_for_previously_shipped_complete_payloads() {
     let (_writer_dir, mut writer) = open_node_with_uuid(node(1));
