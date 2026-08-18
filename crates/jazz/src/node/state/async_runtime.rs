@@ -9,11 +9,18 @@
 pub struct PollableNodeOpen {
     node_uuid: NodeUuid,
     schema: JazzSchema,
-    history_complete: bool,
+    kind: PollableNodeKind,
     cache: groove::storage::DemandLoadedStorage,
     persistence: Option<Box<dyn groove::storage::async_ordered::OrderedKvStorage>>,
     acquisition: groove::db::StorageAcquisition,
     phase: NodeOpenPhase,
+}
+
+#[derive(Clone, Copy)]
+enum PollableNodeKind {
+    Client,
+    HistoryComplete,
+    CatalogueUninitialized,
 }
 
 enum NodeOpenPhase {
@@ -1657,7 +1664,7 @@ impl PollableNodeOpen {
         schema: JazzSchema,
         persistence: Box<dyn groove::storage::async_ordered::OrderedKvStorage>,
     ) -> Self {
-        Self::with_history_complete(node_uuid, schema, persistence, false)
+        Self::with_kind(node_uuid, schema, persistence, PollableNodeKind::Client)
     }
 
     #[doc(hidden)]
@@ -1666,21 +1673,39 @@ impl PollableNodeOpen {
         schema: JazzSchema,
         persistence: Box<dyn groove::storage::async_ordered::OrderedKvStorage>,
     ) -> Self {
-        Self::with_history_complete(node_uuid, schema, persistence, true)
+        Self::with_kind(
+            node_uuid,
+            schema,
+            persistence,
+            PollableNodeKind::HistoryComplete,
+        )
     }
 
-    fn with_history_complete(
+    #[doc(hidden)]
+    pub fn new_catalogue_uninitialized(
+        node_uuid: NodeUuid,
+        persistence: Box<dyn groove::storage::async_ordered::OrderedKvStorage>,
+    ) -> Self {
+        Self::with_kind(
+            node_uuid,
+            JazzSchema::new([]),
+            persistence,
+            PollableNodeKind::CatalogueUninitialized,
+        )
+    }
+
+    fn with_kind(
         node_uuid: NodeUuid,
         schema: JazzSchema,
         persistence: Box<dyn groove::storage::async_ordered::OrderedKvStorage>,
-        history_complete: bool,
+        kind: PollableNodeKind,
     ) -> Self {
         let column_families = schema.column_families();
         let refs = column_families.iter().map(String::as_str).collect::<Vec<_>>();
         Self {
             node_uuid,
             schema,
-            history_complete,
+            kind,
             cache: groove::storage::DemandLoadedStorage::new(&refs),
             persistence: Some(persistence),
             acquisition: groove::db::StorageAcquisition::default(),
@@ -1746,7 +1771,7 @@ impl PollableNodeOpen {
             );
             let node_uuid = self.node_uuid;
             let schema = self.schema.clone();
-            let history_complete = self.history_complete;
+            let kind = self.kind;
             match self.acquisition.poll(
                 self.persistence
                     .as_mut()
@@ -1759,7 +1784,7 @@ impl PollableNodeOpen {
                     let node = construct_pollable_node(
                         node_uuid,
                         schema.clone(),
-                        history_complete,
+                        kind,
                         transaction.clone(),
                     )?;
                     Ok((node, transaction))
@@ -1827,13 +1852,17 @@ impl Drop for PollableNodeOpen {
 fn construct_pollable_node(
     node_uuid: NodeUuid,
     schema: JazzSchema,
-    history_complete: bool,
+    kind: PollableNodeKind,
     cache: groove::storage::DemandLoadedStorage,
 ) -> Result<NodeState<groove::storage::DemandLoadedStorage>, Error> {
-    if history_complete {
-        NodeState::new_history_complete(node_uuid, schema, cache)
-    } else {
-        NodeState::new(node_uuid, schema, cache)
+    match kind {
+        PollableNodeKind::Client => NodeState::new(node_uuid, schema, cache),
+        PollableNodeKind::HistoryComplete => {
+            NodeState::new_history_complete(node_uuid, schema, cache)
+        }
+        PollableNodeKind::CatalogueUninitialized => {
+            NodeState::new_catalogue_uninitialized(node_uuid, cache)
+        }
     }
 }
 

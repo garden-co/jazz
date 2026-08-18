@@ -64,6 +64,23 @@ impl PollableDbOpen {
     }
 
     #[doc(hidden)]
+    pub fn new_catalogue_uninitialized(
+        identity: DbIdentity,
+        persistence: Box<dyn groove::storage::async_ordered::OrderedKvStorage>,
+    ) -> Self {
+        Self {
+            opening: Some(PollableNodeOpen::new_catalogue_uninitialized(
+                identity.node,
+                persistence,
+            )),
+            runtime: None,
+            schema: JazzSchema::new([]),
+            identity,
+            id_source: None,
+        }
+    }
+
+    #[doc(hidden)]
     pub fn with_id_source(mut self, id_source: impl RowIdSource + 'static) -> Self {
         self.id_source = Some(Box::new(id_source));
         self
@@ -168,6 +185,31 @@ impl DemandDrivenDb {
         } = config;
         let mut opening = PollableDbOpen::new_history_complete(
             schema,
+            identity,
+            Box::new(groove::storage::async_ordered::ImmediateStorage::new(
+                storage,
+            )),
+        )
+        .with_boxed_id_source(id_source);
+        std::future::poll_fn(|context| opening.poll(context)).await
+    }
+
+    /// Open a blank dynamic-edge catalogue over an immediately completing
+    /// ordered backend. The store remains unavailable to application sessions
+    /// until an authenticated authority snapshot is adopted.
+    pub async fn open_catalogue_uninitialized_immediate<S>(
+        config: DbConfig<S>,
+    ) -> Result<Self, Error>
+    where
+        S: ResidentStorage + ReopenableStorage + 'static,
+    {
+        let DbConfig {
+            storage,
+            identity,
+            id_source,
+            ..
+        } = config;
+        let mut opening = PollableDbOpen::new_catalogue_uninitialized(
             identity,
             Box::new(groove::storage::async_ordered::ImmediateStorage::new(
                 storage,
