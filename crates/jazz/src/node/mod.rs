@@ -882,7 +882,15 @@ pub(crate) struct PreparedKnownStateFact {
 pub(crate) struct PreparedViewUpdateBranchPartitions {
     registrations: Vec<groove::db::PreparedTableRegistration>,
     partitions: BTreeSet<(PhysicalTableId, BranchId)>,
-    batch: groove::db::PreparedDatabaseBatch,
+    batch: Option<groove::db::PreparedDatabaseBatch>,
+}
+
+/// One receiver batch whose persisted settled state and prospective sparse
+/// schema have been acquired before any live receiver mutation.
+pub(crate) struct PreparedViewUpdateBatch {
+    updates: Vec<ViewUpdateParts>,
+    known_states: Vec<PreparedKnownStateFact>,
+    branch_partitions: PreparedViewUpdateBranchPartitions,
 }
 
 /// Rejection records and derived indexes used for pending-cascade handling.
@@ -1537,6 +1545,7 @@ impl MergeableCommit {
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct ViewUpdateParts {
     pub(crate) subscription: SubscriptionKey,
     pub(crate) settled_through: GlobalSeq,

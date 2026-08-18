@@ -249,6 +249,29 @@ where
         ))
     }
 
+    pub(super) fn staged_ready_view_update(&self) -> Option<(SyncMessage, ViewUpdateParts)> {
+        let ConnectionLink::Upstream { branch_views, .. } = &self.link else {
+            return None;
+        };
+        let staged = self.staged_inbound.front()?;
+        let SyncMessage::ViewUpdate { subscription, .. } = &staged.message else {
+            return None;
+        };
+        if let Some(branch) = branch_views.get(subscription)
+            && self.node.borrow().branch_record(*branch).is_none()
+        {
+            return None;
+        }
+        let message = staged.message.clone();
+        let parts = view_update_parts_from_message(message.clone());
+        Some((message, parts))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_staged_view_update_for_test(&self) -> bool {
+        self.staged_ready_view_update().is_some()
+    }
+
     pub(super) fn complete_staged_relay_commit(&mut self, tx_id: TxId) {
         let staged = self
             .staged_inbound
@@ -272,6 +295,63 @@ where
                 if staged_tx == tx_id
         ));
         notify_write_state_waiters(&self.write_state_waiters, tx_id);
+        self.externally_applied_inbound = true;
+    }
+
+    pub(super) fn complete_staged_view_update(&mut self, parts: &ViewUpdateParts) {
+        let staged = self
+            .staged_inbound
+            .pop_front()
+            .expect("completed receiver ingress retains its staged frame");
+        debug_assert!(matches!(
+            staged.message,
+            SyncMessage::ViewUpdate { subscription, settled_through, .. }
+                if subscription == parts.subscription && settled_through == parts.settled_through
+        ));
+        if let ConnectionLink::Upstream {
+            scope_receipts,
+            scope_view_cuts,
+            ..
+        } = &mut self.link
+        {
+            scope_receipts.remove(&parts.subscription);
+            scope_view_cuts.insert(parts.subscription, parts.settled_through);
+        }
+        let binding_view = self
+            .node
+            .borrow()
+            .binding_view_key_for_subscription(parts.subscription)
+            .ok();
+        if let Some(receipts) = self.active_authority_view_receipts.borrow_mut().as_mut() {
+            let invalidation_cut = if receipts.connection_epoch != self.connection_epoch
+                || !staged.authority_receipt_eligible
+            {
+                Some(parts.settled_through)
+            } else {
+                None
+            };
+            if let Some(cut) = invalidation_cut {
+                receipts.binding_views.clear();
+                receipts.confirmation_floor = receipts.confirmation_floor.max(cut);
+            }
+            if receipts.connection_epoch == self.connection_epoch
+                && staged.authority_receipt_eligible
+                && !parts.opening_pending
+                && parts.settled_through >= receipts.confirmation_floor
+                && let Some(binding_view) = binding_view
+            {
+                receipts.binding_views.insert(binding_view);
+            }
+        }
+        if !parts.opening_pending
+            && let Some(coverage) = self.latest_coverage_subscriptions.borrow().iter().find_map(
+                |(coverage, current)| (*current == parts.subscription).then(|| coverage.clone()),
+            )
+        {
+            self.awaiting_initial_authority_coverage
+                .borrow_mut()
+                .remove(&coverage);
+        }
         self.externally_applied_inbound = true;
     }
 

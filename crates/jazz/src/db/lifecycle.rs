@@ -185,6 +185,30 @@ impl DemandDrivenDb {
                     }
                 }
             }
+            let staged_view = { connection.borrow().staged_ready_view_update() };
+            if let Some((message, parts)) = staged_view {
+                let missing = match self
+                    .runtime
+                    .poll_missing_peer_view_update_refs(context, &message)
+                {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(Err(error)) => return Poll::Ready(Err(error.into())),
+                    Poll::Ready(Ok(missing)) => missing,
+                };
+                if missing.is_empty() {
+                    match self
+                        .runtime
+                        .poll_apply_peer_view_updates(context, std::slice::from_ref(&parts))
+                    {
+                        Poll::Pending => return Poll::Pending,
+                        Poll::Ready(Err(error)) => return Poll::Ready(Err(error.into())),
+                        Poll::Ready(Ok(())) => {
+                            connection.borrow_mut().complete_staged_view_update(&parts)
+                        }
+                    }
+                    continue;
+                }
+            }
         }
 
         let stats = match self.database.node.tick() {

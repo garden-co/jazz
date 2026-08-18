@@ -847,6 +847,66 @@ where
         Ok(())
     }
 
+    /// Acquire the durable state named by a receiver batch without publishing
+    /// canonical versions, settled membership, or sparse schema.
+    pub(crate) fn prepare_view_updates_in_batch(
+        &mut self,
+        updates: Vec<ViewUpdateParts>,
+    ) -> Result<PreparedViewUpdateBatch, Error> {
+        for update in &updates {
+            self.validate_received_view_update_global_seq_durability(update)?;
+        }
+        self.validate_view_update_payloads(&updates)?;
+        let mut prepared_binding_views = BTreeSet::new();
+        let mut known_states = Vec::new();
+        for update in &updates {
+            if update.reset_result_set {
+                continue;
+            }
+            let binding_view_key = match self.binding_view_key_for_subscription(update.subscription)
+            {
+                Ok(binding_view_key) => binding_view_key,
+                Err(Error::InvalidStoredValue(
+                    "subscription referenced unregistered shape"
+                    | "subscription referenced unregistered binding",
+                )) => continue,
+                Err(error) => return Err(error),
+            };
+            if self
+                .query
+                .known_state_loaded_binding_views
+                .contains(&binding_view_key)
+                || !prepared_binding_views.insert(binding_view_key)
+            {
+                continue;
+            }
+            known_states.push(self.prepare_known_state_fact(binding_view_key)?);
+        }
+        let branch_partitions = self.prepare_view_update_branch_partitions(&updates)?;
+        Ok(PreparedViewUpdateBatch {
+            updates,
+            known_states,
+            branch_partitions,
+        })
+    }
+
+    /// Publish one fully acquired receiver batch into the resident database.
+    pub(crate) fn publish_prepared_view_update_batch(
+        &mut self,
+        prepared: PreparedViewUpdateBatch,
+    ) -> Result<(), Error> {
+        let PreparedViewUpdateBatch {
+            updates,
+            known_states,
+            branch_partitions,
+        } = prepared;
+        self.publish_prepared_view_update_branch_partitions(branch_partitions)?;
+        for known_state in known_states {
+            self.publish_prepared_known_state_fact(known_state);
+        }
+        self.apply_view_updates_in_batch(updates)
+    }
+
     /// Resolve sparse branch tables and their metadata writes against a
     /// prospective schema without changing the live database.
     pub(crate) fn prepare_view_update_branch_partitions(
@@ -913,9 +973,17 @@ where
                 vec![Value::U64(table_id.0), Value::Uuid(branch_id.0)],
             );
         }
-        let batch = self
-            .database
-            .prepare_batch_storage_inputs_with_table_registrations(&batch, &registrations)?;
+        let batch = if new_partitions.is_empty() && registrations.is_empty() {
+            None
+        } else {
+            Some(
+                self.database
+                    .prepare_batch_storage_inputs_with_table_registrations(
+                        &batch,
+                        &registrations,
+                    )?,
+            )
+        };
         Ok(PreparedViewUpdateBranchPartitions {
             registrations,
             partitions: new_partitions,
@@ -934,8 +1002,12 @@ where
             partitions,
             batch,
         } = prepared;
-        self.database
-            .commit_prepared_batch_with_table_registrations(registrations, batch)?;
+        if let Some(batch) = batch {
+            self.database
+                .commit_prepared_batch_with_table_registrations(registrations, batch)?;
+        } else {
+            debug_assert!(registrations.is_empty());
+        }
         self.branches.branch_partitions.extend(partitions);
         Ok(())
     }

@@ -1694,6 +1694,189 @@ fn relay_ingress_quarantines_external_publication_until_commit() {
 }
 
 #[test]
+fn peer_view_update_withholds_subscription_publication_until_durable() {
+    let (mut writer, _) = fail_write_many_node();
+    let (mut core, _) = fail_write_many_node();
+    let (tx_id, unit) = writer
+        .commit_mergeable_unit(
+            MergeableCommit::new("todos", row(0xce), 10).cells(title_cells("peer view")),
+        )
+        .unwrap();
+    let SyncMessage::CommitUnit { tx, versions } = unit else {
+        panic!("local write must produce a commit unit")
+    };
+    core.ingest_commit_unit(tx, versions, 10).unwrap();
+    core.apply_fate_update(
+        tx_id,
+        Fate::Accepted,
+        Some(GlobalSeq(1)),
+        Some(DurabilityTier::Global),
+    )
+    .unwrap();
+    let update = core.view_update_for_current_rows("todos").unwrap();
+    let SyncMessage::ViewUpdate {
+        subscription,
+        settled_through,
+        reset_result_set,
+        version_carriers,
+        version_bundles,
+        peer_payload_inventory,
+        result_member_adds,
+        result_member_removes,
+        terminal_operations,
+        program_fact_adds,
+        program_fact_removes,
+    } = update
+    else {
+        panic!("current rows must produce a view update")
+    };
+    let parts = ViewUpdateParts {
+        subscription,
+        settled_through,
+        defer_settlement: false,
+        reset_result_set,
+        version_carriers,
+        version_bundles,
+        peer_complete_tx_payload_refs: peer_payload_inventory.complete_tx_payloads,
+        authorization_progress: peer_payload_inventory.authorization_progress,
+        opening_pending: peer_payload_inventory.opening_pending,
+        result_member_adds,
+        result_member_removes,
+        terminal_operations,
+        program_fact_adds,
+        program_fact_removes,
+    };
+
+    let released = std::rc::Rc::new(std::cell::Cell::new(true));
+    let mut receiver = authority_runtime(
+        std::rc::Rc::clone(&released),
+        std::rc::Rc::new(std::cell::Cell::new(false)),
+    );
+    let waker = std::task::Waker::from(std::sync::Arc::new(PersistenceTestWake));
+    let mut context = std::task::Context::from_waker(&waker);
+    let std::task::Poll::Ready(Ok(history)) =
+        receiver.poll_subscribe_history(&mut context, "todos")
+    else {
+        panic!("empty receiver history must open")
+    };
+    assert!(history.recv().unwrap().is_empty());
+
+    released.set(false);
+    assert!(receiver
+        .poll_apply_peer_view_updates(&mut context, std::slice::from_ref(&parts))
+        .is_pending());
+    assert!(matches!(
+        history.try_recv(),
+        Err(std::sync::mpsc::TryRecvError::Empty)
+    ));
+
+    released.set(true);
+    assert!(matches!(
+        receiver.poll_apply_peer_view_updates(&mut context, std::slice::from_ref(&parts)),
+        std::task::Poll::Ready(Ok(()))
+    ));
+    let delta = history.recv().unwrap();
+    assert_eq!(delta.to_values().unwrap().len(), 1);
+    assert!(matches!(
+        history.try_recv(),
+        Err(std::sync::mpsc::TryRecvError::Empty)
+    ));
+}
+
+#[test]
+fn demand_driven_peer_tick_retains_view_update_until_durable() {
+    let (mut writer, _) = fail_write_many_node();
+    let (mut core, _) = fail_write_many_node();
+    let (tx_id, unit) = writer
+        .commit_mergeable_unit(
+            MergeableCommit::new("todos", row(0xcd), 10).cells(title_cells("wire view")),
+        )
+        .unwrap();
+    let SyncMessage::CommitUnit { tx, versions } = unit else {
+        panic!("local write must produce a commit unit")
+    };
+    core.ingest_commit_unit(tx, versions, 10).unwrap();
+    core.apply_fate_update(
+        tx_id,
+        Fate::Accepted,
+        Some(GlobalSeq(1)),
+        Some(DurabilityTier::Global),
+    )
+    .unwrap();
+    let update = core.view_update_for_current_rows("todos").unwrap();
+
+    let node_schema = schema();
+    let column_families = node_schema.column_families();
+    let refs = column_families.iter().map(String::as_str).collect::<Vec<_>>();
+    let released = std::rc::Rc::new(std::cell::Cell::new(true));
+    let storage = CommitGatedAuthorityStorage {
+        inner: groove::storage::async_ordered::ImmediateStorage::new(MemoryStorage::new(&refs)),
+        released: std::rc::Rc::clone(&released),
+        fail: std::rc::Rc::new(std::cell::Cell::new(false)),
+        completed: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
+    };
+    let identity = crate::db::DbIdentity {
+        node: node(0xcd),
+        author: AuthorId::from_bytes([0xcd; 16]),
+    };
+    let mut opening = crate::db::PollableDbOpen::new(node_schema, identity, Box::new(storage));
+    let waker = std::task::Waker::from(std::sync::Arc::new(PersistenceTestWake));
+    let mut context = std::task::Context::from_waker(&waker);
+    let std::task::Poll::Ready(Ok(mut receiver)) = opening.poll(&mut context) else {
+        panic!("commit-only gate must open the demand-driven database")
+    };
+    let prepared = receiver.prepare_query(&receiver.table("todos")).unwrap();
+    let mut subscription = futures::executor::block_on(receiver.subscribe(
+        &prepared,
+        crate::db::ReadOpts {
+            tier: DurabilityTier::None,
+            local_updates: crate::db::LocalUpdates::Immediate,
+            propagation: crate::db::Propagation::LocalOnly,
+            ..crate::db::ReadOpts::default()
+        },
+    ))
+    .unwrap();
+    assert!(matches!(
+        futures::executor::block_on(subscription.next_event()),
+        Some(crate::db::SubscriptionEvent::Delta { reset: true, .. })
+    ));
+    let inbound = std::rc::Rc::new(std::cell::RefCell::new(
+        std::collections::VecDeque::from([update]),
+    ));
+    let connection = receiver.connect_upstream(Box::new(QueuedInboundTransport {
+        inbound: std::rc::Rc::clone(&inbound),
+    }));
+
+    released.set(false);
+    assert!(receiver.poll_tick(&mut context).is_pending());
+    assert!(connection.borrow().has_staged_view_update_for_test());
+    assert!(subscription.try_next_event().is_none());
+
+    released.set(true);
+    let mut completed = false;
+    for _ in 0..16 {
+        match receiver.poll_tick(&mut context) {
+            std::task::Poll::Pending => assert!(subscription.try_next_event().is_none()),
+            std::task::Poll::Ready(Ok(_)) => {
+                completed = true;
+                break;
+            }
+            std::task::Poll::Ready(Err(error)) => panic!("receiver tick failed: {error}"),
+        }
+    }
+    assert!(completed, "receiver batch must durably complete");
+    let Some(crate::db::SubscriptionEvent::Delta { added, .. }) =
+        subscription.try_next_event()
+    else {
+        panic!("durable view update must publish one subscription delta")
+    };
+    assert_eq!(added.len(), 1);
+    assert_eq!(added[0].row_uuid(), row(0xcd));
+    assert!(!connection.borrow().has_staged_view_update_for_test());
+    assert!(subscription.try_next_event().is_none());
+}
+
+#[test]
 fn demand_driven_peer_tick_retains_relay_frame_across_async_commit() {
     let (mut writer, _) = fail_write_many_node();
     let (tx_id, unit) = writer
