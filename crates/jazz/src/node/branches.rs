@@ -685,6 +685,23 @@ where
         schema_version: SchemaVersionId,
         commits: Vec<MergeableCommit>,
     ) -> Result<PreparedBranchMergeableCommit, Error> {
+        if commits.is_empty() {
+            return Err(Error::InvalidMergeableCommit(
+                "mergeable transaction requires at least one write",
+            ));
+        }
+        let made_at = self.preview_mergeable_tx_time(&commits, commits[0].now_ms);
+        self.prepare_mergeable_many_on_branch_at(branch_id, schema_version, commits, made_at, None)
+    }
+
+    fn prepare_mergeable_many_on_branch_at(
+        &mut self,
+        branch_id: BranchId,
+        schema_version: SchemaVersionId,
+        commits: Vec<MergeableCommit>,
+        made_at: TxTime,
+        branch_merge: Option<BranchMergeProvenance>,
+    ) -> Result<PreparedBranchMergeableCommit, Error> {
         self.require_catalogue_ready()?;
         if !self
             .catalogue
@@ -764,7 +781,6 @@ where
             }
         }
 
-        let made_at = self.preview_mergeable_tx_time(&commits, commits[0].now_ms);
         let tx_id = TxId::new(made_at, self.node_uuid);
         let tx = Transaction {
             tx_id,
@@ -780,7 +796,7 @@ where
             predicate_read_set: None,
             user_metadata_json: commits[0].user_metadata_json.clone(),
             target_lineage: BranchLineage::Branch(branch_id),
-            branch_merge: None,
+            branch_merge,
         };
         let tx_node_alias =
             self.node_aliases
@@ -878,114 +894,6 @@ where
         self.database
             .commit_prepared_batch_with_table_registrations(registrations, batch)?;
         self.branches.branch_partitions.extend(partitions);
-        self.cache_tx_version_tables(tx_id, transaction_tables);
-        Ok(tx_id)
-    }
-
-    fn commit_mergeable_many_on_branch_at(
-        &mut self,
-        branch_id: BranchId,
-        write_schema_version: SchemaVersionId,
-        commits: Vec<MergeableCommit>,
-        made_at: TxTime,
-        branch_merge: Option<BranchMergeProvenance>,
-    ) -> Result<TxId, Error>
-    where
-        S: ReopenableStorage,
-    {
-        let branch = self
-            .branches
-            .branches
-            .get(&branch_id)
-            .cloned()
-            .ok_or(Error::BranchNotFound(branch_id))?;
-        let permission_subject = commits[0].effective_permission_subject();
-        for commit in &commits {
-            let table_schema = self.table_in_schema(&commit.table, write_schema_version)?;
-            let version = VersionRecord::from_commit(commit, &table_schema, write_schema_version)?;
-            if !self.branch_table_write_policy_allows_version_record(
-                &branch,
-                &table_schema,
-                &version,
-                permission_subject,
-            )? {
-                return Err(Error::AuthorizationDenied);
-            }
-        }
-        for table in commits
-            .iter()
-            .map(|commit| commit.table.clone())
-            .collect::<BTreeSet<_>>()
-        {
-            self.persist_branch_partition(table, write_schema_version, branch_id)?;
-        }
-        let tx_id = TxId::new(made_at, self.node_uuid);
-        let tx = Transaction {
-            tx_id,
-            kind: TxKind::Mergeable,
-            n_total_writes: commits.len().try_into().map_err(|_| {
-                Error::InvalidMergeableCommit("transaction write count exceeds u32")
-            })?,
-            made_by: commits[0].made_by,
-            permission_subject: commits[0].permission_subject,
-            base_snapshot: None,
-            row_read_set: None,
-            absent_read_set: None,
-            predicate_read_set: None,
-            user_metadata_json: commits[0].user_metadata_json.clone(),
-            target_lineage: BranchLineage::Branch(branch_id),
-            branch_merge,
-        };
-        let tx_node_alias = self.ensure_node_alias(tx_id.node)?;
-        let schema_version_alias = self.ensure_schema_version_alias(write_schema_version)?;
-        let mut batch = self.database.open_batch();
-        batch.insert(
-            "jazz_transactions",
-            transaction_values(
-                tx_node_alias,
-                &tx,
-                Fate::Pending,
-                None,
-                self.authored_commit_durability,
-            ),
-        );
-        let mut transaction_tables = BTreeSet::new();
-        for commit in commits {
-            let table_schema = self.table_in_schema(&commit.table, write_schema_version)?;
-            let stored = VersionRow::from_parts_with_schema_version(
-                &table_schema,
-                VersionRowParts {
-                    table: commit.table.clone(),
-                    row_uuid: commit.row_uuid,
-                    tx_node_alias,
-                    schema_version_alias,
-                    tx_time: made_at,
-                    parents: commit.parents,
-                    created_by: commit.made_by,
-                    created_at: TxTime(commit.now_ms),
-                    updated_by: commit.made_by,
-                    updated_at: TxTime(commit.now_ms),
-                    authored_columns: Some(
-                        commit
-                            .authored_columns
-                            .clone()
-                            .unwrap_or_else(|| commit.cells.keys().cloned().collect()),
-                    ),
-                    cells: commit.cells,
-                    deletion: commit.deletion,
-                },
-                None,
-            )?;
-            transaction_tables.insert(table_schema.name.clone());
-            let (branch_table, branch_record) =
-                self.branch_version_storage_write_binding(&stored, branch_id)?;
-            batch.insert_raw(
-                branch_table.as_ref(),
-                self.version_storage_primary_key(&stored, BranchLineage::Branch(branch_id))?,
-                branch_record,
-            );
-        }
-        self.commit_database_batch(batch)?;
         self.cache_tx_version_tables(tx_id, transaction_tables);
         Ok(tx_id)
     }
@@ -2072,21 +1980,15 @@ where
             }
             BranchLineage::Branch(branch_id) => {
                 let write_schema_version = self.catalogue.current_write_schema.schema;
-                for table in commits
-                    .iter()
-                    .map(|commit| commit.table.clone())
-                    .collect::<BTreeSet<_>>()
-                {
-                    self.persist_branch_partition(table, write_schema_version, branch_id)?;
-                }
-                let made_at = self.mint_tx_time(0);
-                self.commit_mergeable_many_on_branch_at(
+                let made_at = self.preview_mergeable_tx_time(&commits, 0);
+                let prepared = self.prepare_mergeable_many_on_branch_at(
                     branch_id,
                     write_schema_version,
                     commits,
                     made_at,
                     Some(branch_merge),
-                )
+                )?;
+                self.publish_prepared_branch_mergeable_commit(prepared)
             }
         }
     }

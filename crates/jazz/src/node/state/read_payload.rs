@@ -659,12 +659,6 @@ where
         Ok(None)
     }
 
-    fn mint_tx_time(&mut self, now_ms: u64) -> TxTime {
-        let made_at = TxTime::tick(self.clock.tx_time, now_ms);
-        self.clock.tx_time = made_at;
-        made_at
-    }
-
     fn merge_tx_time(&mut self, observed: TxTime) {
         self.clock.tx_time = self.clock.tx_time.max(observed);
     }
