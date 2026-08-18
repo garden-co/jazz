@@ -516,7 +516,7 @@ export class MutationResult<T, TKind extends TransactionKind = "mergeable"> {
    * Rejects with a {@link PersistedWriteRejectedError} if the write is rejected.
    */
   async wait(
-    ...args: TKind extends "exclusive" ? [] : [options: { tier: DurabilityTier }]
+    ...args: [TKind] extends ["exclusive"] ? [] : [options: { tier: DurabilityTier }]
   ): Promise<T> {
     if (this.#kind === "exclusive") {
       await this.#client.waitForExclusiveTransaction(await this.batchId);
