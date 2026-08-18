@@ -469,7 +469,7 @@ describe("packaged docs index", () => {
 
     expect(lefthook["pre-commit"].commands["docs-index"]).toEqual({
       glob: ["docs/**"],
-      run: "pnpm --filter jazz-tools exec tsx src/mcp/build-index.ts",
+      run: "pnpm --filter docs exec tsx ../packages/jazz-tools/src/mcp/build-index.ts",
       stage_fixed: true,
     });
   });
