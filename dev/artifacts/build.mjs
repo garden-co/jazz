@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, renameSync, rmSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join, resolve } from "node:path";
+import { removeAbandonedNapiStages } from "./napi-staging.mjs";
 import { writeManifest } from "./provenance.mjs";
 
 const root = resolve(fileURLToPath(new URL(".", import.meta.url)), "../..");
@@ -52,7 +53,10 @@ if (kind === "napi" && !expectedNapiBinding)
   throw new Error(`unsupported NAPI target ${resolvedNapiTarget ?? "unknown"}`);
 const napiPath = expectedNapiBinding && join(root, "crates/jazz-napi", expectedNapiBinding);
 const stagedNapiPath = napiPath && `${napiPath}.staged-${process.pid}-${Date.now()}`;
-if (napiPath && existsSync(napiPath)) renameSync(napiPath, stagedNapiPath);
+if (napiPath) {
+  removeAbandonedNapiStages(napiPath);
+  if (existsSync(napiPath)) renameSync(napiPath, stagedNapiPath);
+}
 const result = spawnSync(command, args, {
   cwd: root,
   stdio: "inherit",
