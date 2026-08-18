@@ -9,20 +9,6 @@ where
         self.commit_mergeable_at(commit, made_at)
     }
 
-    /// Commit one local mergeable write under an admitted authored schema.
-    ///
-    /// Client database handles retain the schema they were opened with even
-    /// when an authority later advances its separate current-write pointer.
-    /// Their canonical versions must retain that authored schema so receivers
-    /// can reconstruct through the ordered catalogue lineage.
-    pub(crate) fn commit_mergeable_in_schema(
-        &mut self,
-        schema_version: SchemaVersionId,
-        commit: MergeableCommit,
-    ) -> Result<TxId, Error> {
-        self.commit_mergeable_many_in_schema(schema_version, vec![commit])
-    }
-
     /// Commit multiple local mergeable writes as one transaction.
     pub fn commit_mergeable_many(&mut self, commits: Vec<MergeableCommit>) -> Result<TxId, Error> {
         if commits.is_empty() {
@@ -40,16 +26,6 @@ where
         }
         let made_at = self.preview_mergeable_tx_time(&commits, commits[0].now_ms);
         self.commit_mergeable_many_at(commits, made_at)
-    }
-
-    /// Commit local mergeable writes under one admitted authored schema.
-    pub(crate) fn commit_mergeable_many_in_schema(
-        &mut self,
-        schema_version: SchemaVersionId,
-        commits: Vec<MergeableCommit>,
-    ) -> Result<TxId, Error> {
-        let prepared = self.prepare_mergeable_many_in_schema(schema_version, commits)?;
-        self.publish_prepared_mergeable_commit(prepared)
     }
 
     pub(crate) fn preview_mergeable_tx_time(

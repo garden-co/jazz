@@ -768,19 +768,6 @@ where
         Ok(true)
     }
 
-    /// Commit a mergeable open transaction through the ordinary mergeable batch path.
-    pub(crate) fn commit_mergeable_open(
-        &mut self,
-        open_batch_id: OpenBatchId,
-        mut next_now_ms: impl FnMut() -> u64,
-    ) -> Result<TxId, Error> {
-        let fallback_now_ms = (0..self.mergeable_open_missing_timestamp_count(open_batch_id)?)
-            .map(|_| next_now_ms())
-            .collect::<Vec<_>>();
-        let prepared = self.prepare_mergeable_open(open_batch_id, &fallback_now_ms, false)?;
-        self.publish_prepared_mergeable_open(prepared)
-    }
-
     pub(crate) fn mergeable_open_missing_timestamp_count(
         &self,
         open_batch_id: OpenBatchId,

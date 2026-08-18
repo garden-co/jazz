@@ -949,15 +949,6 @@ where
             .collect())
     }
 
-    pub(crate) fn query_rows_local_preview(
-        &mut self,
-        shape: &ValidatedQuery,
-        binding: &Binding,
-        prepared_plan: Option<&PreparedQueryPlanHandle>,
-    ) -> Result<Vec<CurrentRow>, Error> {
-        self.query_rows_with_prepared_plan(shape, binding, DurabilityTier::Local, prepared_plan)
-    }
-
     pub(crate) fn query_rows_local_preview_profiled(
         &mut self,
         shape: &ValidatedQuery,

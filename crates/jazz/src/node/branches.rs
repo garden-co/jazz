@@ -766,19 +766,6 @@ where
         self.commit_mergeable_many_on_branch(branch_id, vec![commit])
     }
 
-    /// Commit a branch-local write under an admitted authored schema.
-    pub(crate) fn commit_mergeable_on_branch_in_schema(
-        &mut self,
-        branch_id: BranchId,
-        schema_version: SchemaVersionId,
-        commit: MergeableCommit,
-    ) -> Result<TxId, Error>
-    where
-        S: ReopenableStorage,
-    {
-        self.commit_mergeable_many_on_branch_in_schema(branch_id, schema_version, vec![commit])
-    }
-
     /// Commit multiple ordinary mergeable writes atomically into one branch
     /// target. The resulting transaction differs from a root commit only in
     /// its explicit target lineage and the target-relative policy/storage view.

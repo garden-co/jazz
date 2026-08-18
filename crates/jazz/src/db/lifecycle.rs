@@ -311,11 +311,6 @@ impl Db {
         refresh_demand_driven_subscriptions(&self.node, &mut self.runtime).await
     }
 
-    #[cfg(any(test, feature = "testing"))]
-    pub(crate) async fn refresh_subscriptions(&mut self) -> Result<usize, Error> {
-        self.refresh_subscriptions_prepared().await
-    }
-
     /// Open an ordinary database over a storage backend that completes the
     /// ordered asynchronous contract immediately.
     pub async fn open<S>(config: DbConfig<S>) -> Result<Self, Error>

@@ -150,22 +150,6 @@ where
         self.schedule_tick(TickUrgency::Deferred);
     }
 
-    /// Restore locally originated, unsettled durable writes into the
-    /// process-local upload queue after reopening client storage.
-    pub(super) fn restore_pending_uploads(&self, identity: DbIdentity) -> Result<(), Error> {
-        let pending = self
-            .node
-            .borrow_mut()
-            .pending_transaction_ids_for(identity.node, identity.author)?;
-        let mut restored = HashSet::new();
-        for tx_id in pending {
-            if restored.insert(tx_id) {
-                self.queue_pending_upload(tx_id, None);
-            }
-        }
-        Ok(())
-    }
-
     pub(super) fn restore_prepared_pending_uploads(&self, pending: impl IntoIterator<Item = TxId>) {
         let mut restored = HashSet::new();
         for tx_id in pending {
