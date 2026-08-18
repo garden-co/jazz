@@ -146,6 +146,91 @@ impl DemandDrivenDb {
         connection
     }
 
+    /// Accept a subscriber whose storage-mutating frames are retained by this
+    /// asynchronous owner until their durable publication completes.
+    pub fn accept_subscriber(
+        &self,
+        transport: Box<dyn Transport>,
+        identity: AuthorId,
+    ) -> Rc<RefCell<PeerConnection<groove::storage::DemandLoadedStorage>>> {
+        let connection = self.database.accept_subscriber(transport, identity);
+        connection.borrow_mut().enable_external_durable_ingress();
+        connection
+    }
+
+    pub fn accept_subscriber_with_claims(
+        &self,
+        transport: Box<dyn Transport>,
+        identity: AuthorId,
+        claims: BTreeMap<String, Value>,
+    ) -> Rc<RefCell<PeerConnection<groove::storage::DemandLoadedStorage>>> {
+        let connection = self
+            .database
+            .accept_subscriber_with_claims(transport, identity, claims);
+        connection.borrow_mut().enable_external_durable_ingress();
+        connection
+    }
+
+    pub fn accept_subscriber_with_claims_and_trust(
+        &self,
+        transport: Box<dyn Transport>,
+        identity: AuthorId,
+        claims: BTreeMap<String, Value>,
+        trust: CommitUnitTrust,
+    ) -> Rc<RefCell<PeerConnection<groove::storage::DemandLoadedStorage>>> {
+        let connection = self
+            .database
+            .accept_subscriber_with_claims_and_trust(transport, identity, claims, trust);
+        connection.borrow_mut().enable_external_durable_ingress();
+        connection
+    }
+
+    pub fn accept_edge_subscriber_with_claims(
+        &self,
+        transport: Box<dyn Transport>,
+        identity: AuthorId,
+        claims: BTreeMap<String, Value>,
+    ) -> Rc<RefCell<PeerConnection<groove::storage::DemandLoadedStorage>>> {
+        let connection = self
+            .database
+            .accept_edge_subscriber_with_claims(transport, identity, claims);
+        connection.borrow_mut().enable_external_durable_ingress();
+        connection
+    }
+
+    pub fn accept_edge_authority_subscriber_with_claims(
+        &self,
+        transport: Box<dyn Transport>,
+        identity: AuthorId,
+        claims: BTreeMap<String, Value>,
+    ) -> Rc<RefCell<PeerConnection<groove::storage::DemandLoadedStorage>>> {
+        let connection = self
+            .database
+            .accept_edge_authority_subscriber_with_claims(transport, identity, claims);
+        connection.borrow_mut().enable_external_durable_ingress();
+        connection
+    }
+
+    pub fn accept_subscriber_with_resume(
+        &self,
+        transport: Box<dyn Transport>,
+        identity: AuthorId,
+        cursor: ResumeCursor,
+    ) -> Rc<RefCell<PeerConnection<groove::storage::DemandLoadedStorage>>> {
+        let connection = self
+            .database
+            .accept_subscriber_with_resume(transport, identity, cursor);
+        connection.borrow_mut().enable_external_durable_ingress();
+        connection
+    }
+
+    pub fn detach_connection(
+        &self,
+        connection: &Rc<RefCell<PeerConnection<groove::storage::DemandLoadedStorage>>>,
+    ) -> bool {
+        self.database.detach_connection(connection)
+    }
+
     /// Drive peer work without replaying a frame across an asynchronous
     /// storage suspension. At most one durable frame owns the persistence
     /// boundary at a time; ordinary connection-control traffic continues
@@ -217,6 +302,21 @@ impl DemandDrivenDb {
                 }
                 continue;
             }
+            let subscriber_relay = connection.borrow().staged_subscriber_relay_commit();
+            if let Some((tx, versions)) = subscriber_relay {
+                let tx_id = tx.tx_id;
+                match self
+                    .runtime
+                    .poll_ingest_relay_commit_unit(context, tx, versions)
+                {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(Err(error)) => return Poll::Ready(Err(error.into())),
+                    Poll::Ready(Ok(())) => connection
+                        .borrow_mut()
+                        .complete_staged_subscriber_relay_commit(tx_id),
+                }
+                continue;
+            }
             let owned_fate = connection.borrow().staged_owned_fate();
             if let Some((tx_id, fate, global_seq, durability)) = owned_fate {
                 match self
@@ -266,6 +366,7 @@ impl DemandDrivenDb {
                 || connection.staged_branch_metadata().is_some()
                 || connection.staged_row_version_repair().is_some()
                 || connection.staged_relay_commit().is_some()
+                || connection.staged_subscriber_relay_commit().is_some()
                 || connection.staged_owned_fate().is_some()
         }) {
             context.waker().wake_by_ref();

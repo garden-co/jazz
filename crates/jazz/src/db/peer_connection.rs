@@ -226,6 +226,23 @@ where
         Some((tx.clone(), versions.clone()))
     }
 
+    pub(super) fn staged_subscriber_relay_commit(
+        &self,
+    ) -> Option<(crate::tx::Transaction, Vec<crate::protocol::VersionRecord>)> {
+        let ConnectionLink::Subscriber {
+            local_receiver: true,
+            ..
+        } = &self.link
+        else {
+            return None;
+        };
+        let staged = self.staged_inbound.front()?;
+        let SyncMessage::CommitUnit { tx, versions } = &staged.message else {
+            return None;
+        };
+        Some((tx.clone(), versions.clone()))
+    }
+
     pub(super) fn staged_owned_fate(
         &self,
     ) -> Option<(TxId, Fate, Option<GlobalSeq>, Option<DurabilityTier>)> {
@@ -354,6 +371,31 @@ where
             staged.message,
             SyncMessage::CommitUnit { ref tx, .. } if tx.tx_id == tx_id
         ));
+        self.externally_applied_inbound = true;
+    }
+
+    pub(super) fn complete_staged_subscriber_relay_commit(&mut self, tx_id: TxId) {
+        let staged = self
+            .staged_inbound
+            .pop_front()
+            .expect("completed subscriber relay ingress retains its staged frame");
+        debug_assert!(matches!(
+            &staged.message,
+            SyncMessage::CommitUnit { tx, .. } if tx.tx_id == tx_id
+        ));
+        let ConnectionLink::Subscriber { outbox, .. } = &self.link else {
+            unreachable!("subscriber relay completion retains its link")
+        };
+        register_local_fate_route(&self.local_fate_routes, tx_id, &self.downstream_fates);
+        let mut outbox = outbox.borrow_mut();
+        if !outbox.iter().any(|pending| pending.tx_id == tx_id) {
+            outbox.push(PendingUpload {
+                tx_id,
+                unit: Some(staged.message),
+            });
+        }
+        drop(outbox);
+        schedule_tick_in(&self.scheduler, TickUrgency::Deferred);
         self.externally_applied_inbound = true;
     }
 
@@ -1894,13 +1936,31 @@ where
                         }
                     }
                 }
-                let mut applied_inbound = false;
+                let mut applied_inbound = std::mem::take(&mut self.externally_applied_inbound);
                 let mut scheduled_immediate = false;
                 let mut sent_view_update = false;
                 for fate in std::mem::take(&mut *self.downstream_fates.borrow_mut()) {
                     send_with_sync_context(&self.node, peer, self.transport.as_mut(), fate)?;
                 }
-                while let Some(message) = self.transport.try_recv() {
+                while let Some(staged) = self.staged_inbound.pop_front().or_else(|| {
+                    self.transport
+                        .try_recv()
+                        .map(|message| StagedInboundMessage {
+                            message,
+                            authority_receipt_eligible: true,
+                        })
+                }) {
+                    let message = staged.message;
+                    if self.external_durable_ingress
+                        && *local_receiver
+                        && matches!(&message, SyncMessage::CommitUnit { .. })
+                    {
+                        self.staged_inbound.push_front(StagedInboundMessage {
+                            message,
+                            authority_receipt_eligible: staged.authority_receipt_eligible,
+                        });
+                        break;
+                    }
                     // Authorization support is authority-owned in Phase 3.
                     // A subscriber must never be able to smuggle a support
                     // purpose alongside its own shape/binding subscription.
