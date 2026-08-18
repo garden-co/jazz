@@ -54,6 +54,7 @@ async fn refresh_demand_driven_subscriptions(
     database: &Db<groove::storage::DemandLoadedStorage>,
     runtime: &mut DemandDrivenNode,
 ) -> Result<usize, Error> {
+    runtime.publish_query_runtime_updates()?;
     std::future::poll_fn(|context| {
         runtime
             .poll_acquire_resident(context, |node| {
@@ -1002,6 +1003,10 @@ impl DemandDrivenDb {
             // outputs; the synchronous resident peer tick runs after
             // acquisition and is therefore too late to arm this owner poll.
             self.database.node.mark_subscriber_connections_dirty();
+        }
+
+        if let Err(error) = self.runtime.publish_query_runtime_updates() {
+            return Poll::Ready(Err(error.into()));
         }
 
         match self.runtime.poll_acquire_resident(context, |node| {

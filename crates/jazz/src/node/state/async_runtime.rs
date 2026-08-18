@@ -123,6 +123,31 @@ struct PendingPeerCatalogueMessage {
 }
 
 impl DemandDrivenNode {
+    /// Publish pending Groove graph work into the resident query runtime.
+    ///
+    /// This is an explicit publication phase, not acquisition preparation:
+    /// flushing may advance IVM state and emit durable writes. Those writes
+    /// join the owner's ordered persistence queue before any later cold read,
+    /// while already-resident subscription materialization may continue
+    /// synchronously.
+    pub(crate) fn publish_query_runtime_updates(&mut self) -> Result<(), Error> {
+        self.ensure_persistence_usable()?;
+        let result = self.node.borrow_mut().flush_query_runtime();
+        match result {
+            Ok(()) => {
+                self.collect_persistence_unit();
+                Ok(())
+            }
+            Err(error) => {
+                self.discard_failed_operation_writes();
+                if is_not_resident(&error) {
+                    self.fail_persistence();
+                }
+                Err(error)
+            }
+        }
+    }
+
     pub(crate) fn poll_acquire_resident<T>(
         &mut self,
         context: &mut std::task::Context<'_>,
@@ -133,6 +158,12 @@ impl DemandDrivenNode {
         if let Err(error) = self.ensure_persistence_usable() {
             return std::task::Poll::Ready(Err(error));
         }
+        // Resident publications are synchronous and may occur between owner
+        // polls (for example while constructing a local peer or delivering an
+        // immediate callback). Adopt that already-complete unit before
+        // entering a restartable acquisition attempt. Writes emitted by the
+        // attempt itself remain forbidden and are checked below.
+        self.collect_persistence_unit();
         let result = self.acquisition.poll(
             self.persistence.as_mut(),
             &self.cache,

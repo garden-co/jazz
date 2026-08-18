@@ -403,11 +403,10 @@ where
         &self,
         node: &mut NodeState<S>,
     ) -> Result<(), crate::node::Error> {
-        // Typed ingress may have changed physical sources without yet flushing
-        // their incremental graph. Produce terminal deltas before staging
-        // them, so the owner prepares the post-ingress result rather than the
-        // previous subscription state.
-        node.flush_query_runtime()?;
+        // The async owner explicitly publishes pending Groove graph work
+        // before entering this restartable acquisition phase. This method may
+        // inspect and stage terminal deltas, but must never advance IVM state
+        // or emit durable writes itself.
         let pending_authoritative_resets = node.pending_authoritative_reset_binding_views();
         for weak in self.subscriptions.borrow().iter() {
             let Some(state) = weak.upgrade() else {
