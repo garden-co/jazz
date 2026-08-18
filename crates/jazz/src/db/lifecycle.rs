@@ -318,6 +318,51 @@ impl DemandDrivenDb {
         .await
     }
 
+    /// Seed one authority-settled row through the same pending commit and
+    /// authority-ingest boundaries used by network writes.
+    pub async fn seed_settled_mergeable_for_bootstrap(
+        &mut self,
+        table: &str,
+        row: RowUuid,
+        made_by: AuthorId,
+        cells: RowCells,
+    ) -> Result<TxId, Error> {
+        let cells = self.database.apply_insert_defaults(table, cells)?;
+        let commit = MergeableCommit::new(table, row, self.database.next_now_ms())
+            .made_by(made_by)
+            .cells(cells);
+        let schema = self.database.schema_version_id;
+        let tx_id = std::future::poll_fn(|context| {
+            self.runtime
+                .poll_mergeable_commit_in_schema(context, schema, &commit)
+        })
+        .await
+        .map_err(Error::from)?;
+        let SyncMessage::CommitUnit { tx, versions } = self
+            .database
+            .node
+            .node
+            .borrow_mut()
+            .commit_unit_for(tx_id)?
+        else {
+            unreachable!("mergeable commit unit has one canonical wire shape")
+        };
+        std::future::poll_fn(|context| {
+            self.runtime.poll_ingest_commit_unit(
+                context,
+                tx.clone(),
+                versions.clone(),
+                commit.now_ms,
+                None,
+            )
+        })
+        .await
+        .map_err(Error::from)?;
+        self.database.refresh_subscriptions()?;
+        self.database.node.mark_subscriber_connections_dirty();
+        Ok(tx_id)
+    }
+
     #[cfg(test)]
     pub(crate) fn runtime_stats_for_test(&self) -> groove::ivm::RuntimeStats {
         self.database.runtime_stats_for_test()

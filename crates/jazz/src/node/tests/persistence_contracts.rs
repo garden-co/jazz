@@ -2615,6 +2615,51 @@ fn local_catalogue_publication_waits_for_the_same_durable_boundary() {
 }
 
 #[test]
+fn authority_bootstrap_seed_is_not_settled_before_async_ingest_commits() {
+    let node_schema = schema();
+    let column_families = node_schema.column_families();
+    let refs = column_families.iter().map(String::as_str).collect::<Vec<_>>();
+    let released = std::rc::Rc::new(std::cell::Cell::new(true));
+    let storage = CommitGatedAuthorityStorage {
+        inner: groove::storage::async_ordered::ImmediateStorage::new(MemoryStorage::new(&refs)),
+        released: std::rc::Rc::clone(&released),
+        fail: std::rc::Rc::new(std::cell::Cell::new(false)),
+        completed: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
+    };
+    let identity = crate::db::DbIdentity {
+        node: node(0xd3),
+        author: AuthorId::SYSTEM,
+    };
+    let mut opening =
+        crate::db::PollableDbOpen::new_history_complete(node_schema, identity, Box::new(storage));
+    let waker = std::task::Waker::from(std::sync::Arc::new(PersistenceTestWake));
+    let mut context = std::task::Context::from_waker(&waker);
+    let std::task::Poll::Ready(Ok(mut authority)) = opening.poll(&mut context) else {
+        panic!("commit-only gate must open the demand-driven authority")
+    };
+
+    released.set(false);
+    let tx_id = {
+        let mut seed = std::pin::pin!(authority.seed_settled_mergeable_for_bootstrap(
+            "todos",
+            row(0xd3),
+            AuthorId::SYSTEM,
+            title_cells("seeded"),
+        ));
+        assert!(seed.as_mut().poll(&mut context).is_pending());
+        released.set(true);
+        let std::task::Poll::Ready(Ok(tx_id)) = seed.as_mut().poll(&mut context) else {
+            panic!("released seed must settle through authority ingest")
+        };
+        tx_id
+    };
+    assert_eq!(
+        authority.write_state(tx_id).unwrap().durability,
+        DurabilityTier::Global
+    );
+}
+
+#[test]
 fn immediate_authority_storage_completes_through_the_same_first_poll() {
     let (mut writer, _) = fail_write_many_node();
     let (tx_id, unit) = writer
