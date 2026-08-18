@@ -46,6 +46,7 @@ describe("solid/create-jazz-client integration", () => {
         dispose = rootDispose;
         return createSolidJazzClient(() => ({
           appId: makeAppId("mutation-query"),
+          driver: { type: "memory" },
         }));
       });
       client = await waitForReady(result);
@@ -57,7 +58,7 @@ describe("solid/create-jazz-client integration", () => {
           done: false,
         })
         .wait({
-          tier: "local",
+          tier: "none",
         });
       const rows = await client.db.all(app.todos.where({}));
 
@@ -84,6 +85,7 @@ describe("solid/create-jazz-client integration", () => {
         dispose = rootDispose;
         return createSolidJazzClient(() => ({
           appId: makeAppId("external-id"),
+          driver: { type: "memory" },
         }));
       });
       client = await waitForReady(result);
@@ -91,7 +93,7 @@ describe("solid/create-jazz-client integration", () => {
       const inserted = await client.db
         .insert(app.todos, { title: "with external id", done: false }, { id: externalId })
         .wait({
-          tier: "local",
+          tier: "none",
         });
       const rows = await client.db.all(app.todos.where({}));
 
@@ -116,7 +118,10 @@ describe("solid/create-jazz-client integration", () => {
     try {
       const result = createRoot((rootDispose) => {
         dispose = rootDispose;
-        return createSolidJazzClient(() => ({ appId: makeAppId("shutdown") }));
+        return createSolidJazzClient(() => ({
+          appId: makeAppId("shutdown"),
+          driver: { type: "memory" },
+        }));
       });
       client = await waitForReady(result);
 
@@ -126,7 +131,7 @@ describe("solid/create-jazz-client integration", () => {
           done: false,
         })
         .wait({
-          tier: "local",
+          tier: "none",
         });
       await client.db.all(app.todos.where({}));
 
