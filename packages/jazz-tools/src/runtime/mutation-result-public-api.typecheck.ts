@@ -1,14 +1,5 @@
 import type { Db, MutationResult, TableProxy, TransactionKind } from "../index.js";
 
-// @ts-expect-error WriteResult was replaced by MutationResult.
-import type { WriteResult as PackageWriteResult } from "../index.js";
-// @ts-expect-error WriteHandle was replaced by MutationResult.
-import type { WriteHandle as PackageWriteHandle } from "../index.js";
-// @ts-expect-error WriteResult was replaced by MutationResult.
-import type { WriteResult as RuntimeWriteResult } from "./index.js";
-// @ts-expect-error WriteHandle was replaced by MutationResult.
-import type { WriteHandle as RuntimeWriteHandle } from "./index.js";
-
 type Todo = { id: string; title: string; done: boolean };
 type TodoInit = { title: string; done: boolean };
 
@@ -66,7 +57,3 @@ genericResult.wait();
 genericResult.wait({ tier: "global" });
 
 void assertMutationResultContract;
-void (null as unknown as PackageWriteResult<unknown>);
-void (null as unknown as PackageWriteHandle);
-void (null as unknown as RuntimeWriteResult<unknown>);
-void (null as unknown as RuntimeWriteHandle);

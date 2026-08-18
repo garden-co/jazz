@@ -6,10 +6,17 @@ reviewedAt: "4059cdef"
 
 ## Local-first writes
 
-All writes execute against the local database first. `insert`, `update`, and `delete` return write handles immediately. Call `.wait({ tier: ... })` on those handles when you need confirmation that the write reached a specific [durability tier](#write-durability-tiers).
+All writes execute against the local database first. Each mutation returns a `MutationResult`
+with `value`, `batchId`, and `wait`. Call `wait({ tier: ... })` when you need confirmation that
+the mutation reached a specific [durability tier](#write-durability-tiers).
+
+The value depends on the operation. `insert` and `restore` return the local row in `value`.
+`upsert`, `update`, and `delete` use `undefined` because they do not need to materialise a row.
+The value only shows the local result; it does not mean the mutation has reached a server.
 
 Jazz also allows grouping writes together using [transactions](#transactions).
-Writes made through an open transaction are not individually waitable. Call `.wait()` on the returned write result instead.
+Writes made through an open transaction are not individually waitable. Wait on the result returned
+by `transaction`, `exclusiveTransaction`, or `commit` instead.
 
 ## Getting a `Db` handle
 
@@ -69,7 +76,7 @@ Mutations are methods on the database handle. All three take a table as their fi
 
 Use `upsert(...)` when your app already knows the row ID and wants to create that row if it does
 not exist, or update it if it does. Like `insert`, `update`, and `delete`, it applies locally first
-and returns a write handle that can be awaited for durability.
+and returns a `MutationResult<void>` that can be awaited for durability.
 
 ```ts
 const write = db.upsert(
@@ -144,15 +151,29 @@ See [Durability Tiers](/docs/reference/durability-tiers) for the full reference,
 
 Need to clear local data during development? See [Auth Lifecycle](/docs/auth/lifecycle#storage-reset).
 
-`wait({ tier })` resolves when the transaction reaches the requested durability tier. If the transaction is rejected, it rejects with `PersistedWriteRejectedError` instead of hanging.
+## Handling mutation errors
+
+A mutation can fail at two points:
+
+- The mutation call throws immediately if Jazz cannot apply it locally, for example because the
+  input is invalid. Catch this error around the call.
+- `wait(...)` rejects with `PersistedWriteRejectedError` if a later durability or authority check
+  rejects the mutation. Catch this error around the awaited result.
+
+For mergeable mutations, `wait({ tier })` resolves when the mutation reaches the requested
+durability tier. Exclusive transaction results use `wait()` because the authority decides whether
+to accept or reject the transaction.
 
 ```ts
+import { PersistedWriteRejectedError } from "jazz-tools";
+
 const pending = db.insert(app.todos, {
   title: "Ship review fixes",
   done: false,
 });
 
-console.log(pending.transactionId);
+console.log(pending.value.id);
+console.log(await pending.batchId);
 
 try {
   const row = await pending.wait({ tier: "global" });
@@ -164,9 +185,11 @@ try {
 }
 ```
 
-Writes that are not explicitly awaited remain fire-and-forget. Keep the returned write handle and call `wait(...)` when the application needs to observe durability or policy rejection.
+Writes that are not explicitly awaited remain fire-and-forget. Keep the returned `MutationResult`
+and call `wait(...)` when the application needs to observe durability or policy rejection.
 
-You can also set a global `onMutationError` handler that will be notified anytime a write that was not explicitly awaited fails:
+Use `onMutationError` as a fallback for later rejections from mutations that your app did not wait
+for explicitly:
 
 ```ts
 db.onMutationError((error) => {
@@ -185,7 +208,7 @@ const result = await db.exclusiveTransaction(async (tx) => {
   tx.update(app.todos, todoId, { done: true });
 });
 await result.wait();
-console.log(result.transactionId);
+console.log(await result.batchId);
 ```
 
 The changes made as part of an exclusive transaction are scoped to it, and will only be
@@ -195,12 +218,12 @@ transactions are settled by the global authority, `wait()` does not take a durab
 Use a mergeable transaction when you want to group several ordinary writes and commit them together:
 
 ```ts
-const result = db.transaction((tx) => {
+const result = await db.transaction((tx) => {
   tx.insert(app.todos, { title: "Grouped write", done: false });
   tx.update(app.todos, todoId, { done: true });
 });
 await result.wait({ tier: "edge" });
-console.log(result.transactionId);
+console.log(await result.batchId);
 ```
 
 Transactions can read their own local writes through `all(...)` and `one(...)` before commit.
