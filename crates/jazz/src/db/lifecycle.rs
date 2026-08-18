@@ -107,9 +107,20 @@ impl PollableDbOpen {
 }
 
 impl DemandDrivenDb {
-    #[doc(hidden)]
-    pub fn database(&self) -> &Db<groove::storage::DemandLoadedStorage> {
-        &self.database
+    /// Start a logical query without touching durable storage.
+    pub fn table(&self, table: impl Into<String>) -> Query {
+        self.database.table(table)
+    }
+
+    /// Compile a logical query. Durable source acquisition happens when the
+    /// resulting query is read or subscribed, not while its shape is built.
+    pub fn prepare_query(&self, query: &Query) -> Result<PreparedQuery, Error> {
+        self.database.prepare_query(query)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn runtime_stats_for_test(&self) -> groove::ivm::RuntimeStats {
+        self.database.runtime_stats_for_test()
     }
 
     #[doc(hidden)]

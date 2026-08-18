@@ -481,8 +481,7 @@ pub async fn verify_indexeddb_jazz_visibility(page_store: JsValue) -> Result<JsV
         .await
         .map_err(|error| JsValue::from_str(&error.to_string()))?;
     let prepared = owner
-        .database()
-        .prepare_query(&owner.database().table("todos"))
+        .prepare_query(&owner.table("todos"))
         .map_err(|error| JsValue::from_str(&error.to_string()))?;
     let opts = ReadOpts {
         tier: DurabilityTier::None,
@@ -554,8 +553,7 @@ pub async fn verify_indexeddb_jazz_visibility(page_store: JsValue) -> Result<JsV
         .await
         .map_err(|error| JsValue::from_str(&error.to_string()))?;
     let prepared = reopened
-        .database()
-        .prepare_query(&reopened.database().table("todos"))
+        .prepare_query(&reopened.table("todos"))
         .map_err(|error| JsValue::from_str(&error.to_string()))?;
     let mut cold_context = Context::from_waker(Waker::noop());
     if !reopened

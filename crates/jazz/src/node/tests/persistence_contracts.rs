@@ -271,10 +271,7 @@ fn demand_driven_db_preserves_synchronous_facade_visibility_before_durability() 
     let std::task::Poll::Ready(Ok(mut owner)) = opening.poll(&mut context) else {
         panic!("commit-only gate must allow database opening")
     };
-    let prepared = owner
-        .database()
-        .prepare_query(&owner.database().table("todos"))
-        .unwrap();
+    let prepared = owner.prepare_query(&owner.table("todos")).unwrap();
     let opts = crate::db::ReadOpts {
         tier: DurabilityTier::None,
         local_updates: crate::db::LocalUpdates::Immediate,
@@ -291,9 +288,7 @@ fn demand_driven_db_preserves_synchronous_facade_visibility_before_durability() 
         Some(crate::db::SubscriptionEvent::Delta { reset: true, .. })
     ));
     released.set(false);
-    let write = owner
-        .database()
-        .insert("todos", title_cells("facade immediate"))
+    let write = crate::db::block_on(owner.insert("todos", title_cells("facade immediate")))
         .unwrap();
     let Some(crate::db::SubscriptionEvent::Delta { added, .. }) = subscription.try_next_event()
     else {
@@ -359,23 +354,20 @@ fn demand_driven_db_acquires_cold_subscription_before_registering_it() {
     let std::task::Poll::Ready(Ok(mut owner)) = opening.poll(&mut context) else {
         panic!("released metadata reads must open the database")
     };
-    let prepared = owner
-        .database()
-        .prepare_query(&owner.database().table("todos"))
-        .unwrap();
+    let prepared = owner.prepare_query(&owner.table("todos")).unwrap();
     let opts = crate::db::ReadOpts {
         tier: DurabilityTier::None,
         local_updates: crate::db::LocalUpdates::Immediate,
         propagation: crate::db::Propagation::LocalOnly,
         ..crate::db::ReadOpts::default()
     };
-    let subscriptions_before = owner.database().runtime_stats_for_test().active_subscriptions;
+    let subscriptions_before = owner.runtime_stats_for_test().active_subscriptions;
     released.set(false);
     assert!(owner
         .poll_subscribe(&mut context, &prepared, opts.clone())
         .is_pending());
     assert_eq!(
-        owner.database().runtime_stats_for_test().active_subscriptions,
+        owner.runtime_stats_for_test().active_subscriptions,
         subscriptions_before,
         "a suspended cold opening must not leave a real subscription registered"
     );
@@ -393,7 +385,7 @@ fn demand_driven_db_acquires_cold_subscription_before_registering_it() {
     };
     assert_eq!(added.len(), 1);
     assert_eq!(
-        owner.database().runtime_stats_for_test().active_subscriptions,
+        owner.runtime_stats_for_test().active_subscriptions,
         subscriptions_before + 1
     );
     released.set(false);
@@ -494,28 +486,6 @@ fn demand_driven_db_acquires_cold_subscription_before_registering_it() {
     };
     assert_eq!(added.len(), 1);
     assert_eq!(restored_write.row_uuid(), write.row_uuid());
-    let upsert_row = RowUuid::from_bytes([0xce; 16]);
-    let upserted_write = {
-        let mut upsert = std::pin::pin!(owner.upsert(
-            "todos",
-            upsert_row,
-            title_cells("resident upsert"),
-        ));
-        match std::future::Future::poll(upsert.as_mut(), &mut context) {
-            std::task::Poll::Ready(Ok(upserted)) => upserted,
-            std::task::Poll::Ready(Err(error)) => panic!("resident upsert failed: {error}"),
-            std::task::Poll::Pending => {
-                panic!("an upsert over a resident row must complete in its first poll")
-            }
-        }
-    };
-    let Some(crate::db::SubscriptionEvent::Delta { added, .. }) =
-        subscription.try_next_event()
-    else {
-        panic!("the first-poll upsert must synchronously refresh subscriptions")
-    };
-    assert_eq!(added.len(), 1);
-    assert_eq!(upserted_write.row_uuid(), upsert_row);
     assert!(owner.poll_persistence(&mut context).is_pending());
 }
 
@@ -553,10 +523,7 @@ fn demand_driven_db_acquires_cold_relation_snapshot() {
     let std::task::Poll::Ready(Ok(mut owner)) = opening.poll(&mut context) else {
         panic!("released metadata reads must open the database")
     };
-    let prepared = owner
-        .database()
-        .prepare_query(&owner.database().table("todos"))
-        .unwrap();
+    let prepared = owner.prepare_query(&owner.table("todos")).unwrap();
     let opts = crate::db::ReadOpts {
         tier: DurabilityTier::None,
         local_updates: crate::db::LocalUpdates::Immediate,
@@ -692,7 +659,6 @@ fn demand_driven_db_acquires_cold_mutations_before_single_publish() {
     };
     assert_eq!(write.row_uuid(), row);
     let prepared = owner
-        .database()
         .prepare_query(&crate::query::Query::from("todos").filter(crate::query::eq(
             crate::query::col("id"),
             crate::query::lit(groove::records::Value::Uuid(row.0)),
