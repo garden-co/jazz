@@ -622,6 +622,61 @@ fn synchronous_memory_publication_never_claims_local_durability() {
 }
 
 #[test]
+fn synchronous_rocks_publication_is_immediate_and_truthfully_local_durable() {
+    let node_schema = schema();
+    let refs = node_schema.column_families();
+    let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
+    let directory = tempfile::tempdir().unwrap();
+    let identity = crate::db::DbIdentity {
+        node: node(0xc8),
+        author: AuthorId::from_bytes([0xc8; 16]),
+    };
+    let open = || {
+        let rocks = jazz_storage_rocksdb::RocksDbStorage::open(directory.path(), &refs).unwrap();
+        crate::db::block_on(crate::db::DemandDrivenDb::open_immediate(
+            crate::db::DbConfig::new(node_schema.clone(), rocks, identity),
+        ))
+    };
+    let mut owner = open().expect("open immediate Rocks owner");
+    let prepared = owner.prepare_query(&owner.table("todos")).unwrap();
+    let opts = crate::db::ReadOpts {
+        tier: DurabilityTier::None,
+        local_updates: crate::db::LocalUpdates::Immediate,
+        propagation: crate::db::Propagation::LocalOnly,
+        ..crate::db::ReadOpts::default()
+    };
+    let mut subscription = crate::db::block_on(owner.subscribe(&prepared, opts.clone())).unwrap();
+    assert!(matches!(
+        crate::db::block_on(subscription.next_event()),
+        Some(crate::db::SubscriptionEvent::Delta { reset: true, .. })
+    ));
+
+    let write = crate::db::block_on(owner.insert("todos", title_cells("rocks immediate"))).unwrap();
+    let Some(crate::db::SubscriptionEvent::Delta { added, .. }) = subscription.try_next_event()
+    else {
+        panic!("Rocks write must publish its callback before returning")
+    };
+    assert_eq!(added.len(), 1);
+    let rows = crate::db::block_on(owner.all(&prepared, opts.clone())).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].row_uuid(), write.row_uuid());
+    assert_eq!(
+        owner.write_state(write.mergeable_tx_id()).unwrap().durability,
+        DurabilityTier::Local,
+        "a synchronously completed durable Rocks commit may claim Local"
+    );
+    drop(subscription);
+    crate::db::block_on(owner.close()).unwrap();
+
+    let mut reopened = open().expect("reopen immediate Rocks owner");
+    let prepared = reopened.prepare_query(&reopened.table("todos")).unwrap();
+    let rows = crate::db::block_on(reopened.all(&prepared, opts)).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].row_uuid(), write.row_uuid());
+    crate::db::block_on(reopened.close()).unwrap();
+}
+
+#[test]
 fn demand_driven_db_acquires_cold_subscription_before_registering_it() {
     let node_schema = schema();
     let column_families = node_schema.column_families();
