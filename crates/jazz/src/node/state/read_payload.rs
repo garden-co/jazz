@@ -345,6 +345,27 @@ where
         requests: &[RowVersionRef],
         version_bundles: Vec<VersionBundle>,
     ) -> Result<(), Error> {
+        for bundle in
+            self.prepare_row_version_payloads_for_requests(requests, version_bundles)?
+        {
+            self.ingest_known_transaction(
+                bundle.tx,
+                bundle.versions,
+                bundle.fate,
+                bundle.global_seq,
+                bundle.durability,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Validate and narrow a repair response to the exact physical witnesses
+    /// requested by the receiver, without changing canonical storage.
+    pub(crate) fn prepare_row_version_payloads_for_requests(
+        &self,
+        requests: &[RowVersionRef],
+        version_bundles: Vec<VersionBundle>,
+    ) -> Result<Vec<VersionBundle>, Error> {
         let requested_physical = requests
             .iter()
             .map(|request| {
@@ -370,13 +391,13 @@ where
                 ))
             })
             .collect::<Result<Vec<_>, Error>>()?;
-        for bundle in version_bundles {
+        let mut prepared = Vec::new();
+        for mut bundle in version_bundles {
             ingest::validate_received_view_bundle_global_seq_durability(
                 bundle.global_seq,
                 bundle.durability,
             )?;
-            let versions = bundle
-                .versions
+            let versions = std::mem::take(&mut bundle.versions)
                 .into_iter()
                 .filter(|version| {
                     self.physical_table_id_for_schema(version.schema_version(), version.table())
@@ -416,15 +437,10 @@ where
                 }
             }
             self.validate_view_payload_versions(&versions)?;
-            self.ingest_known_transaction(
-                bundle.tx,
-                versions,
-                bundle.fate,
-                bundle.global_seq,
-                bundle.durability,
-            )?;
+            bundle.versions = versions;
+            prepared.push(bundle);
         }
-        Ok(())
+        Ok(prepared)
     }
 
     #[allow(dead_code)]
