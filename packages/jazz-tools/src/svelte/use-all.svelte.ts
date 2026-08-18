@@ -5,14 +5,6 @@ import { getJazzContext } from "./context.svelte.js";
 
 type MaybeGetter<T> = T | (() => T);
 
-type QuerySubscriptionOptions<One extends boolean> = One extends true
-  ? QueryOptions & { one: true }
-  : MaybeGetter<(QueryOptions & { one?: false }) | undefined>;
-
-type QuerySubscriptionResult<T, One extends boolean> = One extends true
-  ? T | null | undefined
-  : T[] | undefined;
-
 function resolve<T>(value: MaybeGetter<T>): T {
   return typeof value === "function" ? (value as () => T)() : value;
 }
@@ -43,14 +35,15 @@ function resolve<T>(value: MaybeGetter<T>): T {
  * {/if}
  * ```
  */
-export class QuerySubscription<T extends { id: string }, One extends boolean = false> {
-  current: QuerySubscriptionResult<T, One> = $state();
+class QuerySubscriptionBase<T extends { id: string }, Result> {
+  current: Result | undefined = $state();
   loading: boolean = $state(true);
   error: Error | null = $state(null);
 
-  constructor(
+  protected constructor(
     query: MaybeGetter<QueryBuilder<T> | undefined>,
-    options?: QuerySubscriptionOptions<One>,
+    options: MaybeGetter<QueryOptions | undefined> | undefined,
+    mode: "all" | "one",
   ) {
     const ctx = getJazzContext();
 
@@ -66,12 +59,8 @@ export class QuerySubscription<T extends { id: string }, One extends boolean = f
       const store = ctx.subscriptionStore;
       if (!store) return;
 
-      const resolvedOptions = resolve(
-        options as MaybeGetter<(QueryOptions & { one?: boolean }) | undefined>,
-      );
-      const one = resolvedOptions?.one === true;
-      const queryOptions = resolvedOptions && (({ one: _, ...rest }) => rest)(resolvedOptions);
-      const subscriptionQuery = one ? limitQueryToOne(resolvedQuery) : resolvedQuery;
+      const resolvedOptions = resolve(options);
+      const subscriptionQuery = mode === "one" ? limitQueryToOne(resolvedQuery) : resolvedQuery;
 
       this.loading = true;
       this.error = null;
@@ -82,32 +71,32 @@ export class QuerySubscription<T extends { id: string }, One extends boolean = f
       // which lets the class be used inside `$effect.root` and `.svelte.ts`.
       let unsubscribe: (() => void) | null = null;
       try {
-        const key = store.makeQueryKey(subscriptionQuery, queryOptions);
+        const key = store.makeQueryKey(subscriptionQuery, resolvedOptions);
         const entry = store.getCacheEntry<T>(key);
 
         // Apply initial state from cache
         if (entry.state.status === "fulfilled") {
           this.current = (
-            one ? (entry.state.data[0] ?? null) : entry.state.data
-          ) as QuerySubscriptionResult<T, One>;
+            mode === "one" ? (entry.state.data[0] ?? null) : entry.state.data
+          ) as Result;
           this.loading = false;
         }
 
         unsubscribe = entry.subscribe({
           onfulfilled: (data: T[]) => {
-            this.current = (one ? (data[0] ?? null) : data) as QuerySubscriptionResult<T, One>;
+            this.current = (mode === "one" ? (data[0] ?? null) : data) as Result;
             this.loading = false;
             this.error = null;
           },
           onDelta: (delta: SubscriptionDelta<T>) => {
-            if (one) {
-              this.current = (delta.all[0] ?? null) as QuerySubscriptionResult<T, One>;
+            if (mode === "one") {
+              this.current = (delta.all[0] ?? null) as Result;
             } else if (this.current) {
               applyDelta(this.current as T[], delta);
             } else if (delta.reset) {
-              this.current = delta.all as QuerySubscriptionResult<T, One>;
+              this.current = delta.all as Result;
             } else {
-              this.current = [] as unknown as QuerySubscriptionResult<T, One>;
+              this.current = [] as unknown as Result;
               applyDelta(this.current as T[], delta);
             }
           },
@@ -131,5 +120,31 @@ export class QuerySubscription<T extends { id: string }, One extends boolean = f
         unsubscribe?.();
       };
     });
+  }
+}
+
+/** Reactive multi-row query subscription. Results are available through `.current`. */
+export class QuerySubscription<T extends { id: string }> extends QuerySubscriptionBase<T, T[]> {
+  constructor(
+    query: MaybeGetter<QueryBuilder<T> | undefined>,
+    options?: MaybeGetter<QueryOptions | undefined>,
+  ) {
+    super(query, options, "all");
+  }
+}
+
+/**
+ * Reactive single-row query subscription. Like {@link QuerySubscription}, but
+ * `.current` is the first matching row, or `null` once an empty result loads.
+ */
+export class QuerySubscriptionOne<T extends { id: string }> extends QuerySubscriptionBase<
+  T,
+  T | null
+> {
+  constructor(
+    query: MaybeGetter<QueryBuilder<T> | undefined>,
+    options?: MaybeGetter<QueryOptions | undefined>,
+  ) {
+    super(query, options, "one");
   }
 }

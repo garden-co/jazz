@@ -40,7 +40,7 @@ vi.mock("./context.svelte.js", () => ({
   }),
 }));
 
-const { QuerySubscription } = await import("./use-all.svelte.js");
+const { QuerySubscription, QuerySubscriptionOne } = await import("./use-all.svelte.js");
 
 function makeQuery(marker = "todos") {
   return {
@@ -236,7 +236,7 @@ describe("svelte/QuerySubscription", () => {
     cleanup();
   });
 
-  it("one mode exposes a nullable row, strips the binding option, and reacts", async () => {
+  it("QuerySubscriptionOne exposes a nullable row and reacts", async () => {
     type Todo = { id: string; title: string };
     let onDelta!: (delta: { all: Todo[]; delta: never[] }) => void;
     mocks.getCacheEntry.mockReturnValue({
@@ -248,11 +248,7 @@ describe("svelte/QuerySubscription", () => {
     } as any);
 
     const query = makeQuery("one") as QueryBuilder<Todo>;
-    const createSubscription = () =>
-      new QuerySubscription(query, {
-        one: true,
-        tier: "edge",
-      });
+    const createSubscription = () => new QuerySubscriptionOne(query, { tier: "edge" });
     let subscription!: ReturnType<typeof createSubscription>;
     const cleanup = $effect.root(() => {
       subscription = createSubscription();
@@ -273,12 +269,14 @@ describe("svelte/QuerySubscription", () => {
     cleanup();
   });
 
-  it("keeps one mode static when query options are reactive", () => {
+  it("QuerySubscriptionOne accepts reactive query options", async () => {
     const query = makeQuery("one") as QueryBuilder<{ id: string }>;
+    const cleanup = $effect.root(() => {
+      new QuerySubscriptionOne(query, () => ({ tier: "edge" as const }));
+    });
+    await settle();
 
-    if ((globalThis as { __typecheck_only__?: boolean }).__typecheck_only__) {
-      // @ts-expect-error `one` controls the instance result type and cannot be reactive.
-      new QuerySubscription(query, () => ({ one: true, tier: "edge" as const }));
-    }
+    expect(mocks.makeQueryKey).toHaveBeenCalledWith(expect.anything(), { tier: "edge" });
+    cleanup();
   });
 });
