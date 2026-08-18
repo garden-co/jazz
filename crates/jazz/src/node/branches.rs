@@ -43,6 +43,12 @@ pub(crate) enum PreparedPeerBranchMetadata {
     Mutation(PreparedBranchRecordMutation),
 }
 
+pub(crate) enum PreparedSessionBranchMetadata {
+    Pending,
+    Noop,
+    Mutation(PreparedBranchRecordMutation),
+}
+
 impl From<&BranchRecord> for crate::protocol::BranchMetadata {
     fn from(record: &BranchRecord) -> Self {
         Self {
@@ -126,6 +132,86 @@ where
             let _ = self.drain_parked_commit_units()?;
         }
         Ok(())
+    }
+
+    pub(crate) fn prepare_session_branch_metadata(
+        &self,
+        metadata: crate::protocol::BranchMetadata,
+        identity: AuthorId,
+    ) -> Result<PreparedSessionBranchMetadata, Error> {
+        self.require_catalogue_ready()?;
+        if metadata.created_by != identity {
+            return Err(Error::InvalidStoredValue(
+                "branch metadata creator does not match authenticated session",
+            ));
+        }
+        if metadata.parent.is_some() {
+            return Err(Error::InvalidStoredValue(
+                "v1 session branch metadata must be parentless",
+            ));
+        }
+        if !self.branches.branches.contains_key(&metadata.branch_id) && !metadata.open {
+            return Err(Error::InvalidStoredValue(
+                "first-seen session branch metadata must be open",
+            ));
+        }
+        let Some(base) = metadata.base.as_ref() else {
+            return Err(Error::InvalidStoredValue(
+                "session branch metadata requires a snapshot base",
+            ));
+        };
+        if base.owner != NodeUuid(uuid::Uuid::nil())
+            || base.local_base != TxTime::default()
+            || !base.dots.is_empty()
+        {
+            return Err(Error::InvalidStoredValue(
+                "unsupported v1 branch snapshot shape",
+            ));
+        }
+        if base.global_base > self.clock.applied_global_watermark {
+            return Ok(PreparedSessionBranchMetadata::Pending);
+        }
+        let record = BranchRecord {
+            branch_id: metadata.branch_id,
+            created_by: metadata.created_by,
+            parent: metadata.parent,
+            base: metadata.base,
+            state: if metadata.open {
+                codec::BranchState::Open
+            } else {
+                codec::BranchState::Discarded
+            },
+        };
+        if let Some(existing) = self.branches.branches.get(&record.branch_id) {
+            if existing == &record {
+                return Ok(PreparedSessionBranchMetadata::Noop);
+            }
+            let valid_close = existing.created_by == record.created_by
+                && existing.parent == record.parent
+                && existing.base == record.base
+                && existing.state == codec::BranchState::Open
+                && record.state == codec::BranchState::Discarded;
+            if !valid_close {
+                return Err(Error::InvalidStoredValue("conflicting branch metadata"));
+            }
+        }
+        Ok(PreparedSessionBranchMetadata::Mutation(
+            self.prepare_branch_record_mutation(record, true, false)?,
+        ))
+    }
+
+    pub(crate) fn publish_prepared_session_branch_metadata(
+        &mut self,
+        prepared: PreparedSessionBranchMetadata,
+    ) -> Result<Vec<SyncMessage>, Error>
+    where
+        S: ReopenableStorage,
+    {
+        if let PreparedSessionBranchMetadata::Mutation(mutation) = prepared {
+            self.publish_branch_record_mutation(mutation)?;
+            return self.drain_parked_commit_units();
+        }
+        Ok(Vec::new())
     }
     /// Create a snapshot-base branch over this node's current settled watermark.
     ///
@@ -262,44 +348,15 @@ where
         &mut self,
         metadata: crate::protocol::BranchMetadata,
         identity: AuthorId,
-    ) -> Result<bool, Error> {
-        self.require_catalogue_ready()?;
-        if metadata.created_by != identity {
-            return Err(Error::InvalidStoredValue(
-                "branch metadata creator does not match authenticated session",
-            ));
-        }
-        if metadata.parent.is_some() {
-            return Err(Error::InvalidStoredValue(
-                "v1 session branch metadata must be parentless",
-            ));
-        }
-        if !self.branches.branches.contains_key(&metadata.branch_id) && !metadata.open {
-            return Err(Error::InvalidStoredValue(
-                "first-seen session branch metadata must be open",
-            ));
-        }
-        let Some(base) = metadata.base.as_ref() else {
-            return Err(Error::InvalidStoredValue(
-                "session branch metadata requires a snapshot base",
-            ));
-        };
-        if base.owner != NodeUuid(uuid::Uuid::nil())
-            || base.local_base != TxTime::default()
-            || !base.dots.is_empty()
-        {
-            return Err(Error::InvalidStoredValue(
-                "unsupported v1 branch snapshot shape",
-            ));
-        }
-        if base.global_base > self.clock.applied_global_watermark {
+    ) -> Result<bool, Error>
+    where
+        S: ReopenableStorage,
+    {
+        let prepared = self.prepare_session_branch_metadata(metadata, identity)?;
+        if matches!(prepared, PreparedSessionBranchMetadata::Pending) {
             return Ok(false);
         }
-        // New metadata and lifecycle advances received from a client session
-        // become a durable upstream relay. Exact downstream retries preserve
-        // the existing pending/acknowledged state instead of reopening a
-        // completed relay and creating an echo loop.
-        self.admit_branch_metadata_with_upstream_relay(metadata, true)?;
+        let _ = self.publish_prepared_session_branch_metadata(prepared)?;
         Ok(true)
     }
 

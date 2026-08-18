@@ -258,6 +258,45 @@ impl DemandDrivenDb {
         let connections = self.database.node.connections.borrow().clone();
         for connection in &connections {
             connection.borrow_mut().stage_available_inbound();
+            let pending_session_branch = connection.borrow().pending_session_branch_metadata();
+            if let Some(metadata) = pending_session_branch {
+                let identity = connection
+                    .borrow()
+                    .session_identity()
+                    .expect("pending session metadata retains its subscriber identity");
+                match self
+                    .runtime
+                    .poll_apply_session_branch_metadata(context, &metadata, identity)
+                {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(Err(error)) => return Poll::Ready(Err(error.into())),
+                    Poll::Ready(Ok(None)) => {}
+                    Poll::Ready(Ok(Some(responses))) => connection
+                        .borrow_mut()
+                        .complete_session_branch_metadata(&metadata, false, responses),
+                }
+            }
+            let staged_session_branch = connection.borrow().staged_session_branch_metadata();
+            if let Some(metadata) = staged_session_branch {
+                let identity = connection
+                    .borrow()
+                    .session_identity()
+                    .expect("staged session metadata retains its subscriber identity");
+                match self
+                    .runtime
+                    .poll_apply_session_branch_metadata(context, &metadata, identity)
+                {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(Err(error)) => return Poll::Ready(Err(error.into())),
+                    Poll::Ready(Ok(None)) => connection
+                        .borrow_mut()
+                        .park_staged_session_branch_metadata(),
+                    Poll::Ready(Ok(Some(responses))) => connection
+                        .borrow_mut()
+                        .complete_session_branch_metadata(&metadata, true, responses),
+                }
+                continue;
+            }
             let staged_catalogue = { connection.borrow().staged_catalogue_snapshot() };
             if let Some(snapshot) = staged_catalogue {
                 match self

@@ -348,6 +348,90 @@ where
         Some((tx.clone(), versions.clone(), *ingest_context))
     }
 
+    pub(super) fn staged_session_branch_metadata(&self) -> Option<crate::protocol::BranchMetadata> {
+        let ConnectionLink::Subscriber { ingest_context, .. } = &self.link else {
+            return None;
+        };
+        if ingest_context.trust != CommitUnitTrust::Session {
+            return None;
+        }
+        let staged = self.staged_inbound.front()?;
+        let SyncMessage::BranchMetadata(metadata) = &staged.message else {
+            return None;
+        };
+        Some(metadata.clone())
+    }
+
+    pub(super) fn pending_session_branch_metadata(
+        &self,
+    ) -> Option<crate::protocol::BranchMetadata> {
+        let ConnectionLink::Subscriber {
+            pending_session_branch_metadata,
+            ..
+        } = &self.link
+        else {
+            return None;
+        };
+        pending_session_branch_metadata.values().next().cloned()
+    }
+
+    pub(super) fn session_identity(&self) -> Option<AuthorId> {
+        let ConnectionLink::Subscriber { ingest_context, .. } = &self.link else {
+            return None;
+        };
+        Some(ingest_context.identity)
+    }
+
+    pub(super) fn park_staged_session_branch_metadata(&mut self) {
+        let staged = self
+            .staged_inbound
+            .pop_front()
+            .expect("parked session branch metadata retains its staged frame");
+        let SyncMessage::BranchMetadata(metadata) = staged.message else {
+            unreachable!("session branch staging retains metadata")
+        };
+        let ConnectionLink::Subscriber {
+            pending_session_branch_metadata,
+            ..
+        } = &mut self.link
+        else {
+            unreachable!("session branch staging retains subscriber link")
+        };
+        pending_session_branch_metadata.insert(metadata.branch_id, metadata);
+    }
+
+    pub(super) fn complete_session_branch_metadata(
+        &mut self,
+        metadata: &crate::protocol::BranchMetadata,
+        staged: bool,
+        responses: Vec<SyncMessage>,
+    ) {
+        if staged {
+            let frame = self
+                .staged_inbound
+                .pop_front()
+                .expect("completed session branch metadata retains its staged frame");
+            debug_assert!(matches!(
+                frame.message,
+                SyncMessage::BranchMetadata(ref candidate) if candidate == metadata
+            ));
+        }
+        let ConnectionLink::Subscriber {
+            pending_session_branch_metadata,
+            pending_branch_metadata_repairs,
+            ..
+        } = &mut self.link
+        else {
+            unreachable!("session branch completion retains subscriber link")
+        };
+        pending_session_branch_metadata.remove(&metadata.branch_id);
+        pending_branch_metadata_repairs.remove(&metadata.branch_id);
+        let mut outbound = self.downstream_fates.borrow_mut();
+        outbound.extend(responses);
+        outbound.push(SyncMessage::BranchMetadata(metadata.clone()));
+        self.externally_applied_inbound = true;
+    }
+
     pub(super) fn staged_subscriber_authority_is_prepared(&self, tx_id: TxId) -> bool {
         self.prepared_subscriber_authority_tx == Some(tx_id)
     }

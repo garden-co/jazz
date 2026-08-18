@@ -50,6 +50,7 @@ pub struct DemandDrivenNode {
     pending_peer_repair: Option<PendingPeerRepair>,
     pending_peer_catalogue: Option<PendingPeerCatalogue>,
     pending_peer_branch_metadata: Option<PendingPeerBranchMetadata>,
+    pending_session_branch_metadata: Option<PendingSessionBranchMetadata>,
     persistence_failed: bool,
 }
 
@@ -93,6 +94,12 @@ struct PendingPeerCatalogue {
 
 struct PendingPeerBranchMetadata {
     branch: BranchId,
+    publication: groove::db::DurablePublicationScope,
+}
+
+struct PendingSessionBranchMetadata {
+    branch: BranchId,
+    responses: Vec<SyncMessage>,
     publication: groove::db::DurablePublicationScope,
 }
 
@@ -1098,6 +1105,105 @@ impl DemandDrivenNode {
         }
     }
 
+    pub(crate) fn poll_apply_session_branch_metadata(
+        &mut self,
+        context: &mut std::task::Context<'_>,
+        metadata: &crate::protocol::BranchMetadata,
+        identity: AuthorId,
+    ) -> std::task::Poll<Result<Option<Vec<SyncMessage>>, Error>> {
+        match &self.pending_session_branch_metadata {
+            Some(pending) if pending.branch != metadata.branch_id => {
+                return std::task::Poll::Ready(Err(Error::InvalidStoredValue(
+                    "different session branch metadata was polled while one is pending",
+                )));
+            }
+            None => {
+                if let Err(error) = self.ensure_durable_publication_idle() {
+                    return std::task::Poll::Ready(Err(error));
+                }
+                let prepared = match self.acquisition.poll(
+                    self.persistence.as_mut(),
+                    &self.cache,
+                    context,
+                    || {
+                        self.node
+                            .borrow()
+                            .prepare_session_branch_metadata(metadata.clone(), identity)
+                    },
+                    missing_node_open_input,
+                ) {
+                    std::task::Poll::Pending => return std::task::Poll::Pending,
+                    std::task::Poll::Ready(Err(error)) => {
+                        self.discard_failed_operation_writes();
+                        return std::task::Poll::Ready(Err(error));
+                    }
+                    std::task::Poll::Ready(Ok(prepared)) => prepared,
+                };
+                if matches!(
+                    prepared,
+                    crate::node::branches::PreparedSessionBranchMetadata::Pending
+                ) {
+                    return std::task::Poll::Ready(Ok(None));
+                }
+                let publication = match self
+                    .node
+                    .borrow_mut()
+                    .database
+                    .begin_durable_publication_scope()
+                {
+                    Ok(publication) => publication,
+                    Err(error) => return std::task::Poll::Ready(Err(error.into())),
+                };
+                let publish_result = self
+                    .node
+                    .borrow_mut()
+                    .publish_prepared_session_branch_metadata(prepared);
+                let responses = match publish_result {
+                    Ok(responses) => responses,
+                    Err(error) => {
+                        publication.abort(&mut self.node.borrow_mut().database);
+                        if is_not_resident(&error) {
+                            self.fail_persistence();
+                        } else {
+                            self.discard_failed_operation_writes();
+                        }
+                        return std::task::Poll::Ready(Err(error));
+                    }
+                };
+                self.collect_persistence_unit();
+                self.pending_session_branch_metadata = Some(PendingSessionBranchMetadata {
+                    branch: metadata.branch_id,
+                    responses,
+                    publication,
+                });
+            }
+            Some(_) => {}
+        }
+        match self.poll_persistence_queue(context) {
+            std::task::Poll::Pending => std::task::Poll::Pending,
+            std::task::Poll::Ready(Ok(())) => {
+                let pending = self
+                    .pending_session_branch_metadata
+                    .take()
+                    .expect("durable session branch metadata retains publication state");
+                pending
+                    .publication
+                    .finish(&mut self.node.borrow_mut().database);
+                std::task::Poll::Ready(Ok(Some(pending.responses)))
+            }
+            std::task::Poll::Ready(Err(error)) => {
+                let pending = self
+                    .pending_session_branch_metadata
+                    .take()
+                    .expect("failed session branch metadata retains publication state");
+                pending
+                    .publication
+                    .abort(&mut self.node.borrow_mut().database);
+                std::task::Poll::Ready(Err(error))
+            }
+        }
+    }
+
     /// Poll a restartable query or subscription operation. It may suspend only
     /// while acquiring a missing durable input; once ready, evaluation runs on
     /// the same resident node used by local writes.
@@ -1207,6 +1313,7 @@ impl DemandDrivenNode {
             || self.pending_peer_repair.is_some()
             || self.pending_peer_catalogue.is_some()
             || self.pending_peer_branch_metadata.is_some()
+            || self.pending_session_branch_metadata.is_some()
         {
             return std::task::Poll::Ready(Err(Error::InvalidStoredValue(
                 "ingress persistence must be polled through its typed operation",
@@ -1369,6 +1476,7 @@ impl DemandDrivenNode {
             || self.pending_peer_repair.is_some()
             || self.pending_peer_catalogue.is_some()
             || self.pending_peer_branch_metadata.is_some()
+            || self.pending_session_branch_metadata.is_some()
         {
             Err(Error::InvalidStoredValue(
                 "a durable publication is awaiting completion",
@@ -1450,6 +1558,7 @@ impl PollableNodeOpen {
             pending_peer_repair: None,
             pending_peer_catalogue: None,
             pending_peer_branch_metadata: None,
+            pending_session_branch_metadata: None,
             persistence_failed: false,
         }
     }
