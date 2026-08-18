@@ -131,11 +131,6 @@ impl DemandDrivenDb {
         }
     }
 
-    #[doc(hidden)]
-    pub fn runtime(&mut self) -> &mut DemandDrivenNode {
-        &mut self.runtime
-    }
-
     /// Write the clean-close marker, durably drain all earlier mutations, then
     /// flush and close the ordered backend. Consuming the owner makes this
     /// lifecycle transition unambiguously terminal.
@@ -152,6 +147,25 @@ impl DemandDrivenDb {
         .map_err(Error::from)?;
         std::future::poll_fn(|context| self.runtime.poll_close(context))
             .await
+            .map_err(Error::from)
+    }
+
+    /// Create a local snapshot-base branch through the ordered async owner.
+    pub async fn create_branch(&mut self) -> Result<crate::ids::BranchId, Error> {
+        let branch = crate::ids::BranchId(uuid::Uuid::now_v7());
+        self.create_branch_with_id(branch).await?;
+        Ok(branch)
+    }
+
+    /// Create a local snapshot-base branch with a caller-supplied stable id.
+    pub async fn create_branch_with_id(
+        &mut self,
+        branch: crate::ids::BranchId,
+    ) -> Result<(), Error> {
+        let author = self.database.identity.author;
+        std::future::poll_fn(|context| self.runtime.poll_create_branch(context, branch, author))
+            .await
+            .map(|_| ())
             .map_err(Error::from)
     }
 
