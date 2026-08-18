@@ -16,8 +16,11 @@ use groove::{
     storage::MemoryStorage,
 };
 use jazz::db::doctest_support;
-use jazz::db::{LocalUpdates, Propagation, ReadOpts, SubscriptionEvent};
-use jazz::ids::{NodeUuid, RowUuid};
+use jazz::db::{
+    DbIdentity, LocalUpdates, PollableDbOpen, Propagation, ReadOpts, SeededRowIdSource,
+    SubscriptionEvent,
+};
+use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::node::{MergeableCommit, NodeState, PollableNodeOpen};
 use jazz::protocol::SyncMessage;
 use jazz::tx::DurabilityTier;
@@ -457,14 +460,27 @@ pub async fn verify_indexeddb_groove_visibility(page_store: JsValue) -> Result<J
     ))
 }
 
-/// Exercise the application-facing Jazz invariant while the same write's
-/// captured Groove batches are persisted by real IndexedDB.
+/// Exercise the application-facing Jazz invariant while the same resident
+/// database owner persists its write through real IndexedDB.
 #[wasm_bindgen]
 pub async fn verify_indexeddb_jazz_visibility(page_store: JsValue) -> Result<JsValue, JsValue> {
-    let db = doctest_support::open_todos_db()
+    let schema = doctest_support::schema();
+    let persistence = IndexedDbOrderedStorage::open(page_store.clone(), 4096, 32)
         .await
         .map_err(|error| JsValue::from_str(&error.to_string()))?;
-    db.enable_async_persistence_capture();
+    let mut opening = PollableDbOpen::new(
+        schema.clone(),
+        DbIdentity {
+            node: NodeUuid::from_bytes([0x11; 16]),
+            author: AuthorId::from_bytes([0xa1; 16]),
+        },
+        Box::new(persistence),
+    )
+    .with_id_source(SeededRowIdSource::new(0x1111));
+    let mut owner = futures::future::poll_fn(|context| opening.poll(context))
+        .await
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    let db = owner.database();
     let prepared = db
         .prepare_query(&db.table("todos"))
         .map_err(|error| JsValue::from_str(&error.to_string()))?;
@@ -510,36 +526,42 @@ pub async fn verify_indexeddb_jazz_visibility(page_store: JsValue) -> Result<JsV
         ));
     }
 
-    let batches = db.take_pending_persistence_batches();
-    if batches.is_empty() {
-        return Err(JsValue::from_str("Jazz emitted no persistence batches"));
-    }
-    let mut persistence = IndexedDbOrderedStorage::open(page_store.clone(), 4096, 32)
-        .await
-        .map_err(|error| JsValue::from_str(&error.to_string()))?;
-    for batch in batches {
-        let request =
-            OwnedStorageRequest::new(OwnedStorageOperation::Commit(batch.into_operations()));
-        complete_request(&mut persistence, &request).await?;
-    }
-    drop(persistence);
-
-    let mut reopened = IndexedDbOrderedStorage::open(page_store, 4096, 32)
-        .await
-        .map_err(|error| JsValue::from_str(&error.to_string()))?;
-    let transaction_scan = OwnedStorageRequest::new(OwnedStorageOperation::Scan(
-        OwnedScanRequest::prefix("jazz_transactions", Vec::new()),
-    ));
-    let OwnedStorageResponse::Rows(transactions) =
-        complete_request(&mut reopened, &transaction_scan).await?
-    else {
+    let mut context = Context::from_waker(Waker::noop());
+    if !owner.poll_persistence(&mut context).is_pending() {
         return Err(JsValue::from_str(
-            "Jazz durable scan returned wrong response",
+            "Jazz IndexedDB durability unexpectedly completed in its first poll",
         ));
-    };
-    if transactions.is_empty() {
+    }
+    futures::future::poll_fn(|context| owner.poll_persistence(context))
+        .await
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    drop(owner);
+
+    let reopened = IndexedDbOrderedStorage::open(page_store, 4096, 32)
+        .await
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    let mut reopening = PollableDbOpen::new(
+        schema,
+        DbIdentity {
+            node: NodeUuid::from_bytes([0x11; 16]),
+            author: AuthorId::from_bytes([0xa1; 16]),
+        },
+        Box::new(reopened),
+    )
+    .with_id_source(SeededRowIdSource::new(0x2222));
+    let mut reopened = futures::future::poll_fn(|context| reopening.poll(context))
+        .await
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    let rows = futures::future::poll_fn(|context| {
+        reopened
+            .runtime()
+            .poll_current_rows(context, "todos", DurabilityTier::None)
+    })
+    .await
+    .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    if rows.len() != 1 {
         return Err(JsValue::from_str(
-            "Jazz canonical transaction did not survive IndexedDB reopen",
+            "Jazz canonical transaction did not survive IndexedDB owner reopen",
         ));
     }
     Ok(JsValue::from_str(
@@ -580,7 +602,7 @@ pub async fn verify_indexeddb_authority_publication(
         .map_err(|error| JsValue::from_str(&error.to_string()))?;
     let mut opening = PollableNodeOpen::new(
         NodeUuid::from_bytes([0x33; 16]),
-        schema,
+        schema.clone(),
         Box::new(persistence),
     );
     let mut authority = futures::future::poll_fn(|context| opening.poll(context))
@@ -626,20 +648,20 @@ pub async fn verify_indexeddb_authority_publication(
     }
     drop(authority);
 
-    let mut reopened = IndexedDbOrderedStorage::open(page_store, 4096, 32)
+    let reopened = IndexedDbOrderedStorage::open(page_store, 4096, 32)
         .await
         .map_err(|error| JsValue::from_str(&error.to_string()))?;
-    let transaction_scan = OwnedStorageRequest::new(OwnedStorageOperation::Scan(
-        OwnedScanRequest::prefix("jazz_transactions", Vec::new()),
-    ));
-    let OwnedStorageResponse::Rows(transactions) =
-        complete_request(&mut reopened, &transaction_scan).await?
-    else {
-        return Err(JsValue::from_str(
-            "authority durable scan returned wrong response",
-        ));
-    };
-    if transactions.is_empty() {
+    let mut reopening =
+        PollableNodeOpen::new(NodeUuid::from_bytes([0x33; 16]), schema, Box::new(reopened));
+    let mut reopened = futures::future::poll_fn(|context| reopening.poll(context))
+        .await
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    let rows = futures::future::poll_fn(|context| {
+        reopened.poll_current_rows(context, "todos", DurabilityTier::Global)
+    })
+    .await
+    .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    if rows.len() != 1 {
         return Err(JsValue::from_str(
             "authority Fate was released without durable transaction state",
         ));

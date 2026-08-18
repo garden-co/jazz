@@ -35,7 +35,7 @@ enum NodeOpenPhase {
 /// storage session whose ordering and cancellation state it depends on.
 #[doc(hidden)]
 pub struct DemandDrivenNode {
-    node: NodeState<groove::storage::DemandLoadedStorage>,
+    node: std::rc::Rc<std::cell::RefCell<NodeState<groove::storage::DemandLoadedStorage>>>,
     cache: groove::storage::DemandLoadedStorage,
     persistence: Box<dyn groove::storage::async_ordered::OrderedKvStorage>,
     acquisition: groove::db::StorageAcquisition,
@@ -59,8 +59,16 @@ struct PendingAuthorityApplication {
 
 impl DemandDrivenNode {
     /// Access the synchronously resident Jazz core.
-    pub fn resident(&self) -> &NodeState<groove::storage::DemandLoadedStorage> {
-        &self.node
+    pub fn resident(
+        &self,
+    ) -> std::cell::Ref<'_, NodeState<groove::storage::DemandLoadedStorage>> {
+        self.node.borrow()
+    }
+
+    pub(crate) fn shared_resident(
+        &self,
+    ) -> std::rc::Rc<std::cell::RefCell<NodeState<groove::storage::DemandLoadedStorage>>> {
+        std::rc::Rc::clone(&self.node)
     }
 
     /// Acquire every cold input for a local mutation before synchronously
@@ -94,7 +102,7 @@ impl DemandDrivenNode {
             self.persistence.as_mut(),
             &self.cache,
             context,
-            || prepare(&mut self.node),
+            || prepare(&mut self.node.borrow_mut()),
             missing_node_open_input,
         ) {
             std::task::Poll::Pending => return std::task::Poll::Pending,
@@ -104,7 +112,7 @@ impl DemandDrivenNode {
             }
             std::task::Poll::Ready(Ok(prepared)) => prepared,
         };
-        let result = publish(&mut self.node, prepared);
+        let result = publish(&mut self.node.borrow_mut(), prepared);
         match &result {
             Ok(_) => self.collect_persistence_unit(),
             Err(error) if is_not_resident(error) => {
@@ -182,7 +190,7 @@ impl DemandDrivenNode {
                     &self.cache,
                     context,
                     || {
-                        self.node.prepare_authority_commit(
+                        self.node.borrow_mut().prepare_authority_commit(
                             request.tx.clone(),
                             request.versions.clone(),
                             request.now_ms,
@@ -198,14 +206,24 @@ impl DemandDrivenNode {
                     }
                     std::task::Poll::Ready(Ok(prepared)) => prepared,
                 };
-                let publication = match self.node.database.begin_durable_publication_scope() {
+                let publication = match self
+                    .node
+                    .borrow_mut()
+                    .database
+                    .begin_durable_publication_scope()
+                {
                     Ok(publication) => publication,
                     Err(error) => return std::task::Poll::Ready(Err(error.into())),
                 };
-                let responses = match self.node.publish_prepared_authority_commit(prepared) {
+                let publish_result = {
+                    self.node
+                        .borrow_mut()
+                        .publish_prepared_authority_commit(prepared)
+                };
+                let responses = match publish_result {
                     Ok(responses) => responses,
                     Err(error) => {
-                        publication.abort(&mut self.node.database);
+                        publication.abort(&mut self.node.borrow_mut().database);
                         if is_not_resident(&error) {
                             self.fail_persistence();
                         } else {
@@ -230,7 +248,9 @@ impl DemandDrivenNode {
                     .pending_authority
                     .take()
                     .expect("completed authority commit retains publication state");
-                pending.publication.finish(&mut self.node.database);
+                pending
+                    .publication
+                    .finish(&mut self.node.borrow_mut().database);
                 std::task::Poll::Ready(Ok(pending.responses))
             }
             std::task::Poll::Ready(Err(error)) => {
@@ -238,7 +258,9 @@ impl DemandDrivenNode {
                     .pending_authority
                     .take()
                     .expect("failed authority commit retains publication state");
-                pending.publication.abort(&mut self.node.database);
+                pending
+                    .publication
+                    .abort(&mut self.node.borrow_mut().database);
                 std::task::Poll::Ready(Err(error))
             }
         }
@@ -295,7 +317,7 @@ impl DemandDrivenNode {
                 self.persistence.as_mut(),
                 &self.cache,
                 context,
-                || self.node.prepare_fate_update(request.clone()),
+                || self.node.borrow_mut().prepare_fate_update(request.clone()),
                 missing_node_open_input,
             ) {
                 std::task::Poll::Pending => return std::task::Poll::Pending,
@@ -306,7 +328,12 @@ impl DemandDrivenNode {
                 }
                 std::task::Poll::Ready(Ok(prepared)) => prepared,
             };
-            match self.node.publish_prepared_fate_update(prepared) {
+            let publish_result = {
+                self.node
+                    .borrow_mut()
+                    .publish_prepared_fate_update(prepared)
+            };
+            match publish_result {
                 Ok(cascades) => {
                     self.collect_persistence_unit();
                     let pending = self
@@ -353,7 +380,7 @@ impl DemandDrivenNode {
             self.persistence.as_mut(),
             &self.cache,
             context,
-            || operation(&mut self.node),
+            || operation(&mut self.node.borrow_mut()),
             missing_node_open_input,
         );
         match &result {
@@ -383,6 +410,17 @@ impl DemandDrivenNode {
         row: RowUuid,
     ) -> std::task::Poll<Result<Vec<HistoryEntry>, Error>> {
         self.poll_query(context, |node| node.row_history(table, row))
+    }
+
+    pub(crate) fn poll_pending_transaction_ids(
+        &mut self,
+        context: &mut std::task::Context<'_>,
+        node_uuid: NodeUuid,
+        author: AuthorId,
+    ) -> std::task::Poll<Result<Vec<TxId>, Error>> {
+        self.poll_query(context, |node| {
+            node.pending_transaction_ids_for(node_uuid, author)
+        })
     }
 
     /// Poll a history subscription opening. Once returned, later prepared
@@ -445,7 +483,11 @@ impl DemandDrivenNode {
     }
 
     fn collect_persistence_unit(&mut self) {
-        let column_families = self.cache.take_pending_column_families();
+        let column_families = self
+            .node
+            .borrow()
+            .database
+            .take_demand_loaded_pending_column_families();
         if !column_families.is_empty() {
             self.pending_persistence.push_back(
                 groove::storage::async_ordered::OwnedStorageRequest::new(
@@ -455,7 +497,11 @@ impl DemandDrivenNode {
                 ),
             );
         }
-        let operations = self.cache.take_pending_writes();
+        let operations = self
+            .node
+            .borrow()
+            .database
+            .take_demand_loaded_pending_writes();
         if !operations.is_empty() {
             self.pending_persistence.push_back(
                 groove::storage::async_ordered::OwnedStorageRequest::new(
@@ -466,9 +512,13 @@ impl DemandDrivenNode {
     }
 
     fn discard_failed_operation_writes(&mut self) {
-        if !self.cache.take_pending_writes().is_empty()
-            || !self.cache.take_pending_column_families().is_empty()
-        {
+        let node = self.node.borrow();
+        let writes = node.database.take_demand_loaded_pending_writes();
+        let column_families = node
+            .database
+            .take_demand_loaded_pending_column_families();
+        drop(node);
+        if !writes.is_empty() || !column_families.is_empty() {
             // An operation that emitted a durable batch before failing has an
             // ambiguous resident outcome. Publish none of it and prevent this
             // runtime from accepting dependent work until a clean reopen.
@@ -539,7 +589,7 @@ impl PollableNodeOpen {
         // acknowledged sync/fate path.
         node.set_non_durable_client();
         DemandDrivenNode {
-            node,
+            node: std::rc::Rc::new(std::cell::RefCell::new(node)),
             cache,
             persistence: self
                 .persistence
@@ -670,8 +720,10 @@ impl PollableNodeOpen {
             ) {
                 std::task::Poll::Pending => return std::task::Poll::Pending,
                 std::task::Poll::Ready(Ok((node, transaction))) => {
-                    let column_families = transaction.take_pending_column_families();
-                    let writes = transaction.take_pending_writes();
+                    let column_families = node
+                        .database
+                        .take_demand_loaded_pending_column_families();
+                    let writes = node.database.take_demand_loaded_pending_writes();
                     let mut requests = std::collections::VecDeque::new();
                     if !column_families.is_empty() {
                         requests.push_back(

@@ -116,6 +116,13 @@ where
             .map(|receipt| receipt.expect("async persistence requested a receipt"))
     }
 
+    /// Publish a storage-resolved batch through the resident runtime and its
+    /// configured storage transaction.
+    pub fn commit_prepared_batch(&mut self, prepared: PreparedDatabaseBatch) -> Result<(), Error> {
+        self.commit_pending_writes(prepared.pending_writes, prepared.direct_operations, false)
+            .map(drop)
+    }
+
     /// Acquire every durable input that a subsequent live IVM tick can read.
     ///
     /// This deliberately does not evaluate the graph. The real runtime is

@@ -932,3 +932,17 @@ pub(super) fn consolidate_table_deltas(table_deltas: Vec<TableDelta>) -> Vec<Tab
         })
         .collect()
 }
+
+impl Database<crate::storage::DemandLoadedStorage> {
+    /// Drain the operation journal owned by the real resident database.
+    #[doc(hidden)]
+    pub fn take_demand_loaded_pending_writes(&self) -> Vec<OwnedWriteOperation> {
+        self.storage.take_pending_writes()
+    }
+
+    /// Drain column-family requests owned by the real resident database.
+    #[doc(hidden)]
+    pub fn take_demand_loaded_pending_column_families(&self) -> Vec<String> {
+        self.storage.take_pending_column_families()
+    }
+}

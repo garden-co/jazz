@@ -1,32 +1,133 @@
 //! Database construction, schema views, write-state waiting, and connection controls.
 
 use super::*;
+use crate::node::{DemandDrivenNode, PollableNodeOpen};
+
+/// Pollable construction for a high-level database backed by ordered async
+/// storage. The resulting owner keeps the familiar synchronous `Db` facade
+/// and its durable runtime together.
+#[doc(hidden)]
+pub struct PollableDbOpen {
+    opening: Option<PollableNodeOpen>,
+    runtime: Option<DemandDrivenNode>,
+    schema: JazzSchema,
+    identity: DbIdentity,
+    id_source: Option<Box<dyn RowIdSource>>,
+}
+
+/// High-level database facade plus the async owner of its resident node.
+#[doc(hidden)]
+pub struct DemandDrivenDb {
+    database: Db<groove::storage::DemandLoadedStorage>,
+    runtime: DemandDrivenNode,
+}
+
+impl PollableDbOpen {
+    #[doc(hidden)]
+    pub fn new(
+        schema: JazzSchema,
+        identity: DbIdentity,
+        persistence: Box<dyn groove::storage::async_ordered::OrderedKvStorage>,
+    ) -> Self {
+        Self {
+            opening: Some(PollableNodeOpen::new(
+                identity.node,
+                schema.clone(),
+                persistence,
+            )),
+            runtime: None,
+            schema,
+            identity,
+            id_source: None,
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn with_id_source(mut self, id_source: impl RowIdSource + 'static) -> Self {
+        self.id_source = Some(Box::new(id_source));
+        self
+    }
+
+    #[doc(hidden)]
+    pub fn poll(&mut self, context: &mut Context<'_>) -> Poll<Result<DemandDrivenDb, Error>> {
+        if self.runtime.is_none() {
+            let runtime: DemandDrivenNode = match self
+                .opening
+                .as_mut()
+                .expect("incomplete database opening retains node opening")
+                .poll(context)
+            {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error.into())),
+                Poll::Ready(Ok(runtime)) => runtime,
+            };
+            self.opening = None;
+            self.runtime = Some(runtime);
+        }
+        let pending = match self
+            .runtime
+            .as_mut()
+            .expect("database opening retains its ready runtime")
+            .poll_pending_transaction_ids(context, self.identity.node, self.identity.author)
+        {
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(Err(error)) => return Poll::Ready(Err(error.into())),
+            Poll::Ready(Ok(pending)) => pending,
+        };
+        let runtime = self
+            .runtime
+            .take()
+            .expect("completed database opening takes its runtime");
+        let node = Node::from_shared(runtime.shared_resident());
+        node.set_non_durable_client();
+        node.restore_prepared_pending_uploads(pending);
+        let schema_version_id = self.schema.version_id();
+        let schema_views = Rc::new(RefCell::new(BTreeMap::from([(
+            SchemaViewId::for_schema(&self.schema),
+            self.schema.clone(),
+        )])));
+        let database = Db {
+            schema: self.schema.clone(),
+            schema_version_id,
+            schema_view_is_fixed: false,
+            schema_views,
+            identity: self.identity,
+            node: Rc::new(node),
+            row_id_source: Rc::new(RefCell::new(
+                self.id_source
+                    .take()
+                    .unwrap_or_else(|| Box::<ProductionRowIdSource>::default()),
+            )),
+            next_now_ms: Rc::new(Cell::new(1)),
+        };
+        Poll::Ready(Ok(DemandDrivenDb { database, runtime }))
+    }
+}
+
+impl DemandDrivenDb {
+    #[doc(hidden)]
+    pub fn database(&self) -> &Db<groove::storage::DemandLoadedStorage> {
+        &self.database
+    }
+
+    #[doc(hidden)]
+    pub fn poll_persistence(&mut self, context: &mut Context<'_>) -> Poll<Result<(), Error>> {
+        match self.runtime.poll_persistence(context) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(result) => Poll::Ready(result.map_err(Into::into)),
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn runtime(&mut self) -> &mut DemandDrivenNode {
+        &mut self.runtime
+    }
+}
 
 impl<S> Db<S>
 where
     S: ResidentStorage + ReopenableStorage + 'static,
 {
-    /// Route later node commits into owned persistence batches and mark this
-    /// facade as a non-durable optimistic client until its host acknowledges
-    /// those batches.
-    #[doc(hidden)]
-    pub fn enable_async_persistence_capture(&self) {
-        self.node.set_non_durable_client();
-        self.node
-            .node
-            .borrow_mut()
-            .enable_async_persistence_capture();
-    }
-
-    /// Drain exact captured Groove batches in node commit order.
-    #[doc(hidden)]
-    pub fn take_pending_persistence_batches(&self) -> Vec<groove::db::PendingPersistenceBatch> {
-        self.node
-            .node
-            .borrow_mut()
-            .take_pending_persistence_batches()
-    }
-
     /// Open a database over the supplied storage and recover local state.
     ///
     /// ```rust

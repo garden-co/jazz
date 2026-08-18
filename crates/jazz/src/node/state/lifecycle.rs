@@ -551,8 +551,6 @@ where
             },
             rejections: RejectionTracking::default(),
             database: DatabaseSlot::new(database),
-            capture_persistence_batches: false,
-            pending_persistence_batches: VecDeque::new(),
             groove_runtime_token: next_groove_runtime_token(),
             history_complete,
             authored_commit_durability: DurabilityTier::Local,

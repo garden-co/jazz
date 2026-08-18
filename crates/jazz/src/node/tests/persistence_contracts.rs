@@ -132,40 +132,6 @@ fn assert_poisoned_node_exposes_nothing(core: &mut NodeState<FailWriteManyMemory
     ));
 }
 
-#[test]
-fn jazz_commit_emits_owned_persistence_batches_after_local_visibility() {
-    let (mut writer, _) = fail_write_many_node();
-    writer.enable_async_persistence_capture();
-    let tx_id = writer
-        .commit_mergeable(
-            MergeableCommit::new("todos", row(0xcf), 10).cells(title_cells("resident")),
-        )
-        .unwrap();
-
-    assert_eq!(
-        writer
-            .current_rows("todos", DurabilityTier::None)
-            .unwrap()
-            .len(),
-        1,
-        "the Jazz local frontier must advance before durability is driven"
-    );
-    let batches = writer.take_pending_persistence_batches();
-    assert!(!batches.is_empty());
-    assert!(
-        batches
-            .into_iter()
-            .flat_map(|batch| batch.into_operations())
-            .any(|operation| matches!(
-                operation,
-                groove::storage::OwnedWriteOperation::Set { ref cf, .. }
-                    if cf == "jazz_transactions"
-            )),
-        "the captured closure must include the canonical transaction"
-    );
-    assert!(writer.transaction_record(tx_id).is_some());
-}
-
 struct GatedAuthorityStorage {
     inner: groove::storage::async_ordered::ImmediateStorage<MemoryStorage>,
     released: std::rc::Rc<std::cell::Cell<bool>>,
@@ -263,8 +229,9 @@ fn authority_runtime(
     let node_schema = schema();
     let column_families = node_schema.column_families();
     let refs = column_families.iter().map(String::as_str).collect::<Vec<_>>();
+    let durable = MemoryStorage::new(&refs);
     let storage = CommitGatedAuthorityStorage {
-        inner: groove::storage::async_ordered::ImmediateStorage::new(MemoryStorage::new(&refs)),
+        inner: groove::storage::async_ordered::ImmediateStorage::new(durable.clone()),
         released,
         fail,
     };
@@ -275,6 +242,77 @@ fn authority_runtime(
         panic!("commit-only gate must not delay node opening reads")
     };
     runtime
+}
+
+#[test]
+fn demand_driven_db_preserves_synchronous_facade_visibility_before_durability() {
+    let released = std::rc::Rc::new(std::cell::Cell::new(true));
+    let failed = std::rc::Rc::new(std::cell::Cell::new(false));
+    let node_schema = schema();
+    let column_families = node_schema.column_families();
+    let refs = column_families.iter().map(String::as_str).collect::<Vec<_>>();
+    let durable = MemoryStorage::new(&refs);
+    let storage = CommitGatedAuthorityStorage {
+        inner: groove::storage::async_ordered::ImmediateStorage::new(durable.clone()),
+        released: std::rc::Rc::clone(&released),
+        fail: failed,
+    };
+    let mut opening = crate::db::PollableDbOpen::new(
+        node_schema,
+        crate::db::DbIdentity {
+            node: node(0xc9),
+            author: AuthorId::from_bytes([0xc9; 16]),
+        },
+        Box::new(storage),
+    )
+    .with_id_source(crate::db::SeededRowIdSource::new(0xc9));
+    let waker = std::task::Waker::from(std::sync::Arc::new(PersistenceTestWake));
+    let mut context = std::task::Context::from_waker(&waker);
+    let std::task::Poll::Ready(Ok(mut owner)) = opening.poll(&mut context) else {
+        panic!("commit-only gate must allow database opening")
+    };
+    let db = owner.database();
+    let prepared = db.prepare_query(&db.table("todos")).unwrap();
+    let opts = crate::db::ReadOpts {
+        tier: DurabilityTier::None,
+        local_updates: crate::db::LocalUpdates::Immediate,
+        propagation: crate::db::Propagation::LocalOnly,
+        ..crate::db::ReadOpts::default()
+    };
+    let mut subscription = crate::db::block_on(db.subscribe(&prepared, opts.clone())).unwrap();
+    assert!(matches!(
+        crate::db::block_on(subscription.next_event()),
+        Some(crate::db::SubscriptionEvent::Delta { reset: true, .. })
+    ));
+    released.set(false);
+    let write = db
+        .insert("todos", title_cells("facade immediate"))
+        .unwrap();
+    let Some(crate::db::SubscriptionEvent::Delta { added, .. }) = subscription.try_next_event()
+    else {
+        panic!("insert must queue its immediate callback before returning")
+    };
+    let rows = crate::db::block_on(db.all(&prepared, opts)).unwrap();
+    assert_eq!(added.len(), 1);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].row_uuid(), write.row_uuid());
+    assert!(owner.poll_persistence(&mut context).is_pending());
+    released.set(true);
+    assert!(matches!(
+        owner.poll_persistence(&mut context),
+        std::task::Poll::Ready(Ok(()))
+    ));
+    drop(subscription);
+    drop(write);
+    drop(owner);
+    let mut reopened = NodeState::new(node(0xc9), schema(), durable).unwrap();
+    assert_eq!(
+        reopened
+            .current_rows("todos", DurabilityTier::None)
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 struct PersistenceTestWake;
@@ -896,7 +934,7 @@ fn cold_authority_preflight_suspends_before_transaction_or_callback_publication(
             None,
         )
         .is_pending());
-    assert!(authority.node.transaction_record(tx_id).is_none());
+    assert!(authority.node.borrow_mut().transaction_record(tx_id).is_none());
     assert!(matches!(
         history.try_recv(),
         Err(std::sync::mpsc::TryRecvError::Empty)

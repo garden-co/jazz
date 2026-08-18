@@ -46,16 +46,22 @@ where
 {
     /// Wrap a node for serving subscriber links.
     pub fn new(node: NodeState<S>) -> Self {
+        Self::from_shared(Rc::new(RefCell::new(node)))
+    }
+
+    pub(crate) fn from_shared(node: Rc<RefCell<NodeState<S>>>) -> Self {
         let pending_mutation_errors = node
+            .borrow()
             .rejected_transactions()
             .into_iter()
             .filter_map(|tx_id| {
-                node.rejected_transaction(tx_id)
+                node.borrow()
+                    .rejected_transaction(tx_id)
                     .map(|rejected| (tx_id, mutation_error_event(rejected)))
             })
             .collect();
         Self {
-            node: Rc::new(RefCell::new(node)),
+            node,
             subscriptions: Rc::new(RefCell::new(Vec::new())),
             outbox: Rc::new(RefCell::new(Vec::new())),
             upstream_subscriptions: Rc::new(RefCell::new(Vec::new())),
@@ -154,6 +160,15 @@ where
             }
         }
         Ok(())
+    }
+
+    pub(super) fn restore_prepared_pending_uploads(&self, pending: impl IntoIterator<Item = TxId>) {
+        let mut restored = HashSet::new();
+        for tx_id in pending {
+            if restored.insert(tx_id) {
+                self.queue_pending_upload(tx_id, None);
+            }
+        }
     }
 
     fn restore_local_subscriber(

@@ -872,6 +872,8 @@ impl Drop for PermissionAdviceFuture {
 
 mod catalogue;
 mod lifecycle;
+#[doc(hidden)]
+pub use lifecycle::{DemandDrivenDb, PollableDbOpen};
 mod mutations;
 mod reads;
 mod subscriptions;

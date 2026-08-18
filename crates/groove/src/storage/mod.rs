@@ -478,6 +478,16 @@ pub struct LayoutStorage<S> {
     layout: StorageLayout,
 }
 
+impl LayoutStorage<DemandLoadedStorage> {
+    pub(crate) fn take_pending_writes(&self) -> Vec<OwnedWriteOperation> {
+        self.inner.take_pending_writes()
+    }
+
+    pub(crate) fn take_pending_column_families(&self) -> Vec<String> {
+        self.inner.take_pending_column_families()
+    }
+}
+
 impl<S> LayoutStorage<S>
 where
     S: ResidentStorage,

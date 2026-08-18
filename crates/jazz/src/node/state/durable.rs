@@ -50,37 +50,14 @@ where
         &mut self,
         batch: DatabaseBatch,
     ) -> Result<(), GrooveDbError> {
-        let persistence = self.database.commit_batch_for_async_persistence(batch)?;
-        if self.capture_persistence_batches {
-            self.pending_persistence_batches.push_back(persistence);
-        }
-        Ok(())
+        self.database.commit_batch(batch)
     }
 
     pub(crate) fn publish_prepared_database_batch(
         &mut self,
         batch: groove::db::PreparedDatabaseBatch,
     ) -> Result<(), GrooveDbError> {
-        let persistence = self
-            .database
-            .commit_prepared_batch_for_async_persistence(batch)?;
-        if self.capture_persistence_batches {
-            self.pending_persistence_batches.push_back(persistence);
-        }
-        Ok(())
-    }
-
-    /// Enable capture of the exact owned Groove batches produced by later
-    /// Jazz commits. The persistence scheduler drains these in FIFO order.
-    #[doc(hidden)]
-    pub fn enable_async_persistence_capture(&mut self) {
-        self.capture_persistence_batches = true;
-    }
-
-    /// Drain captured batches without changing their commit order.
-    #[doc(hidden)]
-    pub fn take_pending_persistence_batches(&mut self) -> Vec<PendingPersistenceBatch> {
-        self.pending_persistence_batches.drain(..).collect()
+        self.database.commit_prepared_batch(batch)
     }
 
     /// Return local synchronization counters.
