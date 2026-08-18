@@ -187,6 +187,12 @@ export interface AuthConfig {
  * - `global`: Persisted at global server
  */
 export type DurabilityTier = "local" | "edge" | "global";
+
+/**
+ * Boundary a caller may await after a local write. `none` means only the
+ * synchronous resident publication; the other values wait for durability.
+ */
+export type WriteWaitTier = "none" | DurabilityTier;
 /**
  * Controls when a write is visible to subscriptions.
  *
@@ -517,7 +523,7 @@ export class WriteHandle<T = void> {
    *
    * Rejects with a {@link PersistedWriteRejectedError} if the write is rejected.
    */
-  async wait(options: { tier: DurabilityTier }): Promise<T> {
+  async wait(options: { tier: WriteWaitTier }): Promise<T> {
     return this.#client.waitForTransaction(this.batchId, options.tier) as Promise<T>;
   }
 
@@ -546,7 +552,7 @@ export class WriteResult<T> extends WriteHandle<T> {
    * Rejects with a {@link PersistedWriteRejectedError} if the write is rejected.
    * @returns the inserted row.
    */
-  override async wait(options: { tier: DurabilityTier }): Promise<T> {
+  override async wait(options: { tier: WriteWaitTier }): Promise<T> {
     await super.wait(options);
     return this.value;
   }
@@ -1206,7 +1212,7 @@ export class JazzClient {
 
   async waitForTransaction(
     batchId: BatchId | Promise<BatchId>,
-    tier: DurabilityTier,
+    tier: WriteWaitTier,
   ): Promise<void> {
     try {
       await this.runtime.waitForTransaction(batchId, tier);

@@ -31,6 +31,7 @@ import {
   type UpdateOptions,
   type UpsertOptions,
   type DurabilityTier,
+  type WriteWaitTier,
   type QueryExecutionOptions,
   type QueryPropagation,
   type QueryVisibility,
@@ -1060,8 +1061,10 @@ export class Db {
 
   private wrapWriteWait<THandle extends WriteHandle<unknown>>(handle: THandle): THandle {
     const wait = handle.wait.bind(handle);
-    handle.wait = (async (options: { tier: DurabilityTier }) => {
-      await this.ensureReady(options.tier);
+    handle.wait = (async (options: { tier: WriteWaitTier }) => {
+      if (options.tier !== "none") {
+        await this.ensureReady(options.tier);
+      }
       return wait(options);
     }) as THandle["wait"];
     return handle;
