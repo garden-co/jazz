@@ -38,6 +38,11 @@ pub(crate) struct PreparedBranchRecordMutation {
     batch: groove::db::PreparedDatabaseBatch,
 }
 
+pub(crate) enum PreparedPeerBranchMetadata {
+    Noop,
+    Mutation(PreparedBranchRecordMutation),
+}
+
 impl From<&BranchRecord> for crate::protocol::BranchMetadata {
     fn from(record: &BranchRecord) -> Self {
         Self {
@@ -54,6 +59,74 @@ impl<S> NodeState<S>
 where
     S: ResidentStorage,
 {
+    pub(crate) fn prepare_peer_branch_metadata(
+        &self,
+        metadata: crate::protocol::BranchMetadata,
+    ) -> Result<PreparedPeerBranchMetadata, Error> {
+        self.require_catalogue_ready()?;
+        let record = BranchRecord {
+            branch_id: metadata.branch_id,
+            created_by: metadata.created_by,
+            parent: metadata.parent,
+            base: metadata.base,
+            state: if metadata.open {
+                codec::BranchState::Open
+            } else {
+                codec::BranchState::Discarded
+            },
+        };
+        if self
+            .branches
+            .pending_metadata_uploads
+            .contains(&record.branch_id)
+        {
+            let existing =
+                self.branches
+                    .branches
+                    .get(&record.branch_id)
+                    .ok_or(Error::InvalidStoredValue(
+                        "pending branch metadata record is missing",
+                    ))?;
+            if existing != &record {
+                return Err(Error::InvalidStoredValue(
+                    "branch metadata acknowledgement does not match local record",
+                ));
+            }
+            return Ok(PreparedPeerBranchMetadata::Mutation(
+                self.prepare_branch_record_mutation(record, false, true)?,
+            ));
+        }
+        if let Some(existing) = self.branches.branches.get(&record.branch_id) {
+            if existing == &record {
+                return Ok(PreparedPeerBranchMetadata::Noop);
+            }
+            let valid_close = existing.created_by == record.created_by
+                && existing.parent == record.parent
+                && existing.base == record.base
+                && existing.state == codec::BranchState::Open
+                && record.state == codec::BranchState::Discarded;
+            if !valid_close {
+                return Err(Error::InvalidStoredValue("conflicting branch metadata"));
+            }
+        }
+        Ok(PreparedPeerBranchMetadata::Mutation(
+            self.prepare_branch_record_mutation(record, false, true)?,
+        ))
+    }
+
+    pub(crate) fn publish_prepared_peer_branch_metadata(
+        &mut self,
+        prepared: PreparedPeerBranchMetadata,
+    ) -> Result<(), Error>
+    where
+        S: ReopenableStorage,
+    {
+        if let PreparedPeerBranchMetadata::Mutation(mutation) = prepared {
+            self.publish_branch_record_mutation(mutation)?;
+            let _ = self.drain_parked_commit_units()?;
+        }
+        Ok(())
+    }
     /// Create a snapshot-base branch over this node's current settled watermark.
     ///
     /// Creation writes only one metadata row; overlay tables are created lazily

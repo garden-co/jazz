@@ -299,6 +299,17 @@ where
         Some((**snapshot).clone())
     }
 
+    pub(super) fn staged_branch_metadata(&self) -> Option<crate::protocol::BranchMetadata> {
+        let ConnectionLink::Upstream { .. } = &self.link else {
+            return None;
+        };
+        let staged = self.staged_inbound.front()?;
+        let SyncMessage::BranchMetadata(metadata) = &staged.message else {
+            return None;
+        };
+        Some(metadata.clone())
+    }
+
     #[cfg(test)]
     pub(crate) fn has_staged_view_update_for_test(&self) -> bool {
         self.staged_ready_view_update().is_some()
@@ -419,6 +430,35 @@ where
             .pop_front()
             .expect("completed catalogue ingress retains its frame");
         debug_assert!(matches!(staged.message, SyncMessage::CatalogueSnapshot(_)));
+        self.externally_applied_inbound = true;
+    }
+
+    pub(super) fn complete_staged_branch_metadata(&mut self, branch: crate::ids::BranchId) {
+        let staged = self
+            .staged_inbound
+            .pop_front()
+            .expect("completed branch metadata retains its frame");
+        debug_assert!(matches!(
+            staged.message,
+            SyncMessage::BranchMetadata(ref metadata) if metadata.branch_id == branch
+        ));
+        let ConnectionLink::Upstream {
+            pending_branch_metadata_repairs,
+            pending_branch_view_updates,
+            ..
+        } = &mut self.link
+        else {
+            unreachable!("branch metadata belongs to an upstream link")
+        };
+        pending_branch_metadata_repairs.remove(&branch);
+        if let Some(updates) = pending_branch_view_updates.remove(&branch) {
+            for update in updates.into_iter().rev() {
+                self.staged_inbound.push_front(StagedInboundMessage {
+                    message: update.message,
+                    authority_receipt_eligible: update.authority_receipt_eligible,
+                });
+            }
+        }
         self.externally_applied_inbound = true;
     }
 
@@ -1062,6 +1102,7 @@ where
                     if self.external_durable_ingress
                         && ((*local_receiver && matches!(&message, SyncMessage::CommitUnit { .. }))
                             || matches!(&message, SyncMessage::CatalogueSnapshot(_))
+                            || matches!(&message, SyncMessage::BranchMetadata(_))
                             || matches!(&message, SyncMessage::RowVersionPayloads { .. })
                             || matches!(
                                 &message,

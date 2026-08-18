@@ -168,6 +168,21 @@ impl DemandDrivenDb {
                 }
                 continue;
             }
+            let staged_branch_metadata = { connection.borrow().staged_branch_metadata() };
+            if let Some(metadata) = staged_branch_metadata {
+                match self
+                    .runtime
+                    .poll_apply_peer_branch_metadata(context, &metadata)
+                {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(Err(error)) => return Poll::Ready(Err(error.into())),
+                    Poll::Ready(Ok(())) => connection
+                        .borrow_mut()
+                        .complete_staged_branch_metadata(metadata.branch_id),
+                }
+                context.waker().wake_by_ref();
+                return Poll::Pending;
+            }
             let staged_repair = { connection.borrow().staged_row_version_repair() };
             if let Some((requests, bundles)) = staged_repair {
                 match self
@@ -251,6 +266,7 @@ impl DemandDrivenDb {
         if connections.iter().any(|connection| {
             let connection = connection.borrow();
             connection.staged_catalogue_snapshot().is_some()
+                || connection.staged_branch_metadata().is_some()
                 || connection.staged_row_version_repair().is_some()
                 || connection.staged_relay_commit().is_some()
                 || connection.staged_accepted_fate().is_some()

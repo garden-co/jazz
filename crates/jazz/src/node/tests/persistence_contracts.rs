@@ -1875,6 +1875,46 @@ fn peer_catalogue_snapshot_is_owned_until_durable() {
 }
 
 #[test]
+fn peer_branch_metadata_is_owned_until_durable() {
+    let metadata = crate::protocol::BranchMetadata {
+        branch_id: BranchId::from_bytes([0xcb; 16]),
+        created_by: AuthorId::from_bytes([0xcb; 16]),
+        parent: None,
+        base: None,
+        open: true,
+    };
+    let released = std::rc::Rc::new(std::cell::Cell::new(true));
+    let mut receiver = authority_runtime(
+        std::rc::Rc::clone(&released),
+        std::rc::Rc::new(std::cell::Cell::new(false)),
+    );
+    let waker = std::task::Waker::from(std::sync::Arc::new(PersistenceTestWake));
+    let mut context = std::task::Context::from_waker(&waker);
+    released.set(false);
+    assert!(receiver
+        .poll_apply_peer_branch_metadata(&mut context, &metadata)
+        .is_pending());
+    released.set(true);
+    loop {
+        match receiver.poll_apply_peer_branch_metadata(&mut context, &metadata) {
+            std::task::Poll::Pending => {}
+            std::task::Poll::Ready(Ok(())) => break,
+            std::task::Poll::Ready(Err(error)) => panic!("branch metadata failed: {error}"),
+        }
+    }
+    assert_eq!(
+        receiver.resident().branch_record(metadata.branch_id).cloned(),
+        Some(BranchRecord {
+            branch_id: metadata.branch_id,
+            created_by: metadata.created_by,
+            parent: None,
+            base: None,
+            state: crate::node::codec::BranchState::Open,
+        })
+    );
+}
+
+#[test]
 fn demand_driven_peer_tick_retains_view_update_until_durable() {
     let (mut writer, _) = fail_write_many_node();
     let (mut core, _) = fail_write_many_node();
