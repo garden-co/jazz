@@ -90,7 +90,9 @@ class QuerySubscriptionBase<T extends { id: string }, Result> {
           },
           onDelta: (delta: SubscriptionDelta<T>) => {
             if (mode === "one") {
-              this.current = (delta.all[0] ?? null) as unknown as Result;
+              const rows = delta.all ?? (this.current ? [this.current as unknown as T] : []);
+              if (!delta.all) applyDelta(rows, delta);
+              this.current = (rows[0] ?? null) as unknown as Result;
             } else if (this.current) {
               applyDelta(this.current as T[], delta);
             } else if (delta.reset) {

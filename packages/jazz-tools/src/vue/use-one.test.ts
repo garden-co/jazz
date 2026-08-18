@@ -10,6 +10,10 @@ vi.mock("./provider.js", () => ({
   useJazzClient: () => ({ manager: mocks }),
 }));
 
+vi.mock("../subscription-store-internal.js", () => ({
+  getSubscriptionStore: (client: any) => client.manager,
+}));
+
 import { useOne, type UseOneResult } from "./use-one.js";
 
 type Todo = { id: string; title: string };

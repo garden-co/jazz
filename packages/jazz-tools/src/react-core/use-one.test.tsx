@@ -4,6 +4,7 @@ import { afterEach, describe, expect, expectTypeOf, it, vi } from "vitest";
 import type { QueryBuilder } from "../runtime/db.js";
 import type { SubscriptionDelta } from "../runtime/subscription-manager.js";
 import { SubscriptionsOrchestrator } from "../subscriptions-orchestrator.js";
+import { attachSubscriptionStore } from "../subscription-store-internal.js";
 import { JazzClientProvider } from "./provider.js";
 import { useOne, type UseOneResult } from "./use-one.js";
 
@@ -34,7 +35,7 @@ function makeHarness() {
   };
   const manager = new SubscriptionsOrchestrator({ appId: "react-use-one" }, db as never);
   return {
-    client: { db, manager, session: null, shutdown: async () => {} } as never,
+    client: attachSubscriptionStore({ db, session: null, shutdown: async () => {} }, manager),
     getSubscribedQuery: () => subscribedQuery,
     emit: (all: Todo[]) => callback!({ all, delta: [] }),
   };
