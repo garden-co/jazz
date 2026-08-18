@@ -20,7 +20,9 @@ async function waitFor(check: () => boolean, timeoutMs: number, message: string)
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (check()) return;
-    await new Promise((r) => setTimeout(r, 50));
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 50));
+    });
   }
   throw new Error(`Timeout: ${message}`);
 }
@@ -301,7 +303,9 @@ describe("React Todo App E2E", () => {
     });
 
     // Let both app instances finish server/event-stream setup before mutating.
-    await new Promise((r) => setTimeout(r, 750));
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 750));
+    });
 
     // Add a todo in app 1 via the form
     const input1 = el1.querySelector<HTMLInputElement>("input[type='text']")!;
@@ -344,7 +348,9 @@ describe("React Todo App E2E", () => {
     });
 
     // Let both app instances finish server/event-stream setup before mutating.
-    await new Promise((r) => setTimeout(r, 750));
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 750));
+    });
 
     // Add a todo in app 1 via the form
     const input1 = el1.querySelector<HTMLInputElement>("input[type='text']")!;

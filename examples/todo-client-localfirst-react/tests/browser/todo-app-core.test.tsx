@@ -29,7 +29,9 @@ async function waitFor(check: () => boolean, timeoutMs: number, message: string)
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (check()) return;
-    await new Promise((r) => setTimeout(r, 50));
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 50));
+    });
   }
   throw new Error(`Timeout: ${message}`);
 }
@@ -72,7 +74,9 @@ async function addTodoAndWaitForLocalDurability(el: HTMLDivElement, title: strin
   });
 
   await addTodo(el, title);
-  await localWriteDurable;
+  await act(async () => {
+    await localWriteDurable;
+  });
 }
 
 function EdgeReadinessProbe({ onSettled }: { onSettled: (error: Error | null) => void }) {
@@ -168,7 +172,9 @@ describe("React Todo App core browser canary", () => {
       secret: "VDOGX2nez-5T9Lgk4VfYMT33Qsa6J4loRAoKLZpvxBg",
     });
 
-    await new Promise((r) => setTimeout(r, 750));
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 750));
+    });
 
     await addTodo(writer, "Core writer todo");
     await waitFor(
@@ -273,7 +279,9 @@ describe("React Todo App core browser canary", () => {
       secret: readerSecret,
     });
 
-    await new Promise((r) => setTimeout(r, 750));
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 750));
+    });
 
     await addTodo(writer, onlineTitle);
     await waitFor(
