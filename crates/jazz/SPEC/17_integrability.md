@@ -19,11 +19,11 @@ The target is one coherent product surface:
 - Node apps call the same TypeScript API backed by NAPI when available;
 - servers run a small operational shell around `Node`, not a wider client `Db`;
 - edge and core deployments are topology choices, not separate products;
-- branches, lenses, subscriptions, and storage expose stable facades instead of
+- overlay views, lenses, subscriptions, and storage expose stable facades instead of
   leaking reference-implementation internals.
 
 This roadmap does not redefine jazz semantics. When there is tension, the data
-model, transaction, sync, topology, API, lowering, branch, lens, and maintained
+model, transaction, sync, topology, API, lowering, partition-overlay, lens, and maintained
 subscription chapters win.
 
 ### 17.2 P0 — lock the integration contract
@@ -35,7 +35,7 @@ WASM or NAPI against a server shell without semantic forks.**
 `opens, mutates one row, and queries it through the native runtime payload shape`,
 `propagates an edge-tier query over the native runtime/server boundary and returns remote row adds`,
 and `server_command_loads_published_schema_and_persists_ws_data_across_restart`.
-The capability matrix and the complete product-facing lens/branch facades remain
+The capability matrix and the complete product-facing lens/overlay facades remain
 roadmap work.
 
 - **TS/WASM/NAPI boundary and capability matrix** — ch. 13 owns the primary direct
@@ -58,8 +58,8 @@ roadmap work.
   contract; jazz ch. 14 owns which jazz data lowers to that substrate.
 - **Subscription event bridge** — ch. 16 owns maintained subscription terminal
   deltas and the TypeScript event bridge; ch. 13 owns the ergonomic watch API.
-- **Lens/branch facades** — ch. 10 and ch. 11 own the schema-lens and branch
-  lifecycle semantics; ch. 13 owns their product-facing API placement.
+- **Lens/overlay facades** — ch. 10 and ch. 11 own schema lenses and normalized
+  head/base partition sources; ch. 13 owns their product-facing API placement.
 
 The former launch binding TODOs are folded into this roadmap. Go, Swift,
 Kotlin, React Native, NAPI, and WASM are language/package surfaces over the same
@@ -106,7 +106,7 @@ same conformance scenarios with topology-specific configuration only.**
 - **Conformance matrix.** Add black-box tests that run the same API scenarios
   against Rust-only, WASM, NAPI, browser-worker, local server, and edge/core
   layouts. Cover mergeable/exclusive transactions, RLS,
-  subscription deltas, branches, and lenses.
+  subscription deltas, partition overlays, and lenses.
 - **Operational surface.** Standardize config, logging, metrics, health checks,
   storage migration reporting, sync lag, full-recompute counters, and protocol
   version mismatch diagnostics.
@@ -130,7 +130,7 @@ Milestone: **integrators can adopt jazz incrementally without bespoke glue.**
   the TypeScript API, without adding alternate semantics.
 - **Hosted/serverless profile.** Document constraints for ephemeral compute,
   edge caches, durable core storage, and background compaction.
-- **Migration playbooks.** Provide guides for schema lenses, branch-based
+- **Migration playbooks.** Provide guides for schema lenses, overlay-based
   previews, storage backend swaps, and protocol upgrades.
 - **Observability recipes.** Ship dashboards or examples for sync health,
   subscription full-recompute budget, edge cache hit rate, and storage latency.
@@ -164,7 +164,7 @@ Milestone: **integrators can adopt jazz incrementally without bespoke glue.**
    backends, including migration metadata.
 5. **Subscription slice** — bridge maintained subscription deltas into stable
    TypeScript events and measure every full-diff full recompute.
-6. **Lens/branch slice** — expose branch and lens facades across Rust,
+6. **Lens/overlay slice** — expose partition-view and lens facades across Rust,
    TypeScript, WASM, and NAPI with conformance tests.
 7. **Topology slice** — run the same scenario suite across client, relay, edge,
    and core roles using the shared wire protocol.

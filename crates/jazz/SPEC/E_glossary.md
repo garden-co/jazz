@@ -21,7 +21,7 @@ Invariant digest: no `INV-*` ids are defined or cited by this chapter.
 ### Identity (ch. 2)
 
 - **`NodeUuid` / `RowUuid` / `AuthorId` / `SchemaVersionId` / `MigrationLensId` /
-  `BranchId`** — wire-stable UUID identities.
+  `PartitionDimensionId`** — wire-stable UUID identities.
 - **`NodeAlias` / `SchemaVersionAlias`** — node-local `u64` interned identities;
   never on the wire (ch. 14).
 - **`AuthorId::SYSTEM`** — the internal author that bypasses all policy (ch. 7).
@@ -111,7 +111,7 @@ Restored}`) · **global-current overwrite table** — node-local derived current
   versions". Add row-version or maintained-view-complete coverage facts only if
   partial payload dedup needs them · **deferred edge fate**.
 
-### API & branches (ch. 13, ch. 11)
+### API & overlay views (ch. 13, ch. 11)
 
 - **`Db` / `DbIdentity`** — the client-side application facade: no role, always
   a synced client over a `NodeState`. **`NodeState`** (local engine) / **`Node`**
@@ -120,8 +120,9 @@ Restored}`) · **global-current overwrite table** — node-local derived current
   `Propagation`** · **`WriteHandle` / Rust `WatchHandle` / binding
   subscription stream** · **`RowIdSource`**
   (`Production` / `Seeded`).
-- **snapshot-base branch** (`BranchRecord`, `BranchState`) · **branch overlay** ·
-  **root branch**.
+- **partition dimension** · **partition tuple** · **row incarnation** ·
+  **overlay read view** · **live base** · **frozen base** ·
+  **supplying partition provenance**.
 
 ## Open Questions
 

@@ -23,7 +23,7 @@ Invariant digest:
 - `INV-SYNC-15`: Exclusive transaction payloads MAY be delivered, stored, and participate partially at the transaction level; receiver-visible subscription state MUST expose them only when complete for the maintained subscription view being served, and partial fragments MUST NOT update whole-database current indexes.
 - `INV-SYNC-16`: A mergeable transaction MAY be delivered and applied partially; each visible mergeable version can contribute without waiting for `tx.n_total_writes`.
 - `INV-SYNC-17`: `ViewUpdate` emission for a result add MUST include enough deletion-register context to reconstruct visible absence/presence for that row.
-- `INV-SYNC-27`: Shared deletion-history storage is local representation only: sync payloads continue to identify deletion versions by logical table, row, transaction, schema and branch lineage, and receivers MUST resolve the sender's record through their own stable physical mapping.
+- `INV-SYNC-27`: Shared deletion-history storage is local representation only: sync payloads continue to identify deletion versions by logical table, partition tuple, row, transaction, and schema, and receivers MUST resolve the sender's record through their own stable physical mapping.
 - `INV-SYNC-18`: An edge acting as mergeable fate authority MUST defer fate assignment until the relevant permission-scope subscription has settled for the writer and affected tables.
 - `INV-SYNC-20`: Incremental query view updates MUST be observationally equivalent to a full rehydrate for the same canonical program instance, including enter/leave churn within a single drain cycle and closure-row replacement.
 - `INV-SYNC-21`: Wire `TxId` and row-version payloads MUST use node UUIDs and schema version IDs, not node-local integer aliases.
@@ -37,8 +37,8 @@ Invariant digest:
 - `INV-SYNC-30`: `settled_through` is a durable canonical-view history cursor for known-state payload dedup and repair, not a subscription or one-shot coverage receipt. Edge/Global settlement and coverage additionally require a fresh confirming `ViewUpdate` from the selected continuously active upstream connection; disconnect, restart, edge switch, or any update from a nonselected upstream invalidates all selected-authority receipts immediately unless an exact recomputation closure is proven.
 - `INV-SYNC-28`: Before the reconstruction cut, structured-output wire v6 carries terminal resets and typed root/path edits atomically. At the cut it is retired; reconstruction and post-cut local publication are governed by target `INV-SYNC-31..35`.
 - `INV-SYNC-31`: A downstream subscription MUST synchronize canonical authored facts and their identity-preserving witness closure under an exact manifest/epoch/digest, never an application-projected row as replicated truth.
-- `INV-SYNC-32`: A receiver MUST select authored-history/branch winners before projection, decode each synchronized fact in its authored schema, project it through the ordered catalogue lineage into the subscription read schema, and derive terminal output with its local IVM without supplementing unrelated local history.
-- `INV-SYNC-33`: The serving authority MUST decide visibility, membership, and settlement and ship only the safe, complete canonical closure plus identified authorized residual program from which the receiver can reproduce that authorized view; opaque admissions MUST be non-replayable across every authority/view/reader/branch/residual identity axis and their protected occurrence plus concrete version/layer witnesses.
+- `INV-SYNC-32`: A receiver MUST select partition-qualified authored-history winners before projection, decode each synchronized fact in its authored schema, project it through the ordered catalogue lineage into the subscription read schema, and derive terminal output with its local IVM without supplementing unrelated local history.
+- `INV-SYNC-33`: The serving authority MUST decide visibility, membership, and settlement and ship only the safe, complete canonical closure plus identified authorized residual program from which the receiver can reproduce that authorized view; opaque admissions MUST be non-replayable across every authority/view/reader/partition-source/residual identity axis and their protected occurrence plus concrete version/layer witnesses.
 - `INV-SYNC-34`: A subscription is settled only when its receiver has verified every class of the complete reproducible input closure for the authority's declared manifest/epoch; reconnect, repair, reset, and recovery must re-establish that closure before reporting settlement.
 - `INV-SYNC-35`: A receiver MUST atomically and durably install a complete manifest, its facts, local IVM state/terminal, and any fast-known-state receipt before publication; it MUST expose neither a partial closure nor a fast receipt across a crash boundary.
 - `INV-TX-2`: Committing an exclusive transaction MUST store the commit locally as `Fate::Pending` with `DurabilityTier::Local` and emit exactly one `SyncMessage::CommitUnit`.
@@ -183,7 +183,7 @@ shape binding and read-view identity. Three protocol rules govern these updates:
 - Result sets are **member-grained**: the ordinary current-row projection is
   `(table, row_uuid, content_tx_id)`, but protocol-visible membership is typed
   `ResultMemberEntry` data. Real-row members carry source/read-view,
-  content/deletion layer, optional deletion tx, schema, branch/prefix, batch,
+  content/deletion layer, optional deletion tx, schema, partition/prefix, batch,
   and digest dimensions when those dimensions participate in identity.
   Synthetic aggregate/window rows and path tuple rows use the same member set
   rather than another result-set engine (`INV-SYNC-7`).
@@ -215,7 +215,7 @@ For a canonical binding view at a declared frontier, the authority sends a safe
 - the ordered, active catalogue/schema/lens lineage needed to interpret every
   included fact and to reach the binding's read schema;
 - canonical authored content and deletion `VersionRecord`s, with their logical
-  table, row, transaction, authored `SchemaVersionId`, branch/source lineage,
+  table, partition tuple, row, transaction, authored `SchemaVersionId`, source lineage,
   and fate/frontier identity intact;
 - authority-maintained relation/correlation, winner, and replacement witnesses
   needed by the lowered program, including their source/witness identity;
@@ -230,7 +230,7 @@ immutable content/deletion history authored by a client, and remains meaningful
 outside this subscription. **Authority-maintained facts** are correlation,
 membership, admission, replacement, and settlement facts computed for this
 authorized binding view. They are not re-authored history and cannot be reused
-as ordinary rows or across another reader, branch, policy revision, or binding.
+as ordinary rows or across another reader, partition view, policy revision, or binding.
 The manifest identifies the exact **authorized residual program** that consumes
 both families: the canonical shape/read view plus the authority-maintained
 relations that replace policy evaluation or hidden correlation at the receiver.
@@ -238,7 +238,7 @@ Its identity and canonical digest are inputs to IVM, not an informal promise.
 
 Every closure begins with a canonical **closure manifest**. It names the
 authority database lineage and authority view epoch, canonical binding view,
-reader/policy revision, `BranchId` and frozen `SnapshotRef` where applicable,
+reader/policy revision, normalized partition sources and `SnapshotRef` where applicable,
 frontier, ordered catalogue segment and digest, residual-program/admission
 identity and digest, plus a complete canonical inventory for every fact class.
 Each inventory has stable fact identities, count, and digest; the manifest's
@@ -256,13 +256,13 @@ hidden row and not a projected substitute. That fact can enable or retract the
 authorized member in the receiver's graph, but cannot be reinterpreted as an
 independently readable source row (`INV-SYNC-33`, ch. 7). Its identity is bound
 to the authority database lineage, authority epoch, manifest digest, canonical
-shape/binding/read view, reader/policy revision, branch/SnapshotRef, and
+shape/binding/read view, reader/policy revision, partition sources/SnapshotRef, and
 residual-program identity. A receiver rejects a replay under any other axis;
 opaque admission is a scoped residual input, not a portable capability. It is
 also bound to its **protected occurrence**: the exact output/result-member or
 path occurrence it admits, its source logical table/row, the concrete
-content/deletion version(s), and the selected layer (`root-current`,
-`branch-base(SnapshotRef)`, or `branch-overlay(BranchId)`). Its identity names
+content/deletion version(s), and the selected exact partition layer (current or
+snapshot-qualified). Its identity names
 every correlation, winner, replacement, and policy witness by stable witness id
 _and_ concrete version/layer. A changed content/deletion winner, layer, witness,
 or protected occurrence retires the old admission; it cannot be reused for a
@@ -273,8 +273,8 @@ Receiver application has one fixed order:
 1. admit and order the catalogue closure; park data whose authored schema or
    lineage is unavailable;
 2. decode each version using its **authored** schema and validate its canonical
-   identity and bytes; resolve history/current winners and branch overlays in
-   their authored lineage before any read-schema projection;
+   identity, partition tuple, and bytes; resolve partition-qualified history and
+   current winners before any read-schema projection;
 3. project only those selected winners through the ordered lens lineage into the
    subscription read schema;
 4. install only the manifest-admitted canonical and authority facts into local
@@ -375,13 +375,13 @@ The source identity of every row and witness is stable across this path, so a
 replacement, deletion, or policy revocation retracts the same local fact that
 caused the prior output.
 
-Branch views are closed in the same way, but their closure is branch-specific.
-The manifest mirrors the selected branch record, its frozen base `SnapshotRef`,
-and only the selected branch's overlay/base winner witnesses. It MUST NOT admit
-a same-row fact from a sibling branch or a post-base parent change merely
-because that fact is present in local history. A missing branch record, base
-contribution, overlay witness, or branch-qualified authority fact prevents
-settlement and is repaired or reset as a branch closure (ch. 11).
+Partition overlay views are closed in the same way, but their closure is
+source-specific. The manifest names normalized head/base tuples and any frozen
+base `SnapshotRef`, and includes only the selected layer winners. It MUST NOT
+admit a same-row fact from another tuple or a post-cut base change merely because
+that fact is present locally. A missing base contribution, head witness, or
+partition-qualified authority fact prevents settlement and is repaired or reset
+as part of that read-view closure (ch. 11).
 
 The result is deterministic: with the same ordered catalogue closure, canonical
 fact multiset, authority admission facts, canonical shape/binding/read view, and
@@ -444,7 +444,7 @@ Under the intended reconstruction model, a reset replaces the receiver's
 canonical closure manifest and every class inventory for that binding view; the
 receiver re-runs local maintenance over that closure and publishes the resulting
 local terminal reset. A reset of projected rows alone is insufficient because it
-cannot prove that later local replacement, lens, policy, relation, branch, or
+cannot prove that later local replacement, lens, policy, relation, partition, or
 admission deltas have the inputs required to reproduce the same result.
 
 **Implementation status (2026-07-27).** The receiver uses the staged-delta path
@@ -479,7 +479,7 @@ reset `ViewUpdate` for the same canonical program instance (ch. 6).
 The universal deletion-history table is not a wire namespace. A commit still
 carries a logical table and a deletion `VersionRecord`; receiver catalogue
 admission resolves that table/schema to its receiver-local `PhysicalTableId` and
-persists the event under its local `(branch_lineage, physical_table_id, row)`
+persists the event under its local `(physical_table_id, partition_tuple, row)`
 prefix. A payload cannot choose or forge a physical id, and a shared storage
 layout never changes table-scoped sync or authorization semantics
 (`INV-SYNC-27`).
@@ -734,7 +734,7 @@ reproducible input closure** for that cursor: ordered catalogue lineage,
 authorized canonical version/witness facts, authoritative admission facts, and
 the exact shape/binding/read-view identity. More precisely, the receiver must
 hold one complete closure manifest for the selected authority epoch and verify
-every catalogue, authored-history, branch, correlation, admission, replacement,
+every catalogue, authored-history, partition, correlation, admission, replacement,
 and settlement inventory named by it. A reconnect fast cursor may omit a known
 version body only under the ordinary repair rule, but it cannot certify
 settlement until every omitted body and every needed fact in every manifest
@@ -760,7 +760,7 @@ policy (`INV-SYNC-26`). Convergence is preserved: a stream served under
 known-state dedup followed by its repairs MUST be observationally equivalent
 to the same stream served without dedup (`INV-SYNC-25`, cf. `INV-SYNC-20`).
 The closure manifest extends that discipline beyond version bodies: a receiver
-requests the exact missing catalogue, branch, correlation, admission,
+requests the exact missing catalogue, partition, correlation, admission,
 replacement, or settlement fact by its manifest class and identity. A server
 that cannot provide a matching member of the current manifest sends a reset
 with a new manifest; it must not leave the receiver partially settled or fill

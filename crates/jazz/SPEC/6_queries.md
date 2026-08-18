@@ -43,7 +43,7 @@ Invariant digest:
 - `INV-QUERY-5`: `Subscribe` MUST name a registered shape and match inferred parameter arity; the supplied usage-site subscription id is independent from the binding id, and `Unsubscribe` MUST drop that usage subscription's settled result set.
 - `INV-QUERY-6`: `RegisterShape` followed by `Subscribe` MUST cause the serving side to attach the usage-site subscription to the matching canonical program instance `(ShapeId, ResolvedReadKey, PolicySharingKey, BindingId)` and respond with a reset-result-set `ViewUpdate`.
 - `INV-QUERY-7`: A reset-result-set `ViewUpdate` MUST replace the subscription result set while retaining per-peer version dedup state.
-- `INV-QUERY-8`: Query `ViewUpdate` result sets MUST be addressed by a canonical program instance and carry typed result membership with enough version/read-view context to distinguish content versions, deletion-register visibility, branch/historic membership, synthetic rows, and path tuples. Real-row members MUST expose the ordinary current-row `(table, row_uuid, content_tx_id)` projection only as a compatibility/payload-bundling projection, not as the complete identity.
+- `INV-QUERY-8`: Query `ViewUpdate` result sets MUST be addressed by a canonical program instance and carry typed result membership with enough version/read-view context to distinguish content versions, deletion-register visibility, partition/historic membership, synthetic rows, and path tuples. Real-row members MUST expose the ordinary current-row `(table, row_uuid, content_tx_id)` projection only as a compatibility/payload-bundling projection, not as the complete identity.
 - `INV-QUERY-9`: Result-set material MUST include output rows plus matched include-reference and join/junction contribution rows, MUST exclude traversed non-matches and failed include paths from subscription payloads, and MUST apply read-policy/policy-atomic filtering before emission.
 - `INV-QUERY-10`: Include missing-target semantics MUST be local view/API behavior: `JoinMode::Inner` drops parents with unresolvable include targets, `JoinMode::Holes` keeps them, and `require_includes` tightens holes mode by requiring include matches without broadening payload material; sync MUST NOT drop readable parents solely because included targets are absent.
 - `INV-QUERY-11`: Local/unsettled query reads MUST return rows complete only relative to node-local visible-current knowledge.
@@ -724,9 +724,9 @@ transition to and from a non-empty input.
 ### 6.5 Query-driven sync
 
 A subscription binds a shape to one binding in one read view. `RegisterShapeOptions`
-carry a semantic `ReadViewSpec` describing the requested current, branch,
-merged-branch, owner-qualified historic snapshot, schema-projected, and
-overlay-visible view. The serving/runtime boundary derives the authoritative
+carry a semantic `ReadViewSpec` describing the requested current source,
+partition-qualified head and optional live/frozen base, owner-qualified historic
+snapshot, schema projection, and transaction overlay. The serving/runtime boundary derives the authoritative
 resolved read identity from the semantic read view plus tier; callers do not
 supply the key as independent identity. The wire vocabulary is `RegisterShape`,
 `Subscribe`, `Unsubscribe`, and `ViewUpdate` (ch. 8).

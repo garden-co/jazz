@@ -28,7 +28,7 @@ resolution, ingest/commit-unit/read-set costs) · **S1** relevance-scaled
 query-driven partial sync · **S2** realtime canvas (mergeable, tier `none`) ·
 **S3** recursive permission-filtered sync · **S4** serializable order processing
 (exclusive, TPC-C-derived) · **S5** durable streams · **S7** migration lenses ·
-**S8** branching · **S9** durable execution. Every
+**S8** partition overlays · **S9** durable execution. Every
 _implemented_ harness runs against the current feature set; **S8 has no harness yet** (`[needs: scenario
 harness]`).
 
@@ -925,38 +925,34 @@ version.
 The native single-version run is the floor; the naive alternative
 (stop-the-world rewrite) is described, not implemented.
 
-### 8. Branching `[needs: scenario harness]`
+### 8. Partition overlays `[needs: scenario harness]`
 
-_Motivation: branches as a first-class database feature — isolated
-parallel lines of work over a shared base (sandboxing, drafts, staging,
-agent experimentation) with snapshot-base semantics, cheap creation, and
-storage shared with the base._
+_Motivation: schema-declared partition dimensions and overlay reads provide
+isolated parallel lines of work over shared live or frozen bases without a
+core-owned branch object._
 
 #### Workload (agent-sandbox shape)
 
-A large base database (S1 fixture scale). N concurrent short-lived
-branches (N = 1 / 10 / 100): each branch is created off current main,
-receives a burst of writes (mixed inserts/updates over base rows),
-serves reads (queries spanning branch-local + base-visible state), then
-is either merged back or discarded. Meanwhile main keeps receiving its
-own write stream.
+A large base database (S1 fixture scale). N concurrent partition tuples
+(N = 1 / 10 / 100) each receive a burst of writes over shared `RowUuid`s and
+serve head-over-base reads; half use live bases and half frozen `SnapshotRef`
+bases. Transactions include same-tuple and cross-tuple atomic writes while the
+base tuples keep receiving their own streams.
 
 #### Metrics
 
-branch creation cost (target: O(1) snapshot capture, independent of base
-size) · branch read overhead vs main reads (the overlay tax) · storage
-per branch vs naive copy (sharing ratio; only branch-local writes may
-cost) · merge-back cost vs branch size · discard cost · subscription
-behavior across branches (a subscriber on main must see nothing from
-unmerged branches — counter, must be 0; branch subscribers see
-base+overlay consistently).
+selector normalization cost · overlay read overhead vs exact-partition reads ·
+storage per sparse tuple vs naive copy · index masking cost · contribution-merge
+cost vs source size · subscription behavior across tuples · cross-partition
+atomic admission and selected-delivery cost.
 
 #### Correctness
 
-branch reads == base-snapshot-plus-overlay oracle · main is bit-identical
-whether or not discarded branches ever existed · merge-back equals the
-equivalent direct-on-main write sequence under the same merge strategies
-· two branches never observe each other.
+overlay reads == independent-layer head-then-base oracle · masking precedes
+predicates and index publication · unrelated tuples never compete · shared
+tables appear once · frozen bases ignore post-cut writes while live bases track
+them · contribution merge equals the equivalent direct-on-target strategy
+effects without echo.
 
 ### 9. Durable execution backend
 

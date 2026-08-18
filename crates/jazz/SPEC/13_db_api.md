@@ -432,7 +432,7 @@ ABI shapes are implementation choices rather than a second public API.
 Subscriptions cross the boundary as host streams/callbacks built on
 `Db::subscribe`, with postcard-encoded chunks if a byte payload is needed.
 Transport code moves encoded `WireFrame` bytes; it does not
-decode `SyncMessage` as product API. Catalogue, branch, and lens APIs should be added only when their core runtime APIs and binding ergonomics are
+decode `SyncMessage` as product API. Catalogue, overlay-view, and lens APIs should be added only when their core runtime APIs and binding ergonomics are
 settled.
 
 #### 13.7.1 Binding Responsibilities
@@ -537,7 +537,7 @@ the client `Db` facade.
 | byte wire transport              |         Y |               N |        Y |        Y |              Y |          Shell |
 | semantic `SyncMessage` transport |         Y |               N |        N |        N |              N | Shell-internal |
 | auth/session admission           |         P |               Y |        P |        P |              P |          Shell |
-| branch/time-travel facade        |         P |               P |        P |        P |              P |          Shell |
+| overlay/time-travel facade       |         P |               P |        P |        P |              P |          Shell |
 | lens/catalogue facade            |         P |               P |        P |        P |              P |          Shell |
 | structured errors/events         |         P |               Y |        Y |        Y |              Y |          Shell |
 | durability tier waits            |         Y |               Y |        Y |        Y |              Y |          Shell |
@@ -594,17 +594,16 @@ reducer_: its behavior must be fully determined by the delivered stream, never
 by re-evaluating the query against row sets.
 
 When a client API needs an alternate read view — read-your-writes inside an
-open transaction, a branch cut, a historical snapshot — the API expresses that
+open transaction, a partition overlay, a historical snapshot — the API expresses that
 view to the core (`ReadOpts.read_view`, open-transaction overlays) and the
 normal lowered query executes there. The engine already evaluates queries
 inside open exclusive transactions (`tx_query` over
 `OverlayRef::OpenTransaction`); binding layers plumb handles to it rather than
 overlaying pending writes above the engine.
 
-**Implementation status (2026-07-27).** Core-owned branch read views are
-exercised by `single_branch_read_view_uses_query_engine_branch_source_for_one_shot_reads`
-(`crates/jazz/src/db/tests.rs:1690`). Cross-binding semantic-duplication audit
-state is intentionally not asserted as a timeless contract here.
+The partition-overlay facade is a target surface owned by ch. 11. Bindings pass
+normalized named head/base sources to the core and never recreate masking,
+winner selection, or copy-on-write semantics in TypeScript or host code.
 
 ## Open Questions
 

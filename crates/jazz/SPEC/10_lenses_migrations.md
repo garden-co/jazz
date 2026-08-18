@@ -72,7 +72,7 @@ Exactly one database-wide catalogue sequencer assigns a dense monotone
 `CatalogueSeq`. An arbitrary core or replica never assigns catalogue sequence;
 edges forward authenticated, prevalidated requests to that sequencer. Catalogue
 sequence is an administrative ordering domain, not a Jazz data transaction and
-not branch causality. A receiver parks an envelope whose earlier catalogue
+not partition-incarnation causality. A receiver parks an envelope whose earlier catalogue
 sequence or active source schema is missing. The same sequence with different
 canonical content is fatal catalogue corruption, not first-arrival wins.
 Validation happens before consuming sequence. If a sequenced operation must be
@@ -149,7 +149,7 @@ alias select the row's descriptor. The alias, its schema mapping, and the
 descriptor registry are durable local storage state and are recovered before
 any payload is decoded. They never appear in a public value or on the wire.
 An alias or mapping remains retained while any retained history, current row,
-branch, snapshot, or rejected payload can name it.
+partition incarnation, snapshot, or rejected payload can name it.
 
 Jazz registers a schema variant and every projection needed for its logical
 views before activating a catalogue bundle or accepting a row under that
@@ -301,7 +301,7 @@ Concretely, suppose `v1.users { id, name, email }` becomes
 people)` plus `RenameColumn(email, email_address)` lens. Alice's immutable
 `v1` version for `users/u1` remains a `v1`-encoded `VersionRecord`. For Bob's
 `v2.people` subscription, the authority sends that authored record with its
-`users`, `u1`, `v1`, transaction, branch, and source identity unchanged, plus
+`users`, `u1`, `v1`, transaction, partition tuple, and source identity unchanged, plus
 the ordered catalogue/lens closure and any safe membership witness. Bob decodes
 the bytes as `v1.users`, applies the two lens operations, then feeds the logical
 `v2.people { id: u1, name, email_address }` fact into the local IVM. Bob's
@@ -365,7 +365,7 @@ change future merge behavior.
   missing-backwards-default check).
 - 🔶 **Explicit schema-version GC.** `INV-LENS-20` forbids automatic deletion of
   published physical lineages or authored variants. If explicit GC is ever added, what completeness,
-  branch/history, lens, and audit evidence must authorize it?
+  partition/history, lens, and audit evidence must authorize it?
 - 🔶 **Multiple-parent schema lineage.** Initial admission has exactly one
   lineage-defining parent. Later cross-lenses may add translation paths but may
   not change physical placement. If a future schema must inherit physical

@@ -132,11 +132,11 @@ content-current row; a later current `Restored` event reveals it again; content
 writes never touch the register (`INV-HIST-11`).
 
 Physically, deletion history is one sparse, schema-independent relation shared
-by all content lineages. Every event is keyed by its root/branch lineage and
-stable physical table lineage before row identity, so a seek for one row is
-bounded to `(branch_lineage, physical_table_id, row_uuid)` and a table scan is
-bounded to `(branch_lineage, physical_table_id)`. It is not a universal scan and
-it never identifies a row by `RowUuid` alone.
+by all content lineages. Every event is keyed by stable physical table and
+canonical partition tuple before row identity, so a seek for one incarnation is
+bounded to `(physical_table_id, partition_tuple, row_uuid)` and a partition scan
+is bounded to `(physical_table_id, partition_tuple)`. It is not a universal scan
+and it never identifies an incarnation by `RowUuid` alone.
 
 ### 4.5 Global-current as derived state
 

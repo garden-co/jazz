@@ -54,7 +54,7 @@ decisions. Guidance appendices are entirely non-normative.
 | 8   | Sync protocol                                                                         | the peer layer: view updates, commit units, fates, subscriptions               |
 | 9   | Topology & the edge tier                                                              | client/relay/edge/core trust ladder; edge authority & cache                    |
 | 10  | Schema evolution: lenses & migrations                                                 | multi-schema coexistence                                                       |
-| 11  | Time-travel & branches                                                                | settled-history reads; snapshot-base branches                                  |
+| 11  | Partitioned history, overlay views & time travel                                       | schema dimensions; live/frozen bases; contribution merges                      |
 | 13  | The high-level `Db` API                                                               | the runtime-typed surface, subscriptions, sync/serve, identity/auth            |
 | 14  | Lowering to groove                                                                    | how every jazz concept maps onto groove                                        |
 | 15  | Sharding                                                                              | exploratory; mostly open questions                                             |

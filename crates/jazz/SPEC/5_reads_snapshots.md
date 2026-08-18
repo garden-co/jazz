@@ -131,8 +131,8 @@ whole-table reads are degenerate query shapes.
 A historical read asks what was visible at a past global position. For a read at
 a past `GlobalTime`, the system chooses independent content and deletion winners
 from `jazz_global_changes` at or before the requested position, then derives
-visibility before returning content (`INV-READ-9`). Time-travel
-and snapshot-base branches build on this mechanism (ch. 11), and read policy is
+visibility before returning content (`INV-READ-9`). Time travel and frozen-base
+partition sources build on this mechanism (ch. 11), and read policy is
 evaluated at the historical cut (ch. 7).
 
 ### 5.7 Subsumed row-history read notes
