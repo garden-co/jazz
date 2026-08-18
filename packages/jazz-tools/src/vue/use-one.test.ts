@@ -38,7 +38,8 @@ describe("vue/useOne", () => {
 
     expectTypeOf(result).toEqualTypeOf<UseOneResult<Todo>>();
     expect(result.data.value).toBeNull();
-    expect(JSON.parse(mocks.makeQueryKey.mock.calls[0]![0]._build()).limit).toBe(1);
+    const limitedQuery = (mocks.makeQueryKey.mock.calls as any[][])[0]![0];
+    expect(JSON.parse(limitedQuery._build()).limit).toBe(1);
     scope.stop();
   });
 

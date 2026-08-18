@@ -47,7 +47,8 @@ describe("solid/useOne", () => {
 
     expectTypeOf(result).toEqualTypeOf<UseOneResult<Todo>>();
     expect(result.data).toBeNull();
-    expect(JSON.parse(mocks.makeQueryKey.mock.calls[0]![0]._build()).limit).toBe(1);
+    const limitedQuery = (mocks.makeQueryKey.mock.calls as any[][])[0]![0];
+    expect(JSON.parse(limitedQuery._build()).limit).toBe(1);
 
     onDelta({ all: [{ id: "1", title: "first" }], delta: [] });
     expect(result.data).toEqual({ id: "1", title: "first" });

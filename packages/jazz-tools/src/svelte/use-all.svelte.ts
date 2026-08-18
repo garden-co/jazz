@@ -1,8 +1,15 @@
 import { applyDelta } from "../shared/index.js";
+import { limitQueryToOne } from "../runtime/db.js";
 import type { QueryBuilder, QueryOptions, SubscriptionDelta } from "../shared/index.js";
 import { getJazzContext } from "./context.svelte.js";
 
 type MaybeGetter<T> = T | (() => T);
+
+type QuerySubscriptionOptions<One extends boolean> = QueryOptions & { one?: One };
+
+type QuerySubscriptionResult<T, One extends boolean> = One extends true
+  ? T | null | undefined
+  : T[] | undefined;
 
 function resolve<T>(value: MaybeGetter<T>): T {
   return typeof value === "function" ? (value as () => T)() : value;
@@ -34,14 +41,14 @@ function resolve<T>(value: MaybeGetter<T>): T {
  * {/if}
  * ```
  */
-export class QuerySubscription<T extends { id: string }> {
-  current: T[] | undefined = $state();
+export class QuerySubscription<T extends { id: string }, One extends boolean = false> {
+  current: QuerySubscriptionResult<T, One> = $state();
   loading: boolean = $state(true);
   error: Error | null = $state(null);
 
   constructor(
     query: MaybeGetter<QueryBuilder<T> | undefined>,
-    options?: MaybeGetter<QueryOptions | undefined>,
+    options?: MaybeGetter<QuerySubscriptionOptions<One> | undefined>,
   ) {
     const ctx = getJazzContext();
 
@@ -58,6 +65,9 @@ export class QuerySubscription<T extends { id: string }> {
       if (!store) return;
 
       const resolvedOptions = resolve(options);
+      const one = resolvedOptions?.one === true;
+      const queryOptions = resolvedOptions && (({ one: _, ...rest }) => rest)(resolvedOptions);
+      const subscriptionQuery = one ? limitQueryToOne(resolvedQuery) : resolvedQuery;
 
       this.loading = true;
       this.error = null;
@@ -68,29 +78,33 @@ export class QuerySubscription<T extends { id: string }> {
       // which lets the class be used inside `$effect.root` and `.svelte.ts`.
       let unsubscribe: (() => void) | null = null;
       try {
-        const key = store.makeQueryKey(resolvedQuery, resolvedOptions);
+        const key = store.makeQueryKey(subscriptionQuery, queryOptions);
         const entry = store.getCacheEntry<T>(key);
 
         // Apply initial state from cache
         if (entry.state.status === "fulfilled") {
-          this.current = entry.state.data;
+          this.current = (
+            one ? (entry.state.data[0] ?? null) : entry.state.data
+          ) as QuerySubscriptionResult<T, One>;
           this.loading = false;
         }
 
         unsubscribe = entry.subscribe({
           onfulfilled: (data: T[]) => {
-            this.current = data;
+            this.current = (one ? (data[0] ?? null) : data) as QuerySubscriptionResult<T, One>;
             this.loading = false;
             this.error = null;
           },
           onDelta: (delta: SubscriptionDelta<T>) => {
-            if (this.current) {
-              applyDelta(this.current, delta);
+            if (one) {
+              this.current = (delta.all[0] ?? null) as QuerySubscriptionResult<T, One>;
+            } else if (this.current) {
+              applyDelta(this.current as T[], delta);
             } else if (delta.reset) {
-              this.current = delta.all;
+              this.current = delta.all as QuerySubscriptionResult<T, One>;
             } else {
-              this.current = [];
-              applyDelta(this.current, delta);
+              this.current = [] as unknown as QuerySubscriptionResult<T, One>;
+              applyDelta(this.current as T[], delta);
             }
           },
           onError: (error: unknown) => {
