@@ -476,7 +476,9 @@ fn demand_driven_db_acquires_cold_subscription_before_registering_it() {
     };
     assert_eq!(removed.len(), 1);
     assert_eq!(deleted_write.row_uuid(), write.row_uuid());
-    let std::task::Poll::Ready(Ok(rows)) = owner.poll_all(&mut context, &prepared, opts) else {
+    let std::task::Poll::Ready(Ok(rows)) =
+        owner.poll_all(&mut context, &prepared, opts.clone())
+    else {
         panic!("a resident post-delete read must complete in its first poll")
     };
     assert_eq!(rows.len(), 1);
@@ -519,6 +521,9 @@ fn demand_driven_db_acquires_cold_subscription_before_registering_it() {
         title_cells("staged b"),
     ))
     .unwrap();
+    let staged = crate::db::block_on(owner.mergeable_all(tx_id, &prepared, opts.clone())).unwrap();
+    assert!(staged.iter().any(|row| row.row_uuid() == tx_row_a));
+    assert!(staged.iter().any(|row| row.row_uuid() == tx_row_b));
     assert!(
         subscription.try_next_event().is_none(),
         "staged transaction writes must remain invisible"

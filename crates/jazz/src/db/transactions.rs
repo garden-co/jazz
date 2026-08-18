@@ -92,6 +92,73 @@ where
             .map_err(MutationPrepareError::Node)
     }
 
+    pub(super) fn stage_mergeable_restore_for_owner(
+        &self,
+        tx_id: OpenBatchId,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+        now_ms: u64,
+    ) -> Result<(), MutationPrepareError> {
+        let cells = self
+            .apply_insert_defaults(table, cells)
+            .map_err(MutationPrepareError::Api)?;
+        let mut node = self.node.node.borrow_mut();
+        let content_parents = node
+            .local_content_winner_tx_id(table, row)
+            .map_err(MutationPrepareError::Node)?
+            .into_iter()
+            .collect();
+        let deletion_parents = node
+            .local_deletion_winner_tx_id(table, row)
+            .map_err(MutationPrepareError::Node)?
+            .into_iter()
+            .collect();
+        node.tx_write_mergeable_in_schema(
+            tx_id,
+            self.schema_version_id,
+            table,
+            row,
+            cells,
+            None,
+            content_parents,
+            Some(now_ms),
+            true,
+        )
+        .map_err(MutationPrepareError::Node)?;
+        node.tx_write_mergeable_in_schema(
+            tx_id,
+            self.schema_version_id,
+            table,
+            row,
+            BTreeMap::new(),
+            Some(DeletionEvent::Restored),
+            deletion_parents,
+            Some(now_ms),
+            true,
+        )
+        .map_err(MutationPrepareError::Node)
+    }
+
+    pub(super) fn transaction_all_for_owner(
+        &self,
+        tx_id: OpenBatchId,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+    ) -> Result<Vec<CurrentRow>, MutationPrepareError> {
+        ensure_default_read_view(&opts).map_err(MutationPrepareError::Api)?;
+        self.node
+            .node
+            .borrow_mut()
+            .tx_query_with_options(
+                tx_id,
+                &prepared.shape,
+                &prepared.binding,
+                opts.include_deleted,
+            )
+            .map_err(MutationPrepareError::Node)
+    }
+
     /// Build a mergeable transaction that commits multiple writes under one id.
     pub fn mergeable_tx(&self) -> Result<MergeableTx<'_, S>, Error> {
         let tx_id = OpenBatchId::new();

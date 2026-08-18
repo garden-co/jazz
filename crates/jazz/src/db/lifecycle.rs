@@ -601,6 +601,54 @@ impl DemandDrivenDb {
         .map_err(MutationPrepareError::into_api)
     }
 
+    pub async fn mergeable_restore(
+        &mut self,
+        tx_id: OpenBatchId,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+    ) -> Result<(), Error> {
+        let now_ms = self.database.next_now_ms();
+        let database = &self.database;
+        std::future::poll_fn(|context| {
+            self.runtime.poll_operation(
+                context,
+                || {
+                    database.stage_mergeable_restore_for_owner(
+                        tx_id,
+                        table,
+                        row,
+                        cells.clone(),
+                        now_ms,
+                    )
+                },
+                MutationPrepareError::missing_input,
+            )
+        })
+        .await
+        .map_err(MutationPrepareError::into_api)
+    }
+
+    /// Read through an open transaction's private overlay. Cold snapshot
+    /// inputs may suspend; staged rows remain private to this transaction.
+    pub async fn mergeable_all(
+        &mut self,
+        tx_id: OpenBatchId,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        let database = &self.database;
+        std::future::poll_fn(|context| {
+            self.runtime.poll_operation(
+                context,
+                || database.transaction_all_for_owner(tx_id, prepared, opts.clone()),
+                MutationPrepareError::missing_input,
+            )
+        })
+        .await
+        .map_err(MutationPrepareError::into_api)
+    }
+
     /// Publish every staged write as one resident and durable transaction.
     pub async fn commit_mergeable(&mut self, tx_id: OpenBatchId) -> Result<TxId, Error> {
         let fallback_now_ms = self.database.next_now_ms();
