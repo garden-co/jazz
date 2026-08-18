@@ -238,6 +238,10 @@ where
         !self.staged_inbound.is_empty()
     }
 
+    pub(super) fn has_externally_applied_inbound(&self) -> bool {
+        self.externally_applied_inbound
+    }
+
     /// Acquire the ordered inputs needed to compile the next subscriber
     /// control frame before the synchronous peer state machine consumes it.
     /// Demand-driven owners stage one frame at a time, so a cold lookup may
@@ -1734,7 +1738,9 @@ where
                     }
                     uploaded.insert(tx_id);
                 }
-                let mut applied = std::mem::take(&mut self.externally_applied_inbound);
+                let externally_applied = std::mem::take(&mut self.externally_applied_inbound);
+                let mut applied = externally_applied;
+                let mut applied_in_tick = false;
                 let mut pending_view_updates = Vec::<PendingAuthorityViewUpdate>::new();
                 let mut pending_initial_coverage_clears = BTreeSet::<CoverageKey>::new();
                 while let Some(StagedInboundMessage {
@@ -2381,6 +2387,7 @@ where
                         );
                     }
                     applied = true;
+                    applied_in_tick = true;
                 }
                 if !pending_view_updates.is_empty() {
                     apply_pending_authority_view_updates(
@@ -2399,8 +2406,10 @@ where
                         &self.active_authority_view_receipts,
                     )?;
                     stats.remote_sync_applied += 1;
-                    let next = self.subscriber_dirty_epoch.get().wrapping_add(1);
-                    self.subscriber_dirty_epoch.set(next);
+                    if applied_in_tick {
+                        let next = self.subscriber_dirty_epoch.get().wrapping_add(1);
+                        self.subscriber_dirty_epoch.set(next);
+                    }
                     schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
                 }
             }
@@ -2479,7 +2488,9 @@ where
                         }
                     }
                 }
-                let mut applied_inbound = std::mem::take(&mut self.externally_applied_inbound);
+                let externally_applied = std::mem::take(&mut self.externally_applied_inbound);
+                let mut applied_inbound = externally_applied;
+                let mut applied_in_tick = false;
                 let mut scheduled_immediate = false;
                 let mut sent_view_update = false;
                 for fate in std::mem::take(&mut *self.downstream_fates.borrow_mut()) {
@@ -2515,6 +2526,7 @@ where
                         continue;
                     }
                     applied_inbound = true;
+                    applied_in_tick = true;
                     let admitted_metadata = match &message {
                         SyncMessage::BranchMetadata(metadata) => Some(metadata.branch_id),
                         _ => None,
@@ -3538,7 +3550,7 @@ where
                 if applied_inbound && !scheduled_immediate {
                     schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
                 }
-                if applied_inbound {
+                if applied_in_tick {
                     let next = self.subscriber_dirty_epoch.get().wrapping_add(1);
                     self.subscriber_dirty_epoch.set(next);
                     self.observed_subscriber_dirty_epoch.set(next);

@@ -710,9 +710,11 @@ impl DemandDrivenDb {
                     Poll::Pending => return Poll::Pending,
                     Poll::Ready(Err(error)) => return Poll::Ready(Err(error.into())),
                     Poll::Ready(Ok(None)) => {}
-                    Poll::Ready(Ok(Some(responses))) => connection
-                        .borrow_mut()
-                        .complete_session_branch_metadata(&metadata, false, responses),
+                    Poll::Ready(Ok(Some(responses))) => {
+                        connection
+                            .borrow_mut()
+                            .complete_session_branch_metadata(&metadata, false, responses);
+                    }
                 }
             }
             let staged_session_branch = connection.borrow().staged_session_branch_metadata();
@@ -730,9 +732,11 @@ impl DemandDrivenDb {
                     Poll::Ready(Ok(None)) => connection
                         .borrow_mut()
                         .park_staged_session_branch_metadata(),
-                    Poll::Ready(Ok(Some(responses))) => connection
-                        .borrow_mut()
-                        .complete_session_branch_metadata(&metadata, true, responses),
+                    Poll::Ready(Ok(Some(responses))) => {
+                        connection
+                            .borrow_mut()
+                            .complete_session_branch_metadata(&metadata, true, responses);
+                    }
                 }
                 continue;
             }
@@ -745,9 +749,11 @@ impl DemandDrivenDb {
                 ) {
                     Poll::Pending => return Poll::Pending,
                     Poll::Ready(Err(error)) => return Poll::Ready(Err(error.into())),
-                    Poll::Ready(Ok(responses)) => connection
-                        .borrow_mut()
-                        .complete_staged_catalogue_message(&message, responses),
+                    Poll::Ready(Ok(responses)) => {
+                        connection
+                            .borrow_mut()
+                            .complete_staged_catalogue_message(&message, responses);
+                    }
                 }
                 continue;
             }
@@ -760,7 +766,7 @@ impl DemandDrivenDb {
                     Poll::Pending => return Poll::Pending,
                     Poll::Ready(Err(error)) => return Poll::Ready(Err(error.into())),
                     Poll::Ready(Ok(())) => {
-                        connection.borrow_mut().complete_staged_catalogue_snapshot()
+                        connection.borrow_mut().complete_staged_catalogue_snapshot();
                     }
                 }
                 continue;
@@ -773,9 +779,17 @@ impl DemandDrivenDb {
                 {
                     Poll::Pending => return Poll::Pending,
                     Poll::Ready(Err(error)) => return Poll::Ready(Err(error.into())),
-                    Poll::Ready(Ok(())) => connection
-                        .borrow_mut()
-                        .complete_staged_branch_metadata(metadata.branch_id),
+                    Poll::Ready(Ok(())) => {
+                        connection
+                            .borrow_mut()
+                            .complete_staged_branch_metadata(metadata.branch_id);
+                    }
+                }
+                if connections
+                    .iter()
+                    .any(|connection| connection.borrow().has_externally_applied_inbound())
+                {
+                    self.database.node.mark_subscriber_connections_dirty();
                 }
                 context.waker().wake_by_ref();
                 return Poll::Pending;
@@ -789,13 +803,19 @@ impl DemandDrivenDb {
                     Poll::Pending => return Poll::Pending,
                     Poll::Ready(Err(error)) => return Poll::Ready(Err(error.into())),
                     Poll::Ready(Ok(())) => {
-                        connection.borrow_mut().complete_staged_row_version_repair()
+                        connection.borrow_mut().complete_staged_row_version_repair();
                     }
                 }
                 // Completion re-stages the original ViewUpdate at the head of
                 // this same link. Yield before the legacy node tick can consume
                 // it; the next owner poll acquires and publishes it through the
                 // typed receiver boundary.
+                if connections
+                    .iter()
+                    .any(|connection| connection.borrow().has_externally_applied_inbound())
+                {
+                    self.database.node.mark_subscriber_connections_dirty();
+                }
                 context.waker().wake_by_ref();
                 return Poll::Pending;
             }
@@ -828,9 +848,11 @@ impl DemandDrivenDb {
                             .abort_staged_subscriber_relay_commit(tx_id, kind);
                         return Poll::Ready(Err(error.into()));
                     }
-                    Poll::Ready(Ok(())) => connection
-                        .borrow_mut()
-                        .complete_staged_subscriber_relay_commit(tx_id, kind),
+                    Poll::Ready(Ok(())) => {
+                        connection
+                            .borrow_mut()
+                            .complete_staged_subscriber_relay_commit(tx_id, kind);
+                    }
                 }
                 continue;
             }
@@ -864,7 +886,6 @@ impl DemandDrivenDb {
                         connection
                             .borrow_mut()
                             .complete_staged_subscriber_authority_commit(tx_id, responses);
-                        self.database.node.mark_subscriber_connections_dirty();
                     }
                 }
                 continue;
@@ -878,7 +899,7 @@ impl DemandDrivenDb {
                     Poll::Pending => return Poll::Pending,
                     Poll::Ready(Err(error)) => return Poll::Ready(Err(error.into())),
                     Poll::Ready(Ok(())) => {
-                        connection.borrow_mut().complete_staged_owned_fate(tx_id)
+                        connection.borrow_mut().complete_staged_owned_fate(tx_id);
                     }
                 }
             }
@@ -900,12 +921,23 @@ impl DemandDrivenDb {
                         Poll::Pending => return Poll::Pending,
                         Poll::Ready(Err(error)) => return Poll::Ready(Err(error.into())),
                         Poll::Ready(Ok(())) => {
-                            connection.borrow_mut().complete_staged_view_update(&parts)
+                            connection.borrow_mut().complete_staged_view_update(&parts);
                         }
                     }
                     continue;
                 }
             }
+        }
+
+        if connections
+            .iter()
+            .any(|connection| connection.borrow().has_externally_applied_inbound())
+        {
+            // Typed async ingress has already mutated the resident query
+            // state. Publish that invalidation before acquiring subscriber
+            // outputs; the legacy synchronous tick runs after acquisition and
+            // is therefore too late to arm this owner poll.
+            self.database.node.mark_subscriber_connections_dirty();
         }
 
         // Typed ingress above may change any subscriber's maintained view.
