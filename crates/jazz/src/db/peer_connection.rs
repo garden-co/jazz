@@ -7,6 +7,13 @@
 use super::node_runtime::{refresh_subscriptions_in, route_upstream_subscription_rejection};
 use super::*;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum SubscriberRelayKind {
+    Local,
+    EdgeMergeable,
+    EdgeOther,
+}
+
 /// A live link between this `Db` and one peer, owned by the `Db`.
 ///
 /// Two link shapes — a client/backend attached to an upstream, or a server
@@ -227,10 +234,16 @@ where
     }
 
     pub(super) fn staged_subscriber_relay_commit(
-        &self,
-    ) -> Option<(crate::tx::Transaction, Vec<crate::protocol::VersionRecord>)> {
+        &mut self,
+    ) -> Option<(
+        crate::tx::Transaction,
+        Vec<crate::protocol::VersionRecord>,
+        SubscriberRelayKind,
+    )> {
         let ConnectionLink::Subscriber {
-            local_receiver: true,
+            peer,
+            ingest_context,
+            local_receiver,
             ..
         } = &self.link
         else {
@@ -240,7 +253,36 @@ where
         let SyncMessage::CommitUnit { tx, versions } = &staged.message else {
             return None;
         };
-        Some((tx.clone(), versions.clone()))
+        if !*local_receiver
+            && !subscriber_permissions_ready(
+                self.node.borrow().permissions_ready(),
+                ingest_context.trust,
+            )
+        {
+            return None;
+        }
+        let kind = if *local_receiver {
+            SubscriberRelayKind::Local
+        } else if ingest_context.edge_authority
+            && matches!(peer.role(), PeerRole::ClientLink { .. })
+        {
+            if tx.kind == TxKind::Mergeable {
+                if !reserve_edge_fate_route(
+                    &self.edge_fate_routes,
+                    *self.admitted_upstream_authority.borrow(),
+                    tx.tx_id,
+                    &self.downstream_fates,
+                ) {
+                    return None;
+                }
+                SubscriberRelayKind::EdgeMergeable
+            } else {
+                SubscriberRelayKind::EdgeOther
+            }
+        } else {
+            return None;
+        };
+        Some((tx.clone(), versions.clone(), kind))
     }
 
     pub(super) fn staged_owned_fate(
@@ -374,7 +416,11 @@ where
         self.externally_applied_inbound = true;
     }
 
-    pub(super) fn complete_staged_subscriber_relay_commit(&mut self, tx_id: TxId) {
+    pub(super) fn complete_staged_subscriber_relay_commit(
+        &mut self,
+        tx_id: TxId,
+        kind: SubscriberRelayKind,
+    ) {
         let staged = self
             .staged_inbound
             .pop_front()
@@ -386,7 +432,22 @@ where
         let ConnectionLink::Subscriber { outbox, .. } = &self.link else {
             unreachable!("subscriber relay completion retains its link")
         };
-        register_local_fate_route(&self.local_fate_routes, tx_id, &self.downstream_fates);
+        match kind {
+            SubscriberRelayKind::Local => {
+                register_local_fate_route(&self.local_fate_routes, tx_id, &self.downstream_fates)
+            }
+            SubscriberRelayKind::EdgeMergeable => {
+                self.downstream_fates
+                    .borrow_mut()
+                    .push(SyncMessage::FateUpdate {
+                        tx_id,
+                        fate: Fate::Accepted,
+                        global_seq: None,
+                        durability: Some(DurabilityTier::Edge),
+                    });
+            }
+            SubscriberRelayKind::EdgeOther => {}
+        }
         let mut outbox = outbox.borrow_mut();
         if !outbox.iter().any(|pending| pending.tx_id == tx_id) {
             outbox.push(PendingUpload {
@@ -397,6 +458,16 @@ where
         drop(outbox);
         schedule_tick_in(&self.scheduler, TickUrgency::Deferred);
         self.externally_applied_inbound = true;
+    }
+
+    pub(super) fn abort_staged_subscriber_relay_commit(
+        &mut self,
+        tx_id: TxId,
+        kind: SubscriberRelayKind,
+    ) {
+        if kind == SubscriberRelayKind::EdgeMergeable {
+            remove_edge_fate_route(&self.edge_fate_routes, tx_id, &self.downstream_fates);
+        }
     }
 
     pub(super) fn complete_staged_owned_fate(&mut self, tx_id: TxId) {
@@ -2854,84 +2925,12 @@ where
                                         // never becomes terminal merely
                                         // because a connection disappeared.
                                         let tx_id = tx.tx_id;
-                                        let route_registered = if let Some(authority) =
-                                            *self.admitted_upstream_authority.borrow()
-                                        {
-                                            let mut routes = self.edge_fate_routes.borrow_mut();
-                                            prune_edge_fate_routes(&mut routes, Some(authority));
-                                            let route_count =
-                                                routes.values().map(Vec::len).sum::<usize>();
-                                            let pending = routes.get(&tx_id);
-                                            let already_routed = pending.is_some_and(|pending| {
-                                                pending.iter().any(|route| {
-                                                    route.authority.is_some_and(|route| {
-                                                        route.same_admitted_link(authority)
-                                                    }) && route.queue.upgrade().is_some_and(
-                                                        |queue| {
-                                                            Rc::ptr_eq(
-                                                                &queue,
-                                                                &self.downstream_fates,
-                                                            )
-                                                        },
-                                                    )
-                                                })
-                                            });
-                                            if already_routed {
-                                                true
-                                            } else if route_count < MAX_EDGE_FATE_ROUTES {
-                                                let pending = routes.entry(tx_id).or_default();
-                                                if pending.len() < MAX_EDGE_FATE_ROUTES_PER_TX {
-                                                    pending.push(EdgeFateRoute {
-                                                        authority: Some(authority),
-                                                        queue: Rc::downgrade(
-                                                            &self.downstream_fates,
-                                                        ),
-                                                    });
-                                                    true
-                                                } else {
-                                                    false
-                                                }
-                                            } else {
-                                                false
-                                            }
-                                        } else {
-                                            let mut routes = self.edge_fate_routes.borrow_mut();
-                                            prune_edge_fate_routes(&mut routes, None);
-                                            let already_routed =
-                                                routes.get(&tx_id).is_some_and(|pending| {
-                                                    pending.iter().any(|route| {
-                                                        route.authority.is_none()
-                                                            && route.queue.upgrade().is_some_and(
-                                                                |queue| {
-                                                                    Rc::ptr_eq(
-                                                                        &queue,
-                                                                        &self.downstream_fates,
-                                                                    )
-                                                                },
-                                                            )
-                                                    })
-                                                });
-                                            let route_count =
-                                                routes.values().map(Vec::len).sum::<usize>();
-                                            if already_routed {
-                                                true
-                                            } else if route_count >= MAX_EDGE_FATE_ROUTES {
-                                                false
-                                            } else {
-                                                let pending = routes.entry(tx_id).or_default();
-                                                if pending.len() >= MAX_EDGE_FATE_ROUTES_PER_TX {
-                                                    false
-                                                } else {
-                                                    pending.push(EdgeFateRoute {
-                                                        authority: None,
-                                                        queue: Rc::downgrade(
-                                                            &self.downstream_fates,
-                                                        ),
-                                                    });
-                                                    true
-                                                }
-                                            }
-                                        };
+                                        let route_registered = reserve_edge_fate_route(
+                                            &self.edge_fate_routes,
+                                            *self.admitted_upstream_authority.borrow(),
+                                            tx_id,
+                                            &self.downstream_fates,
+                                        );
                                         if !route_registered {
                                             // Do not claim Edge durability for
                                             // a write that lacks exactly one

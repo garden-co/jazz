@@ -426,6 +426,61 @@ fn route_local_fate(routes: &LocalFateRoutes, tx_id: TxId, fate: &SyncMessage) {
     }
 }
 
+fn reserve_edge_fate_route(
+    routes: &EdgeFateRoutes,
+    authority: Option<AuthorityContext>,
+    tx_id: TxId,
+    queue: &PendingDownstreamFates,
+) -> bool {
+    let mut routes = routes.borrow_mut();
+    prune_edge_fate_routes(&mut routes, authority);
+    let already_routed = routes.get(&tx_id).is_some_and(|pending| {
+        pending.iter().any(|route| {
+            let authority_matches = match (route.authority, authority) {
+                (None, None) => true,
+                (Some(route), Some(authority)) => route.same_admitted_link(authority),
+                _ => false,
+            };
+            authority_matches
+                && route
+                    .queue
+                    .upgrade()
+                    .is_some_and(|candidate| Rc::ptr_eq(&candidate, queue))
+        })
+    });
+    if already_routed {
+        return true;
+    }
+    if routes.values().map(Vec::len).sum::<usize>() >= MAX_EDGE_FATE_ROUTES {
+        return false;
+    }
+    let pending = routes.entry(tx_id).or_default();
+    if pending.len() >= MAX_EDGE_FATE_ROUTES_PER_TX {
+        return false;
+    }
+    pending.push(EdgeFateRoute {
+        authority,
+        queue: Rc::downgrade(queue),
+    });
+    true
+}
+
+fn remove_edge_fate_route(routes: &EdgeFateRoutes, tx_id: TxId, queue: &PendingDownstreamFates) {
+    let mut routes = routes.borrow_mut();
+    let Some(pending) = routes.get_mut(&tx_id) else {
+        return;
+    };
+    pending.retain(|route| {
+        route
+            .queue
+            .upgrade()
+            .is_some_and(|candidate| !Rc::ptr_eq(&candidate, queue))
+    });
+    if pending.is_empty() {
+        routes.remove(&tx_id);
+    }
+}
+
 fn collect_local_replay_commit_units<S>(
     node: &mut NodeState<S>,
     tx_id: TxId,

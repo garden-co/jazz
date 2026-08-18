@@ -2264,6 +2264,102 @@ fn subscriber_relay_acknowledges_local_durability_only_after_commit() {
 }
 
 #[test]
+fn edge_subscriber_acknowledges_and_relays_only_after_durable_commit() {
+    let (mut writer, _) = fail_write_many_node();
+    let (tx_id, unit) = writer
+        .commit_mergeable_unit(
+            MergeableCommit::new("todos", row(0xd2), 10).cells(title_cells("edge subscriber")),
+        )
+        .unwrap();
+    let node_schema = schema();
+    let column_families = node_schema.column_families();
+    let refs = column_families.iter().map(String::as_str).collect::<Vec<_>>();
+    let released = std::rc::Rc::new(std::cell::Cell::new(true));
+    let storage = CommitGatedAuthorityStorage {
+        inner: groove::storage::async_ordered::ImmediateStorage::new(MemoryStorage::new(&refs)),
+        released: std::rc::Rc::clone(&released),
+        fail: std::rc::Rc::new(std::cell::Cell::new(false)),
+        completed: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
+    };
+    let identity = crate::db::DbIdentity {
+        node: node(0xd2),
+        author: AuthorId::from_bytes([0xd2; 16]),
+    };
+    let mut opening = crate::db::PollableDbOpen::new(node_schema, identity, Box::new(storage));
+    let waker = std::task::Waker::from(std::sync::Arc::new(PersistenceTestWake));
+    let mut context = std::task::Context::from_waker(&waker);
+    let std::task::Poll::Ready(Ok(mut edge)) = opening.poll(&mut context) else {
+        panic!("commit-only gate must open the demand-driven edge")
+    };
+    let authority_outbound = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let _authority = edge.connect_upstream(Box::new(QueuedInboundTransport {
+        inbound: std::rc::Rc::new(std::cell::RefCell::new(
+            std::collections::VecDeque::new(),
+        )),
+        outbound: std::rc::Rc::clone(&authority_outbound),
+        session_context: Some(crate::db::ConnectionSessionContext {
+            local: crate::wire::WireAuthorityEndpoint {
+                node: identity.node,
+                epoch: 1,
+            },
+            remote: crate::wire::WireAuthorityEndpoint {
+                node: node(0xa2),
+                epoch: 2,
+            },
+            link_identity: identity.author,
+            negotiated_features: crate::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS,
+        }),
+    }));
+    let subscriber_outbound = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let _subscriber = edge.accept_edge_authority_subscriber_with_claims(
+        Box::new(QueuedInboundTransport {
+            inbound: std::rc::Rc::new(std::cell::RefCell::new(
+                std::collections::VecDeque::from([unit]),
+            )),
+            outbound: std::rc::Rc::clone(&subscriber_outbound),
+            session_context: None,
+        }),
+        identity.author,
+        std::collections::BTreeMap::new(),
+    );
+
+    released.set(false);
+    assert!(edge.poll_tick(&mut context).is_pending());
+    assert!(subscriber_outbound.borrow().is_empty());
+    assert!(authority_outbound.borrow().is_empty());
+
+    released.set(true);
+    let mut completed = false;
+    for _ in 0..16 {
+        match edge.poll_tick(&mut context) {
+            std::task::Poll::Pending => {
+                assert!(subscriber_outbound.borrow().is_empty());
+                assert!(authority_outbound.borrow().is_empty());
+            }
+            std::task::Poll::Ready(Ok(_)) => {
+                completed = true;
+                break;
+            }
+            std::task::Poll::Ready(Err(error)) => panic!("edge subscriber failed: {error}"),
+        }
+    }
+    assert!(completed);
+    assert!(subscriber_outbound.borrow().iter().any(|message| matches!(
+        message,
+        SyncMessage::FateUpdate {
+            tx_id: acknowledged,
+            fate: Fate::Accepted,
+            durability: Some(DurabilityTier::Edge),
+            ..
+        } if *acknowledged == tx_id
+    )));
+    assert!(authority_outbound.borrow().iter().any(|message| matches!(
+        message,
+        SyncMessage::CommitUnit { tx, .. } if tx.tx_id == tx_id
+    )));
+}
+
+#[test]
 fn immediate_authority_storage_completes_through_the_same_first_poll() {
     let (mut writer, _) = fail_write_many_node();
     let (tx_id, unit) = writer

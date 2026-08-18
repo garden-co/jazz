@@ -302,18 +302,23 @@ impl DemandDrivenDb {
                 }
                 continue;
             }
-            let subscriber_relay = connection.borrow().staged_subscriber_relay_commit();
-            if let Some((tx, versions)) = subscriber_relay {
+            let subscriber_relay = connection.borrow_mut().staged_subscriber_relay_commit();
+            if let Some((tx, versions, kind)) = subscriber_relay {
                 let tx_id = tx.tx_id;
                 match self
                     .runtime
                     .poll_ingest_relay_commit_unit(context, tx, versions)
                 {
                     Poll::Pending => return Poll::Pending,
-                    Poll::Ready(Err(error)) => return Poll::Ready(Err(error.into())),
+                    Poll::Ready(Err(error)) => {
+                        connection
+                            .borrow_mut()
+                            .abort_staged_subscriber_relay_commit(tx_id, kind);
+                        return Poll::Ready(Err(error.into()));
+                    }
                     Poll::Ready(Ok(())) => connection
                         .borrow_mut()
-                        .complete_staged_subscriber_relay_commit(tx_id),
+                        .complete_staged_subscriber_relay_commit(tx_id, kind),
                 }
                 continue;
             }
@@ -366,7 +371,6 @@ impl DemandDrivenDb {
                 || connection.staged_branch_metadata().is_some()
                 || connection.staged_row_version_repair().is_some()
                 || connection.staged_relay_commit().is_some()
-                || connection.staged_subscriber_relay_commit().is_some()
                 || connection.staged_owned_fate().is_some()
         }) {
             context.waker().wake_by_ref();
