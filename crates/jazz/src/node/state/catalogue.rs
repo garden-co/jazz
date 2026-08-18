@@ -972,14 +972,22 @@ where
         if self.rejections.loaded_child_edges.contains(&parent) {
             return Ok(());
         }
-        let Some(parent_alias) = self.node_aliases.get(&parent.node).copied() else {
-            return Err(Error::InvalidStoredValue(
-                "pending edge parent alias must exist",
-            ));
+        let Some(stored_parent) = self.query_transaction(parent)? else {
+            self.rejections.loaded_child_edges.insert(parent);
+            return Ok(());
         };
-        let parent_is_pending = self
-            .query_transaction(parent)?
-            .is_some_and(|tx| matches!(tx.fate, Fate::Pending));
+        let parent_alias = stored_parent.node_alias;
+        let resolved_parent = self
+            .resolve_node_alias(parent_alias)?
+            .ok_or(Error::InvalidStoredValue(
+                "pending edge parent alias must exist",
+            ))?;
+        if resolved_parent != parent.node {
+            return Err(Error::InvalidStoredValue(
+                "pending edge parent alias identifies another node",
+            ));
+        }
+        let parent_is_pending = matches!(stored_parent.fate, Fate::Pending);
         if parent_is_pending {
             let children = self
                 .database
