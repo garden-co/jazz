@@ -569,13 +569,15 @@ describe("forRequest concurrent session isolation", () => {
       { timeout: 10_000 },
     );
 
-    // Cross-user update must be rejected.
-    expect(() => aliceDb.update(todoApp.todos, bobRow.id, { title: "alice-as-bob" })).toThrow(
-      'Update failed: WriteError("read policy denied partial UPDATE on table todos: the operation requires read permission on the target row")',
-    );
-    expect(() => bobDb.update(todoApp.todos, aliceRow.id, { title: "bob-as-alice" })).toThrow(
-      'Update failed: WriteError("read policy denied partial UPDATE on table todos: the operation requires read permission on the target row")',
-    );
+    // These targets are deliberately absent from the caller's authorized local
+    // working set. The write API may therefore stage before the serving
+    // authority resolves the cold target, but its Edge receipt must reject.
+    await expect(
+      aliceDb.update(todoApp.todos, bobRow.id, { title: "alice-as-bob" }).wait({ tier: "edge" }),
+    ).rejects.toThrow(/AuthorizationDenied|Write rejected by server authorization/);
+    await expect(
+      bobDb.update(todoApp.todos, aliceRow.id, { title: "bob-as-alice" }).wait({ tier: "edge" }),
+    ).rejects.toThrow(/AuthorizationDenied|Write rejected by server authorization/);
   }, 30_000);
 
   /**

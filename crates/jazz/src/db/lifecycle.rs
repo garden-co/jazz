@@ -31,7 +31,7 @@ pub struct DemandDrivenDb {
 /// may clone it freely and must route operations back through the unique owner.
 #[derive(Clone, Debug)]
 pub struct DemandDrivenView {
-    schema: JazzSchema,
+    schema_view_id: SchemaViewId,
 }
 
 /// A short-lived typed view borrowed from the unique async database owner.
@@ -253,7 +253,7 @@ impl DemandDrivenDb {
     /// Return the typed view selected when this owner opened.
     pub fn default_view(&self) -> DemandDrivenView {
         DemandDrivenView {
-            schema: self.database.schema.clone(),
+            schema_view_id: self.database.schema_view_id(),
         }
     }
 
@@ -264,18 +264,19 @@ impl DemandDrivenDb {
         &mut self,
         schema: JazzSchema,
     ) -> Result<DemandDrivenView, Error> {
-        let _registered = self.database.register_schema_view(schema.clone())?;
+        let registered = self.database.register_schema_view(schema)?;
+        let schema_view_id = registered.schema_view_id();
         std::future::poll_fn(|context| self.runtime.poll_persistence(context))
             .await
             .map_err(Error::from)?;
-        Ok(DemandDrivenView { schema })
+        Ok(DemandDrivenView { schema_view_id })
     }
 
     fn facade_for_view(
         &self,
         view: &DemandDrivenView,
     ) -> Result<Db<groove::storage::DemandLoadedStorage>, Error> {
-        self.database.register_schema_view(view.schema.clone())
+        self.database.schema_view(view.schema_view_id)
     }
 
     /// Borrow an operational typed view from this owner. The facade cannot
@@ -2715,7 +2716,12 @@ where
             views.insert(schema_view_id, schema.clone());
         }
         drop(views);
-        Ok(Self {
+        Ok(self.with_registered_schema_view(schema))
+    }
+
+    fn with_registered_schema_view(&self, schema: JazzSchema) -> Self {
+        let schema_version_id = schema.version_id();
+        Self {
             schema,
             schema_version_id,
             schema_view_is_fixed: true,
@@ -2724,12 +2730,12 @@ where
             node: Rc::clone(&self.node),
             row_id_source: Rc::clone(&self.row_id_source),
             next_now_ms: Rc::clone(&self.next_now_ms),
-        })
+        }
     }
 
     /// Attach an already-registered typed schema view to this owner.
     pub fn schema_view(&self, schema_view_id: SchemaViewId) -> Result<Self, Error> {
-        let schema = self
+        let registered = self
             .schema_views
             .borrow()
             .get(&schema_view_id)
@@ -2740,7 +2746,16 @@ where
                     format!("schema view {schema_view_id:?} is not registered"),
                 )
             })?;
-        self.register_schema_view(schema)
+        let schema_version_id = registered.version_id();
+        let schema = {
+            let node = self.node.node.borrow();
+            let admitted = node
+                .catalogue_schemas()
+                .get(&schema_version_id)
+                .ok_or_else(|| Error::new(ErrorCode::Schema, "registered schema is missing"))?;
+            schema_with_authoritative_runtime_metadata(registered, &admitted.schema)
+        };
+        Ok(self.with_registered_schema_view(schema))
     }
 
     /// Canonical id of this handle's typed schema view.
@@ -3297,6 +3312,29 @@ fn schema_index_metadata_matches(left: &JazzSchema, right: &JazzSchema) -> bool 
                     && left_table.indexed_columns == right_table.indexed_columns
             })
         })
+}
+
+/// Combine one registered typed shape with the authority-admitted metadata
+/// that may change without changing its structural schema version.
+fn schema_with_authoritative_runtime_metadata(
+    mut registered: JazzSchema,
+    admitted: &JazzSchema,
+) -> JazzSchema {
+    registered.branch_read_policy = admitted.branch_read_policy.clone();
+    registered.branch_write_policy = admitted.branch_write_policy.clone();
+    for table in &mut registered.tables {
+        let Some(admitted_table) = admitted
+            .tables
+            .iter()
+            .find(|candidate| candidate.name == table.name)
+        else {
+            continue;
+        };
+        table.read_policy = admitted_table.read_policy.clone();
+        table.write_policies = admitted_table.write_policies.clone();
+        table.indexed_columns = admitted_table.indexed_columns.clone();
+    }
+    registered
 }
 
 #[cfg(feature = "testing")]
