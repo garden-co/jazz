@@ -503,6 +503,21 @@ identity, row-id source, logical clock, schema views, and one storage-backed
 node runtime. Its ordinary `insert`, `update`, `all`, `subscribe`, transaction,
 peer, and `tick` methods are the only implementations.
 
+Do not preserve the former synchronous database as a renamed private
+`DbCore`, `ResidentDb`, or `DatabaseEngine` field. That would retain the old
+two-object architecture and merely hide its second mode. Move the resident
+state directly onto `Db`, and make the non-suspending state transitions private
+methods on that owner. Name those methods for the operation they perform, not
+for the fact that their inputs happen to be resident.
+
+Tests that previously constructed the synchronous database directly must state
+their actual boundary. Pure query, policy, transaction-staging, and IVM logic
+becomes focused unit coverage of the relevant component or private transition.
+Storage ownership, lifecycle, subscription, binding, server, and simulation
+coverage constructs the sole `Db`. In particular, simulations must never use a
+second synchronous database type: immediate memory and RocksDB backends simply
+drive the same asynchronous interface to readiness without suspension.
+
 This removes the pattern in which `DemandDrivenDb` retains both a
 `Db<DemandLoadedStorage>` and a sibling `DemandDrivenNode`, then repeatedly
 passes closures from one into the other. It also removes the need to qualify
