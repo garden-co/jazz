@@ -2,6 +2,41 @@
 
 use super::*;
 
+pub(super) enum MutationPrepareError {
+    Node(crate::node::Error),
+    Api(Error),
+}
+
+impl From<crate::node::Error> for MutationPrepareError {
+    fn from(error: crate::node::Error) -> Self {
+        Self::Node(error)
+    }
+}
+
+impl From<groove::storage::Error> for MutationPrepareError {
+    fn from(error: groove::storage::Error) -> Self {
+        Self::Node(crate::node::Error::Storage(error))
+    }
+}
+
+impl MutationPrepareError {
+    pub(super) fn into_api(self) -> Error {
+        match self {
+            Self::Node(error) => error.into(),
+            Self::Api(error) => error,
+        }
+    }
+
+    pub(super) fn missing_input(
+        self,
+    ) -> Result<groove::storage::async_ordered::OwnedStorageOperation, Self> {
+        match self {
+            Self::Node(error) => crate::node::missing_node_open_input(error).map_err(Self::Node),
+            error => Err(error),
+        }
+    }
+}
+
 impl<S> Db<S>
 where
     S: ResidentStorage + ReopenableStorage + 'static,
@@ -19,6 +54,185 @@ where
                 .made_by(self.identity.author)
                 .cells(cells),
         ))
+    }
+
+    pub(super) fn acquire_insert_target_for_owner(
+        &self,
+        table: &str,
+        row: RowUuid,
+    ) -> Result<(), MutationPrepareError> {
+        self.table_schema(table)
+            .map_err(MutationPrepareError::Api)?;
+        let (content_parent, deletion_parent) = {
+            let mut node = self.node.node.borrow_mut();
+            let _empty_history = node
+                .row_history(table, row)
+                .map_err(MutationPrepareError::Node)?;
+            (
+                node.local_content_winner_tx_id(table, row)
+                    .map_err(MutationPrepareError::Node)?,
+                node.local_deletion_winner_tx_id(table, row)
+                    .map_err(MutationPrepareError::Node)?,
+            )
+        };
+        if deletion_parent.is_some() {
+            return Err(MutationPrepareError::Api(row_already_deleted(row)));
+        }
+        if content_parent.is_some() {
+            return Err(MutationPrepareError::Api(Error::new(
+                ErrorCode::WriteRejected,
+                format!("encoding error: object already exists: {}", row.0),
+            )));
+        }
+        Ok(())
+    }
+
+    pub(super) fn prepare_update_commit_for_owner(
+        &self,
+        table: &str,
+        row: RowUuid,
+        patch: RowCells,
+        now_ms: u64,
+    ) -> Result<MergeableCommit, MutationPrepareError> {
+        let table_schema = self
+            .table_schema(table)
+            .map_err(MutationPrepareError::Api)?
+            .clone();
+        if self
+            .node
+            .node
+            .borrow_mut()
+            .local_deletion_winner_tx_id(table, row)
+            .map_err(MutationPrepareError::Node)?
+            .is_some()
+        {
+            return Err(MutationPrepareError::Api(row_already_deleted(row)));
+        }
+        let (cells, parent, authored_columns) = if table_schema
+            .columns
+            .iter()
+            .all(|column| patch.contains_key(&column.name))
+        {
+            let existing = self
+                .node
+                .node
+                .borrow_mut()
+                .local_current_row(table, row)
+                .map_err(MutationPrepareError::Node)?;
+            let parent = existing
+                .as_ref()
+                .and_then(|row| self.node.node.borrow_mut().current_row_tx_id(row));
+            let authored_columns = patch.keys().cloned().collect();
+            (patch, parent, authored_columns)
+        } else {
+            let query = Query::from(table).filter(crate::query::eq(
+                crate::query::col("id"),
+                crate::query::lit(Value::Uuid(row.0)),
+            ));
+            let prepared = self
+                .prepare_query(&query)
+                .map_err(MutationPrepareError::Api)?;
+            let existing = self
+                .node
+                .node
+                .borrow_mut()
+                .query_rows_for_client(
+                    &prepared.shape,
+                    &prepared.binding,
+                    DurabilityTier::Local,
+                    self.identity.author,
+                )
+                .map_err(MutationPrepareError::Node)?
+                .into_iter()
+                .find(|candidate| candidate.row_uuid() == row)
+                .ok_or_else(|| {
+                    MutationPrepareError::Api(read_for_write_denied("partial UPDATE", table))
+                })?;
+            let mut cells = BTreeMap::new();
+            for column in &table_schema.columns {
+                if let Some(value) = existing.cell(&table_schema, &column.name) {
+                    cells.insert(
+                        column.name.clone(),
+                        default_cell_for_column_type(&column.column_type, &value),
+                    );
+                }
+            }
+            let parent = self.node.node.borrow_mut().current_row_tx_id(&existing);
+            let authored_columns = patch.keys().cloned().collect();
+            cells.extend(patch);
+            (cells, parent, authored_columns)
+        };
+        Ok(MergeableCommit::new(table, row, now_ms)
+            .made_by(self.identity.author)
+            .parents(parent.into_iter().collect())
+            .cells(cells)
+            .authored_columns(authored_columns))
+    }
+
+    pub(super) fn prepare_noop_update_for_owner(
+        &self,
+        table: &str,
+        row: RowUuid,
+    ) -> Result<(TxId, DurabilityTier), MutationPrepareError> {
+        self.table_schema(table)
+            .map_err(MutationPrepareError::Api)?;
+        if self
+            .node
+            .node
+            .borrow_mut()
+            .local_deletion_winner_tx_id(table, row)
+            .map_err(MutationPrepareError::Node)?
+            .is_some()
+        {
+            return Err(MutationPrepareError::Api(row_already_deleted(row)));
+        }
+        let query = Query::from(table).filter(crate::query::eq(
+            crate::query::col("id"),
+            crate::query::lit(Value::Uuid(row.0)),
+        ));
+        let prepared = self
+            .prepare_query(&query)
+            .map_err(MutationPrepareError::Api)?;
+        let existing = self
+            .node
+            .node
+            .borrow_mut()
+            .query_rows_for_client(
+                &prepared.shape,
+                &prepared.binding,
+                DurabilityTier::Local,
+                self.identity.author,
+            )
+            .map_err(MutationPrepareError::Node)?
+            .into_iter()
+            .find(|candidate| candidate.row_uuid() == row)
+            .ok_or_else(|| {
+                MutationPrepareError::Api(read_for_write_denied("partial UPDATE", table))
+            })?;
+        let tx_id = self
+            .node
+            .node
+            .borrow_mut()
+            .current_row_tx_id(&existing)
+            .ok_or_else(|| {
+                MutationPrepareError::Api(Error::new(
+                    ErrorCode::NotObserved,
+                    "current row has no transaction",
+                ))
+            })?;
+        let durability = self
+            .node
+            .node
+            .borrow_mut()
+            .transaction_state(tx_id)
+            .map(|(_, _, durability)| durability)
+            .ok_or_else(|| {
+                MutationPrepareError::Api(Error::new(
+                    ErrorCode::NotObserved,
+                    "transaction is not known locally",
+                ))
+            })?;
+        Ok((tx_id, durability))
     }
 
     /// Insert a row locally, generating a uuidv7-shaped row id.
@@ -1343,7 +1557,10 @@ where
         row: RowUuid,
         identity: AuthorId,
     ) -> Result<Option<CurrentRow>, Error> {
-        let query = self.prepare_query(&Query::from(table))?;
+        let query = self.prepare_query(&Query::from(table).filter(crate::query::eq(
+            crate::query::col("id"),
+            crate::query::lit(Value::Uuid(row.0)),
+        )))?;
         Ok(self
             .node
             .node
@@ -1364,7 +1581,10 @@ where
         row: RowUuid,
         identity: AuthorId,
     ) -> Result<Option<CurrentRow>, Error> {
-        let query = self.prepare_query(&Query::from(table))?;
+        let query = self.prepare_query(&Query::from(table).filter(crate::query::eq(
+            crate::query::col("id"),
+            crate::query::lit(Value::Uuid(row.0)),
+        )))?;
         Ok(self
             .node
             .node

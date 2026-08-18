@@ -1,5 +1,6 @@
 //! Database construction, schema views, write-state waiting, and connection controls.
 
+use super::mutations::MutationPrepareError;
 use super::subscriptions::SubscriptionOpenError;
 use super::*;
 use crate::node::{DemandDrivenNode, PollableNodeOpen};
@@ -267,6 +268,16 @@ impl DemandDrivenDb {
         cells: RowCells,
     ) -> Result<WriteHandle<groove::storage::DemandLoadedStorage>, Error> {
         let (row_uuid, commit) = self.database.prepare_insert_commit(table, cells)?;
+        let database = &self.database;
+        std::future::poll_fn(|context| {
+            self.runtime.poll_operation(
+                context,
+                || database.acquire_insert_target_for_owner(table, row_uuid),
+                MutationPrepareError::missing_input,
+            )
+        })
+        .await
+        .map_err(MutationPrepareError::into_api)?;
         let schema = self.database.schema_version_id;
         let tx_id = std::future::poll_fn(|context| {
             self.runtime
@@ -279,6 +290,62 @@ impl DemandDrivenDb {
         Ok(WriteHandle {
             node: Rc::downgrade(&self.database.node.node),
             row_uuid,
+            tx_id,
+            local_tier,
+        })
+    }
+
+    /// Update one row through typed acquisition followed by one resident
+    /// publish. A cold existing row may suspend; no write is visible until the
+    /// resolving poll, whose subscription refresh is synchronous.
+    #[doc(hidden)]
+    pub async fn update(
+        &mut self,
+        table: &str,
+        row: RowUuid,
+        patch: RowCells,
+    ) -> Result<WriteHandle<groove::storage::DemandLoadedStorage>, Error> {
+        if patch.is_empty() {
+            let database = &self.database;
+            let (tx_id, local_tier) = std::future::poll_fn(|context| {
+                self.runtime.poll_operation(
+                    context,
+                    || database.prepare_noop_update_for_owner(table, row),
+                    MutationPrepareError::missing_input,
+                )
+            })
+            .await
+            .map_err(MutationPrepareError::into_api)?;
+            return Ok(WriteHandle {
+                node: Rc::downgrade(&self.database.node.node),
+                row_uuid: row,
+                tx_id,
+                local_tier,
+            });
+        }
+        let now_ms = self.database.next_now_ms();
+        let database = &self.database;
+        let prepared = std::future::poll_fn(|context| {
+            self.runtime.poll_operation(
+                context,
+                || database.prepare_update_commit_for_owner(table, row, patch.clone(), now_ms),
+                MutationPrepareError::missing_input,
+            )
+        })
+        .await
+        .map_err(MutationPrepareError::into_api)?;
+        let schema = self.database.schema_version_id;
+        let tx_id = std::future::poll_fn(|context| {
+            self.runtime
+                .poll_mergeable_commit_in_schema(context, schema, &prepared)
+        })
+        .await
+        .map_err(Error::from)?;
+        let local_tier = self.database.finalize_local_commit(tx_id)?;
+        self.database.refresh_subscriptions()?;
+        Ok(WriteHandle {
+            node: Rc::downgrade(&self.database.node.node),
+            row_uuid: row,
             tx_id,
             local_tier,
         })

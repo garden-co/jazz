@@ -422,6 +422,32 @@ fn demand_driven_db_acquires_cold_subscription_before_registering_it() {
         panic!("the direct written rows must remain first-poll visible")
     };
     assert_eq!(rows.len(), 2);
+
+    let updated_write = {
+        let mut update = std::pin::pin!(owner.update(
+            "todos",
+            write.row_uuid(),
+            std::collections::BTreeMap::from([(
+                "title".to_owned(),
+                groove::records::Value::String("resident update".to_owned()),
+            )]),
+        ));
+        let updated = match std::future::Future::poll(update.as_mut(), &mut context) {
+            std::task::Poll::Ready(Ok(updated)) => updated,
+            std::task::Poll::Ready(Err(error)) => panic!("resident update failed: {error}"),
+            std::task::Poll::Pending => {
+                panic!("an update over a resident row must complete in its first poll")
+            }
+        };
+        updated
+    };
+    let Some(crate::db::SubscriptionEvent::Delta { updated, .. }) =
+        subscription.try_next_event()
+    else {
+        panic!("the first-poll update must synchronously refresh subscriptions")
+    };
+    assert_eq!(updated.len(), 1);
+    assert_eq!(updated[0].row_uuid(), updated_write.row_uuid());
     assert!(owner.poll_persistence(&mut context).is_pending());
 }
 
@@ -481,6 +507,84 @@ fn demand_driven_db_acquires_cold_relation_snapshot() {
     };
     assert_eq!(snapshot.root_count, 1);
     assert_eq!(snapshot.rows.len(), 1);
+}
+
+#[test]
+fn demand_driven_db_acquires_cold_update_before_single_publish() {
+    let node_schema = schema();
+    let column_families = node_schema.column_families();
+    let refs = column_families.iter().map(String::as_str).collect::<Vec<_>>();
+    let durable = MemoryStorage::new(&refs);
+    let identity = crate::db::DbIdentity {
+        node: node(0xcc),
+        author: AuthorId::from_bytes([0xcc; 16]),
+    };
+    let seeded = crate::db::block_on(crate::db::Db::open(crate::db::DbConfig {
+        schema: node_schema.clone(),
+        storage: durable.clone(),
+        identity,
+        id_source: Some(Box::new(crate::db::SeededRowIdSource::new(0xcc))),
+    }))
+    .unwrap();
+    let row = seeded
+        .insert("todos", title_cells("cold update seed"))
+        .unwrap()
+        .row_uuid();
+    drop(seeded);
+
+    let released = std::rc::Rc::new(std::cell::Cell::new(true));
+    let storage = GatedAuthorityStorage {
+        inner: groove::storage::async_ordered::ImmediateStorage::new(durable),
+        released: std::rc::Rc::clone(&released),
+        cancellations: std::rc::Rc::new(std::cell::Cell::new(0)),
+        committed_units: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
+        fail_commits: std::rc::Rc::new(std::cell::Cell::new(false)),
+    };
+    let mut opening = crate::db::PollableDbOpen::new(node_schema, identity, Box::new(storage));
+    let waker = std::task::Waker::from(std::sync::Arc::new(PersistenceTestWake));
+    let mut context = std::task::Context::from_waker(&waker);
+    let std::task::Poll::Ready(Ok(mut owner)) = opening.poll(&mut context) else {
+        panic!("released metadata reads must open the database")
+    };
+    released.set(false);
+    let write = {
+        let mut update = std::pin::pin!(owner.update(
+            "todos",
+            row,
+            std::collections::BTreeMap::from([(
+                "title".to_owned(),
+                groove::records::Value::String("after acquisition".to_owned()),
+            )]),
+        ));
+        assert!(std::future::Future::poll(update.as_mut(), &mut context).is_pending());
+        released.set(true);
+        let std::task::Poll::Ready(Ok(write)) =
+            std::future::Future::poll(update.as_mut(), &mut context)
+        else {
+            panic!("released update dependencies must publish exactly once")
+        };
+        write
+    };
+    assert_eq!(write.row_uuid(), row);
+    let prepared = owner
+        .database()
+        .prepare_query(&crate::query::Query::from("todos").filter(crate::query::eq(
+            crate::query::col("id"),
+            crate::query::lit(groove::records::Value::Uuid(row.0)),
+        )))
+        .unwrap();
+    let rows = crate::db::block_on(owner.all(
+        &prepared,
+        crate::db::ReadOpts {
+            tier: DurabilityTier::None,
+            local_updates: crate::db::LocalUpdates::Immediate,
+            propagation: crate::db::Propagation::LocalOnly,
+            ..crate::db::ReadOpts::default()
+        },
+    ))
+    .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].row_uuid(), row);
 }
 
 struct PersistenceTestWake;
