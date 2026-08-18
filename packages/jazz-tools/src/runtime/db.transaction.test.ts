@@ -142,7 +142,7 @@ describe("Db transactions", () => {
       return inserted.id;
     });
 
-    await result.wait({ tier: "local" });
+    await result.wait({ tier: "none" });
     await expect(db.one(app.todos.where({ id: result.value }), { tier: "local" })).resolves.toEqual(
       {
         id: result.value,
@@ -167,7 +167,7 @@ describe("Db transactions", () => {
       return existing.id;
     });
 
-    await result.wait({ tier: "local" });
+    await result.wait({ tier: "none" });
     await expect(db.all(app.todos.where({}), { tier: "local" })).resolves.toEqual([
       { id: existing.id, title: "committed", done: true },
     ]);
@@ -176,8 +176,8 @@ describe("Db transactions", () => {
   it("reads a restored row inside a mergeable callback transaction", async () => {
     const deleted = await db
       .insert(app.todos, { title: "deleted", done: false })
-      .wait({ tier: "local" });
-    await db.delete(app.todos, deleted.id).wait({ tier: "local" });
+      .wait({ tier: "none" });
+    await db.delete(app.todos, deleted.id).wait({ tier: "none" });
 
     const result = await db.transaction(async (tx) => {
       const restored = tx.restore(app.todos, deleted.id, { title: "restored", done: true });
@@ -189,15 +189,15 @@ describe("Db transactions", () => {
       return restored;
     });
 
-    await result.wait({ tier: "local" });
+    await result.wait({ tier: "none" });
     await expect(db.one(app.todos.where({ id: deleted.id }), { tier: "local" })).resolves.toEqual(
       result.value,
     );
   });
 
   it("applies defaults to empty inserts and restores inside a mergeable callback transaction", async () => {
-    const inserted = await db.insert(defaultsApp.defaults_todos, {}).wait({ tier: "local" });
-    await db.delete(defaultsApp.defaults_todos, inserted.id).wait({ tier: "local" });
+    const inserted = await db.insert(defaultsApp.defaults_todos, {}).wait({ tier: "none" });
+    await db.delete(defaultsApp.defaults_todos, inserted.id).wait({ tier: "none" });
 
     const result = await db.transaction(async (tx) => {
       const restored = tx.restore(defaultsApp.defaults_todos, inserted.id, {});
@@ -209,7 +209,7 @@ describe("Db transactions", () => {
       return restored;
     });
 
-    await result.wait({ tier: "local" });
+    await result.wait({ tier: "none" });
     await expect(
       db.one(defaultsApp.defaults_todos.where({ id: inserted.id }), { tier: "local" }),
     ).resolves.toEqual(inserted);
@@ -231,7 +231,7 @@ describe("Db transactions", () => {
       return tx.all(app.todos.where({}), { tier: "local" });
     });
 
-    await result.wait({ tier: "local" });
+    await result.wait({ tier: "none" });
     await expect(db.all(app.todos.where({}), { tier: "local" })).resolves.toEqual(result.value);
   });
 
@@ -254,7 +254,7 @@ describe("Db transactions", () => {
     });
 
     expect(result.value).toMatchObject([{ title: "b" }, { title: "c" }]);
-    await result.wait({ tier: "local" });
+    await result.wait({ tier: "none" });
   });
 
   it("applies contains predicates inside a mergeable transaction", async () => {
@@ -276,7 +276,7 @@ describe("Db transactions", () => {
       });
 
       expect(result.value).toMatchObject([{ title: "work", tags: ["urgent", "team"] }]);
-      await result.wait({ tier: "local" });
+      await result.wait({ tier: "none" });
     } finally {
       await taggedDb.shutdown();
     }

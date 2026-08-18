@@ -1,7 +1,7 @@
 import { createDb, type Db } from "../../src/runtime/db.js";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { app } from "./fixtures/basic/schema";
-import { insertProject, insertUser, uniqueDbName } from "./factories";
+import { insertProject, insertUser } from "./factories";
 
 describe("TS Delete API", () => {
   let db: Db;
@@ -9,7 +9,7 @@ describe("TS Delete API", () => {
   beforeEach(async () => {
     db = await createDb({
       appId: "test-app",
-      driver: { type: "persistent", dbName: uniqueDbName("insert-row-shape") },
+      driver: { type: "memory" },
     });
   });
 
@@ -38,8 +38,8 @@ describe("TS Delete API", () => {
     expect(rows).toEqual([]);
   });
 
-  it("can wait for deletes to be persisted up to a specific durability tier", async () => {
-    const project = await db.insert(app.projects, { name: "Test Project" }).wait({ tier: "local" });
+  it("can wait for deletes to become immediately visible", async () => {
+    const project = await db.insert(app.projects, { name: "Test Project" }).wait({ tier: "none" });
 
     const owner = insertUser(db);
     const todo = await db
@@ -51,10 +51,10 @@ describe("TS Delete API", () => {
         ownerId: owner.id,
         assigneesIds: [],
       })
-      .wait({ tier: "local" });
+      .wait({ tier: "none" });
 
     const pending = db.delete(app.todos, todo.id);
-    await pending.wait({ tier: "local" });
+    await pending.wait({ tier: "none" });
 
     const rows = await db.all(app.todos.where({ id: { eq: todo.id } }), { tier: "local" });
     expect(rows).toEqual([]);

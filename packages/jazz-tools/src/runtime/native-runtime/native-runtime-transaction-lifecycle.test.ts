@@ -494,7 +494,7 @@ it("does not emit onMutationError when an active wait handles the rejection", as
     "00000000-0000-0000-0000-000000000043",
   );
   const wait = runtime.waitForTransaction(batchId, "edge");
-  await Promise.resolve();
+  await vi.waitFor(() => expect(stateChangeWaiters).toHaveLength(1));
   rejected = true;
   stateChangeWaiters.splice(0).forEach((resolve) => resolve());
 

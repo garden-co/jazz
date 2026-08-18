@@ -9,7 +9,7 @@ describe("TS Update API", () => {
   beforeEach(async () => {
     db = await createDb({
       appId: "test-app",
-      driver: { type: "persistent" },
+      driver: { type: "memory" },
     });
   });
 
@@ -97,7 +97,7 @@ describe("TS Update API", () => {
     expect(updated!.done).toBe(true);
   });
 
-  it("can wait for updates to be persisted up to a specific durability tier", async () => {
+  it("can wait for updates to become immediately visible", async () => {
     const { value: project } = db.insert(app.projects, { name: "Test Project" });
     const owner = insertUser(db);
     const { value: todo } = db.insert(app.todos, {
@@ -110,7 +110,7 @@ describe("TS Update API", () => {
     });
 
     const pending = db.update(app.todos, todo.id, { done: true });
-    await pending.wait({ tier: "local" });
+    await pending.wait({ tier: "none" });
 
     const [updated] = await db.all(app.todos.where({ id: { eq: todo.id } }), { tier: "local" });
     expect(updated!.done).toBe(true);

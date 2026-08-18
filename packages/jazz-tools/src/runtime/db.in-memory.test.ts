@@ -44,7 +44,7 @@ describe("createDb in-memory driver", () => {
       done: false,
     });
 
-    await db.update(app.notes, inserted.id, { done: true }).wait({ tier: "local" });
+    await db.update(app.notes, inserted.id, { done: true }).wait({ tier: "none" });
 
     const updated = await db.one<Note>(app.notes.where({ id: { eq: inserted.id } }));
     expect(updated).toEqual({

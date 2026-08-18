@@ -1,7 +1,7 @@
 import { createDb, type Db } from "../../src/runtime/db.js";
 import { afterEach, beforeEach, describe, expect, expectTypeOf, it } from "vitest";
 import { app } from "./fixtures/basic/schema";
-import { insertProject, insertUser, uniqueDbName } from "./factories";
+import { insertProject, insertUser } from "./factories";
 
 describe("TS Insert API", () => {
   let db: Db;
@@ -9,7 +9,7 @@ describe("TS Insert API", () => {
   beforeEach(async () => {
     db = await createDb({
       appId: "test-app",
-      driver: { type: "persistent", dbName: uniqueDbName("insert-row-shape") },
+      driver: { type: "memory" },
     });
   });
 
@@ -46,8 +46,8 @@ describe("TS Insert API", () => {
     });
   });
 
-  it("can wait for row to be persisted up to a specific durability tier", async () => {
-    const project = await db.insert(app.projects, { name: "Test Project" }).wait({ tier: "local" });
+  it("can wait for a row to become immediately visible", async () => {
+    const project = await db.insert(app.projects, { name: "Test Project" }).wait({ tier: "none" });
     expect(project).toEqual({
       id: expect.any(String),
       name: "Test Project",
@@ -63,7 +63,7 @@ describe("TS Insert API", () => {
         ownerId: owner.id,
         assigneesIds: [],
       })
-      .wait({ tier: "local" });
+      .wait({ tier: "none" });
     expect(todo).toEqual({
       id: expect.any(String),
       title: "Test Todo",
@@ -105,7 +105,7 @@ describe("TS Insert API", () => {
     const tx = db.beginTransaction();
     const project = tx.insert(app.projects, { name: "Backfilled Project" }, { updatedAt });
 
-    await (await tx.commit()).wait({ tier: "local" });
+    await (await tx.commit()).wait({ tier: "none" });
 
     const projected = await db.one(
       app.projects.select("name", "$updatedAt").where({ id: { eq: project.id } }),

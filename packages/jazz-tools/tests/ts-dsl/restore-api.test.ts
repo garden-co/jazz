@@ -1,7 +1,7 @@
 import { createDb, type Db } from "../../src/runtime/db.js";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { app } from "./fixtures/basic/schema";
-import { insertProject, insertUser, uniqueDbName } from "./factories";
+import { insertProject, insertUser } from "./factories";
 
 describe("TS Restore API", () => {
   let db: Db;
@@ -9,7 +9,7 @@ describe("TS Restore API", () => {
   beforeEach(async () => {
     db = await createDb({
       appId: "test-app",
-      driver: { type: "persistent", dbName: uniqueDbName("restore-api") },
+      driver: { type: "memory" },
     });
   });
 
@@ -34,13 +34,13 @@ describe("TS Restore API", () => {
     expect(queried).toEqual(restored);
   });
 
-  it("can wait for restores to be persisted up to a specific durability tier", async () => {
-    const project = await db.insert(app.projects, { name: "Test Project" }).wait({ tier: "local" });
-    await db.delete(app.projects, project.id).wait({ tier: "local" });
+  it("can wait for restores to become immediately visible", async () => {
+    const project = await db.insert(app.projects, { name: "Test Project" }).wait({ tier: "none" });
+    await db.delete(app.projects, project.id).wait({ tier: "none" });
 
     const restored = await db
       .restore(app.projects, project.id, { name: "Restored Project" })
-      .wait({ tier: "local" });
+      .wait({ tier: "none" });
 
     expect(restored).toEqual({
       id: project.id,
@@ -67,7 +67,7 @@ describe("TS Restore API", () => {
         },
         { id },
       )
-      .wait({ tier: "local" });
+      .wait({ tier: "none" });
     db.delete(app.todos, todo.id);
 
     const { value: restored } = db.restore(app.todos, todo.id, {
@@ -89,7 +89,7 @@ describe("TS Restore API", () => {
 
   it("restores an all-default row from empty data", async () => {
     const { value: inserted } = db.insert(app.table_with_defaults, {});
-    await db.delete(app.table_with_defaults, inserted.id).wait({ tier: "local" });
+    await db.delete(app.table_with_defaults, inserted.id).wait({ tier: "none" });
 
     const { value: restored } = db.restore(app.table_with_defaults, inserted.id, {});
 

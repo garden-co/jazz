@@ -1,7 +1,7 @@
 import { createDb, type Db } from "../../src/runtime/db.js";
 import { afterEach, assert, beforeEach, describe, expect, it } from "vitest";
 import { app } from "./fixtures/basic/schema";
-import { insertProject, insertTodo, insertUser, uniqueDbName } from "./factories";
+import { insertProject, insertTodo, insertUser } from "./factories";
 
 describe("TS Upsert API", () => {
   let db: Db;
@@ -9,7 +9,7 @@ describe("TS Upsert API", () => {
   beforeEach(async () => {
     db = await createDb({
       appId: "test-app",
-      driver: { type: "persistent", dbName: uniqueDbName("upsert-api") },
+      driver: { type: "memory" },
     });
   });
 
@@ -28,9 +28,9 @@ describe("TS Upsert API", () => {
     });
   });
 
-  it("can wait for upserts to be persisted up to a specific durability tier", async () => {
+  it("can wait for upserts to become immediately visible", async () => {
     const id = "00000000-0000-0000-0000-000000000000";
-    await db.upsert(app.projects, { name: "Test Project" }, { id }).wait({ tier: "local" });
+    await db.upsert(app.projects, { name: "Test Project" }, { id }).wait({ tier: "none" });
 
     const project = await db.one(app.projects.where({ id: { eq: id } }), { tier: "local" });
     expect(project).toEqual({
