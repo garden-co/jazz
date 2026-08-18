@@ -16,7 +16,9 @@ use groove::ivm::{MultisinkDeltas, MultisinkSubscription, RecordDeltas};
 use groove::records::{BorrowedRecord, OwnedRecord, RecordDescriptor, ValueType};
 use groove::schema::ColumnType;
 
-use super::maintained_subscription_view::{MaintainedSubscriptionView, MaintainedTerminalSchemas};
+use super::maintained_subscription_view::{
+    MaintainedSubscriptionView, MaintainedTerminalSchemas, PreparedMaintainedDeltas,
+};
 #[cfg(feature = "testing")]
 use super::maintained_subscription_view::{
     MaintainedSubscriptionViewFootprint, MaintainedTerminalSchemasFootprint,

@@ -6,8 +6,6 @@
 //! public deltas.
 
 use super::*;
-#[cfg(feature = "testing")]
-use groove::ivm::{TerminalEdit, TerminalOperation, TerminalPathSegment};
 
 pub(crate) struct LocalMaintainedViewSubscription {
     pub(super) subscription: MultisinkSubscription,
@@ -15,7 +13,7 @@ pub(crate) struct LocalMaintainedViewSubscription {
     /// canonical materialization inputs are acquired. Draining the Groove
     /// receiver is synchronous; applying these deltas to public subscription
     /// state remains deferred until acquisition succeeds.
-    pub(super) pending_deltas: VecDeque<MultisinkDeltas>,
+    pub(super) pending_deltas: VecDeque<PreparedMaintainedDeltas>,
     pub(super) _retained_prepared_plan: Option<SubscriptionPreparedPlan>,
     pub(super) maintained: MaintainedSubscriptionView,
     pub(super) terminal_schemas: MaintainedTerminalSchemas,
@@ -134,35 +132,7 @@ impl LocalMaintainedViewSubscription {
         let pending_delta_bytes = self
             .pending_deltas
             .iter()
-            .map(|batch| {
-                let record_bytes = batch
-                    .sinks
-                    .iter()
-                    .map(|(name, deltas)| {
-                        name.len()
-                            + 96
-                            + deltas
-                                .deltas
-                                .iter()
-                                .map(|delta| delta.raw().len() + std::mem::size_of_val(delta))
-                                .sum::<usize>()
-                    })
-                    .sum::<usize>();
-                let terminal_bytes = batch
-                    .terminal_sinks
-                    .iter()
-                    .map(|(name, deltas)| {
-                        name.len()
-                            + 96
-                            + deltas
-                                .operations
-                                .iter()
-                                .map(terminal_operation_heap_bytes)
-                                .sum::<usize>()
-                    })
-                    .sum::<usize>();
-                record_bytes + terminal_bytes
-            })
+            .map(PreparedMaintainedDeltas::heap_bytes)
             .sum::<usize>();
         let control_state_bytes = terminal_schemas.terminal_schemas_bytes
             + tables_bytes
@@ -190,28 +160,6 @@ impl LocalMaintainedViewSubscription {
             total_heap_bytes: maintained.total_heap_bytes + control_state_bytes,
         }
     }
-}
-
-#[cfg(feature = "testing")]
-fn terminal_operation_heap_bytes(operation: &TerminalOperation) -> usize {
-    let path_bytes = operation
-        .path
-        .iter()
-        .map(|segment| match segment {
-            TerminalPathSegment::Collection(name) => name.capacity(),
-            TerminalPathSegment::Key(key) => key.capacity(),
-        })
-        .sum::<usize>();
-    let edit_bytes = match &operation.edit {
-        TerminalEdit::Insert { key, value, .. } | TerminalEdit::Update { key, value } => {
-            key.capacity() + value.capacity()
-        }
-        TerminalEdit::Remove { key } | TerminalEdit::Move { key, .. } => key.capacity(),
-    };
-    operation.root_key.capacity()
-        + operation.path.capacity() * std::mem::size_of::<TerminalPathSegment>()
-        + path_bytes
-        + edit_bytes
 }
 
 pub(crate) struct LocalMaintainedViewSubscriptionUpdate {
@@ -643,68 +591,68 @@ where
             }
         }
         loop {
-            let next = local
-                .pending_deltas
-                .pop_front()
-                .map(Ok)
-                .unwrap_or_else(|| local.subscription.try_recv());
-            match next {
-                Ok(deltas) => {
-                    let transitions = local.maintained.apply_multisink_deltas(
-                        deltas,
+            let prepared = if let Some(prepared) = local.pending_deltas.pop_front() {
+                prepared
+            } else {
+                match local.subscription.try_recv() {
+                    Ok(raw) => MaintainedSubscriptionView::prepare_multisink_deltas(
+                        raw,
                         &local.terminal_schemas,
                         &local.tables,
                         &self.node_aliases,
-                    )?;
-                    structured_app_row_changes.extend(transitions.structured_app_row_changes);
-                    terminal_operations.extend(transitions.terminal_operations);
-                    for entry in transitions.adds {
-                        let before = local.result_set.contains(&entry);
-                        states
-                            .entry(entry)
-                            .and_modify(|(_, after)| *after = true)
-                            .or_insert((before, true));
-                    }
-                    for entry in transitions.removes {
-                        let before = local.result_set.contains(&entry);
-                        states
-                            .entry(entry)
-                            .and_modify(|(_, after)| *after = false)
-                            .or_insert((before, false));
-                    }
-                    for member in transitions.result_payload_removes {
-                        let before = local.result_payloads.get(&member).cloned();
-                        payload_states
-                            .entry(member)
-                            .and_modify(|(_, after)| *after = None)
-                            .or_insert((before, None));
-                    }
-                    for (member, payload) in transitions.result_payload_adds {
-                        let before = local.result_payloads.get(&member).cloned();
-                        payload_states
-                            .entry(member)
-                            .and_modify(|(_, after)| *after = Some(payload.clone()))
-                            .or_insert((before, Some(payload)));
-                    }
-                    for fact in transitions.program_fact_adds {
-                        let before = local.program_facts.contains(&fact);
-                        fact_states
-                            .entry(fact)
-                            .and_modify(|(_, after)| *after = true)
-                            .or_insert((before, true));
-                    }
-                    for fact in transitions.program_fact_removes {
-                        let before = local.program_facts.contains(&fact);
-                        fact_states
-                            .entry(fact)
-                            .and_modify(|(_, after)| *after = false)
-                            .or_insert((before, false));
+                    )?,
+                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        return Err(Error::SubscriptionClosed);
                     }
                 }
-                Err(std::sync::mpsc::TryRecvError::Empty) => break,
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    return Err(Error::SubscriptionClosed);
-                }
+            };
+            let transitions = local
+                .maintained
+                .apply_prepared_multisink_deltas(prepared, &self.node_aliases)?;
+            structured_app_row_changes.extend(transitions.structured_app_row_changes);
+            terminal_operations.extend(transitions.terminal_operations);
+            for entry in transitions.adds {
+                let before = local.result_set.contains(&entry);
+                states
+                    .entry(entry)
+                    .and_modify(|(_, after)| *after = true)
+                    .or_insert((before, true));
+            }
+            for entry in transitions.removes {
+                let before = local.result_set.contains(&entry);
+                states
+                    .entry(entry)
+                    .and_modify(|(_, after)| *after = false)
+                    .or_insert((before, false));
+            }
+            for member in transitions.result_payload_removes {
+                let before = local.result_payloads.get(&member).cloned();
+                payload_states
+                    .entry(member)
+                    .and_modify(|(_, after)| *after = None)
+                    .or_insert((before, None));
+            }
+            for (member, payload) in transitions.result_payload_adds {
+                let before = local.result_payloads.get(&member).cloned();
+                payload_states
+                    .entry(member)
+                    .and_modify(|(_, after)| *after = Some(payload.clone()))
+                    .or_insert((before, Some(payload)));
+            }
+            for fact in transitions.program_fact_adds {
+                let before = local.program_facts.contains(&fact);
+                fact_states
+                    .entry(fact)
+                    .and_modify(|(_, after)| *after = true)
+                    .or_insert((before, true));
+            }
+            for fact in transitions.program_fact_removes {
+                let before = local.program_facts.contains(&fact);
+                fact_states
+                    .entry(fact)
+                    .and_modify(|(_, after)| *after = false)
+                    .or_insert((before, false));
             }
         }
         if states.is_empty()

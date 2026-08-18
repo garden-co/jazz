@@ -2,6 +2,61 @@
 
 use super::*;
 
+fn materialization_witness_tx_ids<'a>(
+    members: impl IntoIterator<Item = &'a ResultMemberEntry>,
+    facts: impl IntoIterator<Item = &'a ProgramFactEntry>,
+) -> BTreeSet<TxId> {
+    let mut tx_ids = members
+        .into_iter()
+        .filter_map(ResultMemberEntry::as_row)
+        .map(|(_, _, tx)| tx)
+        .collect::<BTreeSet<_>>();
+    for fact in facts {
+        match fact {
+            ProgramFactEntry::ResultPayload(payload) => {
+                if let Some((_, _, tx)) = payload.member.as_row() {
+                    tx_ids.insert(tx);
+                }
+            }
+            ProgramFactEntry::RelationEdge(edge) => {
+                tx_ids.extend(
+                    edge.source_version
+                        .iter()
+                        .chain(edge.target_version.iter())
+                        .map(|version| version.tx),
+                );
+            }
+            ProgramFactEntry::VersionWitness(witness) => {
+                tx_ids.insert(witness.version.tx);
+            }
+            ProgramFactEntry::PolicyWitness(witness) => {
+                tx_ids.insert(witness.witness.tx);
+            }
+            ProgramFactEntry::ContributingMembers(contribution) => {
+                if let Some((_, _, tx)) = contribution.result.as_row() {
+                    tx_ids.insert(tx);
+                }
+                if let Some((_, _, tx)) = contribution.contributor.as_row() {
+                    tx_ids.insert(tx);
+                }
+                tx_ids.extend(contribution.batch);
+            }
+            ProgramFactEntry::PointRead(point) => {
+                tx_ids.extend(point.version.iter().map(|version| version.tx));
+            }
+            ProgramFactEntry::PathCorrelationCoverage(_)
+            | ProgramFactEntry::SourceCoverage(_)
+            | ProgramFactEntry::ReadFrontierSettled(_)
+            | ProgramFactEntry::CompleteTxPayloadCoverage(_)
+            | ProgramFactEntry::ViewCompleteExclusiveCoverage(_)
+            | ProgramFactEntry::PolicyDecision(_)
+            | ProgramFactEntry::PredicateRead(_)
+            | ProgramFactEntry::PredicateOutputSet(_) => {}
+        }
+    }
+    tx_ids
+}
+
 #[derive(Clone, Copy)]
 pub(super) struct RelationSnapshotWindow {
     pub(super) offset: usize,
@@ -396,29 +451,26 @@ where
         local: &LocalMaintainedViewSubscription,
     ) -> Result<LocalMaintainedMaterializationCache, Error> {
         let mut cache = LocalMaintainedMaterializationCache::default();
-        let mut tx_ids = BTreeSet::new();
+        let tx_ids =
+            materialization_witness_tx_ids(local.result_set.iter(), local.program_facts.iter());
         for member in &local.result_set {
             let Some((_, _, tx_id)) = member.as_row() else {
                 continue;
             };
-            tx_ids.insert(tx_id);
             cache
                 .tx_versions
                 .entry(tx_id)
                 .or_insert_with(|| local.maintained.versions_by_tx(tx_id));
         }
         for fact in &local.program_facts {
-            let ProgramFactEntry::RelationEdge(edge) = fact else {
-                continue;
-            };
-            let Some(version) = &edge.target_version else {
-                continue;
-            };
-            tx_ids.insert(version.tx);
-            cache
-                .tx_versions
-                .entry(version.tx)
-                .or_insert_with(|| local.maintained.versions_by_tx(version.tx));
+            for tx_id in
+                materialization_witness_tx_ids(std::iter::empty::<&ResultMemberEntry>(), [fact])
+            {
+                cache
+                    .tx_versions
+                    .entry(tx_id)
+                    .or_insert_with(|| local.maintained.versions_by_tx(tx_id));
+            }
         }
         self.preload_tx_versions_for_materialization(tx_ids, &mut cache.tx_versions)?;
         Ok(cache)
@@ -430,23 +482,12 @@ where
         result_set: &BTreeSet<ResultMemberEntry>,
         program_facts: &BTreeSet<ProgramFactEntry>,
     ) -> Result<(), Error> {
-        let mut tx_ids = BTreeSet::new();
+        let tx_ids = materialization_witness_tx_ids(result_set.iter(), program_facts.iter());
         let mut cache = BTreeMap::new();
-        for tx_id in result_set
-            .iter()
-            .filter_map(ResultMemberEntry::as_row)
-            .map(|(_, _, tx_id)| tx_id)
-            .chain(program_facts.iter().filter_map(|fact| match fact {
-                ProgramFactEntry::RelationEdge(edge) => {
-                    edge.target_version.as_ref().map(|version| version.tx)
-                }
-                _ => None,
-            }))
-        {
-            tx_ids.insert(tx_id);
+        for tx_id in &tx_ids {
             cache
-                .entry(tx_id)
-                .or_insert_with(|| local.maintained.versions_by_tx(tx_id));
+                .entry(*tx_id)
+                .or_insert_with(|| local.maintained.versions_by_tx(*tx_id));
         }
         self.preload_tx_versions_for_materialization(tx_ids, &mut cache)
     }
@@ -464,7 +505,14 @@ where
     ) -> Result<(), Error> {
         loop {
             match local.subscription.try_recv() {
-                Ok(deltas) => local.pending_deltas.push_back(deltas),
+                Ok(deltas) => local.pending_deltas.push_back(
+                    MaintainedSubscriptionView::prepare_multisink_deltas(
+                        deltas,
+                        &local.terminal_schemas,
+                        &local.tables,
+                        &self.node_aliases,
+                    )?,
+                ),
                 Err(std::sync::mpsc::TryRecvError::Empty) => break,
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                     return Err(Error::SubscriptionClosed);
@@ -472,11 +520,11 @@ where
             }
         }
 
-        let mut future_result_set = local.result_set.clone();
-        let mut future_program_facts = local.program_facts.clone();
+        let mut tx_ids =
+            materialization_witness_tx_ids(local.result_set.iter(), local.program_facts.iter());
         let authoritative_generation = self.applied_view_update_generation(local.binding_view_key);
         if authoritative_generation != local.authoritative_result_generation {
-            let remote = self
+            let remote_result_set = self
                 .query
                 .settled_result_sets
                 .get(&local.binding_view_key)
@@ -486,48 +534,19 @@ where
             // The reconciliation step may inspect the old member while
             // deciding whether the authoritative replacement is locally
             // materializable, before it applies the replacement itself.
-            future_result_set.extend(remote.iter().cloned());
-            future_program_facts.extend(
+            tx_ids.extend(materialization_witness_tx_ids(
+                remote_result_set.iter(),
                 self.query
                     .settled_program_facts
                     .get(&local.binding_view_key)
                     .into_iter()
-                    .flatten()
-                    .cloned(),
-            );
+                    .flatten(),
+            ));
         }
-        let mut maintained = local.maintained.clone();
         for deltas in &local.pending_deltas {
-            let transitions = maintained.apply_multisink_deltas(
-                deltas.clone(),
-                &local.terminal_schemas,
-                &local.tables,
-                &self.node_aliases,
-            )?;
-            for removed in transitions.removes {
-                future_result_set.remove(&removed);
-            }
-            future_result_set.extend(transitions.adds);
-            for removed in transitions.program_fact_removes {
-                future_program_facts.remove(&removed);
-            }
-            future_program_facts.extend(transitions.program_fact_adds);
+            tx_ids.extend(deltas.materialization_witness_tx_ids());
         }
-        let mut tx_ids = BTreeSet::new();
         let mut cache = BTreeMap::new();
-        for tx_id in future_result_set
-            .iter()
-            .filter_map(ResultMemberEntry::as_row)
-            .map(|(_, _, tx_id)| tx_id)
-            .chain(future_program_facts.iter().filter_map(|fact| match fact {
-                ProgramFactEntry::RelationEdge(edge) => {
-                    edge.target_version.as_ref().map(|version| version.tx)
-                }
-                _ => None,
-            }))
-        {
-            tx_ids.insert(tx_id);
-        }
         self.preload_tx_versions_for_materialization(tx_ids, &mut cache)?;
         Ok(())
     }

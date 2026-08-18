@@ -171,6 +171,108 @@ pub(crate) enum DecodedMaintainedEvent {
     },
 }
 
+/// A decoded Groove delta batch that is safe to retain across asynchronous
+/// witness acquisition. Constructing this value validates terminal layouts
+/// but does not mutate the maintained view.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct PreparedMaintainedDeltas {
+    terminal_operations: Vec<TerminalOperation>,
+    sinks: Vec<PreparedMaintainedSinkDeltas>,
+    #[cfg(feature = "testing")]
+    retained_heap_bytes: usize,
+}
+
+#[derive(Clone, Debug)]
+struct PreparedMaintainedSinkDeltas {
+    decoded: Vec<(DecodedMaintainedEvent, i64)>,
+    observed_result_delta_batch: bool,
+    requires_authoritative_membership_reconcile: bool,
+}
+
+impl PreparedMaintainedDeltas {
+    /// Immutable transactions whose version bodies may be needed to render
+    /// the public delta after this batch is committed.
+    pub(crate) fn materialization_witness_tx_ids(&self) -> BTreeSet<TxId> {
+        self.sinks
+            .iter()
+            .flat_map(|sink| &sink.decoded)
+            .flat_map(|(event, _)| match event {
+                DecodedMaintainedEvent::ResultCurrent { member, .. }
+                | DecodedMaintainedEvent::AggregateResult { member, .. } => {
+                    member.as_row().map(|(_, _, tx)| tx).into_iter().collect()
+                }
+                DecodedMaintainedEvent::RelationEdge(edge) => edge
+                    .source_version
+                    .iter()
+                    .chain(edge.target_version.iter())
+                    .map(|version| version.tx)
+                    .collect(),
+                DecodedMaintainedEvent::VersionContent(_)
+                | DecodedMaintainedEvent::VersionDeletion(_)
+                | DecodedMaintainedEvent::ReplacementContent(_)
+                | DecodedMaintainedEvent::ReplacementDeletion(_)
+                | DecodedMaintainedEvent::StructuredAppRow { .. } => Vec::new(),
+            })
+            .collect()
+    }
+
+    #[cfg(feature = "testing")]
+    pub(crate) fn heap_bytes(&self) -> usize {
+        self.retained_heap_bytes
+    }
+}
+
+#[cfg(feature = "testing")]
+fn terminal_operation_heap_bytes(operation: &TerminalOperation) -> usize {
+    let path_bytes = operation
+        .path
+        .iter()
+        .map(|segment| match segment {
+            groove::ivm::TerminalPathSegment::Collection(name) => name.capacity(),
+            groove::ivm::TerminalPathSegment::Key(key) => key.capacity(),
+        })
+        .sum::<usize>();
+    let edit_bytes = match &operation.edit {
+        TerminalEdit::Insert { key, value, .. } | TerminalEdit::Update { key, value } => {
+            key.capacity() + value.capacity()
+        }
+        TerminalEdit::Remove { key } | TerminalEdit::Move { key, .. } => key.capacity(),
+    };
+    operation.root_key.capacity()
+        + operation.path.capacity() * mem::size_of::<groove::ivm::TerminalPathSegment>()
+        + path_bytes
+        + edit_bytes
+}
+
+#[cfg(feature = "testing")]
+fn multisink_deltas_heap_bytes(deltas: &MultisinkDeltas) -> usize {
+    let record_bytes = deltas
+        .sinks
+        .iter()
+        .map(|(name, deltas)| {
+            name.capacity()
+                + deltas
+                    .deltas
+                    .iter()
+                    .map(|delta| delta.raw().len() + mem::size_of_val(delta))
+                    .sum::<usize>()
+        })
+        .sum::<usize>();
+    let terminal_bytes = deltas
+        .terminal_sinks
+        .iter()
+        .map(|(name, deltas)| {
+            name.capacity()
+                + deltas
+                    .operations
+                    .iter()
+                    .map(terminal_operation_heap_bytes)
+                    .sum::<usize>()
+        })
+        .sum::<usize>();
+    record_bytes + terminal_bytes
+}
+
 #[derive(Clone, Debug, Default)]
 pub(crate) struct MaintainedTerminalSchemas {
     sinks: BTreeMap<String, MaintainedTerminalKind>,
@@ -225,6 +327,7 @@ impl MaintainedSubscriptionView {
         MaintainedTerminalSchemas::for_program(program)
     }
 
+    #[cfg(test)]
     pub(crate) fn apply_typed_deltas(
         &mut self,
         sink: &str,
@@ -233,9 +336,24 @@ impl MaintainedSubscriptionView {
         tables: &TableSchemas,
         node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
     ) -> Result<ResultTransitions, super::Error> {
+        let prepared = Self::decode_typed_deltas(sink, deltas, schemas, tables, node_aliases)?;
+        self.apply_prepared_sink_deltas(prepared, node_aliases)
+    }
+
+    fn decode_typed_deltas(
+        sink: &str,
+        deltas: &RecordDeltas,
+        schemas: &MaintainedTerminalSchemas,
+        tables: &TableSchemas,
+        node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
+    ) -> Result<PreparedMaintainedSinkDeltas, super::Error> {
         let kind = schemas.get(sink)?;
         if matches!(kind, MaintainedTerminalKind::IgnoredAggregateAppRows) {
-            return Ok(ResultTransitions::default());
+            return Ok(PreparedMaintainedSinkDeltas {
+                decoded: Vec::new(),
+                observed_result_delta_batch: false,
+                requires_authoritative_membership_reconcile: false,
+            });
         }
         let observed_result_delta_batch = !deltas.is_empty() && kind.is_result_terminal();
         // Deletion witnesses are part of the membership proof: a current-row
@@ -258,35 +376,70 @@ impl MaintainedSubscriptionView {
                 .map(|event| (event, weight))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let mut transitions = self.apply_decoded_deltas(decoded, node_aliases)?;
-        if observed_result_delta_batch {
+        Ok(PreparedMaintainedSinkDeltas {
+            decoded,
+            observed_result_delta_batch,
+            requires_authoritative_membership_reconcile,
+        })
+    }
+
+    fn apply_prepared_sink_deltas(
+        &mut self,
+        prepared: PreparedMaintainedSinkDeltas,
+        node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
+    ) -> Result<ResultTransitions, super::Error> {
+        let mut transitions = self.apply_decoded_deltas(prepared.decoded, node_aliases)?;
+        if prepared.observed_result_delta_batch {
             transitions.observed_result_delta_batches += 1;
         }
         transitions.requires_authoritative_membership_reconcile =
-            requires_authoritative_membership_reconcile;
+            prepared.requires_authoritative_membership_reconcile;
         Ok(transitions)
     }
 
-    pub(crate) fn apply_multisink_deltas(
-        &mut self,
+    pub(crate) fn prepare_multisink_deltas(
         deltas: MultisinkDeltas,
         schemas: &MaintainedTerminalSchemas,
         tables: &TableSchemas,
         node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
-    ) -> Result<ResultTransitions, super::Error> {
-        let mut transitions = ResultTransitions::default();
+    ) -> Result<PreparedMaintainedDeltas, super::Error> {
+        let mut prepared = PreparedMaintainedDeltas {
+            #[cfg(feature = "testing")]
+            retained_heap_bytes: multisink_deltas_heap_bytes(&deltas),
+            ..PreparedMaintainedDeltas::default()
+        };
         for (sink, terminal) in &deltas.terminal_sinks {
             if let MaintainedTerminalKind::StructuredAppRows { layout, .. } = schemas.get(sink)? {
                 for operation in &terminal.operations {
-                    transitions
+                    prepared
                         .terminal_operations
                         .push(rebind_terminal_operation_to_layout(operation, layout)?);
                 }
             }
         }
         for (sink, deltas) in deltas.sinks {
-            let delta_transitions =
-                self.apply_typed_deltas(&sink, &deltas, schemas, tables, node_aliases)?;
+            prepared.sinks.push(Self::decode_typed_deltas(
+                &sink,
+                &deltas,
+                schemas,
+                tables,
+                node_aliases,
+            )?);
+        }
+        Ok(prepared)
+    }
+
+    pub(crate) fn apply_prepared_multisink_deltas(
+        &mut self,
+        prepared: PreparedMaintainedDeltas,
+        node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
+    ) -> Result<ResultTransitions, super::Error> {
+        let mut transitions = ResultTransitions {
+            terminal_operations: prepared.terminal_operations,
+            ..ResultTransitions::default()
+        };
+        for prepared_sink in prepared.sinks {
+            let delta_transitions = self.apply_prepared_sink_deltas(prepared_sink, node_aliases)?;
             transitions.adds.extend(delta_transitions.adds);
             transitions.removes.extend(delta_transitions.removes);
             transitions
@@ -310,6 +463,17 @@ impl MaintainedSubscriptionView {
                 delta_transitions.requires_authoritative_membership_reconcile;
         }
         Ok(transitions)
+    }
+
+    pub(crate) fn apply_multisink_deltas(
+        &mut self,
+        deltas: MultisinkDeltas,
+        schemas: &MaintainedTerminalSchemas,
+        tables: &TableSchemas,
+        node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
+    ) -> Result<ResultTransitions, super::Error> {
+        let prepared = Self::prepare_multisink_deltas(deltas, schemas, tables, node_aliases)?;
+        self.apply_prepared_multisink_deltas(prepared, node_aliases)
     }
 
     pub(crate) fn apply_decoded_deltas(
@@ -2042,6 +2206,77 @@ mod tests {
 
     fn aliases() -> BTreeMap<NodeUuid, NodeAlias> {
         BTreeMap::from([(node(1), NodeAlias(10)), (node(2), NodeAlias(20))])
+    }
+
+    #[test]
+    fn prepared_delta_exposes_witness_demand_without_advancing_view_state() {
+        let member_tx = tx(1, 10);
+        let source_tx = tx(1, 11);
+        let target_tx = tx(1, 12);
+        let member = ResultMemberEntry::row((String::from("todos").into(), row(1), member_tx));
+        let version_ref = |tx| RowVersionRefEntry {
+            tx,
+            schema_version: None,
+            layer: ResultRowLayer::Content,
+            batch: None,
+            branch_or_prefix: None,
+            row_digest: None,
+        };
+        let edge = RelationEdgeEntry {
+            path: "owner".to_owned(),
+            source_table: String::from("todos").into(),
+            source_row: row(1),
+            target_table: String::from("users").into(),
+            target_row: row(2),
+            kind: None,
+            source_version: Some(version_ref(source_tx)),
+            target_version: Some(version_ref(target_tx)),
+            depth: None,
+            edge_id: None,
+            branch: None,
+            role: None,
+            order: None,
+            hole_state: None,
+        };
+        let prepared = PreparedMaintainedDeltas {
+            sinks: vec![PreparedMaintainedSinkDeltas {
+                decoded: vec![
+                    (
+                        DecodedMaintainedEvent::ResultCurrent {
+                            member: member.clone(),
+                            payload: ResultMemberPayloadEntry {
+                                member: member.clone(),
+                                descriptor: Vec::new(),
+                                record: Vec::new(),
+                            },
+                        },
+                        1,
+                    ),
+                    (DecodedMaintainedEvent::RelationEdge(edge.clone()), 1),
+                ],
+                observed_result_delta_batch: true,
+                requires_authoritative_membership_reconcile: false,
+            }],
+            ..PreparedMaintainedDeltas::default()
+        };
+        let mut maintained = MaintainedSubscriptionView::default();
+
+        assert!(maintained.active_result_members().is_empty());
+        assert_eq!(
+            prepared.materialization_witness_tx_ids(),
+            BTreeSet::from([member_tx, source_tx, target_tx])
+        );
+        assert!(maintained.active_result_members().is_empty());
+
+        let transitions = maintained
+            .apply_prepared_multisink_deltas(prepared, &aliases())
+            .expect("commit prepared batch");
+        assert_eq!(transitions.adds, vec![member.clone()]);
+        assert_eq!(
+            transitions.program_fact_adds,
+            vec![ProgramFactEntry::RelationEdge(edge)]
+        );
+        assert_eq!(maintained.active_result_members(), vec![member]);
     }
 
     /// Production-shaped typed relation facts retain branch identity through
