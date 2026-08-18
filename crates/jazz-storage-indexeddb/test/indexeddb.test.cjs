@@ -109,16 +109,10 @@ async function main() {
     if (result.authorityReceipt !== "Jazz authority Fate followed IndexedDB durability") {
       throw new Error(JSON.stringify(result));
     }
-    if (
-      result.demandReceipt !==
-      "IndexedDB demand loading preserved synchronous resident writes"
-    ) {
+    if (result.demandReceipt !== "IndexedDB demand loading preserved synchronous resident writes") {
       throw new Error(JSON.stringify(result));
     }
-    if (
-      result.nodeReceipt !==
-      "IndexedDB node open/write/reopen preserved resident visibility"
-    ) {
+    if (result.nodeReceipt !== "IndexedDB node open/write/reopen preserved resident visibility") {
       throw new Error(JSON.stringify(result));
     }
     console.log(result.receipt);
