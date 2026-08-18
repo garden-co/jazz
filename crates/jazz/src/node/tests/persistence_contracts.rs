@@ -521,6 +521,16 @@ fn demand_driven_db_acquires_cold_subscription_before_registering_it() {
         title_cells("staged b"),
     ))
     .unwrap();
+    let staged = {
+        let mut read = std::pin::pin!(owner.transaction_all(tx_id, &prepared, opts.clone()));
+        assert!(std::future::Future::poll(read.as_mut(), &mut context).is_pending());
+        assert!(subscription.try_next_event().is_none());
+        released.set(true);
+        crate::db::block_on(read.as_mut()).expect("released transaction inputs must read")
+    };
+    assert!(staged.iter().any(|row| row.row_uuid() == tx_row_a));
+    assert!(staged.iter().any(|row| row.row_uuid() == tx_row_b));
+    released.set(false);
     assert!(
         subscription.try_next_event().is_none(),
         "staged transaction writes must remain invisible"

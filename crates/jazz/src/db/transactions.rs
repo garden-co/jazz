@@ -151,6 +151,25 @@ where
             .map_err(MutationPrepareError::Node)
     }
 
+    pub(super) fn transaction_all_for_owner(
+        &self,
+        tx_id: OpenBatchId,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+    ) -> Result<Vec<CurrentRow>, MutationPrepareError> {
+        ensure_default_read_view(&opts).map_err(MutationPrepareError::Api)?;
+        self.node
+            .node
+            .borrow_mut()
+            .tx_query_with_options(
+                tx_id,
+                &prepared.shape,
+                &prepared.binding,
+                opts.include_deleted,
+            )
+            .map_err(MutationPrepareError::Node)
+    }
+
     pub(super) fn exclusive_read_for_owner(
         &self,
         tx_id: OpenBatchId,

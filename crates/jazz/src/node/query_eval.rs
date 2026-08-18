@@ -543,6 +543,18 @@ where
         } else {
             self.normalized_row_set_shape(&lowered_shape, &binding)?
         };
+        // Transaction overlays are assembled from their frozen base plus
+        // staged writes. Acquire every logical source named by this normalized
+        // query before lowering so the source resolver never converts a cold
+        // storage request into a capability gap.
+        for table in normalized_source_tables(&input_shape) {
+            let _ = self.tx_current_rows_in_schema_with_options(
+                tx_id,
+                lowered_shape.schema_version(),
+                &table,
+                include_deleted,
+            )?;
+        }
         let input = RowSetProgramInput {
             binding: self.program_binding_for_shape(
                 &lowered_shape,
