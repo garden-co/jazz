@@ -2204,6 +2204,47 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(attachedSubjects).toEqual(["client", "client"]);
   });
 
+  it("coalesces concurrent coverage waits into one owned transport pump", async () => {
+    globalThis.WebSocket = FakeWebSocket as unknown as typeof WebSocket;
+    const transport = new FakeTransport([]);
+    let coveredAfterTick = Number.POSITIVE_INFINITY;
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            all: () => encodeRows([]),
+            connectUpstream: () => transport,
+            prepareQuery: () => ({}),
+            attachQuery: () => ({}),
+            queryAttachmentIsCovered: () => transport.tickCount >= coveredAfterTick,
+            detachQuery: () => undefined,
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+    await runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+    await waitForFakeWebSocketNegotiation();
+    await waitForServerPumpTimer();
+
+    const ticksBeforeCoverage = transport.tickCount;
+    coveredAfterTick = ticksBeforeCoverage + 2;
+    await Promise.all(
+      Array.from({ length: 8 }, () =>
+        runtime.query(JSON.stringify({ table: "todos" }), null, "edge"),
+      ),
+    );
+
+    expect(transport.tickCount - ticksBeforeCoverage).toBe(2);
+  });
+
   it("passes supported read tiers through and fails fast for unsupported read options", async () => {
     const runtime = emptyNativeRuntime();
 

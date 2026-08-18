@@ -427,6 +427,8 @@ export class NativeRuntimeAdapter implements Runtime {
   private coreTickScheduled = false;
   private ownerTickTail: Promise<void> | null = null;
   private serverPumpScheduled = false;
+  private serverPumpRequested = false;
+  private serverPumpInFlight: Promise<void> | null = null;
   private closed = false;
   private nextSubscriptionId = 1;
 
@@ -2053,6 +2055,29 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   private async pumpServerTransport(): Promise<void> {
+    this.serverPumpRequested = true;
+    if (this.serverPumpInFlight) {
+      await this.serverPumpInFlight;
+      return;
+    }
+
+    const pump = this.runServerTransportPump();
+    this.serverPumpInFlight = pump;
+    try {
+      await pump;
+    } finally {
+      if (this.serverPumpInFlight === pump) this.serverPumpInFlight = null;
+    }
+  }
+
+  private async runServerTransportPump(): Promise<void> {
+    while (this.serverPumpRequested && !this.closed) {
+      this.serverPumpRequested = false;
+      await this.runServerTransportPumpPass();
+    }
+  }
+
+  private async runServerTransportPumpPass(): Promise<void> {
     const transport = this.serverTransport;
     if (this.closed || !transport) return;
     this.drainPendingInboundServerFrames(transport);
