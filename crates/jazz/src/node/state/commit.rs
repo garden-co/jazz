@@ -48,38 +48,8 @@ where
         schema_version: SchemaVersionId,
         commits: Vec<MergeableCommit>,
     ) -> Result<TxId, Error> {
-        self.require_catalogue_ready()?;
-        if !self
-            .catalogue
-            .catalogue_schemas
-            .contains_key(&schema_version)
-        {
-            return Err(Error::InvalidMergeableCommit(
-                "authored schema version is not admitted",
-            ));
-        }
-        if commits.is_empty() {
-            return Err(Error::InvalidMergeableCommit(
-                "mergeable transaction requires at least one write",
-            ));
-        }
-        for commit in &commits {
-            commit.validate()?;
-            if commit.effective_permission_subject() != commits[0].effective_permission_subject() {
-                return Err(Error::InvalidMergeableCommit(
-                    "mergeable transaction permission subjects must match",
-                ));
-            }
-        }
-        let made_at = self.preview_mergeable_tx_time(&commits, commits[0].now_ms);
-        self.commit_mergeable_many_at_with_schema_versions(
-            commits
-                .into_iter()
-                .map(|commit| (schema_version, commit))
-                .collect(),
-            made_at,
-            None,
-        )
+        let prepared = self.prepare_mergeable_many_in_schema(schema_version, commits)?;
+        self.publish_prepared_mergeable_commit(prepared)
     }
 
     pub(crate) fn preview_mergeable_tx_time(
@@ -114,10 +84,39 @@ where
         schema: SchemaVersionId,
         commit: MergeableCommit,
     ) -> Result<PreparedMergeableCommit, Error> {
-        commit.validate()?;
-        let made_at = self.preview_mergeable_tx_time(std::slice::from_ref(&commit), commit.now_ms);
+        self.prepare_mergeable_many_in_schema(schema, vec![commit])
+    }
+
+    pub(crate) fn prepare_mergeable_many_in_schema(
+        &mut self,
+        schema: SchemaVersionId,
+        commits: Vec<MergeableCommit>,
+    ) -> Result<PreparedMergeableCommit, Error> {
+        self.require_catalogue_ready()?;
+        if !self.catalogue.catalogue_schemas.contains_key(&schema) {
+            return Err(Error::InvalidMergeableCommit(
+                "authored schema version is not admitted",
+            ));
+        }
+        if commits.is_empty() {
+            return Err(Error::InvalidMergeableCommit(
+                "mergeable transaction requires at least one write",
+            ));
+        }
+        for commit in &commits {
+            commit.validate()?;
+            if commit.effective_permission_subject() != commits[0].effective_permission_subject() {
+                return Err(Error::InvalidMergeableCommit(
+                    "mergeable transaction permission subjects must match",
+                ));
+            }
+        }
+        let made_at = self.preview_mergeable_tx_time(&commits, commits[0].now_ms);
         self.prepare_mergeable_many_at_with_schema_versions(
-            vec![(schema, commit)],
+            commits
+                .into_iter()
+                .map(|commit| (schema, commit))
+                .collect(),
             made_at,
             None,
             true,

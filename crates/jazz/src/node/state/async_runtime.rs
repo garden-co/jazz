@@ -152,6 +152,22 @@ impl DemandDrivenNode {
         )
     }
 
+    /// Commit several mergeable writes as one transaction under an explicit
+    /// authored schema. All durable inputs are acquired before the atomic
+    /// resident publication.
+    pub fn poll_mergeable_many_in_schema(
+        &mut self,
+        context: &mut std::task::Context<'_>,
+        schema: SchemaVersionId,
+        commits: &[MergeableCommit],
+    ) -> std::task::Poll<Result<TxId, Error>> {
+        self.poll_local_operation(
+            context,
+            |node| node.prepare_mergeable_many_in_schema(schema, commits.to_vec()),
+            |node, prepared| node.publish_prepared_mergeable_commit(prepared),
+        )
+    }
+
     /// Create one local branch through the same acquire-then-publish boundary
     /// as application-row writes.
     pub fn poll_create_branch(

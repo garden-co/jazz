@@ -262,6 +262,44 @@ where
             .deletion(DeletionEvent::Deleted))
     }
 
+    pub(super) fn prepare_restore_commits_for_owner(
+        &self,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+        now_ms: u64,
+    ) -> Result<Vec<MergeableCommit>, MutationPrepareError> {
+        let cells = self
+            .apply_insert_defaults(table, cells)
+            .map_err(MutationPrepareError::Api)?;
+        let (content_parent, deletion_parent) = {
+            let mut node = self.node.node.borrow_mut();
+            (
+                node.local_content_winner_tx_id(table, row)
+                    .map_err(MutationPrepareError::Node)?,
+                node.local_deletion_winner_tx_id(table, row)
+                    .map_err(MutationPrepareError::Node)?,
+            )
+        };
+        let Some(deletion_parent) = deletion_parent else {
+            return Err(MutationPrepareError::Api(Error::new(
+                ErrorCode::WriteRejected,
+                format!("row not deleted: {}", row.0),
+            )));
+        };
+        Ok(vec![
+            MergeableCommit::new(table, row, now_ms)
+                .made_by(self.identity.author)
+                .parents(content_parent.into_iter().collect())
+                .cells(cells),
+            MergeableCommit::new(table, row, now_ms)
+                .made_by(self.identity.author)
+                .parents(vec![deletion_parent])
+                .cells(BTreeMap::<String, Value>::new())
+                .deletion(DeletionEvent::Restored),
+        ])
+    }
+
     /// Insert a row locally, generating a uuidv7-shaped row id.
     ///
     /// The generated id is available from [`WriteHandle::row_uuid`].

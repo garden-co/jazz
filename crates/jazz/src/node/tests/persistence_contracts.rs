@@ -473,6 +473,27 @@ fn demand_driven_db_acquires_cold_subscription_before_registering_it() {
         panic!("a resident post-delete read must complete in its first poll")
     };
     assert_eq!(rows.len(), 1);
+
+    let restored_write = {
+        let mut restore = std::pin::pin!(owner.restore(
+            "todos",
+            write.row_uuid(),
+            title_cells("resident restore"),
+        ));
+        match std::future::Future::poll(restore.as_mut(), &mut context) {
+            std::task::Poll::Ready(Ok(restored)) => restored,
+            std::task::Poll::Ready(Err(error)) => panic!("resident restore failed: {error}"),
+            std::task::Poll::Pending => {
+                panic!("a restore over resident witnesses must complete in its first poll")
+            }
+        }
+    };
+    let Some(crate::db::SubscriptionEvent::Delta { added, .. }) = subscription.try_next_event()
+    else {
+        panic!("the first-poll restore must synchronously refresh subscriptions")
+    };
+    assert_eq!(added.len(), 1);
+    assert_eq!(restored_write.row_uuid(), write.row_uuid());
     assert!(owner.poll_persistence(&mut context).is_pending());
 }
 
@@ -559,6 +580,11 @@ fn demand_driven_db_acquires_cold_mutations_before_single_publish() {
         .insert("todos", title_cells("cold delete seed"))
         .unwrap()
         .row_uuid();
+    let restore_row = seeded
+        .insert("todos", title_cells("cold restore seed"))
+        .unwrap()
+        .row_uuid();
+    seeded.delete("todos", restore_row).unwrap();
     drop(seeded);
 
     let released = std::rc::Rc::new(std::cell::Cell::new(true));
@@ -588,6 +614,23 @@ fn demand_driven_db_acquires_cold_mutations_before_single_publish() {
         deleted
     };
     assert_eq!(deleted.row_uuid(), delete_row);
+    released.set(false);
+    let restored = {
+        let mut restore = std::pin::pin!(owner.restore(
+            "todos",
+            restore_row,
+            title_cells("after restore acquisition"),
+        ));
+        assert!(std::future::Future::poll(restore.as_mut(), &mut context).is_pending());
+        released.set(true);
+        let std::task::Poll::Ready(Ok(restored)) =
+            std::future::Future::poll(restore.as_mut(), &mut context)
+        else {
+            panic!("released restore dependencies must publish exactly once")
+        };
+        restored
+    };
+    assert_eq!(restored.row_uuid(), restore_row);
     released.set(false);
     let write = {
         let mut update = std::pin::pin!(owner.update(
