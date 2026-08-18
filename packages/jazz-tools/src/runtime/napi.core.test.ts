@@ -484,7 +484,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     },
   );
 
-  it("delivers native NAPI subscription updates through the native handle", async () => {
+  it("delivers tier-none NAPI subscription updates before mutations return", async () => {
     const { NapiDb } = await loadNapiModule();
     const runtime = new NativeRuntimeAdapter(
       { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
@@ -498,7 +498,8 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
 
     const manager = new SubscriptionManager<WasmRow>();
     const updates: ReturnType<SubscriptionManager<WasmRow>["handleDelta"]>[] = [];
-    const handle = runtime.createSubscription(JSON.stringify({ table: "todos" }), null, "local");
+    const publicationOrder: string[] = [];
+    const handle = runtime.createSubscription(JSON.stringify({ table: "todos" }), null, "none");
     runtime.executeSubscription(handle, (delta: unknown) => {
       updates.push(
         manager.handleDelta(
@@ -507,6 +508,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
           TEST_SCHEMA.todos.columns,
         ),
       );
+      if (updates.length > 1) publicationOrder.push("callback");
     });
 
     expect(updates).toEqual([{ all: [], delta: [], reset: true }]);
@@ -515,7 +517,9 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       title: { type: "Text", value: "direct napi subscribed row" },
       done: { type: "Boolean", value: false },
     });
+    publicationOrder.push("returned");
 
+    expect(publicationOrder).toEqual(["callback", "returned"]);
     expect(updates).toHaveLength(2);
     expect(updates[1]?.delta).toEqual([
       {

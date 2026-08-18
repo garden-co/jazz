@@ -619,6 +619,67 @@ describe("NativeRuntimeAdapter server transport", () => {
     );
   });
 
+  it("publishes an immediate local subscription before insert returns", () => {
+    const order: string[] = [];
+    let wrote = false;
+    let drained = false;
+    const rowId = uuidBytes("00000000-0000-0000-0000-000000000124");
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            prepareQuery: () => ({}),
+            subscribe: () => ({
+              readAll: () => {
+                if (!wrote || drained) return [];
+                drained = true;
+                return [
+                  {
+                    type: "snapshot",
+                    rows: encodeRelationSnapshot([
+                      {
+                        table: "todos",
+                        rowId,
+                        title: "controlled input",
+                      },
+                    ]),
+                  },
+                ];
+              },
+            }),
+            insertWithIdEncoded: () => {
+              order.push("resident-write");
+              wrote = true;
+              return fakeWrite();
+            },
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+    const handle = runtime.createSubscription(JSON.stringify({ table: "todos" }), null, "none");
+    runtime.executeSubscription(handle, () => {
+      order.push("callback");
+    });
+
+    runtime.insert(
+      "todos",
+      { title: { type: "Text", value: "controlled input" } },
+      null,
+      "00000000-0000-0000-0000-000000000124",
+    );
+    order.push("returned");
+
+    expect(order).toEqual(["resident-write", "callback", "returned"]);
+  });
+
   it("runs scheduled core ticks before post-wait edge reads", async () => {
     let schedulerCallback: ((urgency: "immediate" | "deferred") => void) | undefined;
     let ticked = false;
