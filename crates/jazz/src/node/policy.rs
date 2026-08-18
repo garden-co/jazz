@@ -304,11 +304,7 @@ where
             return Ok(true);
         }
         let table = self.table(table_name)?.clone();
-        let Some(row) = self
-            .current_rows(table_name, DurabilityTier::Local)?
-            .into_iter()
-            .find(|row| row.row_uuid() == row_uuid)
-        else {
+        let Some(row) = self.local_current_row(table_name, row_uuid)? else {
             return Ok(false);
         };
         let Some(policy) = table.write_policies.update_using.clone() else {
@@ -327,11 +323,7 @@ where
             return Ok(true);
         }
         let table = self.table(table_name)?.clone();
-        let Some(row) = self
-            .current_rows(table_name, DurabilityTier::Local)?
-            .into_iter()
-            .find(|row| row.row_uuid() == row_uuid)
-        else {
+        let Some(row) = self.local_current_row(table_name, row_uuid)? else {
             return Ok(false);
         };
         let Some(policy) = table.write_policies.delete_using.clone() else {
