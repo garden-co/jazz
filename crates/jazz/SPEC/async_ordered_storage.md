@@ -15,6 +15,9 @@ The experiment now uses the same demand-driven owner from Groove through Jazz:
 - `DemandDrivenDatabase`, `DemandDrivenNode`, and `DemandDrivenDb` own the
   resident runtime and ordered persistence scheduler without a legacy parallel
   runtime;
+- NAPI and WASM bindings hold one `DemandDrivenDb` owner plus inert typed-view
+  tokens; neither binding retains a parallel `Db<MemoryStorage>` or
+  `Db<OpfsStorage>` execution path;
 - volatile Memory remains `Pending/None` even though its operations complete
   in their first poll, while persistent RocksDB and IndexedDB may advance the
   Local frontier only after their storage commit completes;

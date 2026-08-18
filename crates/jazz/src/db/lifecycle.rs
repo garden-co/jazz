@@ -323,6 +323,17 @@ impl DemandDrivenDb {
         self.database.on_mutation_error(callback);
     }
 
+    pub fn request_permission_advice(
+        &self,
+        action: PermissionAdviceAction,
+    ) -> PermissionAdviceFuture {
+        self.database.request_permission_advice(action)
+    }
+
+    pub fn cancel_permission_advice_request(&self, request_id: PermissionAdviceRequestId) {
+        self.database.cancel_permission_advice_request(request_id);
+    }
+
     pub fn set_non_durable_client(&self) {
         self.database.set_non_durable_client();
     }
@@ -688,6 +699,24 @@ impl DemandDrivenDb {
         let connections = self.database.node.connections.borrow().clone();
         for connection in &connections {
             connection.borrow_mut().stage_available_inbound();
+            match self.runtime.poll_acquire_resident(context, |node| {
+                connection
+                    .borrow_mut()
+                    .prepare_local_subscriber_restore(node)
+            }) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error.into())),
+                Poll::Ready(Ok(())) => {}
+            }
+            match self.runtime.poll_acquire_resident(context, |node| {
+                connection
+                    .borrow_mut()
+                    .prepare_pending_upstream_inputs(node)
+            }) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error.into())),
+                Poll::Ready(Ok(())) => {}
+            }
             match self.runtime.poll_acquire_resident(context, |node| {
                 connection
                     .borrow_mut()
@@ -1613,6 +1642,32 @@ impl DemandDrivenDb {
         .map_err(MutationPrepareError::into_api)
     }
 
+    pub async fn transaction_all_for_identity(
+        &mut self,
+        tx_id: OpenBatchId,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+        author: AuthorId,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        let database = &self.database;
+        std::future::poll_fn(|context| {
+            self.runtime.poll_operation(
+                context,
+                || {
+                    database.transaction_all_for_identity_for_owner(
+                        tx_id,
+                        prepared,
+                        author,
+                        opts.clone(),
+                    )
+                },
+                MutationPrepareError::missing_input,
+            )
+        })
+        .await
+        .map_err(MutationPrepareError::into_api)
+    }
+
     /// Publish every staged write as one resident and durable transaction.
     pub async fn commit_mergeable(&mut self, tx_id: OpenBatchId) -> Result<TxId, Error> {
         let fallback_count = self
@@ -2028,6 +2083,10 @@ impl DemandDrivenViewDb<'_> {
         Ok(())
     }
 
+    pub fn can_insert(&self, table: &str, cells: RowCells) -> Result<PermissionAdvice, Error> {
+        self.database.can_insert(table, cells)
+    }
+
     pub fn local_current_row(
         &self,
         table: &str,
@@ -2083,6 +2142,16 @@ impl DemandDrivenViewDb<'_> {
             tx_id,
             local_tier,
         })
+    }
+
+    /// Insert one generated row through this typed view.
+    pub async fn insert(
+        &mut self,
+        table: &str,
+        cells: RowCells,
+    ) -> Result<WriteHandle<groove::storage::DemandLoadedStorage>, Error> {
+        let row = self.database.row_id_source.borrow_mut().next_row_id();
+        self.insert_with_id(table, row, cells, None, None).await
     }
 
     /// Insert one caller-selected row through this typed view.
@@ -2415,6 +2484,32 @@ impl DemandDrivenViewDb<'_> {
             self.runtime.poll_operation(
                 context,
                 || database.transaction_all_for_owner(tx_id, prepared, opts.clone()),
+                MutationPrepareError::missing_input,
+            )
+        })
+        .await
+        .map_err(MutationPrepareError::into_api)
+    }
+
+    pub async fn transaction_all_for_identity(
+        &mut self,
+        tx_id: OpenBatchId,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+        author: AuthorId,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        let database = &self.database;
+        std::future::poll_fn(|context| {
+            self.runtime.poll_operation(
+                context,
+                || {
+                    database.transaction_all_for_identity_for_owner(
+                        tx_id,
+                        prepared,
+                        author,
+                        opts.clone(),
+                    )
+                },
                 MutationPrepareError::missing_input,
             )
         })

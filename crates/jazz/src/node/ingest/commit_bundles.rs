@@ -20,6 +20,104 @@ impl<S> NodeState<S>
 where
     S: ResidentStorage,
 {
+    /// Acquire canonical storage inputs that receiver-bundle publication may
+    /// consult while staging history and current-winner updates.
+    ///
+    /// Receiver payload validation is intentionally separate: this method is
+    /// the storage half of preparation and must not advance clocks, mutate
+    /// maintained membership, or publish a database batch.
+    pub(super) fn prepare_view_bundle_storage_inputs(
+        &mut self,
+        bundle: VersionBundleRef<'_>,
+    ) -> Result<(), Error>
+    where
+        S: ReopenableStorage,
+    {
+        let tx = bundle.tx;
+        let tx_node_alias = self.prepare_node_alias(tx.tx_id.node)?;
+        let existing_tx = self.query_transaction(tx.tx_id)?;
+        let tx_already_known = existing_tx.is_some();
+        if existing_tx.is_some() {
+            let _ = self.query_versions_for_tx(tx.tx_id)?;
+            // A complete repeated bundle enters `apply_fate_update` even when
+            // its fate value is unchanged. Reuse that operation's preparation
+            // unconditionally so pending-edge cleanup and every derived
+            // current-index write are resident before receiver publication.
+            let _ = self.prepare_fate_update(FateUpdateRequest {
+                tx_id: tx.tx_id,
+                fate: bundle.fate.clone(),
+                global_seq: bundle.global_seq,
+                durability: Some(bundle.durability),
+            })?;
+        }
+        for version in bundle.versions {
+            let table = self.table_in_schema(version.table(), version.schema_version())?;
+            let layer = VersionLayer::for_record(version);
+            let _ = self.query_local_layer_winner(&table.name, version.row_uuid(), layer)?;
+            let _ = self.query_global_layer_winner_in_schema(
+                version.schema_version(),
+                &table.name,
+                version.row_uuid(),
+                layer,
+            )?;
+            if let Some(global_seq) = bundle.global_seq {
+                self.preload_global_change_slot(
+                    version.schema_version(),
+                    &table.name,
+                    version.row_uuid(),
+                    layer,
+                    global_seq,
+                )?;
+            }
+            self.preload_ahead_current_slot(version, tx_node_alias, tx.tx_id.time)?;
+            if layer == VersionLayer::Content {
+                let table_id = self.physical_table_id_for_schema(
+                    version.schema_version(),
+                    &table.name,
+                )?;
+                let _ = self.read_merge_heads(table_id, version.row_uuid())?;
+            }
+        }
+        if matches!(bundle.fate, Fate::Pending) {
+            self.prepare_pending_edge_write_inputs(
+                tx,
+                bundle.versions,
+                tx_node_alias,
+                tx_already_known,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn prepare_pending_edge_write_inputs(
+        &self,
+        tx: &Transaction,
+        versions: &[VersionRecord],
+        tx_node_alias: NodeAlias,
+        tx_already_known: bool,
+    ) -> Result<(), Error> {
+        let mut pending_edges = self.database.open_batch();
+        for parent in versions
+            .iter()
+            .flat_map(VersionRecord::parents)
+            .collect::<BTreeSet<_>>()
+        {
+            let parent_alias = self.node_aliases.get(&parent.node).copied().ok_or(
+                Error::InvalidStoredValue("pending edge parent alias must exist"),
+            )?;
+            let values = pending_edge_values(tx_node_alias, tx.tx_id, parent_alias, parent);
+            if tx_already_known {
+                pending_edges.update("jazz_pending_edges", values);
+            } else {
+                pending_edges.insert("jazz_pending_edges", values);
+            }
+        }
+        let _ = self
+            .database
+            .prepare_batch_storage_inputs(&pending_edges)?;
+        Ok(())
+    }
+
     /// Acquire the exact durable-backed inputs needed to publish one unfated
     /// relay commit. Parking for unavailable catalogue/branch protocol state
     /// remains a resident publication; durable storage misses do not.
@@ -42,7 +140,8 @@ where
         }
 
         let tx_node_alias = self.prepare_node_alias(tx.tx_id.node)?;
-        if self.query_transaction(tx.tx_id)?.is_some() {
+        let tx_already_known = self.query_transaction(tx.tx_id)?.is_some();
+        if tx_already_known {
             let _ = self.query_versions_for_tx(tx.tx_id)?;
         }
 
@@ -80,6 +179,15 @@ where
                         let _ = self.read_merge_heads(table_id, version.row_uuid())?;
                     }
                 }
+                // Relay publication records one pending edge per distinct
+                // parent. Acquire the exact insert/update slots before its
+                // durable publication scope opens.
+                self.prepare_pending_edge_write_inputs(
+                    &tx,
+                    &versions,
+                    tx_node_alias,
+                    tx_already_known,
+                )?;
             }
         }
         Ok(PreparedRelayCommit { tx, versions })

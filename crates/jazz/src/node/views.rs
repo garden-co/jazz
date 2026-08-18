@@ -852,7 +852,10 @@ where
     pub(crate) fn prepare_view_updates_in_batch(
         &mut self,
         updates: Vec<ViewUpdateParts>,
-    ) -> Result<PreparedViewUpdateBatch, Error> {
+    ) -> Result<PreparedViewUpdateBatch, Error>
+    where
+        S: ReopenableStorage,
+    {
         for update in &updates {
             self.validate_received_view_update_global_seq_durability(update)?;
         }
@@ -861,26 +864,32 @@ where
         let mut known_states = Vec::new();
         for update in &updates {
             if update.reset_result_set {
-                continue;
+                // Reset payloads still publish canonical row bundles below;
+                // only their prior known-state fact is intentionally absent.
+            } else {
+                let binding_view_key =
+                    match self.binding_view_key_for_subscription(update.subscription) {
+                        Ok(binding_view_key) => binding_view_key,
+                        Err(Error::InvalidStoredValue(
+                            "subscription referenced unregistered shape"
+                            | "subscription referenced unregistered binding",
+                        )) => continue,
+                        Err(error) => return Err(error),
+                    };
+                if !self
+                    .query
+                    .known_state_loaded_binding_views
+                    .contains(&binding_view_key)
+                    && prepared_binding_views.insert(binding_view_key)
+                {
+                    known_states.push(self.prepare_known_state_fact(binding_view_key)?);
+                }
             }
-            let binding_view_key = match self.binding_view_key_for_subscription(update.subscription)
+            for bundle in
+                version_bundle_refs_for_carriers(&update.version_bundles, &update.version_carriers)?
             {
-                Ok(binding_view_key) => binding_view_key,
-                Err(Error::InvalidStoredValue(
-                    "subscription referenced unregistered shape"
-                    | "subscription referenced unregistered binding",
-                )) => continue,
-                Err(error) => return Err(error),
-            };
-            if self
-                .query
-                .known_state_loaded_binding_views
-                .contains(&binding_view_key)
-                || !prepared_binding_views.insert(binding_view_key)
-            {
-                continue;
+                self.prepare_view_bundle_storage_inputs(bundle)?;
             }
-            known_states.push(self.prepare_known_state_fact(binding_view_key)?);
         }
         let branch_partitions = self.prepare_view_update_branch_partitions(&updates)?;
         Ok(PreparedViewUpdateBatch {

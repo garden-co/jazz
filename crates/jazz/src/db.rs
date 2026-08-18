@@ -486,7 +486,7 @@ fn collect_local_replay_commit_units<S>(
     tx_id: TxId,
     visited: &mut BTreeSet<TxId>,
     units: &mut Vec<(TxId, SyncMessage)>,
-) -> Result<(), Error>
+) -> Result<(), crate::node::Error>
 where
     S: ResidentStorage,
 {

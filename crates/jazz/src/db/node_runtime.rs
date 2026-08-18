@@ -175,45 +175,6 @@ where
         }
     }
 
-    fn restore_local_subscriber(
-        &self,
-        author: AuthorId,
-        downstream_fates: &PendingDownstreamFates,
-    ) -> Result<(), Error> {
-        let pending = self
-            .node
-            .borrow_mut()
-            .pending_transaction_ids_for_author(author)?;
-        let pending_set = pending.iter().copied().collect::<BTreeSet<_>>();
-        let mut replay_units = Vec::new();
-        let mut visited = BTreeSet::new();
-        {
-            let mut node = self.node.borrow_mut();
-            for tx_id in &pending {
-                collect_local_replay_commit_units(
-                    &mut node,
-                    *tx_id,
-                    &mut visited,
-                    &mut replay_units,
-                )?;
-            }
-        }
-        for (tx_id, unit) in replay_units {
-            // A reopened main-thread runtime has no transaction history. Send
-            // accepted causal ancestors before each pending unit so the latter
-            // can be ingested before its Local ack or later authority fate.
-            downstream_fates.borrow_mut().push(unit.clone());
-            if pending_set.contains(&tx_id) {
-                self.queue_pending_upload(tx_id, Some(unit));
-            }
-        }
-        for tx_id in pending {
-            register_local_fate_route(&self.local_fate_routes, tx_id, downstream_fates);
-        }
-        queue_local_acknowledgements(&self.local_fate_routes, &self.node);
-        Ok(())
-    }
-
     pub(super) fn mark_subscriber_connections_dirty(&self) {
         let next = self.subscriber_dirty_epoch.get().wrapping_add(1);
         self.subscriber_dirty_epoch.set(next);
@@ -606,7 +567,8 @@ where
             observed_subscriber_dirty_epoch: Cell::new(self.subscriber_dirty_epoch.get()),
             observed_session_claim_revision: Cell::new(0),
             connection_epoch,
-            startup_error: None,
+            local_subscriber_restore_pending: false,
+            prepared_upstream_command_count: None,
             link: ConnectionLink::Upstream {
                 local_receiver,
                 pending,
@@ -799,9 +761,6 @@ where
             .map(|context| context.local.epoch)
             .unwrap_or_else(|| uuid::Uuid::new_v4().as_u128() as u64);
         let downstream_fates = Rc::new(RefCell::new(Vec::new()));
-        let startup_error = local_receiver
-            .then(|| self.restore_local_subscriber(identity, &downstream_fates))
-            .and_then(Result::err);
         let connection = Rc::new(RefCell::new(PeerConnection {
             transport,
             staged_inbound: VecDeque::new(),
@@ -828,7 +787,8 @@ where
             observed_subscriber_dirty_epoch: Cell::new(self.subscriber_dirty_epoch.get()),
             observed_session_claim_revision: Cell::new(session_claim_revision),
             connection_epoch,
-            startup_error,
+            local_subscriber_restore_pending: local_receiver,
+            prepared_upstream_command_count: None,
             link: ConnectionLink::Subscriber {
                 peer,
                 ingest_context,
@@ -842,6 +802,7 @@ where
                 shape_registrations: BTreeMap::new(),
                 prepared_subscribe_update: None,
                 prepared_group_updates: BTreeMap::new(),
+                prepared_current_row_updates: BTreeMap::new(),
                 deferred_subscribe_rejections: VecDeque::new(),
                 served_current_rows: BTreeMap::new(),
                 pending_branch_metadata_repairs: BTreeMap::new(),
