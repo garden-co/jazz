@@ -529,7 +529,33 @@ fn synchronous_memory_publication_never_claims_local_durability() {
         panic!("memory must open in its first poll")
     };
 
+    let prepared = owner.prepare_query(&owner.table("todos")).unwrap();
+    let opts = crate::db::ReadOpts {
+        tier: DurabilityTier::None,
+        local_updates: crate::db::LocalUpdates::Immediate,
+        propagation: crate::db::Propagation::LocalOnly,
+        ..crate::db::ReadOpts::default()
+    };
+    let std::task::Poll::Ready(Ok(mut subscription)) =
+        owner.poll_subscribe(&mut context, &prepared, opts.clone())
+    else {
+        panic!("memory subscription must open in its first poll")
+    };
+    assert!(matches!(
+        subscription.try_next_event(),
+        Some(crate::db::SubscriptionEvent::Delta { reset: true, .. })
+    ));
     let write = crate::db::block_on(owner.insert("todos", title_cells("volatile"))).unwrap();
+    assert!(matches!(
+        subscription.try_next_event(),
+        Some(crate::db::SubscriptionEvent::Delta { added, .. })
+            if added.len() == 1 && added[0].row_uuid() == write.row_uuid()
+    ));
+    assert!(matches!(
+        owner.poll_all(&mut context, &prepared, opts),
+        std::task::Poll::Ready(Ok(rows))
+            if rows.len() == 1 && rows[0].row_uuid() == write.row_uuid()
+    ));
     assert_eq!(
         owner.write_state(write.mergeable_tx_id()).unwrap().durability,
         DurabilityTier::None

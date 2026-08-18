@@ -3,6 +3,8 @@ import type { Transport } from "./native-runtime-adapter.js";
 export interface PeerTransportRuntime {
   onPeerTransportWork(listener: () => void): () => void;
   notifyPeerTransportActivity?(): void;
+  tickPeerTransport(transport: Transport): Promise<number>;
+  handlePeerTransportError(error: unknown): void;
 }
 
 export class BrowserWorkerTransportPump {
@@ -44,7 +46,9 @@ export class BrowserWorkerTransportPump {
     this.scheduled = true;
     queueMicrotask(() => {
       this.scheduled = false;
-      this.pump();
+      void this.pump().catch((error: unknown) => {
+        this.runtime.handlePeerTransportError(error);
+      });
     });
   }
 
@@ -55,13 +59,13 @@ export class BrowserWorkerTransportPump {
     this.transport.close();
   }
 
-  private pump(): void {
+  private async pump(): Promise<void> {
     if (this.closed || this.running) return;
     this.running = true;
     let exhausted = true;
     try {
       for (let round = 0; round < 32; round += 1) {
-        const work = this.transport.tick();
+        const work = await this.runtime.tickPeerTransport(this.transport);
         const frames = normalizeTransportFrames(this.transport.recvWireFrames());
         if (frames.length > 0) this.sendFrames(frames);
         if (work === 0 && frames.length === 0) {

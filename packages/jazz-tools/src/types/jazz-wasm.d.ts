@@ -35,7 +35,7 @@ declare module "jazz-wasm" {
   export class WasmTransport {
     sendWireFrame(frame: Uint8Array): void;
     recvWireFrames(): Uint8Array[];
-    tick(): number;
+    tick(): Promise<number>;
     updateAuthenticatedClaims(claims: Record<string, unknown>): void;
     close(): boolean;
   }
@@ -154,9 +154,9 @@ declare module "jazz-wasm" {
     ): WasmWrite;
     setTickScheduler(callback: (urgency: "immediate" | "deferred") => void): void;
     onMutationError(callback: (event: any) => void): void;
-    tick(): void;
+    tick(): Promise<void>;
     setNonDurableClient(): void;
-    close(): boolean;
+    close(): Promise<boolean>;
     connectUpstream(): WasmTransport;
     connectUpstreamWithSession(
       protocolVersion: number,

@@ -213,8 +213,8 @@ type NativeDb = {
     localEpoch: bigint,
   ): Transport;
   acceptSubscriber?(author: Uint8Array, claims: Record<string, unknown>): Transport;
-  tick(): void;
-  close?(): void;
+  tick(): void | Promise<void>;
+  close?(): void | Promise<unknown>;
   free?(): void;
 };
 
@@ -274,7 +274,7 @@ export type Transport = {
   recvWireFrames(): unknown[];
   sendWireFrame(frame: Uint8Array): void;
   sendWireFrames?(frames: readonly Uint8Array[]): void;
-  tick(): number;
+  tick(): number | Promise<number>;
   updateAuthenticatedClaims?(claims: Record<string, unknown>): void;
   free?(): void;
 };
@@ -425,10 +425,8 @@ export class NativeRuntimeAdapter implements Runtime {
   private readonly peerTransportWorkListeners = new Set<() => void>();
   private peerTransportActivityEpoch = 0;
   private coreTickScheduled = false;
-  private coreTickRunning = false;
-  private coreTickAgain = false;
+  private ownerTickTail: Promise<void> | null = null;
   private serverPumpScheduled = false;
-  private serverPumpAgain = false;
   private closed = false;
   private nextSubscriptionId = 1;
 
@@ -564,7 +562,16 @@ export class NativeRuntimeAdapter implements Runtime {
     return this.ownerRuntime.closed;
   }
 
-  close(): void {
+  async close(): Promise<void> {
+    await this.shutdown(true);
+  }
+
+  /** @internal Test-only process-crash boundary: release resources without a durable close marker. */
+  async simulateCrash(): Promise<void> {
+    await this.shutdown(false);
+  }
+
+  private async shutdown(graceful: boolean): Promise<void> {
     if (this.closed) return;
     this.closed = true;
     for (const subscription of this.subscriptions.values()) {
@@ -594,8 +601,12 @@ export class NativeRuntimeAdapter implements Runtime {
     this.peerUpstreamAttached = false;
     this.serverCarrier?.close();
     this.serverCarrier = null;
-    this.db.close?.();
-    this.db.free?.();
+    await this.ownerTickTail;
+    try {
+      if (graceful) await this.db.close?.();
+    } finally {
+      this.db.free?.();
+    }
   }
 
   insert(
@@ -895,7 +906,7 @@ export class NativeRuntimeAdapter implements Runtime {
     for (;;) {
       this.throwServerTransportErrorForTier(tier);
       const observedServerWorkEpoch = this.serverTransportWorkEpoch;
-      this.pumpServerTransport();
+      await this.pumpServerTransport();
       this.throwServerTransportErrorForTier(tier);
       const settlement = write.wait(tier);
       const transportError = this.waitForServerTransportError(tier);
@@ -1156,11 +1167,11 @@ export class NativeRuntimeAdapter implements Runtime {
       },
     });
     this.serverCarrier = carrier;
-    this.serverCarrierPromise = carrier.ready().then((negotiation) => {
+    this.serverCarrierPromise = carrier.ready().then(async (negotiation) => {
       const transport = this.connectNegotiatedUpstream(negotiation);
       this.serverTransport = transport;
       this.flushQueuedServerFrames(carrier);
-      this.pumpServerTransport();
+      await this.pumpServerTransport();
       this.pumpSubscriptions();
       return carrier;
     });
@@ -1203,14 +1214,14 @@ export class NativeRuntimeAdapter implements Runtime {
     this.queuedServerFrames.length = 0;
     this.pendingInboundServerFrames.length = 0;
     this.serverPumpScheduled = false;
-    this.serverPumpAgain = false;
     return Promise.resolve();
   }
 
   updateAuth(authJson: string): Promise<void> | void {
     if (this !== this.ownerRuntime) return this.ownerRuntime.updateAuth(authJson);
     if (!this.serverEndpointUrl) return;
-    return this.connect(this.serverEndpointUrl, authJson);
+    this.connect(this.serverEndpointUrl, authJson);
+    return this.serverCarrierPromise?.then(() => undefined);
   }
 
   onAuthFailure(callback: (reason: string) => void): void {
@@ -1520,7 +1531,7 @@ export class NativeRuntimeAdapter implements Runtime {
       // that boundary.
       if (this.closed) return;
       this.throwServerTransportErrorForTier(tier);
-      this.pumpServerTransport();
+      await this.pumpServerTransport();
       this.throwServerTransportErrorForTier(tier);
       if (this.db.queryAttachmentIsCovered) {
         const peerHasResponded =
@@ -1657,33 +1668,68 @@ export class NativeRuntimeAdapter implements Runtime {
 
   private scheduleCoreTick(): void {
     if (this.closed) return;
-    if (this.coreTickRunning) {
-      this.coreTickAgain = true;
-      return;
-    }
     if (this.coreTickScheduled) return;
     this.coreTickScheduled = true;
     queueMicrotask(() => {
       this.coreTickScheduled = false;
-      this.runCoreTick();
+      void this.enqueueOwnerTick().catch((error: unknown) => {
+        this.handleServerTransportError(error);
+      });
     });
   }
 
-  private runCoreTick(): void {
-    if (this.closed || this.coreTickRunning) return;
-    this.coreTickRunning = true;
-    try {
-      this.db.tick();
+  private enqueueOwnerTick(scheduleServerPump = true): Promise<void> {
+    if (this !== this.ownerRuntime) {
+      return this.ownerRuntime.enqueueOwnerTick(scheduleServerPump);
+    }
+    const run = async () => {
+      if (this.closed) return;
+      await this.db.tick();
       this.pumpSubscriptions();
-      this.scheduleServerPump();
-      this.notifyPeerTransportWork();
-    } finally {
-      this.coreTickRunning = false;
+      if (scheduleServerPump) this.scheduleServerPump();
+    };
+    const tick = this.ownerTickTail ? this.ownerTickTail.then(run) : run();
+    const barrier = tick.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.ownerTickTail = barrier;
+    void barrier.then(() => {
+      if (this.ownerTickTail === barrier) this.ownerTickTail = null;
+    });
+    return tick;
+  }
+
+  private enqueueTransportTick(transport: Transport, scheduleServerPump = true): Promise<number> {
+    if (this !== this.ownerRuntime) {
+      return this.ownerRuntime.enqueueTransportTick(transport, scheduleServerPump);
     }
-    if (this.coreTickAgain) {
-      this.coreTickAgain = false;
-      this.scheduleCoreTick();
-    }
+    let work = 0;
+    const run = async () => {
+      if (this.closed) return;
+      work = await transport.tick();
+      this.pumpSubscriptions();
+      if (scheduleServerPump) this.scheduleServerPump();
+    };
+    const tick = this.ownerTickTail ? this.ownerTickTail.then(run) : run();
+    const barrier = tick.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.ownerTickTail = barrier;
+    void barrier.then(() => {
+      if (this.ownerTickTail === barrier) this.ownerTickTail = null;
+    });
+    return tick.then(() => work);
+  }
+
+  tickPeerTransport(transport: Transport): Promise<number> {
+    return this.enqueueTransportTick(transport);
+  }
+
+  handlePeerTransportError(error: unknown): void {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.handlePeerTransportError(error);
+    this.handleServerTransportError(error);
   }
 
   private startSubscriptionReader(handle: number, subscription: SubscriptionState): void {
@@ -1990,11 +2036,9 @@ export class NativeRuntimeAdapter implements Runtime {
     setTimeout(() => {
       this.serverPumpScheduled = false;
       if (this.closed) return;
-      this.pumpServerTransport();
-      if (this.serverPumpAgain) {
-        this.serverPumpAgain = false;
-        this.scheduleServerPump();
-      }
+      void this.pumpServerTransport().catch((error: unknown) => {
+        this.handleServerTransportError(error);
+      });
     }, SERVER_PUMP_DEBOUNCE_MS);
   }
 
@@ -2008,22 +2052,22 @@ export class NativeRuntimeAdapter implements Runtime {
     return this.serverTransport != null || this.peerUpstreamAttached;
   }
 
-  private pumpServerTransport(): void {
+  private async pumpServerTransport(): Promise<void> {
     const transport = this.serverTransport;
     if (this.closed || !transport) return;
     this.drainPendingInboundServerFrames(transport);
     for (let round = 0; round < 32; round += 1) {
-      transport.tick();
+      const work = await this.enqueueTransportTick(transport, false);
       const frames = normalizeTransportFrames(transport.recvWireFrames());
       if (frames.length > 0) {
         this.sendServerFrames(frames);
       }
       this.pumpSubscriptions();
-      if (frames.length === 0) {
+      if (work === 0 && frames.length === 0) {
         return;
       }
     }
-    this.serverPumpAgain = true;
+    this.scheduleServerPump();
   }
 
   private drainPendingInboundServerFrames(transport: Transport): void {

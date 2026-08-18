@@ -183,7 +183,7 @@ async function handleAfterInitialization(message: Exclude<BrowserWorkerMessage, 
       // after WAL durability but before the main-thread wait is acknowledged.
       suppressOutboundFrames = true;
       await new Promise((resolve) => setTimeout(resolve, 25));
-      await closeRuntime();
+      await closeRuntime(false);
       break;
     case "simulate-pending-auth-confirmation":
       simulatePendingAuthConfirmation = true;
@@ -226,7 +226,7 @@ async function waitForAuthConfirmation(
   }
 }
 
-async function closeRuntime(): Promise<void> {
+async function closeRuntime(graceful = true): Promise<void> {
   for (const followerTabId of [...followerPeers.keys()]) {
     closeFollower(followerTabId, false);
   }
@@ -234,7 +234,8 @@ async function closeRuntime(): Promise<void> {
   relayPump = null;
   subscriber?.free?.();
   subscriber = null;
-  await runtime?.close();
+  if (graceful) await runtime?.close();
+  else await runtime?.simulateCrash();
   runtime = null;
   disposeTelemetry?.();
   disposeTelemetry = null;
@@ -320,8 +321,10 @@ async function handleFollowerMessage(
       if (!peer.subscriber) {
         throw new Error("Browser follower port is not initialized");
       }
+      const connectionEpoch = authConnectionEpoch;
       peer.subscriber.updateAuthenticatedClaims?.(message.sessionClaims);
       await activeRuntime.updateAuth(message.authJson);
+      await waitForAuthConfirmation(activeRuntime, connectionEpoch);
       broadcastAuthRestored();
       return;
     }

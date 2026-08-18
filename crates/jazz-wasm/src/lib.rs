@@ -293,10 +293,20 @@ enum WasmTransportInner {
 }
 
 impl WasmTransportInner {
-    fn tick(&self) -> Result<u32, JsValue> {
+    async fn tick(&self) -> Result<u32, JsValue> {
         match self {
             Self::Open { owner, .. } => {
-                let stats = block_on(wasm_owner(owner)?.tick()).map_err(to_js_error)?;
+                let stats = std::future::poll_fn(|context| {
+                    let Ok(mut owner) = wasm_owner(owner) else {
+                        return std::task::Poll::Ready(Err(JsValue::from_str(
+                            "database is closed",
+                        )));
+                    };
+                    owner
+                        .poll_tick(context)
+                        .map(|result| result.map_err(to_js_error))
+                })
+                .await?;
                 Ok(stats.subscription_events as u32)
             }
         }
@@ -940,15 +950,16 @@ impl WasmDbInner {
         })
     }
 
-    fn tick(&self) -> Result<(), jazz::db::Error> {
+    async fn tick(&self) -> Result<(), jazz::db::Error> {
         let Self::Open(open) = self else {
             panic!("WasmDb is closed");
         };
-        block_on(
+        std::future::poll_fn(|context| {
             wasm_owner(&open.owner)
                 .expect("WasmDb owner is open")
-                .tick(),
-        )
+                .poll_tick(context)
+        })
+        .await
         .map(|_| ())
     }
 }
@@ -1695,8 +1706,8 @@ impl WasmDb {
     }
 
     #[wasm_bindgen(js_name = tick)]
-    pub fn tick(&self) -> Result<(), JsValue> {
-        self.inner.tick().map_err(to_js_error)
+    pub async fn tick(&self) -> Result<(), JsValue> {
+        self.inner.tick().await.map_err(to_js_error)
     }
 
     /// Configure this runtime as the optimistic in-memory side of a browser
@@ -1889,7 +1900,7 @@ impl WasmDb {
     }
 
     #[wasm_bindgen(js_name = close)]
-    pub fn close(&mut self) -> Result<bool, JsValue> {
+    pub async fn close(&mut self) -> Result<bool, JsValue> {
         let inner = std::mem::replace(&mut self.inner, WasmDbInner::Closed);
         if !self.owns_runtime {
             return Ok(!matches!(inner, WasmDbInner::Closed));
@@ -1900,7 +1911,7 @@ impl WasmDb {
         let Some(owner) = open.owner.borrow_mut().take() else {
             return Ok(false);
         };
-        block_on(owner.close()).map_err(to_js_error)?;
+        owner.close().await.map_err(to_js_error)?;
         Ok(true)
     }
 }
@@ -1947,8 +1958,8 @@ impl WasmTransport {
     }
 
     #[wasm_bindgen(js_name = tick)]
-    pub fn tick(&self) -> Result<u32, JsValue> {
-        self.inner.tick()
+    pub async fn tick(&self) -> Result<u32, JsValue> {
+        self.inner.tick().await
     }
 
     #[wasm_bindgen(js_name = close)]
