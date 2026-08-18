@@ -1809,6 +1809,7 @@ impl DemandDrivenNodeOpen {
         mut node: NodeState<groove::storage::DemandLoadedStorage>,
         cache: groove::storage::DemandLoadedStorage,
     ) -> DemandDrivenNode {
+        cache.publish_transaction();
         // Every local mutation first publishes resident visibility at None.
         // Durable storage advances the exact transaction to Local only after
         // its commit completes; volatile storage never makes that claim.

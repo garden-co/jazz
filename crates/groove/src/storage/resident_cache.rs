@@ -1,7 +1,7 @@
 //! Demand-loaded synchronous storage view over an asynchronous durable store.
 
 use std::cell::RefCell;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::async_ordered::{OwnedScanRequest, OwnedStorageOperation, OwnedStorageResponse};
 use super::{
@@ -20,6 +20,61 @@ use super::{
 pub struct DemandLoadedStorage {
     cache: MemoryStorage,
     state: std::rc::Rc<RefCell<DemandState>>,
+    transaction: Option<std::rc::Rc<ResidentTransaction>>,
+}
+
+/// Undo journal for the node-open preparation transaction.
+///
+/// The resident cache is private to the unopened owner, so preparation may
+/// update it in place. If preparation suspends or fails, dropping the last
+/// transaction handle restores only the keys that preparation touched. A
+/// successful durable node-open commit publishes the journal instead. This
+/// keeps opening proportional to the demanded inputs and staged writes rather
+/// than copying every admitted row into a disposable cache.
+struct ResidentTransaction {
+    cache: MemoryStorage,
+    original_values: RefCell<OriginalValues>,
+    published: std::cell::Cell<bool>,
+}
+
+type OriginalValues = BTreeMap<(String, Vec<u8>), Option<Value>>;
+
+impl ResidentTransaction {
+    fn record_original(&self, cf: &str, key: &[u8]) -> Result<(), Error> {
+        if self.published.get() {
+            return Ok(());
+        }
+        let identity = (cf.to_owned(), key.to_vec());
+        if self.original_values.borrow().contains_key(&identity) {
+            return Ok(());
+        }
+        let original = self.cache.get(cf, key)?;
+        self.original_values.borrow_mut().insert(identity, original);
+        Ok(())
+    }
+
+    fn publish(&self) {
+        self.published.set(true);
+        self.original_values.borrow_mut().clear();
+    }
+}
+
+impl Drop for ResidentTransaction {
+    fn drop(&mut self) {
+        if self.published.get() {
+            return;
+        }
+        for ((cf, key), value) in self.original_values.get_mut().iter().rev() {
+            let result = match value {
+                Some(value) => self.cache.set(cf, key, value),
+                None => self.cache.delete(cf, key),
+            };
+            debug_assert!(
+                result.is_ok(),
+                "resident transaction rollback must be infallible"
+            );
+        }
+    }
 }
 
 #[derive(Clone, Default)]
@@ -82,6 +137,7 @@ impl DemandLoadedStorage {
         Self {
             cache: MemoryStorage::new(column_families),
             state: std::rc::Rc::new(RefCell::new(state)),
+            transaction: None,
         }
     }
 
@@ -93,29 +149,31 @@ impl DemandLoadedStorage {
     /// retry after admitting the requested input, or publish the successful
     /// transaction as its new resident view.
     ///
-    /// This currently snapshots the resident memory store. Keeping that detail
-    /// behind this boundary lets the implementation become copy-on-write later
-    /// without changing restartable core operations.
     pub fn begin_transaction(&self) -> Result<Self, Error> {
-        let column_families = self.cache.column_family_names().unwrap_or_default();
-        let refs = column_families
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>();
-        let fork = Self::new(&refs);
-        for column_family in column_families {
-            for (key, value) in self.cache.prefix(&column_family, &[])? {
-                fork.cache.set(&column_family, &key, &value)?;
-            }
-        }
         let state = self.state.borrow();
-        *fork.state.borrow_mut() = DemandState {
-            admissions: state.admissions.clone(),
-            dirty_keys: state.dirty_keys.clone(),
-            pending_writes: Vec::new(),
-            pending_column_families: state.pending_column_families.clone(),
-        };
-        Ok(fork)
+        Ok(Self {
+            cache: self.cache.clone(),
+            state: std::rc::Rc::new(RefCell::new(DemandState {
+                admissions: state.admissions.clone(),
+                dirty_keys: state.dirty_keys.clone(),
+                pending_writes: Vec::new(),
+                pending_column_families: state.pending_column_families.clone(),
+            })),
+            transaction: Some(std::rc::Rc::new(ResidentTransaction {
+                cache: self.cache.clone(),
+                original_values: RefCell::new(BTreeMap::new()),
+                published: std::cell::Cell::new(false),
+            })),
+        })
+    }
+
+    /// Publish a successfully persisted preparation transaction as the live
+    /// resident cache. No row copy is required: the transaction already owns
+    /// the exact in-place writes guarded by its undo journal.
+    pub fn publish_transaction(&self) {
+        if let Some(transaction) = &self.transaction {
+            transaction.publish();
+        }
     }
 
     /// Take writes applied synchronously to the resident working set.
@@ -248,6 +306,9 @@ impl ResidentStorage for DemandLoadedStorage {
     }
 
     fn set(&self, cf: &ColumnFamilyName, key: &Key, value: &[u8]) -> Result<(), Error> {
+        if let Some(transaction) = &self.transaction {
+            transaction.record_original(cf, key)?;
+        }
         self.cache.set(cf, key, value)?;
         self.mark_dirty(cf, key);
         self.state
@@ -262,6 +323,9 @@ impl ResidentStorage for DemandLoadedStorage {
     }
 
     fn delete(&self, cf: &ColumnFamilyName, key: &Key) -> Result<(), Error> {
+        if let Some(transaction) = &self.transaction {
+            transaction.record_original(cf, key)?;
+        }
         self.cache.delete(cf, key)?;
         self.mark_dirty(cf, key);
         self.state
@@ -333,7 +397,11 @@ impl ResidentStorage for DemandLoadedStorage {
 
 impl ReopenableStorage for DemandLoadedStorage {
     fn reopen(self, column_families: &[&str]) -> Result<Self, Error> {
-        let Self { cache, state } = self;
+        let Self {
+            cache,
+            state,
+            transaction,
+        } = self;
         state
             .borrow_mut()
             .pending_column_families
@@ -341,6 +409,7 @@ impl ReopenableStorage for DemandLoadedStorage {
         Ok(Self {
             cache: cache.reopen(column_families)?,
             state,
+            transaction,
         })
     }
 }
@@ -385,5 +454,59 @@ mod tests {
         let state = storage.state.borrow();
         assert_eq!(state.admissions.points.len(), 10_000);
         assert!(state.admissions.scans.is_empty());
+    }
+
+    #[test]
+    fn node_open_transaction_rolls_back_only_touched_keys_and_publishes_in_place() {
+        let storage = DemandLoadedStorage::new(&["rows"]);
+        storage
+            .admit(
+                OwnedStorageOperation::Get {
+                    column_family: "rows".to_owned(),
+                    key: b"existing".to_vec(),
+                },
+                OwnedStorageResponse::Value(Some(b"before".to_vec())),
+            )
+            .unwrap();
+
+        {
+            let transaction = storage.begin_transaction().unwrap();
+            transaction.set("rows", b"existing", b"after").unwrap();
+            transaction.set("rows", b"new", b"value").unwrap();
+            assert_eq!(
+                storage.cache.get("rows", b"existing").unwrap(),
+                Some(b"after".to_vec())
+            );
+        }
+        assert_eq!(
+            storage.cache.get("rows", b"existing").unwrap(),
+            Some(b"before".to_vec())
+        );
+        assert_eq!(storage.cache.get("rows", b"new").unwrap(), None);
+
+        {
+            let transaction = storage.begin_transaction().unwrap();
+            transaction.set("rows", b"existing", b"published").unwrap();
+            transaction.publish_transaction();
+            transaction.set("rows", b"after-open", b"live").unwrap();
+            assert!(
+                transaction
+                    .transaction
+                    .as_ref()
+                    .unwrap()
+                    .original_values
+                    .borrow()
+                    .is_empty(),
+                "published runtime writes must not extend the node-open undo journal"
+            );
+        }
+        assert_eq!(
+            storage.cache.get("rows", b"existing").unwrap(),
+            Some(b"published".to_vec())
+        );
+        assert_eq!(
+            storage.cache.get("rows", b"after-open").unwrap(),
+            Some(b"live".to_vec())
+        );
     }
 }
