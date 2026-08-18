@@ -304,6 +304,28 @@ impl DemandDrivenDb {
         self.database.write_state(tx_id)
     }
 
+    pub fn wait_for_transaction_with(
+        &self,
+        tx_id: TxId,
+        tier: DurabilityTier,
+        callback: impl FnOnce(Result<TxId, Error>) + 'static,
+    ) {
+        self.database
+            .wait_for_transaction_with(tx_id, tier, callback);
+    }
+
+    pub fn set_tick_scheduler(&self, scheduler: Option<Rc<dyn TickScheduler>>) {
+        self.database.set_tick_scheduler(scheduler);
+    }
+
+    pub fn on_mutation_error(&self, callback: MutationErrorCallback) {
+        self.database.on_mutation_error(callback);
+    }
+
+    pub fn set_non_durable_client(&self) {
+        self.database.set_non_durable_client();
+    }
+
     #[cfg(any(feature = "runtime", test))]
     pub async fn apply_trusted_catalogue_snapshot(
         &mut self,
@@ -1706,6 +1728,33 @@ impl DemandDrivenViewDb<'_> {
         .await
     }
 
+    /// Run a one-shot query as an explicit terminated-session identity.
+    pub async fn all_for_identity(
+        &mut self,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+        author: AuthorId,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        let database = &self.database;
+        std::future::poll_fn(|context| {
+            if let Err(error) = ensure_supported_read_view(&opts) {
+                return Poll::Ready(Err(error));
+            }
+            match self.runtime.poll_resident_operation(context, || {
+                database.all_resident(
+                    prepared,
+                    &opts,
+                    author,
+                    QueryAuthorizationMode::TrustedServing,
+                )
+            }) {
+                Poll::Pending => Poll::Pending,
+                Poll::Ready(result) => Poll::Ready(result.map_err(Into::into)),
+            }
+        })
+        .await
+    }
+
     /// Materialize a structured relation snapshot in this typed view.
     pub async fn relation_snapshot(
         &mut self,
@@ -1739,6 +1788,29 @@ impl DemandDrivenViewDb<'_> {
                     &opts,
                     author,
                     QueryAuthorizationMode::ClientLocal,
+                )
+            }) {
+                Poll::Pending => Poll::Pending,
+                Poll::Ready(result) => Poll::Ready(result.map_err(Into::into)),
+            }
+        })
+        .await
+    }
+
+    pub async fn relation_snapshot_for_identity(
+        &mut self,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+        author: AuthorId,
+    ) -> Result<RelationSnapshot, Error> {
+        let database = &self.database;
+        std::future::poll_fn(|context| {
+            match self.runtime.poll_resident_operation(context, || {
+                database.relation_snapshot_resident(
+                    prepared,
+                    &opts,
+                    author,
+                    QueryAuthorizationMode::TrustedServing,
                 )
             }) {
                 Poll::Pending => Poll::Pending,
@@ -1784,6 +1856,77 @@ impl DemandDrivenViewDb<'_> {
             }
         })
         .await
+    }
+
+    pub async fn subscribe_for_identity(
+        &mut self,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+        author: AuthorId,
+    ) -> Result<SubscriptionStream, Error> {
+        let database = &self.database;
+        std::future::poll_fn(|context| {
+            match self.runtime.poll_operation(
+                context,
+                || {
+                    database.open_subscription_resident(
+                        prepared,
+                        opts.clone(),
+                        author,
+                        QueryAuthorizationMode::TrustedServing,
+                    )
+                },
+                SubscriptionOpenError::missing_input,
+            ) {
+                Poll::Pending => Poll::Pending,
+                Poll::Ready(result) => Poll::Ready(result.map_err(SubscriptionOpenError::into_api)),
+            }
+        })
+        .await
+    }
+
+    pub fn set_identity_claims(
+        &self,
+        author: AuthorId,
+        claims: BTreeMap<String, Value>,
+    ) -> Result<(), Error> {
+        self.database.set_identity_claims(author, claims);
+        Ok(())
+    }
+
+    pub fn local_current_row(
+        &self,
+        table: &str,
+        row: RowUuid,
+    ) -> Result<Option<CurrentRow>, Error> {
+        self.database.local_current_row(table, row)
+    }
+
+    pub fn attach_query_with_opts(
+        &self,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+    ) -> Result<QueryAttachment, Error> {
+        self.database.attach_query_with_opts(prepared, opts)
+    }
+
+    pub fn attach_query_for_identity_with_opts(
+        &self,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+        author: AuthorId,
+    ) -> Result<QueryAttachment, Error> {
+        self.database
+            .attach_query_with_opts_for_identity(prepared, opts, author)
+    }
+
+    pub fn query_attachment_is_covered(&self, attachment: &QueryAttachment) -> Result<bool, Error> {
+        Ok(self.database.query_attachment_is_covered(attachment))
+    }
+
+    pub fn detach_query(&self, attachment: QueryAttachment) -> Result<(), Error> {
+        self.database.detach_query(attachment);
+        Ok(())
     }
 
     async fn publish_mergeable(
