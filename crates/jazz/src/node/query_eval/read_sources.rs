@@ -2200,7 +2200,9 @@ where
         let query = shape.query();
         let mut access_paths = BTreeMap::new();
         let equalities = root_literal_equalities(query, binding)?;
-        if let Some(value) = equalities.get("id").cloned() {
+        let table = self.table_in_schema(&query.table, shape.schema_version())?;
+        let has_declared_id = table.columns.iter().any(|column| column.name == "id");
+        if !has_declared_id && let Some(value) = equalities.get("id").cloned() {
             access_paths.insert(
                 root_source_id(&query.table),
                 CurrentAccessPath::PrimaryKey(vec![value]),

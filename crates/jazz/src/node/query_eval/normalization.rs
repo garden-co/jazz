@@ -260,7 +260,8 @@ pub(super) fn select_current_access_path(
     table: &TableSchema,
     equalities: &BTreeMap<String, Value>,
 ) -> Option<CurrentAccessPath> {
-    if let Some(value) = equalities.get("id").cloned() {
+    let has_declared_id = table.columns.iter().any(|column| column.name == "id");
+    if !has_declared_id && let Some(value) = equalities.get("id").cloned() {
         return Some(CurrentAccessPath::PrimaryKey(vec![value]));
     }
     for column in table.global_current_indexed_columns() {
@@ -592,10 +593,25 @@ fn normalize_compare(
 ) -> Result<NormalizedPredicateExpr, Error> {
     let left_type = operand_column_type(schema, source, left)?;
     let right_type = operand_column_type(schema, source, right)?;
+    let has_declared_id = schema
+        .tables
+        .iter()
+        .find(|table| table.name == source.table)
+        .is_some_and(|table| table.columns.iter().any(|column| column.name == "id"));
     Ok(NormalizedPredicateExpr::Compare {
-        left: normalize_operand_with_target_type(source, left, right_type.as_ref())?,
+        left: normalize_operand_with_target_type_and_declared_id(
+            source,
+            left,
+            right_type.as_ref(),
+            has_declared_id,
+        )?,
         op,
-        right: normalize_operand_with_target_type(source, right, left_type.as_ref())?,
+        right: normalize_operand_with_target_type_and_declared_id(
+            source,
+            right,
+            left_type.as_ref(),
+            has_declared_id,
+        )?,
     })
 }
 
@@ -608,8 +624,17 @@ fn normalize_operand_with_target_type(
     operand: &Operand,
     target_type: Option<&ColumnType>,
 ) -> Result<NormalizedValueRef, Error> {
+    normalize_operand_with_target_type_and_declared_id(source, operand, target_type, false)
+}
+
+fn normalize_operand_with_target_type_and_declared_id(
+    source: &SourceId,
+    operand: &Operand,
+    target_type: Option<&ColumnType>,
+    has_declared_id: bool,
+) -> Result<NormalizedValueRef, Error> {
     Ok(match operand {
-        Operand::Column(column) if column == "id" => {
+        Operand::Column(column) if column == "id" && !has_declared_id => {
             NormalizedValueRef::RowId(RowIdRef::Source(source.clone()))
         }
         Operand::Column(column) => match provenance_field(column) {
@@ -647,21 +672,29 @@ pub(super) fn operand_column_type(
     let Operand::Column(column) = operand else {
         return Ok(None);
     };
-    if column == "id" {
-        return Ok(Some(ColumnType::Uuid));
-    }
     if let Some(field) = provenance_field(column) {
         return Ok(Some(match field {
             ProvenanceField::CreatedAt | ProvenanceField::UpdatedAt => ColumnType::U64,
             ProvenanceField::CreatedBy | ProvenanceField::UpdatedBy => ColumnType::Uuid,
         }));
     }
-    let table = table_schema(schema, &source.table)?;
-    Ok(table
+    let table = match table_schema(schema, &source.table) {
+        Ok(table) => table,
+        Err(_) if column == "id" => return Ok(Some(ColumnType::Uuid)),
+        Err(error) => return Err(error),
+    };
+    let declared = table
         .columns
         .iter()
         .find(|candidate| candidate.name == *column)
-        .map(|column| column.column_type.clone()))
+        .map(|column| column.column_type.clone());
+    if declared.is_some() {
+        return Ok(declared);
+    }
+    if column == "id" {
+        return Ok(Some(ColumnType::Uuid));
+    }
+    Ok(None)
 }
 
 pub(super) fn contains_needle_type(

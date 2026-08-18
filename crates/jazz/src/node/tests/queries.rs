@@ -79,6 +79,34 @@ fn one_shot_filtered_read_uses_primary_key_scan_for_id_equality() {
 }
 
 #[test]
+fn declared_id_column_filter_uses_declared_value_not_physical_row_uuid() {
+    let schema = JazzSchema::new([TableSchema::new(
+        "things",
+        [
+            ColumnSchema::new("id", ColumnType::Uuid),
+            ColumnSchema::new("label", ColumnType::String),
+        ],
+    )]);
+    let (_writer_dir, mut writer) = open_node_with_schema(node(8), schema.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    let physical_row = row(0x11);
+    let declared_id = row(0xaa);
+    commit_mergeable_global(
+        &mut writer,
+        &mut core,
+        MergeableCommit::new("things", physical_row, 10).cells(BTreeMap::from([
+            ("id".to_owned(), Value::Uuid(declared_id.0)),
+            ("label".to_owned(), Value::String("declared id".to_owned())),
+        ])),
+    );
+
+    let query = Query::from("things").filter(eq(col("id"), lit(Value::Uuid(declared_id.0))));
+    let (selected, _) = query_rows_by_uuid(&mut core, query, DurabilityTier::Global);
+
+    assert_eq!(selected, vec![physical_row]);
+}
+
+#[test]
 fn one_shot_filtered_read_uses_declared_index_for_indexed_column_equality() {
     let schema = access_path_schema();
     let (_writer_dir, mut writer) = open_node_with_schema(node(8), schema.clone());

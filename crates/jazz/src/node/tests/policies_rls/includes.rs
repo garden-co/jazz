@@ -21,6 +21,63 @@ fn required_include_rls_schema() -> JazzSchema {
     ])
 }
 
+#[test]
+fn parent_ref_join_matches_a_declared_id_column_instead_of_the_physical_row_uuid() {
+    let schema = JazzSchema::new([
+        TableSchema::new(
+            "memberships",
+            [
+                ColumnSchema::new("chat", ColumnType::Uuid),
+                ColumnSchema::new("label", ColumnType::String),
+            ],
+        )
+        .with_reference("chat", "chats"),
+        TableSchema::new(
+            "chats",
+            [
+                ColumnSchema::new("id", ColumnType::Uuid),
+                ColumnSchema::new("title", ColumnType::String),
+            ],
+        ),
+    ]);
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    let physical_chat = row(0xc1);
+    let declared_chat_id = row(0xaa);
+    let membership = row(0xd1);
+    let tx = core
+        .commit_mergeable_many(vec![
+            MergeableCommit::new("chats", physical_chat, 10).cells(BTreeMap::from([
+                ("id".to_owned(), Value::Uuid(declared_chat_id.0)),
+                ("title".to_owned(), v("declared-id chat")),
+            ])),
+            MergeableCommit::new("memberships", membership, 11).cells(BTreeMap::from([
+                ("chat".to_owned(), Value::Uuid(declared_chat_id.0)),
+                ("label".to_owned(), v("membership")),
+            ])),
+        ])
+        .unwrap();
+    core.apply_fate_update(
+        tx,
+        Fate::Accepted,
+        Some(core.clock.next_global_seq),
+        Some(DurabilityTier::Global),
+    )
+    .unwrap();
+
+    // This is the core query shape emitted by a binding-layer parent include:
+    // correlate the child's foreign-key value with the parent's declared `id`.
+    let shape = Query::from("memberships")
+        .join_via_column("chats", "id", "chat", [])
+        .validate(&core.catalogue.schema)
+        .unwrap();
+    let rows = required_include_rows(&mut core, &shape, AuthorId::SYSTEM);
+    assert_eq!(
+        rows.into_iter().map(|row| row.row_uuid()).collect::<Vec<_>>(),
+        vec![membership]
+    );
+
+}
+
 fn required_include_shape(core: &NodeState<RocksDbStorage>, include: Include) -> ValidatedQuery {
     Query::from("roots")
         .include_with(include)
@@ -654,4 +711,3 @@ fn system_identity_required_include_uses_existence_only_resolvability() {
         BTreeSet::from([row(0xd1), row(0xd2)])
     );
 }
-
