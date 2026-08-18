@@ -1501,9 +1501,10 @@ fn cold_mergeable_preparation_suspends_before_resident_publication() {
         panic!("published local row must be resident without another await")
     };
     assert_eq!(rows.len(), 1);
-    assert!(
-        committed_units.borrow().is_empty(),
-        "resident visibility precedes asynchronous durability"
+    assert_eq!(
+        committed_units.borrow().len(),
+        1,
+        "a cold post-write table scan must not overtake the queued commit"
     );
 }
 

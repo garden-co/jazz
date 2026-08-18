@@ -35,6 +35,11 @@ pub struct StorageAcquisition {
 }
 
 impl StorageAcquisition {
+    /// Whether this driver already owns an issued backend request.
+    pub fn is_pending(&self) -> bool {
+        self.pending.is_some()
+    }
+
     /// Poll one restartable resident operation, acquiring exact durable inputs
     /// until it can complete synchronously.
     pub fn poll<T, E>(
@@ -127,13 +132,7 @@ impl DemandDrivenDatabase {
         context: &mut Context<'_>,
         mut read: impl FnMut(&Database<crate::storage::DemandLoadedStorage>) -> Result<T, Error>,
     ) -> Poll<Result<T, Error>> {
-        self.acquisition.poll(
-            self.persistence.as_mut(),
-            &self.cache,
-            context,
-            || read(&self.database),
-            missing_storage_input,
-        )
+        self.poll_acquisition(context, |database| read(database))
     }
 
     /// Poll prerequisite durable reads, then execute exactly one real resident
@@ -149,13 +148,9 @@ impl DemandDrivenDatabase {
         let pending_batch = batch
             .as_ref()
             .expect("commit batch is consumed exactly once after Ready");
-        match self.acquisition.poll(
-            self.persistence.as_mut(),
-            &self.cache,
-            context,
-            || self.database.prepare_batch_storage_inputs(pending_batch),
-            missing_storage_input,
-        ) {
+        match self.poll_acquisition(context, |database| {
+            database.prepare_batch_storage_inputs(pending_batch)
+        }) {
             Poll::Pending => Poll::Pending,
             Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
             Poll::Ready(Ok(prepared)) => {
@@ -179,13 +174,9 @@ impl DemandDrivenDatabase {
         let pending_graph = graph
             .as_ref()
             .expect("subscription graph is consumed exactly once after Ready");
-        match self.acquisition.poll(
-            self.persistence.as_mut(),
-            &self.cache,
-            context,
-            || self.database.subscribe_one_sink(pending_graph.clone()),
-            missing_storage_input,
-        ) {
+        match self.poll_acquisition(context, |database| {
+            database.subscribe_one_sink(pending_graph.clone())
+        }) {
             Poll::Pending => Poll::Pending,
             Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
             Poll::Ready(Ok(subscription)) => {
@@ -203,6 +194,40 @@ impl DemandDrivenDatabase {
         self.pending_persistence.push_back(OwnedStorageRequest::new(
             OwnedStorageOperation::Commit(batch.into_operations()),
         ));
+    }
+
+    /// Run one restartable resident operation. Fully resident work completes
+    /// without touching persistence; a genuine miss is fenced behind every
+    /// older queued commit before its read request reaches the backend.
+    fn poll_acquisition<T>(
+        &mut self,
+        context: &mut Context<'_>,
+        mut operation: impl FnMut(
+            &mut Database<crate::storage::DemandLoadedStorage>,
+        ) -> Result<T, Error>,
+    ) -> Poll<Result<T, Error>> {
+        if !self.acquisition.is_pending() {
+            match operation(&mut self.database) {
+                Ok(value) => return Poll::Ready(Ok(value)),
+                Err(error) => {
+                    if let Err(error) = missing_storage_input(error) {
+                        return Poll::Ready(Err(error));
+                    }
+                }
+            }
+            match self.poll_persistence(context) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                Poll::Ready(Ok(())) => {}
+            }
+        }
+        self.acquisition.poll(
+            self.persistence.as_mut(),
+            &self.cache,
+            context,
+            || operation(&mut self.database),
+            missing_storage_input,
+        )
     }
 
     /// Poll queued durable writes in FIFO order. Immediate backends drain in

@@ -155,8 +155,42 @@ impl DemandDrivenNode {
             &mut NodeState<groove::storage::DemandLoadedStorage>,
         ) -> Result<T, Error>,
     ) -> std::task::Poll<Result<T, Error>> {
+        let node = std::rc::Rc::clone(&self.node);
+        match self.poll_restartable_acquisition(
+            context,
+            || prepare(&mut node.borrow_mut()),
+            missing_node_open_input,
+        ) {
+            std::task::Poll::Ready(Ok(prepared)) => {
+                match self.ensure_acquisition_attempt_clean() {
+                    Ok(()) => std::task::Poll::Ready(Ok(prepared)),
+                    Err(error) => std::task::Poll::Ready(Err(error)),
+                }
+            }
+            result => result,
+        }
+    }
+
+    /// Run one mutation-free resident attempt, fencing a genuine cold miss
+    /// behind all older persistence before the backend request is issued.
+    ///
+    /// This is the single acquisition boundary for a ready node. A suspended
+    /// or failed attempt may not emit writes. Callers that use it for typed
+    /// preparation additionally require a successful attempt to remain pure;
+    /// completed query/subscription operations may publish resident metadata.
+    fn poll_restartable_acquisition<T, E>(
+        &mut self,
+        context: &mut std::task::Context<'_>,
+        mut operation: impl FnMut() -> Result<T, E>,
+        missing_input: impl Fn(
+            E,
+        ) -> Result<groove::storage::async_ordered::OwnedStorageOperation, E>,
+    ) -> std::task::Poll<Result<T, E>>
+    where
+        E: From<Error> + From<groove::storage::Error>,
+    {
         if let Err(error) = self.ensure_persistence_usable() {
-            return std::task::Poll::Ready(Err(error));
+            return std::task::Poll::Ready(Err(error.into()));
         }
         // Resident publications are synchronous and may occur between owner
         // polls (for example while constructing a local peer or delivering an
@@ -165,63 +199,58 @@ impl DemandDrivenNode {
         // attempt itself remain forbidden and are checked below.
         self.collect_persistence_unit();
 
-        // Probe the resident operation before touching durable storage. A
-        // fully resident read must retain the synchronous completion property,
-        // while a cold miss is ordered after every older publication. The
-        // probe is restartable and must therefore remain mutation-free just
-        // like every later acquisition attempt.
-        let resident_probe = {
-            let mut node = self.node.borrow_mut();
-            prepare(&mut node)
-        };
-        match resident_probe {
-            Ok(prepared) => {
-                return match self.ensure_acquisition_attempt_clean() {
-                    Ok(()) => std::task::Poll::Ready(Ok(prepared)),
-                    Err(error) => std::task::Poll::Ready(Err(error)),
-                };
-            }
-            Err(error) => {
-                if let Err(error) = missing_node_open_input(error) {
-                    self.discard_failed_operation_writes();
-                    return std::task::Poll::Ready(Err(error));
+        if !self.acquisition.is_pending() {
+            // Probe the resident operation before touching durable storage. A
+            // fully resident read must retain the synchronous completion
+            // property, while a cold miss is ordered after every older
+            // publication. An already-issued request skips this probe and is
+            // polled to completion with its original operation identity.
+            let resident_probe = operation();
+            match resident_probe {
+                Ok(prepared) => {
+                    return std::task::Poll::Ready(Ok(prepared));
                 }
-                if let Err(error) = self.ensure_acquisition_attempt_clean() {
-                    return std::task::Poll::Ready(Err(error));
+                Err(error) => {
+                    if let Err(error) = missing_input(error) {
+                        self.discard_failed_operation_writes();
+                        return std::task::Poll::Ready(Err(error));
+                    }
+                    if let Err(error) = self.ensure_acquisition_attempt_clean() {
+                        return std::task::Poll::Ready(Err(error.into()));
+                    }
                 }
             }
-        }
 
-        // The operation genuinely needs durable input. Fence that request
-        // behind older publication units (including column-family creation)
-        // before StorageAcquisition is allowed to issue it. Resident reads
-        // above never pay this asynchronous durability boundary.
-        match self.poll_persistence_queue(context) {
-            std::task::Poll::Pending => return std::task::Poll::Pending,
-            std::task::Poll::Ready(Err(error)) => return std::task::Poll::Ready(Err(error)),
-            std::task::Poll::Ready(Ok(())) => {}
+            // The operation genuinely needs durable input. Fence that request
+            // behind older publication units (including column-family
+            // creation) before StorageAcquisition is allowed to issue it.
+            // Resident reads above never pay this durability boundary.
+            match self.poll_persistence_queue(context) {
+                std::task::Poll::Pending => return std::task::Poll::Pending,
+                std::task::Poll::Ready(Err(error)) => {
+                    return std::task::Poll::Ready(Err(error.into()));
+                }
+                std::task::Poll::Ready(Ok(())) => {}
+            }
         }
         let result = self.acquisition.poll(
             self.persistence.as_mut(),
             &self.cache,
             context,
-            || prepare(&mut self.node.borrow_mut()),
-            missing_node_open_input,
+            operation,
+            missing_input,
         );
         match result {
             std::task::Poll::Pending => match self.ensure_acquisition_attempt_clean() {
                 Ok(()) => std::task::Poll::Pending,
-                Err(error) => std::task::Poll::Ready(Err(error)),
+                Err(error) => std::task::Poll::Ready(Err(error.into())),
             },
             std::task::Poll::Ready(Err(error)) => {
                 self.discard_failed_operation_writes();
                 std::task::Poll::Ready(Err(error))
             }
             std::task::Poll::Ready(Ok(prepared)) => {
-                match self.ensure_acquisition_attempt_clean() {
-                    Ok(()) => std::task::Poll::Ready(Ok(prepared)),
-                    Err(error) => std::task::Poll::Ready(Err(error)),
-                }
+                std::task::Poll::Ready(Ok(prepared))
             }
         }
     }
@@ -266,23 +295,14 @@ impl DemandDrivenNode {
         if let Err(error) = self.ensure_durable_publication_idle() {
             return std::task::Poll::Ready(Err(error));
         }
-        let prepared = match self.acquisition.poll(
-            self.persistence.as_mut(),
-            &self.cache,
+        let node = std::rc::Rc::clone(&self.node);
+        let prepared = match self.poll_restartable_acquisition(
             context,
-            || prepare(&mut self.node.borrow_mut()),
+            || prepare(&mut node.borrow_mut()),
             missing_node_open_input,
         ) {
-            std::task::Poll::Pending => {
-                return match self.ensure_acquisition_attempt_clean() {
-                    Ok(()) => std::task::Poll::Pending,
-                    Err(error) => std::task::Poll::Ready(Err(error)),
-                };
-            }
-            std::task::Poll::Ready(Err(error)) => {
-                self.discard_failed_operation_writes();
-                return std::task::Poll::Ready(Err(error));
-            }
+            std::task::Poll::Pending => return std::task::Poll::Pending,
+            std::task::Poll::Ready(Err(error)) => return std::task::Poll::Ready(Err(error)),
             std::task::Poll::Ready(Ok(prepared)) => prepared,
         };
         if let Err(error) = self.ensure_acquisition_attempt_clean() {
@@ -517,20 +537,14 @@ impl DemandDrivenNode {
                 if let Err(error) = self.ensure_durable_publication_idle() {
                     return std::task::Poll::Ready(Err(error));
                 }
-                let prepared = match self.acquisition.poll(
-                    self.persistence.as_mut(),
-                    &self.cache,
-                    context,
-                    || {
-                        self.node.borrow_mut().prepare_authority_commit(
-                            request.tx.clone(),
-                            request.versions.clone(),
-                            request.now_ms,
-                            request.ingest_context,
-                        )
-                    },
-                    missing_node_open_input,
-                ) {
+                let prepared = match self.poll_acquire_resident(context, |node| {
+                    node.prepare_authority_commit(
+                        request.tx.clone(),
+                        request.versions.clone(),
+                        request.now_ms,
+                        request.ingest_context,
+                    )
+                }) {
                     std::task::Poll::Pending => return std::task::Poll::Pending,
                     std::task::Poll::Ready(Err(error)) => {
                         self.discard_failed_operation_writes();
@@ -636,17 +650,9 @@ impl DemandDrivenNode {
                 if let Err(error) = self.ensure_durable_publication_idle() {
                     return std::task::Poll::Ready(Err(error));
                 }
-                let prepared = match self.acquisition.poll(
-                    self.persistence.as_mut(),
-                    &self.cache,
-                    context,
-                    || {
-                        self.node
-                            .borrow_mut()
-                            .prepare_relay_commit(tx.clone(), versions.clone())
-                    },
-                    missing_node_open_input,
-                ) {
+                let prepared = match self.poll_acquire_resident(context, |node| {
+                    node.prepare_relay_commit(tx.clone(), versions.clone())
+                }) {
                     std::task::Poll::Pending => return std::task::Poll::Pending,
                     std::task::Poll::Ready(Err(error)) => {
                         self.discard_failed_operation_writes();
@@ -781,13 +787,9 @@ impl DemandDrivenNode {
                 .and_then(|pending| pending.steps.front())
                 .cloned()
                 .expect("an active fate application retains a step");
-            let prepared = match self.acquisition.poll(
-                self.persistence.as_mut(),
-                &self.cache,
-                context,
-                || self.node.borrow_mut().prepare_fate_update(request.clone()),
-                missing_node_open_input,
-            ) {
+            let prepared = match self.poll_acquire_resident(context, |node| {
+                node.prepare_fate_update(request.clone())
+            }) {
                 std::task::Poll::Pending => return std::task::Poll::Pending,
                 std::task::Poll::Ready(Err(error)) => {
                     self.pending_fate = None;
@@ -952,17 +954,9 @@ impl DemandDrivenNode {
                 if let Err(error) = self.ensure_durable_publication_idle() {
                     return std::task::Poll::Ready(Err(error));
                 }
-                let prepared = match self.acquisition.poll(
-                    self.persistence.as_mut(),
-                    &self.cache,
-                    context,
-                    || {
-                        self.node
-                            .borrow_mut()
-                            .prepare_view_updates_in_batch(updates.to_vec())
-                    },
-                    missing_node_open_input,
-                ) {
+                let prepared = match self.poll_acquire_resident(context, |node| {
+                    node.prepare_view_updates_in_batch(updates.to_vec())
+                }) {
                     std::task::Poll::Pending => return std::task::Poll::Pending,
                     std::task::Poll::Ready(Err(error)) => {
                         self.discard_failed_operation_writes();
@@ -1055,18 +1049,9 @@ impl DemandDrivenNode {
                 if let Err(error) = self.ensure_durable_publication_idle() {
                     return std::task::Poll::Ready(Err(error));
                 }
-                let prepared = match self.acquisition.poll(
-                    self.persistence.as_mut(),
-                    &self.cache,
-                    context,
-                    || {
-                        self.node.borrow_mut().prepare_repair_payload_ingress(
-                            requests,
-                            bundles.to_vec(),
-                        )
-                    },
-                    missing_node_open_input,
-                ) {
+                let prepared = match self.poll_acquire_resident(context, |node| {
+                    node.prepare_repair_payload_ingress(requests, bundles.to_vec())
+                }) {
                     std::task::Poll::Pending => return std::task::Poll::Pending,
                     std::task::Poll::Ready(Err(error)) => {
                         self.discard_failed_operation_writes();
@@ -1138,17 +1123,9 @@ impl DemandDrivenNode {
             if let Err(error) = self.ensure_durable_publication_idle() {
                 return std::task::Poll::Ready(Err(error));
             }
-            let prepared = match self.acquisition.poll(
-                self.persistence.as_mut(),
-                &self.cache,
-                context,
-                || {
-                    self.node
-                        .borrow()
-                        .prepare_trusted_catalogue_snapshot(snapshot.clone())
-                },
-                missing_node_open_input,
-            ) {
+            let prepared = match self.poll_acquire_resident(context, |node| {
+                node.prepare_trusted_catalogue_snapshot(snapshot.clone())
+            }) {
                 std::task::Poll::Pending => return std::task::Poll::Pending,
                 std::task::Poll::Ready(Err(error)) => {
                     self.discard_failed_operation_writes();
@@ -1321,17 +1298,9 @@ impl DemandDrivenNode {
                 if let Err(error) = self.ensure_durable_publication_idle() {
                     return std::task::Poll::Ready(Err(error));
                 }
-                let prepared = match self.acquisition.poll(
-                    self.persistence.as_mut(),
-                    &self.cache,
-                    context,
-                    || {
-                        self.node
-                            .borrow()
-                            .prepare_peer_branch_metadata(metadata.clone())
-                    },
-                    missing_node_open_input,
-                ) {
+                let prepared = match self.poll_acquire_resident(context, |node| {
+                    node.prepare_peer_branch_metadata(metadata.clone())
+                }) {
                     std::task::Poll::Pending => return std::task::Poll::Pending,
                     std::task::Poll::Ready(Err(error)) => {
                         self.discard_failed_operation_writes();
@@ -1395,17 +1364,9 @@ impl DemandDrivenNode {
                 if let Err(error) = self.ensure_durable_publication_idle() {
                     return std::task::Poll::Ready(Err(error));
                 }
-                let prepared = match self.acquisition.poll(
-                    self.persistence.as_mut(),
-                    &self.cache,
-                    context,
-                    || {
-                        self.node
-                            .borrow()
-                            .prepare_session_branch_metadata(metadata.clone(), identity)
-                    },
-                    missing_node_open_input,
-                ) {
+                let prepared = match self.poll_acquire_resident(context, |node| {
+                    node.prepare_session_branch_metadata(metadata.clone(), identity)
+                }) {
                     std::task::Poll::Pending => return std::task::Poll::Pending,
                     std::task::Poll::Ready(Err(error)) => {
                         self.discard_failed_operation_writes();
@@ -1499,21 +1460,11 @@ impl DemandDrivenNode {
         if let Err(error) = self.ensure_durable_publication_idle() {
             return std::task::Poll::Ready(Err(error.into()));
         }
-        let result = self.acquisition.poll(
-            self.persistence.as_mut(),
-            &self.cache,
-            context,
-            operation,
-            missing_input,
-        );
+        let result = self.poll_restartable_acquisition(context, operation, missing_input);
         match &result {
             std::task::Poll::Ready(Ok(_)) => self.collect_persistence_unit(),
             std::task::Poll::Ready(Err(_)) => self.discard_failed_operation_writes(),
-            std::task::Poll::Pending => {
-                if let Err(error) = self.ensure_acquisition_attempt_clean() {
-                    return std::task::Poll::Ready(Err(error.into()));
-                }
-            }
+            std::task::Poll::Pending => {}
         }
         result
     }
@@ -1747,6 +1698,10 @@ impl DemandDrivenNode {
                     durability: Some(DurabilityTier::Local),
                 }
             };
+            // This acquisition belongs to the durability unit whose commit
+            // has just completed. It precedes (rather than fences behind) any
+            // later queued publication, so it intentionally uses the raw
+            // acquisition driver inside the persistence scheduler.
             let prepared = match self.acquisition.poll(
                 self.persistence.as_mut(),
                 &self.cache,
@@ -1920,24 +1875,10 @@ impl Drop for DemandDrivenNode {
 impl DemandDrivenNodeOpen {
     fn finish(
         &mut self,
-        mut node: NodeState<groove::storage::DemandLoadedStorage>,
+        node: NodeState<groove::storage::DemandLoadedStorage>,
         cache: groove::storage::DemandLoadedStorage,
     ) -> DemandDrivenNode {
         cache.publish_transaction();
-        // Every local mutation first publishes resident visibility at None.
-        // Durable storage advances the exact transaction to Local only after
-        // its commit completes; volatile storage never makes that claim.
-        node.set_non_durable_client();
-        let durable = self
-            .persistence
-            .as_ref()
-            .expect("ready node retains its persistence session")
-            .is_durable();
-        node.set_resident_storage_durability_floor(if durable {
-            DurabilityTier::Local
-        } else {
-            DurabilityTier::None
-        });
         DemandDrivenNode {
             node: std::rc::Rc::new(std::cell::RefCell::new(node)),
             cache,
@@ -2098,6 +2039,22 @@ impl DemandDrivenNodeOpen {
             ) {
                 std::task::Poll::Pending => return std::task::Poll::Pending,
                 std::task::Poll::Ready(Ok((node, transaction))) => {
+                    let mut node = node;
+                    // Configure the resident owner inside the same opening
+                    // transaction whose writes are finalized below. A ready
+                    // node must not inherit a second, uncommitted bootstrap
+                    // journal from post-finalization configuration.
+                    node.set_non_durable_client();
+                    let durable = self
+                        .persistence
+                        .as_ref()
+                        .expect("ready node retains its persistence session")
+                        .is_durable();
+                    node.set_resident_storage_durability_floor(if durable {
+                        DurabilityTier::Local
+                    } else {
+                        DurabilityTier::None
+                    });
                     let column_families = node
                         .database
                         .take_demand_loaded_pending_column_families();

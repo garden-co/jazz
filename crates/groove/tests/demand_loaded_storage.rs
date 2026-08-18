@@ -1,4 +1,4 @@
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::task::{Context, Poll, Waker};
 
@@ -17,6 +17,41 @@ struct GatedStorage {
     inner: ImmediateStorage<MemoryStorage>,
     released: Rc<Cell<bool>>,
     polls: Rc<Cell<usize>>,
+}
+
+struct CommitGatedStorage {
+    inner: ImmediateStorage<MemoryStorage>,
+    commits_released: Rc<Cell<bool>>,
+    completed: Rc<RefCell<Vec<&'static str>>>,
+}
+
+impl OrderedKvStorage for CommitGatedStorage {
+    fn poll_request(
+        &mut self,
+        request: &OwnedStorageRequest,
+        context: &mut Context<'_>,
+    ) -> Poll<Result<OwnedStorageResponse, Error>> {
+        if matches!(request.operation(), OwnedStorageOperation::Commit(_))
+            && !self.commits_released.get()
+        {
+            return Poll::Pending;
+        }
+        let result = self.inner.poll_request(request, context);
+        if matches!(result, Poll::Ready(Ok(_))) {
+            self.completed.borrow_mut().push(
+                if matches!(request.operation(), OwnedStorageOperation::Commit(_)) {
+                    "commit"
+                } else {
+                    "read"
+                },
+            );
+        }
+        result
+    }
+
+    fn cancel_request(&mut self, request: StorageRequestId) -> Result<(), Error> {
+        self.inner.cancel_request(request)
+    }
 }
 
 impl OrderedKvStorage for GatedStorage {
@@ -414,4 +449,50 @@ fn direct_write_is_synchronous_while_an_unloaded_reference_may_suspend() {
     );
     database.enqueue_persistence(persistence);
     assert!(database.poll_persistence(&mut context).is_pending());
+}
+
+#[test]
+fn cold_read_cannot_overtake_an_older_resident_commit() {
+    let commits_released = Rc::new(Cell::new(true));
+    let completed = Rc::new(RefCell::new(Vec::new()));
+    let storage = CommitGatedStorage {
+        inner: ImmediateStorage::new(MemoryStorage::new(&["rows", "related", "indices"])),
+        commits_released: Rc::clone(&commits_released),
+        completed: Rc::clone(&completed),
+    };
+    let mut database = DemandDrivenDatabase::new(referencing_schema(), Box::new(storage)).unwrap();
+    let mut context = Context::from_waker(Waker::noop());
+
+    let Poll::Ready(Ok(_)) = database.poll_read(&mut context, |database| {
+        database.primary_key_scan("rows", &[])
+    }) else {
+        panic!("immediate storage must load the direct source")
+    };
+    completed.borrow_mut().clear();
+    commits_released.set(false);
+
+    let mut batch = Some(database.resident().open_batch());
+    batch.as_mut().unwrap().insert(
+        "rows",
+        vec![
+            Value::U64(31),
+            Value::U64(99),
+            Value::String("ordered".into()),
+        ],
+    );
+    let Poll::Ready(Ok(persistence)) = database.poll_commit_batch(&mut context, &mut batch) else {
+        panic!("resident commit preparation must stay synchronous")
+    };
+    database.enqueue_persistence(persistence);
+
+    assert!(
+        database
+            .poll_read(&mut context, |database| database
+                .primary_key_scan("related", &[]))
+            .is_pending()
+    );
+    assert!(
+        !completed.borrow().contains(&"read"),
+        "the cold read must remain behind the queued commit"
+    );
 }
