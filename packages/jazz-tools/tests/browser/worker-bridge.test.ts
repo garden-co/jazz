@@ -1344,7 +1344,7 @@ describe("Worker Bridge with OPFS", () => {
       code: "permission_denied",
       reason: "Write rejected by server authorization",
       transaction: {
-        batchId,
+        transactionId: batchId,
         kind: "mergeable",
         sealed: true,
         latestSettlement: {
@@ -1416,7 +1416,7 @@ describe("Worker Bridge with OPFS", () => {
       code: "permission_denied",
       reason: "Write rejected by server authorization",
       transaction: {
-        batchId,
+        transactionId: batchId,
         kind: "mergeable",
         sealed: true,
         latestSettlement: {
@@ -1490,7 +1490,7 @@ describe("Worker Bridge with OPFS", () => {
       code: "permission_denied",
       reason: "Write rejected by server authorization",
       transaction: {
-        batchId,
+        transactionId: batchId,
         kind: "mergeable",
         sealed: true,
         latestSettlement: {
@@ -1634,7 +1634,7 @@ describe("Worker Bridge with OPFS", () => {
         expect(mutationErrorSpy).toHaveBeenCalledWith(
           expect.objectContaining({
             code: "permission_denied",
-            transaction: expect.objectContaining({ batchId }),
+            transaction: expect.objectContaining({ transactionId: batchId }),
           }),
         );
       });
@@ -1706,7 +1706,7 @@ describe("Worker Bridge with OPFS", () => {
         expect(mutationErrorSpy).toHaveBeenCalledWith(
           expect.objectContaining({
             code: "permission_denied",
-            transaction: expect.objectContaining({ batchId }),
+            transaction: expect.objectContaining({ transactionId: batchId }),
           }),
         );
       });
@@ -1777,7 +1777,7 @@ describe("Worker Bridge with OPFS", () => {
         expect(mutationErrorSpy).toHaveBeenCalledWith(
           expect.objectContaining({
             code: "permission_denied",
-            transaction: expect.objectContaining({ batchId }),
+            transaction: expect.objectContaining({ transactionId: batchId }),
           }),
         );
       });
