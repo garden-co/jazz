@@ -552,13 +552,42 @@ pub async fn verify_indexeddb_jazz_visibility(page_store: JsValue) -> Result<JsV
     let mut reopened = futures::future::poll_fn(|context| reopening.poll(context))
         .await
         .map_err(|error| JsValue::from_str(&error.to_string()))?;
-    let rows = futures::future::poll_fn(|context| {
-        reopened
-            .runtime()
-            .poll_current_rows(context, "todos", DurabilityTier::None)
-    })
-    .await
-    .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    let prepared = reopened
+        .database()
+        .prepare_query(&reopened.database().table("todos"))
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    let mut cold_context = Context::from_waker(Waker::noop());
+    if !reopened
+        .poll_all(
+            &mut cold_context,
+            &prepared,
+            ReadOpts {
+                tier: DurabilityTier::None,
+                local_updates: LocalUpdates::Immediate,
+                propagation: Propagation::LocalOnly,
+                include_deleted: false,
+                ..ReadOpts::default()
+            },
+        )
+        .is_pending()
+    {
+        return Err(JsValue::from_str(
+            "cold IndexedDB one-shot unexpectedly completed without async acquisition",
+        ));
+    }
+    let rows = reopened
+        .all(
+            &prepared,
+            ReadOpts {
+                tier: DurabilityTier::None,
+                local_updates: LocalUpdates::Immediate,
+                propagation: Propagation::LocalOnly,
+                include_deleted: false,
+                ..ReadOpts::default()
+            },
+        )
+        .await
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
     if rows.len() != 1 {
         return Err(JsValue::from_str(
             "Jazz canonical transaction did not survive IndexedDB owner reopen",

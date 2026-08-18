@@ -292,7 +292,9 @@ fn demand_driven_db_preserves_synchronous_facade_visibility_before_durability() 
     else {
         panic!("insert must queue its immediate callback before returning")
     };
-    let rows = crate::db::block_on(db.all(&prepared, opts)).unwrap();
+    let std::task::Poll::Ready(Ok(rows)) = owner.poll_all(&mut context, &prepared, opts) else {
+        panic!("a resident post-write read must complete in its first poll")
+    };
     assert_eq!(added.len(), 1);
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].row_uuid(), write.row_uuid());

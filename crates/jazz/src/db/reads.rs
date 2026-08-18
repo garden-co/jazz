@@ -268,45 +268,52 @@ where
         author: AuthorId,
         authorization_mode: QueryAuthorizationMode,
     ) -> Result<Vec<CurrentRow>, Error> {
+        ensure_supported_read_view(&opts)?;
+        self.all_resident(prepared, &opts, author, authorization_mode)
+            .map_err(Into::into)
+    }
+
+    pub(super) fn all_resident(
+        &self,
+        prepared: &PreparedQuery,
+        opts: &ReadOpts,
+        author: AuthorId,
+        authorization_mode: QueryAuthorizationMode,
+    ) -> Result<Vec<CurrentRow>, crate::node::Error> {
         let tier = effective_read_tier(&opts);
         let mut node = self.node.node.borrow_mut();
         match &opts.read_view.source {
             ReadViewSourceSpec::Current => {}
             ReadViewSourceSpec::Branch { branch } if !opts.include_deleted => {
                 return match authorization_mode {
-                    QueryAuthorizationMode::TrustedServing => node
-                        .query_rows_on_branch_for_link(
-                            crate::ids::BranchId(*branch),
-                            &prepared.shape,
-                            &prepared.binding,
-                            author,
-                        )
-                        .map_err(Into::into),
+                    QueryAuthorizationMode::TrustedServing => node.query_rows_on_branch_for_link(
+                        crate::ids::BranchId(*branch),
+                        &prepared.shape,
+                        &prepared.binding,
+                        author,
+                    ),
                     QueryAuthorizationMode::ClientLocal if tier < DurabilityTier::Edge => node
                         .query_rows_on_branch_for_client(
                             crate::ids::BranchId(*branch),
                             &prepared.shape,
                             &prepared.binding,
                             author,
-                        )
-                        .map_err(Into::into),
-                    QueryAuthorizationMode::ClientLocal => node
-                        .query_rows_for_client_read_view(
-                            &prepared.shape,
-                            &prepared.binding,
-                            self.node
-                                .upstream_register_shape_options(
-                                    tier,
-                                    opts.read_view.clone(),
-                                    opts.propagation == Propagation::Full,
-                                )
-                                .tier,
-                            &opts.read_view,
-                        )
-                        .map_err(Into::into),
+                        ),
+                    QueryAuthorizationMode::ClientLocal => node.query_rows_for_client_read_view(
+                        &prepared.shape,
+                        &prepared.binding,
+                        self.node
+                            .upstream_register_shape_options(
+                                tier,
+                                opts.read_view.clone(),
+                                opts.propagation == Propagation::Full,
+                            )
+                            .tier,
+                        &opts.read_view,
+                    ),
                 };
             }
-            _ => ensure_default_read_view(&opts)?,
+            _ => {}
         }
         match (opts.include_deleted, authorization_mode) {
             (true, mode) => node.query_rows_including_deleted_in_authorization_mode(
@@ -331,7 +338,6 @@ where
                 node.query_rows_for_client(&prepared.shape, &prepared.binding, tier, author)
             }
         }
-        .map_err(Into::into)
     }
 
     /// Tier-gated one-shot relation read evaluated as the database identity.

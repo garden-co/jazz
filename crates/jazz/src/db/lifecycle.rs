@@ -122,6 +122,46 @@ impl DemandDrivenDb {
     pub fn runtime(&mut self) -> &mut DemandDrivenNode {
         &mut self.runtime
     }
+
+    /// Poll a high-level one-shot read through query-driven durable loading.
+    ///
+    /// If every required input is resident, this returns `Ready` on the first
+    /// poll. A cold durable dependency suspends the operation, admits exactly
+    /// that dependency, and retries the same resident evaluation.
+    #[doc(hidden)]
+    pub fn poll_all(
+        &mut self,
+        context: &mut Context<'_>,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+    ) -> Poll<Result<Vec<CurrentRow>, Error>> {
+        if let Err(error) = ensure_supported_read_view(&opts) {
+            return Poll::Ready(Err(error));
+        }
+        let database = &self.database;
+        let author = database.identity.author;
+        match self.runtime.poll_resident_operation(context, || {
+            database.all_resident(
+                &prepared,
+                &opts,
+                author,
+                QueryAuthorizationMode::ClientLocal,
+            )
+        }) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(result) => Poll::Ready(result.map_err(Into::into)),
+        }
+    }
+
+    /// Run a high-level one-shot read, suspending only for cold durable input.
+    #[doc(hidden)]
+    pub async fn all(
+        &mut self,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        std::future::poll_fn(|context| self.poll_all(context, prepared, opts.clone())).await
+    }
 }
 
 impl<S> Db<S>

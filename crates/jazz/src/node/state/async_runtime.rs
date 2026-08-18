@@ -363,12 +363,10 @@ impl DemandDrivenNode {
     /// Poll a restartable query or subscription operation. It may suspend only
     /// while acquiring a missing durable input; once ready, evaluation runs on
     /// the same resident node used by local writes.
-    fn poll_query<T>(
+    pub(crate) fn poll_resident_operation<T>(
         &mut self,
         context: &mut std::task::Context<'_>,
-        mut operation: impl FnMut(
-            &mut NodeState<groove::storage::DemandLoadedStorage>,
-        ) -> Result<T, Error>,
+        operation: impl FnMut() -> Result<T, Error>,
     ) -> std::task::Poll<Result<T, Error>> {
         if let Err(error) = self.ensure_persistence_usable() {
             return std::task::Poll::Ready(Err(error));
@@ -380,7 +378,7 @@ impl DemandDrivenNode {
             self.persistence.as_mut(),
             &self.cache,
             context,
-            || operation(&mut self.node.borrow_mut()),
+            operation,
             missing_node_open_input,
         );
         match &result {
@@ -389,6 +387,17 @@ impl DemandDrivenNode {
             std::task::Poll::Pending => {}
         }
         result
+    }
+
+    fn poll_query<T>(
+        &mut self,
+        context: &mut std::task::Context<'_>,
+        mut operation: impl FnMut(
+            &mut NodeState<groove::storage::DemandLoadedStorage>,
+        ) -> Result<T, Error>,
+    ) -> std::task::Poll<Result<T, Error>> {
+        let node = std::rc::Rc::clone(&self.node);
+        self.poll_resident_operation(context, || operation(&mut node.borrow_mut()))
     }
 
     /// Poll one current-table read without exposing the mutable resident node
