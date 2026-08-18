@@ -96,7 +96,7 @@ fn jazz_docs_history_schema() -> DatabaseSchema {
     ))])
 }
 
-fn seed_jazz_docs_history<S: ResidentStorage>(
+fn seed_jazz_docs_history<S: OrderedKvStorage>(
     database: &mut Database<S>,
     start_idx: u64,
     row_count: u64,

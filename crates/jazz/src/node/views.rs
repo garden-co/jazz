@@ -178,7 +178,7 @@ pub(crate) struct MaintainedViewBundleInputs<'a> {
 
 impl<S> NodeState<S>
 where
-    S: ResidentStorage,
+    S: OrderedKvStorage,
 {
     /// Subscribe to the raw history storage table.
     pub fn subscribe_history(&mut self, table: &str) -> Result<Subscription, Error> {

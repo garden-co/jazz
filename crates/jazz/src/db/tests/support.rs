@@ -371,7 +371,7 @@ pub(super) fn opened_rows(event: SubscriptionEvent) -> Vec<CurrentRow> {
 
 pub(super) fn pending_upstream_subscribe_count<S>(db: &Db<S>) -> usize
 where
-    S: ResidentStorage + ReopenableStorage + 'static,
+    S: OrderedKvStorage + ReopenableStorage + 'static,
 {
     db.node
         .upstream_subscriptions
@@ -383,7 +383,7 @@ where
 
 pub(super) fn pending_upstream_unsubscribe_count<S>(db: &Db<S>) -> usize
 where
-    S: ResidentStorage + ReopenableStorage + 'static,
+    S: OrderedKvStorage + ReopenableStorage + 'static,
 {
     db.node
         .upstream_subscriptions
@@ -599,14 +599,14 @@ pub(super) fn expect_error<T>(result: Result<T, Error>) -> Error {
 
 pub(super) fn prepared<S>(db: &Db<S>, query: &Query) -> PreparedQuery
 where
-    S: ResidentStorage + ReopenableStorage + 'static,
+    S: OrderedKvStorage + ReopenableStorage + 'static,
 {
     db.prepare_query(query).unwrap()
 }
 
 pub(super) fn prepared_read<S>(db: &Db<S>, query: &Query) -> Vec<CurrentRow>
 where
-    S: ResidentStorage + ReopenableStorage + 'static,
+    S: OrderedKvStorage + ReopenableStorage + 'static,
 {
     let prepared = prepared(db, query);
     db.read(&prepared).unwrap()
@@ -614,7 +614,7 @@ where
 
 pub(super) fn prepared_one<S>(db: &Db<S>, query: &Query) -> Option<CurrentRow>
 where
-    S: ResidentStorage + ReopenableStorage + 'static,
+    S: OrderedKvStorage + ReopenableStorage + 'static,
 {
     let prepared = prepared(db, query);
     db.one(&prepared).unwrap()
@@ -622,7 +622,7 @@ where
 
 pub(super) fn prepared_all<S>(db: &Db<S>, query: &Query, opts: ReadOpts) -> Vec<CurrentRow>
 where
-    S: ResidentStorage + ReopenableStorage + 'static,
+    S: OrderedKvStorage + ReopenableStorage + 'static,
 {
     let prepared = prepared(db, query);
     block_on(db.all(&prepared, opts)).unwrap()
@@ -634,7 +634,7 @@ pub(super) fn prepared_subscribe<S>(
     opts: ReadOpts,
 ) -> Result<SubscriptionStream, Error>
 where
-    S: ResidentStorage + ReopenableStorage + 'static,
+    S: OrderedKvStorage + ReopenableStorage + 'static,
 {
     let prepared = prepared(db, query);
     block_on(db.subscribe(&prepared, opts))

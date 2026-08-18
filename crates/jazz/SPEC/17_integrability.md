@@ -179,7 +179,7 @@ Milestone: **integrators can adopt jazz incrementally without bespoke glue.**
   core). SQLite is conditionally in scope as the **last** alpha item, paired
   with React Native support: it is needed only if RocksDB proves unworkable in
   the RN environment. It is deliberately scheduled last because it is pure
-  tooling — a clean additional `OrderedKvStorage` backend behind the existing
+  tooling — a clean additional `AsyncOrderedKvStorage` backend behind the existing
   storage contract, with no design decisions attached.
 
 **Implementation status.** The alpha conformance matrix covers in-memory

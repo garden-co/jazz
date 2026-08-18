@@ -97,7 +97,7 @@ pub(super) fn validate_table_schema_variants(table: &TableSchema) -> Result<(), 
 
 impl<S> Database<S>
 where
-    S: ResidentStorage,
+    S: OrderedKvStorage,
 {
     /// Validate a table addition without changing the live runtime.
     #[doc(hidden)]

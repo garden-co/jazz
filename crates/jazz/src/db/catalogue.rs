@@ -4,7 +4,7 @@ use super::*;
 
 impl<S> Db<S>
 where
-    S: ResidentStorage + ReopenableStorage + 'static,
+    S: OrderedKvStorage + ReopenableStorage + 'static,
 {
     /// Publish an immutable schema-version payload through the catalogue lane.
     pub fn publish_schema(&self, schema: SchemaVersion) -> Result<Vec<SyncMessage>, Error> {

@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    ColumnFamilyName, Error, Key, ReopenableStorage, ResidentStorage, ScanVisitor, Value,
+    ColumnFamilyName, Error, Key, OrderedKvStorage, ReopenableStorage, ScanVisitor, Value,
     WriteOperation, apply_storage_delta, key_codec,
 };
 
@@ -96,7 +96,7 @@ impl MemoryStorage {
     }
 }
 
-impl ResidentStorage for MemoryStorage {
+impl OrderedKvStorage for MemoryStorage {
     fn get(&self, cf: &ColumnFamilyName, key: &Key) -> Result<Option<Value>, Error> {
         self.with_cf(cf, |values| values.get(key).cloned())
     }

@@ -5,7 +5,7 @@ use super::*;
 
 impl<S> Db<S>
 where
-    S: ResidentStorage + ReopenableStorage + 'static,
+    S: OrderedKvStorage + ReopenableStorage + 'static,
 {
     pub(super) fn begin_mergeable_for_owner(
         &self,

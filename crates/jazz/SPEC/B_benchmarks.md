@@ -199,7 +199,7 @@ engine O(n²) cliff:
   `bytes_floor: 0` (entropy-floor anchor uncomputed for canvas). Hotspot note: S3
   cold/block-tree load is dominated by
   `NodeState::expand_query_closure`, `PeerState::rehydrate_current_rows`,
-  `OrderedKvStorage::prefix`, and global-layer-winner lookups (samply, 2026-06-15).
+  `AsyncOrderedKvStorage::prefix`, and global-layer-winner lookups (samply, 2026-06-15).
 
 Gap kinds: **FEATURE** means a required capability is not implemented, not
 available through the needed surface, or not incrementally maintained where the

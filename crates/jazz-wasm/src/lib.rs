@@ -16,7 +16,7 @@ use jazz::groove::records::{BorrowedRecord, RecordDescriptor, Value};
 #[cfg(target_arch = "wasm32")]
 use jazz::groove::storage::OpfsStorage;
 use jazz::groove::storage::{
-    DemandLoadedStorage, MemoryStorage, ReopenableStorage, ResidentStorage,
+    DemandLoadedStorage, MemoryStorage, OrderedKvStorage, ReopenableStorage,
 };
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::protocol::PermissionAdviceAction;
@@ -2174,7 +2174,7 @@ fn open_db<S>(
     config: WasmOpenDbConfig,
 ) -> Result<DemandDrivenDb, jazz::db::Error>
 where
-    S: ResidentStorage + ReopenableStorage + 'static,
+    S: OrderedKvStorage + ReopenableStorage + 'static,
 {
     let mut db_config = DbConfig::new(schema, storage, config.identity.into());
     if let Some(seed) = config.row_id_seed {

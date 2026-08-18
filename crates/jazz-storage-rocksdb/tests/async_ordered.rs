@@ -3,7 +3,7 @@ use std::task::{Context, Poll, Wake, Waker};
 
 use groove::storage::OwnedWriteOperation;
 use groove::storage::async_ordered::{
-    ImmediateStorage, OrderedKvStorage, OwnedStorageOperation, OwnedStorageRequest,
+    AsyncOrderedKvStorage, ImmediateStorage, OwnedStorageOperation, OwnedStorageRequest,
     OwnedStorageResponse,
 };
 use jazz_storage_rocksdb::RocksDbStorage;
@@ -15,7 +15,7 @@ impl Wake for NoopWake {
 }
 
 fn poll_request(
-    storage: &mut dyn OrderedKvStorage,
+    storage: &mut dyn AsyncOrderedKvStorage,
     request: &OwnedStorageRequest,
 ) -> Poll<Result<OwnedStorageResponse, groove::storage::Error>> {
     let waker = Waker::from(Arc::new(NoopWake));

@@ -83,7 +83,7 @@ impl PeerState {
         node: &NodeState<S>,
         subscription: SubscriptionKey,
     ) where
-        S: ResidentStorage,
+        S: OrderedKvStorage,
     {
         let current_token = node.groove_runtime_token();
         if self.subscriptions.get(&subscription).is_some_and(|state| {
@@ -106,7 +106,7 @@ impl PeerState {
         binding: &Binding,
     ) -> Result<(), Error>
     where
-        S: ResidentStorage,
+        S: OrderedKvStorage,
     {
         node.register_query_subscription_for_peer(
             shape.shape_id(),
@@ -130,7 +130,7 @@ impl PeerState {
         table: &str,
     ) -> Result<SyncMessage, Error>
     where
-        S: ResidentStorage,
+        S: OrderedKvStorage,
     {
         let (shape, binding) = node.whole_table_shape_binding(table)?;
         let subscription = SubscriptionKey {
@@ -212,7 +212,7 @@ impl PeerState {
         binding: &Binding,
     ) -> Result<SyncMessage, Error>
     where
-        S: ResidentStorage,
+        S: OrderedKvStorage,
     {
         self.query_update_inner(node, shape, binding)
     }
@@ -226,7 +226,7 @@ impl PeerState {
         binding: &Binding,
     ) -> Result<SyncMessage, Error>
     where
-        S: ResidentStorage,
+        S: OrderedKvStorage,
     {
         self.query_update_for_subscription_with_opts(
             node,
@@ -248,7 +248,7 @@ impl PeerState {
         opts: RegisterShapeOptions,
     ) -> Result<SyncMessage, Error>
     where
-        S: ResidentStorage,
+        S: OrderedKvStorage,
     {
         self.query_update_inner_for_subscription(node, subscription, shape, binding, opts, true)
     }
@@ -264,7 +264,7 @@ impl PeerState {
         opts: RegisterShapeOptions,
     ) -> Result<SyncMessage, Error>
     where
-        S: ResidentStorage,
+        S: OrderedKvStorage,
     {
         self.query_update_inner_for_subscription(node, subscription, shape, binding, opts, false)
     }
@@ -276,7 +276,7 @@ impl PeerState {
         binding: &Binding,
     ) -> Result<SyncMessage, Error>
     where
-        S: ResidentStorage,
+        S: OrderedKvStorage,
     {
         let subscription = SubscriptionKey {
             shape_id: shape.shape_id(),
@@ -303,7 +303,7 @@ impl PeerState {
         flush_query_runtime: bool,
     ) -> Result<SyncMessage, Error>
     where
-        S: ResidentStorage,
+        S: OrderedKvStorage,
     {
         self.clear_stale_groove_runtime_handles(node, subscription);
         self.ensure_query_subscription_registered(node, subscription, shape, binding)?;
@@ -374,7 +374,7 @@ impl PeerState {
         flush_query_runtime: bool,
     ) -> Result<SyncMessage, Error>
     where
-        S: ResidentStorage,
+        S: OrderedKvStorage,
     {
         let trace_rehydrate = std::env::var_os("JAZZ_REHYDRATE_TRACE").is_some();
         let trace_start = Instant::now();
@@ -603,7 +603,7 @@ impl PeerState {
         flush_query_runtime: bool,
     ) -> Result<ResultTransitions, Error>
     where
-        S: ResidentStorage,
+        S: OrderedKvStorage,
     {
         if flush_query_runtime {
             node.flush_query_runtime()?;
@@ -764,7 +764,7 @@ impl PeerState {
         request: MaintainedRehydrateRequest<'_>,
     ) -> Result<SyncMessage, Error>
     where
-        S: ResidentStorage,
+        S: OrderedKvStorage,
     {
         let MaintainedRehydrateRequest {
             shape,
@@ -1047,7 +1047,7 @@ impl PeerState {
         table: &str,
     ) -> Result<SyncMessage, Error>
     where
-        S: ResidentStorage,
+        S: OrderedKvStorage,
     {
         let (shape, binding) = node.whole_table_shape_binding(table)?;
         self.rehydrate_query(node, &shape, &binding)
@@ -1061,7 +1061,7 @@ impl PeerState {
         binding: &Binding,
     ) -> Result<SyncMessage, Error>
     where
-        S: ResidentStorage,
+        S: OrderedKvStorage,
     {
         self.rehydrate_query_with_opts(node, shape, binding, RegisterShapeOptions::default())
     }
@@ -1075,7 +1075,7 @@ impl PeerState {
         opts: RegisterShapeOptions,
     ) -> Result<SyncMessage, Error>
     where
-        S: ResidentStorage,
+        S: OrderedKvStorage,
     {
         let subscription = SubscriptionKey {
             shape_id: shape.shape_id(),
@@ -1095,7 +1095,7 @@ impl PeerState {
         opts: RegisterShapeOptions,
     ) -> Result<SyncMessage, Error>
     where
-        S: ResidentStorage,
+        S: OrderedKvStorage,
     {
         self.rehydrate_query_for_subscription_with_purpose(
             node,
@@ -1117,7 +1117,7 @@ impl PeerState {
         purpose: RehydratePurpose,
     ) -> Result<SyncMessage, Error>
     where
-        S: ResidentStorage,
+        S: OrderedKvStorage,
     {
         self.clear_stale_groove_runtime_handles(node, subscription);
         self.ensure_query_subscription_registered(node, subscription, shape, binding)?;
@@ -1183,7 +1183,7 @@ impl PeerState {
         opts: RegisterShapeOptions,
     ) -> Result<SyncMessage, Error>
     where
-        S: ResidentStorage,
+        S: OrderedKvStorage,
     {
         let subscription = SubscriptionKey {
             shape_id: shape.shape_id(),
@@ -1210,7 +1210,7 @@ impl PeerState {
         shape: &ValidatedQuery,
     ) -> Result<SyncMessage, Error>
     where
-        S: ResidentStorage,
+        S: OrderedKvStorage,
     {
         self.clear_stale_groove_runtime_handles(node, maintained_subscription);
         let source_transitions = self.drain_maintained_subscription_view_changes(

@@ -23,7 +23,7 @@ use groove::ivm::ProjectField;
 #[cfg(test)]
 use groove::queries::{Query, Select, SelectItem, TableRef};
 use groove::records::{self, BorrowedRecord, OwnedRecord, Value};
-use groove::storage::{self, ReopenableStorage, ResidentStorage, StorageLayout};
+use groove::storage::{self, OrderedKvStorage, ReopenableStorage, StorageLayout};
 use thiserror::Error;
 
 use self::query_engine::user_column_field;
@@ -1359,7 +1359,7 @@ impl PartialEq<(RowUuid, BTreeMap<String, Value>)> for CurrentRow {
 /// Cheap read-only handle for historical settled-state reads.
 pub struct HistoricalRead<'node, S>
 where
-    S: ResidentStorage,
+    S: OrderedKvStorage,
 {
     node: &'node mut NodeState<S>,
     position: GlobalSeq,
@@ -1367,7 +1367,7 @@ where
 
 impl<S> HistoricalRead<'_, S>
 where
-    S: ResidentStorage,
+    S: OrderedKvStorage,
 {
     /// Global settle position this handle reads at.
     pub fn position(&self) -> GlobalSeq {

@@ -1,6 +1,6 @@
 impl<S> NodeState<S>
 where
-    S: ResidentStorage,
+    S: OrderedKvStorage,
 {
     /// Apply one sync message and return any outgoing sync messages.
     pub fn apply_sync_message(&mut self, message: SyncMessage) -> Result<Vec<SyncMessage>, Error>

@@ -63,7 +63,7 @@ impl From<&BranchRecord> for crate::protocol::BranchMetadata {
 
 impl<S> NodeState<S>
 where
-    S: ResidentStorage,
+    S: OrderedKvStorage,
 {
     pub(crate) fn prepare_peer_branch_metadata(
         &self,

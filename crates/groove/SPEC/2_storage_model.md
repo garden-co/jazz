@@ -11,8 +11,8 @@ rules for tables and indices. Chapters 3–7 build on these guarantees.
 Invariant digest:
 
 - `INV-OK-14`: Base-table writes and durable index/view writes MUST be committed through one storage-atomic batch; if the final batch fails after runtime state advances, the Database...
-- `INV-STORAGE-1`: `ResidentStorage` implementations MUST return scan results in lexicographic key order and `scan_range`/`range` MUST include keys `>= start` and exclude keys `>= end`.
-- `INV-STORAGE-2`: `ResidentStorage::scan_prefix`/`prefix` MUST return exactly keys beginning with the supplied byte prefix in lexicographic key order, including prefixes whose finite upper bound cannot be computed.
+- `INV-STORAGE-1`: `OrderedKvStorage` implementations MUST return scan results in lexicographic key order and `scan_range`/`range` MUST include keys `>= start` and exclude keys `>= end`.
+- `INV-STORAGE-2`: `OrderedKvStorage::scan_prefix`/`prefix` MUST return exactly keys beginning with the supplied byte prefix in lexicographic key order, including prefixes whose finite upper bound cannot be computed.
 - `INV-STORAGE-4`: `write_many` MUST apply all `Set`/`Delete` operations atomically at the storage-operation level, and a missing column family in the operation list MUST leave earlier valid operations unapplied.
 - `INV-STORAGE-5`: `ReopenableStorage::reopen` MUST preserve existing data while adding newly requested column families.
 - `INV-STORAGE-6`: Table records MUST be stored as values in the table column family named by `TableSchema::name`, keyed by the encoded primary key derived from the row record.
@@ -75,7 +75,7 @@ whole-row enum appears in Jazz's public schema, wire values, lenses, or query AP
 
 ## Details
 
-Rust names in this chapter (`ResidentStorage`, `RecordStore`,
+Rust names in this chapter (`OrderedKvStorage`, `RecordStore`,
 `RocksDbStorage`, …) identify the reference implementation surface. The
 normative contract is the behavior specified here.
 
@@ -84,11 +84,11 @@ normative contract is the behavior specified here.
 inheriting them from a consumer such as `jazz-tools`. This is a build-layout
 choice, not part of the portable storage contract.
 
-### 2.1 The storage interface: `ResidentStorage`
+### 2.1 The storage interface: `OrderedKvStorage`
 
 The storage layer supplies exactly the ordered byte map groove needs. It is
 partitioned into named column families and exposes a small set of operations
-(`ResidentStorage` in the reference implementation): point `get`, `set`, and
+(`OrderedKvStorage` in the reference implementation): point `get`, `set`, and
 `delete`; forward range scans over `start..end`; prefix scans in forward and
 reverse order; a last-with-prefix helper; and atomic batch writes through
 `write_many`.
@@ -338,7 +338,7 @@ The former hybrid columnar-base proposal is rejected and is not part of Groove's
 - 🔶 **Future: allow compaction concurrent with a scan of the same range.**
   The draft avoids the problem by excluding the two, which costs compaction
   scheduling freedom under sustained read load. Relaxing it needs a source of
-  reader isolation, and today there is none to draw on: `ResidentStorage`
+  reader isolation, and today there is none to draw on: `OrderedKvStorage`
   offers `get`/`scan_range`/`scan_prefix`/`write_many` with no snapshot or
   read-version, so a scan observes whatever is committed while it runs.
   Keeping superseded material addressable and changing the storage contract

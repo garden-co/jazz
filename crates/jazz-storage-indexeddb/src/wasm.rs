@@ -5,7 +5,7 @@ use std::task::{Context, Poll, Waker};
 
 use futures::lock::Mutex;
 use groove::storage::async_ordered::{
-    OrderedKvStorage, OwnedScanBounds, OwnedScanRequest, OwnedStorageOperation,
+    AsyncOrderedKvStorage, OwnedScanBounds, OwnedScanRequest, OwnedStorageOperation,
     OwnedStorageRequest, OwnedStorageResponse, ScanDirection, StorageRequestId,
 };
 use groove::storage::{Error, OwnedWriteOperation, apply_storage_delta};
@@ -115,7 +115,7 @@ impl IndexedDbOrderedStorage {
     }
 }
 
-impl OrderedKvStorage for IndexedDbOrderedStorage {
+impl AsyncOrderedKvStorage for IndexedDbOrderedStorage {
     fn is_durable(&self) -> bool {
         true
     }

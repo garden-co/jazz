@@ -2,7 +2,7 @@ use super::*;
 
 impl<S> Database<S>
 where
-    S: ResidentStorage,
+    S: OrderedKvStorage,
 {
     /// Return decoded records whose explicit schema index exactly matches the
     /// supplied index-column key.
@@ -174,7 +174,7 @@ where
         prefix: &[Value],
     ) -> Result<Vec<VariantRecord>, Error>
     where
-        T: ResidentStorage,
+        T: OrderedKvStorage,
     {
         let raw = self.primary_key_scan_raw_with_storage(storage, table, prefix)?;
         Ok(raw
@@ -294,7 +294,7 @@ where
         key: &[Value],
     ) -> Result<Option<EncodedKeyValue<'a>>, Error>
     where
-        T: ResidentStorage,
+        T: OrderedKvStorage,
     {
         let table_schema = self.table(table)?;
         let primary_key = table_schema
@@ -329,7 +329,7 @@ where
         prefix: &[Value],
     ) -> Result<Vec<EncodedKeyValue<'a>>, Error>
     where
-        T: ResidentStorage,
+        T: OrderedKvStorage,
     {
         let table_schema = self.table(table)?;
         let primary_key = table_schema
@@ -365,7 +365,7 @@ where
         prefix: &[Value],
     ) -> Result<Option<EncodedKeyValue<'a>>, Error>
     where
-        T: ResidentStorage,
+        T: OrderedKvStorage,
     {
         let table_schema = self.table(table)?;
         let primary_key = table_schema
@@ -585,7 +585,7 @@ where
         prefix: &[Value],
     ) -> Result<Vec<EncodedKeyValue<'a>>, Error>
     where
-        T: ResidentStorage,
+        T: OrderedKvStorage,
     {
         let index = self.index(table, index_name)?;
         if prefix.len() > index.columns.len() {
@@ -678,7 +678,7 @@ where
         raw_entries: Vec<crate::storage::KeyValue>,
     ) -> Result<Vec<EncodedKeyValue<'a>>, Error>
     where
-        T: ResidentStorage,
+        T: OrderedKvStorage,
     {
         let table_schema = self.table(table)?;
         let storage_descriptor = table_schema.record_schema();

@@ -1692,7 +1692,7 @@ fn open_core_db<S>(
     config: CoreOpenDbConfig,
 ) -> std::result::Result<CoreDemandDrivenDb, jazz::db::Error>
 where
-    S: jazz::groove::storage::ResidentStorage + jazz::groove::storage::ReopenableStorage + 'static,
+    S: jazz::groove::storage::OrderedKvStorage + jazz::groove::storage::ReopenableStorage + 'static,
 {
     let mut db_config = CoreDbConfig::new(schema, storage, config.identity.into());
     if let Some(seed) = config.row_id_seed {

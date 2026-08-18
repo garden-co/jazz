@@ -12,7 +12,7 @@ use groove::records::{RecordDescriptor, Value};
 use groove::schema::{
     ColumnSchema, ColumnType, DatabaseSchema, IntegerKeyType, PrimaryKey, TableSchema,
 };
-use groove::storage::ResidentStorage;
+use groove::storage::OrderedKvStorage;
 use hdrhistogram::Histogram;
 use jazz_storage_rocksdb::{Durability, RocksDbStorage};
 use rusqlite::{Connection, params};
@@ -42,7 +42,7 @@ fn main() {
     }
 }
 
-fn apply_bench_auto_family_override<S: ResidentStorage>(db: &mut Database<S>) {
+fn apply_bench_auto_family_override<S: OrderedKvStorage>(db: &mut Database<S>) {
     if env::var_os("GROOVE_BENCH_DISABLE_AUTO_DIRECT_FAMILY").is_some() {
         db.set_auto_direct_family_enabled(false);
     }

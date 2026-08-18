@@ -11,7 +11,7 @@ use rustc_hash::FxHashMap as HashMap;
 
 use crate::ivm::{IvmGraph, NodeId, OpType, RecursiveOp, StaticScanSpec, TableSourceOp};
 use crate::records::RecordDescriptor;
-use crate::storage::ResidentStorage;
+use crate::storage::OrderedKvStorage;
 
 use super::{
     ArrangementUpdateMode, AsOf, EvalContext, GraphRuntimeView, IvmRuntimeError, NodeState,
@@ -130,7 +130,7 @@ pub(super) fn recursive_delta<S>(
     step: NodeId,
 ) -> Result<Vec<RecordDelta>, IvmRuntimeError>
 where
-    S: ResidentStorage,
+    S: OrderedKvStorage,
 {
     let has_recompute_table_delta = has_recompute_table_delta_for_recursion(&runtime, seed, step)?;
     let has_table_delta = has_table_delta_for_cached_tables(&runtime, recursive);
@@ -278,7 +278,7 @@ fn has_table_delta_for_cached_tables<S>(
     recursive: &RecursiveOp,
 ) -> bool
 where
-    S: ResidentStorage,
+    S: OrderedKvStorage,
 {
     runtime
         .table_deltas
@@ -292,7 +292,7 @@ fn has_recompute_table_delta_for_recursion<S>(
     step: NodeId,
 ) -> Result<bool, IvmRuntimeError>
 where
-    S: ResidentStorage,
+    S: OrderedKvStorage,
 {
     let mut tables = HashMap::<String, RecordDescriptor>::default();
     collect_table_source_names(runtime.graph, seed, &mut tables)?;
@@ -316,7 +316,7 @@ fn has_recompute_binding_delta_for_recursion<S>(
     step: NodeId,
 ) -> Result<bool, IvmRuntimeError>
 where
-    S: ResidentStorage,
+    S: OrderedKvStorage,
 {
     let mut shapes = HashMap::<String, RecordDescriptor>::default();
     collect_binding_sources(runtime.graph, seed, &mut shapes)?;
@@ -335,7 +335,7 @@ pub(super) fn hydrate_recursive_arrangements<S>(
     accumulated: RecordDeltas,
 ) -> Result<(), IvmRuntimeError>
 where
-    S: ResidentStorage,
+    S: OrderedKvStorage,
 {
     // Evaluate the step once against snapshot table deltas and the full
     // accumulated relation. The result is discarded; the purpose is to prepare
@@ -373,7 +373,7 @@ where
 pub(super) fn snapshot_table_deltas(
     schema: &crate::schema::DatabaseSchema,
     graph: &IvmGraph,
-    storage: &impl ResidentStorage,
+    storage: &impl OrderedKvStorage,
     root: NodeId,
 ) -> Result<Vec<TableDelta>, IvmRuntimeError> {
     let mut tables = std::collections::HashSet::<TableSnapshotSource>::new();
@@ -544,7 +544,7 @@ pub(super) fn recompute_recursive(
     recursive: &RecursiveOp,
     output_desc: RecordDescriptor,
     step: NodeId,
-    storage: &impl ResidentStorage,
+    storage: &impl OrderedKvStorage,
     binding_snapshots: &HashMap<String, RecordDeltas>,
     _current_tick: u64,
     scope: ScopeId,
@@ -643,7 +643,7 @@ struct HydrationEvaluator<'a, S> {
 
 impl<S> HydrationEvaluator<'_, S>
 where
-    S: ResidentStorage,
+    S: OrderedKvStorage,
 {
     fn eval_node(&mut self, node: NodeId) -> Result<RecordDeltas, IvmRuntimeError> {
         let graph_node = self

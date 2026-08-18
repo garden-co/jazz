@@ -4,7 +4,7 @@ use std::collections::VecDeque;
 use std::task::{Context, Poll};
 
 use crate::storage::async_ordered::{
-    OrderedKvStorage, OwnedStorageOperation, OwnedStorageRequest, OwnedStorageResponse,
+    AsyncOrderedKvStorage, OwnedStorageOperation, OwnedStorageRequest, OwnedStorageResponse,
 };
 
 use super::*;
@@ -19,7 +19,7 @@ use super::*;
 pub struct DemandDrivenDatabase {
     database: Database<crate::storage::DemandLoadedStorage>,
     cache: crate::storage::DemandLoadedStorage,
-    persistence: Box<dyn OrderedKvStorage>,
+    persistence: Box<dyn AsyncOrderedKvStorage>,
     acquisition: StorageAcquisition,
     pending_persistence: VecDeque<OwnedStorageRequest>,
 }
@@ -44,7 +44,7 @@ impl StorageAcquisition {
     /// until it can complete synchronously.
     pub fn poll<T, E>(
         &mut self,
-        persistence: &mut dyn OrderedKvStorage,
+        persistence: &mut dyn AsyncOrderedKvStorage,
         cache: &crate::storage::DemandLoadedStorage,
         context: &mut Context<'_>,
         mut attempt: impl FnMut() -> Result<T, E>,
@@ -92,7 +92,7 @@ impl StorageAcquisition {
     /// Cancel any backend work retained for the suspended operation.
     pub fn cancel(
         &mut self,
-        persistence: &mut dyn OrderedKvStorage,
+        persistence: &mut dyn AsyncOrderedKvStorage,
     ) -> Result<(), crate::storage::Error> {
         if let Some(request) = self.pending.take() {
             persistence.cancel_request(request.id())?;
@@ -118,7 +118,7 @@ impl DemandDrivenDatabase {
     #[doc(hidden)]
     pub fn new(
         schema: crate::schema::DatabaseSchema,
-        persistence: Box<dyn OrderedKvStorage>,
+        persistence: Box<dyn AsyncOrderedKvStorage>,
     ) -> Result<Self, Error> {
         let column_families = schema.column_families();
         let cache = crate::storage::DemandLoadedStorage::new(&column_families);

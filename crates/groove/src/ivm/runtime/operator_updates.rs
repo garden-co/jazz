@@ -162,7 +162,7 @@ impl NodeState {
         eval_mode: EvalMode,
     ) -> Result<RecordDeltas, IvmRuntimeError>
     where
-        S: ResidentStorage,
+        S: OrderedKvStorage,
     {
         if eval_mode == EvalMode::Hydrate {
             let storage = storage.ok_or(IvmRuntimeError::StorageUnavailable)?;
@@ -513,7 +513,7 @@ impl NodeState {
         persist: &PersistOp,
         output_desc: RecordDescriptor,
         input: &RecordDeltas,
-        storage: &impl ResidentStorage,
+        storage: &impl OrderedKvStorage,
     ) -> Result<RecordDeltas, IvmRuntimeError> {
         let trace = std::env::var_os("GROOVE_TRACE_INDEX_BY").is_some() && !input.deltas.is_empty();
         let start = trace.then(std::time::Instant::now);

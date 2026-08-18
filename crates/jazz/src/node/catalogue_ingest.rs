@@ -30,7 +30,7 @@ fn next_schema_version_alias_in_catalogue(
 
 impl<S> NodeState<S>
 where
-    S: ResidentStorage,
+    S: OrderedKvStorage,
 {
     pub(crate) fn apply_trusted_catalogue_snapshot(
         &mut self,

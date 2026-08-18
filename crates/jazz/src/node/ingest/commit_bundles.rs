@@ -18,7 +18,7 @@ pub(crate) struct PreparedRelayCommit {
 
 impl<S> NodeState<S>
 where
-    S: ResidentStorage,
+    S: OrderedKvStorage,
 {
     /// Acquire canonical storage inputs that receiver-bundle publication may
     /// consult while staging history and current-winner updates.

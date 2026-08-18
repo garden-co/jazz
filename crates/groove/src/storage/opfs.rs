@@ -12,7 +12,7 @@ pub use opfs_btree::SyncPolicy as BtreeSyncPolicy;
 use opfs_btree::{BTreeOptions, OpfsBTree, SyncFile};
 
 use super::{
-    ColumnFamilyName, Error, Key, ResidentStorage, ScanVisitor, Value, WriteOperation,
+    ColumnFamilyName, Error, Key, OrderedKvStorage, ScanVisitor, Value, WriteOperation,
     apply_storage_delta, key_codec,
 };
 
@@ -142,7 +142,7 @@ impl OpfsStorage {
     }
 }
 
-impl<F> ResidentStorage for BtreeStorage<F>
+impl<F> OrderedKvStorage for BtreeStorage<F>
 where
     F: SyncFile,
 {

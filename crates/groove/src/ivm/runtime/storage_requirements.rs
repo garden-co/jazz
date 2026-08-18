@@ -22,7 +22,7 @@ impl TickStorageRequirements {
 
     pub(crate) fn ensure_resident<S>(&self, storage: &S) -> Result<(), IvmRuntimeError>
     where
-        S: ResidentStorage,
+        S: OrderedKvStorage,
     {
         for scan in &self.scans {
             storage.require_resident(

@@ -11,7 +11,7 @@ pub struct DemandDrivenNodeOpen {
     schema: JazzSchema,
     kind: DemandDrivenNodeKind,
     cache: groove::storage::DemandLoadedStorage,
-    persistence: Option<Box<dyn groove::storage::async_ordered::OrderedKvStorage>>,
+    persistence: Option<Box<dyn groove::storage::async_ordered::AsyncOrderedKvStorage>>,
     acquisition: groove::db::StorageAcquisition,
     phase: NodeOpenPhase,
 }
@@ -44,7 +44,7 @@ enum NodeOpenPhase {
 pub struct DemandDrivenNode {
     node: std::rc::Rc<std::cell::RefCell<NodeState<groove::storage::DemandLoadedStorage>>>,
     cache: groove::storage::DemandLoadedStorage,
-    persistence: Box<dyn groove::storage::async_ordered::OrderedKvStorage>,
+    persistence: Box<dyn groove::storage::async_ordered::AsyncOrderedKvStorage>,
     acquisition: groove::db::StorageAcquisition,
     /// Cold inputs needed while publishing Local durability belong to the
     /// persistence scheduler, not to whichever public operation is polled
@@ -1922,7 +1922,7 @@ impl DemandDrivenNodeOpen {
     pub fn new(
         node_uuid: NodeUuid,
         schema: JazzSchema,
-        persistence: Box<dyn groove::storage::async_ordered::OrderedKvStorage>,
+        persistence: Box<dyn groove::storage::async_ordered::AsyncOrderedKvStorage>,
     ) -> Self {
         Self::with_kind(node_uuid, schema, persistence, DemandDrivenNodeKind::Client)
     }
@@ -1931,7 +1931,7 @@ impl DemandDrivenNodeOpen {
     pub fn new_history_complete(
         node_uuid: NodeUuid,
         schema: JazzSchema,
-        persistence: Box<dyn groove::storage::async_ordered::OrderedKvStorage>,
+        persistence: Box<dyn groove::storage::async_ordered::AsyncOrderedKvStorage>,
     ) -> Self {
         Self::with_kind(
             node_uuid,
@@ -1944,7 +1944,7 @@ impl DemandDrivenNodeOpen {
     #[doc(hidden)]
     pub fn new_catalogue_uninitialized(
         node_uuid: NodeUuid,
-        persistence: Box<dyn groove::storage::async_ordered::OrderedKvStorage>,
+        persistence: Box<dyn groove::storage::async_ordered::AsyncOrderedKvStorage>,
     ) -> Self {
         Self::with_kind(
             node_uuid,
@@ -1957,7 +1957,7 @@ impl DemandDrivenNodeOpen {
     fn with_kind(
         node_uuid: NodeUuid,
         schema: JazzSchema,
-        persistence: Box<dyn groove::storage::async_ordered::OrderedKvStorage>,
+        persistence: Box<dyn groove::storage::async_ordered::AsyncOrderedKvStorage>,
         kind: DemandDrivenNodeKind,
     ) -> Self {
         let column_families = schema.column_families();

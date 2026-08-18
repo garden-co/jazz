@@ -39,7 +39,7 @@ impl SubscriptionOpenError {
 
 impl<S> Db<S>
 where
-    S: ResidentStorage + ReopenableStorage + 'static,
+    S: OrderedKvStorage + ReopenableStorage + 'static,
 {
     /// Subscribe to a query and return a stream of materialized subscription events.
     ///

@@ -1,6 +1,6 @@
 impl<S> NodeState<S>
 where
-    S: ResidentStorage,
+    S: OrderedKvStorage,
 {
     /// Commit one complete node-owned Groove batch.
     ///

@@ -1130,7 +1130,7 @@ fn bind_query_operand_with_target_type(
 
 impl<S> NodeState<S>
 where
-    S: ResidentStorage,
+    S: OrderedKvStorage,
 {
     pub(super) fn program_binding_for_shape(
         &self,

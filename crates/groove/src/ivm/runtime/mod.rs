@@ -38,7 +38,7 @@ use crate::records::{
 };
 use crate::schema::{DatabaseSchema, IndexSchema, TableSchema};
 use crate::storage::{
-    OwnedWriteOperation, RecordStore, ResidentStorage, StagedWriteOverlay, StagedWriteState,
+    OrderedKvStorage, OwnedWriteOperation, RecordStore, StagedWriteOverlay, StagedWriteState,
 };
 use thiserror::Error;
 

@@ -5,8 +5,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::async_ordered::{OwnedScanRequest, OwnedStorageOperation, OwnedStorageResponse};
 use super::{
-    ColumnFamilyName, Error, Key, MemoryStorage, OwnedWriteOperation, ReopenableStorage,
-    ResidentStorage, ScanVisitor, Value, WriteOperation, apply_storage_delta,
+    ColumnFamilyName, Error, Key, MemoryStorage, OrderedKvStorage, OwnedWriteOperation,
+    ReopenableStorage, ScanVisitor, Value, WriteOperation, apply_storage_delta,
 };
 
 /// Synchronous working set that reports exact missing storage inputs instead
@@ -292,7 +292,7 @@ fn covers(admitted: &OwnedStorageOperation, requested: &OwnedStorageOperation) -
     }
 }
 
-impl ResidentStorage for DemandLoadedStorage {
+impl OrderedKvStorage for DemandLoadedStorage {
     fn require_resident(&self, operation: &OwnedStorageOperation) -> Result<(), Error> {
         self.require(operation.clone())
     }

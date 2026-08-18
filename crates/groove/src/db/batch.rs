@@ -5,7 +5,7 @@ use super::*;
 /// [`Database::commit_batch`] and staged callers share the final tick/write path.
 pub struct StagedDatabaseBatch<'a, S>
 where
-    S: ResidentStorage,
+    S: OrderedKvStorage,
 {
     pub(super) database: &'a mut Database<S>,
     pub(super) batch: DatabaseBatch,
@@ -13,7 +13,7 @@ where
 
 impl<S> StagedDatabaseBatch<'_, S>
 where
-    S: ResidentStorage,
+    S: OrderedKvStorage,
 {
     pub fn reserve(&mut self, additional: usize) {
         self.batch.reserve(additional);

@@ -9,7 +9,7 @@ use super::*;
 
 impl<S> NodeState<S>
 where
-    S: ResidentStorage,
+    S: OrderedKvStorage,
 {
     /// Open an exclusive transaction over the current snapshot.
     pub fn open_exclusive(&mut self, id: OpenBatchId) -> Result<(), Error> {

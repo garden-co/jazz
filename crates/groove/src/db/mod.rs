@@ -1,11 +1,11 @@
 //! Schema-aware database facade over records, storage, and the IVM runtime.
 //!
 //! This module owns the public [`Database`] API: opening a schema on an
-//! [`ResidentStorage`], encoding user rows through [`RecordDescriptor`],
+//! [`OrderedKvStorage`], encoding user rows through [`RecordDescriptor`],
 //! maintaining primary/secondary durable storage entries, and synchronously
 //! ticking [`IvmRuntime`] after committed batches. Query planning and graph
 //! execution live in [`crate::ivm`]; binary row layout lives in
-//! [`crate::records`]; storage durability lives below the [`ResidentStorage`]
+//! [`crate::records`]; storage durability lives below the [`OrderedKvStorage`]
 //! seam. New readers should start here to see how commits become table deltas
 //! and how subscriptions are exposed above the engine.
 
@@ -32,7 +32,7 @@ use crate::schema::{
     PrimaryKeyColumn, PrimaryKeyType, TableSchema, TableVariant,
 };
 use crate::storage::{
-    LayoutStorage, OwnedWriteOperation, RecordStore, ResidentStorage, StagedWriteOverlay,
+    LayoutStorage, OrderedKvStorage, OwnedWriteOperation, RecordStore, StagedWriteOverlay,
     StagedWriteState, StorageLayout, WriteOperation,
 };
 use thiserror::Error;
@@ -61,7 +61,7 @@ pub struct Database<S> {
 /// Owned durable-storage work produced by a synchronously visible local commit.
 ///
 /// This is an internal migration seam for hosts whose durable
-/// [`ResidentStorage`] adapter may suspend. Applying a batch to the resident
+/// [`OrderedKvStorage`] adapter may suspend. Applying a batch to the resident
 /// database still advances the IVM and publishes local subscription deltas in
 /// the caller's stack. The host then owns this receipt until the corresponding
 /// durable commit succeeds or poisons the database on failure.
@@ -136,7 +136,7 @@ impl DurablePublicationScope {
     /// Successfully complete this scope. Publication occurs only when this is
     /// the outermost scope and no nested scope aborted.
     #[doc(hidden)]
-    pub fn finish<S: ResidentStorage>(mut self, database: &mut Database<S>) {
+    pub fn finish<S: OrderedKvStorage>(mut self, database: &mut Database<S>) {
         assert!(
             Arc::ptr_eq(&self.state, &database.durable_publication_state),
             "durable publication scope belongs to a different database"
@@ -147,7 +147,7 @@ impl DurablePublicationScope {
 
     /// Abort this scope and poison its whole nested publication unit.
     #[doc(hidden)]
-    pub fn abort<S: ResidentStorage>(mut self, database: &mut Database<S>) {
+    pub fn abort<S: OrderedKvStorage>(mut self, database: &mut Database<S>) {
         assert!(
             Arc::ptr_eq(&self.state, &database.durable_publication_state),
             "durable publication scope belongs to a different database"

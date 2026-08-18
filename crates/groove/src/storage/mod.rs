@@ -2,7 +2,7 @@
 //!
 //! This module owns the backing-implementation contract: column families, point
 //! reads, ordered range/prefix scans, reverse/prefix helpers, and atomic write
-//! batches. Storage backends only need to provide [`ResidentStorage`]. Higher
+//! batches. Storage backends only need to provide [`OrderedKvStorage`]. Higher
 //! layers should work through record-store handles such as [`RecordStore`] and
 //! directly exposed direct stores rather than reaching through to column
 //! families or raw ordered-KV operations.
@@ -186,10 +186,10 @@ fn current_winner_key(
 /// Groove evaluates against this interface without suspending. A complete
 /// in-memory store can implement it directly; a durable async runtime normally
 /// supplies a demand-loaded resident cache and handles [`Error::NotResident`]
-/// through [`async_ordered::OrderedKvStorage`]. Column-family names remain
+/// through [`async_ordered::AsyncOrderedKvStorage`]. Column-family names remain
 /// backing details consumed by record-store plumbing; higher layers should use
 /// typed record-store handles instead of calling these methods directly.
-pub trait ResidentStorage {
+pub trait OrderedKvStorage {
     /// Whether a successful commit survives process loss and can therefore
     /// satisfy a caller's local-durability contract.
     ///
@@ -510,7 +510,7 @@ impl LayoutStorage<DemandLoadedStorage> {
 
 impl<S> LayoutStorage<S>
 where
-    S: ResidentStorage,
+    S: OrderedKvStorage,
 {
     pub fn new(inner: S, layout: StorageLayout) -> Result<Self, Error> {
         let storage = Self { inner, layout };
@@ -603,9 +603,9 @@ where
     }
 }
 
-impl<S> ResidentStorage for LayoutStorage<S>
+impl<S> OrderedKvStorage for LayoutStorage<S>
 where
-    S: ResidentStorage,
+    S: OrderedKvStorage,
 {
     fn is_durable(&self) -> bool {
         self.inner.is_durable()
@@ -793,13 +793,13 @@ where
 }
 
 /// Storage that can be reconstructed with an expanded table/column-family set.
-pub trait ReopenableStorage: ResidentStorage + Sized {
+pub trait ReopenableStorage: OrderedKvStorage + Sized {
     fn reopen(self, column_families: &[&str]) -> Result<Self, Error>;
 }
 
 /// Object-safe form of [`ReopenableStorage`] used at runtime adapter
 /// boundaries.
-pub trait ErasedReopenableStorage: ResidentStorage + Send {
+pub trait ErasedReopenableStorage: OrderedKvStorage + Send {
     fn reopen_boxed(
         self: Box<Self>,
         column_families: &[&str],
@@ -834,7 +834,7 @@ impl BoxedStorage {
     }
 }
 
-impl ResidentStorage for BoxedStorage {
+impl OrderedKvStorage for BoxedStorage {
     fn is_durable(&self) -> bool {
         self.inner.is_durable()
     }
@@ -953,7 +953,7 @@ pub struct RecordStore<'a, S> {
 
 impl<'a, S> RecordStore<'a, S>
 where
-    S: ResidentStorage,
+    S: OrderedKvStorage,
 {
     pub fn new(storage: &'a S, column_family: &'a str, descriptor: &'a RecordDescriptor) -> Self {
         Self {
@@ -1207,7 +1207,7 @@ pub struct StorageTransaction<'a, S> {
 
 impl<'a, S> StorageTransaction<'a, S>
 where
-    S: ResidentStorage,
+    S: OrderedKvStorage,
 {
     pub fn new(base: &'a S) -> Self {
         Self {
@@ -1237,9 +1237,9 @@ where
     }
 }
 
-impl<S> ResidentStorage for StorageTransaction<'_, S>
+impl<S> OrderedKvStorage for StorageTransaction<'_, S>
 where
-    S: ResidentStorage,
+    S: OrderedKvStorage,
 {
     fn require_resident(
         &self,
@@ -1338,9 +1338,9 @@ impl<'a, S> StagedWriteOverlay<'a, S> {
     }
 }
 
-impl<S> ResidentStorage for StagedWriteOverlay<'_, S>
+impl<S> OrderedKvStorage for StagedWriteOverlay<'_, S>
 where
-    S: ResidentStorage,
+    S: OrderedKvStorage,
 {
     fn require_resident(
         &self,
@@ -1792,7 +1792,7 @@ pub(crate) mod conformance {
 
     pub(crate) fn persistence_order_and_batch_atomicity<S>(storage: S)
     where
-        S: ResidentStorage,
+        S: OrderedKvStorage,
     {
         storage.set("records", b"user:2", b"two").unwrap();
         storage.set("records", b"user:1", b"one").unwrap();
@@ -1862,7 +1862,7 @@ pub(crate) mod conformance {
 
     pub(crate) fn delta_append_current_winner_observes_merged_state<S>(storage: S)
     where
-        S: ResidentStorage,
+        S: OrderedKvStorage,
     {
         fn record(time: u64, node: u8, payload: &[u8]) -> Vec<u8> {
             let mut bytes = Vec::new();
@@ -1949,7 +1949,7 @@ mod tests {
         ));
     }
 
-    fn reverse_prefix_values<S: ResidentStorage>(
+    fn reverse_prefix_values<S: OrderedKvStorage>(
         storage: &S,
         cf: &str,
         prefix: &[u8],
@@ -2527,9 +2527,9 @@ mod tests {
     fn staged_overlay_reverse_prefix_scans_match_trait_default() {
         struct DefaultReverse<'a, S>(&'a StagedWriteOverlay<'a, S>);
 
-        impl<S> ResidentStorage for DefaultReverse<'_, S>
+        impl<S> OrderedKvStorage for DefaultReverse<'_, S>
         where
-            S: ResidentStorage,
+            S: OrderedKvStorage,
         {
             fn get(&self, cf: &ColumnFamilyName, key: &Key) -> Result<Option<Vec<u8>>, Error> {
                 self.0.get(cf, key)
@@ -2728,9 +2728,9 @@ mod tests {
             }
         }
 
-        impl<S> ResidentStorage for CountingStorage<S>
+        impl<S> OrderedKvStorage for CountingStorage<S>
         where
-            S: ResidentStorage,
+            S: OrderedKvStorage,
         {
             fn get(&self, cf: &ColumnFamilyName, key: &Key) -> Result<Option<Vec<u8>>, Error> {
                 self.inner.get(cf, key)

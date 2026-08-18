@@ -414,7 +414,7 @@ pub(super) fn record_store_for_table<'a, S>(
     descriptor: &'a RecordDescriptor,
 ) -> RecordStore<'a, S>
 where
-    S: ResidentStorage,
+    S: OrderedKvStorage,
 {
     RecordStore::new(storage, &table.name, descriptor)
 }
@@ -1553,7 +1553,7 @@ impl IvmRuntime {
     pub fn subscribe_one_sink(
         &mut self,
         graph: GraphBuilder,
-        storage: &impl ResidentStorage,
+        storage: &impl OrderedKvStorage,
     ) -> Result<Subscription, IvmRuntimeError> {
         if builder_contains_binding_source(&graph) {
             return Err(IvmRuntimeError::BindingSourceRequiresPrepare);
@@ -1596,7 +1596,7 @@ impl IvmRuntime {
     where
         I: IntoIterator<Item = (K, GraphBuilder)>,
         K: Into<String>,
-        S: ResidentStorage,
+        S: OrderedKvStorage,
     {
         self.flush_pending_binding_retractions(storage)?;
         let sinks = sinks
@@ -1673,7 +1673,7 @@ impl IvmRuntime {
     ) -> Result<PreparedShape, IvmRuntimeError>
     where
         I: IntoIterator<Item = RoutedMultisinkTerminal>,
-        S: ResidentStorage,
+        S: OrderedKvStorage,
     {
         self.flush_pending_binding_retractions(storage)?;
         let terminals = terminals.into_iter().collect::<Vec<_>>();
@@ -1766,7 +1766,7 @@ impl IvmRuntime {
         storage: &S,
     ) -> Result<MultisinkSubscription, IvmRuntimeError>
     where
-        S: ResidentStorage,
+        S: OrderedKvStorage,
     {
         self.bind_shape_with_public_fields(shape_id, binding_values, BTreeMap::new(), storage)
     }
@@ -1779,7 +1779,7 @@ impl IvmRuntime {
         storage: &S,
     ) -> Result<MultisinkSubscription, IvmRuntimeError>
     where
-        S: ResidentStorage,
+        S: OrderedKvStorage,
     {
         self.flush_pending_binding_retractions(storage)?;
         let shape = self
@@ -1864,7 +1864,7 @@ impl IvmRuntime {
         binding_source_shape: impl Into<String>,
         binding_descriptor: RecordDescriptor,
         output_key_fields: impl IntoIterator<Item = impl Into<String>>,
-        storage: &impl ResidentStorage,
+        storage: &impl OrderedKvStorage,
     ) -> Result<PreparedShape, IvmRuntimeError> {
         // One-sink sugar: the ordinary prepared-shape API is represented as a
         // routed multisink shape with a single default terminal.
@@ -1900,7 +1900,7 @@ impl IvmRuntime {
         binding_source_shape: impl Into<String>,
         binding_descriptor: RecordDescriptor,
         routing_key_fields: impl IntoIterator<Item = impl Into<String>>,
-        storage: &impl ResidentStorage,
+        storage: &impl OrderedKvStorage,
     ) -> Result<PreparedShape, IvmRuntimeError> {
         // One-sink sugar for callers that want to describe a clean public
         // output separately from the route-carrying terminal graph.
@@ -1938,7 +1938,7 @@ impl IvmRuntime {
         storage: &S,
     ) -> Result<Subscription, IvmRuntimeError>
     where
-        S: ResidentStorage,
+        S: OrderedKvStorage,
     {
         let multisink = self.bind_shape(shape_id, binding_values, storage)?;
         self.single_sink_subscription(multisink, DEFAULT_SINK)
@@ -1952,7 +1952,7 @@ impl IvmRuntime {
         storage: &S,
     ) -> Result<Subscription, IvmRuntimeError>
     where
-        S: ResidentStorage,
+        S: OrderedKvStorage,
     {
         validate_public_output_for_shape(
             self.prepared_shapes
@@ -1996,7 +1996,7 @@ impl IvmRuntime {
         storage: &S,
     ) -> Result<bool, IvmRuntimeError>
     where
-        S: ResidentStorage,
+        S: OrderedKvStorage,
     {
         if let Some(subscription) = self.multisink_subscriptions.remove(&subscription_id) {
             let removed = self.remove_multisink_retainers(subscription_id, &subscription.outputs);
@@ -2021,7 +2021,7 @@ impl IvmRuntime {
         storage: &S,
     ) -> Result<usize, IvmRuntimeError>
     where
-        S: ResidentStorage,
+        S: OrderedKvStorage,
     {
         let dropped = self
             .multisink_subscriptions

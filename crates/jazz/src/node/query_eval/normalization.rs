@@ -851,7 +851,7 @@ fn collect_closure_paths<S>(
     includes: &[Include],
 ) -> Result<(BTreeSet<SourceId>, Vec<ClosurePath>), Error>
 where
-    S: ResidentStorage,
+    S: OrderedKvStorage,
 {
     let mut sources = BTreeSet::new();
     let mut paths = Vec::new();
@@ -2334,7 +2334,7 @@ fn policy_branch_base_is_converter_false(query: &JazzQuery) -> bool {
 
 impl<S> NodeState<S>
 where
-    S: ResidentStorage,
+    S: OrderedKvStorage,
 {
     pub(super) fn collect_policy_dependency_claim_params(
         &self,

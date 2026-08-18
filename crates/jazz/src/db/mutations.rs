@@ -39,7 +39,7 @@ impl MutationPrepareError {
 
 impl<S> Db<S>
 where
-    S: ResidentStorage + ReopenableStorage + 'static,
+    S: OrderedKvStorage + ReopenableStorage + 'static,
 {
     pub(super) fn prepare_insert_commit(
         &self,

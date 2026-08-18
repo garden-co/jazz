@@ -36,7 +36,7 @@ pub(super) enum CurrentAccessPath {
 
 impl<S> SourceResolver for CurrentQuerySourceResolver<'_, S>
 where
-    S: ResidentStorage,
+    S: OrderedKvStorage,
 {
     fn resolve_source(
         &mut self,
@@ -639,7 +639,7 @@ where
 
 impl<S> CurrentQuerySourceResolver<'_, S>
 where
-    S: ResidentStorage,
+    S: OrderedKvStorage,
 {
     pub(crate) fn current_projection_target(
         &mut self,
@@ -1875,7 +1875,7 @@ fn resolved_current_source_graph<S>(
     Error,
 >
 where
-    S: ResidentStorage,
+    S: OrderedKvStorage,
 {
     let mut fields = current_row_fields(table)
         .into_iter()
@@ -2197,7 +2197,7 @@ fn current_row_descriptor_fields(table: &TableSchema) -> Vec<(String, ValueType)
 
 impl<S> NodeState<S>
 where
-    S: ResidentStorage,
+    S: OrderedKvStorage,
 {
     pub(super) fn one_shot_access_paths(
         &self,

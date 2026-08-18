@@ -1,6 +1,6 @@
 impl<S> NodeState<S>
 where
-    S: ResidentStorage,
+    S: OrderedKvStorage,
 {
     /// Commit a local mergeable write and leave its fate pending.
     pub fn commit_mergeable(&mut self, commit: MergeableCommit) -> Result<TxId, Error> {

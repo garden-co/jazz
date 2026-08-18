@@ -26,7 +26,7 @@ fn version_bundles_for_update(update: &SyncMessage) -> Vec<VersionBundle> {
 }
 fn assert_currency_tables_match_storage<S>(node: &mut NodeState<S>, table: &str)
 where
-    S: ResidentStorage,
+    S: OrderedKvStorage,
 {
     let versions = node.query_table_versions(table).unwrap();
     let mut local_expected = BTreeMap::<(RowUuid, VersionLayer), TxId>::new();
@@ -118,7 +118,7 @@ fn global_winner_tx<S>(
     layer: VersionLayer,
 ) -> Option<TxId>
 where
-    S: ResidentStorage,
+    S: OrderedKvStorage,
 {
     let winner = node
         .query_global_layer_winner(table, row_uuid, layer)
@@ -127,7 +127,7 @@ where
 }
 fn ahead_current_row_count<S>(node: &mut NodeState<S>, table: &str) -> usize
 where
-    S: ResidentStorage,
+    S: OrderedKvStorage,
 {
     let physical_table = node
         .physical_table_id_for_schema(node.catalogue.current_schema_version_id, table)
@@ -409,7 +409,7 @@ impl ReopenRefusingMemoryStorage {
     }
 }
 
-impl ResidentStorage for ReopenRefusingMemoryStorage {
+impl OrderedKvStorage for ReopenRefusingMemoryStorage {
     fn get(
         &self,
         cf: &ColumnFamilyName,
@@ -1139,7 +1139,7 @@ fn register_shape_binding<S>(
     shape: &ValidatedQuery,
     binding: &Binding,
 ) where
-    S: ResidentStorage + ReopenableStorage,
+    S: OrderedKvStorage + ReopenableStorage,
 {
     node.apply_sync_message(SyncMessage::RegisterShape {
         shape_id: shape.shape_id(),

@@ -8,10 +8,10 @@ use groove::schema::{
     ColumnSchema, ColumnType, DatabaseSchema, IndexSchema, IntegerKeyType, PrimaryKey, TableSchema,
 };
 use groove::storage::async_ordered::{
-    ImmediateStorage, OrderedKvStorage, OwnedStorageOperation, OwnedStorageRequest,
+    AsyncOrderedKvStorage, ImmediateStorage, OwnedStorageOperation, OwnedStorageRequest,
     OwnedStorageResponse, StorageRequestId,
 };
-use groove::storage::{DemandLoadedStorage, Error, MemoryStorage, ResidentStorage};
+use groove::storage::{DemandLoadedStorage, Error, MemoryStorage, OrderedKvStorage};
 
 struct GatedStorage {
     inner: ImmediateStorage<MemoryStorage>,
@@ -32,7 +32,7 @@ struct FailFirstReadStorage {
     read_requests: Rc<RefCell<Vec<StorageRequestId>>>,
 }
 
-impl OrderedKvStorage for FailFirstReadStorage {
+impl AsyncOrderedKvStorage for FailFirstReadStorage {
     fn poll_request(
         &mut self,
         request: &OwnedStorageRequest,
@@ -56,7 +56,7 @@ impl OrderedKvStorage for FailFirstReadStorage {
     }
 }
 
-impl OrderedKvStorage for CommitGatedStorage {
+impl AsyncOrderedKvStorage for CommitGatedStorage {
     fn poll_request(
         &mut self,
         request: &OwnedStorageRequest,
@@ -85,7 +85,7 @@ impl OrderedKvStorage for CommitGatedStorage {
     }
 }
 
-impl OrderedKvStorage for GatedStorage {
+impl AsyncOrderedKvStorage for GatedStorage {
     fn poll_request(
         &mut self,
         request: &OwnedStorageRequest,

@@ -11,7 +11,7 @@ use super::*;
 /// Node-owned participant surface for upstream and subscriber connections.
 pub struct Node<S>
 where
-    S: ResidentStorage,
+    S: OrderedKvStorage,
 {
     pub(super) node: Rc<RefCell<NodeState<S>>>,
     pub(super) subscriptions: SubscriptionList,
@@ -41,7 +41,7 @@ where
 
 impl<S> Node<S>
 where
-    S: ResidentStorage + ReopenableStorage + 'static,
+    S: OrderedKvStorage + ReopenableStorage + 'static,
 {
     /// Wrap a node for serving subscriber links.
     pub fn new(node: NodeState<S>) -> Self {
@@ -1059,7 +1059,7 @@ pub(super) fn refresh_subscriptions_in<S>(
     active_authority_view_receipts: &ActiveAuthorityViewReceipts,
 ) -> Result<usize, Error>
 where
-    S: ResidentStorage + ReopenableStorage + 'static,
+    S: OrderedKvStorage + ReopenableStorage + 'static,
 {
     let mut retained = Vec::new();
     let mut changed = 0;

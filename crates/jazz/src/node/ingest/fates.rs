@@ -20,7 +20,7 @@ pub(crate) struct FateUpdateRequest {
 
 impl<S> NodeState<S>
 where
-    S: ResidentStorage,
+    S: OrderedKvStorage,
 {
     /// Apply an upstream fate update.
     pub fn apply_fate_update(

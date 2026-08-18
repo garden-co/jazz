@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::sync::Mutex;
 
 use crate::server::catalogue_entry::CatalogueEntry;
-use jazz::groove::storage::{BoxedStorage, ResidentStorage};
+use jazz::groove::storage::{BoxedStorage, OrderedKvStorage};
 use jazz::tools::ObjectId;
 
 pub(crate) type DynCatalogueStorage = Box<dyn CatalogueStorage + Send>;
@@ -190,7 +190,7 @@ fn storage_error(error: jazz::groove::storage::Error) -> CatalogueStorageError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use jazz::groove::storage::{ResidentStorage, StorageFactory};
+    use jazz::groove::storage::{OrderedKvStorage, StorageFactory};
 
     #[test]
     fn adapter_catalogue_reads_the_pre_extraction_default_cf_layout() {

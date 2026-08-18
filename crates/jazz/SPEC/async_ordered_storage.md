@@ -36,7 +36,7 @@ selection does not alter the owner, IVM, transaction, or publication model.
 
 ## Goal
 
-`OrderedKvStorage` is an asynchronous, owned-data boundary. Memory,
+`AsyncOrderedKvStorage` is an asynchronous, owned-data boundary. Memory,
 RocksDB, and already-resident page-cache operations complete on their first
 poll; IndexedDB and cold page operations may return `Pending`. Groove and Jazz
 have one execution model above that boundary. They do not select a synchronous
@@ -93,10 +93,10 @@ same owned operation later. The semantic phases and outputs are identical.
 
 The Rust names reflect those roles:
 
-- `ResidentStorage` is the synchronous interface Groove evaluates against. It
+- `OrderedKvStorage` is the synchronous interface Groove evaluates against. It
   means “this key range has already been admitted,” not “this is the durable
   backend.”
-- `async_ordered::OrderedKvStorage` is the owned-request durable boundary.
+- `async_ordered::AsyncOrderedKvStorage` is the owned-request durable boundary.
 - `ImmediateStorage<S>` adapts Memory, RocksDB, or another reopenable resident
   implementation to that boundary and completes every operation in its first
   poll.
@@ -128,7 +128,7 @@ write before a persistent worker receives it.
 
 ## Storage contract
 
-The `OrderedKvStorage` surface owns every request and result across suspension:
+The `AsyncOrderedKvStorage` surface owns every request and result across suspension:
 
 - point reads own their column-family name and key;
 - scans return owned key/value chunks and an owned continuation identity;

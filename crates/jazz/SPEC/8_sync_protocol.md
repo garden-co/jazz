@@ -451,7 +451,7 @@ admission deltas have the inputs required to reproduce the same result.
 for non-reset bundles; `receiver_batch_ingests_non_reset_complete_bundles_once`
 and `cold_reset_bulk_ingest_matches_incremental_ingest`
 (`crates/jazz/src/node/tests/sync.rs`) cover the one-batch/one-tick behavior.
-The remaining reset-specific bypass and the move to an `OrderedKvStorage`
+The remaining reset-specific bypass and the move to an `AsyncOrderedKvStorage`
 transaction are implementation work, not protocol invariants.
 
 **Structured-output delivery (v6 and reconstruction cut).** Before the
@@ -795,7 +795,7 @@ network sync. Transport-local batching, compression, and resume metadata must
 not leak into row/version encoding.
 
 **Implementation status (2026-07-27).** The receiver still uses the core
-staged-batch seam rather than an `OrderedKvStorage` transaction. The wire
+staged-batch seam rather than an `AsyncOrderedKvStorage` transaction. The wire
 envelope has no portable resume credentials or trace/replay ids, and the
 canonical cross-language fixture set is incomplete. The ordinary committed-unit
 path also remains primarily client-to-core; the client-to-edge-to-core topology

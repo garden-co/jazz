@@ -9,7 +9,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll};
 
-use super::{Error, KeyValue, OwnedWriteOperation, ReopenableStorage, ResidentStorage};
+use super::{Error, KeyValue, OrderedKvStorage, OwnedWriteOperation, ReopenableStorage};
 
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -119,7 +119,7 @@ pub enum OwnedStorageResponse {
 /// and return the same terminal result exactly once. Requests may be
 /// thread-affine; neither the backend nor its wake path is required to be
 /// `Send`.
-pub trait OrderedKvStorage {
+pub trait AsyncOrderedKvStorage {
     /// Whether every operation is guaranteed to complete on its first poll.
     ///
     /// This capability lets higher layers preserve synchronous local
@@ -174,16 +174,18 @@ impl<S> ImmediateStorage<S> {
     }
 }
 
-impl<S> OrderedKvStorage for ImmediateStorage<S>
+impl<S> AsyncOrderedKvStorage for ImmediateStorage<S>
 where
-    S: ResidentStorage + ReopenableStorage,
+    S: OrderedKvStorage + ReopenableStorage,
 {
     fn completes_synchronously(&self) -> bool {
         true
     }
 
     fn is_durable(&self) -> bool {
-        self.inner.as_ref().is_some_and(ResidentStorage::is_durable)
+        self.inner
+            .as_ref()
+            .is_some_and(OrderedKvStorage::is_durable)
     }
 
     fn poll_request(
@@ -215,15 +217,15 @@ where
         Poll::Ready(match request.operation() {
             OwnedStorageOperation::EnsureColumnFamilies(_) => unreachable!("handled above"),
             OwnedStorageOperation::Get { column_family, key } => {
-                ResidentStorage::get(inner, column_family, key).map(OwnedStorageResponse::Value)
+                OrderedKvStorage::get(inner, column_family, key).map(OwnedStorageResponse::Value)
             }
             OwnedStorageOperation::Scan(request) => {
                 let mut rows = match &request.bounds {
                     OwnedScanBounds::Prefix(prefix) => {
-                        ResidentStorage::prefix(inner, &request.column_family, prefix)?
+                        OrderedKvStorage::prefix(inner, &request.column_family, prefix)?
                     }
                     OwnedScanBounds::Range { start, end } => {
-                        ResidentStorage::range(inner, &request.column_family, start, end)?
+                        OrderedKvStorage::range(inner, &request.column_family, start, end)?
                     }
                 };
                 if request.direction == ScanDirection::Reverse {
@@ -236,14 +238,13 @@ where
                     .iter()
                     .map(OwnedWriteOperation::as_write_operation)
                     .collect::<Vec<_>>();
-                ResidentStorage::write_many(inner, &operations)
+                OrderedKvStorage::write_many(inner, &operations)
                     .map(|()| OwnedStorageResponse::Committed)
             }
-            OwnedStorageOperation::Flush => {
-                ResidentStorage::flush_write_boundary(inner).map(|()| OwnedStorageResponse::Flushed)
-            }
+            OwnedStorageOperation::Flush => OrderedKvStorage::flush_write_boundary(inner)
+                .map(|()| OwnedStorageResponse::Flushed),
             OwnedStorageOperation::Close => {
-                ResidentStorage::close(inner).map(|()| OwnedStorageResponse::Closed)
+                OrderedKvStorage::close(inner).map(|()| OwnedStorageResponse::Closed)
             }
         })
     }

@@ -1,6 +1,6 @@
 impl<S> NodeState<S>
 where
-    S: ResidentStorage,
+    S: OrderedKvStorage,
 {
     pub(crate) fn table(&self, table: &str) -> Result<&TableSchema, Error> {
         self.catalogue

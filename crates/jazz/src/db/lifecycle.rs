@@ -71,7 +71,7 @@ impl DemandDrivenDbOpen {
     pub fn new(
         schema: JazzSchema,
         identity: DbIdentity,
-        persistence: Box<dyn groove::storage::async_ordered::OrderedKvStorage>,
+        persistence: Box<dyn groove::storage::async_ordered::AsyncOrderedKvStorage>,
     ) -> Self {
         Self {
             opening: Some(DemandDrivenNodeOpen::new(
@@ -90,7 +90,7 @@ impl DemandDrivenDbOpen {
     pub fn new_history_complete(
         schema: JazzSchema,
         identity: DbIdentity,
-        persistence: Box<dyn groove::storage::async_ordered::OrderedKvStorage>,
+        persistence: Box<dyn groove::storage::async_ordered::AsyncOrderedKvStorage>,
     ) -> Self {
         Self {
             opening: Some(DemandDrivenNodeOpen::new_history_complete(
@@ -108,7 +108,7 @@ impl DemandDrivenDbOpen {
     #[doc(hidden)]
     pub fn new_catalogue_uninitialized(
         identity: DbIdentity,
-        persistence: Box<dyn groove::storage::async_ordered::OrderedKvStorage>,
+        persistence: Box<dyn groove::storage::async_ordered::AsyncOrderedKvStorage>,
     ) -> Self {
         Self {
             opening: Some(DemandDrivenNodeOpen::new_catalogue_uninitialized(
@@ -198,7 +198,7 @@ impl DemandDrivenDb {
     /// ordered asynchronous contract immediately.
     pub async fn open_immediate<S>(config: DbConfig<S>) -> Result<Self, Error>
     where
-        S: ResidentStorage + ReopenableStorage + 'static,
+        S: OrderedKvStorage + ReopenableStorage + 'static,
     {
         let DbConfig {
             schema,
@@ -221,7 +221,7 @@ impl DemandDrivenDb {
     /// ordered backend.
     pub async fn open_history_complete_immediate<S>(config: DbConfig<S>) -> Result<Self, Error>
     where
-        S: ResidentStorage + ReopenableStorage + 'static,
+        S: OrderedKvStorage + ReopenableStorage + 'static,
     {
         let DbConfig {
             schema,
@@ -247,7 +247,7 @@ impl DemandDrivenDb {
         config: DbConfig<S>,
     ) -> Result<Self, Error>
     where
-        S: ResidentStorage + ReopenableStorage + 'static,
+        S: OrderedKvStorage + ReopenableStorage + 'static,
     {
         let DbConfig {
             storage,
@@ -2699,7 +2699,7 @@ impl DemandDrivenViewDb<'_> {
 
 impl<S> Db<S>
 where
-    S: ResidentStorage + ReopenableStorage + 'static,
+    S: OrderedKvStorage + ReopenableStorage + 'static,
 {
     /// Open a database over the supplied storage and recover local state.
     ///

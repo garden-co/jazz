@@ -2,7 +2,7 @@ use super::*;
 
 impl<S> Database<S>
 where
-    S: ResidentStorage,
+    S: OrderedKvStorage,
 {
     /// Run one IVM tick without base-table writes.
     ///

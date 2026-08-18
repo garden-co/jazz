@@ -22,7 +22,7 @@ pub(super) enum SubscriberRelayKind {
 /// (relay/edge/core) stays below this facade in [`crate::peer`].
 pub struct PeerConnection<S>
 where
-    S: ResidentStorage,
+    S: OrderedKvStorage,
 {
     pub(super) transport: Box<dyn Transport>,
     pub(super) staged_inbound: VecDeque<StagedInboundMessage>,
@@ -221,7 +221,7 @@ pub struct ResumeCursor {
 
 impl<S> PeerConnection<S>
 where
-    S: ResidentStorage + ReopenableStorage + 'static,
+    S: OrderedKvStorage + ReopenableStorage + 'static,
 {
     pub(super) fn enable_external_durable_ingress(&mut self) {
         self.external_durable_ingress = true;
@@ -847,7 +847,7 @@ where
         versions: &[crate::protocol::VersionRecord],
     ) -> Result<(), crate::node::Error>
     where
-        S2: ResidentStorage,
+        S2: OrderedKvStorage,
     {
         if self.prepared_subscriber_authority_tx == Some(tx_id) {
             return Ok(());
@@ -3852,7 +3852,7 @@ where
 
 impl<S> PeerConnection<S>
 where
-    S: ResidentStorage,
+    S: OrderedKvStorage,
 {
     pub(super) fn mark_subscriber_dirty(&mut self) -> bool {
         if let ConnectionLink::Subscriber { serve_dirty, .. } = &mut self.link {
@@ -4013,7 +4013,7 @@ fn apply_pending_authority_view_updates<S>(
     connection_epoch: u64,
 ) -> Result<(), Error>
 where
-    S: ResidentStorage + ReopenableStorage + 'static,
+    S: OrderedKvStorage + ReopenableStorage + 'static,
 {
     let confirmed_subscriptions = pending
         .iter()
@@ -4107,7 +4107,7 @@ fn evaluate_authoritative_permission_advice<S>(
     action: PermissionAdviceAction,
 ) -> PermissionAdvice
 where
-    S: ResidentStorage,
+    S: OrderedKvStorage,
 {
     let result = match action {
         PermissionAdviceAction::Insert { table, cells } => {
@@ -4178,7 +4178,7 @@ fn serve_authorization_scope_intent<S>(
     hydration_count: &mut u64,
 ) -> Result<(), Error>
 where
-    S: ResidentStorage,
+    S: OrderedKvStorage,
 {
     if !node.borrow().is_history_complete()
         || !subscriber_permissions_ready(node.borrow().permissions_ready(), trust)
@@ -4409,7 +4409,7 @@ fn authorization_scope_receipt_for_view<S>(
     update: &SyncMessage,
 ) -> Option<(SubscriptionKey, AuthorizationScopeReceipt)>
 where
-    S: ResidentStorage,
+    S: OrderedKvStorage,
 {
     let SyncMessage::ViewUpdate {
         subscription,
@@ -4447,7 +4447,7 @@ fn aggregate_authorization_scope_receipt_for_view<S>(
     update: &SyncMessage,
 ) -> Option<(SubscriptionKey, AuthorizationScopeReceipt)>
 where
-    S: ResidentStorage,
+    S: OrderedKvStorage,
 {
     let (subscription, mut receipt) = authorization_scope_receipt_for_view(
         node,
@@ -4577,7 +4577,7 @@ fn refresh_authorized_scope_purpose<S>(
     prior: &AuthorizedScopePurpose,
 ) -> Option<AuthorizedScopePurpose>
 where
-    S: ResidentStorage,
+    S: OrderedKvStorage,
 {
     let expected = node
         .authorization_support_scope(link_identity, &prior.action)
@@ -4656,7 +4656,7 @@ fn operand_is_id(operand: &Operand) -> bool {
 
 fn drop_peer_request<S>(node: &Rc<RefCell<NodeState<S>>>)
 where
-    S: ResidentStorage,
+    S: OrderedKvStorage,
 {
     node.borrow_mut().record_dropped_peer_request();
 }
@@ -4667,7 +4667,7 @@ fn handle_transport_backpressure<S>(
     error: &TransportError,
 ) -> bool
 where
-    S: ResidentStorage,
+    S: OrderedKvStorage,
 {
     match error {
         TransportError::Backpressure => {
@@ -4685,7 +4685,7 @@ fn handle_db_backpressure<S>(
     error: &Error,
 ) -> bool
 where
-    S: ResidentStorage,
+    S: OrderedKvStorage,
 {
     if error.code == ErrorCode::Backpressure {
         node.borrow_mut().record_transport_backpressure_retry();
@@ -4793,7 +4793,7 @@ fn send_with_sync_context<S>(
     message: SyncMessage,
 ) -> Result<(), Error>
 where
-    S: ResidentStorage + ReopenableStorage + 'static,
+    S: OrderedKvStorage + ReopenableStorage + 'static,
 {
     send_catalogue_snapshot_if_needed(node, peer, transport)?;
     let mut message = message;
@@ -4823,7 +4823,7 @@ fn send_catalogue_snapshot_if_needed<S>(
     transport: &mut dyn Transport,
 ) -> Result<(), Error>
 where
-    S: ResidentStorage + ReopenableStorage + 'static,
+    S: OrderedKvStorage + ReopenableStorage + 'static,
 {
     let snapshot = node.borrow().catalogue_snapshot()?;
     let catalogue_fingerprint = *blake3::hash(
@@ -4852,7 +4852,7 @@ fn send_with_local_sync_context<S>(
     message: SyncMessage,
 ) -> Result<(), Error>
 where
-    S: ResidentStorage + ReopenableStorage + 'static,
+    S: OrderedKvStorage + ReopenableStorage + 'static,
 {
     let _ = node;
     #[cfg(feature = "sync-autopsy")]
@@ -4912,7 +4912,7 @@ fn handle_write_state_update<S>(
     scheduler: &SharedTickScheduler,
     tx_id: TxId,
 ) where
-    S: ResidentStorage + ReopenableStorage + 'static,
+    S: OrderedKvStorage + ReopenableStorage + 'static,
 {
     let handled_by_waiter = notify_write_state_waiters(waiters, tx_id);
     let rejected = node.borrow().rejected_transaction(tx_id);

@@ -207,7 +207,7 @@ fn graph_runtime_view<'a, S>(
 
 impl<'a, S> GraphRuntimeView<'a, S>
 where
-    S: ResidentStorage,
+    S: OrderedKvStorage,
 {
     pub(super) fn eval_with_binding(
         &mut self,
@@ -330,7 +330,7 @@ where
 
 impl<S> TickEvaluator<'_, S>
 where
-    S: ResidentStorage,
+    S: OrderedKvStorage,
 {
     pub(super) fn apply_root_ordering(
         &self,

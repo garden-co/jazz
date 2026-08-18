@@ -35,18 +35,18 @@ marked in-flight operational material; open questions hold unresolved decisions.
 
 **Chapter map**
 
-| #   | chapter                                              | one line                                                             |
-| --- | ---------------------------------------------------- | -------------------------------------------------------------------- |
-| 1   | Introduction                                         | this file: what groove is, conventions                               |
-| 2   | Data & storage model                                 | weighted record sets, records, keys, the `ResidentStorage` interface |
-| 3   | Queries & operators                                  | the query graph, filter/join/project/aggregate                       |
-| 4   | Incremental maintenance                              | the tick: deltas → arrangements → outputs                            |
-| 5   | Prepared shapes & bindings-as-data                   | the work-sharing core                                                |
-| 6   | Recursion & fixpoint                                 | a fixpoint inside every commit                                       |
-| 7   | Correctness, determinism & scope                     | the oracle property, deliberate limits                               |
-| A   | _guidance:_ implementation map                       | where to read the code                                               |
-| B   | _guidance:_ benchmarks, performance & meta-learnings | the suite, its predictions, levers, findings                         |
-| —   | _registry:_ `INVARIANTS.md`                          | out-of-band: every `INV-` id → test + impl                           |
+| #   | chapter                                              | one line                                                              |
+| --- | ---------------------------------------------------- | --------------------------------------------------------------------- |
+| 1   | Introduction                                         | this file: what groove is, conventions                                |
+| 2   | Data & storage model                                 | weighted record sets, records, keys, the `OrderedKvStorage` interface |
+| 3   | Queries & operators                                  | the query graph, filter/join/project/aggregate                        |
+| 4   | Incremental maintenance                              | the tick: deltas → arrangements → outputs                             |
+| 5   | Prepared shapes & bindings-as-data                   | the work-sharing core                                                 |
+| 6   | Recursion & fixpoint                                 | a fixpoint inside every commit                                        |
+| 7   | Correctness, determinism & scope                     | the oracle property, deliberate limits                                |
+| A   | _guidance:_ implementation map                       | where to read the code                                                |
+| B   | _guidance:_ benchmarks, performance & meta-learnings | the suite, its predictions, levers, findings                          |
+| —   | _registry:_ `INVARIANTS.md`                          | out-of-band: every `INV-` id → test + impl                            |
 
 ### 1.2 Conventions
 
@@ -95,7 +95,7 @@ throughout the specification are:
   flowing through a maintained `BindingSource` weighted record set (ch. 5).
 - **tick** — one synchronous propagation of a delta batch through the graph to
   every affected subscription (ch. 4).
-- **`ResidentStorage`** — the ordered key/value interface groove is implemented
+- **`OrderedKvStorage`** — the ordered key/value interface groove is implemented
   over (RocksDB in production; an in-memory store in tests) (ch. 2).
 
 ## Open Questions

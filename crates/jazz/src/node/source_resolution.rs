@@ -8,7 +8,7 @@ use super::*;
 
 impl<S> NodeState<S>
 where
-    S: ResidentStorage,
+    S: OrderedKvStorage,
 {
     pub(super) fn current_rows_for_schema(
         &mut self,

@@ -403,7 +403,7 @@ fn version_identity_fields(schema: &VersionIdentityFields) -> Vec<String> {
 
 impl<S> NodeState<S>
 where
-    S: ResidentStorage,
+    S: OrderedKvStorage,
 {
     pub(super) fn compile_query_program_request(
         &mut self,

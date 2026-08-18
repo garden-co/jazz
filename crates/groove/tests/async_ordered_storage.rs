@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll, Wake, Waker};
 
 use groove::storage::async_ordered::{
-    ImmediateStorage, OrderedKvStorage, OwnedScanRequest, OwnedStorageOperation,
+    AsyncOrderedKvStorage, ImmediateStorage, OwnedScanRequest, OwnedStorageOperation,
     OwnedStorageRequest, OwnedStorageResponse, ScanDirection, StorageRequestId,
 };
 use groove::storage::{Error, MemoryStorage, OwnedWriteOperation};
@@ -24,7 +24,7 @@ impl Wake for NoopWake {
 }
 
 fn poll_request(
-    storage: &mut dyn OrderedKvStorage,
+    storage: &mut dyn AsyncOrderedKvStorage,
     request: &OwnedStorageRequest,
 ) -> Poll<Result<OwnedStorageResponse, Error>> {
     let waker = Waker::from(Arc::new(NoopWake));
@@ -63,7 +63,7 @@ impl ControlledStorage {
     }
 }
 
-impl OrderedKvStorage for ControlledStorage {
+impl AsyncOrderedKvStorage for ControlledStorage {
     fn poll_request(
         &mut self,
         request: &OwnedStorageRequest,

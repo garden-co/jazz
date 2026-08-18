@@ -352,7 +352,7 @@ fn counter_value_from_i128(
     }
 }
 
-fn branch_metadata_available<S: ResidentStorage>(node: &NodeState<S>, tx: &Transaction) -> bool {
+fn branch_metadata_available<S: OrderedKvStorage>(node: &NodeState<S>, tx: &Transaction) -> bool {
     match tx.target_lineage {
         crate::tx::BranchLineage::Root => true,
         crate::tx::BranchLineage::Branch(branch) => node.branches.branches.contains_key(&branch),

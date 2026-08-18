@@ -33,7 +33,7 @@ impl FailWriteManyMemoryStorage {
     }
 }
 
-impl ResidentStorage for FailWriteManyMemoryStorage {
+impl OrderedKvStorage for FailWriteManyMemoryStorage {
     fn get(
         &self,
         cf: &ColumnFamilyName,
@@ -140,7 +140,7 @@ struct GatedAuthorityStorage {
     fail_commits: std::rc::Rc<std::cell::Cell<bool>>,
 }
 
-impl groove::storage::async_ordered::OrderedKvStorage for GatedAuthorityStorage {
+impl groove::storage::async_ordered::AsyncOrderedKvStorage for GatedAuthorityStorage {
     fn is_durable(&self) -> bool {
         true
     }
@@ -166,7 +166,7 @@ impl groove::storage::async_ordered::OrderedKvStorage for GatedAuthorityStorage 
             }
             self.committed_units.borrow_mut().push(operations.len());
         }
-        groove::storage::async_ordered::OrderedKvStorage::poll_request(
+        groove::storage::async_ordered::AsyncOrderedKvStorage::poll_request(
             &mut self.inner,
             request,
             context,
@@ -318,7 +318,7 @@ impl crate::db::Transport for QueuedInboundTransport {
     }
 }
 
-impl groove::storage::async_ordered::OrderedKvStorage for CommitGatedAuthorityStorage {
+impl groove::storage::async_ordered::AsyncOrderedKvStorage for CommitGatedAuthorityStorage {
     fn is_durable(&self) -> bool {
         true
     }
@@ -344,7 +344,7 @@ impl groove::storage::async_ordered::OrderedKvStorage for CommitGatedAuthoritySt
                 }));
             }
         }
-        let result = groove::storage::async_ordered::OrderedKvStorage::poll_request(
+        let result = groove::storage::async_ordered::AsyncOrderedKvStorage::poll_request(
             &mut self.inner,
             request,
             context,

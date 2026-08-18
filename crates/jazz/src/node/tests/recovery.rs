@@ -449,7 +449,7 @@ fn recovery_rebuilds_only_pending_parent_edges_and_prunes_on_acceptance() {
 
 fn mark_accepted_without_ahead_cleanup<S>(node: &mut NodeState<S>, tx_id: TxId, global_seq: GlobalSeq)
 where
-    S: ResidentStorage,
+    S: OrderedKvStorage,
 {
     let mut stored = node.query_transaction(tx_id).unwrap().unwrap();
     stored.fate = Fate::Accepted;
@@ -723,7 +723,7 @@ impl FailReplayScanStorage {
     }
 }
 
-impl ResidentStorage for FailReplayScanStorage {
+impl OrderedKvStorage for FailReplayScanStorage {
     fn get(
         &self,
         cf: &ColumnFamilyName,
