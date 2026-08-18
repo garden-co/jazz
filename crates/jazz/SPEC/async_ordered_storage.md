@@ -15,6 +15,9 @@ The experiment now uses the same demand-driven owner from Groove through Jazz:
 - `DemandDrivenDatabase`, `DemandDrivenNode`, and `DemandDrivenDb` own the
   resident runtime and ordered persistence scheduler without a legacy parallel
   runtime;
+- independently resumable work owns distinct acquisition state: public
+  operations, Local-durability promotion, and node opening cannot consume one
+  another's pending storage request;
 - NAPI and WASM bindings hold one `DemandDrivenDb` owner plus inert typed-view
   tokens; neither binding retains a parallel `Db<MemoryStorage>` or
   `Db<OpfsStorage>` execution path;

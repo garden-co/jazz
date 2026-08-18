@@ -46,6 +46,11 @@ pub struct DemandDrivenNode {
     cache: groove::storage::DemandLoadedStorage,
     persistence: Box<dyn groove::storage::async_ordered::OrderedKvStorage>,
     acquisition: groove::db::StorageAcquisition,
+    /// Cold inputs needed while publishing Local durability belong to the
+    /// persistence scheduler, not to whichever public operation is polled
+    /// next. Keeping a distinct driver preserves the suspended operation's
+    /// identity across owner polls.
+    promotion_acquisition: groove::db::StorageAcquisition,
     pending_persistence:
         std::collections::VecDeque<groove::storage::async_ordered::OwnedStorageRequest>,
     pending_local_durability: std::collections::BTreeMap<
@@ -1700,9 +1705,10 @@ impl DemandDrivenNode {
             };
             // This acquisition belongs to the durability unit whose commit
             // has just completed. It precedes (rather than fences behind) any
-            // later queued publication, so it intentionally uses the raw
-            // acquisition driver inside the persistence scheduler.
-            let prepared = match self.acquisition.poll(
+            // later queued publication, and therefore has its own driver
+            // inside the persistence scheduler. It must never share pending
+            // request state with a public operation's acquisition.
+            let prepared = match self.promotion_acquisition.poll(
                 self.persistence.as_mut(),
                 &self.cache,
                 context,
@@ -1861,6 +1867,9 @@ fn storage_response_matches(
 impl Drop for DemandDrivenNode {
     fn drop(&mut self) {
         let _ = self.acquisition.cancel(self.persistence.as_mut());
+        let _ = self
+            .promotion_acquisition
+            .cancel(self.persistence.as_mut());
         for request in self.pending_persistence.drain(..) {
             let _ = self.persistence.cancel_request(request.id());
         }
@@ -1887,6 +1896,7 @@ impl DemandDrivenNodeOpen {
                 .take()
                 .expect("ready node takes its persistence session"),
             acquisition: groove::db::StorageAcquisition::default(),
+            promotion_acquisition: groove::db::StorageAcquisition::default(),
             pending_persistence: std::collections::VecDeque::new(),
             pending_local_durability: std::collections::BTreeMap::new(),
             pending_local_promotions: std::collections::VecDeque::new(),
