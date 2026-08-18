@@ -84,6 +84,7 @@ describe("native write path", () => {
   it("keeps fixed-size server-backed transaction cost flat as the store grows", async () => {
     const appId = `writepath-server-repro-${Date.now()}`;
     const dir = mkdtempSync(join(tmpdir(), "jazz-writepath-server-repro-"));
+    const clientDir = mkdtempSync(join(tmpdir(), "jazz-writepath-client-repro-"));
     const server = await startLocalJazzServer({
       appId,
       dataDir: dir,
@@ -94,7 +95,9 @@ describe("native write path", () => {
       appId,
       app: importApp,
       permissions: {},
-      driver: { type: "memory" },
+      // The connected client still needs its own durable Local boundary.
+      // Volatile memory is immediate, but never claims Local durability.
+      driver: { type: "persistent", dataPath: clientDir },
       serverUrl: server.url,
       adminSecret: server.adminSecret,
       backendSecret: server.backendSecret,
@@ -141,6 +144,7 @@ describe("native write path", () => {
       await context.shutdown();
       await server.stop();
       rmSync(dir, { recursive: true, force: true });
+      rmSync(clientDir, { recursive: true, force: true });
     }
     const early = timings.slice(1, 6).reduce((sum, value) => sum + value, 0) / 5;
     const late = timings.slice(-5).reduce((sum, value) => sum + value, 0) / 5;

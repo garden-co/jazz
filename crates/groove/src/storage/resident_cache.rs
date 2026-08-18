@@ -24,10 +24,53 @@ pub struct DemandLoadedStorage {
 
 #[derive(Clone, Default)]
 struct DemandState {
-    admitted: Vec<OwnedStorageOperation>,
+    admissions: ResidentAdmissions,
     dirty_keys: BTreeSet<(String, Vec<u8>)>,
     pending_writes: Vec<OwnedWriteOperation>,
     pending_column_families: BTreeSet<String>,
+}
+
+/// Exact point admissions are indexed independently from range admissions.
+///
+/// Written keys become resident immediately and can grow without bound during
+/// a process lifetime. Keeping them in the same linear list as semantic range
+/// coverage made every later write search the entire write history. Range
+/// admissions are normally few and need coverage comparisons, while point
+/// admissions need only exact logarithmic lookup.
+#[derive(Clone, Default)]
+struct ResidentAdmissions {
+    points: BTreeSet<(String, Vec<u8>)>,
+    scans: Vec<OwnedScanRequest>,
+}
+
+impl ResidentAdmissions {
+    fn insert(&mut self, operation: OwnedStorageOperation) {
+        match operation {
+            OwnedStorageOperation::Get { column_family, key } => {
+                self.points.insert((column_family, key));
+            }
+            OwnedStorageOperation::Scan(scan) => {
+                if !self.scans.contains(&scan) {
+                    self.scans.push(scan);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn covers(&self, requested: &OwnedStorageOperation) -> bool {
+        match requested {
+            OwnedStorageOperation::Get { column_family, key }
+                if self.points.contains(&(column_family.clone(), key.clone())) =>
+            {
+                true
+            }
+            _ => self
+                .scans
+                .iter()
+                .any(|admitted| covers(&OwnedStorageOperation::Scan(admitted.clone()), requested)),
+        }
+    }
 }
 
 impl DemandLoadedStorage {
@@ -67,7 +110,7 @@ impl DemandLoadedStorage {
         }
         let state = self.state.borrow();
         *fork.state.borrow_mut() = DemandState {
-            admitted: state.admitted.clone(),
+            admissions: state.admissions.clone(),
             dirty_keys: state.dirty_keys.clone(),
             pending_writes: Vec::new(),
             pending_column_families: state.pending_column_families.clone(),
@@ -128,21 +171,12 @@ impl DemandLoadedStorage {
                 });
             }
         }
-        let mut state = self.state.borrow_mut();
-        if !state.admitted.contains(&request) {
-            state.admitted.push(request);
-        }
+        self.state.borrow_mut().admissions.insert(request);
         Ok(())
     }
 
     fn require(&self, request: OwnedStorageOperation) -> Result<(), Error> {
-        if self
-            .state
-            .borrow()
-            .admitted
-            .iter()
-            .any(|admitted| covers(admitted, &request))
-        {
+        if self.state.borrow().admissions.covers(&request) {
             Ok(())
         } else {
             Err(Error::NotResident {
@@ -154,13 +188,10 @@ impl DemandLoadedStorage {
     fn mark_dirty(&self, cf: &str, key: &[u8]) {
         let mut state = self.state.borrow_mut();
         state.dirty_keys.insert((cf.to_owned(), key.to_vec()));
-        let request = OwnedStorageOperation::Get {
+        state.admissions.insert(OwnedStorageOperation::Get {
             column_family: cf.to_owned(),
             key: key.to_vec(),
-        };
-        if !state.admitted.contains(&request) {
-            state.admitted.push(request);
-        }
+        });
     }
 }
 
@@ -339,5 +370,20 @@ mod tests {
             storage.get("rows", b"item/1").unwrap(),
             Some(b"one".to_vec())
         );
+    }
+
+    #[test]
+    fn written_point_admissions_are_indexed_separately_from_ranges() {
+        let storage = DemandLoadedStorage::new(&["rows"]);
+        for index in 0_u32..10_000 {
+            storage.set("rows", &index.to_be_bytes(), b"value").unwrap();
+        }
+        // Rewriting a resident key must not accumulate another admission, and
+        // writes must never masquerade as loaded range coverage.
+        storage.set("rows", &5_u32.to_be_bytes(), b"new").unwrap();
+
+        let state = storage.state.borrow();
+        assert_eq!(state.admissions.points.len(), 10_000);
+        assert!(state.admissions.scans.is_empty());
     }
 }
