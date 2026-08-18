@@ -480,9 +480,9 @@ pub async fn verify_indexeddb_jazz_visibility(page_store: JsValue) -> Result<JsV
     let mut owner = futures::future::poll_fn(|context| opening.poll(context))
         .await
         .map_err(|error| JsValue::from_str(&error.to_string()))?;
-    let db = owner.database();
-    let prepared = db
-        .prepare_query(&db.table("todos"))
+    let prepared = owner
+        .database()
+        .prepare_query(&owner.database().table("todos"))
         .map_err(|error| JsValue::from_str(&error.to_string()))?;
     let opts = ReadOpts {
         tier: DurabilityTier::None,
@@ -491,7 +491,7 @@ pub async fn verify_indexeddb_jazz_visibility(page_store: JsValue) -> Result<JsV
         include_deleted: false,
         ..ReadOpts::default()
     };
-    let mut subscription = db
+    let mut subscription = owner
         .subscribe(&prepared, opts.clone())
         .await
         .map_err(|error| JsValue::from_str(&error.to_string()))?;
@@ -500,7 +500,8 @@ pub async fn verify_indexeddb_jazz_visibility(page_store: JsValue) -> Result<JsV
         .await
         .ok_or_else(|| JsValue::from_str("Jazz subscription closed during opening"))?;
 
-    let write = db
+    let write = owner
+        .database()
         .insert(
             "todos",
             doctest_support::todo_cells("controlled input", false),
@@ -511,7 +512,7 @@ pub async fn verify_indexeddb_jazz_visibility(page_store: JsValue) -> Result<JsV
             "Jazz immediate subscription delta was not queued inside insert",
         ));
     };
-    let rows = db
+    let rows = owner
         .all(&prepared, opts)
         .await
         .map_err(|error| JsValue::from_str(&error.to_string()))?;

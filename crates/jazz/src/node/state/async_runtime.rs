@@ -363,23 +363,30 @@ impl DemandDrivenNode {
     /// Poll a restartable query or subscription operation. It may suspend only
     /// while acquiring a missing durable input; once ready, evaluation runs on
     /// the same resident node used by local writes.
-    pub(crate) fn poll_resident_operation<T>(
+    pub(crate) fn poll_operation<T, E>(
         &mut self,
         context: &mut std::task::Context<'_>,
-        operation: impl FnMut() -> Result<T, Error>,
-    ) -> std::task::Poll<Result<T, Error>> {
+        operation: impl FnMut() -> Result<T, E>,
+        missing_input: impl Fn(E) -> Result<
+            groove::storage::async_ordered::OwnedStorageOperation,
+            E,
+        >,
+    ) -> std::task::Poll<Result<T, E>>
+    where
+        E: From<Error> + From<groove::storage::Error>,
+    {
         if let Err(error) = self.ensure_persistence_usable() {
-            return std::task::Poll::Ready(Err(error));
+            return std::task::Poll::Ready(Err(error.into()));
         }
         if let Err(error) = self.ensure_authority_publication_idle() {
-            return std::task::Poll::Ready(Err(error));
+            return std::task::Poll::Ready(Err(error.into()));
         }
         let result = self.acquisition.poll(
             self.persistence.as_mut(),
             &self.cache,
             context,
             operation,
-            missing_node_open_input,
+            missing_input,
         );
         match &result {
             std::task::Poll::Ready(Ok(_)) => self.collect_persistence_unit(),
@@ -387,6 +394,14 @@ impl DemandDrivenNode {
             std::task::Poll::Pending => {}
         }
         result
+    }
+
+    pub(crate) fn poll_resident_operation<T>(
+        &mut self,
+        context: &mut std::task::Context<'_>,
+        operation: impl FnMut() -> Result<T, Error>,
+    ) -> std::task::Poll<Result<T, Error>> {
+        self.poll_operation(context, operation, missing_node_open_input)
     }
 
     fn poll_query<T>(
@@ -798,7 +813,7 @@ fn construct_pollable_node(
     }
 }
 
-fn missing_node_open_input(
+pub(crate) fn missing_node_open_input(
     error: Error,
 ) -> Result<groove::storage::async_ordered::OwnedStorageOperation, Error> {
     match error {

@@ -271,21 +271,28 @@ fn demand_driven_db_preserves_synchronous_facade_visibility_before_durability() 
     let std::task::Poll::Ready(Ok(mut owner)) = opening.poll(&mut context) else {
         panic!("commit-only gate must allow database opening")
     };
-    let db = owner.database();
-    let prepared = db.prepare_query(&db.table("todos")).unwrap();
+    let prepared = owner
+        .database()
+        .prepare_query(&owner.database().table("todos"))
+        .unwrap();
     let opts = crate::db::ReadOpts {
         tier: DurabilityTier::None,
         local_updates: crate::db::LocalUpdates::Immediate,
         propagation: crate::db::Propagation::LocalOnly,
         ..crate::db::ReadOpts::default()
     };
-    let mut subscription = crate::db::block_on(db.subscribe(&prepared, opts.clone())).unwrap();
+    let std::task::Poll::Ready(Ok(mut subscription)) =
+        owner.poll_subscribe(&mut context, &prepared, opts.clone())
+    else {
+        panic!("a resident subscription opening must complete in its first poll")
+    };
     assert!(matches!(
         crate::db::block_on(subscription.next_event()),
         Some(crate::db::SubscriptionEvent::Delta { reset: true, .. })
     ));
     released.set(false);
-    let write = db
+    let write = owner
+        .database()
         .insert("todos", title_cells("facade immediate"))
         .unwrap();
     let Some(crate::db::SubscriptionEvent::Delta { added, .. }) = subscription.try_next_event()
@@ -314,6 +321,79 @@ fn demand_driven_db_preserves_synchronous_facade_visibility_before_durability() 
             .unwrap()
             .len(),
         1
+    );
+}
+
+#[test]
+fn demand_driven_db_acquires_cold_subscription_before_registering_it() {
+    let node_schema = schema();
+    let column_families = node_schema.column_families();
+    let refs = column_families.iter().map(String::as_str).collect::<Vec<_>>();
+    let durable = MemoryStorage::new(&refs);
+    let identity = crate::db::DbIdentity {
+        node: node(0xca),
+        author: AuthorId::from_bytes([0xca; 16]),
+    };
+    let seeded = crate::db::block_on(crate::db::Db::open(crate::db::DbConfig {
+        schema: node_schema.clone(),
+        storage: durable.clone(),
+        identity,
+        id_source: Some(Box::new(crate::db::SeededRowIdSource::new(0xca))),
+    }))
+    .unwrap();
+    seeded.insert("todos", title_cells("durable seed")).unwrap();
+    drop(seeded);
+
+    let released = std::rc::Rc::new(std::cell::Cell::new(true));
+    let storage = GatedAuthorityStorage {
+        inner: groove::storage::async_ordered::ImmediateStorage::new(durable),
+        released: std::rc::Rc::clone(&released),
+        cancellations: std::rc::Rc::new(std::cell::Cell::new(0)),
+        committed_units: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
+        fail_commits: std::rc::Rc::new(std::cell::Cell::new(false)),
+    };
+    let mut opening = crate::db::PollableDbOpen::new(node_schema, identity, Box::new(storage));
+    let waker = std::task::Waker::from(std::sync::Arc::new(PersistenceTestWake));
+    let mut context = std::task::Context::from_waker(&waker);
+    let std::task::Poll::Ready(Ok(mut owner)) = opening.poll(&mut context) else {
+        panic!("released metadata reads must open the database")
+    };
+    let prepared = owner
+        .database()
+        .prepare_query(&owner.database().table("todos"))
+        .unwrap();
+    let opts = crate::db::ReadOpts {
+        tier: DurabilityTier::None,
+        local_updates: crate::db::LocalUpdates::Immediate,
+        propagation: crate::db::Propagation::LocalOnly,
+        ..crate::db::ReadOpts::default()
+    };
+    let subscriptions_before = owner.database().runtime_stats_for_test().active_subscriptions;
+    released.set(false);
+    assert!(owner
+        .poll_subscribe(&mut context, &prepared, opts.clone())
+        .is_pending());
+    assert_eq!(
+        owner.database().runtime_stats_for_test().active_subscriptions,
+        subscriptions_before,
+        "a suspended cold opening must not leave a real subscription registered"
+    );
+    released.set(true);
+    let std::task::Poll::Ready(Ok(mut subscription)) =
+        owner.poll_subscribe(&mut context, &prepared, opts)
+    else {
+        panic!("released input must complete the subscription opening")
+    };
+    let Some(crate::db::SubscriptionEvent::Delta {
+        reset: true, added, ..
+    }) = subscription.try_next_event()
+    else {
+        panic!("completed opening must synchronously queue its initial reset")
+    };
+    assert_eq!(added.len(), 1);
+    assert_eq!(
+        owner.database().runtime_stats_for_test().active_subscriptions,
+        subscriptions_before + 1
     );
 }
 

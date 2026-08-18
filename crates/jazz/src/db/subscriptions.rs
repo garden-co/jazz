@@ -2,6 +2,41 @@
 
 use super::*;
 
+pub(super) enum SubscriptionOpenError {
+    Node(crate::node::Error),
+    Api(Error),
+}
+
+impl From<crate::node::Error> for SubscriptionOpenError {
+    fn from(error: crate::node::Error) -> Self {
+        Self::Node(error)
+    }
+}
+
+impl From<groove::storage::Error> for SubscriptionOpenError {
+    fn from(error: groove::storage::Error) -> Self {
+        Self::Node(crate::node::Error::Storage(error))
+    }
+}
+
+impl SubscriptionOpenError {
+    pub(super) fn into_api(self) -> Error {
+        match self {
+            Self::Node(error) => error.into(),
+            Self::Api(error) => error,
+        }
+    }
+
+    pub(super) fn missing_input(
+        self,
+    ) -> Result<groove::storage::async_ordered::OwnedStorageOperation, Self> {
+        match self {
+            Self::Node(error) => crate::node::missing_node_open_input(error).map_err(Self::Node),
+            error => Err(error),
+        }
+    }
+}
+
 impl<S> Db<S>
 where
     S: ResidentStorage + ReopenableStorage + 'static,
@@ -46,13 +81,13 @@ where
         prepared: &PreparedQuery,
         opts: ReadOpts,
     ) -> Result<SubscriptionStream, Error> {
-        self.open_subscription(
+        self.open_subscription_resident(
             prepared,
             opts,
             self.identity.author,
             QueryAuthorizationMode::ClientLocal,
         )
-        .await
+        .map_err(SubscriptionOpenError::into_api)
     }
 
     /// Subscribe to a query evaluated as `author`.
@@ -62,13 +97,13 @@ where
         opts: ReadOpts,
         author: AuthorId,
     ) -> Result<SubscriptionStream, Error> {
-        self.open_subscription(
+        self.open_subscription_resident(
             prepared,
             opts,
             author,
             QueryAuthorizationMode::TrustedServing,
         )
-        .await
+        .map_err(SubscriptionOpenError::into_api)
     }
 
     /// Subscribe to an output-changing relation query.
@@ -389,16 +424,61 @@ where
         self.node.schedule_tick(TickUrgency::Immediate);
     }
 
-    async fn open_subscription(
+    pub(super) fn open_subscription_resident(
         &self,
         prepared: &PreparedQuery,
         opts: ReadOpts,
         author: AuthorId,
         authorization_mode: QueryAuthorizationMode,
-    ) -> Result<SubscriptionStream, Error> {
-        ensure_supported_subscription_read_opts(&opts)?;
-        self.validate_prepared_shape_for_registration(prepared)?;
+    ) -> Result<SubscriptionStream, SubscriptionOpenError> {
+        ensure_supported_subscription_read_opts(&opts).map_err(SubscriptionOpenError::Api)?;
+        self.validate_prepared_shape_for_registration(prepared)
+            .map_err(SubscriptionOpenError::Api)?;
         let read_tier = effective_read_tier(&opts);
+        let remote_propagate_upstream = opts.propagation == Propagation::Full;
+        // A non-durable browser client must still ask its durable worker for a
+        // local-only view. The wire flag stops that request at the worker.
+        let propagates_upstream = remote_propagate_upstream
+            || self.node.upstream_durability_floor.get() == DurabilityTier::Local;
+        // Acquire both the local and possible remote-tier programs before the
+        // first real Groove subscription is retained. This keeps every later
+        // façade-side registration in the non-suspending publish phase.
+        if propagates_upstream {
+            let upstream_opts = self.node.upstream_register_shape_options(
+                read_tier,
+                opts.read_view.clone(),
+                remote_propagate_upstream,
+            );
+            let (shape, binding) = if upstream_opts.tier == read_tier {
+                (prepared.shape.clone(), prepared.binding.clone())
+            } else {
+                let (shape, binding, _) = self
+                    .node
+                    .node
+                    .borrow_mut()
+                    .prepare_query_binding_for_link_in_authorization_mode(
+                        &prepared.shape,
+                        &prepared.binding,
+                        upstream_opts.tier,
+                        author,
+                        authorization_mode,
+                    )
+                    .map_err(SubscriptionOpenError::Node)?;
+                (shape, binding)
+            };
+            self.node
+                .node
+                .borrow_mut()
+                .ensure_peer_maintained_subscription_view_supported(
+                    &shape,
+                    &binding,
+                    upstream_opts.tier,
+                    author,
+                    &opts.read_view,
+                    authorization_mode,
+                )
+                .map_err(SubscriptionOpenError::Node)?;
+        }
         self.node
             .node
             .borrow_mut()
@@ -409,7 +489,8 @@ where
                 author,
                 &opts.read_view,
                 authorization_mode,
-            )?;
+            )
+            .map_err(SubscriptionOpenError::Node)?;
         let (local_shape, local_binding, _local_plan) = self
             .node
             .node
@@ -420,7 +501,8 @@ where
                 read_tier,
                 author,
                 authorization_mode,
-            )?;
+            )
+            .map_err(SubscriptionOpenError::Node)?;
         let (subscription, snapshot) = self
             .node
             .node
@@ -433,7 +515,8 @@ where
                 &opts.read_view,
                 Some(_local_plan),
                 authorization_mode,
-            )?;
+            )
+            .map_err(SubscriptionOpenError::Node)?;
         let root_occurrence_ids = subscription.root_occurrence_ids().to_vec();
         let local_subscription_id = subscription.subscription_id();
         let local_node = Rc::clone(&self.node.node);
@@ -464,11 +547,6 @@ where
         let mut requires_authority_receipt = false;
         let mut upstream_subscription_handles = Vec::new();
         let mut suppress_provisional_opening = false;
-        let remote_propagate_upstream = opts.propagation == Propagation::Full;
-        // A non-durable browser client must still ask its durable worker for a
-        // local-only view. The wire flag stops that request at the worker.
-        let propagates_upstream = remote_propagate_upstream
-            || self.node.upstream_durability_floor.get() == DurabilityTier::Local;
         if propagates_upstream {
             let upstream_opts = self.node.upstream_register_shape_options(
                 effective_read_tier(&opts),
@@ -488,7 +566,8 @@ where
                         upstream_opts.tier,
                         author,
                         authorization_mode,
-                    )?;
+                    )
+                    .map_err(SubscriptionOpenError::Node)?;
                 (shape, binding)
             };
             state_shape = shape.clone();
@@ -498,13 +577,15 @@ where
             // even when this subscription opens before an upstream exists.
             // The eventual connection must send its own ViewUpdate.
             requires_authority_receipt = upstream_opts.tier >= DurabilityTier::Edge;
-            let opened = self.open_subscription_upstream_coverage(
-                &shape,
-                &binding,
-                upstream_opts,
-                author,
-                authorization_mode,
-            )?;
+            let opened = self
+                .open_subscription_upstream_coverage(
+                    &shape,
+                    &binding,
+                    upstream_opts,
+                    author,
+                    authorization_mode,
+                )
+                .map_err(SubscriptionOpenError::Api)?;
             upstream_subscription_handles = opened.handles;
             suppress_provisional_opening = authorization_mode
                 == QueryAuthorizationMode::ClientLocal
@@ -562,7 +643,8 @@ where
             && snapshot.edges.is_empty();
         let (sender, receiver) = unbounded();
         let initial_outputs =
-            subscription_outputs_with_occurrence_sidecar(&snapshot, &root_occurrence_ids)?;
+            subscription_outputs_with_occurrence_sidecar(&snapshot, &root_occurrence_ids)
+                .map_err(SubscriptionOpenError::Api)?;
         let state_snapshot = relation_snapshot_with_delta_slack(&snapshot);
         let mut snapshot_index = RelationSnapshotIndex::from_snapshot(&state_snapshot);
         snapshot_index.roots = root_occurrence_ids
@@ -608,7 +690,12 @@ where
                 settled,
                 tier: read_tier,
             })
-            .map_err(|_| Error::new(ErrorCode::Protocol, "subscription receiver closed"))?;
+            .map_err(|_| {
+                SubscriptionOpenError::Api(Error::new(
+                    ErrorCode::Protocol,
+                    "subscription receiver closed",
+                ))
+            })?;
         self.node
             .subscriptions
             .borrow_mut()
@@ -659,8 +746,8 @@ where
         ensure_supported_subscription_read_opts(&opts)?;
         let query = relation_query_to_query(query)?;
         let prepared = self.prepare_query(&query)?;
-        self.open_subscription(&prepared, opts, author, authorization_mode)
-            .await
+        self.open_subscription_resident(&prepared, opts, author, authorization_mode)
+            .map_err(SubscriptionOpenError::into_api)
     }
 
     fn open_subscription_upstream_coverage(

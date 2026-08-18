@@ -255,6 +255,16 @@ queued units in the same poll; pending backends retain the oldest request and
 never let a later unit overtake it. A failed unit poisons the owner and releases
 no later durable work until clean reopen.
 
+The high-level `Db` façade and this owner share the same resident `NodeState`.
+Owner-level reads and subscription openings rerun their ordinary synchronous
+resident operation after admitting an exact missing input; they do not evaluate
+against a second database. A warm read or opening is therefore first-poll ready.
+A cold subscription attempt uses Groove's transactional graph lifecycle: a
+missing input removes the attempted subscription retainers and staged graph
+nodes before suspension, and Jazz publishes its stream/coverage state only
+after the resident opening succeeds. The resumed opening installs exactly one
+real subscription and queues its initial reset before returning `Ready`.
+
 ### Local operation phases
 
 A local mutation is one operation with two explicit phases, not a synchronous

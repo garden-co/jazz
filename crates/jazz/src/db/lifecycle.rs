@@ -1,5 +1,6 @@
 //! Database construction, schema views, write-state waiting, and connection controls.
 
+use super::subscriptions::SubscriptionOpenError;
 use super::*;
 use crate::node::{DemandDrivenNode, PollableNodeOpen};
 
@@ -161,6 +162,45 @@ impl DemandDrivenDb {
         opts: ReadOpts,
     ) -> Result<Vec<CurrentRow>, Error> {
         std::future::poll_fn(|context| self.poll_all(context, prepared, opts.clone())).await
+    }
+
+    /// Poll a high-level subscription opening through query-driven durable
+    /// loading. A suspended attempt cannot leave a registered Groove
+    /// subscription or public Jazz subscription state behind.
+    #[doc(hidden)]
+    pub fn poll_subscribe(
+        &mut self,
+        context: &mut Context<'_>,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+    ) -> Poll<Result<SubscriptionStream, Error>> {
+        let database = &self.database;
+        let author = database.identity.author;
+        match self.runtime.poll_operation(
+            context,
+            || {
+                database.open_subscription_resident(
+                    prepared,
+                    opts.clone(),
+                    author,
+                    QueryAuthorizationMode::ClientLocal,
+                )
+            },
+            SubscriptionOpenError::missing_input,
+        ) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(result) => Poll::Ready(result.map_err(SubscriptionOpenError::into_api)),
+        }
+    }
+
+    /// Open a high-level subscription, suspending only for cold durable input.
+    #[doc(hidden)]
+    pub async fn subscribe(
+        &mut self,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+    ) -> Result<SubscriptionStream, Error> {
+        std::future::poll_fn(|context| self.poll_subscribe(context, prepared, opts.clone())).await
     }
 }
 
