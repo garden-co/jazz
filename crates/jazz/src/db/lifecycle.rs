@@ -34,6 +34,16 @@ pub struct DemandDrivenView {
     schema: JazzSchema,
 }
 
+/// A short-lived typed view borrowed from the unique async database owner.
+///
+/// It owns no storage or runtime. Dropping it merely releases the mutable
+/// borrow so another schema view can operate on the same resident node.
+#[doc(hidden)]
+pub struct DemandDrivenViewDb<'a> {
+    database: Db<groove::storage::DemandLoadedStorage>,
+    runtime: &'a mut DemandDrivenNode,
+}
+
 impl PollableDbOpen {
     #[doc(hidden)]
     pub fn new(
@@ -266,6 +276,19 @@ impl DemandDrivenDb {
         view: &DemandDrivenView,
     ) -> Result<Db<groove::storage::DemandLoadedStorage>, Error> {
         self.database.register_schema_view(view.schema.clone())
+    }
+
+    /// Borrow an operational typed view from this owner. The facade cannot
+    /// outlive the owner borrow and therefore cannot become a second owner.
+    pub fn view<'a>(
+        &'a mut self,
+        view: &DemandDrivenView,
+    ) -> Result<DemandDrivenViewDb<'a>, Error> {
+        let database = self.facade_for_view(view)?;
+        Ok(DemandDrivenViewDb {
+            database,
+            runtime: &mut self.runtime,
+        })
     }
 
     /// Compile a query against an explicit typed view of this owner.
@@ -978,6 +1001,16 @@ impl DemandDrivenDb {
         std::future::poll_fn(|context| self.poll_all(context, prepared, opts.clone())).await
     }
 
+    /// Run a one-shot read through an explicit typed view of this owner.
+    pub async fn all_in_view(
+        &mut self,
+        view: &DemandDrivenView,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        self.view(view)?.all(prepared, opts).await
+    }
+
     /// Poll a structured relation snapshot through exact durable acquisition.
     #[doc(hidden)]
     pub fn poll_relation_snapshot(
@@ -1030,6 +1063,16 @@ impl DemandDrivenDb {
             .await
     }
 
+    /// Read a structured snapshot through an explicit typed view.
+    pub async fn relation_snapshot_in_view(
+        &mut self,
+        view: &DemandDrivenView,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+    ) -> Result<RelationSnapshot, Error> {
+        self.view(view)?.relation_snapshot(prepared, opts).await
+    }
+
     /// Materialize the canonical public result tree from an acquired snapshot.
     #[doc(hidden)]
     pub async fn result_tree(
@@ -1038,6 +1081,17 @@ impl DemandDrivenDb {
         opts: ReadOpts,
     ) -> Result<ResultTree, Error> {
         let snapshot = self.relation_snapshot(prepared, opts).await?;
+        materialize_result_tree(prepared.shape.query(), snapshot)
+    }
+
+    /// Materialize a public result tree through an explicit typed view.
+    pub async fn result_tree_in_view(
+        &mut self,
+        view: &DemandDrivenView,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+    ) -> Result<ResultTree, Error> {
+        let snapshot = self.relation_snapshot_in_view(view, prepared, opts).await?;
         materialize_result_tree(prepared.shape.query(), snapshot)
     }
 
@@ -1078,6 +1132,16 @@ impl DemandDrivenDb {
         opts: ReadOpts,
     ) -> Result<SubscriptionStream, Error> {
         std::future::poll_fn(|context| self.poll_subscribe(context, prepared, opts.clone())).await
+    }
+
+    /// Open a subscription through an explicit typed view.
+    pub async fn subscribe_in_view(
+        &mut self,
+        view: &DemandDrivenView,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+    ) -> Result<SubscriptionStream, Error> {
+        self.view(view)?.subscribe(prepared, opts).await
     }
 
     /// Insert through the async owner. Durable prerequisites may suspend, but
@@ -1597,6 +1661,129 @@ impl DemandDrivenDb {
 
     pub fn abandon_exclusive(&mut self, tx_id: OpenBatchId) -> Result<(), Error> {
         self.database.abandon_exclusive_handle(tx_id)
+    }
+}
+
+impl DemandDrivenViewDb<'_> {
+    /// Start a logical query in this typed view without loading storage.
+    pub fn table(&self, table: impl Into<String>) -> Query {
+        self.database.table(table)
+    }
+
+    /// Compile a logical query in this typed view.
+    pub fn prepare_query(&self, query: &Query) -> Result<PreparedQuery, Error> {
+        self.database.prepare_query(query)
+    }
+
+    /// Run a one-shot query, loading only missing physical inputs.
+    pub async fn all(
+        &mut self,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        let database = &self.database;
+        let author = database.identity.author;
+        std::future::poll_fn(|context| {
+            if let Err(error) = ensure_supported_read_view(&opts) {
+                return Poll::Ready(Err(error));
+            }
+            match self.runtime.poll_resident_operation(context, || {
+                if let ReadViewSourceSpec::Branch { branch } = &opts.read_view.source {
+                    database.node.node.borrow_mut().acquire_branch_read_inputs(
+                        &prepared.shape,
+                        &prepared.binding,
+                        crate::ids::BranchId(*branch),
+                        author,
+                        false,
+                    )?;
+                }
+                database.all_resident(prepared, &opts, author, QueryAuthorizationMode::ClientLocal)
+            }) {
+                Poll::Pending => Poll::Pending,
+                Poll::Ready(result) => Poll::Ready(result.map_err(Into::into)),
+            }
+        })
+        .await
+    }
+
+    /// Materialize a structured relation snapshot in this typed view.
+    pub async fn relation_snapshot(
+        &mut self,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+    ) -> Result<RelationSnapshot, Error> {
+        let database = &self.database;
+        let author = database.identity.author;
+        std::future::poll_fn(|context| {
+            if let Err(error) = ensure_supported_read_view(&opts) {
+                return Poll::Ready(Err(error));
+            }
+            if opts.include_deleted {
+                return Poll::Ready(Err(Error::new(
+                    ErrorCode::Query,
+                    "relation snapshots do not support include_deleted yet",
+                )));
+            }
+            match self.runtime.poll_resident_operation(context, || {
+                if let ReadViewSourceSpec::Branch { branch } = &opts.read_view.source {
+                    database.node.node.borrow_mut().acquire_branch_read_inputs(
+                        &prepared.shape,
+                        &prepared.binding,
+                        crate::ids::BranchId(*branch),
+                        author,
+                        false,
+                    )?;
+                }
+                database.relation_snapshot_resident(
+                    prepared,
+                    &opts,
+                    author,
+                    QueryAuthorizationMode::ClientLocal,
+                )
+            }) {
+                Poll::Pending => Poll::Pending,
+                Poll::Ready(result) => Poll::Ready(result.map_err(Into::into)),
+            }
+        })
+        .await
+    }
+
+    /// Materialize the canonical public result tree in this typed view.
+    pub async fn result_tree(
+        &mut self,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+    ) -> Result<ResultTree, Error> {
+        let snapshot = self.relation_snapshot(prepared, opts).await?;
+        materialize_result_tree(prepared.shape.query(), snapshot)
+    }
+
+    /// Open a maintained subscription in this typed view.
+    pub async fn subscribe(
+        &mut self,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+    ) -> Result<SubscriptionStream, Error> {
+        let database = &self.database;
+        let author = database.identity.author;
+        std::future::poll_fn(|context| {
+            match self.runtime.poll_operation(
+                context,
+                || {
+                    database.open_subscription_resident(
+                        prepared,
+                        opts.clone(),
+                        author,
+                        QueryAuthorizationMode::ClientLocal,
+                    )
+                },
+                SubscriptionOpenError::missing_input,
+            ) {
+                Poll::Pending => Poll::Pending,
+                Poll::Ready(result) => Poll::Ready(result.map_err(SubscriptionOpenError::into_api)),
+            }
+        })
+        .await
     }
 }
 
