@@ -169,6 +169,43 @@ impl DemandDrivenDb {
             .map_err(Error::from)
     }
 
+    /// Insert into a branch overlay. A missing physical partition is prepared
+    /// off-runtime, then its schema, durable marker, and first row publish in
+    /// the same resolving poll.
+    pub async fn insert_on_branch(
+        &mut self,
+        branch: crate::ids::BranchId,
+        table: &str,
+        cells: RowCells,
+    ) -> Result<WriteHandle<groove::storage::DemandLoadedStorage>, Error> {
+        let (row_uuid, commit) = self.database.prepare_insert_commit(table, cells)?;
+        let schema = self.database.schema_version_id;
+        let tx_id = std::future::poll_fn(|context| {
+            self.runtime.poll_mergeable_many_on_branch_in_schema(
+                context,
+                branch,
+                schema,
+                std::slice::from_ref(&commit),
+            )
+        })
+        .await?;
+        let local_tier = self.database.finalize_local_commit(tx_id)?;
+        self.database.refresh_subscriptions()?;
+        Ok(WriteHandle {
+            node: Rc::downgrade(&self.database.node.node),
+            row_uuid,
+            tx_id,
+            local_tier,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn resident_node_for_test(
+        &self,
+    ) -> Rc<RefCell<crate::node::NodeState<groove::storage::DemandLoadedStorage>>> {
+        Rc::clone(&self.database.node.node)
+    }
+
     /// Poll a high-level one-shot read through query-driven durable loading.
     ///
     /// If every required input is resident, this returns `Ready` on the first

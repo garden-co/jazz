@@ -143,6 +143,24 @@ where
         .map(drop)
     }
 
+    /// Publish validated table additions and the first batch prepared against
+    /// them as one resident operation.
+    #[doc(hidden)]
+    pub fn commit_prepared_batch_with_table_registrations(
+        &mut self,
+        registrations: Vec<PreparedTableRegistration>,
+        prepared: PreparedDatabaseBatch,
+    ) -> Result<(), Error> {
+        for registration in registrations {
+            self.publish_table_registration(registration)?;
+        }
+        if let Err(error) = self.commit_prepared_batch(prepared) {
+            self.mark_async_persistence_failed();
+            return Err(error);
+        }
+        Ok(())
+    }
+
     /// Acquire every durable input that a subsequent live IVM tick can read.
     ///
     /// This deliberately does not evaluate the graph. The real runtime is
@@ -187,6 +205,55 @@ where
             self.owned_storage_operation_for_pending(write)?;
         }
         Ok(prepared)
+    }
+
+    /// Resolve a batch against a prospectively extended live schema without
+    /// installing those tables in the real runtime.
+    #[doc(hidden)]
+    pub fn prepare_batch_storage_inputs_with_table_registrations(
+        &self,
+        batch: &DatabaseBatch,
+        registrations: &[PreparedTableRegistration],
+    ) -> Result<PreparedDatabaseBatch, Error> {
+        self.ensure_not_poisoned()?;
+        let mut prospective = self.ivm_runtime.schema().clone();
+        for registration in registrations {
+            if prospective.table(&registration.table.name).is_some() {
+                return Err(Error::TableAlreadyExists(registration.table.name.clone()));
+            }
+            prospective.tables.push(registration.table.clone());
+        }
+        validate_durable_key_schema(&prospective)?;
+        let pending_writes =
+            self.pending_writes_from_operations_in_schema(&batch.operations, &prospective)?;
+        let descriptors = pending_writes
+            .iter()
+            .map(PendingTableWrite::descriptor)
+            .collect::<Vec<_>>();
+        let stores = pending_writes
+            .iter()
+            .zip(&descriptors)
+            .map(|(write, descriptor)| {
+                let key_descriptor = prospective
+                    .table(write.table())
+                    .and_then(|table| table.primary_key.as_ref().map(primary_key_descriptor));
+                record_store_for_table(&self.storage, write.table(), key_descriptor, descriptor)
+            })
+            .collect::<Vec<_>>();
+        let table_deltas = compute_table_deltas(&pending_writes, &stores, &prospective)?;
+        let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
+        self.ivm_runtime
+            .tick_storage_requirements()
+            .and_then(|requirements| requirements.ensure_resident(&storage))
+            .map_err(Error::IvmRuntime)?;
+        for write in &pending_writes {
+            self.owned_storage_operation_for_pending(write)?;
+        }
+        Ok(PreparedDatabaseBatch {
+            pending_writes,
+            direct_operations: batch.direct_operations.clone(),
+            table_deltas: Some(table_deltas),
+        })
     }
 
     /// Resolve base-table writes without acquiring async-only IVM closure
@@ -332,6 +399,17 @@ where
         Ok(pending_writes)
     }
 
+    fn pending_writes_from_operations_in_schema(
+        &self,
+        operations: &[BatchOperation],
+        schema: &DatabaseSchema,
+    ) -> Result<Vec<PendingTableWrite>, Error> {
+        operations
+            .iter()
+            .map(|operation| self.pending_write_from_operation_in_schema(operation, schema))
+            .collect()
+    }
+
     pub(super) fn ensure_batch_storage_txn(&self, batch: &DatabaseBatch) -> Result<(), Error> {
         let mut txn_operations = batch.txn_operations.borrow_mut();
         while batch.txn_indexed_operations.get() < batch.operations.len() {
@@ -373,9 +451,22 @@ where
         &self,
         operation: &BatchOperation,
     ) -> Result<PendingTableWrite, Error> {
+        self.pending_write_from_operation_in_schema(operation, self.ivm_runtime.schema())
+    }
+
+    fn pending_write_from_operation_in_schema(
+        &self,
+        operation: &BatchOperation,
+        schema: &DatabaseSchema,
+    ) -> Result<PendingTableWrite, Error> {
+        let lookup_table = |name: &str| {
+            schema
+                .table(name)
+                .ok_or_else(|| Error::TableNotFound(name.to_owned()))
+        };
         match operation {
             BatchOperation::Insert { table, record } => {
-                let table_schema = self.table(table)?;
+                let table_schema = lookup_table(table)?;
                 let (variant_tag, descriptor, record) = resolve_record_input(table_schema, record)?;
                 let key = primary_key_bytes(table_schema, variant_tag, descriptor, &record)?;
                 Ok(PendingTableWrite::Set {
@@ -388,7 +479,7 @@ where
                 })
             }
             BatchOperation::InsertFresh { table, record } => {
-                let table_schema = self.table(table)?;
+                let table_schema = lookup_table(table)?;
                 let (variant_tag, descriptor, record) = resolve_record_input(table_schema, record)?;
                 let key = primary_key_bytes(table_schema, variant_tag, descriptor, &record)?;
                 Ok(PendingTableWrite::Set {
@@ -401,7 +492,7 @@ where
                 })
             }
             BatchOperation::InsertRaw { table, key, record } => {
-                let table_schema = self.table(table)?;
+                let table_schema = lookup_table(table)?;
                 let (variant_tag, descriptor, record) =
                     resolve_raw_record_input(table_schema, record)?;
                 Ok(PendingTableWrite::Set {
@@ -414,7 +505,7 @@ where
                 })
             }
             BatchOperation::InsertRawFresh { table, key, record } => {
-                let table_schema = self.table(table)?;
+                let table_schema = lookup_table(table)?;
                 let (variant_tag, descriptor, record) =
                     resolve_raw_record_input(table_schema, record)?;
                 Ok(PendingTableWrite::Set {
@@ -427,7 +518,7 @@ where
                 })
             }
             BatchOperation::Update { table, record } => {
-                let table_schema = self.table(table)?;
+                let table_schema = lookup_table(table)?;
                 let (variant_tag, descriptor, record) = resolve_record_input(table_schema, record)?;
                 let key = primary_key_bytes(table_schema, variant_tag, descriptor, &record)?;
                 Ok(PendingTableWrite::Set {
@@ -440,7 +531,7 @@ where
                 })
             }
             BatchOperation::UpdateRaw { table, key, record } => {
-                let table_schema = self.table(table)?;
+                let table_schema = lookup_table(table)?;
                 let (variant_tag, descriptor, record) =
                     resolve_raw_record_input(table_schema, record)?;
                 Ok(PendingTableWrite::Set {
@@ -453,7 +544,7 @@ where
                 })
             }
             BatchOperation::Delete { table, key } => {
-                let table_schema = self.table(table)?;
+                let table_schema = lookup_table(table)?;
                 Ok(PendingTableWrite::Delete {
                     table: table.clone(),
                     key: key.clone().into_bytes(),

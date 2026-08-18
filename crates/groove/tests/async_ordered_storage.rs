@@ -454,3 +454,51 @@ fn multi_batch_unit_completes_only_after_its_final_durable_batch() {
         Poll::Ready(Ok(completed)) if completed == vec![unit]
     ));
 }
+
+#[test]
+fn lazy_table_schema_and_first_row_publish_together() {
+    let initial = TableSchema::new(
+        "rows",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("value", ColumnType::String),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64));
+    let lazy = TableSchema::new(
+        "lazy_rows",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("value", ColumnType::String),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64));
+    let mut database = Database::new(
+        DatabaseSchema::new([initial]),
+        MemoryStorage::new(&["rows", "lazy_rows", "indices"]),
+    )
+    .unwrap();
+    let registration = database.prepare_table_registration(lazy).unwrap();
+    let mut batch = database.open_batch();
+    batch.insert(
+        "lazy_rows",
+        vec![Value::U64(7), Value::String("prepared".to_owned())],
+    );
+    let prepared = database
+        .prepare_batch_storage_inputs_with_table_registrations(
+            &batch,
+            std::slice::from_ref(&registration),
+        )
+        .unwrap();
+
+    assert!(database.table_schema("lazy_rows").is_err());
+    database
+        .commit_prepared_batch_with_table_registrations(vec![registration], prepared)
+        .unwrap();
+    let rows = database.primary_key_scan("lazy_rows", &[]).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].get("value").unwrap(),
+        Value::String("prepared".to_owned())
+    );
+}

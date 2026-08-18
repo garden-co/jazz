@@ -843,6 +843,16 @@ pub(crate) struct PreparedMergeableCommit {
     permission_subject: AuthorId,
 }
 
+/// One branch transaction whose lazy physical partitions and row batch have
+/// both been validated without changing the live runtime.
+pub(crate) struct PreparedBranchMergeableCommit {
+    tx_id: TxId,
+    registrations: Vec<groove::db::PreparedTableRegistration>,
+    partitions: BTreeSet<(PhysicalTableId, BranchId)>,
+    batch: groove::db::PreparedDatabaseBatch,
+    transaction_tables: BTreeSet<String>,
+}
+
 pub(crate) struct PreparedOpenMergeableCommit {
     open_batch_id: OpenBatchId,
     commit: PreparedMergeableCommit,

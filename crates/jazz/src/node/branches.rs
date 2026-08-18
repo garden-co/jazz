@@ -674,6 +674,17 @@ where
     where
         S: ReopenableStorage,
     {
+        let prepared =
+            self.prepare_mergeable_many_on_branch_in_schema(branch_id, schema_version, commits)?;
+        self.publish_prepared_branch_mergeable_commit(prepared)
+    }
+
+    pub(crate) fn prepare_mergeable_many_on_branch_in_schema(
+        &mut self,
+        branch_id: BranchId,
+        schema_version: SchemaVersionId,
+        commits: Vec<MergeableCommit>,
+    ) -> Result<PreparedBranchMergeableCommit, Error> {
         self.require_catalogue_ready()?;
         if !self
             .catalogue
@@ -702,20 +713,173 @@ where
         if !self.branch_write_policy_allows(branch_id, permission_subject)? {
             return Err(Error::AuthorizationDenied);
         }
-        for commit in &commits {
-            for parent in &commit.parents {
-                self.merge_tx_time(parent.time);
-            }
-        }
-        for table in commits
+        let partitions = commits
             .iter()
             .map(|commit| commit.table.clone())
             .collect::<BTreeSet<_>>()
-        {
-            self.persist_branch_partition(table, schema_version, branch_id)?;
+            .into_iter()
+            .map(|table| {
+                self.physical_table_id_for_schema(schema_version, &table)
+                    .map(|table_id| (table_id, branch_id))
+            })
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        let new_partitions = partitions
+            .difference(&self.branches.branch_partitions)
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let mut prospective_partitions = self.branches.branch_partitions.clone();
+        prospective_partitions.extend(new_partitions.iter().copied());
+        let registrations = physical_version_storage_tables(
+            &self.catalogue.catalogue_schemas,
+            &self.catalogue.schema_version_aliases,
+            &self.catalogue.physical_mappings,
+            &prospective_partitions,
+        )?
+        .into_iter()
+        .filter_map(|table| match self.database.table_schema(&table.name) {
+            Ok(_) => None,
+            Err(GrooveDbError::TableNotFound(_)) => {
+                Some(self.database.prepare_table_registration(table))
+            }
+            Err(error) => Some(Err(error)),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+        let branch = self
+            .branches
+            .branches
+            .get(&branch_id)
+            .cloned()
+            .ok_or(Error::BranchNotFound(branch_id))?;
+        for commit in &commits {
+            let table_schema = self.table_in_schema(&commit.table, schema_version)?;
+            let version = VersionRecord::from_commit(commit, &table_schema, schema_version)?;
+            if !self.branch_table_write_policy_allows_version_record(
+                &branch,
+                &table_schema,
+                &version,
+                permission_subject,
+            )? {
+                return Err(Error::AuthorizationDenied);
+            }
         }
-        let made_at = self.mint_tx_time(commits[0].now_ms);
-        self.commit_mergeable_many_on_branch_at(branch_id, schema_version, commits, made_at, None)
+
+        let made_at = self.preview_mergeable_tx_time(&commits, commits[0].now_ms);
+        let tx_id = TxId::new(made_at, self.node_uuid);
+        let tx = Transaction {
+            tx_id,
+            kind: TxKind::Mergeable,
+            n_total_writes: commits.len().try_into().map_err(|_| {
+                Error::InvalidMergeableCommit("transaction write count exceeds u32")
+            })?,
+            made_by: commits[0].made_by,
+            permission_subject: commits[0].permission_subject,
+            base_snapshot: None,
+            row_read_set: None,
+            absent_read_set: None,
+            predicate_read_set: None,
+            user_metadata_json: commits[0].user_metadata_json.clone(),
+            target_lineage: BranchLineage::Branch(branch_id),
+            branch_merge: None,
+        };
+        let tx_node_alias =
+            self.node_aliases
+                .get(&tx_id.node)
+                .copied()
+                .ok_or(Error::InvalidStoredValue(
+                    "local node alias must be installed before branch write preparation",
+                ))?;
+        let schema_version_alias = self
+            .catalogue
+            .schema_version_aliases
+            .get(&schema_version)
+            .copied()
+            .ok_or(Error::InvalidStoredValue(
+                "authored schema alias must be installed before branch write preparation",
+            ))?;
+        let mut batch = self.database.open_batch();
+        for (table_id, branch_id) in &new_partitions {
+            batch.update(
+                "jazz_branch_partitions",
+                vec![Value::U64(table_id.0), Value::Uuid(branch_id.0)],
+            );
+        }
+        batch.insert(
+            "jazz_transactions",
+            transaction_values(
+                tx_node_alias,
+                &tx,
+                Fate::Pending,
+                None,
+                self.authored_commit_durability,
+            ),
+        );
+        let mut transaction_tables = BTreeSet::new();
+        for commit in commits {
+            let table_schema = self.table_in_schema(&commit.table, schema_version)?;
+            let stored = VersionRow::from_parts_with_schema_version(
+                &table_schema,
+                VersionRowParts {
+                    table: commit.table.clone(),
+                    row_uuid: commit.row_uuid,
+                    tx_node_alias,
+                    schema_version_alias,
+                    tx_time: made_at,
+                    parents: commit.parents,
+                    created_by: commit.made_by,
+                    created_at: TxTime(commit.now_ms),
+                    updated_by: commit.made_by,
+                    updated_at: TxTime(commit.now_ms),
+                    authored_columns: Some(
+                        commit
+                            .authored_columns
+                            .clone()
+                            .unwrap_or_else(|| commit.cells.keys().cloned().collect()),
+                    ),
+                    cells: commit.cells,
+                    deletion: commit.deletion,
+                },
+                None,
+            )?;
+            transaction_tables.insert(table_schema.name.clone());
+            let (branch_table, branch_record) =
+                self.branch_version_storage_write_binding(&stored, branch_id)?;
+            batch.insert_raw(
+                branch_table.as_ref(),
+                self.version_storage_primary_key(&stored, BranchLineage::Branch(branch_id))?,
+                branch_record,
+            );
+        }
+        self.stage_recovery_checkpoint(&mut batch, made_at);
+        let batch = self
+            .database
+            .prepare_batch_storage_inputs_with_table_registrations(&batch, &registrations)?;
+        Ok(PreparedBranchMergeableCommit {
+            tx_id,
+            registrations,
+            partitions: new_partitions,
+            batch,
+            transaction_tables,
+        })
+    }
+
+    pub(crate) fn publish_prepared_branch_mergeable_commit(
+        &mut self,
+        prepared: PreparedBranchMergeableCommit,
+    ) -> Result<TxId, Error> {
+        let PreparedBranchMergeableCommit {
+            tx_id,
+            registrations,
+            partitions,
+            batch,
+            transaction_tables,
+        } = prepared;
+        self.clock.tx_time = self.clock.tx_time.max(tx_id.time);
+        self.database
+            .commit_prepared_batch_with_table_registrations(registrations, batch)?;
+        self.branches.branch_partitions.extend(partitions);
+        self.cache_tx_version_tables(tx_id, transaction_tables);
+        Ok(tx_id)
     }
 
     fn commit_mergeable_many_on_branch_at(
@@ -1126,7 +1290,7 @@ where
             .find(|row| row.row_uuid() == row_uuid))
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "testing"))]
     pub(crate) fn evaluate_branch_metadata_write_policy_for_test(
         &mut self,
         branch_id: BranchId,
@@ -2158,6 +2322,19 @@ where
                     .table_schema(&physical_branch_history_table_name(table_id, branch_id))
                     .is_ok()
             })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn current_branch_partition_exists_for_test(
+        &self,
+        table: &str,
+        branch_id: BranchId,
+    ) -> bool {
+        self.branch_subscription_source_exists_for_test(
+            table,
+            self.catalogue.current_write_schema.schema,
+            branch_id,
+        )
     }
 
     pub(super) fn ensure_branch_target_partitions(

@@ -676,11 +676,12 @@ fn demand_driven_db_acquires_cold_mutations_before_single_publish() {
     drop(seeded);
 
     let released = std::rc::Rc::new(std::cell::Cell::new(true));
+    let committed_units = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
     let storage = GatedAuthorityStorage {
         inner: groove::storage::async_ordered::ImmediateStorage::new(durable),
         released: std::rc::Rc::clone(&released),
         cancellations: std::rc::Rc::new(std::cell::Cell::new(0)),
-        committed_units: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
+        committed_units: std::rc::Rc::clone(&committed_units),
         fail_commits: std::rc::Rc::new(std::cell::Cell::new(false)),
     };
     let mut opening = crate::db::PollableDbOpen::new(node_schema, identity, Box::new(storage));
@@ -791,6 +792,49 @@ fn demand_driven_db_acquires_cold_mutations_before_single_publish() {
     .unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].row_uuid(), row);
+
+    released.set(true);
+    let branch = crate::db::block_on(owner.create_branch()).unwrap();
+    crate::db::block_on(std::future::poll_fn(|context| {
+        owner.poll_persistence(context)
+    }))
+    .unwrap();
+    let resident = owner.resident_node_for_test();
+    assert!(!resident
+        .borrow()
+        .current_branch_partition_exists_for_test("todos", branch));
+    let units_before_branch_write = committed_units.borrow().len();
+    released.set(false);
+    let branch_write = {
+        let mut insert = std::pin::pin!(owner.insert_on_branch(
+            branch,
+            "todos",
+            title_cells("first async branch row"),
+        ));
+        assert!(std::future::Future::poll(insert.as_mut(), &mut context).is_pending());
+        assert!(
+            !resident
+                .borrow()
+                .current_branch_partition_exists_for_test("todos", branch),
+            "cold preparation must not install the live partition schema"
+        );
+        released.set(true);
+        crate::db::block_on(insert.as_mut()).expect("released branch inputs must publish once")
+    };
+    assert!(resident
+        .borrow()
+        .current_branch_partition_exists_for_test("todos", branch));
+    assert_ne!(branch_write.row_uuid(), row);
+    crate::db::block_on(std::future::poll_fn(|context| {
+        owner.poll_persistence(context)
+    }))
+    .unwrap();
+    let committed = committed_units.borrow();
+    assert_eq!(committed.len(), units_before_branch_write + 1);
+    assert!(
+        committed.last().copied().unwrap_or_default() >= 3,
+        "one durable unit must contain partition metadata, transaction, and row"
+    );
 }
 
 struct PersistenceTestWake;

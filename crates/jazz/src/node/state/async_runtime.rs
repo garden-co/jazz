@@ -170,6 +170,28 @@ impl DemandDrivenNode {
         )
     }
 
+    /// Commit a branch-local write together with any lazily-created physical
+    /// partition through one acquire/publish operation.
+    pub fn poll_mergeable_many_on_branch_in_schema(
+        &mut self,
+        context: &mut std::task::Context<'_>,
+        branch_id: BranchId,
+        schema: SchemaVersionId,
+        commits: &[MergeableCommit],
+    ) -> std::task::Poll<Result<TxId, Error>> {
+        self.poll_local_operation(
+            context,
+            |node| {
+                node.prepare_mergeable_many_on_branch_in_schema(
+                    branch_id,
+                    schema,
+                    commits.to_vec(),
+                )
+            },
+            |node, prepared| node.publish_prepared_branch_mergeable_commit(prepared),
+        )
+    }
+
     /// Commit a staged mergeable transaction without consuming its open handle
     /// until all cold parents and patch inputs have been acquired.
     pub fn poll_mergeable_open(

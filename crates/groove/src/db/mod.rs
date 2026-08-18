@@ -85,6 +85,18 @@ pub struct PreparedDatabaseBatch {
     table_deltas: Option<Vec<crate::ivm::TableDelta>>,
 }
 
+/// Validated live-schema addition retained across an acquire/publish boundary.
+///
+/// Preparing a first write for a lazily-created physical table must be able to
+/// resolve that write without mutating the live IVM schema. The host publishes
+/// this token immediately before the batch prepared against it.
+#[doc(hidden)]
+#[derive(Clone, Debug)]
+#[must_use = "a prepared table registration must be published or discarded"]
+pub struct PreparedTableRegistration {
+    table: TableSchema,
+}
+
 impl PendingPersistenceBatch {
     /// Consume the receipt into the exact owned storage operations.
     #[doc(hidden)]

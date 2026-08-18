@@ -99,6 +99,31 @@ impl<S> Database<S>
 where
     S: ResidentStorage,
 {
+    /// Validate a table addition without changing the live runtime.
+    #[doc(hidden)]
+    pub fn prepare_table_registration(
+        &self,
+        table: TableSchema,
+    ) -> Result<PreparedTableRegistration, Error> {
+        self.ensure_not_poisoned()?;
+        if self.ivm_runtime.table(&table.name).is_some() {
+            return Err(Error::TableAlreadyExists(table.name));
+        }
+        let mut updated = self.ivm_runtime.schema().clone();
+        updated.tables.push(table.clone());
+        validate_durable_key_schema(&updated)?;
+        Ok(PreparedTableRegistration { table })
+    }
+
+    pub(super) fn publish_table_registration(
+        &mut self,
+        prepared: PreparedTableRegistration,
+    ) -> Result<(), Error> {
+        self.ivm_runtime
+            .register_table(prepared.table)
+            .map_err(Error::IvmRuntime)
+    }
+
     /// Return the live schema for a table.
     pub fn table_schema(&self, table: &str) -> Result<&TableSchema, Error> {
         self.table(table)
@@ -109,16 +134,8 @@ where
     /// The backing storage layout must already be able to route the table's
     /// logical family (for example through a shared class family).
     pub fn register_table(&mut self, table: TableSchema) -> Result<(), Error> {
-        self.ensure_not_poisoned()?;
-        if self.ivm_runtime.table(&table.name).is_some() {
-            return Err(Error::TableAlreadyExists(table.name));
-        }
-        let mut updated = self.ivm_runtime.schema().clone();
-        updated.tables.push(table.clone());
-        validate_durable_key_schema(&updated)?;
-        self.ivm_runtime
-            .register_table(table)
-            .map_err(Error::IvmRuntime)
+        let prepared = self.prepare_table_registration(table)?;
+        self.publish_table_registration(prepared)
     }
 
     /// Append one whole-row enum case to an already variant table.
