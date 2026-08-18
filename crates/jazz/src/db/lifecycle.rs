@@ -69,6 +69,11 @@ impl PollableDbOpen {
         self
     }
 
+    fn with_boxed_id_source(mut self, id_source: Option<Box<dyn RowIdSource>>) -> Self {
+        self.id_source = id_source;
+        self
+    }
+
     #[doc(hidden)]
     pub fn poll(&mut self, context: &mut Context<'_>) -> Poll<Result<DemandDrivenDb, Error>> {
         if self.runtime.is_none() {
@@ -126,6 +131,52 @@ impl PollableDbOpen {
 }
 
 impl DemandDrivenDb {
+    /// Open an ordinary database over a storage backend that completes the
+    /// ordered asynchronous contract immediately.
+    pub async fn open_immediate<S>(config: DbConfig<S>) -> Result<Self, Error>
+    where
+        S: ResidentStorage + ReopenableStorage + 'static,
+    {
+        let DbConfig {
+            schema,
+            storage,
+            identity,
+            id_source,
+        } = config;
+        let mut opening = PollableDbOpen::new(
+            schema,
+            identity,
+            Box::new(groove::storage::async_ordered::ImmediateStorage::new(
+                storage,
+            )),
+        )
+        .with_boxed_id_source(id_source);
+        std::future::poll_fn(|context| opening.poll(context)).await
+    }
+
+    /// Open a history-complete authority over an immediately completing
+    /// ordered backend.
+    pub async fn open_history_complete_immediate<S>(config: DbConfig<S>) -> Result<Self, Error>
+    where
+        S: ResidentStorage + ReopenableStorage + 'static,
+    {
+        let DbConfig {
+            schema,
+            storage,
+            identity,
+            id_source,
+        } = config;
+        let mut opening = PollableDbOpen::new_history_complete(
+            schema,
+            identity,
+            Box::new(groove::storage::async_ordered::ImmediateStorage::new(
+                storage,
+            )),
+        )
+        .with_boxed_id_source(id_source);
+        std::future::poll_fn(|context| opening.poll(context)).await
+    }
+
     /// Start a logical query without touching durable storage.
     pub fn table(&self, table: impl Into<String>) -> Query {
         self.database.table(table)
