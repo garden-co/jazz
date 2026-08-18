@@ -25,6 +25,15 @@ pub struct DemandDrivenDb {
     runtime: DemandDrivenNode,
 }
 
+/// Immutable typed-schema selection for one [`DemandDrivenDb`] owner.
+///
+/// This token carries no node, storage, scheduler, or mutable state. Bindings
+/// may clone it freely and must route operations back through the unique owner.
+#[derive(Clone, Debug)]
+pub struct DemandDrivenView {
+    schema: JazzSchema,
+}
+
 impl PollableDbOpen {
     #[doc(hidden)]
     pub fn new(
@@ -229,6 +238,43 @@ impl DemandDrivenDb {
     /// resulting query is read or subscribed, not while its shape is built.
     pub fn prepare_query(&self, query: &Query) -> Result<PreparedQuery, Error> {
         self.database.prepare_query(query)
+    }
+
+    /// Return the typed view selected when this owner opened.
+    pub fn default_view(&self) -> DemandDrivenView {
+        DemandDrivenView {
+            schema: self.database.schema.clone(),
+        }
+    }
+
+    /// Admit and register a typed schema, then return an inert selection token.
+    /// Catalogue control state is a startup-resident invariant; only its
+    /// resulting ordered write may suspend here.
+    pub async fn register_schema_view(
+        &mut self,
+        schema: JazzSchema,
+    ) -> Result<DemandDrivenView, Error> {
+        let _registered = self.database.register_schema_view(schema.clone())?;
+        std::future::poll_fn(|context| self.runtime.poll_persistence(context))
+            .await
+            .map_err(Error::from)?;
+        Ok(DemandDrivenView { schema })
+    }
+
+    fn facade_for_view(
+        &self,
+        view: &DemandDrivenView,
+    ) -> Result<Db<groove::storage::DemandLoadedStorage>, Error> {
+        self.database.register_schema_view(view.schema.clone())
+    }
+
+    /// Compile a query against an explicit typed view of this owner.
+    pub fn prepare_query_in_view(
+        &self,
+        view: &DemandDrivenView,
+        query: &Query,
+    ) -> Result<PreparedQuery, Error> {
+        self.facade_for_view(view)?.prepare_query(query)
     }
 
     pub fn write_state(&self, tx_id: TxId) -> Result<WriteState, Error> {

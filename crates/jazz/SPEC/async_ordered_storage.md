@@ -391,6 +391,31 @@ binding needs an equivalent synchronous drain/notification path for immediate
 local events; a `ReadableStream` microtask alone does not prove the application
 invariant. Storage- and network-driven events may continue through async streams.
 
+### One owner, many typed views
+
+Bindings must not model a typed schema view as another database owner. There is
+exactly one durable scheduler, persistence queue, peer set, row-id source, and
+logical clock for an opened database. Registering or attaching a schema yields
+an inert, cloneable view token containing only the validated schema/view
+identity. Reads, writes, transactions, subscriptions, and peer operations pass
+that token back to the unique owner.
+
+The owner may construct a short-lived resident `Db<DemandLoadedStorage>` view
+internally to reuse validation and materialization code, but that facade never
+escapes and never owns persistence. A binding therefore stores:
+
+- one shared mutable `DemandDrivenDb` owner;
+- one immutable typed-view token per public database handle;
+- write, transaction, subscription, and transport handles tied back to that
+  same owner.
+
+Schema registration is itself an owner operation. If the schema is already
+authority-admitted, registration only installs process-local typed metadata. If
+it requires local catalogue admission, the owner publishes that catalogue
+transition through the same ordered durable boundary before returning the
+token. Dropping a view cannot close or flush the owner; only the handle that
+owns the runtime lifetime may do so.
+
 ## Required proof matrix
 
 The same behavioral suite must run against:
