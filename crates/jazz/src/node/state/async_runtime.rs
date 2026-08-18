@@ -41,6 +41,8 @@ pub struct DemandDrivenNode {
     acquisition: groove::db::StorageAcquisition,
     pending_persistence:
         std::collections::VecDeque<groove::storage::async_ordered::OwnedStorageRequest>,
+    pending_shutdown:
+        Option<std::collections::VecDeque<groove::storage::async_ordered::OwnedStorageRequest>>,
     pending_fate: Option<PendingFateApplication>,
     pending_authority: Option<PendingAuthorityApplication>,
     persistence_failed: bool,
@@ -501,6 +503,66 @@ impl DemandDrivenNode {
         self.poll_persistence_queue(context)
     }
 
+    /// Drain every resident journal, flush the ordered durable boundary, and
+    /// close the backend session in order. This is terminal for the owner.
+    pub fn poll_close(
+        &mut self,
+        context: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Error>> {
+        if self.pending_shutdown.is_none() {
+            match self.poll_persistence(context) {
+                std::task::Poll::Pending => return std::task::Poll::Pending,
+                std::task::Poll::Ready(Err(error)) => {
+                    return std::task::Poll::Ready(Err(error));
+                }
+                std::task::Poll::Ready(Ok(())) => {}
+            }
+            self.pending_shutdown = Some(std::collections::VecDeque::from([
+                groove::storage::async_ordered::OwnedStorageRequest::new(
+                    groove::storage::async_ordered::OwnedStorageOperation::Flush,
+                ),
+                groove::storage::async_ordered::OwnedStorageRequest::new(
+                    groove::storage::async_ordered::OwnedStorageOperation::Close,
+                ),
+            ]));
+        }
+        loop {
+            let Some(request) = self
+                .pending_shutdown
+                .as_ref()
+                .and_then(|requests| requests.front())
+            else {
+                return std::task::Poll::Ready(Ok(()));
+            };
+            match self.persistence.poll_request(request, context) {
+                std::task::Poll::Pending => return std::task::Poll::Pending,
+                std::task::Poll::Ready(Ok(response))
+                    if storage_response_matches(request.operation(), &response) =>
+                {
+                    self.pending_shutdown
+                        .as_mut()
+                        .expect("active shutdown retains its requests")
+                        .pop_front();
+                }
+                std::task::Poll::Ready(Ok(response)) => {
+                    self.fail_persistence();
+                    return std::task::Poll::Ready(Err(Error::Storage(
+                        groove::storage::Error::Backend {
+                            backend: "demand-driven-node",
+                            message: format!(
+                                "node shutdown returned unexpected response {response:?}"
+                            ),
+                        },
+                    )));
+                }
+                std::task::Poll::Ready(Err(error)) => {
+                    self.fail_persistence();
+                    return std::task::Poll::Ready(Err(error.into()));
+                }
+            }
+        }
+    }
+
     fn poll_persistence_queue(
         &mut self,
         context: &mut std::task::Context<'_>,
@@ -618,6 +680,12 @@ fn storage_response_matches(
         ) | (
             groove::storage::async_ordered::OwnedStorageOperation::Commit(_),
             groove::storage::async_ordered::OwnedStorageResponse::Committed
+        ) | (
+            groove::storage::async_ordered::OwnedStorageOperation::Flush,
+            groove::storage::async_ordered::OwnedStorageResponse::Flushed
+        ) | (
+            groove::storage::async_ordered::OwnedStorageOperation::Close,
+            groove::storage::async_ordered::OwnedStorageResponse::Closed
         )
     )
 }
@@ -627,6 +695,11 @@ impl Drop for DemandDrivenNode {
         let _ = self.acquisition.cancel(self.persistence.as_mut());
         for request in self.pending_persistence.drain(..) {
             let _ = self.persistence.cancel_request(request.id());
+        }
+        if let Some(requests) = self.pending_shutdown.as_mut() {
+            for request in requests.drain(..) {
+                let _ = self.persistence.cancel_request(request.id());
+            }
         }
     }
 }
@@ -651,6 +724,7 @@ impl PollableNodeOpen {
                 .expect("ready node takes its persistence session"),
             acquisition: groove::db::StorageAcquisition::default(),
             pending_persistence: std::collections::VecDeque::new(),
+            pending_shutdown: None,
             pending_fate: None,
             pending_authority: None,
             persistence_failed: false,

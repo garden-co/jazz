@@ -136,6 +136,25 @@ impl DemandDrivenDb {
         &mut self.runtime
     }
 
+    /// Write the clean-close marker, durably drain all earlier mutations, then
+    /// flush and close the ordered backend. Consuming the owner makes this
+    /// lifecycle transition unambiguously terminal.
+    pub async fn close(mut self) -> Result<(), Error> {
+        let database = &self.database;
+        std::future::poll_fn(|context| {
+            self.runtime.poll_operation(
+                context,
+                || database.node.node.borrow_mut().close(),
+                crate::node::missing_node_open_input,
+            )
+        })
+        .await
+        .map_err(Error::from)?;
+        std::future::poll_fn(|context| self.runtime.poll_close(context))
+            .await
+            .map_err(Error::from)
+    }
+
     /// Poll a high-level one-shot read through query-driven durable loading.
     ///
     /// If every required input is resident, this returns `Ready` on the first

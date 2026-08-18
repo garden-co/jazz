@@ -183,6 +183,7 @@ struct CommitGatedAuthorityStorage {
     inner: groove::storage::async_ordered::ImmediateStorage<MemoryStorage>,
     released: std::rc::Rc<std::cell::Cell<bool>>,
     fail: std::rc::Rc<std::cell::Cell<bool>>,
+    completed: std::rc::Rc<std::cell::RefCell<Vec<&'static str>>>,
 }
 
 impl groove::storage::async_ordered::OrderedKvStorage for CommitGatedAuthorityStorage {
@@ -207,11 +208,21 @@ impl groove::storage::async_ordered::OrderedKvStorage for CommitGatedAuthoritySt
                 }));
             }
         }
-        groove::storage::async_ordered::OrderedKvStorage::poll_request(
+        let result = groove::storage::async_ordered::OrderedKvStorage::poll_request(
             &mut self.inner,
             request,
             context,
-        )
+        );
+        if matches!(result, std::task::Poll::Ready(Ok(_))) {
+            let operation = match request.operation() {
+                groove::storage::async_ordered::OwnedStorageOperation::Commit(_) => "commit",
+                groove::storage::async_ordered::OwnedStorageOperation::Flush => "flush",
+                groove::storage::async_ordered::OwnedStorageOperation::Close => "close",
+                _ => "read",
+            };
+            self.completed.borrow_mut().push(operation);
+        }
+        result
     }
 
     fn cancel_request(
@@ -234,6 +245,7 @@ fn authority_runtime(
         inner: groove::storage::async_ordered::ImmediateStorage::new(durable.clone()),
         released,
         fail,
+        completed: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
     };
     let mut opening = PollableNodeOpen::new(node(0xce), node_schema, Box::new(storage));
     let waker = std::task::Waker::from(std::sync::Arc::new(PersistenceTestWake));
@@ -252,10 +264,12 @@ fn demand_driven_db_preserves_synchronous_facade_visibility_before_durability() 
     let column_families = node_schema.column_families();
     let refs = column_families.iter().map(String::as_str).collect::<Vec<_>>();
     let durable = MemoryStorage::new(&refs);
+    let completed = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
     let storage = CommitGatedAuthorityStorage {
         inner: groove::storage::async_ordered::ImmediateStorage::new(durable.clone()),
         released: std::rc::Rc::clone(&released),
         fail: failed,
+        completed: std::rc::Rc::clone(&completed),
     };
     let mut opening = crate::db::PollableDbOpen::new(
         node_schema,
@@ -309,7 +323,8 @@ fn demand_driven_db_preserves_synchronous_facade_visibility_before_durability() 
     ));
     drop(subscription);
     drop(write);
-    drop(owner);
+    crate::db::block_on(owner.close()).unwrap();
+    assert!(completed.borrow().ends_with(&["commit", "flush", "close"]));
     let mut reopened = NodeState::new(node(0xc9), schema(), durable).unwrap();
     assert_eq!(
         reopened
