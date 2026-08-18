@@ -1192,6 +1192,39 @@ where
         Ok(())
     }
 
+    pub(super) fn preload_ahead_current_slot(
+        &mut self,
+        version: &VersionRecord,
+        tx_node_alias: NodeAlias,
+        tx_time: TxTime,
+    ) -> Result<(), Error> {
+        let storage_table = match VersionLayer::for_record(version) {
+            VersionLayer::Content => physical_current_binding(
+                &self.catalogue.catalogue_schemas,
+                &self.catalogue.physical_mappings,
+                version.schema_version(),
+                version.table(),
+                PhysicalCurrentClass::Ahead,
+            )?
+            .storage_table,
+            VersionLayer::Deletion => self.physical_current_table_for_schema(
+                version.schema_version(),
+                version.table(),
+                VersionLayer::Deletion,
+                PhysicalCurrentClass::Ahead,
+            )?,
+        };
+        let _ = self.database.primary_key_scan_raw(
+            &storage_table,
+            &[
+                Value::Uuid(version.row_uuid().0),
+                Value::U64(tx_time.0),
+                Value::U64(tx_node_alias.0),
+            ],
+        )?;
+        Ok(())
+    }
+
     /// Build the physical current-source carrier consumed by Groove terminals.
     fn public_current_values(
         &mut self,

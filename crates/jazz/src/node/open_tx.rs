@@ -592,7 +592,23 @@ where
         open_batch_id: OpenBatchId,
         made_by: AuthorId,
         now_ms: u64,
-    ) -> Result<(TxId, SyncMessage), Error> {
+    ) -> Result<(TxId, SyncMessage), Error>
+    where
+        S: ReopenableStorage,
+    {
+        let prepared = self.prepare_exclusive_commit(open_batch_id, made_by, now_ms)?;
+        self.publish_prepared_exclusive_commit(prepared)
+    }
+
+    pub(crate) fn prepare_exclusive_commit(
+        &mut self,
+        open_batch_id: OpenBatchId,
+        made_by: AuthorId,
+        now_ms: u64,
+    ) -> Result<PreparedExclusiveCommit, Error>
+    where
+        S: ReopenableStorage,
+    {
         if !matches!(
             self.open_tx(open_batch_id)?.kind,
             OpenTransactionKind::Exclusive
@@ -610,10 +626,12 @@ where
             .get(&open_batch_id)
             .cloned()
             .ok_or(Error::MissingOpenBatch(open_batch_id))?;
-        for parent in open_tx.writes.iter().flat_map(|write| write.parents.iter()) {
-            self.merge_tx_time(parent.time);
-        }
-        let made_at = self.mint_tx_time(now_ms);
+        let observed = open_tx
+            .writes
+            .iter()
+            .flat_map(|write| write.parents.iter().map(|parent| parent.time))
+            .fold(self.clock.tx_time, TxTime::max);
+        let made_at = TxTime::tick(observed, now_ms);
         let tx_id = TxId::new(made_at, self.node_uuid);
         let provenance_snapshot = open_tx.base_snapshot.clone();
         let versions = open_tx
@@ -668,6 +686,24 @@ where
             target_lineage: crate::tx::BranchLineage::Root,
             branch_merge: None,
         };
+        let _ = self.prepare_authority_commit(tx.clone(), versions.clone(), now_ms, None)?;
+        Ok(PreparedExclusiveCommit {
+            open_batch_id,
+            tx,
+            versions,
+        })
+    }
+
+    pub(crate) fn publish_prepared_exclusive_commit(
+        &mut self,
+        prepared: PreparedExclusiveCommit,
+    ) -> Result<(TxId, SyncMessage), Error> {
+        let PreparedExclusiveCommit {
+            open_batch_id,
+            tx,
+            versions,
+        } = prepared;
+        let tx_id = tx.tx_id;
         self.ingest_transaction_and_versions(
             tx.clone(),
             versions.clone(),

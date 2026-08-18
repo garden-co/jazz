@@ -521,22 +521,16 @@ fn demand_driven_db_acquires_cold_subscription_before_registering_it() {
         title_cells("staged b"),
     ))
     .unwrap();
-    let staged = crate::db::block_on(owner.mergeable_all(tx_id, &prepared, opts.clone())).unwrap();
-    assert!(staged.iter().any(|row| row.row_uuid() == tx_row_a));
-    assert!(staged.iter().any(|row| row.row_uuid() == tx_row_b));
     assert!(
         subscription.try_next_event().is_none(),
         "staged transaction writes must remain invisible"
     );
     let committed = {
         let mut commit = std::pin::pin!(owner.commit_mergeable(tx_id));
-        match std::future::Future::poll(commit.as_mut(), &mut context) {
-            std::task::Poll::Ready(Ok(committed)) => committed,
-            std::task::Poll::Ready(Err(error)) => panic!("mergeable commit failed: {error}"),
-            std::task::Poll::Pending => {
-                panic!("a resident mergeable transaction must commit in its first poll")
-            }
-        }
+        assert!(std::future::Future::poll(commit.as_mut(), &mut context).is_pending());
+        assert!(subscription.try_next_event().is_none());
+        released.set(true);
+        crate::db::block_on(commit.as_mut()).expect("released mergeable inputs must publish once")
     };
     let Some(crate::db::SubscriptionEvent::Delta { added, .. }) = subscription.try_next_event()
     else {
@@ -544,6 +538,43 @@ fn demand_driven_db_acquires_cold_subscription_before_registering_it() {
     };
     assert_eq!(added.len(), 2);
     assert!(committed.time.0 > 0);
+    released.set(true);
+
+    let exclusive_id = crate::db::block_on(owner.begin_exclusive()).unwrap();
+    assert!(crate::db::block_on(owner.exclusive_read(
+        exclusive_id,
+        "todos",
+        write.row_uuid(),
+    ))
+    .unwrap()
+    .is_some());
+    let exclusive_row = RowUuid::from_bytes([0xd1; 16]);
+    crate::db::block_on(owner.exclusive_insert(
+        exclusive_id,
+        "todos",
+        exclusive_row,
+        title_cells("exclusive staged"),
+    ))
+    .unwrap();
+    assert!(
+        subscription.try_next_event().is_none(),
+        "exclusive staging must remain private"
+    );
+    released.set(false);
+    let exclusive_tx = {
+        let mut commit = std::pin::pin!(owner.commit_exclusive(exclusive_id));
+        assert!(std::future::Future::poll(commit.as_mut(), &mut context).is_pending());
+        assert!(subscription.try_next_event().is_none());
+        released.set(true);
+        crate::db::block_on(commit.as_mut()).expect("released exclusive inputs must publish once")
+    };
+    let Some(crate::db::SubscriptionEvent::Delta { added, .. }) = subscription.try_next_event()
+    else {
+        panic!("exclusive publication must synchronously refresh subscriptions")
+    };
+    assert_eq!(added.len(), 1);
+    assert!(exclusive_tx.time.0 > committed.time.0);
+    released.set(false);
     assert!(owner.poll_persistence(&mut context).is_pending());
 }
 
@@ -648,6 +679,22 @@ fn demand_driven_db_acquires_cold_mutations_before_single_publish() {
     let std::task::Poll::Ready(Ok(mut owner)) = opening.poll(&mut context) else {
         panic!("released metadata reads must open the database")
     };
+    let exclusive_id = crate::db::block_on(owner.begin_exclusive()).unwrap();
+    let exclusive_row = RowUuid::from_bytes([0xd2; 16]);
+    crate::db::block_on(owner.exclusive_insert(
+        exclusive_id,
+        "todos",
+        exclusive_row,
+        title_cells("cold exclusive seed"),
+    ))
+    .unwrap();
+    released.set(false);
+    {
+        let mut commit = std::pin::pin!(owner.commit_exclusive(exclusive_id));
+        assert!(std::future::Future::poll(commit.as_mut(), &mut context).is_pending());
+        released.set(true);
+        crate::db::block_on(commit.as_mut()).expect("released exclusive inputs must publish once");
+    }
     released.set(false);
     let deleted = {
         let mut delete = std::pin::pin!(owner.delete("todos", delete_row));

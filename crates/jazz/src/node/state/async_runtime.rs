@@ -185,6 +185,22 @@ impl DemandDrivenNode {
         )
     }
 
+    /// Validate and publish a staged exclusive transaction without consuming
+    /// its handle or advancing the local clock during cold acquisition.
+    pub fn poll_exclusive_open(
+        &mut self,
+        context: &mut std::task::Context<'_>,
+        open_batch_id: OpenBatchId,
+        made_by: AuthorId,
+        now_ms: u64,
+    ) -> std::task::Poll<Result<(TxId, SyncMessage), Error>> {
+        self.poll_local_operation(
+            context,
+            |node| node.prepare_exclusive_commit(open_batch_id, made_by, now_ms),
+            |node, prepared| node.publish_prepared_exclusive_commit(prepared),
+        )
+    }
+
     /// Create one local branch through the same acquire-then-publish boundary
     /// as application-row writes.
     pub fn poll_create_branch(

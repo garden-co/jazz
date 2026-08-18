@@ -99,20 +99,7 @@ where
                         )?;
                         let _ = self.read_merge_heads(table_id, version.row_uuid())?;
                     }
-                    let ahead_table = self.physical_current_table_for_schema(
-                        version.schema_version(),
-                        &table.name,
-                        layer,
-                        PhysicalCurrentClass::Ahead,
-                    )?;
-                    let _ = self.database.primary_key_get_raw(
-                        &ahead_table,
-                        &[
-                            Value::Uuid(version.row_uuid().0),
-                            Value::U64(tx.tx_id.time.0),
-                            Value::U64(tx_node_alias.0),
-                        ],
-                    )?;
+                    self.preload_ahead_current_slot(version, tx_node_alias, tx.tx_id.time)?;
                 }
             }
         }

@@ -83,7 +83,7 @@ where
                 self.schema_version_id,
                 table,
                 row,
-                BTreeMap::new(),
+                BTreeMap::<String, Value>::new(),
                 Some(DeletionEvent::Deleted),
                 Vec::new(),
                 Some(now_ms),
@@ -140,23 +140,110 @@ where
         .map_err(MutationPrepareError::Node)
     }
 
-    pub(super) fn transaction_all_for_owner(
+    pub(super) fn begin_exclusive_for_owner(
         &self,
-        tx_id: OpenBatchId,
-        prepared: &PreparedQuery,
-        opts: ReadOpts,
-    ) -> Result<Vec<CurrentRow>, MutationPrepareError> {
-        ensure_default_read_view(&opts).map_err(MutationPrepareError::Api)?;
+        id: OpenBatchId,
+    ) -> Result<(), MutationPrepareError> {
         self.node
             .node
             .borrow_mut()
-            .tx_query_with_options(
+            .open_exclusive_for_identity(id, self.identity.author)
+            .map_err(MutationPrepareError::Node)
+    }
+
+    pub(super) fn exclusive_read_for_owner(
+        &self,
+        tx_id: OpenBatchId,
+        table: &str,
+        row: RowUuid,
+    ) -> Result<Option<RowCells>, MutationPrepareError> {
+        self.node
+            .node
+            .borrow_mut()
+            .tx_read_in_schema(tx_id, self.schema_version_id, table, row)
+            .map_err(MutationPrepareError::Node)
+    }
+
+    pub(super) fn stage_exclusive_insert_for_owner(
+        &self,
+        tx_id: OpenBatchId,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+        now_ms: u64,
+    ) -> Result<(), MutationPrepareError> {
+        let cells = self
+            .apply_insert_defaults(table, cells)
+            .map_err(MutationPrepareError::Api)?;
+        self.node
+            .node
+            .borrow_mut()
+            .tx_write_in_schema_at_ms(
                 tx_id,
-                &prepared.shape,
-                &prepared.binding,
-                opts.include_deleted,
+                self.schema_version_id,
+                table,
+                row,
+                cells,
+                None,
+                Some(now_ms),
             )
             .map_err(MutationPrepareError::Node)
+    }
+
+    pub(super) fn stage_exclusive_delete_for_owner(
+        &self,
+        tx_id: OpenBatchId,
+        table: &str,
+        row: RowUuid,
+        now_ms: u64,
+    ) -> Result<(), MutationPrepareError> {
+        self.node
+            .node
+            .borrow_mut()
+            .tx_write_in_schema_at_ms(
+                tx_id,
+                self.schema_version_id,
+                table,
+                row,
+                BTreeMap::<String, Value>::new(),
+                Some(DeletionEvent::Deleted),
+                Some(now_ms),
+            )
+            .map_err(MutationPrepareError::Node)
+    }
+
+    pub(super) fn stage_exclusive_restore_for_owner(
+        &self,
+        tx_id: OpenBatchId,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+        now_ms: u64,
+    ) -> Result<(), MutationPrepareError> {
+        let cells = self
+            .apply_insert_defaults(table, cells)
+            .map_err(MutationPrepareError::Api)?;
+        let mut node = self.node.node.borrow_mut();
+        node.tx_write_in_schema_at_ms(
+            tx_id,
+            self.schema_version_id,
+            table,
+            row,
+            cells,
+            None,
+            Some(now_ms),
+        )
+        .map_err(MutationPrepareError::Node)?;
+        node.tx_write_in_schema_at_ms(
+            tx_id,
+            self.schema_version_id,
+            table,
+            row,
+            BTreeMap::<String, Value>::new(),
+            Some(DeletionEvent::Restored),
+            Some(now_ms),
+        )
+        .map_err(MutationPrepareError::Node)
     }
 
     /// Build a mergeable transaction that commits multiple writes under one id.

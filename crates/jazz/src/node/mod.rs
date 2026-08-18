@@ -848,6 +848,12 @@ pub(crate) struct PreparedOpenMergeableCommit {
     commit: PreparedMergeableCommit,
 }
 
+pub(crate) struct PreparedExclusiveCommit {
+    open_batch_id: OpenBatchId,
+    tx: Transaction,
+    versions: Vec<VersionRecord>,
+}
+
 /// Rejection records and derived indexes used for pending-cascade handling.
 #[derive(Clone, Debug, Default)]
 struct RejectionTracking {
