@@ -1638,6 +1638,68 @@ describe("SubscriptionManager", () => {
     ]);
   });
 
+  it("defers a terminal root move until authority re-admits its row", () => {
+    const manager = new SubscriptionManager<TestItem>();
+    const first = "00000000-0000-4000-8000-000000000001";
+    const second = "00000000-0000-4000-8000-000000000002";
+    const secondKey = [10, ...uuidBytes(second)];
+    const empty = new Uint8Array();
+    const frame = (overrides: Partial<NativeRowDelta>): NativeRowDelta => ({
+      __jazzNativeRowDelta: true,
+      added: empty,
+      removed: empty,
+      updated: empty,
+      addedCount: 0,
+      removedCount: 0,
+      updatedCount: 0,
+      ...overrides,
+    });
+
+    manager.handleDelta(
+      frame({
+        added: Uint8Array.from([
+          ...nativeAddedRecord(first, 0, "first", 1),
+          ...nativeAddedRecord(second, 1, "second", 2),
+        ]),
+        addedCount: 2,
+      }),
+      transform,
+      nativeColumns,
+    );
+    const removedBytes: number[] = [...uuidBytes(second)];
+    pushU32(removedBytes, 1);
+    manager.handleDelta(
+      frame({ removed: Uint8Array.from(removedBytes), removedCount: 1 }),
+      transform,
+      nativeColumns,
+    );
+
+    const deferred = manager.handleDelta(
+      frame({
+        terminalOperations: [
+          {
+            root_key: secondKey,
+            path: [],
+            edit: { Move: { key: secondKey, index: 0 } },
+          },
+        ],
+      }),
+      transform,
+      nativeColumns,
+    );
+    expect(deferred.all).toEqual([{ id: first, name: "first", count: 1 }]);
+
+    const readded = manager.handleDelta(
+      frame({
+        added: nativeAddedRecord(second, 1, "second", 2),
+        addedCount: 1,
+      }),
+      transform,
+      nativeColumns,
+    );
+    expect(readded.all?.map((row) => row.id)).toEqual([second, first]);
+  });
+
   it("clears tracked state before applying native reset frames", () => {
     const manager = new SubscriptionManager<TestItem>();
     const first = "00000000-0000-4000-8000-000000000001";

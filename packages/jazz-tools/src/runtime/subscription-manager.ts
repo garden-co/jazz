@@ -435,11 +435,10 @@ export class SubscriptionManager<T extends { id: string }> {
     );
     const ready: NativeTerminalOperation[] = [];
     for (const operation of operations) {
-      if (
-        operation.path.length > 0 &&
+      const rootIsMissing =
         !insertedRoots.has(this.terminalAddress(operation.root_key)) &&
-        !this.terminalRows.has(this.terminalRootId(operation.root_key))
-      ) {
+        !this.terminalRows.has(this.terminalRootId(operation.root_key));
+      if (rootIsMissing && (operation.path.length > 0 || "Move" in operation.edit)) {
         this.deferredTerminalOperations.push(operation);
         continue;
       }

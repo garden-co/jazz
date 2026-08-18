@@ -531,20 +531,18 @@ where
             coverage_groups,
             prepared_group_updates,
             prepared_current_row_updates,
-            serve_dirty: _,
+            serve_dirty,
             served_current_rows,
             ..
         } = &mut self.link
         else {
             return Ok(());
         };
-        if !subscriber_permissions_ready(node.permissions_ready(), ingest_context.trust) {
+        if !*serve_dirty
+            || !subscriber_permissions_ready(node.permissions_ready(), ingest_context.trust)
+        {
             return Ok(());
         }
-        // A later connection in the same resident tick may advance the
-        // shared dirty epoch. Prepare every live group's next update now so
-        // that bounded follow-up serving never discovers cold storage after
-        // the async owner has yielded control to the synchronous tick.
         if !coverage_groups.is_empty() {
             node.flush_query_runtime()?;
         }
