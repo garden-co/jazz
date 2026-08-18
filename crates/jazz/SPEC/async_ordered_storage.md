@@ -295,6 +295,48 @@ publish and its local subscription callbacks still occur in one synchronous
 poll. Encountering a new cold input during publish is an invariant violation
 and poisons the resident runtime rather than exposing a partial mutation.
 
+### Peer ingress operations
+
+A peer tick is a driver, not an atomic storage operation. Transport receive,
+repair bookkeeping, authenticated-link state, resident mutation, durability,
+and outbound delivery currently happen in one loop, but an asynchronous store
+must not make that whole loop replayable. A cold miss after an inbound frame
+has changed any of those domains would otherwise duplicate a request, lose a
+frame, or expose a partially applied message.
+
+The durable owner therefore stages each inbound frame under its connection and
+drives one typed ingress operation through these phases:
+
+1. **classify and preflight** validates the authenticated envelope and acquires
+   every durable-backed input used by that message without consuming the
+   frame, advancing connection cursors, mutating the resident node, or sending
+   transport output;
+2. **resident publish** applies the prepared message exactly once. Commit and
+   fate messages use the same prepared authority/relay and publication-scope
+   machinery as direct owner calls; view, catalogue, branch, and repair
+   messages have their own typed preparation rather than a generic replayable
+   `apply_sync_message` closure;
+3. **durable/external release** commits the complete resident journal where the
+   message changes durable Jazz state, then atomically marks the staged frame
+   consumed and releases its receipts, routed fates, subscription events, and
+   outbound responses.
+
+Pure connection-control messages may complete without a storage commit, but
+they still advance their connection state only once. Several frames may be
+batched when their prepared operations and release ordering are explicit; the
+semantic unit remains the staged frame, not an arbitrarily replayed tick.
+Transport backpressure retains an already-produced outbound frame and never
+reapplies its resident ingress operation. A persistence failure poisons the
+owner before any durable/external release, and reconnect recovery starts from
+the last coherent durable frame boundary.
+
+`NodeState::apply_sync_message` remains the synchronous resident publication
+surface for fully resident callers and tests. The asynchronous peer driver is
+responsible for selecting a typed preparation before invoking it; a generic
+`poll_operation(|| apply_sync_message(...))` is forbidden because many message
+handlers intentionally update more than resident storage and are not replay
+safe.
+
 ## Resident current-state requirement
 
 An overlay containing only the newest row is insufficient for an immediate new

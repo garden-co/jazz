@@ -1553,6 +1553,130 @@ fn cold_authority_preflight_suspends_before_transaction_or_callback_publication(
 }
 
 #[test]
+fn cold_relay_ingress_suspends_and_withholds_callbacks_until_durable() {
+    let (mut writer, _) = fail_write_many_node();
+    let (tx_id, unit) = writer
+        .commit_mergeable_unit(
+            MergeableCommit::new("todos", row(0xcb), 10).cells(title_cells("cold relay")),
+        )
+        .unwrap();
+    let SyncMessage::CommitUnit { tx, versions } = unit else {
+        panic!("local write must produce a commit unit")
+    };
+    let node_schema = schema();
+    let column_families = node_schema.column_families();
+    let refs = column_families.iter().map(String::as_str).collect::<Vec<_>>();
+    let durable = MemoryStorage::new(&refs);
+    let waker = std::task::Waker::from(std::sync::Arc::new(PersistenceTestWake));
+    let mut context = std::task::Context::from_waker(&waker);
+    let mut bootstrap = PollableNodeOpen::new(
+        node(0xcb),
+        node_schema.clone(),
+        Box::new(groove::storage::async_ordered::ImmediateStorage::new(
+            durable.clone(),
+        )),
+    );
+    let std::task::Poll::Ready(Ok(bootstrap)) = bootstrap.poll(&mut context) else {
+        panic!("immediate bootstrap must complete")
+    };
+    drop(bootstrap);
+
+    let released = std::rc::Rc::new(std::cell::Cell::new(true));
+    let backend = GatedAuthorityStorage {
+        inner: groove::storage::async_ordered::ImmediateStorage::new(durable),
+        released: std::rc::Rc::clone(&released),
+        cancellations: std::rc::Rc::new(std::cell::Cell::new(0)),
+        committed_units: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
+        fail_commits: std::rc::Rc::new(std::cell::Cell::new(false)),
+    };
+    let mut opening = PollableNodeOpen::new(node(0xcb), node_schema, Box::new(backend));
+    let std::task::Poll::Ready(Ok(mut relay)) = opening.poll(&mut context) else {
+        panic!("checkpointed relay must reopen")
+    };
+    let std::task::Poll::Ready(Ok(history)) =
+        relay.poll_subscribe_history(&mut context, "todos")
+    else {
+        panic!("empty history must open before gating storage")
+    };
+    assert!(history.recv().unwrap().is_empty());
+
+    released.set(false);
+    assert!(relay
+        .poll_ingest_relay_commit_unit(&mut context, tx.clone(), versions.clone())
+        .is_pending());
+    assert!(relay.node.borrow_mut().transaction_record(tx_id).is_none());
+    assert!(matches!(
+        history.try_recv(),
+        Err(std::sync::mpsc::TryRecvError::Empty)
+    ));
+
+    released.set(true);
+    let outcome = loop {
+        match relay.poll_ingest_relay_commit_unit(&mut context, tx.clone(), versions.clone()) {
+            std::task::Poll::Pending => {}
+            ready => break ready,
+        }
+    };
+    let std::task::Poll::Ready(Ok(())) = outcome else {
+        panic!("released relay ingress must complete: {outcome:?}")
+    };
+    assert_eq!(history.recv().unwrap().to_values().unwrap().len(), 1);
+    let stored = relay
+        .node
+        .borrow_mut()
+        .transaction_record(tx_id)
+        .expect("durable relay ingress must publish its transaction");
+    assert_eq!(stored.fate, Fate::Pending);
+    assert_eq!(stored.durability, DurabilityTier::Local);
+}
+
+#[test]
+fn relay_ingress_quarantines_external_publication_until_commit() {
+    let (mut writer, _) = fail_write_many_node();
+    let (tx_id, unit) = writer
+        .commit_mergeable_unit(
+            MergeableCommit::new("todos", row(0xcc), 10).cells(title_cells("relay commit")),
+        )
+        .unwrap();
+    let SyncMessage::CommitUnit { tx, versions } = unit else {
+        panic!("local write must produce a commit unit")
+    };
+    let released = std::rc::Rc::new(std::cell::Cell::new(true));
+    let mut relay = authority_runtime(
+        std::rc::Rc::clone(&released),
+        std::rc::Rc::new(std::cell::Cell::new(false)),
+    );
+    let waker = std::task::Waker::from(std::sync::Arc::new(PersistenceTestWake));
+    let mut context = std::task::Context::from_waker(&waker);
+    let std::task::Poll::Ready(Ok(history)) =
+        relay.poll_subscribe_history(&mut context, "todos")
+    else {
+        panic!("empty relay history must open")
+    };
+    assert!(history.recv().unwrap().is_empty());
+
+    released.set(false);
+    assert!(relay
+        .poll_ingest_relay_commit_unit(&mut context, tx.clone(), versions.clone())
+        .is_pending());
+    assert!(
+        relay.node.borrow_mut().transaction_record(tx_id).is_some(),
+        "resident ingress publishes once before its durable request completes"
+    );
+    assert!(matches!(
+        history.try_recv(),
+        Err(std::sync::mpsc::TryRecvError::Empty)
+    ));
+
+    released.set(true);
+    assert!(matches!(
+        relay.poll_ingest_relay_commit_unit(&mut context, tx, versions),
+        std::task::Poll::Ready(Ok(()))
+    ));
+    assert_eq!(history.recv().unwrap().to_values().unwrap().len(), 1);
+}
+
+#[test]
 fn immediate_authority_storage_completes_through_the_same_first_poll() {
     let (mut writer, _) = fail_write_many_node();
     let (tx_id, unit) = writer

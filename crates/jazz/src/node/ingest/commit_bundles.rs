@@ -10,10 +10,91 @@ pub(crate) struct PreparedAuthorityCommit {
     request: AuthorityCommitRequest,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct PreparedRelayCommit {
+    tx: Transaction,
+    versions: Vec<VersionRecord>,
+}
+
 impl<S> NodeState<S>
 where
     S: ResidentStorage,
 {
+    /// Acquire the exact durable-backed inputs needed to publish one unfated
+    /// relay commit. Parking for unavailable catalogue/branch protocol state
+    /// remains a resident publication; durable storage misses do not.
+    pub(crate) fn prepare_relay_commit(
+        &mut self,
+        tx: Transaction,
+        versions: Vec<VersionRecord>,
+    ) -> Result<PreparedRelayCommit, Error>
+    where
+        S: ReopenableStorage,
+    {
+        self.require_catalogue_ready()?;
+        let versions = canonical_versions(versions);
+        if commit_unit_limit_violation(&versions).is_some()
+            || !commit_unit_write_count_matches(&tx, versions.len())
+            || self.malformed_authored_version_reason(&versions).is_some()
+            || (tx.kind != TxKind::Mergeable && tx.kind != TxKind::Exclusive)
+        {
+            return Ok(PreparedRelayCommit { tx, versions });
+        }
+
+        let tx_node_alias = self.prepare_node_alias(tx.tx_id.node)?;
+        if self.query_transaction(tx.tx_id)?.is_some() {
+            let _ = self.query_versions_for_tx(tx.tx_id)?;
+        }
+
+        let branch_ready = !matches!(
+            tx.target_lineage,
+            crate::tx::BranchLineage::Branch(branch_id)
+                if !self.branches.branches.contains_key(&branch_id)
+        );
+        let schemas_ready = versions.iter().all(|version| {
+            self.catalogue
+                .catalogue_schemas
+                .contains_key(&version.schema_version())
+        });
+        if branch_ready && schemas_ready {
+            let mut memo = IngestMemo::default();
+            if self.missing_parent_refs_memo(&versions, &mut memo)?.is_empty() {
+                for version in &versions {
+                    let table = self.table_in_schema(version.table(), version.schema_version())?;
+                    let layer = VersionLayer::for_record(version);
+                    let _ = self.query_local_layer_winner(
+                        &table.name,
+                        version.row_uuid(),
+                        layer,
+                    )?;
+                    self.preload_ahead_current_slot(
+                        version,
+                        tx_node_alias,
+                        tx.tx_id.time,
+                    )?;
+                    if layer == VersionLayer::Content {
+                        let table_id = self.physical_table_id_for_schema(
+                            version.schema_version(),
+                            &table.name,
+                        )?;
+                        let _ = self.read_merge_heads(table_id, version.row_uuid())?;
+                    }
+                }
+            }
+        }
+        Ok(PreparedRelayCommit { tx, versions })
+    }
+
+    pub(crate) fn publish_prepared_relay_commit(
+        &mut self,
+        prepared: PreparedRelayCommit,
+    ) -> Result<(), Error>
+    where
+        S: ReopenableStorage,
+    {
+        self.ingest_relay_commit_unit_without_drain(prepared.tx, prepared.versions)
+    }
+
     /// Acquire the durable-backed inputs that can affect authority validation.
     ///
     /// This phase may populate read/query caches, but it cannot advance a
@@ -539,6 +620,19 @@ where
     where
         S: ReopenableStorage,
     {
+        self.ingest_relay_commit_unit_without_drain(tx, versions)?;
+        self.drain_parked_relay_commit_units()?;
+        Ok(())
+    }
+
+    fn ingest_relay_commit_unit_without_drain(
+        &mut self,
+        tx: Transaction,
+        versions: Vec<VersionRecord>,
+    ) -> Result<(), Error>
+    where
+        S: ReopenableStorage,
+    {
         self.require_catalogue_ready()?;
         if commit_unit_limit_violation(&versions).is_some()
             || !commit_unit_write_count_matches(&tx, versions.len())
@@ -550,7 +644,6 @@ where
         }
         self.prepare_branch_target_partitions_if_ready(&tx, &versions)?;
         self.ingest_relay_commit_unit_once(tx, versions)?;
-        self.drain_parked_relay_commit_units()?;
         Ok(())
     }
 
