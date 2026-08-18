@@ -2502,6 +2502,76 @@ fn session_branch_metadata_echo_waits_for_durable_commit() {
 }
 
 #[test]
+fn incremental_catalogue_ack_waits_for_durable_commit() {
+    let node_schema = schema();
+    let message = SyncMessage::PublishSchema {
+        author: AuthorId::SYSTEM,
+        schema: Box::new(crate::protocol::SchemaVersion::new(node_schema.clone())),
+    };
+    let column_families = node_schema.column_families();
+    let refs = column_families.iter().map(String::as_str).collect::<Vec<_>>();
+    let released = std::rc::Rc::new(std::cell::Cell::new(true));
+    let storage = CommitGatedAuthorityStorage {
+        inner: groove::storage::async_ordered::ImmediateStorage::new(MemoryStorage::new(&refs)),
+        released: std::rc::Rc::clone(&released),
+        fail: std::rc::Rc::new(std::cell::Cell::new(false)),
+        completed: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
+    };
+    let identity = crate::db::DbIdentity {
+        node: node(0xd5),
+        author: AuthorId::SYSTEM,
+    };
+    let mut opening =
+        crate::db::PollableDbOpen::new_history_complete(node_schema, identity, Box::new(storage));
+    let waker = std::task::Waker::from(std::sync::Arc::new(PersistenceTestWake));
+    let mut context = std::task::Context::from_waker(&waker);
+    let std::task::Poll::Ready(Ok(mut authority)) = opening.poll(&mut context) else {
+        panic!("commit-only gate must open the demand-driven authority")
+    };
+    let outbound = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let _subscriber = authority.accept_subscriber_with_claims_and_trust(
+        Box::new(QueuedInboundTransport {
+            inbound: std::rc::Rc::new(std::cell::RefCell::new(
+                std::collections::VecDeque::from([message]),
+            )),
+            outbound: std::rc::Rc::clone(&outbound),
+            session_context: None,
+        }),
+        AuthorId::SYSTEM,
+        std::collections::BTreeMap::new(),
+        crate::node::CommitUnitTrust::TrustedBackend,
+    );
+
+    released.set(false);
+    assert!(authority.poll_tick(&mut context).is_pending());
+    assert!(!outbound
+        .borrow()
+        .iter()
+        .any(|message| matches!(message, SyncMessage::CatalogueAck(_))));
+
+    released.set(true);
+    let mut completed = false;
+    for _ in 0..16 {
+        match authority.poll_tick(&mut context) {
+            std::task::Poll::Pending => assert!(!outbound
+                .borrow()
+                .iter()
+                .any(|message| matches!(message, SyncMessage::CatalogueAck(_)))),
+            std::task::Poll::Ready(Ok(_)) => {
+                completed = true;
+                break;
+            }
+            std::task::Poll::Ready(Err(error)) => panic!("catalogue publish failed: {error}"),
+        }
+    }
+    assert!(completed);
+    assert!(outbound
+        .borrow()
+        .iter()
+        .any(|message| matches!(message, SyncMessage::CatalogueAck(_))));
+}
+
+#[test]
 fn immediate_authority_storage_completes_through_the_same_first_poll() {
     let (mut writer, _) = fail_write_many_node();
     let (tx_id, unit) = writer

@@ -362,6 +362,23 @@ where
         Some(metadata.clone())
     }
 
+    pub(super) fn staged_catalogue_message(
+        &self,
+    ) -> Option<(SyncMessage, CommitUnitIngestContext)> {
+        let ConnectionLink::Subscriber { ingest_context, .. } = &self.link else {
+            return None;
+        };
+        let staged = self.staged_inbound.front()?;
+        matches!(
+            staged.message,
+            SyncMessage::PublishSchema { .. }
+                | SyncMessage::PublishSchemaWithLens { .. }
+                | SyncMessage::PublishLens { .. }
+                | SyncMessage::SetCurrentWriteSchema { .. }
+        )
+        .then_some((staged.message.clone(), *ingest_context))
+    }
+
     pub(super) fn pending_session_branch_metadata(
         &self,
     ) -> Option<crate::protocol::BranchMetadata> {
@@ -429,6 +446,20 @@ where
         let mut outbound = self.downstream_fates.borrow_mut();
         outbound.extend(responses);
         outbound.push(SyncMessage::BranchMetadata(metadata.clone()));
+        self.externally_applied_inbound = true;
+    }
+
+    pub(super) fn complete_staged_catalogue_message(
+        &mut self,
+        message: &SyncMessage,
+        responses: Vec<SyncMessage>,
+    ) {
+        let staged = self
+            .staged_inbound
+            .pop_front()
+            .expect("completed catalogue ingress retains its staged frame");
+        debug_assert_eq!(&staged.message, message);
+        self.downstream_fates.borrow_mut().extend(responses);
         self.externally_applied_inbound = true;
     }
 

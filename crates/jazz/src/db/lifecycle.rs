@@ -297,6 +297,21 @@ impl DemandDrivenDb {
                 }
                 continue;
             }
+            let staged_catalogue_message = connection.borrow().staged_catalogue_message();
+            if let Some((message, ingest_context)) = staged_catalogue_message {
+                match self.runtime.poll_apply_peer_catalogue_message(
+                    context,
+                    &message,
+                    ingest_context,
+                ) {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(Err(error)) => return Poll::Ready(Err(error.into())),
+                    Poll::Ready(Ok(responses)) => connection
+                        .borrow_mut()
+                        .complete_staged_catalogue_message(&message, responses),
+                }
+                continue;
+            }
             let staged_catalogue = { connection.borrow().staged_catalogue_snapshot() };
             if let Some(snapshot) = staged_catalogue {
                 match self

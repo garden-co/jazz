@@ -51,6 +51,7 @@ pub struct DemandDrivenNode {
     pending_peer_catalogue: Option<PendingPeerCatalogue>,
     pending_peer_branch_metadata: Option<PendingPeerBranchMetadata>,
     pending_session_branch_metadata: Option<PendingSessionBranchMetadata>,
+    pending_peer_catalogue_message: Option<PendingPeerCatalogueMessage>,
     persistence_failed: bool,
 }
 
@@ -99,6 +100,12 @@ struct PendingPeerBranchMetadata {
 
 struct PendingSessionBranchMetadata {
     branch: BranchId,
+    responses: Vec<SyncMessage>,
+    publication: groove::db::DurablePublicationScope,
+}
+
+struct PendingPeerCatalogueMessage {
+    message: SyncMessage,
     responses: Vec<SyncMessage>,
     publication: groove::db::DurablePublicationScope,
 }
@@ -1032,6 +1039,84 @@ impl DemandDrivenNode {
         }
     }
 
+    pub(crate) fn poll_apply_peer_catalogue_message(
+        &mut self,
+        context: &mut std::task::Context<'_>,
+        message: &SyncMessage,
+        ingest_context: CommitUnitIngestContext,
+    ) -> std::task::Poll<Result<Vec<SyncMessage>, Error>> {
+        match &self.pending_peer_catalogue_message {
+            Some(pending) if &pending.message != message => {
+                return std::task::Poll::Ready(Err(Error::InvalidStoredValue(
+                    "different catalogue message was polled while one is pending",
+                )));
+            }
+            None => {
+                if let Err(error) = self.ensure_durable_publication_idle() {
+                    return std::task::Poll::Ready(Err(error));
+                }
+                let publication = match self
+                    .node
+                    .borrow_mut()
+                    .database
+                    .begin_durable_publication_scope()
+                {
+                    Ok(publication) => publication,
+                    Err(error) => return std::task::Poll::Ready(Err(error.into())),
+                };
+                let apply_result = self
+                    .node
+                    .borrow_mut()
+                    .apply_sync_message_with_ingest_context(
+                        message.clone(),
+                        Some(ingest_context),
+                    );
+                let responses = match apply_result {
+                    Ok(responses) => responses,
+                    Err(error) => {
+                        publication.abort(&mut self.node.borrow_mut().database);
+                        if is_not_resident(&error) {
+                            self.fail_persistence();
+                        } else {
+                            self.discard_failed_operation_writes();
+                        }
+                        return std::task::Poll::Ready(Err(error));
+                    }
+                };
+                self.collect_persistence_unit();
+                self.pending_peer_catalogue_message = Some(PendingPeerCatalogueMessage {
+                    message: message.clone(),
+                    responses,
+                    publication,
+                });
+            }
+            Some(_) => {}
+        }
+        match self.poll_persistence_queue(context) {
+            std::task::Poll::Pending => std::task::Poll::Pending,
+            std::task::Poll::Ready(Ok(())) => {
+                let pending = self
+                    .pending_peer_catalogue_message
+                    .take()
+                    .expect("durable catalogue message retains publication state");
+                pending
+                    .publication
+                    .finish(&mut self.node.borrow_mut().database);
+                std::task::Poll::Ready(Ok(pending.responses))
+            }
+            std::task::Poll::Ready(Err(error)) => {
+                let pending = self
+                    .pending_peer_catalogue_message
+                    .take()
+                    .expect("failed catalogue message retains publication state");
+                pending
+                    .publication
+                    .abort(&mut self.node.borrow_mut().database);
+                std::task::Poll::Ready(Err(error))
+            }
+        }
+    }
+
     pub(crate) fn poll_apply_peer_branch_metadata(
         &mut self,
         context: &mut std::task::Context<'_>,
@@ -1314,6 +1399,7 @@ impl DemandDrivenNode {
             || self.pending_peer_catalogue.is_some()
             || self.pending_peer_branch_metadata.is_some()
             || self.pending_session_branch_metadata.is_some()
+            || self.pending_peer_catalogue_message.is_some()
         {
             return std::task::Poll::Ready(Err(Error::InvalidStoredValue(
                 "ingress persistence must be polled through its typed operation",
@@ -1477,6 +1563,7 @@ impl DemandDrivenNode {
             || self.pending_peer_catalogue.is_some()
             || self.pending_peer_branch_metadata.is_some()
             || self.pending_session_branch_metadata.is_some()
+            || self.pending_peer_catalogue_message.is_some()
         {
             Err(Error::InvalidStoredValue(
                 "a durable publication is awaiting completion",
@@ -1559,6 +1646,7 @@ impl PollableNodeOpen {
             pending_peer_catalogue: None,
             pending_peer_branch_metadata: None,
             pending_session_branch_metadata: None,
+            pending_peer_catalogue_message: None,
             persistence_failed: false,
         }
     }
