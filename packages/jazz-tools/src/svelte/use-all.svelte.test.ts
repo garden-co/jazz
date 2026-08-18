@@ -272,4 +272,13 @@ describe("svelte/QuerySubscription", () => {
     expect(subscription.current).toBeNull();
     cleanup();
   });
+
+  it("keeps one mode static when query options are reactive", () => {
+    const query = makeQuery("one") as QueryBuilder<{ id: string }>;
+
+    if ((globalThis as { __typecheck_only__?: boolean }).__typecheck_only__) {
+      // @ts-expect-error `one` controls the instance result type and cannot be reactive.
+      new QuerySubscription(query, () => ({ one: true, tier: "edge" as const }));
+    }
+  });
 });

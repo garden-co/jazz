@@ -5,7 +5,9 @@ import { getJazzContext } from "./context.svelte.js";
 
 type MaybeGetter<T> = T | (() => T);
 
-type QuerySubscriptionOptions<One extends boolean> = QueryOptions & { one?: One };
+type QuerySubscriptionOptions<One extends boolean> = One extends true
+  ? QueryOptions & { one: true }
+  : MaybeGetter<(QueryOptions & { one?: false }) | undefined>;
 
 type QuerySubscriptionResult<T, One extends boolean> = One extends true
   ? T | null | undefined
@@ -48,7 +50,7 @@ export class QuerySubscription<T extends { id: string }, One extends boolean = f
 
   constructor(
     query: MaybeGetter<QueryBuilder<T> | undefined>,
-    options?: MaybeGetter<QuerySubscriptionOptions<One> | undefined>,
+    options?: QuerySubscriptionOptions<One>,
   ) {
     const ctx = getJazzContext();
 
@@ -64,7 +66,9 @@ export class QuerySubscription<T extends { id: string }, One extends boolean = f
       const store = ctx.subscriptionStore;
       if (!store) return;
 
-      const resolvedOptions = resolve(options);
+      const resolvedOptions = resolve(
+        options as MaybeGetter<(QueryOptions & { one?: boolean }) | undefined>,
+      );
       const one = resolvedOptions?.one === true;
       const queryOptions = resolvedOptions && (({ one: _, ...rest }) => rest)(resolvedOptions);
       const subscriptionQuery = one ? limitQueryToOne(resolvedQuery) : resolvedQuery;
