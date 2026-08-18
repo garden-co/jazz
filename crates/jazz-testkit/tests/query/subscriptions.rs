@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use jazz::db::ReadOpts;
 use jazz::tools::server::JazzServer;
 use jazz::tools::{JazzClient, Query, QueryBuilder, Value};
 
@@ -556,7 +557,6 @@ local_tokio_test! {
 ///
 /// This test uses a single local client so it isolates the subscription
 /// delivery path from server sync ordering.
-#[ignore = "local-only subscriptions emit no add delta for local inserts"]
 async fn local_subscription_preserves_final_state_under_rapid_updates() {
     const RAPID_UPDATES: usize = 100;
 
@@ -565,7 +565,7 @@ async fn local_subscription_preserves_final_state_under_rapid_updates() {
     let descriptor = todo_subscription_record_descriptor();
 
     let mut stream = client
-        .subscribe(query.clone())
+        .subscribe_with_opts(query.clone(), ReadOpts::default())
         .await
         .expect("subscribe to local todos");
     let mut log = Vec::new();
