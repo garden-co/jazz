@@ -17,6 +17,7 @@ struct GatedStorage {
     inner: ImmediateStorage<MemoryStorage>,
     released: Rc<Cell<bool>>,
     polls: Rc<Cell<usize>>,
+    cancellations: Rc<Cell<usize>>,
 }
 
 struct CommitGatedStorage {
@@ -99,6 +100,8 @@ impl OrderedKvStorage for GatedStorage {
     }
 
     fn cancel_request(&mut self, _request: StorageRequestId) -> Result<(), Error> {
+        self.cancellations
+            .set(self.cancellations.get().saturating_add(1));
         Ok(())
     }
 }
@@ -223,6 +226,7 @@ fn demand_loaded_query_fetches_then_reads_resident_state() {
         inner: ImmediateStorage::new(seeded.into_storage()),
         released: Rc::clone(&released),
         polls: Rc::clone(&polls),
+        cancellations: Rc::new(Cell::new(0)),
     };
     let mut database = DemandDrivenDatabase::new(schema, Box::new(durable)).unwrap();
     let mut context = Context::from_waker(Waker::noop());
@@ -376,6 +380,7 @@ fn opened_subscription_inherits_synchronous_write_visibility_over_async_storage(
         inner: ImmediateStorage::new(MemoryStorage::new(&["rows", "indices"])),
         released: Rc::clone(&released),
         polls,
+        cancellations: Rc::new(Cell::new(0)),
     };
     let mut database = DemandDrivenDatabase::new(schema, Box::new(durable)).unwrap();
     let mut context = Context::from_waker(Waker::noop());
@@ -451,10 +456,12 @@ fn direct_write_is_synchronous_while_an_unloaded_reference_may_suspend() {
     let schema = referencing_schema();
     let released = Rc::new(Cell::new(true));
     let polls = Rc::new(Cell::new(0));
+    let cancellations = Rc::new(Cell::new(0));
     let durable = GatedStorage {
         inner: ImmediateStorage::new(MemoryStorage::new(&["rows", "related", "indices"])),
         released: Rc::clone(&released),
         polls,
+        cancellations: Rc::clone(&cancellations),
     };
     let mut database = DemandDrivenDatabase::new(schema, Box::new(durable)).unwrap();
     let mut context = Context::from_waker(Waker::noop());
@@ -509,6 +516,12 @@ fn direct_write_is_synchronous_while_an_unloaded_reference_may_suspend() {
     );
     database.enqueue_persistence(persistence);
     assert!(database.poll_persistence(&mut context).is_pending());
+    drop(database);
+    assert_eq!(
+        cancellations.get(),
+        2,
+        "dropping the owner cancels both its cold read and queued commit"
+    );
 }
 
 #[test]

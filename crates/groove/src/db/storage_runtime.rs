@@ -249,6 +249,7 @@ impl DemandDrivenDatabase {
                     self.pending_persistence.pop_front();
                 }
                 Poll::Ready(Ok(response)) => {
+                    self.pending_persistence.pop_front();
                     self.database.mark_async_persistence_failed();
                     return Poll::Ready(Err(crate::storage::Error::Backend {
                         backend: "demand-driven",
@@ -257,6 +258,7 @@ impl DemandDrivenDatabase {
                     .into()));
                 }
                 Poll::Ready(Err(error)) => {
+                    self.pending_persistence.pop_front();
                     self.database.mark_async_persistence_failed();
                     return Poll::Ready(Err(error.into()));
                 }
@@ -273,5 +275,14 @@ impl DemandDrivenDatabase {
     #[doc(hidden)]
     pub fn resident_mut(&mut self) -> &mut Database<crate::storage::DemandLoadedStorage> {
         &mut self.database
+    }
+}
+
+impl Drop for DemandDrivenDatabase {
+    fn drop(&mut self) {
+        let _ = self.acquisition.cancel(self.persistence.as_mut());
+        for request in self.pending_persistence.drain(..) {
+            let _ = self.persistence.cancel_request(request.id());
+        }
     }
 }
