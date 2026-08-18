@@ -323,6 +323,24 @@ terminalizes the in-memory request before attempting backend abort; ambiguous
 cancellation is recovered from durable state rather than retried under the old
 request identity.
 
+Recovery never tries to repair or roll back the poisoned resident runtime. The
+owner is discarded, the binding opens a fresh backend session, and ordinary
+query-driven node opening reconstructs the last coherent durable state. A
+backend may reuse the same underlying database, but it must not reuse an
+ambiguous request identity or the old resident node. Thus an optimistic row
+whose persistent commit failed remains visible only until the owner reports the
+failure; it is absent after clean reopen unless the backend proves that exact
+commit durable.
+
+Lazy physical schema is part of the same prepare/publish discipline. A first
+branch write validates prospective Groove table registrations and prepares its
+row batch against that prospective schema without changing the live runtime.
+The resolving poll installs those table descriptors and publishes the durable
+partition marker, transaction, and first row as one resident operation and one
+persistence unit. An authorized maintained subscription may install an empty
+process-local source earlier, but that source is not durable branch metadata
+and denied subscriptions must not allocate it.
+
 ## Binding requirement
 
 Core readiness is not enough if a binding defers delivery. Native bindings

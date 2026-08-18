@@ -1348,15 +1348,16 @@ fn demand_driven_node_poisoned_after_durable_commit_failure() {
         .iter()
         .map(String::as_str)
         .collect::<Vec<_>>();
+    let durable = MemoryStorage::new(&refs);
     let fail_commits = std::rc::Rc::new(std::cell::Cell::new(false));
     let backend = GatedAuthorityStorage {
-        inner: groove::storage::async_ordered::ImmediateStorage::new(MemoryStorage::new(&refs)),
+        inner: groove::storage::async_ordered::ImmediateStorage::new(durable.clone()),
         released: std::rc::Rc::new(std::cell::Cell::new(true)),
         cancellations: std::rc::Rc::new(std::cell::Cell::new(0)),
         committed_units: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
         fail_commits: std::rc::Rc::clone(&fail_commits),
     };
-    let mut opening = PollableNodeOpen::new(node(0xd6), node_schema, Box::new(backend));
+    let mut opening = PollableNodeOpen::new(node(0xd6), node_schema.clone(), Box::new(backend));
     let waker = std::sync::Arc::new(PersistenceTestWake).into();
     let mut context = std::task::Context::from_waker(&waker);
     let std::task::Poll::Ready(Ok(mut runtime)) = opening.poll(&mut context) else {
@@ -1380,6 +1381,26 @@ fn demand_driven_node_poisoned_after_durable_commit_failure() {
             groove::db::Error::DatabasePoisoned
         )))
     ));
+    drop(runtime);
+
+    fail_commits.set(false);
+    let recovery_backend = GatedAuthorityStorage {
+        inner: groove::storage::async_ordered::ImmediateStorage::new(durable),
+        released: std::rc::Rc::new(std::cell::Cell::new(true)),
+        cancellations: std::rc::Rc::new(std::cell::Cell::new(0)),
+        committed_units: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
+        fail_commits,
+    };
+    let mut reopening = PollableNodeOpen::new(node(0xd6), node_schema, Box::new(recovery_backend));
+    let std::task::Poll::Ready(Ok(mut recovered)) = reopening.poll(&mut context) else {
+        panic!("a fresh storage session must recover the last coherent durable state")
+    };
+    let std::task::Poll::Ready(Ok(rows)) =
+        recovered.poll_current_rows(&mut context, "todos", DurabilityTier::None)
+    else {
+        panic!("recovered current rows must be queryable")
+    };
+    assert!(rows.is_empty(), "the failed optimistic write must not survive reopen");
 }
 
 #[test]
