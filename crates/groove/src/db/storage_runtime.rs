@@ -66,7 +66,15 @@ impl StorageAcquisition {
                             .admit(request.operation().clone(), response)
                             .map_err(E::from)?;
                     }
-                    Poll::Ready(Err(error)) => return Poll::Ready(Err(E::from(error))),
+                    Poll::Ready(Err(error)) => {
+                        // A backend error terminalizes this request identity.
+                        // Retaining it would let a later, independent owner
+                        // operation accidentally restart the completed request.
+                        self.pending
+                            .take()
+                            .expect("failed acquisition request remains pending");
+                        return Poll::Ready(Err(E::from(error)));
+                    }
                 }
             }
             match attempt() {

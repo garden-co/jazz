@@ -25,6 +25,36 @@ struct CommitGatedStorage {
     completed: Rc<RefCell<Vec<&'static str>>>,
 }
 
+struct FailFirstReadStorage {
+    inner: ImmediateStorage<MemoryStorage>,
+    failed: bool,
+    read_requests: Rc<RefCell<Vec<StorageRequestId>>>,
+}
+
+impl OrderedKvStorage for FailFirstReadStorage {
+    fn poll_request(
+        &mut self,
+        request: &OwnedStorageRequest,
+        context: &mut Context<'_>,
+    ) -> Poll<Result<OwnedStorageResponse, Error>> {
+        if !matches!(request.operation(), OwnedStorageOperation::Commit(_)) {
+            self.read_requests.borrow_mut().push(request.id());
+            if !self.failed {
+                self.failed = true;
+                return Poll::Ready(Err(Error::Backend {
+                    backend: "fail-first-read",
+                    message: "injected terminal read failure".to_owned(),
+                }));
+            }
+        }
+        self.inner.poll_request(request, context)
+    }
+
+    fn cancel_request(&mut self, request: StorageRequestId) -> Result<(), Error> {
+        self.inner.cancel_request(request)
+    }
+}
+
 impl OrderedKvStorage for CommitGatedStorage {
     fn poll_request(
         &mut self,
@@ -215,6 +245,36 @@ fn demand_loaded_query_fetches_then_reads_resident_state() {
         polls_after_hydration,
         "the same one-shot must be served entirely from its resident working set"
     );
+}
+
+#[test]
+fn failed_acquisition_request_identity_is_not_reused_by_a_later_read() {
+    let durable = MemoryStorage::new(&["rows", "indices"]);
+    let mut seeded = Database::new(schema(), durable).unwrap();
+    let mut batch = seeded.open_batch();
+    batch.insert("rows", vec![Value::U64(9), Value::String("retry".into())]);
+    seeded.commit_batch(batch).unwrap();
+    let read_requests = Rc::new(RefCell::new(Vec::new()));
+    let backend = FailFirstReadStorage {
+        inner: ImmediateStorage::new(seeded.into_storage()),
+        failed: false,
+        read_requests: Rc::clone(&read_requests),
+    };
+    let mut database = DemandDrivenDatabase::new(schema(), Box::new(backend)).unwrap();
+    let mut context = Context::from_waker(Waker::noop());
+    let read = |database: &Database<DemandLoadedStorage>| database.primary_key_scan("rows", &[]);
+
+    assert!(matches!(
+        database.poll_read(&mut context, read),
+        Poll::Ready(Err(_))
+    ));
+    let Poll::Ready(Ok(rows)) = database.poll_read(&mut context, read) else {
+        panic!("a later read must start with a fresh request identity")
+    };
+    assert_eq!(rows.len(), 1);
+    let requests = read_requests.borrow();
+    assert!(requests.len() >= 2);
+    assert_ne!(requests[0], requests[1]);
 }
 
 #[test]

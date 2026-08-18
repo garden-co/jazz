@@ -1836,6 +1836,10 @@ impl DemandDrivenNode {
     fn fail_persistence(&mut self) {
         self.persistence_failed = true;
         self.pending_local_durability.clear();
+        let _ = self.acquisition.cancel(self.persistence.as_mut());
+        let _ = self
+            .promotion_acquisition
+            .cancel(self.persistence.as_mut());
         for request in self.pending_persistence.drain(..) {
             let _ = self.persistence.cancel_request(request.id());
         }
