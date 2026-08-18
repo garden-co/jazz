@@ -767,7 +767,7 @@ fn default_disjuncts() -> Vec<Conjunction> {
 impl Query {
     /// Exact core canonical order for aggregate outputs, exposed only to
     /// integration-test helpers that decode the maintained wire record.
-    #[cfg(feature = "test-utils")]
+    #[cfg(feature = "testing")]
     #[doc(hidden)]
     pub fn canonical_aggregate_functions(&self) -> Vec<AggregateFunction> {
         let Some(aggregate) = &self.aggregate else {

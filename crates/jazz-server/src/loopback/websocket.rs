@@ -16,23 +16,24 @@ use std::sync::{
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use crate::db::DbIdentity;
-use crate::ids::{AuthorId, NodeUuid};
-use crate::protocol_limits::{MAX_WIRE_FRAME_BYTES, validate_wire_frame_len};
-use crate::schema::JazzSchema;
 use futures_util::{SinkExt, StreamExt};
+use jazz::db::DbIdentity;
+use jazz::ids::{AuthorId, NodeUuid};
+use jazz::protocol_limits::{MAX_WIRE_FRAME_BYTES, validate_wire_frame_len};
+use jazz::schema::JazzSchema;
 use tokio::net::{TcpListener as TokioTcpListener, TcpStream};
 use tokio::sync::Mutex as TokioMutex;
 use tokio_tungstenite::{WebSocketStream, accept_hdr_async};
 use tungstenite::handshake::server::{Request, Response};
 use tungstenite::protocol::Message;
 
-use crate::serving::auth_admission::{
+use jazz::groove::storage::StorageFactory;
+use jazz::serving::auth_admission::{
     AdmissionSource, AdmittedSession, AuthAdmissionConfig, AuthAdmissionError, AuthHandshake,
     LOCAL_FIRST_JWT_ISSUER, admit_bearer_jwt, admit_local_first_jwt, admit_static_bearer,
     admit_static_bearer_with_claims, bearer_from_authorization,
 };
-use crate::serving::{
+use jazz::serving::{
     InMemoryServerShell, InMemoryServerShellConfig, ListenerConfig, ShellError, StorageConfig,
 };
 
@@ -148,6 +149,7 @@ impl LoopbackWebSocketServer {
             StorageConfig::InMemory,
             websocket_path,
             auth_admission,
+            None,
         )
     }
 
@@ -157,6 +159,7 @@ impl LoopbackWebSocketServer {
         storage: StorageConfig,
         websocket_path: impl Into<String>,
         auth_admission: AuthAdmissionConfig,
+        storage_factory: Option<Arc<dyn StorageFactory>>,
     ) -> LoopbackWebSocketResult<Self> {
         let listener = TcpListener::bind(bind_addr)?;
         listener.set_nonblocking(true)?;
@@ -179,6 +182,10 @@ impl LoopbackWebSocketServer {
             };
             let local = tokio::task::LocalSet::new();
             runtime.block_on(local.run_until(async move {
+                let config = match storage_factory {
+                    Some(factory) => config.with_storage_factory(factory),
+                    None => config,
+                };
                 let shell = match InMemoryServerShell::start_with_storage(config, storage) {
                     Ok(shell) => shell,
                     Err(error) => {
@@ -243,6 +250,21 @@ impl LoopbackWebSocketServer {
     pub fn start_with_config(
         config: LoopbackWebSocketServerConfig,
     ) -> LoopbackWebSocketResult<Self> {
+        Self::start_with_config_and_optional_storage_factory(config, None)
+    }
+
+    /// Start from loopback config with a target-owned durable storage adapter.
+    pub fn start_with_config_and_storage_factory(
+        config: LoopbackWebSocketServerConfig,
+        storage_factory: Arc<dyn StorageFactory>,
+    ) -> LoopbackWebSocketResult<Self> {
+        Self::start_with_config_and_optional_storage_factory(config, Some(storage_factory))
+    }
+
+    fn start_with_config_and_optional_storage_factory(
+        config: LoopbackWebSocketServerConfig,
+        storage_factory: Option<Arc<dyn StorageFactory>>,
+    ) -> LoopbackWebSocketResult<Self> {
         match &config.storage {
             StorageConfig::InMemory => Self::start_with_admission(
                 config.listener.bind_addr,
@@ -256,6 +278,7 @@ impl LoopbackWebSocketServer {
                 config.storage,
                 config.listener.websocket_path.clone(),
                 config.auth_admission,
+                storage_factory,
             ),
             StorageConfig::SQLite { .. } => {
                 Err(LoopbackWebSocketError::DurableStorageUnavailable {
@@ -553,7 +576,7 @@ fn validate_auth_handshake(
 async fn service_connection(
     mut socket: WebSocketStream<TcpStream>,
     shell: Arc<TokioMutex<InMemoryServerShell>>,
-    session: crate::serving::ServerSession,
+    session: jazz::serving::ServerSession,
 ) {
     let mut outbound_tick = tokio::time::interval(Duration::from_millis(5));
     loop {

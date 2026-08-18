@@ -5,12 +5,12 @@ use std::time::{Duration, Instant};
 use jazz::groove::records::{BorrowedRecord, RecordDescriptor, Value as GrooveValue, ValueType};
 use jazz::row_input;
 use jazz::tools::public_schema::AggregateFunction;
-use jazz::tools::server::JazzServer;
 use jazz::tools::{
     ColumnMergeStrategy, ColumnType, DurabilityTier, JazzClient, PolicyExpr, QueryBuilder, Row,
     RowDescriptor, Schema, SchemaBuilder, SubscriptionStream, SubscriptionStreamItem, TableName,
     TablePolicies, TableSchema, Value,
 };
+use jazz_server::JazzServer;
 use support::{TestingClient, wait_for_query};
 use uuid::Uuid;
 
@@ -545,13 +545,13 @@ async fn aggregate_subscription_count_and_grouped_sum_track_full_state() {
         .run_until(async {
             let schema = metrics_schema();
             let server = JazzServer::start_with_schema(schema.clone()).await;
-            let writer = JazzClient::connect(server.make_client_context_for_user(
+            let writer = jazz_testkit::connect(server.make_client_context_for_user(
                 schema.clone(),
                 "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaa1",
             ))
             .await
             .expect("connect writer");
-            let client = JazzClient::connect(
+            let client = jazz_testkit::connect(
                 server.make_client_context_for_user(schema, "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaa11"),
             )
             .await
@@ -694,13 +694,13 @@ async fn aggregate_subscription_group_field_named_count_uses_structural_wire_slo
         .run_until(async {
             let schema = count_named_metrics_schema();
             let server = JazzServer::start_with_schema(schema.clone()).await;
-            let writer = JazzClient::connect(server.make_client_context_for_user(
+            let writer = jazz_testkit::connect(server.make_client_context_for_user(
                 schema.clone(),
                 "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaa21",
             ))
             .await
             .expect("connect writer");
-            let subscriber = JazzClient::connect(
+            let subscriber = jazz_testkit::connect(
                 server.make_client_context_for_user(schema, "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaa22"),
             )
             .await
@@ -751,13 +751,13 @@ async fn aggregate_subscription_uses_core_canonical_order_for_mixed_outputs() {
         .run_until(async {
             let schema = mixed_metrics_schema();
             let server = JazzServer::start_with_schema(schema.clone()).await;
-            let writer = JazzClient::connect(server.make_client_context_for_user(
+            let writer = jazz_testkit::connect(server.make_client_context_for_user(
                 schema.clone(),
                 "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaa23",
             ))
             .await
             .expect("connect writer");
-            let subscriber = JazzClient::connect(
+            let subscriber = jazz_testkit::connect(
                 server.make_client_context_for_user(schema, "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaa24"),
             )
             .await
@@ -830,7 +830,7 @@ async fn aggregate_sum_public_boundary_preserves_nullable_results() {
         .run_until(async {
             let schema = nullable_metrics_schema();
             let server = JazzServer::start_with_schema(schema.clone()).await;
-            let client = JazzClient::connect(
+            let client = jazz_testkit::connect(
                 server.make_client_context_for_user(schema, "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaa3"),
             )
             .await
@@ -902,13 +902,13 @@ async fn grouped_null_aggregate_membership_survives_absence_and_replacement() {
         .run_until(async {
             let schema = nullable_metrics_schema();
             let server = JazzServer::start_with_schema(schema.clone()).await;
-            let writer = JazzClient::connect(server.make_client_context_for_user(
+            let writer = jazz_testkit::connect(server.make_client_context_for_user(
                 schema.clone(),
                 "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaa7",
             ))
             .await
             .expect("connect writer");
-            let client = JazzClient::connect(
+            let client = jazz_testkit::connect(
                 server.make_client_context_for_user(schema, "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaa17"),
             )
             .await
@@ -1040,13 +1040,13 @@ async fn maintained_integer_sum_accumulates_multiple_deltas_and_retracts_empty_g
         .run_until(async {
             let schema = metrics_schema();
             let server = JazzServer::start_with_schema(schema.clone()).await;
-            let writer = JazzClient::connect(server.make_client_context_for_user(
+            let writer = jazz_testkit::connect(server.make_client_context_for_user(
                 schema.clone(),
                 "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaa6",
             ))
             .await
             .expect("connect writer");
-            let client = JazzClient::connect(
+            let client = jazz_testkit::connect(
                 server.make_client_context_for_user(schema, "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaa12"),
             )
             .await
@@ -1137,13 +1137,13 @@ async fn maintained_bigint_sum_replaces_a_multi_row_group_after_insert() {
         .run_until(async {
             let schema = bigint_metrics_schema();
             let server = JazzServer::start_with_schema(schema.clone()).await;
-            let writer = JazzClient::connect(server.make_client_context_for_user(
+            let writer = jazz_testkit::connect(server.make_client_context_for_user(
                 schema.clone(),
                 "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaa9",
             ))
             .await
             .expect("connect writer");
-            let client = JazzClient::connect(
+            let client = jazz_testkit::connect(
                 server.make_client_context_for_user(schema, "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaa13"),
             )
             .await
@@ -1190,13 +1190,13 @@ async fn maintained_double_sum_and_avg_replace_a_multi_row_group_after_insert() 
         .run_until(async {
             let schema = double_metrics_schema();
             let server = JazzServer::start_with_schema(schema.clone()).await;
-            let writer = JazzClient::connect(server.make_client_context_for_user(
+            let writer = jazz_testkit::connect(server.make_client_context_for_user(
                 schema.clone(),
                 "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaa10",
             ))
             .await
             .expect("connect writer");
-            let client = JazzClient::connect(
+            let client = jazz_testkit::connect(
                 server.make_client_context_for_user(schema, "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaa14"),
             )
             .await
@@ -1274,13 +1274,13 @@ async fn maintained_min_and_max_replace_multi_row_groups() {
         .run_until(async {
             let schema = metrics_schema();
             let server = JazzServer::start_with_schema(schema.clone()).await;
-            let writer = JazzClient::connect(server.make_client_context_for_user(
+            let writer = jazz_testkit::connect(server.make_client_context_for_user(
                 schema.clone(),
                 "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaa15",
             ))
             .await
             .expect("connect writer");
-            let client = JazzClient::connect(
+            let client = jazz_testkit::connect(
                 server.make_client_context_for_user(schema, "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaa16"),
             )
             .await
@@ -1352,7 +1352,7 @@ async fn integer_sum_uses_public_signed_values_for_multi_row_groups() {
         .run_until(async {
             let schema = metrics_schema();
             let server = JazzServer::start_with_schema(schema.clone()).await;
-            let client = JazzClient::connect(
+            let client = jazz_testkit::connect(
                 server.make_client_context_for_user(schema, "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaa2"),
             )
             .await
@@ -1389,7 +1389,7 @@ async fn integer_avg_uses_public_signed_values_for_multi_row_groups() {
         .run_until(async {
             let schema = metrics_schema();
             let server = JazzServer::start_with_schema(schema.clone()).await;
-            let client = JazzClient::connect(
+            let client = jazz_testkit::connect(
                 server.make_client_context_for_user(schema, "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaa3"),
             )
             .await
@@ -1502,7 +1502,7 @@ async fn bigint_aggregates_keep_signed_value_semantics() {
         .run_until(async {
             let schema = bigint_metrics_schema();
             let server = JazzServer::start_with_schema(schema.clone()).await;
-            let client = JazzClient::connect(
+            let client = jazz_testkit::connect(
                 server.make_client_context_for_user(schema, "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaa5"),
             )
             .await
@@ -1559,7 +1559,7 @@ async fn aggregate_sum_bigint_survives_public_client_boundary() {
         .run_until(async {
             let schema = bigint_metrics_schema();
             let server = JazzServer::start_with_schema(schema.clone()).await;
-            let client = JazzClient::connect(
+            let client = jazz_testkit::connect(
                 server.make_client_context_for_user(schema, "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaa4"),
             )
             .await
@@ -1618,7 +1618,7 @@ async fn aggregate_outputs_do_not_collide_with_grouped_public_column_names() {
         .run_until(async {
             let schema = aggregate_alias_collision_schema();
             let server = JazzServer::start_with_schema(schema.clone()).await;
-            let client = JazzClient::connect(
+            let client = jazz_testkit::connect(
                 server.make_client_context_for_user(schema, "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaa6"),
             )
             .await
@@ -1685,13 +1685,13 @@ async fn integer_counter_columns_merge_signed_public_values() {
         .run_until(async {
             let schema = counter_schema();
             let server = JazzServer::start_with_schema(schema.clone()).await;
-            let alice = JazzClient::connect(server.make_client_context_for_user(
+            let alice = jazz_testkit::connect(server.make_client_context_for_user(
                 schema.clone(),
                 "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaa7",
             ))
             .await
             .expect("connect alice");
-            let bob = JazzClient::connect(
+            let bob = jazz_testkit::connect(
                 server.make_client_context_for_user(schema, "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaa8"),
             )
             .await
@@ -1777,12 +1777,12 @@ async fn aggregate_subscription_spy_stays_at_policy_visible_truth() {
             let server = JazzServer::start_with_schema(schema.clone()).await;
             let admin_id = test_user_id("aggregate-admin");
             let spy_id = test_user_id("aggregate-spy");
-            let admin = JazzClient::connect(
+            let admin = jazz_testkit::connect(
                 server.make_client_context_for_user(schema.clone(), admin_id.clone()),
             )
             .await
             .expect("connect admin");
-            let spy = JazzClient::connect(
+            let spy = jazz_testkit::connect(
                 server.make_client_context_for_user(schema.clone(), spy_id.clone()),
             )
             .await

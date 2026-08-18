@@ -79,7 +79,7 @@ for required in cargo mktemp grep sed date; do
   }
 done
 
-cargo_args=(-p jazz --no-default-features --features test)
+cargo_args=(-p jazz --no-default-features --features testing,transport-compression-zstd)
 if [[ "$target_kind" == "lib" ]]; then
   cargo_args+=(--lib)
   selected_binary="jazz lib tests"
@@ -90,7 +90,7 @@ fi
 
 target_dir="${CARGO_TARGET_DIR:-$ROOT/target}"
 printf 'dev/t: target=%s\n' "$selected_binary"
-printf 'dev/t: features=no-default-features,test; cache target=%s rustc_wrapper=%s sccache_dir=%s incremental=%s\n' \
+printf 'dev/t: features=no-default-features,testing,transport-compression-zstd; cache target=%s rustc_wrapper=%s sccache_dir=%s incremental=%s\n' \
   "$target_dir" "${RUSTC_WRAPPER:-none}" "${SCCACHE_DIR:-none}" "${CARGO_INCREMENTAL:-default}"
 printf 'dev/t: inventory command:'
 printf ' %q' cargo test "${cargo_args[@]}" -- --list

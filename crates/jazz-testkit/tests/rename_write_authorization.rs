@@ -16,11 +16,11 @@ use jazz::protocol::{
 use jazz::query::{claim, col, eq};
 use jazz::row_input;
 use jazz::schema::{JazzSchema, Policy, TableSchema, WritePolicies};
+use jazz::tools::SchemaBuilder;
 use jazz::tools::public_schema::SchemaHash;
 use jazz::tools::schema_lens::{Lens, LensTransform};
-use jazz::tools::server::JazzServer;
-use jazz::tools::{JazzClient, SchemaBuilder};
 use jazz::tx::{DurabilityTier, Fate, RejectionReason};
+use jazz_server::JazzServer;
 use support::{publish_allow_all_permissions, push_catalogue_in_memory, wait_for_edge_query_ready};
 
 fn author(byte: u8) -> AuthorId {
@@ -345,7 +345,7 @@ async fn renamed_table_insert_after_schema_evolution_reaches_edge() {
             )
             .await;
 
-            let bob = JazzClient::connect(
+            let bob = jazz_testkit::connect(
                 server.make_client_context_for_user(v2, "bob-sequential-rename-write-auth"),
             )
             .await

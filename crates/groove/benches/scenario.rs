@@ -12,8 +12,9 @@ use groove::records::{RecordDescriptor, Value};
 use groove::schema::{
     ColumnSchema, ColumnType, DatabaseSchema, IntegerKeyType, PrimaryKey, TableSchema,
 };
-use groove::storage::{Durability, OrderedKvStorage, RocksDbStorage};
+use groove::storage::OrderedKvStorage;
 use hdrhistogram::Histogram;
+use jazz_storage_rocksdb::{Durability, RocksDbStorage};
 use rusqlite::{Connection, params};
 
 fn main() {

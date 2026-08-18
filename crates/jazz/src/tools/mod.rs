@@ -1,42 +1,36 @@
-#[cfg(any(feature = "server", test))]
-pub(crate) mod admin_catalogue_payload_codec;
-pub(crate) mod admin_catalogue_row_format;
+#[doc(hidden)]
+pub mod admin_catalogue_row_format;
 pub mod app_id;
 pub mod identity;
 pub mod metadata;
-#[cfg(feature = "server")]
-pub mod middleware;
 /// Target-shell factory boundary for native peer transports.
 pub mod native_transport_connector;
-/// Deprecated native compatibility adapter. New native shells use the
-/// `jazz-native-transport` package and inject its connector explicitly.
-#[cfg(any(feature = "client", feature = "server"))]
-pub mod native_websocket_transport;
 mod object;
 pub mod policy_claims;
 pub(crate) mod public_api;
 pub mod public_schema;
-#[cfg(any(feature = "client", feature = "server", test))]
-pub(crate) mod public_schema_convert;
+#[cfg(any(feature = "runtime", test))]
+#[doc(hidden)]
+pub mod public_schema_convert;
 pub mod schema_lens;
-#[cfg(feature = "server")]
-pub mod server;
 pub mod sync;
-#[cfg(feature = "test-utils")]
+#[cfg(feature = "testing")]
 pub mod test_support;
 pub mod transaction;
 
 pub mod transport_error;
 pub mod websocket_prelude_auth;
 
-#[cfg(feature = "client")]
+#[cfg(feature = "runtime")]
 #[allow(clippy::await_holding_refcell_ref)]
 mod client;
 
-#[cfg(feature = "client")]
+#[cfg(feature = "runtime")]
 use std::path::PathBuf;
+#[cfg(feature = "runtime")]
+use std::sync::Arc;
 
-#[cfg(feature = "client")]
+#[cfg(feature = "runtime")]
 use thiserror::Error;
 
 pub use app_id::AppId;
@@ -49,18 +43,18 @@ pub use public_schema::{
 pub use schema_lens::{Direction, Lens, LensOp, LensTransform};
 pub use transaction::OpenBatchId;
 
-#[cfg(feature = "client")]
+#[cfg(feature = "runtime")]
 pub use client::{JazzClient, JazzTransaction};
 
 pub(crate) use object::OutputOccurrenceId;
 pub use object::{BranchName, ObjectId, ResultKey};
-#[cfg(feature = "client")]
+#[cfg(feature = "runtime")]
 pub use sync::ClientId;
-#[cfg(feature = "client")]
+#[cfg(feature = "runtime")]
 pub use sync::DurabilityTier;
 
 /// Configuration for connecting to Jazz.
-#[cfg(feature = "client")]
+#[cfg(feature = "runtime")]
 #[derive(Debug, Clone)]
 pub struct AppContext {
     /// Application ID.
@@ -75,6 +69,8 @@ pub struct AppContext {
     pub data_dir: PathBuf,
     /// Local storage backend.
     pub storage: ClientStorage,
+    /// Target-shell factory for persistent local storage.
+    pub storage_factory: Option<Arc<dyn crate::groove::storage::StorageFactory>>,
 
     // Authentication fields
     /// JWT token for frontend authentication.
@@ -88,7 +84,7 @@ pub struct AppContext {
     pub admin_secret: Option<String>,
 }
 
-#[cfg(feature = "test-utils")]
+#[cfg(feature = "testing")]
 impl AppContext {
     pub fn test(schema: Schema) -> AppContext {
         AppContext {
@@ -98,6 +94,7 @@ impl AppContext {
             server_url: String::new(),
             data_dir: std::env::temp_dir(),
             storage: crate::tools::ClientStorage::Memory,
+            storage_factory: None,
             jwt_token: None,
             backend_secret: None,
             admin_secret: None,
@@ -106,7 +103,7 @@ impl AppContext {
 }
 
 /// Local storage backend for a client application.
-#[cfg(feature = "client")]
+#[cfg(feature = "runtime")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ClientStorage {
     /// Persist client state to disk under `AppContext::data_dir`.
@@ -117,7 +114,7 @@ pub enum ClientStorage {
 }
 
 /// Errors from Jazz client operations.
-#[cfg(feature = "client")]
+#[cfg(feature = "runtime")]
 #[derive(Error, Debug)]
 pub enum JazzError {
     #[error("Connection error: {0}")]
@@ -149,16 +146,16 @@ pub enum JazzError {
 }
 
 /// Result type for Jazz operations.
-#[cfg(feature = "client")]
+#[cfg(feature = "runtime")]
 pub type Result<T> = std::result::Result<T, JazzError>;
 
 /// Handle to a subscription.
-#[cfg(feature = "client")]
+#[cfg(feature = "runtime")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SubscriptionHandle(pub u64);
 
 /// Reason a subscription stream was rejected by a serving peer.
-#[cfg(feature = "client")]
+#[cfg(feature = "runtime")]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SubscriptionRejectReason {
     /// The serving peer cannot currently maintain this query shape/read view.
@@ -176,7 +173,7 @@ pub enum SubscriptionRejectReason {
 }
 
 /// Client-safe server failure classifications for subscriptions.
-#[cfg(feature = "client")]
+#[cfg(feature = "runtime")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SubscriptionServerFailureCode {
     /// The requested table was absent on the serving peer.
@@ -194,7 +191,7 @@ pub enum SubscriptionServerFailureCode {
 }
 
 /// Item yielded by a public subscription stream.
-#[cfg(feature = "client")]
+#[cfg(feature = "runtime")]
 #[derive(Clone, Debug)]
 pub enum SubscriptionStreamItem {
     /// Incremental or reset row delta.
@@ -207,12 +204,12 @@ pub enum SubscriptionStreamItem {
 }
 
 /// Stream of row deltas from a subscription.
-#[cfg(feature = "client")]
+#[cfg(feature = "runtime")]
 pub struct SubscriptionStream {
     receiver: tokio::sync::mpsc::UnboundedReceiver<SubscriptionStreamItem>,
 }
 
-#[cfg(feature = "client")]
+#[cfg(feature = "runtime")]
 impl SubscriptionStream {
     /// Create a new subscription stream.
     #[allow(dead_code)]

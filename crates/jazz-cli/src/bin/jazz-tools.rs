@@ -15,10 +15,10 @@
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use clap::{Parser, Subcommand};
-use jazz::tools::middleware::AuthConfig;
 use jazz_cli::commands;
 #[cfg(feature = "otel")]
 use jazz_otel as otel;
+use jazz_server::AuthConfig;
 
 const DEFAULT_SHUTDOWN_TIMEOUT_SECS: u64 = 30;
 const MAX_SHUTDOWN_TIMEOUT_SECS: u64 = 60 * 60;

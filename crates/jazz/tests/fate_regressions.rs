@@ -11,7 +11,7 @@ use jazz::schema::{JazzSchema, TableSchema};
 use jazz::tx::{DurabilityTier, Fate};
 
 use groove::schema::{ColumnSchema, ColumnType};
-use groove::storage::RocksDbStorage;
+use jazz_storage_rocksdb::RocksDbStorage;
 
 fn schema() -> JazzSchema {
     JazzSchema::new([TableSchema::new(

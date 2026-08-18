@@ -7,8 +7,8 @@ use groove::records::{RecordDescriptor, Value};
 use groove::schema::{
     ColumnSchema, ColumnType, DatabaseSchema, IndexSchema, IntegerKeyType, PrimaryKey, TableSchema,
 };
-use groove::storage::{Durability, RocksDbStorage};
 use hdrhistogram::Histogram;
+use jazz_storage_rocksdb::{Durability, RocksDbStorage};
 
 fn main() {
     jazz_benchmark_guard::refuse_contaminated_measurement();

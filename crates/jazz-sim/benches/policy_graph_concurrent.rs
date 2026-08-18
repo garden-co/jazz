@@ -12,7 +12,6 @@ use jazz::db::{
 };
 use jazz::groove::records::{EnumValue, Value};
 use jazz::groove::schema::ColumnType;
-use jazz::groove::storage::{Durability, RocksDbStorage};
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::node::{CurrentRow, MergeableCommit, NodeState};
 use jazz::protocol::SyncMessage;
@@ -25,6 +24,7 @@ use jazz_sim::policy_graph_fixture::{
     SeedRow, member_seed_dump_from_path,
 };
 use jazz_sim::{emit_json_line, metadata_fields};
+use jazz_storage_rocksdb::{Durability, RocksDbStorage};
 use serde_json::{Value as JsonValue, json};
 
 const PUBLIC_FIXTURE_DIR: &str = "../../packages/jazz-tools/src/testing/fixtures/policy-graph-perf";

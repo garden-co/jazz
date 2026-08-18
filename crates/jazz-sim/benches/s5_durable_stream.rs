@@ -15,7 +15,6 @@ use jazz::db::{
 };
 use jazz::groove::records::Value;
 use jazz::groove::schema::{ColumnSchema, ColumnType};
-use jazz::groove::storage::{Durability, RocksDbStorage};
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::node::{MergeableCommit, NodeState};
 use jazz::peer::PeerState;
@@ -26,6 +25,7 @@ use jazz::time::GlobalSeq;
 use jazz::tx::{DurabilityTier, Fate};
 use jazz::wire::TransportError;
 use jazz_sim::{PeerProfile, bench_profile, emit_json_line, mem, metadata_fields};
+use jazz_storage_rocksdb::{Durability, RocksDbStorage};
 use rusqlite::{Connection, params};
 use serde_json::{Value as JsonValue, json};
 use tempfile::TempDir;

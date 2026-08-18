@@ -8,30 +8,18 @@ autotests = true
 
 [features]
 # Jazz is the common semantic library. Process and target shells select
-# storage, transport, compression, and server capabilities explicitly.
+# storage, transport, compression, and runtime capabilities explicitly.
 default = []
-rocksdb = ["groove/rocksdb", "dep:rocksdb"]
-sqlite = []
-native-websocket-transport = [
-  "dep:reqwest",
-  "dep:tokio",
-  "dep:tokio-tungstenite",
-  "dep:tungstenite",
-]
-client = ["native-websocket-transport"]
-server = ["native-websocket-transport", "dep:axum", "dep:jsonwebtoken", "dep:tower-http"]
+runtime = ["dep:jsonwebtoken", "dep:tokio"]
 sync-autopsy = []
 # Disabled-by-default counters for the cold-settle attribution bench. They do
 # not alter protocol behavior or production measurement paths.
 cold-settle-attribution = ["groove/cold-settle-attribution"]
-r3-open-attribution = ["rocksdb", "testing"]
-testing = []
-embedded-server = ["server", "client", "sqlite"]
+r3-open-attribution = ["testing"]
+testing = ["runtime"]
 transport-compression-lz4 = ["jazz-compression/lz4"]
 transport-compression-zstd = ["jazz-compression/zstd"]
 transport-compression-ruzstd = ["jazz-compression/ruzstd"]
-test-utils = ["embedded-server", "sync-autopsy"]
-test = ["test-utils", "rocksdb", "transport-compression-zstd"]
 
 [dependencies]
 futures-core = "0.3.31"
@@ -56,42 +44,12 @@ internment = "0.8"
 smallvec = { version = "1.11", features = ["serde"] }
 sha2 = "0.10"
 tokio = { version = "1", features = ["macros", "net", "rt", "sync", "time"], optional = true }
-rocksdb = { package = "rust-rocksdb", version = "0.48.0", default-features = false, features = [
-  "lz4",
-  "zstd",
-], optional = true }
-axum = { version = "0.8.9", default-features = false, features = [
-  "http1",
-  "json",
-  "matched-path",
-  "original-uri",
-  "query",
-  "tokio",
-  "tracing",
-  "ws",
-], optional = true }
-tower-http = { version = "0.6.8", default-features = false, features = [
-  "cors",
-  "trace",
-], optional = true }
-tokio-tungstenite = { version = "0.29", default-features = false, features = [
-  "connect",
-  "rustls-tls-native-roots",
-  "rustls-tls-webpki-roots",
-], optional = true }
-tungstenite = { version = "0.29", default-features = false, features = [
-  "handshake",
-], optional = true }
 jsonwebtoken = { version = "10.4", default-features = false, features = [
   "rust_crypto",
   "use_pem",
 ], optional = true }
 base64 = "0.22"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
-reqwest = { version = "0.12", default-features = false, features = [
-  "json",
-  "rustls-tls",
-], optional = true }
 
 [dev-dependencies]
 jazz-benchmark-guard = { path = "../benchmark-guard" }
@@ -103,6 +61,7 @@ criterion = "0.5"
 insta = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 jsonwebtoken = { version = "10.4", default-features = false, features = ["rust_crypto", "use_pem"] }
+jazz-storage-rocksdb.workspace = true
 futures = "0.3"
 tokio = { version = "1", features = [
   "macros",
@@ -147,7 +106,7 @@ harness = false
 [[bench]]
 name = "selective_global_hydration"
 harness = false
-required-features = ["rocksdb", "testing"]
+required-features = ["testing"]
 
 [[bench]]
 name = "observer_write_path"
@@ -184,12 +143,8 @@ required-features = ["testing"]
 
 [[test]]
 name = "parameterized_subscription_routing"
-required-features = ["test"]
+required-features = ["testing"]
 
 [[test]]
 name = "authorization_scope_reentry"
-required-features = ["test"]
-
-[[example]]
-name = "realistic_bench"
-required-features = ["client"]
+required-features = ["testing"]

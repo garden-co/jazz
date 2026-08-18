@@ -266,7 +266,7 @@ test("Rust CI splits a bounded real differential-oracle smoke behind a stable ag
 
   assert.match(
     workspace,
-    /run-rust-tests\.mjs --timeout-seconds 780 --nextest-profile jazz-ci -- --workspace --lib --bins --tests --features test/,
+    /run-rust-tests\.mjs --timeout-seconds 780 --nextest-profile jazz-ci -- --workspace --lib --bins --tests --features jazz\/testing,jazz\/transport-compression-zstd,jazz-server\/test,jazz-cli\/test/,
   );
   for (const testTarget of [
     "incremental_delivery_canary",
@@ -277,7 +277,7 @@ test("Rust CI splits a bounded real differential-oracle smoke behind a stable ag
   }
   assert.match(
     differential,
-    /cargo test -p jazz --lib --features test --no-run --message-format=json/,
+    /cargo test -p jazz --lib --features testing,transport-compression-zstd --no-run --message-format=json/,
   );
   assert.match(differential, /message\.target\.name === "jazz"/);
   assert.match(
@@ -315,10 +315,10 @@ test("Rust CI splits a bounded real differential-oracle smoke behind a stable ag
     () =>
       assert.match(
         differential.replace(
-          "cargo test -p jazz --lib --features test --no-run --message-format=json",
+          "cargo test -p jazz --lib --features testing,transport-compression-zstd --no-run --message-format=json",
           "cargo test -p jazz --no-run --message-format=json",
         ),
-        /cargo test -p jazz --lib --features test --no-run --message-format=json/,
+        /cargo test -p jazz --lib --features testing,transport-compression-zstd --no-run --message-format=json/,
       ),
     /--lib/,
   );
@@ -350,8 +350,8 @@ test("Rust CI splits a bounded real differential-oracle smoke behind a stable ag
     () =>
       assertM3CompileThenRun(
         differential.replace(
-          "cargo test -p jazz --lib --features test --no-run --message-format=json",
-          "timeout 60s cargo test -p jazz --lib --features test --no-run --message-format=json",
+          "cargo test -p jazz --lib --features testing,transport-compression-zstd --no-run --message-format=json",
+          "timeout 60s cargo test -p jazz --lib --features testing,transport-compression-zstd --no-run --message-format=json",
         ),
       ),
     /cold compilation must not consume the semantic-execution timeout/,

@@ -11,7 +11,8 @@ use groove::records::{Value, VariantRecord};
 use groove::schema::{
     ColumnSchema, ColumnType, DatabaseSchema, IntegerKeyType, PrimaryKey, TableSchema,
 };
-use groove::storage::{OrderedKvStorage, RocksDbStorage};
+use groove::storage::OrderedKvStorage;
+use jazz_storage_rocksdb::RocksDbStorage;
 use serde_json::json;
 
 const ROWS: u64 = 1_000;

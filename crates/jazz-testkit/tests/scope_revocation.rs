@@ -5,11 +5,11 @@ use std::time::Duration;
 
 use jazz::row_input;
 use jazz::tools::public_schema::{PolicyExpr, TablePolicies};
-use jazz::tools::server::JazzServer;
 use jazz::tools::{
-    ColumnDescriptor, ColumnType, DurabilityTier, JazzClient, ObjectId, QueryBuilder,
-    RowDescriptor, Session, TableName, TableSchema, Value,
+    ColumnDescriptor, ColumnType, DurabilityTier, ObjectId, QueryBuilder, RowDescriptor, Session,
+    TableName, TableSchema, Value,
 };
+use jazz_server::JazzServer;
 use support::{
     publish_permissions, push_catalogue_in_memory, wait_for_edge_query_ready, wait_for_query,
 };
@@ -93,7 +93,7 @@ async fn scope_revocation_removes_edge_results_without_redacting_local_copy() {
             let writer_reader_id = ObjectId::from_uuid(Uuid::new_v4());
             let writer_user_id = writer_reader_id.uuid().to_string();
 
-            let writer = JazzClient::connect(
+            let writer = jazz_testkit::connect(
                 server.make_client_context_for_user(schema.clone(), &writer_user_id),
             )
             .await
@@ -101,7 +101,7 @@ async fn scope_revocation_removes_edge_results_without_redacting_local_copy() {
             wait_for_edge_query_ready(&writer, "docs", READY_TIMEOUT).await;
 
             let bob =
-                JazzClient::connect(user_client_context(&server, schema.clone(), &bob_user_id))
+                jazz_testkit::connect(user_client_context(&server, schema.clone(), &bob_user_id))
                     .await
                     .expect("connect bob");
             wait_for_edge_query_ready(&bob, "docs", READY_TIMEOUT).await;

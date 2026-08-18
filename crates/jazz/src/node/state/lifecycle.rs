@@ -563,7 +563,7 @@ where
             session_claim_revisions: BTreeMap::new(),
             permissions_ready: true,
             catalogue_activation_failed: false,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "testing"))]
             catalogue_activation_failpoint: None,
             initial_sync_flush_cadence: None,
             initial_sync_flush_active: false,

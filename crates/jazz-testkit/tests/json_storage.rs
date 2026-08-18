@@ -209,7 +209,7 @@ async fn json_column_rejects_malformed_default_before_empty_insert() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let schema = default_documents_schema(Value::Text("{\"name\":true".to_owned()), None);
-            let error = match JazzClient::connect(AppContext::test(schema)).await {
+            let error = match jazz_testkit::connect(AppContext::test(schema)).await {
                 Ok(_) => panic!("malformed JSON default must reject schema admission"),
                 Err(error) => error,
             };
@@ -233,7 +233,7 @@ async fn json_column_rejects_schema_invalid_default_before_empty_insert() {
                 Value::Text("{\"name\":123}".to_owned()),
                 Some(name_json_schema()),
             );
-            let error = match JazzClient::connect(AppContext::test(schema)).await {
+            let error = match jazz_testkit::connect(AppContext::test(schema)).await {
                 Ok(_) => panic!("JSON Schema-invalid default must reject schema admission"),
                 Err(error) => error,
             };
@@ -366,7 +366,7 @@ async fn invalid_json_schema_rejects_nullable_column_without_default() {
                     },
                 ))
                 .build();
-            let error = match JazzClient::connect(AppContext::test(schema)).await {
+            let error = match jazz_testkit::connect(AppContext::test(schema)).await {
                 Ok(_) => panic!("invalid declared JSON Schema must reject schema admission"),
                 Err(error) => error,
             };

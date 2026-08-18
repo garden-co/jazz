@@ -10,9 +10,24 @@ use jazz::serving::{
     DeploymentProfile, DrainState, DryRunReport, HealthStatus, NodeRole, ServerShell,
     StorageConfig, StorageKind,
     auth_admission::{AuthAdmissionConfig, JwtVerifierConfig},
-    loopback_http::load_latest_admin_schema_for_app,
-    loopback_websocket::{LoopbackWebSocketServer, LoopbackWebSocketServerConfig},
 };
+use jazz_server::loopback::http::load_latest_admin_schema_for_app;
+use jazz_server::loopback::websocket::{LoopbackWebSocketServer, LoopbackWebSocketServerConfig};
+
+fn start_loopback_server(
+    config: LoopbackWebSocketServerConfig,
+) -> jazz_server::loopback::websocket::LoopbackWebSocketResult<LoopbackWebSocketServer> {
+    if matches!(config.storage, StorageConfig::RocksDb { .. }) {
+        #[cfg(feature = "rocksdb")]
+        {
+            return LoopbackWebSocketServer::start_with_config_and_storage_factory(
+                config,
+                std::sync::Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory),
+            );
+        }
+    }
+    LoopbackWebSocketServer::start_with_config(config)
+}
 
 fn main() -> ExitCode {
     let mut args = env::args();
@@ -171,7 +186,7 @@ fn run_server_app(app_id: &str, args: Vec<String>, program: &str) -> ExitCode {
     config.listener.websocket_path = options.websocket_path;
 
     let websocket_path = config.listener.websocket_path.clone();
-    let server = match LoopbackWebSocketServer::start_with_config(config) {
+    let server = match start_loopback_server(config) {
         Ok(server) => server,
         Err(error) => {
             eprintln!("error={error}");
@@ -253,7 +268,7 @@ fn run_loopback_websocket_schema(
     config.listener.websocket_path = options.websocket_path;
 
     let websocket_path = config.listener.websocket_path.clone();
-    let server = match LoopbackWebSocketServer::start_with_config(config) {
+    let server = match start_loopback_server(config) {
         Ok(server) => server,
         Err(error) => {
             eprintln!("error={error}");

@@ -6,11 +6,11 @@ use std::collections::HashMap;
 use std::sync::LazyLock;
 use std::time::Duration;
 
-use jazz::tools::server::JazzServer;
 use jazz::tools::{
     ColumnDescriptor, ColumnMergeStrategy, ColumnType, DurabilityTier, JazzClient, ObjectId, Query,
     QueryBuilder, RowDescriptor, Schema, TableName, TableSchema, Value,
 };
+use jazz_server::JazzServer;
 use support::{TestingClient, wait_for, wait_for_query};
 
 const READY_TIMEOUT: Duration = Duration::from_secs(30);

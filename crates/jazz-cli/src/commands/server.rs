@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use jazz::node::EdgeCacheBudget;
-use jazz::tools::middleware::AuthConfig;
+use jazz_server::AuthConfig;
 
 /// Run the Jazz server.
 #[allow(clippy::too_many_arguments)]
@@ -28,6 +28,7 @@ pub async fn run(
         edge_cache_budget,
         bound_port_file,
         shutdown_timeout,
+        std::sync::Arc::new(jazz_native_transport::NativeWebSocketConnector),
     )
     .await
 }

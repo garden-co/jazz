@@ -4,7 +4,7 @@
 
 #[path = "../src/client_worker.rs"]
 mod client_worker;
-#[path = "../../../../crates/jazz/tests/support/permissions.rs"]
+#[path = "../../../../crates/jazz-testkit/src/permissions.rs"]
 mod permissions_support;
 
 use std::convert::Infallible;
@@ -25,6 +25,14 @@ use jazz::tools::{
     AppContext, AppId, ClientStorage, ColumnType, DurabilityTier, JazzClient, SchemaBuilder,
     TableSchema,
 };
+
+async fn connect_native(context: AppContext) -> jazz::tools::Result<JazzClient> {
+    JazzClient::connect_with_native_transport(
+        context,
+        std::sync::Arc::new(jazz_native_transport::NativeWebSocketConnector),
+    )
+    .await
+}
 use serde::{Deserialize, Serialize};
 use tempfile::TempDir;
 use tokio::sync::broadcast;
@@ -91,6 +99,9 @@ async fn setup_test_app_with_path(data_dir: PathBuf) -> Router {
         server_url: String::new(),
         data_dir,
         storage: ClientStorage::Persistent,
+        storage_factory: Some(std::sync::Arc::new(
+            jazz_storage_rocksdb::RocksDbStorageFactory,
+        )),
         jwt_token: None,
         backend_secret: None,
         admin_secret: None,
@@ -457,11 +468,14 @@ async fn test_local_persistence() {
             server_url: String::new(),
             data_dir: data_path.clone(),
             storage: ClientStorage::Persistent,
+            storage_factory: Some(std::sync::Arc::new(
+                jazz_storage_rocksdb::RocksDbStorageFactory,
+            )),
             jwt_token: None,
             backend_secret: None,
             admin_secret: None,
         };
-        let client = JazzClient::connect(context).await.unwrap();
+        let client = connect_native(context).await.unwrap();
 
         // Create a todo
         let values = todo_values("Persist me", "");
@@ -487,11 +501,14 @@ async fn test_local_persistence() {
             server_url: String::new(),
             data_dir: data_path,
             storage: ClientStorage::Persistent,
+            storage_factory: Some(std::sync::Arc::new(
+                jazz_storage_rocksdb::RocksDbStorageFactory,
+            )),
             jwt_token: None,
             backend_secret: None,
             admin_secret: None,
         };
-        let client = JazzClient::connect(context).await.unwrap();
+        let client = connect_native(context).await.unwrap();
 
         // Query todos - should have the one we created
         let query = QueryBuilder::new("todos").build();
@@ -769,11 +786,14 @@ async fn test_server_resync() {
             server_url: server.base_url(),
             data_dir: data_path.clone(),
             storage: ClientStorage::Persistent,
+            storage_factory: Some(std::sync::Arc::new(
+                jazz_storage_rocksdb::RocksDbStorageFactory,
+            )),
             jwt_token: Some(make_test_jwt("client1-user")),
             backend_secret: None,
             admin_secret: None,
         };
-        let client = JazzClient::connect(context).await.unwrap();
+        let client = connect_native(context).await.unwrap();
         let permissions_schema = test_schema();
         publish_test_schema(&server.base_url(), test_app_id).await;
         permissions_support::publish_allow_all_permissions(
@@ -816,11 +836,14 @@ async fn test_server_resync() {
             server_url: server.base_url(),
             data_dir: data_path,
             storage: ClientStorage::Persistent,
+            storage_factory: Some(std::sync::Arc::new(
+                jazz_storage_rocksdb::RocksDbStorageFactory,
+            )),
             jwt_token: Some(make_test_jwt("client2-user")),
             backend_secret: None,
             admin_secret: None, // Intentionally no admin - server already has schema
         };
-        let client = JazzClient::connect(context).await.unwrap();
+        let client = connect_native(context).await.unwrap();
 
         // One-shot query with EdgeServer durability tier — waits for the server's
         // QuerySettled response before resolving, ensuring synced data arrives.

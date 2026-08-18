@@ -22,8 +22,9 @@ use crate::tx::{
 use groove::schema::{ColumnSchema, ColumnType};
 use groove::storage::{
     BtreeSyncPolicy, ColumnFamilyName, Key, MemoryStorage, NativeBtreeStorage, OrderedKvStorage,
-    ReopenableStorage, RocksDbStorage, ScanVisitor, Value as StorageValue, WriteOperation,
+    ReopenableStorage, ScanVisitor, Value as StorageValue, WriteOperation,
 };
+use jazz_storage_rocksdb::RocksDbStorage;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 include!("support.rs");

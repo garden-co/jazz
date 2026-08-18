@@ -1,46 +1,41 @@
-#[cfg(feature = "test-utils")]
+#[cfg(feature = "testing")]
 use std::time::Duration;
 
-#[cfg(feature = "test-utils")]
-use crate::tools::AppId;
 use crate::tools::object::ObjectId;
-#[cfg(feature = "test-utils")]
+#[cfg(feature = "testing")]
 use crate::tools::public_api::query::Query;
-#[cfg(feature = "test-utils")]
+#[cfg(feature = "testing")]
 use crate::tools::public_api::types::Value;
-use crate::tools::schema_lens::Lens;
-#[cfg(feature = "test-utils")]
-use crate::tools::server::ServerState;
-#[cfg(feature = "test-utils")]
-use crate::tools::{DurabilityTier, JazzClient, Schema};
+#[cfg(feature = "testing")]
+use crate::tools::{DurabilityTier, JazzClient};
 
-#[cfg(feature = "test-utils")]
+#[cfg(feature = "testing")]
 pub type QueryRows = Vec<(ObjectId, Vec<Value>)>;
 
-#[cfg(feature = "test-utils")]
+#[cfg(feature = "testing")]
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
-#[cfg(feature = "test-utils")]
+#[cfg(feature = "testing")]
 const DEFAULT_QUERY_TIMEOUT: Duration = Duration::from_secs(8);
 
-#[cfg(feature = "test-utils")]
+#[cfg(feature = "testing")]
 const DEFAULT_WAIT_TIMEOUT_MULTIPLIER: u32 = 8;
 
 /// Sanctioned test-support reconnect control: mirrors the public client's
 /// upstream detach without clearing local known-state or pending writes.
-#[cfg(feature = "test-utils")]
+#[cfg(feature = "testing")]
 pub fn disconnect_client(client: &JazzClient) -> bool {
     client.disconnect_upstream_for_test()
 }
 
 /// Sanctioned test-support reconnect control: reattaches the preserved client
 /// state to the original upstream transport.
-#[cfg(feature = "test-utils")]
+#[cfg(feature = "testing")]
 pub async fn reconnect_client(client: &JazzClient) -> crate::tools::Result<bool> {
     client.reconnect_upstream_for_test().await
 }
 
-#[cfg(feature = "test-utils")]
+#[cfg(feature = "testing")]
 fn load_tolerant_wait_timeout(timeout: Duration) -> Duration {
     let multiplier = std::env::var("JAZZ_TOOLS_TEST_WAIT_TIMEOUT_MULTIPLIER")
         .ok()
@@ -55,7 +50,7 @@ fn load_tolerant_wait_timeout(timeout: Duration) -> Duration {
 ///
 /// Per-attempt query timeouts and transient query errors are retried until the
 /// outer deadline is reached.
-#[cfg(feature = "test-utils")]
+#[cfg(feature = "testing")]
 pub async fn wait_for_query<T, F>(
     client: &JazzClient,
     query: Query,
@@ -114,7 +109,7 @@ where
 }
 
 /// Re-runs an identity-bearing query until its ResultKey rows satisfy the matcher.
-#[cfg(feature = "test-utils")]
+#[cfg(feature = "testing")]
 pub async fn wait_for_query_results<T, F>(
     client: &JazzClient,
     query: Query,
@@ -159,46 +154,4 @@ where
         }
         tokio::time::sleep(DEFAULT_POLL_INTERVAL).await;
     }
-}
-
-/// Publishes schemas and lenses directly into an in-process test server's
-/// catalogue store.
-///
-/// This helper is intentionally scoped to `test-utils`: integration tests need
-/// to seed catalogue state before exercising public client behavior, but the
-/// catalogue storage itself remains a server-internal implementation detail.
-#[cfg(feature = "test-utils")]
-pub async fn push_catalogue_in_memory(
-    state: std::sync::Arc<ServerState>,
-    app_id: AppId,
-    env: &str,
-    user_branch: &str,
-    schemas: &[Schema],
-    lenses: &[Lens],
-) -> Result<(), Box<dyn std::error::Error>> {
-    for schema in schemas {
-        state
-            .catalogue
-            .publish_schema(&state.catalogue_store, schema.clone())
-            .map_err(|error| format!("publish schema to server catalogue: {error}"))?;
-    }
-
-    for lens in lenses {
-        state
-            .catalogue
-            .publish_lens(&state.catalogue_store, lens)
-            .map_err(|error| format!("publish lens to server catalogue: {error}"))?;
-    }
-
-    let _ = (app_id, env, user_branch);
-    crate::tools::server::runtime_catalogue::publish_runtime_catalogue(&state, schemas, lenses)
-        .await
-        .map_err(|error| format!("bridge catalogue into server runtime: {error}"))?;
-
-    state
-        .catalogue
-        .flush(&state.catalogue_store)
-        .map_err(|error| format!("flush server catalogue: {error}"))?;
-
-    Ok(())
 }

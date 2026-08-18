@@ -358,11 +358,18 @@ async fn connect_client(
         server_url: server_url.unwrap_or("").to_string(),
         data_dir,
         storage: jazz::tools::ClientStorage::Persistent,
+        storage_factory: Some(std::sync::Arc::new(
+            jazz_storage_rocksdb::RocksDbStorageFactory,
+        )),
         jwt_token: None,
         backend_secret: None,
         admin_secret: None,
     };
-    Ok(JazzClient::connect(context).await?)
+    Ok(JazzClient::connect_with_native_transport(
+        context,
+        std::sync::Arc::new(jazz_native_transport::NativeWebSocketConnector),
+    )
+    .await?)
 }
 
 async fn seed_dataset(

@@ -3,11 +3,11 @@
 use jazz_testkit as support;
 
 use jazz::row_input;
-use jazz::tools::server::JazzServer;
 use jazz::tools::{
-    ClientId, ClientStorage, ColumnType, DurabilityTier, JazzClient, QueryBuilder, Schema,
-    SchemaBuilder, TableSchema,
+    ClientId, ClientStorage, ColumnType, DurabilityTier, QueryBuilder, Schema, SchemaBuilder,
+    TableSchema,
 };
+use jazz_server::JazzServer;
 
 use support::{has_row, wait_for_rows};
 
@@ -35,12 +35,15 @@ async fn persistent_restart_replays_pending_write_with_valid_token_impl() {
     context.admin_secret = None;
     context.client_id = Some(ClientId::new());
     context.storage = ClientStorage::Persistent;
+    context.storage_factory = Some(std::sync::Arc::new(
+        jazz_storage_rocksdb::RocksDbStorageFactory,
+    ));
 
     // Keep the initial write offline so only the reopened client can deliver
     // it. The context still carries the helper's ordinary long-lived JWT.
     let mut offline_context = context.clone();
     offline_context.server_url.clear();
-    let offline = JazzClient::connect(offline_context)
+    let offline = jazz_testkit::connect(offline_context)
         .await
         .expect("open persistent client offline");
     let (todo_id, expected_values, batch_id) = offline
@@ -58,7 +61,7 @@ async fn persistent_restart_replays_pending_write_with_valid_token_impl() {
         .expect("offline todo reaches local durability");
     offline.shutdown().await.expect("shutdown offline client");
 
-    let reopened = JazzClient::connect(context)
+    let reopened = jazz_testkit::connect(context)
         .await
         .expect("reopen persistent client with valid token");
     wait_for_rows(

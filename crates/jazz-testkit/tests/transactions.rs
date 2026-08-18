@@ -5,11 +5,11 @@ use jazz_testkit as support;
 
 use jazz::protocol_limits::MAX_WIRE_FRAME_BYTES;
 use jazz::row_input;
-use jazz::tools::server::JazzServer;
 use jazz::tools::{
     ColumnType, DurabilityTier, JazzClient, ObjectId, QueryBuilder, Schema, SchemaBuilder,
     TableSchema, Value, WriteContext,
 };
+use jazz_server::JazzServer;
 use support::wait_for_query;
 
 static TEST_USER_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -62,7 +62,7 @@ async fn wait_for_edge_ready(client: &JazzClient) {
 }
 
 async fn connect_user(server: &JazzServer, schema: Schema, user_id: &str) -> JazzClient {
-    let client = JazzClient::connect(server.make_client_context_for_user(schema, user_id))
+    let client = jazz_testkit::connect(server.make_client_context_for_user(schema, user_id))
         .await
         .expect("connect user");
     wait_for_edge_ready(&client).await;

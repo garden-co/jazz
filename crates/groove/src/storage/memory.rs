@@ -1,8 +1,7 @@
 //! In-memory implementation of the ordered key/value storage trait.
 
-use std::cell::RefCell;
 use std::collections::BTreeMap;
-use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
@@ -14,7 +13,7 @@ use super::{
 const MEMORY_STORAGE_SNAPSHOT_VERSION: u16 = 1;
 
 type ColumnFamilies = BTreeMap<String, BTreeMap<Vec<u8>, Vec<u8>>>;
-type SharedColumnFamilies = Rc<RefCell<ColumnFamilies>>;
+type SharedColumnFamilies = Arc<Mutex<ColumnFamilies>>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum MemoryStorageSnapshotError {
@@ -51,7 +50,7 @@ impl MemoryStorage {
     }
 
     fn ensure_column_families(&self, column_families: &[&str]) {
-        let mut inner = self.inner.borrow_mut();
+        let mut inner = self.inner.lock().expect("memory storage mutex poisoned");
         for cf in column_families {
             inner.entry((*cf).to_owned()).or_default();
         }
@@ -62,7 +61,7 @@ impl MemoryStorage {
         cf: &ColumnFamilyName,
         f: impl FnOnce(&BTreeMap<Vec<u8>, Vec<u8>>) -> T,
     ) -> Result<T, Error> {
-        let inner = self.inner.borrow();
+        let inner = self.inner.lock().expect("memory storage mutex poisoned");
         let values = inner
             .get(cf)
             .ok_or_else(|| Error::ColumnFamilyNotFound(cf.to_owned()))?;
@@ -73,7 +72,11 @@ impl MemoryStorage {
     pub fn export_snapshot(&self) -> Result<Vec<u8>, MemoryStorageSnapshotError> {
         let snapshot = MemoryStorageSnapshot {
             version: MEMORY_STORAGE_SNAPSHOT_VERSION,
-            column_families: self.inner.borrow().clone(),
+            column_families: self
+                .inner
+                .lock()
+                .expect("memory storage mutex poisoned")
+                .clone(),
         };
         postcard::to_allocvec(&snapshot).map_err(MemoryStorageSnapshotError::Encode)
     }
@@ -88,7 +91,7 @@ impl MemoryStorage {
                 expected: MEMORY_STORAGE_SNAPSHOT_VERSION,
             });
         }
-        *self.inner.borrow_mut() = snapshot.column_families;
+        *self.inner.lock().expect("memory storage mutex poisoned") = snapshot.column_families;
         Ok(())
     }
 }
@@ -109,7 +112,7 @@ impl OrderedKvStorage for MemoryStorage {
     }
 
     fn set(&self, cf: &ColumnFamilyName, key: &Key, value: &[u8]) -> Result<(), Error> {
-        let mut inner = self.inner.borrow_mut();
+        let mut inner = self.inner.lock().expect("memory storage mutex poisoned");
         let values = inner
             .get_mut(cf)
             .ok_or_else(|| Error::ColumnFamilyNotFound(cf.to_owned()))?;
@@ -118,7 +121,7 @@ impl OrderedKvStorage for MemoryStorage {
     }
 
     fn delete(&self, cf: &ColumnFamilyName, key: &Key) -> Result<(), Error> {
-        let mut inner = self.inner.borrow_mut();
+        let mut inner = self.inner.lock().expect("memory storage mutex poisoned");
         let values = inner
             .get_mut(cf)
             .ok_or_else(|| Error::ColumnFamilyNotFound(cf.to_owned()))?;
@@ -201,7 +204,7 @@ impl OrderedKvStorage for MemoryStorage {
 
     fn write_many(&self, operations: &[WriteOperation<'_>]) -> Result<(), Error> {
         {
-            let inner = self.inner.borrow();
+            let inner = self.inner.lock().expect("memory storage mutex poisoned");
             for operation in operations {
                 let cf = match operation {
                     WriteOperation::Set { cf, .. }
@@ -214,7 +217,7 @@ impl OrderedKvStorage for MemoryStorage {
             }
         }
 
-        let mut inner = self.inner.borrow_mut();
+        let mut inner = self.inner.lock().expect("memory storage mutex poisoned");
         for operation in operations {
             match operation {
                 WriteOperation::Set { cf, key, value } => {
@@ -242,7 +245,14 @@ impl OrderedKvStorage for MemoryStorage {
     }
 
     fn column_family_names(&self) -> Option<Vec<String>> {
-        Some(self.inner.borrow().keys().cloned().collect())
+        Some(
+            self.inner
+                .lock()
+                .expect("memory storage mutex poisoned")
+                .keys()
+                .cloned()
+                .collect(),
+        )
     }
 }
 

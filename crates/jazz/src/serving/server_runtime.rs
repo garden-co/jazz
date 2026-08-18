@@ -5,6 +5,7 @@ use std::thread;
 
 use crate::db::{CommitUnitTrust, ConnectionSessionContext, DbIdentity, RowCells, Transport};
 use crate::groove::records::Value;
+use crate::groove::storage::StorageFactory;
 use crate::ids::{AuthorId, BranchId, NodeUuid, RowUuid, SchemaVersionId};
 use crate::node::EdgeCacheBudget;
 use crate::protocol::{MigrationLens, SyncMessage};
@@ -25,8 +26,35 @@ use tokio::sync::{mpsc as tokio_mpsc, oneshot, watch};
 /// joins the owner before its surrounding server storage lifecycle completes.
 /// This ensures native RocksDB resources are destroyed on their owner thread.
 #[derive(Clone)]
-pub(crate) struct ServerShellHandle {
+pub struct ServerRuntimeHandle {
     inner: Arc<ServerShellInner>,
+}
+
+/// Opaque activity subscription for a server runtime.
+pub struct ServerRuntimeActivity {
+    receiver: watch::Receiver<u64>,
+}
+
+impl ServerRuntimeActivity {
+    /// Wait until runtime work may have produced outbound frames.
+    pub async fn changed(&mut self) -> Result<(), String> {
+        self.receiver
+            .changed()
+            .await
+            .map_err(|_| "server runtime activity channel closed".to_owned())
+    }
+}
+
+/// Opaque stream of per-tick outbound frame batches.
+pub struct ServerRuntimeFrameStream {
+    receiver: tokio_mpsc::UnboundedReceiver<Result<Vec<AbiBytes>, String>>,
+}
+
+impl ServerRuntimeFrameStream {
+    /// Receive the next completed tick's outbound frames.
+    pub async fn recv(&mut self) -> Option<Result<Vec<AbiBytes>, String>> {
+        self.receiver.recv().await
+    }
 }
 
 struct ServerShellInner {
@@ -42,7 +70,7 @@ impl Drop for ServerShellInner {
         // direct builder use that is simply dropped: without it, dropping the
         // last sender merely asks the owner thread to exit and a caller can
         // race a reopen of the same RocksDB path before that exit completes.
-        // There can be no remaining `ServerShellHandle` when this runs, so no
+        // There can be no remaining `ServerRuntimeHandle` when this runs, so no
         // public operation can be waiting for an owner-thread reply.
         let _ = shutdown_blocking(self);
     }
@@ -55,11 +83,12 @@ enum ServerShellCommand {
     Shutdown(mpsc::Sender<()>),
 }
 
-impl ServerShellHandle {
+impl ServerRuntimeHandle {
     /// Reopen an already bootstrapped dynamic edge. A blank store returns
     /// `None` so its owner can run the authenticated bootstrap exchange.
-    pub(crate) fn try_start_dynamic_edge_from_storage(
+    pub fn try_start_dynamic_edge_from_storage(
         storage_config: StorageConfig,
+        storage_factory: Option<Arc<dyn StorageFactory>>,
         edge_cache_budget: Option<EdgeCacheBudget>,
     ) -> Result<Option<Self>, String> {
         let (jobs, receiver) = mpsc::channel::<ServerShellCommand>();
@@ -74,6 +103,7 @@ impl ServerShellHandle {
                         author: AuthorId::SYSTEM,
                     },
                     storage_config,
+                    storage_factory,
                     edge_cache_budget,
                 ) {
                     Ok(Some(shell)) => {
@@ -117,8 +147,9 @@ impl ServerShellHandle {
     /// Construct a ready edge shell only after an authenticated bootstrap
     /// snapshot has been durably adopted. The owner thread is not published to
     /// downstream routes until this returns successfully.
-    pub(crate) fn start_dynamic_edge_with_catalogue_snapshot(
+    pub fn start_dynamic_edge_with_catalogue_snapshot(
         storage_config: StorageConfig,
+        storage_factory: Option<Arc<dyn StorageFactory>>,
         edge_cache_budget: Option<EdgeCacheBudget>,
         snapshot: crate::protocol::CatalogueSnapshot,
     ) -> Result<Self, String> {
@@ -135,6 +166,7 @@ impl ServerShellHandle {
                         author: AuthorId::SYSTEM,
                     },
                     storage_config,
+                    storage_factory,
                     edge_cache_budget,
                     snapshot,
                 ) {
@@ -173,7 +205,8 @@ impl ServerShellHandle {
         })
     }
 
-    pub(crate) async fn encoded_trusted_catalogue_snapshot(
+    /// Encode the trusted catalogue through the negotiated wire format.
+    pub async fn encoded_trusted_catalogue_snapshot(
         &self,
         protocol_version: u16,
         features: crate::wire::WireFeatures,
@@ -190,7 +223,7 @@ impl ServerShellHandle {
     /// same authenticated snapshot path used at first bootstrap. The snapshot
     /// adoption rebuilds the local physical projection registry before this
     /// call returns, so callers may safely make the edge externally ready.
-    pub(crate) async fn apply_trusted_catalogue_snapshot(
+    pub async fn apply_trusted_catalogue_snapshot(
         &self,
         snapshot: crate::protocol::CatalogueSnapshot,
     ) -> Result<(), String> {
@@ -202,8 +235,9 @@ impl ServerShellHandle {
         .await
     }
 
-    #[cfg(test)]
-    pub(crate) async fn set_catalogue_activation_failpoint(
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub async fn set_catalogue_activation_failpoint(
         &self,
         failpoint: crate::node::CatalogueActivationFailpoint,
     ) -> Result<(), String> {
@@ -214,8 +248,8 @@ impl ServerShellHandle {
         .await
     }
 
-    #[cfg(any(test, feature = "test"))]
-    pub(crate) async fn trusted_catalogue_snapshot_for_test(
+    #[doc(hidden)]
+    pub async fn trusted_catalogue_snapshot_for_test(
         &self,
     ) -> Result<crate::protocol::CatalogueSnapshot, String> {
         self.run(move |shell| {
@@ -225,8 +259,9 @@ impl ServerShellHandle {
         })
         .await
     }
-    #[cfg(test)]
-    pub(crate) async fn runtime_catalogue_contains(
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub async fn runtime_catalogue_contains(
         &self,
         schema: SchemaVersionId,
         lens: crate::ids::MigrationLensId,
@@ -235,28 +270,34 @@ impl ServerShellHandle {
             .await
     }
 
-    pub(crate) fn start_with_storage(
+    /// Start a core runtime over the selected storage configuration.
+    pub fn start_with_storage(
         schema: JazzSchema,
         storage_config: StorageConfig,
+        storage_factory: Option<Arc<dyn StorageFactory>>,
     ) -> Result<Self, String> {
         Self::start_with_storage_config_and_permissions(
             schema,
             storage_config,
+            storage_factory,
             NodeRole::Core,
             None,
             false,
         )
     }
 
-    pub(crate) fn start_with_storage_config(
+    /// Start a runtime with an explicit role and optional Edge cache budget.
+    pub fn start_with_storage_config(
         schema: JazzSchema,
         storage_config: StorageConfig,
+        storage_factory: Option<Arc<dyn StorageFactory>>,
         role: NodeRole,
         edge_cache_budget: Option<EdgeCacheBudget>,
     ) -> Result<Self, String> {
         Self::start_with_storage_config_and_permissions(
             schema,
             storage_config,
+            storage_factory,
             role,
             edge_cache_budget,
             true,
@@ -266,6 +307,7 @@ impl ServerShellHandle {
     fn start_with_storage_config_and_permissions(
         schema: JazzSchema,
         storage_config: StorageConfig,
+        storage_factory: Option<Arc<dyn StorageFactory>>,
         role: NodeRole,
         edge_cache_budget: Option<EdgeCacheBudget>,
         permissions_ready: bool,
@@ -287,6 +329,10 @@ impl ServerShellHandle {
                 .with_row_id_seed(0x5e)
                 .with_runtime_schema_bootstrap()
                 .with_role(role);
+                let config = match storage_factory {
+                    Some(factory) => config.with_storage_factory(factory),
+                    None => config,
+                };
                 let config = match edge_cache_budget {
                     Some(budget) => config.with_edge_cache_budget(budget),
                     None => config,
@@ -335,11 +381,15 @@ impl ServerShellHandle {
         })
     }
 
-    pub(crate) fn subscribe_activity(&self) -> watch::Receiver<u64> {
-        self.inner.activity_tx.subscribe()
+    /// Subscribe to runtime activity that may make outbound session frames available.
+    pub fn subscribe_activity(&self) -> ServerRuntimeActivity {
+        ServerRuntimeActivity {
+            receiver: self.inner.activity_tx.subscribe(),
+        }
     }
 
-    pub(crate) async fn open_with_session_context(
+    /// Admit an authenticated session into the semantic runtime.
+    pub async fn open_with_session_context(
         &self,
         identity: AuthorId,
         claims: BTreeMap<String, Value>,
@@ -361,7 +411,8 @@ impl ServerShellHandle {
         .await
     }
 
-    pub(crate) async fn publish_schema_with_lens(
+    /// Publish a validated schema and optional migration lens to the runtime.
+    pub async fn publish_schema_with_lens(
         &self,
         schema: JazzSchema,
         lens: MigrationLens,
@@ -383,7 +434,8 @@ impl ServerShellHandle {
     }
 
     #[allow(dead_code)] // exercised only by the integration-test server feature
-    pub(crate) async fn seed_branch_row_for_test(
+    #[doc(hidden)]
+    pub async fn seed_branch_row_for_test(
         &self,
         branch: BranchId,
         table: String,
@@ -405,7 +457,8 @@ impl ServerShellHandle {
     }
 
     #[allow(dead_code)] // exercised only by the integration-test server feature
-    pub(crate) async fn create_branch_for_test(&self, branch: BranchId) -> Result<(), String> {
+    #[doc(hidden)]
+    pub async fn create_branch_for_test(&self, branch: BranchId) -> Result<(), String> {
         let activity_tx = self.inner.activity_tx.clone();
         let result = self
             .run(move |shell| {
@@ -420,7 +473,8 @@ impl ServerShellHandle {
         result
     }
 
-    pub(crate) async fn publish_permissions_schema(
+    /// Publish the permissions schema selected by the catalogue shell.
+    pub async fn publish_permissions_schema(
         &self,
         schema: JazzSchema,
         lineage_source: SchemaVersionId,
@@ -445,11 +499,12 @@ impl ServerShellHandle {
     /// shell thread keeps ingesting later frames. This is intentionally a
     /// streaming operation rather than one large `run` job so a route can
     /// publish a durability fate as soon as it is true.
-    pub(crate) fn receive_tick_stream(
+    /// Apply an inbound frame batch and stream every immediately available response.
+    pub fn receive_tick_stream(
         &self,
         session: ServerSession,
         frames: Vec<AbiBytes>,
-    ) -> Result<tokio_mpsc::UnboundedReceiver<Result<Vec<AbiBytes>, String>>, String> {
+    ) -> Result<ServerRuntimeFrameStream, String> {
         let activity_tx = self.inner.activity_tx.clone();
         let (outbound_tx, outbound_rx) = tokio_mpsc::unbounded_channel();
         self.send(ServerShellCommand::Run(Box::new(move |shell| {
@@ -478,10 +533,13 @@ impl ServerShellHandle {
                 notify_shell_activity(&activity_tx);
             }
         })))?;
-        Ok(outbound_rx)
+        Ok(ServerRuntimeFrameStream {
+            receiver: outbound_rx,
+        })
     }
 
-    pub(crate) async fn tick_take(&self, session: ServerSession) -> Result<Vec<AbiBytes>, String> {
+    /// Tick the runtime once and return pending frames for one session.
+    pub async fn tick_take(&self, session: ServerSession) -> Result<Vec<AbiBytes>, String> {
         let activity_tx = self.inner.activity_tx.clone();
         self.run(move |shell| {
             let result = shell
@@ -504,7 +562,8 @@ impl ServerShellHandle {
         .await
     }
 
-    pub(crate) async fn connect_upstream(
+    /// Attach a negotiated upstream transport to an edge runtime.
+    pub async fn connect_upstream(
         &self,
         transport: Box<dyn Transport + Send>,
     ) -> Result<(), String> {
@@ -521,11 +580,13 @@ impl ServerShellHandle {
         .await
     }
 
-    pub(crate) fn notify_activity(&self) {
+    /// Wake shell tasks after an adapter stages inbound work.
+    pub fn notify_activity(&self) {
         notify_shell_activity(&self.inner.activity_tx);
     }
 
-    pub(crate) fn close(&self, session: ServerSession) {
+    /// Close a semantic session without exposing runtime storage or peer state.
+    pub fn close(&self, session: ServerSession) {
         let _ = self.send(ServerShellCommand::Run(Box::new(move |shell| {
             let _ = shell.close_session(session);
         })));
@@ -533,7 +594,8 @@ impl ServerShellHandle {
 
     /// Retire the job sender, then wait until the owner has dropped the shell
     /// and its storage. It is safe for multiple shutdown paths to call this.
-    pub(crate) async fn shutdown(&self) -> Result<(), String> {
+    /// Stop and join the runtime owner thread.
+    pub async fn shutdown(&self) -> Result<(), String> {
         let inner = Arc::clone(&self.inner);
         tokio::task::spawn_blocking(move || shutdown_blocking(&inner))
             .await

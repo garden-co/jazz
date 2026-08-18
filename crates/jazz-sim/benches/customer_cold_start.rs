@@ -13,7 +13,6 @@ use jazz::db::{
 };
 use jazz::groove::records::{ScalarEnumSchema, Value};
 use jazz::groove::schema::{ColumnSchema, ColumnType};
-use jazz::groove::storage::{Durability, RocksDbStorage};
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::node::MergeableCommit;
 use jazz::protocol::{SubscriptionKey, SyncMessage};
@@ -24,6 +23,7 @@ use jazz::wire::{
     WireStreamEncoder, compress_sync_payload, current_wire_features,
 };
 use jazz_sim::{emit_json_line, metadata_fields};
+use jazz_storage_rocksdb::{Durability, RocksDbStorage};
 use serde_json::{Value as JsonValue, json};
 
 #[cfg(all(feature = "bench-alloc-metrics", not(feature = "bench-alloc-sites")))]

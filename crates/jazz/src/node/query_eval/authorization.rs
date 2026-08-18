@@ -1357,7 +1357,7 @@ mod authorization_scope_compiler_tests {
     use crate::protocol::TableLens;
     use crate::schema::WritePolicies;
     use groove::schema::ColumnType;
-    use groove::storage::{Durability, RocksDbStorage};
+    use jazz_storage_rocksdb::{Durability, RocksDbStorage};
 
     fn table() -> crate::schema::TableSchema {
         crate::schema::TableSchema::new("protected", Vec::<ColumnSchema>::new())

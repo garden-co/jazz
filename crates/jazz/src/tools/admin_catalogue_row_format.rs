@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use crate::tools::object::ObjectId;
-use crate::tools::public_api::types::{ColumnDescriptor, ColumnType, RowDescriptor, Value};
+use crate::tools::ObjectId;
+use crate::tools::public_schema::{ColumnDescriptor, ColumnType, RowDescriptor, Value};
 use uuid::Uuid;
 
 /// Maximum payload size allowed for a single BYTEA value (1 MiB).
@@ -11,7 +11,7 @@ const INVALID_UUID_TEXT_SENTINEL: [u8; 16] = [0xff; 16];
 
 macro_rules! cfg_decode {
     ($item:item) => {
-        #[cfg(any(test, feature = "server"))]
+        #[cfg(any(test, feature = "runtime"))]
         $item
     };
 }
@@ -30,7 +30,7 @@ pub enum EncodingError {
     /// Null value for non-nullable column.
     NullNotAllowed { column: String },
     /// Binary data is malformed or too short.
-    #[cfg(any(test, feature = "server"))]
+    #[cfg(any(test, feature = "runtime"))]
     MalformedData { message: String },
     /// BYTEA payload exceeds the configured per-cell limit.
     ByteaTooLarge {
@@ -39,7 +39,7 @@ pub enum EncodingError {
         max: usize,
     },
     /// Column index out of bounds.
-    #[cfg(any(test, feature = "server"))]
+    #[cfg(any(test, feature = "runtime"))]
     ColumnIndexOutOfBounds { index: usize, max: usize },
 }
 
@@ -65,7 +65,7 @@ impl std::fmt::Display for EncodingError {
             EncodingError::NullNotAllowed { column } => {
                 write!(f, "null not allowed for column '{column}'")
             }
-            #[cfg(any(test, feature = "server"))]
+            #[cfg(any(test, feature = "runtime"))]
             EncodingError::MalformedData { message } => {
                 write!(f, "malformed data: {message}")
             }
@@ -79,7 +79,7 @@ impl std::fmt::Display for EncodingError {
                     "bytea payload too large for column '{column}': {actual} bytes exceeds limit {max}"
                 )
             }
-            #[cfg(any(test, feature = "server"))]
+            #[cfg(any(test, feature = "runtime"))]
             EncodingError::ColumnIndexOutOfBounds { index, max } => {
                 write!(f, "column index {index} out of bounds (max {max})")
             }
@@ -89,7 +89,7 @@ impl std::fmt::Display for EncodingError {
 
 impl std::error::Error for EncodingError {}
 
-#[cfg(any(test, feature = "server"))]
+#[cfg(any(test, feature = "runtime"))]
 #[derive(Debug, Clone)]
 struct CompiledColumnLayout {
     fixed_offset: Option<usize>,
@@ -101,7 +101,7 @@ struct CompiledColumnLayout {
 
 #[derive(Debug, Clone)]
 struct CompiledRowLayout {
-    #[cfg(any(test, feature = "server"))]
+    #[cfg(any(test, feature = "runtime"))]
     columns: Vec<CompiledColumnLayout>,
     fixed_section_size: usize,
     variable_column_count: usize,
@@ -113,16 +113,16 @@ fn compiled_row_layout_cache() -> &'static Mutex<HashMap<[u8; 32], Arc<CompiledR
 }
 
 fn compile_row_layout(descriptor: &RowDescriptor) -> CompiledRowLayout {
-    #[cfg(any(test, feature = "server"))]
+    #[cfg(any(test, feature = "runtime"))]
     let mut columns = Vec::with_capacity(descriptor.columns.len());
     let mut fixed_offset = 0usize;
     let mut variable_index = 0usize;
 
     for column in &descriptor.columns {
         if let Some(fixed_value_size) = column.column_type.fixed_size() {
-            #[cfg(any(test, feature = "server"))]
+            #[cfg(any(test, feature = "runtime"))]
             let fixed_total_size = fixed_value_size + usize::from(column.nullable);
-            #[cfg(any(test, feature = "server"))]
+            #[cfg(any(test, feature = "runtime"))]
             columns.push(CompiledColumnLayout {
                 fixed_offset: Some(fixed_offset),
                 fixed_total_size: Some(fixed_total_size),
@@ -132,7 +132,7 @@ fn compile_row_layout(descriptor: &RowDescriptor) -> CompiledRowLayout {
             });
             fixed_offset += fixed_value_size + usize::from(column.nullable);
         } else {
-            #[cfg(any(test, feature = "server"))]
+            #[cfg(any(test, feature = "runtime"))]
             columns.push(CompiledColumnLayout {
                 fixed_offset: None,
                 fixed_total_size: None,
@@ -145,7 +145,7 @@ fn compile_row_layout(descriptor: &RowDescriptor) -> CompiledRowLayout {
     }
 
     CompiledRowLayout {
-        #[cfg(any(test, feature = "server"))]
+        #[cfg(any(test, feature = "runtime"))]
         columns,
         fixed_section_size: fixed_offset,
         variable_column_count: variable_index,
@@ -1201,7 +1201,7 @@ cfg_decode! {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tools::public_api::types::EnumCaseDescriptor;
+    use crate::tools::public_schema::EnumCaseDescriptor;
     use uuid::Uuid;
 
     fn test_descriptor() -> RowDescriptor {

@@ -7,12 +7,12 @@ use jazz::db::{
 };
 use jazz::groove::records::Value;
 use jazz::groove::schema::{ColumnSchema, ColumnType};
-use jazz::groove::storage::RocksDbStorage;
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::node::{CurrentRow, RelationEdge, RelationSnapshot};
 use jazz::query::{ArraySubquery, OrderDirection, Query};
 use jazz::schema::{JazzSchema, Policy, TableSchema};
 use jazz::tx::DurabilityTier;
+use jazz_storage_rocksdb::RocksDbStorage;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct CanonicalRow {

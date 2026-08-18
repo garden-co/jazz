@@ -28,10 +28,10 @@ use std::time::Duration;
 
 use jazz::tools::public_schema::PolicyExpr;
 use jazz::tools::public_schema::TablePolicies;
-use jazz::tools::server::JazzServer;
 use jazz::tools::{
     ColumnType, DurabilityTier, QueryBuilder, Schema, SchemaBuilder, TableSchema, Value,
 };
+use jazz_server::JazzServer;
 use serde_json::json;
 use support::{TestingClient, wait_for_query};
 

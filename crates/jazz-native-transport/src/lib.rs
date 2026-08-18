@@ -99,6 +99,15 @@ pub struct WebSocketTransport {
 pub struct NativeWebSocketConnector;
 
 impl NativeTransportConnector for NativeWebSocketConnector {
+    fn validate_catalogue_bootstrap_url(
+        &self,
+        server_url: &str,
+        app_id: AppId,
+    ) -> Result<(), jazz::tools::native_transport_connector::NativeTransportError> {
+        validate_catalogue_bootstrap_upstream_url(server_url, app_id)
+            .map_err(jazz::tools::native_transport_connector::NativeTransportError)
+    }
+
     fn connect(&self, request: NativeTransportRequest) -> NativeTransportFuture {
         Box::pin(async move {
             let transport = WebSocketTransport::connect_with_wake(
@@ -420,10 +429,7 @@ fn client_websocket_config() -> WebSocketConfig {
         .max_frame_size(Some(MAX_WIRE_FRAME_BYTES))
 }
 
-pub(crate) fn validate_catalogue_bootstrap_upstream_url(
-    base_url: &str,
-    app_id: AppId,
-) -> Result<(), String> {
+fn validate_catalogue_bootstrap_upstream_url(base_url: &str, app_id: AppId) -> Result<(), String> {
     validate_bootstrap_upstream_url(&ws_url(base_url, app_id)).map_err(|error| error.to_string())
 }
 

@@ -11,13 +11,11 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::tools::middleware::auth::validate_admin_secret;
-use crate::tools::public_api::types::{
-    ColumnType, Schema, SchemaHash, TableName, TablePolicies, Value,
-};
-use crate::tools::schema_lens::{Lens, LensOp, LensTransform};
-use crate::tools::server::{ServerState, ShutdownPhase};
-use crate::tools::transport_error::ErrorResponse;
+use crate::middleware::auth::validate_admin_secret;
+use crate::server::{ServerState, ShutdownPhase};
+use jazz::tools::public_schema::{ColumnType, Schema, SchemaHash, TableName, TablePolicies, Value};
+use jazz::tools::schema_lens::{Lens, LensOp, LensTransform};
+use jazz::tools::transport_error::ErrorResponse;
 
 use super::utils::{
     parse_app_id_param, parse_object_id_param, parse_schema_hash_param, permissions_head_view,
@@ -585,9 +583,8 @@ pub(super) async fn publish_schema_handler(
             .into_response();
     }
 
-    if (state.core_server_shell().is_some() || state.core_server_shell_storage_config.is_some())
-        && let Err(err) =
-            crate::tools::public_schema_convert::convert_public_schema(&request.schema)
+    if (state.runtime().is_some() || state.core_server_shell_storage_config.is_some())
+        && let Err(err) = jazz::tools::public_schema_convert::convert_public_schema(&request.schema)
     {
         return (
             StatusCode::BAD_REQUEST,
@@ -615,7 +612,7 @@ pub(super) async fn publish_schema_handler(
                 .into_response();
         }
     };
-    if let Err(err) = crate::tools::server::runtime_catalogue::publish_runtime_catalogue(
+    if let Err(err) = crate::server::runtime_catalogue::publish_runtime_catalogue(
         &state,
         std::slice::from_ref(&schema),
         &[],
@@ -859,9 +856,9 @@ pub(super) async fn publish_permissions_handler(
         table.policies = policies.clone();
     }
 
-    if (state.core_server_shell().is_some() || state.core_server_shell_storage_config.is_some())
+    if (state.runtime().is_some() || state.core_server_shell_storage_config.is_some())
         && let Err(err) =
-            crate::tools::public_schema_convert::convert_public_schema(&schema_with_permissions)
+            jazz::tools::public_schema_convert::convert_public_schema(&schema_with_permissions)
     {
         return (
             StatusCode::BAD_REQUEST,
@@ -884,12 +881,8 @@ pub(super) async fn publish_permissions_handler(
         {
             Ok(head) => {
                 if let Err(err) =
-                    crate::tools::server::runtime_catalogue::publish_runtime_catalogue(
-                        &state,
-                        &[],
-                        &[],
-                    )
-                    .await
+                    crate::server::runtime_catalogue::publish_runtime_catalogue(&state, &[], &[])
+                        .await
                 {
                     return (
                         StatusCode::INTERNAL_SERVER_ERROR,
@@ -910,7 +903,7 @@ pub(super) async fn publish_permissions_handler(
             )
                 .into_response(),
         },
-        Err(crate::tools::server::catalogue::CatalogueError::WriteError(message))
+        Err(crate::server::catalogue::CatalogueError::WriteError(message))
             if message.starts_with("stale permissions parent") =>
         {
             (
@@ -1184,7 +1177,7 @@ pub(super) async fn publish_migration_handler(
         }
     };
 
-    if let Err(err) = crate::tools::server::runtime_catalogue::publish_runtime_catalogue(
+    if let Err(err) = crate::server::runtime_catalogue::publish_runtime_catalogue(
         &state,
         &[],
         std::slice::from_ref(&lens),
