@@ -703,9 +703,12 @@ where
         // Parking is in-memory delivery state, not derivable from storage, so a
         // live refresh must retain it for the caller to drain afterwards.
         let parking = self.parking.clone();
+        let publication_lineage = self
+            .database
+            .take_durable_publication_lineage();
         let old_database = self.database.take();
         let storage = old_database.into_storage();
-        let database = Self::open_full_database(
+        let mut database = Self::open_full_database(
             &self.catalogue.schema,
             &self.catalogue.catalogue_schemas,
             &self.catalogue.schema_version_aliases,
@@ -713,6 +716,7 @@ where
             &self.branches.branch_partitions,
             storage,
         )?;
+        database.adopt_durable_publication_lineage(publication_lineage);
         self.database.replace(database);
         self.register_physical_history_variant_projections()?;
         self.register_physical_current_variant_projections()?;

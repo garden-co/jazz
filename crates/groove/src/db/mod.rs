@@ -118,6 +118,14 @@ pub struct DurablePublicationScope {
     resolved: bool,
 }
 
+/// Opaque publication lineage transferred when one logical database replaces
+/// its resident IVM/runtime during schema activation.
+#[doc(hidden)]
+#[must_use = "a detached publication lineage must be adopted by the replacement database"]
+pub struct DurablePublicationLineage {
+    state: Arc<Mutex<DurablePublicationState>>,
+}
+
 #[derive(Default)]
 struct DurablePublicationState {
     depth: usize,

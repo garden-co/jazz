@@ -81,6 +81,32 @@ where
         })
     }
 
+    /// Detach the logical publication lineage before replacing this database's
+    /// resident runtime. Existing scope tokens continue to address this state.
+    #[doc(hidden)]
+    pub fn take_durable_publication_lineage(&mut self) -> DurablePublicationLineage {
+        DurablePublicationLineage {
+            state: std::mem::replace(
+                &mut self.durable_publication_state,
+                Arc::new(Mutex::new(DurablePublicationState::default())),
+            ),
+        }
+    }
+
+    /// Attach a predecessor's logical publication lineage to a freshly built
+    /// replacement runtime.
+    #[doc(hidden)]
+    pub fn adopt_durable_publication_lineage(&mut self, lineage: DurablePublicationLineage) {
+        let state = self
+            .durable_publication_state
+            .lock()
+            .expect("durable publication state mutex poisoned");
+        debug_assert_eq!(state.depth, 0);
+        debug_assert!(!state.aborted);
+        drop(state);
+        self.durable_publication_state = lineage.state;
+    }
+
     /// Reject any host operation after an ambiguous durable finalization.
     #[doc(hidden)]
     pub fn ensure_usable(&self) -> Result<(), Error> {

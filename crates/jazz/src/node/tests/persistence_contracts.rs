@@ -1846,6 +1846,35 @@ fn peer_repair_payload_withholds_canonical_publication_until_durable() {
 }
 
 #[test]
+fn peer_catalogue_snapshot_is_owned_until_durable() {
+    let snapshot = catalogue_snapshot_fixture();
+    let expected_schema = snapshot.current_write_schema.schema;
+    let released = std::rc::Rc::new(std::cell::Cell::new(true));
+    let mut receiver = authority_runtime(
+        std::rc::Rc::clone(&released),
+        std::rc::Rc::new(std::cell::Cell::new(false)),
+    );
+    let waker = std::task::Waker::from(std::sync::Arc::new(PersistenceTestWake));
+    let mut context = std::task::Context::from_waker(&waker);
+    released.set(false);
+    assert!(receiver
+        .poll_apply_peer_catalogue_snapshot(&mut context, &snapshot)
+        .is_pending());
+    released.set(true);
+    loop {
+        match receiver.poll_apply_peer_catalogue_snapshot(&mut context, &snapshot) {
+            std::task::Poll::Pending => {}
+            std::task::Poll::Ready(Ok(())) => break,
+            std::task::Poll::Ready(Err(error)) => panic!("catalogue snapshot failed: {error}"),
+        }
+    }
+    assert_eq!(
+        receiver.resident().current_write_schema().unwrap().schema,
+        expected_schema
+    );
+}
+
+#[test]
 fn demand_driven_peer_tick_retains_view_update_until_durable() {
     let (mut writer, _) = fail_write_many_node();
     let (mut core, _) = fail_write_many_node();

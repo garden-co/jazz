@@ -288,6 +288,17 @@ where
         Some((repair.requests.clone(), version_bundles.clone()))
     }
 
+    pub(super) fn staged_catalogue_snapshot(&self) -> Option<crate::protocol::CatalogueSnapshot> {
+        let ConnectionLink::Upstream { .. } = &self.link else {
+            return None;
+        };
+        let staged = self.staged_inbound.front()?;
+        let SyncMessage::CatalogueSnapshot(snapshot) = &staged.message else {
+            return None;
+        };
+        Some((**snapshot).clone())
+    }
+
     #[cfg(test)]
     pub(crate) fn has_staged_view_update_for_test(&self) -> bool {
         self.staged_ready_view_update().is_some()
@@ -399,6 +410,15 @@ where
             message: repair.update,
             authority_receipt_eligible: repair.authority_receipt_eligible,
         });
+        self.externally_applied_inbound = true;
+    }
+
+    pub(super) fn complete_staged_catalogue_snapshot(&mut self) {
+        let staged = self
+            .staged_inbound
+            .pop_front()
+            .expect("completed catalogue ingress retains its frame");
+        debug_assert!(matches!(staged.message, SyncMessage::CatalogueSnapshot(_)));
         self.externally_applied_inbound = true;
     }
 
@@ -1041,6 +1061,7 @@ where
                 }) {
                     if self.external_durable_ingress
                         && ((*local_receiver && matches!(&message, SyncMessage::CommitUnit { .. }))
+                            || matches!(&message, SyncMessage::CatalogueSnapshot(_))
                             || matches!(&message, SyncMessage::RowVersionPayloads { .. })
                             || matches!(
                                 &message,

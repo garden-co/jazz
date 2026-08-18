@@ -7,6 +7,12 @@ struct PlannedCatalogueSnapshot {
     activated_lineages: Vec<StagedSchemaLineage>,
 }
 
+pub(crate) struct PreparedTrustedCatalogueSnapshot {
+    plan: PlannedCatalogueSnapshot,
+    bootstrap_uninitialized: bool,
+    runtime_semantics_changed: bool,
+}
+
 fn next_schema_version_alias_in_catalogue(
     catalogue: &SchemaCatalogue,
 ) -> Result<SchemaVersionAlias, Error> {
@@ -33,6 +39,14 @@ where
     where
         S: ReopenableStorage,
     {
+        let prepared = self.prepare_trusted_catalogue_snapshot(snapshot)?;
+        self.publish_prepared_trusted_catalogue_snapshot(prepared)
+    }
+
+    pub(crate) fn prepare_trusted_catalogue_snapshot(
+        &self,
+        snapshot: crate::protocol::CatalogueSnapshot,
+    ) -> Result<PreparedTrustedCatalogueSnapshot, Error> {
         let bootstrap_uninitialized =
             self.catalogue_bootstrap_state == CatalogueBootstrapState::Uninitialized;
         let plan = self.plan_trusted_catalogue_snapshot(snapshot)?;
@@ -41,6 +55,25 @@ where
             || self.catalogue.catalogue_lenses != plan.catalogue.catalogue_lenses
             || self.catalogue.physical_mappings != plan.catalogue.physical_mappings
             || self.catalogue.current_write_schema != plan.catalogue.current_write_schema;
+        Ok(PreparedTrustedCatalogueSnapshot {
+            plan,
+            bootstrap_uninitialized,
+            runtime_semantics_changed,
+        })
+    }
+
+    pub(crate) fn publish_prepared_trusted_catalogue_snapshot(
+        &mut self,
+        prepared: PreparedTrustedCatalogueSnapshot,
+    ) -> Result<(), Error>
+    where
+        S: ReopenableStorage,
+    {
+        let PreparedTrustedCatalogueSnapshot {
+            plan,
+            bootstrap_uninitialized,
+            runtime_semantics_changed,
+        } = prepared;
         let previous_catalogue = std::mem::replace(&mut self.catalogue, plan.catalogue.clone());
         // Snapshot replay can install widened mappings after a persistent edge
         // restart. Rebuild the live projection registry as part of that

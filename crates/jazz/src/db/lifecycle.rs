@@ -154,6 +154,20 @@ impl DemandDrivenDb {
         let connections = self.database.node.connections.borrow().clone();
         for connection in &connections {
             connection.borrow_mut().stage_available_inbound();
+            let staged_catalogue = { connection.borrow().staged_catalogue_snapshot() };
+            if let Some(snapshot) = staged_catalogue {
+                match self
+                    .runtime
+                    .poll_apply_peer_catalogue_snapshot(context, &snapshot)
+                {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(Err(error)) => return Poll::Ready(Err(error.into())),
+                    Poll::Ready(Ok(())) => {
+                        connection.borrow_mut().complete_staged_catalogue_snapshot()
+                    }
+                }
+                continue;
+            }
             let staged_repair = { connection.borrow().staged_row_version_repair() };
             if let Some((requests, bundles)) = staged_repair {
                 match self
@@ -236,7 +250,8 @@ impl DemandDrivenDb {
         };
         if connections.iter().any(|connection| {
             let connection = connection.borrow();
-            connection.staged_row_version_repair().is_some()
+            connection.staged_catalogue_snapshot().is_some()
+                || connection.staged_row_version_repair().is_some()
                 || connection.staged_relay_commit().is_some()
                 || connection.staged_accepted_fate().is_some()
         }) {
