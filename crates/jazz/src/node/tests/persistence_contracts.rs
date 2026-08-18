@@ -2572,6 +2572,49 @@ fn incremental_catalogue_ack_waits_for_durable_commit() {
 }
 
 #[test]
+fn local_catalogue_publication_waits_for_the_same_durable_boundary() {
+    let node_schema = schema();
+    let message = SyncMessage::PublishSchema {
+        author: AuthorId::SYSTEM,
+        schema: Box::new(crate::protocol::SchemaVersion::new(node_schema.clone())),
+    };
+    let column_families = node_schema.column_families();
+    let refs = column_families.iter().map(String::as_str).collect::<Vec<_>>();
+    let released = std::rc::Rc::new(std::cell::Cell::new(true));
+    let storage = CommitGatedAuthorityStorage {
+        inner: groove::storage::async_ordered::ImmediateStorage::new(MemoryStorage::new(&refs)),
+        released: std::rc::Rc::clone(&released),
+        fail: std::rc::Rc::new(std::cell::Cell::new(false)),
+        completed: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
+    };
+    let mut opening = PollableNodeOpen::new_history_complete(
+        node(0xd4),
+        node_schema,
+        Box::new(storage),
+    );
+    let waker = std::task::Waker::from(std::sync::Arc::new(PersistenceTestWake));
+    let mut context = std::task::Context::from_waker(&waker);
+    let std::task::Poll::Ready(Ok(mut runtime)) = opening.poll(&mut context) else {
+        panic!("commit-only gate must open the demand-driven authority")
+    };
+
+    released.set(false);
+    assert!(runtime
+        .poll_apply_trusted_catalogue_message(&mut context, &message)
+        .is_pending());
+
+    released.set(true);
+    let std::task::Poll::Ready(Ok(responses)) =
+        runtime.poll_apply_trusted_catalogue_message(&mut context, &message)
+    else {
+        panic!("released catalogue publication must finish")
+    };
+    assert!(responses
+        .iter()
+        .any(|message| matches!(message, SyncMessage::CatalogueAck(_))));
+}
+
+#[test]
 fn immediate_authority_storage_completes_through_the_same_first_poll() {
     let (mut writer, _) = fail_write_many_node();
     let (tx_id, unit) = writer

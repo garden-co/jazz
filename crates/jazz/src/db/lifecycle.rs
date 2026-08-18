@@ -234,6 +234,90 @@ impl DemandDrivenDb {
         self.database.write_state(tx_id)
     }
 
+    #[cfg(any(feature = "runtime", test))]
+    pub async fn apply_trusted_catalogue_snapshot(
+        &mut self,
+        snapshot: crate::protocol::CatalogueSnapshot,
+    ) -> Result<(), Error> {
+        std::future::poll_fn(|context| {
+            self.runtime
+                .poll_apply_peer_catalogue_snapshot(context, &snapshot)
+        })
+        .await
+        .map_err(Into::into)
+    }
+
+    #[cfg(any(feature = "runtime", test))]
+    pub fn trusted_catalogue_snapshot(&self) -> Result<crate::protocol::CatalogueSnapshot, Error> {
+        self.database.trusted_catalogue_snapshot()
+    }
+
+    #[cfg(any(feature = "runtime", test))]
+    pub fn trusted_current_catalogue_schema(&self) -> Result<JazzSchema, Error> {
+        self.database.trusted_current_catalogue_schema()
+    }
+
+    #[cfg(any(feature = "runtime", test))]
+    pub fn catalogue_bootstrap_is_ready(&self) -> bool {
+        self.database.catalogue_bootstrap_is_ready()
+    }
+
+    async fn apply_trusted_catalogue_message(
+        &mut self,
+        message: SyncMessage,
+    ) -> Result<Vec<SyncMessage>, Error> {
+        self.database.check_catalogue_admin()?;
+        std::future::poll_fn(|context| {
+            self.runtime
+                .poll_apply_trusted_catalogue_message(context, &message)
+        })
+        .await
+        .map_err(Into::into)
+    }
+
+    pub async fn publish_schema(
+        &mut self,
+        schema: SchemaVersion,
+    ) -> Result<Vec<SyncMessage>, Error> {
+        self.apply_trusted_catalogue_message(SyncMessage::PublishSchema {
+            author: self.database.identity.author,
+            schema: Box::new(schema),
+        })
+        .await
+    }
+
+    pub async fn publish_lens(&mut self, lens: MigrationLens) -> Result<Vec<SyncMessage>, Error> {
+        self.apply_trusted_catalogue_message(SyncMessage::PublishLens {
+            author: self.database.identity.author,
+            lens,
+        })
+        .await
+    }
+
+    pub async fn publish_schema_with_lens(
+        &mut self,
+        catalogue_seq: u64,
+        publication: SchemaLineagePublication,
+    ) -> Result<Vec<SyncMessage>, Error> {
+        self.apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
+            author: self.database.identity.author,
+            catalogue_seq,
+            publication: Box::new(publication),
+        })
+        .await
+    }
+
+    pub async fn set_current_write_schema(
+        &mut self,
+        pointer: CurrentWriteSchema,
+    ) -> Result<Vec<SyncMessage>, Error> {
+        self.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+            author: self.database.identity.author,
+            pointer,
+        })
+        .await
+    }
+
     #[cfg(test)]
     pub(crate) fn runtime_stats_for_test(&self) -> groove::ivm::RuntimeStats {
         self.database.runtime_stats_for_test()

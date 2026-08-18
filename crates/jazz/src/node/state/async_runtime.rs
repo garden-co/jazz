@@ -1052,6 +1052,23 @@ impl DemandDrivenNode {
         message: &SyncMessage,
         ingest_context: CommitUnitIngestContext,
     ) -> std::task::Poll<Result<Vec<SyncMessage>, Error>> {
+        self.poll_apply_catalogue_message(context, message, Some(ingest_context))
+    }
+
+    pub(crate) fn poll_apply_trusted_catalogue_message(
+        &mut self,
+        context: &mut std::task::Context<'_>,
+        message: &SyncMessage,
+    ) -> std::task::Poll<Result<Vec<SyncMessage>, Error>> {
+        self.poll_apply_catalogue_message(context, message, None)
+    }
+
+    fn poll_apply_catalogue_message(
+        &mut self,
+        context: &mut std::task::Context<'_>,
+        message: &SyncMessage,
+        ingest_context: Option<CommitUnitIngestContext>,
+    ) -> std::task::Poll<Result<Vec<SyncMessage>, Error>> {
         match &self.pending_peer_catalogue_message {
             Some(pending) if &pending.message != message => {
                 return std::task::Poll::Ready(Err(Error::InvalidStoredValue(
@@ -1071,13 +1088,18 @@ impl DemandDrivenNode {
                     Ok(publication) => publication,
                     Err(error) => return std::task::Poll::Ready(Err(error.into())),
                 };
-                let apply_result = self
-                    .node
-                    .borrow_mut()
-                    .apply_sync_message_with_ingest_context(
-                        message.clone(),
-                        Some(ingest_context),
-                    );
+                let apply_result = if let Some(ingest_context) = ingest_context {
+                    self.node
+                        .borrow_mut()
+                        .apply_sync_message_with_ingest_context(
+                            message.clone(),
+                            Some(ingest_context),
+                        )
+                } else {
+                    self.node
+                        .borrow_mut()
+                        .apply_trusted_catalogue_message(message.clone())
+                };
                 let responses = match apply_result {
                     Ok(responses) => responses,
                     Err(error) => {
