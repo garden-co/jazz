@@ -2,6 +2,31 @@
 
 use super::*;
 
+#[test]
+fn volatile_storage_does_not_change_direct_upstream_subscription_topology() {
+    let schema = schema();
+    let client = open_db(0xc7, AuthorId::from_bytes([0xc7; 16]), &schema);
+    client.set_non_durable_client();
+
+    let (transport, _server_transport, outbound) = duplex_with_client_outbound_tap();
+    let _upstream = client.connect_upstream(transport);
+    let prepared = client.prepare_query(&client.table("todos")).unwrap();
+    let _attachment = client
+        .attach_query_with_opts(&prepared, edge_subscribe_opts())
+        .unwrap();
+    client.tick().unwrap();
+
+    let tier = outbound.borrow().iter().find_map(|message| match message {
+        SyncMessage::RegisterShape { opts, .. } => Some(opts.tier),
+        _ => None,
+    });
+    assert_eq!(
+        tier,
+        Some(DurabilityTier::Global),
+        "volatile local storage must not make a direct Core connection advertise a Local upstream"
+    );
+}
+
 /// A Core immediately refreshes a peer-edge subscriber that was visited before
 /// a later client upload in the same service pass, so Bob receives Alice's
 /// later canonical row without needing an unrelated next websocket frame.

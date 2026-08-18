@@ -37,7 +37,6 @@ where
     pub(super) next_subscription_nonce: Cell<u64>,
     pub(super) subscriber_dirty_epoch: Rc<Cell<u64>>,
     pub(super) edge_cache_budget: Cell<Option<EdgeCacheBudget>>,
-    pub(super) upstream_durability_floor: Cell<DurabilityTier>,
 }
 
 impl<S> Node<S>
@@ -88,7 +87,6 @@ where
             admitted_upstream_authority: Rc::new(RefCell::new(None)),
             subscriber_dirty_epoch: Rc::new(Cell::new(0)),
             edge_cache_budget: Cell::new(None),
-            upstream_durability_floor: Cell::new(DurabilityTier::Global),
         }
     }
 
@@ -101,7 +99,7 @@ where
         upstream_register_shape_options(
             tier,
             read_view,
-            self.upstream_durability_floor.get(),
+            self.node.borrow().upstream_durability_floor(),
             propagate_upstream,
         )
     }
@@ -119,7 +117,13 @@ where
 
     pub(super) fn set_non_durable_client(&self) {
         self.node.borrow_mut().set_non_durable_client();
-        self.upstream_durability_floor.set(DurabilityTier::Local);
+    }
+
+    /// Declare the least durable tier served by this node's immediate
+    /// upstream. This describes connection topology, independently of whether
+    /// this node's own storage is durable.
+    pub(super) fn set_upstream_durability_floor(&self, tier: DurabilityTier) {
+        self.node.borrow_mut().set_upstream_durability_floor(tier);
     }
 
     /// Change whether subscriber links may serve their registered views.
@@ -836,6 +840,7 @@ where
                 served: BTreeMap::new(),
                 coverage_groups: BTreeMap::new(),
                 shape_registrations: BTreeMap::new(),
+                prepared_subscribe_update: None,
                 deferred_subscribe_rejections: VecDeque::new(),
                 served_current_rows: BTreeMap::new(),
                 pending_branch_metadata_repairs: BTreeMap::new(),

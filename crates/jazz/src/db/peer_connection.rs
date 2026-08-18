@@ -123,6 +123,10 @@ pub(super) enum ConnectionLink {
         coverage_groups: BTreeMap<CoverageKey, CoverageGroup>,
         /// Explicit state for each subscriber `RegisterShape`, keyed by shape and read view.
         shape_registrations: BTreeMap<ShapeRegistrationKey, SubscriberShapeRegistration>,
+        /// Fully materialized opening prepared by the asynchronous owner for
+        /// the staged Subscribe frame. The synchronous protocol transition
+        /// consumes this exactly once after every ordered input is resident.
+        prepared_subscribe_update: Option<(SubscriptionKey, SyncMessage)>,
         /// Permanent rejections received as later `Subscribe` messages. These
         /// wait until an unrelated view update has been flushed, so they cannot
         /// starve a supported subscription on the same connection.
@@ -215,6 +219,162 @@ where
                 authority_receipt_eligible: true,
             });
         }
+    }
+
+    pub(super) fn park_staged_inbound_tail(&mut self) -> VecDeque<StagedInboundMessage> {
+        self.staged_inbound
+            .split_off(self.staged_inbound.len().min(1))
+    }
+
+    pub(super) fn restore_staged_inbound_tail(&mut self, tail: VecDeque<StagedInboundMessage>) {
+        self.staged_inbound.extend(tail);
+    }
+
+    /// Acquire the ordered inputs needed to compile the next subscriber
+    /// control frame before the synchronous peer state machine consumes it.
+    /// Demand-driven owners stage one frame at a time, so a cold lookup may
+    /// suspend without replaying any protocol side effects.
+    pub(super) fn prepare_staged_subscription_inputs(
+        &mut self,
+        node: &mut NodeState<S>,
+    ) -> Result<(), crate::node::Error> {
+        let Some(staged) = self.staged_inbound.front() else {
+            return Ok(());
+        };
+        let ConnectionLink::Subscriber {
+            peer,
+            ingest_context,
+            session_claims,
+            shape_registrations,
+            local_receiver,
+            coverage_groups,
+            prepared_subscribe_update,
+            ..
+        } = &mut self.link
+        else {
+            return Ok(());
+        };
+        node.set_session_claims(ingest_context.identity, session_claims.clone());
+        match &staged.message {
+            SyncMessage::RegisterShape {
+                shape_id,
+                opts,
+                ast,
+            } => {
+                let Some(shape) = validate_shape_ast_for_registration(node, *shape_id, ast)? else {
+                    return Ok(());
+                };
+                if shape.params().is_empty()
+                    && !matches!(opts.read_view.source, ReadViewSourceSpec::Branch { .. })
+                {
+                    let binding = shape.bind(BTreeMap::new())?;
+                    node.ensure_peer_maintained_subscription_view_supported(
+                        &shape,
+                        &binding,
+                        opts.tier,
+                        subscriber_permission_subject(*ingest_context),
+                        &opts.read_view,
+                        QueryAuthorizationMode::TrustedServing,
+                    )?;
+                }
+            }
+            SyncMessage::Subscribe(subscribe) => {
+                let key = (subscribe.shape_id, subscribe.subscription.read_view);
+                let Some(
+                    SubscriberShapeRegistration::Registered(opts)
+                    | SubscriberShapeRegistration::PendingCatalogueAdmission(opts),
+                ) = shape_registrations.get(&key)
+                else {
+                    return Ok(());
+                };
+                let Some(shape) = node.registered_shape(subscribe.shape_id) else {
+                    return Ok(());
+                };
+                let values = shape
+                    .params()
+                    .keys()
+                    .cloned()
+                    .zip(subscribe.values.clone())
+                    .collect::<BTreeMap<_, _>>();
+                let binding = shape.bind(values)?;
+                if let ReadViewSourceSpec::Branch { branch } = &opts.read_view.source
+                    && !node.branch_metadata_visible_to(
+                        crate::ids::BranchId(*branch),
+                        peer.link_identity(),
+                    )?
+                {
+                    return Ok(());
+                }
+                node.ensure_peer_maintained_subscription_view_supported(
+                    &shape,
+                    &binding,
+                    opts.tier,
+                    subscriber_permission_subject(*ingest_context),
+                    &opts.read_view,
+                    QueryAuthorizationMode::TrustedServing,
+                )?;
+                if prepared_subscribe_update
+                    .as_ref()
+                    .is_some_and(|(subscription, _)| *subscription == subscribe.subscription)
+                {
+                    return Ok(());
+                }
+                let coverage = coverage_key(&shape, &binding, opts.clone());
+                let group_subscription = SubscriptionKey {
+                    shape_id: coverage.shape_id,
+                    binding_id: coverage.binding_id,
+                    read_view: coverage.opts.read_view_key(),
+                };
+                let first_subscriber = coverage_groups
+                    .get(&coverage)
+                    .is_none_or(|group| group.subscribers.is_empty());
+                let upstream_opts = if *local_receiver {
+                    upstream_register_shape_options(
+                        opts.tier,
+                        opts.read_view.clone(),
+                        DurabilityTier::Global,
+                        opts.propagate_upstream,
+                    )
+                } else {
+                    opts.clone()
+                };
+                let waiting_for_upstream = *local_receiver
+                    && opts.propagate_upstream
+                    && opts.tier > DurabilityTier::Local
+                    && !node.has_settled_result_set(BindingViewKey {
+                        shape_id: shape.shape_id(),
+                        binding_id: binding.binding_id(),
+                        read_view: upstream_opts.read_view_key(),
+                    });
+                if !subscriber_permissions_ready(node.permissions_ready(), ingest_context.trust)
+                    || waiting_for_upstream
+                {
+                    return Ok(());
+                }
+                let update = if first_subscriber {
+                    peer.declare_known_state(group_subscription, subscribe.known_state.clone());
+                    let update = peer.rehydrate_query_for_subscription_with_opts(
+                        node,
+                        group_subscription,
+                        &shape,
+                        &binding,
+                        opts.clone(),
+                    )?;
+                    retarget_view_update(update, subscribe.subscription)
+                } else {
+                    peer.declare_known_state(subscribe.subscription, subscribe.known_state.clone());
+                    peer.rehydrate_query_for_subscription_from_maintained_subscription(
+                        node,
+                        group_subscription,
+                        subscribe.subscription,
+                        &shape,
+                    )?
+                };
+                *prepared_subscribe_update = Some((subscribe.subscription, update));
+            }
+            _ => {}
+        }
+        Ok(())
     }
 
     pub(super) fn staged_relay_commit(
@@ -1490,8 +1650,9 @@ where
                     message,
                     authority_receipt_eligible,
                 }) = self.staged_inbound.pop_front().or_else(|| {
-                    self.transport
-                        .try_recv()
+                    (!self.external_durable_ingress)
+                        .then(|| self.transport.try_recv())
+                        .flatten()
                         .map(|message| StagedInboundMessage {
                             message,
                             authority_receipt_eligible: true,
@@ -2162,6 +2323,7 @@ where
                 served,
                 coverage_groups,
                 shape_registrations,
+                prepared_subscribe_update,
                 deferred_subscribe_rejections,
                 served_current_rows,
                 pending_branch_metadata_repairs,
@@ -2231,8 +2393,9 @@ where
                     send_with_sync_context(&self.node, peer, self.transport.as_mut(), fate)?;
                 }
                 while let Some(staged) = self.staged_inbound.pop_front().or_else(|| {
-                    self.transport
-                        .try_recv()
+                    (!self.external_durable_ingress)
+                        .then(|| self.transport.try_recv())
+                        .flatten()
                         .map(|message| StagedInboundMessage {
                             message,
                             authority_receipt_eligible: true,
@@ -2725,6 +2888,11 @@ where
                                     binding_id: binding.binding_id(),
                                     read_view: upstream_opts.read_view_key(),
                                 });
+                            let prepared_update = prepared_subscribe_update.take().and_then(
+                                |(prepared_subscription, update)| {
+                                    (prepared_subscription == subscription).then_some(update)
+                                },
+                            );
                             let update = if !permissions_ready {
                                 Some(SyncMessage::ViewUpdate {
                                     subscription,
@@ -2759,35 +2927,42 @@ where
                                 }
                                 None
                             } else if first_subscriber {
-                                peer.declare_known_state(group_subscription, known_state.clone());
-                                let mut node = self.node.borrow_mut();
-                                let update_result = peer
-                                    .rehydrate_query_for_subscription_with_opts(
-                                        &mut node,
+                                let update = if let Some(update) = prepared_update {
+                                    update
+                                } else {
+                                    peer.declare_known_state(
                                         group_subscription,
-                                        &shape,
-                                        &binding,
-                                        opts.clone(),
+                                        known_state.clone(),
                                     );
-                                let update = match update_result {
-                                    Ok(update) => update,
-                                    Err(crate::node::Error::QueryCapability(detail)) => {
-                                        send_unsupported_shape_capability_rejection(
-                                            &mut *self.transport,
-                                            subscription,
-                                            detail,
-                                        )
-                                        .map_err(transport_error)?;
-                                        continue;
-                                    }
-                                    Err(error) => {
-                                        reject_server_subscription_failure(
-                                            &mut *self.transport,
-                                            subscription,
-                                            &error,
-                                        )
-                                        .map_err(transport_error)?;
-                                        continue;
+                                    let mut node = self.node.borrow_mut();
+                                    let update_result = peer
+                                        .rehydrate_query_for_subscription_with_opts(
+                                            &mut node,
+                                            group_subscription,
+                                            &shape,
+                                            &binding,
+                                            opts.clone(),
+                                        );
+                                    match update_result {
+                                        Ok(update) => retarget_view_update(update, subscription),
+                                        Err(crate::node::Error::QueryCapability(detail)) => {
+                                            send_unsupported_shape_capability_rejection(
+                                                &mut *self.transport,
+                                                subscription,
+                                                detail,
+                                            )
+                                            .map_err(transport_error)?;
+                                            continue;
+                                        }
+                                        Err(error) => {
+                                            reject_server_subscription_failure(
+                                                &mut *self.transport,
+                                                subscription,
+                                                &error,
+                                            )
+                                            .map_err(transport_error)?;
+                                            continue;
+                                        }
                                     }
                                 };
                                 #[cfg(feature = "sync-autopsy")]
@@ -2797,27 +2972,31 @@ where
                                     summarize_subscription_key(group_subscription),
                                     summarize_sync_message(&update)
                                 ));
-                                Some(retarget_view_update(update, subscription))
+                                Some(update)
                             } else {
-                                peer.declare_known_state(subscription, known_state.clone());
-                                let mut node = self.node.borrow_mut();
-                                let update_result = peer
-                                    .rehydrate_query_for_subscription_from_maintained_subscription(
-                                        &mut node,
-                                        group_subscription,
-                                        subscription,
-                                        &shape,
-                                    );
-                                let update = match update_result {
-                                    Ok(update) => update,
-                                    Err(error) => {
-                                        reject_server_subscription_failure(
-                                            &mut *self.transport,
+                                let update = if let Some(update) = prepared_update {
+                                    update
+                                } else {
+                                    peer.declare_known_state(subscription, known_state.clone());
+                                    let mut node = self.node.borrow_mut();
+                                    let update_result = peer
+                                        .rehydrate_query_for_subscription_from_maintained_subscription(
+                                            &mut node,
+                                            group_subscription,
                                             subscription,
-                                            &error,
-                                        )
-                                        .map_err(transport_error)?;
-                                        continue;
+                                            &shape,
+                                        );
+                                    match update_result {
+                                        Ok(update) => update,
+                                        Err(error) => {
+                                            reject_server_subscription_failure(
+                                                &mut *self.transport,
+                                                subscription,
+                                                &error,
+                                            )
+                                            .map_err(transport_error)?;
+                                            continue;
+                                        }
                                     }
                                 };
                                 #[cfg(feature = "sync-autopsy")]

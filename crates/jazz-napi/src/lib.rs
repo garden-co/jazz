@@ -1519,6 +1519,13 @@ impl NapiDb {
         Ok(())
     }
 
+    #[napi(js_name = "setUpstreamDurabilityFloor")]
+    pub fn set_upstream_durability_floor(&self, tier: String) -> napi::Result<()> {
+        let db = napi_db(&self.inner)?;
+        napi_owner(&db)?.set_upstream_durability_floor(core_durability_tier_from_str(&tier)?);
+        Ok(())
+    }
+
     #[napi(js_name = "connectUpstream")]
     pub fn connect_upstream(&self) -> napi::Result<Transport> {
         let db = napi_db(&self.inner)?;

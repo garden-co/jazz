@@ -1374,14 +1374,7 @@ where
                 shape.shape_id(),
                 binding.binding_id(),
                 RegisterShapeOptions {
-                    // A non-durable browser-side runtime consumes the worker
-                    // relay's Edge handoff rather than the worker's Global
-                    // upstream coverage.
-                    tier: if self.authored_commit_durability == DurabilityTier::None {
-                        tier
-                    } else {
-                        DurabilityTier::Global
-                    },
+                    tier: tier.max(self.upstream_durability_floor),
                     read_view: read_view.clone(),
                     ..RegisterShapeOptions::default()
                 }

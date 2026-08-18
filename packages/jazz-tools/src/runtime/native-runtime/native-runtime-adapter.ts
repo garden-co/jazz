@@ -202,6 +202,7 @@ type NativeDb = {
   ): void;
   onMutationError(callback: (event: MutationErrorEvent) => void): void;
   setNonDurableClient?(): void;
+  setUpstreamDurabilityFloor?(tier: "local" | "global"): void;
   connectUpstream(): Transport;
   connectUpstreamWithSession?(
     protocolVersion: number,
@@ -510,8 +511,12 @@ export class NativeRuntimeAdapter implements Runtime {
     }) as (error: Error | null, urgency: string) => void);
   }
 
-  connectUpstreamPeer(): Transport {
-    if (this !== this.ownerRuntime) return this.ownerRuntime.connectUpstreamPeer();
+  connectUpstreamPeer(upstreamFloor: "local" | "global" = "global"): Transport {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.connectUpstreamPeer(upstreamFloor);
+    if (!this.db.setUpstreamDurabilityFloor) {
+      throw new Error("Native runtime does not expose upstream durability topology");
+    }
+    this.db.setUpstreamDurabilityFloor(upstreamFloor);
     this.peerUpstreamAttached = true;
     return this.db.connectUpstream();
   }
@@ -942,10 +947,7 @@ export class NativeRuntimeAdapter implements Runtime {
     this.applySessionClaims(session);
     assertNoUnsupportedPermissionIntrospection(queryJson);
     const coreQueryJson = addNestedOuterColumns(queryJson);
-    // In browser mode the requested tier gates hydration through the worker,
-    // while the main-thread Db remains an in-memory materialized cache. Once
-    // coverage is confirmed, evaluate that cache at its Local tier.
-    const materializedTier = this.nonDurableClient ? "local" : tier;
+    const materializedTier = this.nonDurableClient && tier !== "none" ? "local" : tier;
     const opts = readOptions(materializedTier, queryIncludesDeleted(coreQueryJson), optionsJson);
     if (queryUsesNativeRelationApi(coreQueryJson)) {
       if (this.readAuthorizationHost === "trusted-serving") {
@@ -1438,7 +1440,7 @@ export class NativeRuntimeAdapter implements Runtime {
     session: RuntimeSession | null,
   ): Promise<unknown | undefined> {
     if (this.closed) return;
-    if (tier == null || (tier === "local" && !this.nonDurableClient)) return;
+    if (tier == null || tier === "none" || (tier === "local" && !this.nonDurableClient)) return;
     if (!readPropagationIsFull(optionsJson) && !this.nonDurableClient) return;
     if (!this.hasUpstream()) return;
     if (!this.db.attachQuery) return;

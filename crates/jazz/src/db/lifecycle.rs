@@ -326,6 +326,10 @@ impl DemandDrivenDb {
         self.database.set_non_durable_client();
     }
 
+    pub fn set_upstream_durability_floor(&self, tier: DurabilityTier) {
+        self.database.set_upstream_durability_floor(tier);
+    }
+
     pub fn set_initial_sync_flush_cadence(
         &self,
         cadence: InitialSyncFlushCadence,
@@ -683,6 +687,15 @@ impl DemandDrivenDb {
         let connections = self.database.node.connections.borrow().clone();
         for connection in &connections {
             connection.borrow_mut().stage_available_inbound();
+            match self.runtime.poll_acquire_resident(context, |node| {
+                connection
+                    .borrow_mut()
+                    .prepare_staged_subscription_inputs(node)
+            }) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error.into())),
+                Poll::Ready(Ok(())) => {}
+            }
             let pending_session_branch = connection.borrow().pending_session_branch_metadata();
             if let Some(metadata) = pending_session_branch {
                 let identity = connection
@@ -891,7 +904,15 @@ impl DemandDrivenDb {
             }
         }
 
-        let stats = match self.database.node.tick() {
+        let parked_tails = connections
+            .iter()
+            .map(|connection| connection.borrow_mut().park_staged_inbound_tail())
+            .collect::<Vec<_>>();
+        let tick_result = self.database.node.tick();
+        for (connection, tail) in connections.iter().zip(parked_tails) {
+            connection.borrow_mut().restore_staged_inbound_tail(tail);
+        }
+        let stats = match tick_result {
             Ok(stats) => stats,
             Err(error) => return Poll::Ready(Err(error)),
         };
@@ -2772,6 +2793,13 @@ where
     /// writes begin.
     pub fn set_non_durable_client(&self) {
         self.node.set_non_durable_client();
+    }
+
+    /// Declare the durability guaranteed by this database's immediate
+    /// upstream. Browser main-thread runtimes use `Local` for their persistent
+    /// worker; direct server connections retain the default `Global` floor.
+    pub fn set_upstream_durability_floor(&self, tier: DurabilityTier) {
+        self.node.set_upstream_durability_floor(tier);
     }
 
     /// Configure this client database's first-snapshot durability cadence.

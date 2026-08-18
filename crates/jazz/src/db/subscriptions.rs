@@ -455,7 +455,7 @@ where
         // A non-durable browser client must still ask its durable worker for a
         // local-only view. The wire flag stops that request at the worker.
         let propagates_upstream = remote_propagate_upstream
-            || self.node.upstream_durability_floor.get() == DurabilityTier::Local;
+            || self.node.node.borrow().upstream_durability_floor() == DurabilityTier::Local;
         // Acquire both the local and possible remote-tier programs before the
         // first real Groove subscription is retained. This keeps every later
         // façade-side registration in the non-suspending publish phase.

@@ -47,7 +47,7 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
     this.readyPromise = this.request({ type: "init", sessionClaims });
     void this.readyPromise.catch((error: unknown) => this.fail(asError(error)));
 
-    const transport = runtime.connectUpstreamPeer();
+    const transport = runtime.connectUpstreamPeer("local");
     this.pump = new BrowserWorkerTransportPump(runtime, transport, (frames) => {
       const copies = transferableFrames(frames);
       this.port.postMessage(

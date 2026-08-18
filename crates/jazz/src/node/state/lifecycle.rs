@@ -554,6 +554,7 @@ where
             groove_runtime_token: next_groove_runtime_token(),
             history_complete,
             authored_commit_durability: DurabilityTier::Local,
+            upstream_durability_floor: DurabilityTier::Global,
             node_aliases: BTreeMap::new(),
             sync_metrics: SyncMetrics::default(),
             query_engine_read_metrics: QueryEngineReadMetrics::default(),
@@ -641,6 +642,14 @@ where
 
     pub(crate) fn set_non_durable_client(&mut self) {
         self.authored_commit_durability = DurabilityTier::None;
+    }
+
+    pub(crate) fn set_upstream_durability_floor(&mut self, tier: DurabilityTier) {
+        self.upstream_durability_floor = tier;
+    }
+
+    pub(crate) fn upstream_durability_floor(&self) -> DurabilityTier {
+        self.upstream_durability_floor
     }
 
     /// Attach process-local auth claims to an accepted subscriber identity.

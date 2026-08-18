@@ -1901,6 +1901,18 @@ impl WasmDb {
         Ok(())
     }
 
+    #[wasm_bindgen(js_name = setUpstreamDurabilityFloor)]
+    pub fn set_upstream_durability_floor(&self, tier: String) -> Result<(), JsValue> {
+        let tier = durability_tier_from_str(&tier)?;
+        match &self.inner {
+            WasmDbInner::Memory(db) => db.set_upstream_durability_floor(tier),
+            #[cfg(target_arch = "wasm32")]
+            WasmDbInner::Browser(db) => db.set_upstream_durability_floor(tier),
+            WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
+        }
+        Ok(())
+    }
+
     #[wasm_bindgen(js_name = connectUpstream)]
     pub fn connect_upstream(&self) -> Result<WasmTransport, JsValue> {
         let queues = WasmWireQueues::default();

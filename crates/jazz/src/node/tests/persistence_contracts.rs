@@ -196,6 +196,111 @@ struct QueuedInboundTransport {
     session_context: Option<crate::db::ConnectionSessionContext>,
 }
 
+#[test]
+fn demand_driven_subscriber_compilation_suspends_before_consuming_the_wire_frame() {
+    let node_schema = schema();
+    let shape = Query::from("todos").validate(&node_schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let opts = RegisterShapeOptions {
+        tier: DurabilityTier::Global,
+        ..RegisterShapeOptions::default()
+    };
+    let subscription = SubscriptionKey {
+        shape_id: shape.shape_id(),
+        binding_id: binding.binding_id(),
+        read_view: opts.read_view_key(),
+    };
+    let inbound = std::collections::VecDeque::from([
+        SyncMessage::RegisterShape {
+            shape_id: shape.shape_id(),
+            opts: opts.clone(),
+            ast: crate::protocol::ShapeAst::from_validated(&shape),
+        },
+        SyncMessage::Subscribe(crate::protocol::Subscribe {
+            shape_id: shape.shape_id(),
+            subscription,
+            values: Vec::new(),
+            known_state: None,
+        }),
+    ]);
+    let refs = node_schema.column_families();
+    let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
+    let released = std::rc::Rc::new(std::cell::Cell::new(true));
+    let memory = MemoryStorage::new(&refs);
+    let mut seeded = NodeState::new_history_complete(node(0xb8), node_schema.clone(), memory.clone())
+        .unwrap();
+    let write = seeded
+        .commit_mergeable(
+            MergeableCommit::new("todos", row(0xba), 1).cells(title_cells("cold opening")),
+        )
+        .unwrap();
+    seeded
+        .apply_fate_update(
+            write,
+            Fate::Accepted,
+            Some(GlobalSeq(1)),
+            Some(DurabilityTier::Global),
+        )
+        .unwrap();
+    drop(seeded);
+    let storage = GatedAuthorityStorage {
+        inner: groove::storage::async_ordered::ImmediateStorage::new(memory),
+        released: std::rc::Rc::clone(&released),
+        cancellations: std::rc::Rc::new(std::cell::Cell::new(0)),
+        committed_units: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
+        fail_commits: std::rc::Rc::new(std::cell::Cell::new(false)),
+    };
+    let mut opening = crate::db::PollableDbOpen::new_history_complete(
+        node_schema,
+        crate::db::DbIdentity {
+            node: node(0xb8),
+            author: AuthorId::SYSTEM,
+        },
+        Box::new(storage),
+    );
+    let waker = std::task::Waker::from(std::sync::Arc::new(PersistenceTestWake));
+    let mut context = std::task::Context::from_waker(&waker);
+    let std::task::Poll::Ready(Ok(mut authority)) = opening.poll(&mut context) else {
+        panic!("synchronous setup opens the demand-driven authority")
+    };
+    let outbound = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let _subscriber = authority.accept_subscriber(
+        Box::new(QueuedInboundTransport {
+            inbound: std::rc::Rc::new(std::cell::RefCell::new(inbound)),
+            outbound: std::rc::Rc::clone(&outbound),
+            session_context: None,
+        }),
+        AuthorId::from_bytes([0xb9; 16]),
+    );
+
+    released.set(false);
+    assert!(matches!(
+        authority.poll_tick(&mut context),
+        std::task::Poll::Ready(Ok(_))
+    ));
+    assert!(authority.poll_tick(&mut context).is_pending());
+    assert!(outbound.borrow().is_empty());
+
+    released.set(true);
+    for _ in 0..64 {
+        match authority.poll_tick(&mut context) {
+            std::task::Poll::Pending | std::task::Poll::Ready(Ok(_)) => {}
+            std::task::Poll::Ready(Err(error)) => panic!("subscriber compilation failed: {error}"),
+        }
+        if outbound.borrow().iter().any(|message| matches!(
+            message,
+            SyncMessage::ViewUpdate {
+                subscription: observed,
+                reset_result_set: true,
+                ..
+            } if *observed == subscription
+        )) {
+            return;
+        }
+    }
+    panic!("resident retry must consume the staged Subscribe and emit its opening");
+}
+
 impl crate::db::Transport for QueuedInboundTransport {
     fn send(
         &mut self,

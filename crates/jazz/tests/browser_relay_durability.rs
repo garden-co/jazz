@@ -128,6 +128,7 @@ fn non_durable_browser_client_waits_for_worker_local_ack() {
     let main_thread = open_db(0x11, alice, &schema);
     let worker = open_db(0x22, AuthorId::SYSTEM, &schema);
     main_thread.set_non_durable_client();
+    main_thread.set_upstream_durability_floor(DurabilityTier::Local);
 
     let (main_transport, worker_transport) = duplex();
     let _main_connection = main_thread.connect_upstream(main_transport);
@@ -205,6 +206,7 @@ fn browser_worker_initial_view_preserves_newer_optimistic_membership() {
     let main_thread = open_db(0x1c, alice, &schema);
     let worker = open_db(0x2c, alice, &schema);
     main_thread.set_non_durable_client();
+    main_thread.set_upstream_durability_floor(DurabilityTier::Local);
 
     let (main_transport, worker_transport) = duplex();
     let _main_connection = main_thread.connect_upstream(main_transport);
@@ -302,6 +304,7 @@ fn worker_relay_forwards_authority_fate_to_browser_client() {
     let worker = open_db(0x23, AuthorId::SYSTEM, &schema);
     let core = open_core(0x34, &schema);
     main_thread.set_non_durable_client();
+    main_thread.set_upstream_durability_floor(DurabilityTier::Local);
 
     let (main_transport, worker_subscriber_transport) = duplex();
     let _main_connection = main_thread.connect_upstream(main_transport);
@@ -440,6 +443,7 @@ fn browser_client_hydrates_local_subscription_from_worker_relay() {
 
     let main_thread = open_db(0x13, alice, &schema);
     main_thread.set_non_durable_client();
+    main_thread.set_upstream_durability_floor(DurabilityTier::Local);
     let (main_transport, worker_transport) = duplex();
     let _main_connection = main_thread.connect_upstream(main_transport);
     let _worker_connection = worker.accept_subscriber(worker_transport, alice);
@@ -497,6 +501,7 @@ fn browser_client_local_only_subscription_stops_at_worker() {
 
     let main_thread = open_db(0x1b, alice, &schema);
     main_thread.set_non_durable_client();
+    main_thread.set_upstream_durability_floor(DurabilityTier::Local);
     let (main_transport, worker_subscriber_transport) = duplex();
     let _main_connection = main_thread.connect_upstream(main_transport);
     let _worker_subscriber = worker.accept_subscriber(worker_subscriber_transport, alice);
@@ -552,6 +557,7 @@ fn browser_relay_does_not_publish_a_premature_settled_snapshot() {
     let worker = open_db(0x27, alice, &schema);
     let core = open_core(0x37, &schema);
     main_thread.set_non_durable_client();
+    main_thread.set_upstream_durability_floor(DurabilityTier::Local);
 
     let seeder = open_db(0x18, alice, &schema);
     let (seeder_transport, core_seed_transport) = duplex();
@@ -654,6 +660,7 @@ fn browser_relay_hydrates_fresh_included_edge_subscription_from_authority() {
     let worker = open_db(0x2f, alice, &schema);
     let core = open_core(0x3f, &schema);
     main_thread.set_non_durable_client();
+    main_thread.set_upstream_durability_floor(DurabilityTier::Local);
 
     let seeder = open_db(0x20, alice, &schema);
     let (seeder_transport, core_seed_transport) = duplex();
@@ -742,6 +749,7 @@ fn browser_relay_publishes_an_explicit_settled_empty_handoff() {
     let worker = open_db(0x29, alice, &schema);
     let core = open_core(0x39, &schema);
     main_thread.set_non_durable_client();
+    main_thread.set_upstream_durability_floor(DurabilityTier::Local);
 
     let (main_transport, worker_subscriber_transport) = duplex();
     let _main_connection = main_thread.connect_upstream(main_transport);
@@ -839,6 +847,7 @@ fn browser_relay_replays_causal_ancestors_before_pending_write_fates() {
 
     let first_main = open_db(0x19, alice, &schema);
     first_main.set_non_durable_client();
+    first_main.set_upstream_durability_floor(DurabilityTier::Local);
     let (first_main_transport, first_worker_transport) = duplex();
     let first_main_connection = first_main.connect_upstream(first_main_transport);
     let first_worker_connection = worker.accept_subscriber(first_worker_transport, alice);
@@ -875,6 +884,7 @@ fn browser_relay_replays_causal_ancestors_before_pending_write_fates() {
 
     let reopened_main = open_db(0x19, alice, &schema);
     reopened_main.set_non_durable_client();
+    reopened_main.set_upstream_durability_floor(DurabilityTier::Local);
     let (reopened_main_transport, reopened_worker_transport) = duplex();
     let _reopened_main_connection = reopened_main.connect_upstream(reopened_main_transport);
     let _reopened_worker_connection = worker.accept_subscriber(reopened_worker_transport, alice);
@@ -915,6 +925,7 @@ fn worker_relay_forwards_authority_rejection_to_browser_client() {
     let worker = open_db(0x25, AuthorId::SYSTEM, &schema);
     let core = open_core(0x35, &schema);
     main_thread.set_non_durable_client();
+    main_thread.set_upstream_durability_floor(DurabilityTier::Local);
 
     let (main_transport, worker_subscriber_transport) = duplex();
     let _main_connection = main_thread.connect_upstream(main_transport);
@@ -965,6 +976,7 @@ fn reopened_worker_replays_pending_commit_before_later_fate() {
     let storage = tempfile::tempdir().expect("worker temp dir");
     let first_main = open_db(0x15, alice, &schema);
     first_main.set_non_durable_client();
+    first_main.set_upstream_durability_floor(DurabilityTier::Local);
     let first_worker = open_persistent_worker(storage.path(), 0x26, &schema);
     let (first_main_transport, first_worker_transport) = duplex();
     let first_main_connection = first_main.connect_upstream(first_main_transport);
@@ -990,6 +1002,7 @@ fn reopened_worker_replays_pending_commit_before_later_fate() {
 
     let second_main = open_db(0x15, alice, &schema);
     second_main.set_non_durable_client();
+    second_main.set_upstream_durability_floor(DurabilityTier::Local);
     let second_worker = open_persistent_worker(storage.path(), 0x26, &schema);
     let (second_main_transport, second_worker_transport) = duplex();
     let _second_main_connection = second_main.connect_upstream(second_main_transport);
@@ -1028,6 +1041,7 @@ fn reopened_worker_routes_later_rejection_to_same_main_thread_identity() {
 
     let first_main = open_db(0x1b, alice, &schema);
     first_main.set_non_durable_client();
+    first_main.set_upstream_durability_floor(DurabilityTier::Local);
     let first_worker = open_persistent_worker(storage.path(), 0x2a, &schema);
     let (first_main_transport, first_worker_transport) = duplex();
     let first_main_connection = first_main.connect_upstream(first_main_transport);
@@ -1053,6 +1067,7 @@ fn reopened_worker_routes_later_rejection_to_same_main_thread_identity() {
 
     let reopened_main = open_db(0x1b, alice, &schema);
     reopened_main.set_non_durable_client();
+    reopened_main.set_upstream_durability_floor(DurabilityTier::Local);
     let reopened_worker = open_persistent_worker(storage.path(), 0x2a, &schema);
     let core = open_core(0x3a, &schema);
     let (main_transport, worker_subscriber_transport) = duplex();

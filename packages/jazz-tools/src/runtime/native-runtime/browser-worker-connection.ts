@@ -57,7 +57,7 @@ export class DedicatedBrowserWorkerConnection implements BrowserWorkerConnection
       if (!this.failed) callbacks.onFailure(error);
     });
 
-    const transport = runtime.connectUpstreamPeer();
+    const transport = runtime.connectUpstreamPeer("local");
     this.pump = new BrowserWorkerTransportPump(runtime, transport, (frames) => {
       this.postFrames(frames);
     });

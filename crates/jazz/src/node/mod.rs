@@ -556,6 +556,11 @@ pub struct NodeState<S> {
     /// runtime uses `None` because its in-memory preview is not durable until
     /// the dedicated worker acknowledges persistence.
     authored_commit_durability: DurabilityTier,
+    /// Least durability guaranteed by this node's immediate upstream. This is
+    /// topology, not a property of local storage: a volatile browser tab has a
+    /// Local worker upstream, while a volatile direct client has a Global
+    /// server upstream.
+    upstream_durability_floor: DurabilityTier,
     /// Mapping from stable node UUIDs to compact on-disk aliases.
     pub(crate) node_aliases: BTreeMap<NodeUuid, NodeAlias>,
     /// Runtime counters for sync parking, draining, and ingestion behavior.
