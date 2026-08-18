@@ -495,7 +495,6 @@ where
                     .flatten()
                     .cloned(),
             );
-            future_result_set.extend(remote.difference(&local.authoritative_result_set).cloned());
         }
         let mut maintained = local.maintained.clone();
         for deltas in &local.pending_deltas {

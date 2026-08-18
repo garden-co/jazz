@@ -3575,6 +3575,10 @@ pub struct DbMaintainedSubscriptionFootprint {
     pub local_result_payloads: usize,
     /// Local program fact count.
     pub program_facts: usize,
+    /// Groove delta batches staged while their durable witnesses are acquired.
+    pub pending_delta_batches: usize,
+    /// Approximate heap bytes retained by staged Groove delta batches.
+    pub pending_delta_bytes: usize,
     /// Approximate heap bytes retained by local subscription control state.
     pub control_state_bytes: usize,
     /// Approximate maintained plus local control-state heap bytes.
@@ -3602,6 +3606,8 @@ impl DbMaintainedSubscriptionFootprint {
             result_set: footprint.result_set,
             local_result_payloads: footprint.result_payloads,
             program_facts: footprint.program_facts,
+            pending_delta_batches: footprint.pending_delta_batches,
+            pending_delta_bytes: footprint.pending_delta_bytes,
             control_state_bytes: footprint.control_state_bytes,
             total_heap_bytes: footprint.total_heap_bytes,
         }

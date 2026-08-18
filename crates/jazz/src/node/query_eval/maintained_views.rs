@@ -6,6 +6,8 @@
 //! public deltas.
 
 use super::*;
+#[cfg(feature = "testing")]
+use groove::ivm::{TerminalEdit, TerminalOperation, TerminalPathSegment};
 
 pub(crate) struct LocalMaintainedViewSubscription {
     pub(super) subscription: MultisinkSubscription,
@@ -54,6 +56,8 @@ pub(crate) struct LocalMaintainedViewSubscriptionFootprint {
     pub(crate) result_set: usize,
     pub(crate) result_payloads: usize,
     pub(crate) program_facts: usize,
+    pub(crate) pending_delta_batches: usize,
+    pub(crate) pending_delta_bytes: usize,
     pub(crate) control_state_bytes: usize,
     pub(crate) total_heap_bytes: usize,
 }
@@ -127,6 +131,39 @@ impl LocalMaintainedViewSubscription {
             })
             .sum::<usize>()
             + self.program_facts.len() * 64;
+        let pending_delta_bytes = self
+            .pending_deltas
+            .iter()
+            .map(|batch| {
+                let record_bytes = batch
+                    .sinks
+                    .iter()
+                    .map(|(name, deltas)| {
+                        name.len()
+                            + 96
+                            + deltas
+                                .deltas
+                                .iter()
+                                .map(|delta| delta.raw().len() + std::mem::size_of_val(delta))
+                                .sum::<usize>()
+                    })
+                    .sum::<usize>();
+                let terminal_bytes = batch
+                    .terminal_sinks
+                    .iter()
+                    .map(|(name, deltas)| {
+                        name.len()
+                            + 96
+                            + deltas
+                                .operations
+                                .iter()
+                                .map(terminal_operation_heap_bytes)
+                                .sum::<usize>()
+                    })
+                    .sum::<usize>();
+                record_bytes + terminal_bytes
+            })
+            .sum::<usize>();
         let control_state_bytes = terminal_schemas.terminal_schemas_bytes
             + tables_bytes
             + self.result_table.len()
@@ -138,7 +175,8 @@ impl LocalMaintainedViewSubscription {
             + result_set_bytes
             + authoritative_result_set_bytes
             + result_payloads_bytes
-            + program_facts_bytes;
+            + program_facts_bytes
+            + pending_delta_bytes;
         LocalMaintainedViewSubscriptionFootprint {
             maintained,
             terminal_schemas,
@@ -146,10 +184,34 @@ impl LocalMaintainedViewSubscription {
             result_set: self.result_set.len(),
             result_payloads: self.result_payloads.len(),
             program_facts: self.program_facts.len(),
+            pending_delta_batches: self.pending_deltas.len(),
+            pending_delta_bytes,
             control_state_bytes,
             total_heap_bytes: maintained.total_heap_bytes + control_state_bytes,
         }
     }
+}
+
+#[cfg(feature = "testing")]
+fn terminal_operation_heap_bytes(operation: &TerminalOperation) -> usize {
+    let path_bytes = operation
+        .path
+        .iter()
+        .map(|segment| match segment {
+            TerminalPathSegment::Collection(name) => name.capacity(),
+            TerminalPathSegment::Key(key) => key.capacity(),
+        })
+        .sum::<usize>();
+    let edit_bytes = match &operation.edit {
+        TerminalEdit::Insert { key, value, .. } | TerminalEdit::Update { key, value } => {
+            key.capacity() + value.capacity()
+        }
+        TerminalEdit::Remove { key } | TerminalEdit::Move { key, .. } => key.capacity(),
+    };
+    operation.root_key.capacity()
+        + operation.path.capacity() * std::mem::size_of::<TerminalPathSegment>()
+        + path_bytes
+        + edit_bytes
 }
 
 pub(crate) struct LocalMaintainedViewSubscriptionUpdate {
