@@ -738,6 +738,15 @@ where
         open_batch_id: OpenBatchId,
         mut next_now_ms: impl FnMut() -> u64,
     ) -> Result<TxId, Error> {
+        let prepared = self.prepare_mergeable_open(open_batch_id, next_now_ms())?;
+        self.publish_prepared_mergeable_open(prepared)
+    }
+
+    pub(crate) fn prepare_mergeable_open(
+        &mut self,
+        open_batch_id: OpenBatchId,
+        fallback_now_ms: u64,
+    ) -> Result<PreparedOpenMergeableCommit, Error> {
         if !matches!(
             self.open_tx(open_batch_id)?.kind,
             OpenTransactionKind::Mergeable { .. }
@@ -763,9 +772,6 @@ where
         };
         let mut commits = Vec::with_capacity(open_tx.writes.len());
         for (index, write) in open_tx.writes.into_iter().enumerate() {
-            for parent in &write.parents {
-                self.merge_tx_time(parent.time);
-            }
             let parents = if write.refresh_parents_at_commit {
                 if write.deletion.is_none() {
                     self.local_content_winner_tx_id(&write.table, write.row_uuid)?
@@ -801,7 +807,7 @@ where
             let mut commit = MergeableCommit::new(
                 &write.table,
                 write.row_uuid,
-                write.now_ms.unwrap_or_else(&mut next_now_ms),
+                write.now_ms.unwrap_or(fallback_now_ms),
             )
             .made_by(made_by)
             .parents(parents)
@@ -830,11 +836,24 @@ where
             .map(|(_, commit)| commit.clone())
             .collect::<Vec<_>>();
         let made_at = self.preview_mergeable_tx_time(&plain_commits, first.1.now_ms);
-        let committed =
-            self.commit_mergeable_many_at_with_schema_versions(commits, made_at, None)?;
-        self.open_tx.open_transactions.remove(&open_batch_id);
-        self.open_tx.closed_batches.insert(open_batch_id);
-        Ok(committed)
+        let commit =
+            self.prepare_mergeable_many_at_with_schema_versions(commits, made_at, None, true)?;
+        Ok(PreparedOpenMergeableCommit {
+            open_batch_id,
+            commit,
+        })
+    }
+
+    pub(crate) fn publish_prepared_mergeable_open(
+        &mut self,
+        prepared: PreparedOpenMergeableCommit,
+    ) -> Result<TxId, Error> {
+        let tx_id = self.publish_prepared_mergeable_commit(prepared.commit)?;
+        self.open_tx
+            .open_transactions
+            .remove(&prepared.open_batch_id);
+        self.open_tx.closed_batches.insert(prepared.open_batch_id);
+        Ok(tx_id)
     }
 
     /// Abandon an open transaction.

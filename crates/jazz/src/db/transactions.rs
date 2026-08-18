@@ -1,11 +1,97 @@
 //! Mergeable and exclusive transaction handles and staging.
 
+use super::mutations::MutationPrepareError;
 use super::*;
 
 impl<S> Db<S>
 where
     S: ResidentStorage + ReopenableStorage + 'static,
 {
+    pub(super) fn begin_mergeable_for_owner(
+        &self,
+        id: OpenBatchId,
+    ) -> Result<(), MutationPrepareError> {
+        self.node
+            .node
+            .borrow_mut()
+            .open_mergeable(id, self.identity.author, None)
+            .map_err(MutationPrepareError::Node)
+    }
+
+    pub(super) fn stage_mergeable_insert_for_owner(
+        &self,
+        tx_id: OpenBatchId,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+        now_ms: u64,
+    ) -> Result<(), MutationPrepareError> {
+        let cells = self
+            .apply_insert_defaults(table, cells)
+            .map_err(MutationPrepareError::Api)?;
+        self.node
+            .node
+            .borrow_mut()
+            .tx_write_mergeable_in_schema(
+                tx_id,
+                self.schema_version_id,
+                table,
+                row,
+                cells,
+                None,
+                Vec::new(),
+                Some(now_ms),
+                false,
+            )
+            .map_err(MutationPrepareError::Node)
+    }
+
+    pub(super) fn stage_mergeable_update_for_owner(
+        &self,
+        tx_id: OpenBatchId,
+        table: &str,
+        row: RowUuid,
+        patch: RowCells,
+        now_ms: u64,
+    ) -> Result<(), MutationPrepareError> {
+        self.node
+            .node
+            .borrow_mut()
+            .tx_patch_mergeable_in_schema(
+                tx_id,
+                self.schema_version_id,
+                table,
+                row,
+                patch,
+                Some(now_ms),
+            )
+            .map_err(MutationPrepareError::Node)
+    }
+
+    pub(super) fn stage_mergeable_delete_for_owner(
+        &self,
+        tx_id: OpenBatchId,
+        table: &str,
+        row: RowUuid,
+        now_ms: u64,
+    ) -> Result<(), MutationPrepareError> {
+        self.node
+            .node
+            .borrow_mut()
+            .tx_write_mergeable_in_schema(
+                tx_id,
+                self.schema_version_id,
+                table,
+                row,
+                BTreeMap::new(),
+                Some(DeletionEvent::Deleted),
+                Vec::new(),
+                Some(now_ms),
+                false,
+            )
+            .map_err(MutationPrepareError::Node)
+    }
+
     /// Build a mergeable transaction that commits multiple writes under one id.
     pub fn mergeable_tx(&self) -> Result<MergeableTx<'_, S>, Error> {
         let tx_id = OpenBatchId::new();

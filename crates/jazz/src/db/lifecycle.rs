@@ -507,6 +507,118 @@ impl DemandDrivenDb {
             local_tier,
         })
     }
+
+    /// Open a staged mergeable transaction owned by this async database.
+    pub async fn begin_mergeable(&mut self) -> Result<OpenBatchId, Error> {
+        let id = OpenBatchId::new();
+        let database = &self.database;
+        std::future::poll_fn(|context| {
+            self.runtime.poll_operation(
+                context,
+                || database.begin_mergeable_for_owner(id),
+                MutationPrepareError::missing_input,
+            )
+        })
+        .await
+        .map_err(MutationPrepareError::into_api)?;
+        Ok(id)
+    }
+
+    /// Stage an insert in an open mergeable transaction. Staged writes remain
+    /// invisible until [`DemandDrivenDb::commit_mergeable`] publishes them.
+    pub async fn mergeable_insert(
+        &mut self,
+        tx_id: OpenBatchId,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+    ) -> Result<(), Error> {
+        let now_ms = self.database.next_now_ms();
+        let database = &self.database;
+        std::future::poll_fn(|context| {
+            self.runtime.poll_operation(
+                context,
+                || {
+                    database.stage_mergeable_insert_for_owner(
+                        tx_id,
+                        table,
+                        row,
+                        cells.clone(),
+                        now_ms,
+                    )
+                },
+                MutationPrepareError::missing_input,
+            )
+        })
+        .await
+        .map_err(MutationPrepareError::into_api)
+    }
+
+    pub async fn mergeable_update(
+        &mut self,
+        tx_id: OpenBatchId,
+        table: &str,
+        row: RowUuid,
+        patch: RowCells,
+    ) -> Result<(), Error> {
+        let now_ms = self.database.next_now_ms();
+        let database = &self.database;
+        std::future::poll_fn(|context| {
+            self.runtime.poll_operation(
+                context,
+                || {
+                    database.stage_mergeable_update_for_owner(
+                        tx_id,
+                        table,
+                        row,
+                        patch.clone(),
+                        now_ms,
+                    )
+                },
+                MutationPrepareError::missing_input,
+            )
+        })
+        .await
+        .map_err(MutationPrepareError::into_api)
+    }
+
+    pub async fn mergeable_delete(
+        &mut self,
+        tx_id: OpenBatchId,
+        table: &str,
+        row: RowUuid,
+    ) -> Result<(), Error> {
+        let now_ms = self.database.next_now_ms();
+        let database = &self.database;
+        std::future::poll_fn(|context| {
+            self.runtime.poll_operation(
+                context,
+                || database.stage_mergeable_delete_for_owner(tx_id, table, row, now_ms),
+                MutationPrepareError::missing_input,
+            )
+        })
+        .await
+        .map_err(MutationPrepareError::into_api)
+    }
+
+    /// Publish every staged write as one resident and durable transaction.
+    pub async fn commit_mergeable(&mut self, tx_id: OpenBatchId) -> Result<TxId, Error> {
+        let fallback_now_ms = self.database.next_now_ms();
+        let committed = std::future::poll_fn(|context| {
+            self.runtime
+                .poll_mergeable_open(context, tx_id, fallback_now_ms)
+        })
+        .await
+        .map_err(Error::from)?;
+        self.database.finalize_local_commit(committed)?;
+        self.database.refresh_subscriptions()?;
+        Ok(committed)
+    }
+
+    /// Abandon a staged transaction without publishing any of its writes.
+    pub fn abandon_mergeable(&mut self, tx_id: OpenBatchId) -> Result<(), Error> {
+        self.database.abandon_transaction_handle(tx_id)
+    }
 }
 
 impl<S> Db<S>

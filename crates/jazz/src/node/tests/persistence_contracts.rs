@@ -501,6 +501,44 @@ fn demand_driven_db_acquires_cold_subscription_before_registering_it() {
     };
     assert_eq!(added.len(), 1);
     assert_eq!(restored_write.row_uuid(), write.row_uuid());
+
+    let tx_id = crate::db::block_on(owner.begin_mergeable()).unwrap();
+    let tx_row_a = RowUuid::from_bytes([0xcf; 16]);
+    let tx_row_b = RowUuid::from_bytes([0xd0; 16]);
+    crate::db::block_on(owner.mergeable_insert(
+        tx_id,
+        "todos",
+        tx_row_a,
+        title_cells("staged a"),
+    ))
+    .unwrap();
+    crate::db::block_on(owner.mergeable_insert(
+        tx_id,
+        "todos",
+        tx_row_b,
+        title_cells("staged b"),
+    ))
+    .unwrap();
+    assert!(
+        subscription.try_next_event().is_none(),
+        "staged transaction writes must remain invisible"
+    );
+    let committed = {
+        let mut commit = std::pin::pin!(owner.commit_mergeable(tx_id));
+        match std::future::Future::poll(commit.as_mut(), &mut context) {
+            std::task::Poll::Ready(Ok(committed)) => committed,
+            std::task::Poll::Ready(Err(error)) => panic!("mergeable commit failed: {error}"),
+            std::task::Poll::Pending => {
+                panic!("a resident mergeable transaction must commit in its first poll")
+            }
+        }
+    };
+    let Some(crate::db::SubscriptionEvent::Delta { added, .. }) = subscription.try_next_event()
+    else {
+        panic!("transaction publication must synchronously refresh subscriptions")
+    };
+    assert_eq!(added.len(), 2);
+    assert!(committed.time.0 > 0);
     assert!(owner.poll_persistence(&mut context).is_pending());
 }
 

@@ -843,6 +843,11 @@ pub(crate) struct PreparedMergeableCommit {
     permission_subject: AuthorId,
 }
 
+pub(crate) struct PreparedOpenMergeableCommit {
+    open_batch_id: OpenBatchId,
+    commit: PreparedMergeableCommit,
+}
+
 /// Rejection records and derived indexes used for pending-cascade handling.
 #[derive(Clone, Debug, Default)]
 struct RejectionTracking {

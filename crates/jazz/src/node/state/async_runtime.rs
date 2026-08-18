@@ -170,6 +170,21 @@ impl DemandDrivenNode {
         )
     }
 
+    /// Commit a staged mergeable transaction without consuming its open handle
+    /// until all cold parents and patch inputs have been acquired.
+    pub fn poll_mergeable_open(
+        &mut self,
+        context: &mut std::task::Context<'_>,
+        open_batch_id: OpenBatchId,
+        fallback_now_ms: u64,
+    ) -> std::task::Poll<Result<TxId, Error>> {
+        self.poll_local_operation(
+            context,
+            |node| node.prepare_mergeable_open(open_batch_id, fallback_now_ms),
+            |node, prepared| node.publish_prepared_mergeable_open(prepared),
+        )
+    }
+
     /// Create one local branch through the same acquire-then-publish boundary
     /// as application-row writes.
     pub fn poll_create_branch(
