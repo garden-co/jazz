@@ -22,7 +22,7 @@ use jazz::db::{
 };
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::node::{MergeableCommit, NodeState, PollableNodeOpen};
-use jazz::protocol::SyncMessage;
+use jazz::protocol::{ReadViewSourceSpec, ReadViewSpec, SyncMessage};
 use jazz::tx::DurabilityTier;
 use opfs_btree::BTreeError;
 use opfs_btree::async_db::{AsyncPageBTree, AsyncPageBTreeOptions};
@@ -535,6 +535,62 @@ pub async fn verify_indexeddb_jazz_visibility(page_store: JsValue) -> Result<JsV
     futures::future::poll_fn(|context| owner.poll_persistence(context))
         .await
         .map_err(|error| JsValue::from_str(&error.to_string()))?;
+
+    let branch = owner
+        .create_branch()
+        .await
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    futures::future::poll_fn(|context| owner.poll_persistence(context))
+        .await
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    let branch_opts = ReadOpts {
+        tier: DurabilityTier::None,
+        local_updates: LocalUpdates::Immediate,
+        propagation: Propagation::LocalOnly,
+        read_view: ReadViewSpec {
+            source: ReadViewSourceSpec::Branch { branch: branch.0 },
+            ..ReadViewSpec::default()
+        },
+        ..ReadOpts::default()
+    };
+    let mut branch_subscription = owner
+        .subscribe(&prepared, branch_opts.clone())
+        .await
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    branch_subscription
+        .next_event()
+        .await
+        .ok_or_else(|| JsValue::from_str("Jazz branch subscription closed during async opening"))?;
+    let branch_write = owner
+        .insert_on_branch(
+            branch,
+            "todos",
+            doctest_support::todo_cells("branch input", false),
+        )
+        .await
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    let Some(SubscriptionEvent::Delta { added, .. }) = branch_subscription.try_next_event() else {
+        return Err(JsValue::from_str(
+            "Jazz branch subscription did not update inside first write",
+        ));
+    };
+    if added.len() != 1 || added[0].row_uuid() != branch_write.row_uuid() {
+        return Err(JsValue::from_str(
+            "Jazz branch subscription observed the wrong first row",
+        ));
+    }
+    let mut branch_persistence_context = Context::from_waker(Waker::noop());
+    if !owner
+        .poll_persistence(&mut branch_persistence_context)
+        .is_pending()
+    {
+        return Err(JsValue::from_str(
+            "Jazz branch durability unexpectedly completed in its first poll",
+        ));
+    }
+    futures::future::poll_fn(|context| owner.poll_persistence(context))
+        .await
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
     drop(owner);
 
     let reopened = IndexedDbOrderedStorage::open(page_store, 4096, 32)
@@ -590,6 +646,19 @@ pub async fn verify_indexeddb_jazz_visibility(page_store: JsValue) -> Result<JsV
     if rows.len() != 1 {
         return Err(JsValue::from_str(
             "Jazz canonical transaction did not survive IndexedDB owner reopen",
+        ));
+    }
+    let branch_rows = reopened
+        .all(&prepared, branch_opts)
+        .await
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    if branch_rows.len() != 1
+        || !branch_rows
+            .iter()
+            .any(|row| row.row_uuid() == branch_write.row_uuid())
+    {
+        return Err(JsValue::from_str(
+            "Jazz branch row did not survive IndexedDB owner reopen",
         ));
     }
     Ok(JsValue::from_str(

@@ -588,14 +588,15 @@ where
     ///
     /// Source lowering reports capability gaps for unsupported graphs, which
     /// would erase a demand-loaded storage miss. This preflight keeps the
-    /// exact storage request outside lowering and leaves the real subscription
-    /// unregistered until all base sources are resident.
-    pub(crate) fn acquire_branch_subscription_inputs(
+    /// exact storage request outside lowering and leaves a real query or
+    /// subscription unregistered until all base sources are resident.
+    pub(crate) fn acquire_branch_read_inputs(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
         branch_id: BranchId,
         identity: AuthorId,
+        install_sparse_source: bool,
     ) -> Result<(), Error> {
         if !self.branch_metadata_visible_to(branch_id, identity)? {
             return Err(Error::AuthorizationDenied);
@@ -609,11 +610,13 @@ where
             .ok_or(Error::BranchNotFound(branch_id))?;
         for table in normalized_source_tables(&input_shape) {
             let _ = self.branch_base_rows_for_schema(&table, &branch, shape.schema_version())?;
-            self.prepare_branch_subscription_source_partition(
-                &table,
-                shape.schema_version(),
-                branch_id,
-            )?;
+            if install_sparse_source {
+                self.prepare_branch_subscription_source_partition(
+                    &table,
+                    shape.schema_version(),
+                    branch_id,
+                )?;
+            }
         }
         Ok(())
     }

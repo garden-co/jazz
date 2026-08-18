@@ -442,11 +442,12 @@ where
             self.node
                 .node
                 .borrow_mut()
-                .acquire_branch_subscription_inputs(
+                .acquire_branch_read_inputs(
                     &prepared.shape,
                     &prepared.binding,
                     crate::ids::BranchId(*branch),
                     author,
+                    true,
                 )
                 .map_err(SubscriptionOpenError::Node)?;
         }

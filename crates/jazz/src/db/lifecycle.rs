@@ -224,6 +224,15 @@ impl DemandDrivenDb {
         let database = &self.database;
         let author = database.identity.author;
         match self.runtime.poll_resident_operation(context, || {
+            if let ReadViewSourceSpec::Branch { branch } = &opts.read_view.source {
+                database.node.node.borrow_mut().acquire_branch_read_inputs(
+                    &prepared.shape,
+                    &prepared.binding,
+                    crate::ids::BranchId(*branch),
+                    author,
+                    false,
+                )?;
+            }
             database.all_resident(
                 &prepared,
                 &opts,
@@ -266,6 +275,15 @@ impl DemandDrivenDb {
         let database = &self.database;
         let author = database.identity.author;
         match self.runtime.poll_resident_operation(context, || {
+            if let ReadViewSourceSpec::Branch { branch } = &opts.read_view.source {
+                database.node.node.borrow_mut().acquire_branch_read_inputs(
+                    &prepared.shape,
+                    &prepared.binding,
+                    crate::ids::BranchId(*branch),
+                    author,
+                    false,
+                )?;
+            }
             database.relation_snapshot_resident(
                 prepared,
                 &opts,
