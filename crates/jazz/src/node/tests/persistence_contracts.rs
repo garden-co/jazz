@@ -1784,6 +1784,68 @@ fn peer_view_update_withholds_subscription_publication_until_durable() {
 }
 
 #[test]
+fn peer_repair_payload_withholds_canonical_publication_until_durable() {
+    let (mut writer, _) = fail_write_many_node();
+    let (mut core, _) = fail_write_many_node();
+    let (tx_id, unit) = writer
+        .commit_mergeable_unit(
+            MergeableCommit::new("todos", row(0xca), 10).cells(title_cells("repair payload")),
+        )
+        .unwrap();
+    let SyncMessage::CommitUnit { tx, versions } = unit else {
+        panic!("local write must produce a commit unit")
+    };
+    core.ingest_commit_unit(tx, versions, 10).unwrap();
+    core.apply_fate_update(
+        tx_id,
+        Fate::Accepted,
+        Some(GlobalSeq(1)),
+        Some(DurabilityTier::Global),
+    )
+    .unwrap();
+    let bundles = version_bundles_for_update(&core.view_update_for_current_rows("todos").unwrap());
+    let requests = vec![crate::protocol::RowVersionRef::new(
+        "todos",
+        row(0xca),
+        tx_id,
+    )];
+    let released = std::rc::Rc::new(std::cell::Cell::new(true));
+    let mut receiver = authority_runtime(
+        std::rc::Rc::clone(&released),
+        std::rc::Rc::new(std::cell::Cell::new(false)),
+    );
+    let waker = std::task::Waker::from(std::sync::Arc::new(PersistenceTestWake));
+    let mut context = std::task::Context::from_waker(&waker);
+    let std::task::Poll::Ready(Ok(history)) =
+        receiver.poll_subscribe_history(&mut context, "todos")
+    else {
+        panic!("empty receiver history must open")
+    };
+    assert!(history.recv().unwrap().is_empty());
+
+    released.set(false);
+    assert!(receiver
+        .poll_apply_peer_repair_payloads(&mut context, &requests, &bundles)
+        .is_pending());
+    assert!(matches!(
+        history.try_recv(),
+        Err(std::sync::mpsc::TryRecvError::Empty)
+    ));
+    released.set(true);
+    loop {
+        match receiver.poll_apply_peer_repair_payloads(&mut context, &requests, &bundles) {
+            std::task::Poll::Pending => assert!(matches!(
+                history.try_recv(),
+                Err(std::sync::mpsc::TryRecvError::Empty)
+            )),
+            std::task::Poll::Ready(Ok(())) => break,
+            std::task::Poll::Ready(Err(error)) => panic!("repair failed: {error}"),
+        }
+    }
+    assert_eq!(history.recv().unwrap().to_values().unwrap().len(), 1);
+}
+
+#[test]
 fn demand_driven_peer_tick_retains_view_update_until_durable() {
     let (mut writer, _) = fail_write_many_node();
     let (mut core, _) = fail_write_many_node();
@@ -1846,7 +1908,6 @@ fn demand_driven_peer_tick_retains_view_update_until_durable() {
     let connection = receiver.connect_upstream(Box::new(QueuedInboundTransport {
         inbound: std::rc::Rc::clone(&inbound),
     }));
-
     released.set(false);
     assert!(receiver.poll_tick(&mut context).is_pending());
     assert!(connection.borrow().has_staged_view_update_for_test());

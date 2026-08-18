@@ -893,6 +893,10 @@ pub(crate) struct PreparedViewUpdateBatch {
     branch_partitions: PreparedViewUpdateBranchPartitions,
 }
 
+pub(crate) struct PreparedRepairPayloadIngress {
+    bundles: Vec<VersionBundle>,
+}
+
 /// Rejection records and derived indexes used for pending-cascade handling.
 #[derive(Clone, Debug, Default)]
 struct RejectionTracking {

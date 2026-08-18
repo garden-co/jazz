@@ -443,6 +443,37 @@ where
         Ok(prepared)
     }
 
+    pub(crate) fn prepare_repair_payload_ingress(
+        &mut self,
+        requests: &[RowVersionRef],
+        version_bundles: Vec<VersionBundle>,
+    ) -> Result<PreparedRepairPayloadIngress, Error>
+    where
+        S: ReopenableStorage,
+    {
+        let bundles = self.prepare_row_version_payloads_for_requests(requests, version_bundles)?;
+        for bundle in &bundles {
+            let _ = self.prepare_relay_commit(bundle.tx.clone(), bundle.versions.clone())?;
+        }
+        Ok(PreparedRepairPayloadIngress { bundles })
+    }
+
+    pub(crate) fn publish_prepared_repair_payload_ingress(
+        &mut self,
+        prepared: PreparedRepairPayloadIngress,
+    ) -> Result<(), Error> {
+        for bundle in prepared.bundles {
+            self.ingest_known_transaction(
+                bundle.tx,
+                bundle.versions,
+                bundle.fate,
+                bundle.global_seq,
+                bundle.durability,
+            )?;
+        }
+        Ok(())
+    }
+
     #[allow(dead_code)]
     pub(crate) fn missing_known_state_row_version_refs(
         &mut self,

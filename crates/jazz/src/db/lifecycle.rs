@@ -154,6 +154,25 @@ impl DemandDrivenDb {
         let connections = self.database.node.connections.borrow().clone();
         for connection in &connections {
             connection.borrow_mut().stage_available_inbound();
+            let staged_repair = { connection.borrow().staged_row_version_repair() };
+            if let Some((requests, bundles)) = staged_repair {
+                match self
+                    .runtime
+                    .poll_apply_peer_repair_payloads(context, &requests, &bundles)
+                {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(Err(error)) => return Poll::Ready(Err(error.into())),
+                    Poll::Ready(Ok(())) => {
+                        connection.borrow_mut().complete_staged_row_version_repair()
+                    }
+                }
+                // Completion re-stages the original ViewUpdate at the head of
+                // this same link. Yield before the legacy node tick can consume
+                // it; the next owner poll acquires and publishes it through the
+                // typed receiver boundary.
+                context.waker().wake_by_ref();
+                return Poll::Pending;
+            }
             let relay = connection.borrow().staged_relay_commit();
             if let Some((tx, versions)) = relay {
                 let tx_id = tx.tx_id;
@@ -217,7 +236,8 @@ impl DemandDrivenDb {
         };
         if connections.iter().any(|connection| {
             let connection = connection.borrow();
-            connection.staged_relay_commit().is_some()
+            connection.staged_row_version_repair().is_some()
+                || connection.staged_relay_commit().is_some()
                 || connection.staged_accepted_fate().is_some()
         }) {
             context.waker().wake_by_ref();

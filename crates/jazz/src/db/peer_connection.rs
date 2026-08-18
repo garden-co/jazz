@@ -267,6 +267,27 @@ where
         Some((message, parts))
     }
 
+    pub(super) fn staged_row_version_repair(
+        &self,
+    ) -> Option<(
+        Vec<crate::protocol::RowVersionRef>,
+        Vec<crate::protocol::VersionBundle>,
+    )> {
+        let ConnectionLink::Upstream {
+            pending_row_version_repairs,
+            ..
+        } = &self.link
+        else {
+            return None;
+        };
+        let repair = pending_row_version_repairs.front()?;
+        let staged = self.staged_inbound.front()?;
+        let SyncMessage::RowVersionPayloads { version_bundles } = &staged.message else {
+            return None;
+        };
+        Some((repair.requests.clone(), version_bundles.clone()))
+    }
+
     #[cfg(test)]
     pub(crate) fn has_staged_view_update_for_test(&self) -> bool {
         self.staged_ready_view_update().is_some()
@@ -352,6 +373,32 @@ where
                 .borrow_mut()
                 .remove(&coverage);
         }
+        self.externally_applied_inbound = true;
+    }
+
+    pub(super) fn complete_staged_row_version_repair(&mut self) {
+        let staged = self
+            .staged_inbound
+            .pop_front()
+            .expect("completed repair retains its response frame");
+        debug_assert!(matches!(
+            staged.message,
+            SyncMessage::RowVersionPayloads { .. }
+        ));
+        let ConnectionLink::Upstream {
+            pending_row_version_repairs,
+            ..
+        } = &mut self.link
+        else {
+            unreachable!("row-version repair belongs to an upstream link")
+        };
+        let repair = pending_row_version_repairs
+            .pop_front()
+            .expect("completed repair retains its request context");
+        self.staged_inbound.push_front(StagedInboundMessage {
+            message: repair.update,
+            authority_receipt_eligible: repair.authority_receipt_eligible,
+        });
         self.externally_applied_inbound = true;
     }
 
@@ -994,6 +1041,7 @@ where
                 }) {
                     if self.external_durable_ingress
                         && ((*local_receiver && matches!(&message, SyncMessage::CommitUnit { .. }))
+                            || matches!(&message, SyncMessage::RowVersionPayloads { .. })
                             || matches!(
                                 &message,
                                 SyncMessage::FateUpdate {

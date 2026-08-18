@@ -47,6 +47,7 @@ pub struct DemandDrivenNode {
     pending_ingress: Option<PendingDurableIngress>,
     pending_peer_fate: Option<PendingPeerFate>,
     pending_peer_view_updates: Option<PendingPeerViewUpdates>,
+    pending_peer_repair: Option<PendingPeerRepair>,
     persistence_failed: bool,
 }
 
@@ -76,6 +77,11 @@ struct PendingPeerFate {
 
 struct PendingPeerViewUpdates {
     identity: Vec<(SubscriptionKey, GlobalSeq)>,
+    publication: groove::db::DurablePublicationScope,
+}
+
+struct PendingPeerRepair {
+    identity: Vec<RowVersionRef>,
     publication: groove::db::DurablePublicationScope,
 }
 
@@ -822,6 +828,96 @@ impl DemandDrivenNode {
         })
     }
 
+    pub(crate) fn poll_apply_peer_repair_payloads(
+        &mut self,
+        context: &mut std::task::Context<'_>,
+        requests: &[RowVersionRef],
+        bundles: &[VersionBundle],
+    ) -> std::task::Poll<Result<(), Error>> {
+        match &self.pending_peer_repair {
+            Some(pending) if pending.identity != requests => {
+                return std::task::Poll::Ready(Err(Error::InvalidStoredValue(
+                    "a different repair response was polled while one is pending",
+                )));
+            }
+            None => {
+                if let Err(error) = self.ensure_durable_publication_idle() {
+                    return std::task::Poll::Ready(Err(error));
+                }
+                let prepared = match self.acquisition.poll(
+                    self.persistence.as_mut(),
+                    &self.cache,
+                    context,
+                    || {
+                        self.node.borrow_mut().prepare_repair_payload_ingress(
+                            requests,
+                            bundles.to_vec(),
+                        )
+                    },
+                    missing_node_open_input,
+                ) {
+                    std::task::Poll::Pending => return std::task::Poll::Pending,
+                    std::task::Poll::Ready(Err(error)) => {
+                        self.discard_failed_operation_writes();
+                        return std::task::Poll::Ready(Err(error));
+                    }
+                    std::task::Poll::Ready(Ok(prepared)) => prepared,
+                };
+                let publication = match self
+                    .node
+                    .borrow_mut()
+                    .database
+                    .begin_durable_publication_scope()
+                {
+                    Ok(publication) => publication,
+                    Err(error) => return std::task::Poll::Ready(Err(error.into())),
+                };
+                let result = self
+                    .node
+                    .borrow_mut()
+                    .publish_prepared_repair_payload_ingress(prepared);
+                if let Err(error) = result {
+                    publication.abort(&mut self.node.borrow_mut().database);
+                    if is_not_resident(&error) {
+                        self.fail_persistence();
+                    } else {
+                        self.discard_failed_operation_writes();
+                    }
+                    return std::task::Poll::Ready(Err(error));
+                }
+                self.collect_persistence_unit();
+                self.pending_peer_repair = Some(PendingPeerRepair {
+                    identity: requests.to_vec(),
+                    publication,
+                });
+            }
+            Some(_) => {}
+        }
+        match self.poll_persistence_queue(context) {
+            std::task::Poll::Pending => std::task::Poll::Pending,
+            std::task::Poll::Ready(Ok(())) => {
+                let pending = self
+                    .pending_peer_repair
+                    .take()
+                    .expect("durable repair retains publication state");
+                pending
+                    .publication
+                    .finish(&mut self.node.borrow_mut().database);
+                std::task::Poll::Ready(Ok(()))
+            }
+            std::task::Poll::Ready(Err(error)) => {
+                let pending = self
+                    .pending_peer_repair
+                    .take()
+                    .expect("failed repair retains publication state");
+                pending
+                    .publication
+                    .abort(&mut self.node.borrow_mut().database);
+                std::task::Poll::Ready(Err(error))
+            }
+        }
+    }
+
     /// Poll a restartable query or subscription operation. It may suspend only
     /// while acquiring a missing durable input; once ready, evaluation runs on
     /// the same resident node used by local writes.
@@ -928,6 +1024,7 @@ impl DemandDrivenNode {
         if self.pending_ingress.is_some()
             || self.pending_peer_fate.is_some()
             || self.pending_peer_view_updates.is_some()
+            || self.pending_peer_repair.is_some()
         {
             return std::task::Poll::Ready(Err(Error::InvalidStoredValue(
                 "ingress persistence must be polled through its typed operation",
@@ -1087,6 +1184,7 @@ impl DemandDrivenNode {
         if self.pending_ingress.is_some()
             || self.pending_peer_fate.is_some()
             || self.pending_peer_view_updates.is_some()
+            || self.pending_peer_repair.is_some()
         {
             Err(Error::InvalidStoredValue(
                 "a durable publication is awaiting completion",
@@ -1165,6 +1263,7 @@ impl PollableNodeOpen {
             pending_ingress: None,
             pending_peer_fate: None,
             pending_peer_view_updates: None,
+            pending_peer_repair: None,
             persistence_failed: false,
         }
     }
