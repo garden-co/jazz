@@ -803,7 +803,11 @@ fn server_command_loads_published_schema_and_persists_ws_data_across_restart() {
             todo_cells("durable cli row", true),
         )
         .expect("write todo through client db");
-    assert!(pump_websocket(&writer.socket, &writer.db, &writer.wire,));
+    assert!(pump_websocket(
+        &mut writer.socket,
+        &mut writer.db,
+        &writer.wire,
+    ));
     let state = write.write_state().expect("write state");
     assert_eq!(state.fate, Fate::Accepted);
     drop(writer.socket);
@@ -834,7 +838,11 @@ fn server_command_loads_published_schema_and_persists_ws_data_across_restart() {
         },
     ))
     .expect("subscribe to todos");
-    assert!(pump_websocket(&reader.socket, &reader.db, &reader.wire,));
+    assert!(pump_websocket(
+        &mut reader.socket,
+        &mut reader.db,
+        &reader.wire,
+    ));
     assert_eq!(
         subscription_fields(&mut subscription, &schema.tables[0]),
         vec![("durable cli row".to_owned(), true)]
@@ -881,7 +889,11 @@ fn websocket_reconnect_resets_structured_terminal_before_live_patches() {
             ]),
         )
         .unwrap();
-    assert!(pump_websocket(&writer.socket, &writer.db, &writer.wire));
+    assert!(pump_websocket(
+        &mut writer.socket,
+        &mut writer.db,
+        &writer.wire,
+    ));
 
     let mut reader = open_connected_client(
         schema.clone(),
@@ -904,7 +916,11 @@ fn websocket_reconnect_resets_structured_terminal_before_live_patches() {
         },
     ))
     .unwrap();
-    assert!(pump_websocket(&reader.socket, &reader.db, &reader.wire));
+    assert!(pump_websocket(
+        &mut reader.socket,
+        &mut reader.db,
+        &reader.wire,
+    ));
     let reset = block_on(subscription.next()).expect("structured reset event");
     assert!(matches!(
         reset,
@@ -934,7 +950,11 @@ fn websocket_reconnect_resets_structured_terminal_before_live_patches() {
             ]),
         )
         .unwrap();
-    assert!(pump_websocket(&writer.socket, &writer.db, &writer.wire));
+    assert!(pump_websocket(
+        &mut writer.socket,
+        &mut writer.db,
+        &writer.wire,
+    ));
 
     let reconnected_wire = QueuedWireTransport::default();
     reader
@@ -944,7 +964,11 @@ fn websocket_reconnect_resets_structured_terminal_before_live_patches() {
         )));
     reader.wire = reconnected_wire;
     reader.socket = connect_server_ws(&server.ws_url, subject);
-    assert!(pump_websocket(&reader.socket, &reader.db, &reader.wire));
+    assert!(pump_websocket(
+        &mut reader.socket,
+        &mut reader.db,
+        &reader.wire,
+    ));
 
     // Replacing the upstream invalidates the old authority receipt before the
     // new link can speak. Preserve the cached structured value, but publish
@@ -998,8 +1022,16 @@ fn websocket_reconnect_resets_structured_terminal_before_live_patches() {
             ]),
         )
         .unwrap();
-    assert!(pump_websocket(&writer.socket, &writer.db, &writer.wire));
-    assert!(pump_websocket(&reader.socket, &reader.db, &reader.wire));
+    assert!(pump_websocket(
+        &mut writer.socket,
+        &mut writer.db,
+        &writer.wire,
+    ));
+    assert!(pump_websocket(
+        &mut reader.socket,
+        &mut reader.db,
+        &reader.wire,
+    ));
     let mut patch = None;
     while let Some(event) = subscription.next().now_or_never().flatten() {
         if matches!(
