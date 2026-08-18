@@ -10,7 +10,7 @@ use groove::storage::async_ordered::{
 };
 use groove::storage::{Error, OwnedWriteOperation, apply_storage_delta};
 use groove::{
-    db::{Database, DemandDrivenDatabase, GraphBuilder, PollableDatabase},
+    db::{Database, DemandDrivenDatabase, GraphBuilder},
     records::Value,
     schema::{ColumnSchema, ColumnType, DatabaseSchema, IntegerKeyType, PrimaryKey, TableSchema},
     storage::MemoryStorage,
@@ -386,16 +386,16 @@ pub async fn verify_indexeddb_groove_visibility(page_store: JsValue) -> Result<J
         ],
     )
     .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
-    let resident = Database::new(schema, MemoryStorage::new(&["rows", "indices"]))
-        .map_err(|error| JsValue::from_str(&error.to_string()))?;
     let persistence = IndexedDbOrderedStorage::open(page_store.clone(), 4096, 3)
         .await
         .map_err(|error| JsValue::from_str(&error.to_string()))?;
-    let mut database = PollableDatabase::new(resident, Box::new(persistence));
-    let subscription = database
-        .resident_mut()
-        .subscribe_one_sink(GraphBuilder::table("rows"))
+    let mut database = DemandDrivenDatabase::new(schema, Box::new(persistence))
         .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    let mut graph = Some(GraphBuilder::table("rows"));
+    let subscription =
+        futures::future::poll_fn(|context| database.poll_subscribe_one_sink(context, &mut graph))
+            .await
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
     if !subscription
         .recv()
         .map_err(|error| JsValue::from_str(&error.to_string()))?
@@ -406,14 +406,22 @@ pub async fn verify_indexeddb_groove_visibility(page_store: JsValue) -> Result<J
         ));
     }
 
-    let mut batch = database.resident().open_batch();
-    batch.insert(
+    let mut batch = Some(database.resident().open_batch());
+    batch.as_mut().unwrap().insert(
         "rows",
         vec![Value::U64(1), Value::String("controlled input".into())],
     );
-    database
-        .commit_batch(batch)
-        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    let persistence =
+        match database.poll_commit_batch(&mut Context::from_waker(Waker::noop()), &mut batch) {
+            Poll::Ready(Ok(persistence)) => persistence,
+            Poll::Ready(Err(error)) => return Err(JsValue::from_str(&error.to_string())),
+            Poll::Pending => {
+                return Err(JsValue::from_str(
+                    "resident Groove write unexpectedly required another IndexedDB read",
+                ));
+            }
+        };
+    database.enqueue_persistence(persistence);
 
     let local_delta = subscription
         .recv()
