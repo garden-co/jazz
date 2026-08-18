@@ -44,8 +44,7 @@ pub struct DemandDrivenNode {
     pending_shutdown:
         Option<std::collections::VecDeque<groove::storage::async_ordered::OwnedStorageRequest>>,
     pending_fate: Option<PendingFateApplication>,
-    pending_authority: Option<PendingAuthorityApplication>,
-    pending_relay: Option<PendingRelayApplication>,
+    pending_ingress: Option<PendingDurableIngress>,
     persistence_failed: bool,
 }
 
@@ -54,16 +53,17 @@ struct PendingFateApplication {
     steps: std::collections::VecDeque<ingest::FateUpdateRequest>,
 }
 
-struct PendingAuthorityApplication {
-    request: ingest::AuthorityCommitRequest,
-    responses: Vec<SyncMessage>,
-    publication: groove::db::DurablePublicationScope,
-}
-
-struct PendingRelayApplication {
-    tx: Transaction,
-    versions: Vec<VersionRecord>,
-    publication: groove::db::DurablePublicationScope,
+enum PendingDurableIngress {
+    Authority {
+        request: ingest::AuthorityCommitRequest,
+        responses: Vec<SyncMessage>,
+        publication: groove::db::DurablePublicationScope,
+    },
+    Relay {
+        tx: Transaction,
+        versions: Vec<VersionRecord>,
+        publication: groove::db::DurablePublicationScope,
+    },
 }
 
 impl DemandDrivenNode {
@@ -270,10 +270,17 @@ impl DemandDrivenNode {
             now_ms,
             ingest_context,
         };
-        match &self.pending_authority {
-            Some(pending) if pending.request != request => {
+        match &self.pending_ingress {
+            Some(PendingDurableIngress::Authority { request: pending, .. })
+                if pending != &request =>
+            {
                 return std::task::Poll::Ready(Err(Error::InvalidStoredValue(
                     "a different authority commit was polled while one is pending",
+                )));
+            }
+            Some(PendingDurableIngress::Relay { .. }) => {
+                return std::task::Poll::Ready(Err(Error::InvalidStoredValue(
+                    "a relay commit is awaiting durable completion",
                 )));
             }
             None => {
@@ -328,7 +335,7 @@ impl DemandDrivenNode {
                     }
                 };
                 self.collect_persistence_unit();
-                self.pending_authority = Some(PendingAuthorityApplication {
+                self.pending_ingress = Some(PendingDurableIngress::Authority {
                     request: request.clone(),
                     responses,
                     publication,
@@ -340,22 +347,29 @@ impl DemandDrivenNode {
             std::task::Poll::Pending => std::task::Poll::Pending,
             std::task::Poll::Ready(Ok(())) => {
                 let pending = self
-                    .pending_authority
+                    .pending_ingress
                     .take()
                     .expect("completed authority commit retains publication state");
-                pending
-                    .publication
-                    .finish(&mut self.node.borrow_mut().database);
-                std::task::Poll::Ready(Ok(pending.responses))
+                let PendingDurableIngress::Authority {
+                    responses,
+                    publication,
+                    ..
+                } = pending
+                else {
+                    unreachable!("authority poll retains authority ingress")
+                };
+                publication.finish(&mut self.node.borrow_mut().database);
+                std::task::Poll::Ready(Ok(responses))
             }
             std::task::Poll::Ready(Err(error)) => {
                 let pending = self
-                    .pending_authority
+                    .pending_ingress
                     .take()
                     .expect("failed authority commit retains publication state");
-                pending
-                    .publication
-                    .abort(&mut self.node.borrow_mut().database);
+                let PendingDurableIngress::Authority { publication, .. } = pending else {
+                    unreachable!("authority poll retains authority ingress")
+                };
+                publication.abort(&mut self.node.borrow_mut().database);
                 std::task::Poll::Ready(Err(error))
             }
         }
@@ -373,10 +387,19 @@ impl DemandDrivenNode {
             return std::task::Poll::Ready(Err(error));
         }
         let versions = canonical_versions(versions);
-        match &self.pending_relay {
-            Some(pending) if pending.tx != tx || pending.versions != versions => {
+        match &self.pending_ingress {
+            Some(PendingDurableIngress::Relay {
+                tx: pending_tx,
+                versions: pending_versions,
+                ..
+            }) if pending_tx != &tx || pending_versions != &versions => {
                 return std::task::Poll::Ready(Err(Error::InvalidStoredValue(
                     "a different relay commit was polled while one is pending",
+                )));
+            }
+            Some(PendingDurableIngress::Authority { .. }) => {
+                return std::task::Poll::Ready(Err(Error::InvalidStoredValue(
+                    "an authority commit is awaiting durable completion",
                 )));
             }
             None => {
@@ -425,7 +448,7 @@ impl DemandDrivenNode {
                     return std::task::Poll::Ready(Err(error));
                 }
                 self.collect_persistence_unit();
-                self.pending_relay = Some(PendingRelayApplication {
+                self.pending_ingress = Some(PendingDurableIngress::Relay {
                     tx: tx.clone(),
                     versions: versions.clone(),
                     publication,
@@ -437,22 +460,24 @@ impl DemandDrivenNode {
             std::task::Poll::Pending => std::task::Poll::Pending,
             std::task::Poll::Ready(Ok(())) => {
                 let pending = self
-                    .pending_relay
+                    .pending_ingress
                     .take()
                     .expect("completed relay commit retains publication state");
-                pending
-                    .publication
-                    .finish(&mut self.node.borrow_mut().database);
+                let PendingDurableIngress::Relay { publication, .. } = pending else {
+                    unreachable!("relay poll retains relay ingress")
+                };
+                publication.finish(&mut self.node.borrow_mut().database);
                 std::task::Poll::Ready(Ok(()))
             }
             std::task::Poll::Ready(Err(error)) => {
                 let pending = self
-                    .pending_relay
+                    .pending_ingress
                     .take()
                     .expect("failed relay commit retains publication state");
-                pending
-                    .publication
-                    .abort(&mut self.node.borrow_mut().database);
+                let PendingDurableIngress::Relay { publication, .. } = pending else {
+                    unreachable!("relay poll retains relay ingress")
+                };
+                publication.abort(&mut self.node.borrow_mut().database);
                 std::task::Poll::Ready(Err(error))
             }
         }
@@ -655,7 +680,7 @@ impl DemandDrivenNode {
         &mut self,
         context: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Result<(), Error>> {
-        if self.pending_authority.is_some() || self.pending_relay.is_some() {
+        if self.pending_ingress.is_some() {
             return std::task::Poll::Ready(Err(Error::InvalidStoredValue(
                 "ingress persistence must be polled through its typed operation",
             )));
@@ -811,7 +836,7 @@ impl DemandDrivenNode {
     }
 
     fn ensure_durable_publication_idle(&self) -> Result<(), Error> {
-        if self.pending_authority.is_some() || self.pending_relay.is_some() {
+        if self.pending_ingress.is_some() {
             Err(Error::InvalidStoredValue(
                 "a durable publication is awaiting completion",
             ))
@@ -886,8 +911,7 @@ impl PollableNodeOpen {
             pending_persistence: std::collections::VecDeque::new(),
             pending_shutdown: None,
             pending_fate: None,
-            pending_authority: None,
-            pending_relay: None,
+            pending_ingress: None,
             persistence_failed: false,
         }
     }
