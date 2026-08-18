@@ -92,7 +92,7 @@ function EdgeReadinessProbe({ onSettled }: { onSettled: (error: Error | null) =>
 }
 
 describe("React Todo App core browser canary", () => {
-  const mounts: Array<{ root: Root; container: HTMLDivElement }> = [];
+  const mounts: Array<{ root: Root; container: HTMLDivElement; dbName?: string }> = [];
 
   async function mountApp(config: {
     appId?: string;
@@ -106,7 +106,8 @@ describe("React Todo App core browser canary", () => {
     const el = document.createElement("div");
     document.body.appendChild(el);
     const r = createRoot(el);
-    mounts.push({ root: r, container: el });
+    const dbName = config.driver?.type === "persistent" ? config.driver.dbName : undefined;
+    mounts.push({ root: r, container: el, dbName });
 
     await act(async () => {
       r.render(
@@ -138,15 +139,22 @@ describe("React Todo App core browser canary", () => {
   }
 
   afterEach(async () => {
-    for (const { root, container } of mounts) {
+    while (mounts.length > 0) {
+      const { container, dbName } = mounts[0]!;
       try {
-        await act(async () => root.unmount());
+        await unmountApp(container, dbName);
       } catch {
-        /* best effort */
+        // Keep cleanup moving after a failed assertion, but still remove this
+        // exact mount so a broken shutdown cannot poison the following test.
+        const [{ root }] = mounts.splice(0, 1);
+        try {
+          await act(async () => root.unmount());
+        } catch {
+          /* best effort */
+        }
+        container.remove();
       }
-      container.remove();
     }
-    mounts.length = 0;
   });
 
   it("syncs two persistent OPFS app instances through one core server", async () => {
