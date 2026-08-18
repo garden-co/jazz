@@ -1785,6 +1785,186 @@ impl DemandDrivenViewDb<'_> {
         })
         .await
     }
+
+    async fn publish_mergeable(
+        &mut self,
+        commits: &[MergeableCommit],
+        row: RowUuid,
+    ) -> Result<WriteHandle<groove::storage::DemandLoadedStorage>, Error> {
+        let schema = self.database.schema_version_id;
+        let tx_id = std::future::poll_fn(|context| {
+            self.runtime
+                .poll_mergeable_many_in_schema(context, schema, commits)
+        })
+        .await
+        .map_err(Error::from)?;
+        let local_tier = self.database.finalize_local_commit(tx_id)?;
+        self.database.refresh_subscriptions()?;
+        Ok(WriteHandle {
+            node: Rc::downgrade(&self.database.node.node),
+            row_uuid: row,
+            tx_id,
+            local_tier,
+        })
+    }
+
+    /// Insert one caller-selected row through this typed view.
+    pub async fn insert_with_id(
+        &mut self,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+        made_by: Option<AuthorId>,
+        now_ms: Option<u64>,
+    ) -> Result<WriteHandle<groove::storage::DemandLoadedStorage>, Error> {
+        let author = made_by.unwrap_or(self.database.identity.author);
+        let cells = self.database.apply_insert_defaults(table, cells)?;
+        let commit = MergeableCommit::new(
+            table,
+            row,
+            now_ms.unwrap_or_else(|| self.database.next_now_ms()),
+        )
+        .made_by(author)
+        .permission_subject(author)
+        .cells(cells);
+        let database = &self.database;
+        std::future::poll_fn(|context| {
+            self.runtime.poll_operation(
+                context,
+                || database.acquire_insert_target_for_owner(table, row),
+                MutationPrepareError::missing_input,
+            )
+        })
+        .await
+        .map_err(MutationPrepareError::into_api)?;
+        self.publish_mergeable(std::slice::from_ref(&commit), row)
+            .await
+    }
+
+    /// Update one row through this typed view.
+    pub async fn update(
+        &mut self,
+        table: &str,
+        row: RowUuid,
+        patch: RowCells,
+        made_by: Option<AuthorId>,
+        now_ms: Option<u64>,
+    ) -> Result<WriteHandle<groove::storage::DemandLoadedStorage>, Error> {
+        if patch.is_empty() {
+            let database = &self.database;
+            let (tx_id, local_tier) = std::future::poll_fn(|context| {
+                self.runtime.poll_operation(
+                    context,
+                    || database.prepare_noop_update_for_owner(table, row),
+                    MutationPrepareError::missing_input,
+                )
+            })
+            .await
+            .map_err(MutationPrepareError::into_api)?;
+            return Ok(WriteHandle {
+                node: Rc::downgrade(&self.database.node.node),
+                row_uuid: row,
+                tx_id,
+                local_tier,
+            });
+        }
+        let now_ms = now_ms.unwrap_or_else(|| self.database.next_now_ms());
+        let author = made_by.unwrap_or(self.database.identity.author);
+        let database = &self.database;
+        let commit = std::future::poll_fn(|context| {
+            self.runtime.poll_operation(
+                context,
+                || database.prepare_update_commit_for_owner(table, row, patch.clone(), now_ms),
+                MutationPrepareError::missing_input,
+            )
+        })
+        .await
+        .map_err(MutationPrepareError::into_api)?
+        .made_by(author)
+        .permission_subject(author);
+        self.publish_mergeable(std::slice::from_ref(&commit), row)
+            .await
+    }
+
+    /// Insert or update one caller-selected row through this typed view.
+    pub async fn upsert(
+        &mut self,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+        made_by: Option<AuthorId>,
+        now_ms: Option<u64>,
+    ) -> Result<WriteHandle<groove::storage::DemandLoadedStorage>, Error> {
+        let now_ms = now_ms.unwrap_or_else(|| self.database.next_now_ms());
+        let author = made_by.unwrap_or(self.database.identity.author);
+        let database = &self.database;
+        let commit = std::future::poll_fn(|context| {
+            self.runtime.poll_operation(
+                context,
+                || database.prepare_upsert_commit_for_owner(table, row, cells.clone(), now_ms),
+                MutationPrepareError::missing_input,
+            )
+        })
+        .await
+        .map_err(MutationPrepareError::into_api)?
+        .made_by(author)
+        .permission_subject(author);
+        self.publish_mergeable(std::slice::from_ref(&commit), row)
+            .await
+    }
+
+    /// Soft-delete one row through this typed view.
+    pub async fn delete(
+        &mut self,
+        table: &str,
+        row: RowUuid,
+        made_by: Option<AuthorId>,
+        now_ms: Option<u64>,
+    ) -> Result<WriteHandle<groove::storage::DemandLoadedStorage>, Error> {
+        let now_ms = now_ms.unwrap_or_else(|| self.database.next_now_ms());
+        let author = made_by.unwrap_or(self.database.identity.author);
+        let database = &self.database;
+        let commit = std::future::poll_fn(|context| {
+            self.runtime.poll_operation(
+                context,
+                || database.prepare_delete_commit_for_owner(table, row, now_ms),
+                MutationPrepareError::missing_input,
+            )
+        })
+        .await
+        .map_err(MutationPrepareError::into_api)?
+        .made_by(author)
+        .permission_subject(author);
+        self.publish_mergeable(std::slice::from_ref(&commit), row)
+            .await
+    }
+
+    /// Restore one row through this typed view.
+    pub async fn restore(
+        &mut self,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+        made_by: Option<AuthorId>,
+        now_ms: Option<u64>,
+    ) -> Result<WriteHandle<groove::storage::DemandLoadedStorage>, Error> {
+        let now_ms = now_ms.unwrap_or_else(|| self.database.next_now_ms());
+        let author = made_by.unwrap_or(self.database.identity.author);
+        let database = &self.database;
+        let commits = std::future::poll_fn(|context| {
+            self.runtime.poll_operation(
+                context,
+                || database.prepare_restore_commits_for_owner(table, row, cells.clone(), now_ms),
+                MutationPrepareError::missing_input,
+            )
+        })
+        .await
+        .map_err(MutationPrepareError::into_api)?
+        .into_iter()
+        .map(|commit| commit.made_by(author).permission_subject(author))
+        .collect::<Vec<_>>();
+        self.publish_mergeable(&commits, row).await
+    }
 }
 
 impl<S> Db<S>
