@@ -475,3 +475,154 @@ The suite must prove:
   operations;
 - NAPI and WASM callback timing is asserted behaviorally, not inferred from an
   eventually delivered stream.
+
+## Addendum: evolve the owners instead of grafting parallel async facades
+
+The first implementation proves the storage and publication invariants, but
+its ownership graph still presents the asynchronous path as a parallel layer:
+
+```text
+old path: Db<S> -> Node<S> -> NodeState<S> -> Groove Database<S>
+new path: DemandDrivenDb -> DemandDrivenNode -> NodeState<DemandLoadedStorage>
+                                         \-> storage session and schedulers
+```
+
+That shape is useful scaffolding for proving the experiment, not the desired
+final architecture. The durable owner is held beside the familiar facade and
+both coordinate through shared state. This creates duplicate construction,
+duplicate operation surfaces, and names that describe which implementation
+path was selected rather than the role of an abstraction.
+
+The cleanup should proceed in the following order, ranked by simplification
+payoff.
+
+### 1. Make `Db` the sole high-level owner
+
+Collapse `Db<S>` and `DemandDrivenDb`. The resulting `Db` owns its schema,
+identity, row-id source, logical clock, schema views, and one storage-backed
+node runtime. Its ordinary `insert`, `update`, `all`, `subscribe`, transaction,
+peer, and `tick` methods are the only implementations.
+
+This removes the pattern in which `DemandDrivenDb` retains both a
+`Db<DemandLoadedStorage>` and a sibling `DemandDrivenNode`, then repeatedly
+passes closures from one into the other. It also removes the need to qualify
+the familiar core operations as `*_resident` merely because an asynchronous
+facade has taken their old names.
+
+There must not be separate `open_immediate`,
+`open_history_complete_immediate`, or
+`open_catalogue_uninitialized_immediate` modes. Normal opening accepts a
+storage session. A synchronous memory or RocksDB implementation simply makes
+the same future ready on its first poll.
+
+### 2. Make `Node` the sole node owner
+
+Keep `NodeState` as the synchronous reducer/evaluator: that boundary is what
+allows a fully prepared local mutation and its subscription callbacks to be
+published without suspension. Collapse `Node<S>` and `DemandDrivenNode` around
+it, however. The resulting `Node` owns:
+
+- its `NodeState<StorageWorkingSet>`;
+- the synchronous working set;
+- the durable storage session;
+- cold-input and durability-promotion request drivers;
+- the ordered persistence queue;
+- pending ingress, fate, repair, catalogue, and branch operations; and
+- the existing connection, subscription, scheduling, and waiter state.
+
+Request identity, storage lifetime, peer state, and the reducer they drive then
+belong to one object. `Db` no longer stores a facade node and a sibling runtime
+that must point at the same `Rc<RefCell<NodeState<_>>>`.
+
+### 3. Keep schema-view identity, delete the parallel view database
+
+The cloneable schema-view token is legitimate. A second database facade is
+not. Collapse `DemandDrivenView` and `DemandDrivenViewDb` into either:
+
+```rust,ignore
+pub struct DbView<'a> {
+    db: &'a mut Db,
+    schema_view_id: SchemaViewId,
+}
+```
+
+or a cloneable `DbSchemaView` token passed to `Db::*_in_view` methods. Choose
+one model rather than implementing reads, writes, transactions, and
+subscriptions on both an owner and a view-owner facade.
+
+### 4. Make Groove `Database` the sole owning database API
+
+Apply the same correction one layer lower. The final public Groove `Database`
+owns its working set, storage session, input-request driver, and persistence
+queue. The current synchronous generic evaluator should become an internal
+`DatabaseState<S>` (or equivalently direct internal state), not remain a
+parallel public database wrapped by `DemandDrivenDatabase`.
+
+This does not make the evaluator asynchronous. `DatabaseState` continues to
+operate synchronously against a loaded working set. The owning `Database`
+loads missing inputs and retries a mutation-free attempt before allowing one
+non-suspending publication.
+
+### 5. Use one set of constructors
+
+Opening semantics such as ordinary client, history-complete authority, and
+catalogue-uninitialized edge remain meaningful. Completion timing is not a
+mode and must not appear in constructor names. Every constructor produces the
+same `Db` type and accepts a backend convertible into the common storage
+session boundary. Adapting an `OrderedKvStorage + ReopenableStorage` backend is
+a private construction detail.
+
+### 6. Fold opening state into the ordinary owner construction
+
+Once `Db` and `Node` are the real owners, `DemandDrivenDbOpen` should disappear.
+Retain a separately named `NodeOpen` only if a real shell must poll node
+construction without a database. Otherwise opening phases such as input
+loading, initialization commit, and readiness are private state in the future
+returned by `Db::open`.
+
+### 7. Share the operation driver, not the mutation itself
+
+The prepare/publish split is an invariant and must remain explicit:
+
+1. preparation may discover missing inputs and suspend without visible
+   mutation;
+2. after all inputs are loaded, publication cannot suspend;
+3. publication makes local rows and callbacks visible synchronously;
+4. persistence is ordered after publication; and
+5. an ambiguous persistence failure poisons the owner.
+
+What should collapse is the repeated orchestration around that split. Fate,
+ingress, view update, repair, catalogue, branch, and local mutation paths all
+repeat variants of acquire, retain a prepared token, publish, collect durable
+operations, enqueue, finalize, or poison. A shared internal operation protocol
+should express preparation and publication while one node driver owns the
+lifecycle. Some protocols will retain typed pending state, but they should not
+each reimplement the safety machinery.
+
+### 8. Revisit publication receipts after ownership is stable
+
+`PreparedDatabaseBatch`, `PreparedTableRegistration`,
+`PendingPersistenceBatch`, `DurablePublicationScope`, and
+`DurablePublicationLineage` encode several real atomicity phases. Do not merge
+them merely to reduce the type count. Once `Db`, `Node`, and Groove `Database`
+have unique owners, evaluate whether a higher-level prepared publication can
+own the schema registrations, IVM batch, durable operations, scope, and output
+without obscuring the acquire/publish boundary.
+
+### Boundaries that must remain distinct
+
+The cleanup must not collapse three essential distinctions:
+
+- **Working set versus storage session.** The reducer needs synchronous access
+  to loaded state; the session owns potentially suspended durable I/O. They are
+  different abstractions but should be private parts of one database/node
+  owner.
+- **Prepare versus publish.** Preparation is restartable and mutation-free;
+  publication is one non-suspending visibility transition.
+- **Owned request values versus backend execution.** Stable, owned request
+  identity allows a backend to retain work without self-referential futures
+  and allows cancellation and terminal-response rules to remain explicit.
+
+Terminology cleanup follows the ownership cleanup. Names such as
+`DemandDriven*`, `Immediate*`, and most `*_resident` qualifiers should disappear
+naturally when there is only one `Db`, one `Node`, and one Groove `Database`.
