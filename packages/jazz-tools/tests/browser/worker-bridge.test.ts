@@ -1001,7 +1001,7 @@ describe("Worker Bridge with OPFS", () => {
   // 6. Subscription through worker bridge
   // -------------------------------------------------------------------------
 
-  it("subscriptions fire on insert", async () => {
+  it("publishes immediate subscription state before a tier-none write wait resolves", async () => {
     const db = track(
       await createDb({
         appId: "test-app",
@@ -1017,14 +1017,20 @@ describe("Worker Bridge with OPFS", () => {
       }),
     );
 
-    db.insert(todos, { title: "Observed", done: false });
-
-    // Wait for subscription to fire
     await waitForCondition(
-      async () => received.some((r) => r.length > 0),
+      async () => received.length > 0,
       3000,
-      "Subscription should fire after insert",
+      "Subscription should publish its initial snapshot",
     );
+    received.length = 0;
+
+    const write = db.insert(todos, { title: "Observed", done: false });
+    await write.wait({ tier: "none" });
+
+    expect(
+      received.some((rows) => rows.some((row) => row.title === "Observed")),
+      "tier-none completion must not overtake its immediate subscription callback",
+    ).toBe(true);
 
     const last = received[received.length - 1];
     expect(last.length).toBe(1);
