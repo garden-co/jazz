@@ -217,19 +217,16 @@ impl DemandDrivenDb {
                 }
                 continue;
             }
-            let accepted_fate = connection.borrow().staged_accepted_fate();
-            if let Some((tx_id, global_seq, durability)) = accepted_fate {
-                match self.runtime.poll_apply_peer_fate_update(
-                    context,
-                    tx_id,
-                    Fate::Accepted,
-                    global_seq,
-                    durability,
-                ) {
+            let unrouted_fate = connection.borrow().staged_unrouted_fate();
+            if let Some((tx_id, fate, global_seq, durability)) = unrouted_fate {
+                match self
+                    .runtime
+                    .poll_apply_peer_fate_update(context, tx_id, fate, global_seq, durability)
+                {
                     Poll::Pending => return Poll::Pending,
                     Poll::Ready(Err(error)) => return Poll::Ready(Err(error.into())),
                     Poll::Ready(Ok(())) => {
-                        connection.borrow_mut().complete_staged_accepted_fate(tx_id)
+                        connection.borrow_mut().complete_staged_unrouted_fate(tx_id)
                     }
                 }
             }
@@ -269,7 +266,7 @@ impl DemandDrivenDb {
                 || connection.staged_branch_metadata().is_some()
                 || connection.staged_row_version_repair().is_some()
                 || connection.staged_relay_commit().is_some()
-                || connection.staged_accepted_fate().is_some()
+                || connection.staged_unrouted_fate().is_some()
         }) {
             context.waker().wake_by_ref();
             Poll::Pending

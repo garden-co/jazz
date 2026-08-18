@@ -226,16 +226,16 @@ where
         Some((tx.clone(), versions.clone()))
     }
 
-    pub(super) fn staged_accepted_fate(
+    pub(super) fn staged_unrouted_fate(
         &self,
-    ) -> Option<(TxId, Option<GlobalSeq>, Option<DurabilityTier>)> {
+    ) -> Option<(TxId, Fate, Option<GlobalSeq>, Option<DurabilityTier>)> {
         let ConnectionLink::Upstream { .. } = &self.link else {
             return None;
         };
         let staged = self.staged_inbound.front()?;
         let SyncMessage::FateUpdate {
             tx_id,
-            fate: Fate::Accepted,
+            fate,
             global_seq,
             durability,
         } = &staged.message
@@ -244,6 +244,7 @@ where
         };
         (!self.edge_fate_routes.borrow().contains_key(tx_id)).then_some((
             *tx_id,
+            fate.clone(),
             *global_seq,
             *durability,
         ))
@@ -327,14 +328,14 @@ where
         self.externally_applied_inbound = true;
     }
 
-    pub(super) fn complete_staged_accepted_fate(&mut self, tx_id: TxId) {
+    pub(super) fn complete_staged_unrouted_fate(&mut self, tx_id: TxId) {
         let staged = self
             .staged_inbound
             .pop_front()
             .expect("completed fate ingress retains its staged frame");
         debug_assert!(matches!(
             staged.message,
-            SyncMessage::FateUpdate { tx_id: staged_tx, fate: Fate::Accepted, .. }
+            SyncMessage::FateUpdate { tx_id: staged_tx, .. }
                 if staged_tx == tx_id
         ));
         notify_write_state_waiters(&self.write_state_waiters, tx_id);
@@ -1106,10 +1107,8 @@ where
                             || matches!(&message, SyncMessage::RowVersionPayloads { .. })
                             || matches!(
                                 &message,
-                                SyncMessage::FateUpdate {
-                                    fate: Fate::Accepted,
-                                    ..
-                                }
+                                SyncMessage::FateUpdate { tx_id, .. }
+                                    if !self.edge_fate_routes.borrow().contains_key(tx_id)
                             ))
                     {
                         self.staged_inbound.push_front(StagedInboundMessage {
