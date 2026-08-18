@@ -468,10 +468,36 @@ fn demand_driven_db_preserves_synchronous_facade_visibility_before_durability() 
         DurabilityTier::Local,
         "a completed durable commit must advance the exact transaction"
     );
+    let write_tx_id = write.mergeable_tx_id();
     drop(subscription);
     drop(write);
     crate::db::block_on(owner.close()).unwrap();
     assert!(completed.borrow().ends_with(&["commit", "flush", "close"]));
+    let reopened_storage = CommitGatedAuthorityStorage {
+        inner: groove::storage::async_ordered::ImmediateStorage::new(durable.clone()),
+        released: std::rc::Rc::new(std::cell::Cell::new(true)),
+        fail: std::rc::Rc::new(std::cell::Cell::new(false)),
+        completed: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
+    };
+    let mut reopening = crate::db::PollableDbOpen::new(
+        schema(),
+        crate::db::DbIdentity {
+            node: node(0xc9),
+            author: AuthorId::from_bytes([0xc9; 16]),
+        },
+        Box::new(reopened_storage),
+    );
+    let std::task::Poll::Ready(Ok(reopened_owner)) = reopening.poll(&mut context) else {
+        panic!("durable database must reopen in its first poll")
+    };
+    assert_eq!(
+        reopened_owner
+            .write_state(write_tx_id)
+            .unwrap()
+            .durability,
+        DurabilityTier::Local,
+        "a transaction read back from durable storage retains its Local floor"
+    );
     let mut reopened = NodeState::new(node(0xc9), schema(), durable).unwrap();
     assert_eq!(
         reopened

@@ -52,6 +52,7 @@ pub struct DemandDrivenNode {
         groove::storage::async_ordered::StorageRequestId,
         Vec<TxId>,
     >,
+    pending_local_promotions: std::collections::VecDeque<TxId>,
     pending_shutdown:
         Option<std::collections::VecDeque<groove::storage::async_ordered::OwnedStorageRequest>>,
     pending_fate: Option<PendingFateApplication>,
@@ -252,6 +253,9 @@ impl DemandDrivenNode {
             .entry(request.id())
             .or_default()
             .push(tx_id);
+        self.node
+            .borrow_mut()
+            .mark_transaction_durability_pending(tx_id);
     }
 
     /// Commit one mergeable write through the native acquire-then-publish
@@ -1568,6 +1572,11 @@ impl DemandDrivenNode {
         if let Err(error) = self.ensure_persistence_usable() {
             return std::task::Poll::Ready(Err(error));
         }
+        match self.poll_local_durability_promotions(context) {
+            std::task::Poll::Pending => return std::task::Poll::Pending,
+            std::task::Poll::Ready(Err(error)) => return std::task::Poll::Ready(Err(error)),
+            std::task::Poll::Ready(Ok(())) => {}
+        }
         self.collect_persistence_unit();
         loop {
             let Some(request) = self.pending_persistence.front() else {
@@ -1580,34 +1589,22 @@ impl DemandDrivenNode {
                 {
                     let request_id = request.id();
                     self.pending_persistence.pop_front();
-                    if let Some(transactions) = self.pending_local_durability.remove(&request_id)
-                        && self.persistence.is_durable()
-                    {
-                        for tx_id in transactions {
-                            let Some((fate, global_seq, durability)) =
-                                self.node.borrow_mut().transaction_state(tx_id)
-                            else {
-                                self.fail_persistence();
-                                return std::task::Poll::Ready(Err(Error::InvalidStoredValue(
-                                    "durably committed local transaction disappeared",
-                                )));
-                            };
-                            if durability < DurabilityTier::Local {
-                                let result = {
-                                    self.node.borrow_mut().apply_fate_update(
-                                        tx_id,
-                                        fate,
-                                        global_seq,
-                                        Some(DurabilityTier::Local),
-                                    )
-                                };
-                                if let Err(error) = result {
-                                    self.fail_persistence();
+                    if let Some(transactions) = self.pending_local_durability.remove(&request_id) {
+                        if self.persistence.is_durable() {
+                            self.pending_local_promotions.extend(transactions);
+                            match self.poll_local_durability_promotions(context) {
+                                std::task::Poll::Pending => return std::task::Poll::Pending,
+                                std::task::Poll::Ready(Err(error)) => {
                                     return std::task::Poll::Ready(Err(error));
                                 }
+                                std::task::Poll::Ready(Ok(())) => {}
+                            }
+                        } else {
+                            let mut node = self.node.borrow_mut();
+                            for tx_id in transactions {
+                                node.settle_transaction_durability(tx_id);
                             }
                         }
-                        self.collect_persistence_unit();
                     }
                 }
                 std::task::Poll::Ready(Ok(response)) => {
@@ -1624,6 +1621,63 @@ impl DemandDrivenNode {
                 }
             }
         }
+    }
+
+    fn poll_local_durability_promotions(
+        &mut self,
+        context: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Error>> {
+        while let Some(tx_id) = self.pending_local_promotions.front().copied() {
+            let request = {
+                let Some((fate, global_seq, _)) = self.node.borrow_mut().transaction_state(tx_id)
+                else {
+                    self.fail_persistence();
+                    return std::task::Poll::Ready(Err(Error::InvalidStoredValue(
+                        "durably committed local transaction disappeared",
+                    )));
+                };
+                ingest::FateUpdateRequest {
+                    tx_id,
+                    fate,
+                    global_seq,
+                    durability: Some(DurabilityTier::Local),
+                }
+            };
+            let prepared = match self.acquisition.poll(
+                self.persistence.as_mut(),
+                &self.cache,
+                context,
+                || self.node.borrow_mut().prepare_fate_update(request.clone()),
+                missing_node_open_input,
+            ) {
+                std::task::Poll::Pending => return std::task::Poll::Pending,
+                std::task::Poll::Ready(Err(error)) => {
+                    self.fail_persistence();
+                    return std::task::Poll::Ready(Err(error));
+                }
+                std::task::Poll::Ready(Ok(prepared)) => prepared,
+            };
+            let publish_result = self
+                .node
+                .borrow_mut()
+                .publish_prepared_fate_update(prepared);
+            if let Err(error) = publish_result {
+                self.fail_persistence();
+                return std::task::Poll::Ready(Err(error));
+            }
+            self.node
+                .borrow_mut()
+                .settle_transaction_durability(tx_id);
+            self.pending_local_promotions.pop_front();
+            // Local durability is a fact established by the commit that just
+            // completed. Publishing it updates the resident IVM, but must not
+            // manufacture a second durable transaction.
+            let node = self.node.borrow();
+            node.database.take_demand_loaded_pending_writes();
+            node.database
+                .take_demand_loaded_pending_column_families();
+        }
+        std::task::Poll::Ready(Ok(()))
     }
 
     fn collect_persistence_unit(&mut self) {
@@ -1751,6 +1805,16 @@ impl PollableNodeOpen {
         // Durable storage advances the exact transaction to Local only after
         // its commit completes; volatile storage never makes that claim.
         node.set_non_durable_client();
+        let durable = self
+            .persistence
+            .as_ref()
+            .expect("ready node retains its persistence session")
+            .is_durable();
+        node.set_resident_storage_durability_floor(if durable {
+            DurabilityTier::Local
+        } else {
+            DurabilityTier::None
+        });
         DemandDrivenNode {
             node: std::rc::Rc::new(std::cell::RefCell::new(node)),
             cache,
@@ -1761,6 +1825,7 @@ impl PollableNodeOpen {
             acquisition: groove::db::StorageAcquisition::default(),
             pending_persistence: std::collections::VecDeque::new(),
             pending_local_durability: std::collections::BTreeMap::new(),
+            pending_local_promotions: std::collections::VecDeque::new(),
             pending_shutdown: None,
             pending_fate: None,
             pending_ingress: None,

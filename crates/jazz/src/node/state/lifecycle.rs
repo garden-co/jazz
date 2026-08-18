@@ -554,6 +554,8 @@ where
             groove_runtime_token: next_groove_runtime_token(),
             history_complete,
             authored_commit_durability: DurabilityTier::Local,
+            resident_storage_durability_floor: DurabilityTier::None,
+            pending_resident_durability: BTreeSet::new(),
             upstream_durability_floor: DurabilityTier::Global,
             node_aliases: BTreeMap::new(),
             sync_metrics: SyncMetrics::default(),
@@ -642,6 +644,18 @@ where
 
     pub(crate) fn set_non_durable_client(&mut self) {
         self.authored_commit_durability = DurabilityTier::None;
+    }
+
+    pub(crate) fn set_resident_storage_durability_floor(&mut self, tier: DurabilityTier) {
+        self.resident_storage_durability_floor = tier;
+    }
+
+    pub(crate) fn mark_transaction_durability_pending(&mut self, tx_id: TxId) {
+        self.pending_resident_durability.insert(tx_id);
+    }
+
+    pub(crate) fn settle_transaction_durability(&mut self, tx_id: TxId) {
+        self.pending_resident_durability.remove(&tx_id);
     }
 
     pub(crate) fn set_upstream_durability_floor(&mut self, tier: DurabilityTier) {

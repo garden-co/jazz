@@ -556,6 +556,11 @@ pub struct NodeState<S> {
     /// runtime uses `None` because its in-memory preview is not durable until
     /// the dedicated worker acknowledges persistence.
     authored_commit_durability: DurabilityTier,
+    /// Durability implied by records read from this runtime's backing store.
+    /// Transactions authored into the resident cache remain excluded until
+    /// their ordered commit is acknowledged.
+    resident_storage_durability_floor: DurabilityTier,
+    pending_resident_durability: BTreeSet<TxId>,
     /// Least durability guaranteed by this node's immediate upstream. This is
     /// topology, not a property of local storage: a volatile browser tab has a
     /// Local worker upstream, while a volatile direct client has a Global

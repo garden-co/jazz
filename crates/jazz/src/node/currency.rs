@@ -727,6 +727,14 @@ where
                 .transpose()?,
         };
         let fate = fate_from_encoded_fields(record)?;
+        let stored_durability = durability_from_discriminant(
+            record.get_enum(TransactionRowRecord::FIELD_DURABILITY_IDX)?,
+        )?;
+        let durability = if self.pending_resident_durability.contains(&tx_id) {
+            stored_durability
+        } else {
+            stored_durability.max(self.resident_storage_durability_floor)
+        };
         Ok(StoredTransaction {
             tx,
             node_alias: expected_alias,
@@ -734,9 +742,7 @@ where
             global_seq: record
                 .get_nullable_u64(TransactionRowRecord::FIELD_GLOBAL_SEQ_IDX)?
                 .map(GlobalSeq),
-            durability: durability_from_discriminant(
-                record.get_enum(TransactionRowRecord::FIELD_DURABILITY_IDX)?,
-            )?,
+            durability,
         })
     }
 
