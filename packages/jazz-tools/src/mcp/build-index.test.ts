@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { execFileSync } from "node:child_process";
 import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -454,6 +455,25 @@ describe("buildIndex", () => {
 });
 
 describe("packaged docs index", () => {
+  it("regenerates the packaged index before committing docs changes", () => {
+    const lefthook = JSON.parse(
+      execFileSync("pnpm", ["exec", "lefthook", "dump", "--format", "json"], {
+        cwd: repoRoot,
+        encoding: "utf8",
+      }),
+    ) as {
+      "pre-commit": {
+        commands: Record<string, { glob?: string[]; run?: string; stage_fixed?: boolean }>;
+      };
+    };
+
+    expect(lefthook["pre-commit"].commands["docs-index"]).toEqual({
+      glob: ["docs/**"],
+      run: "pnpm --filter jazz-tools exec tsx src/mcp/build-index.ts",
+      stage_fixed: true,
+    });
+  });
+
   it("matches a clean rebuild of the complete production docs corpus", async () => {
     const outputDir = await mkdtemp(join(tmpdir(), "production-docs-index-"));
     try {
