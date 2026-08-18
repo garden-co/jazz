@@ -61,6 +61,7 @@ async function assertMutationResultContract() {
 }
 
 declare const genericResult: MutationResult<void, TransactionKind>;
+// @ts-expect-error A widened transaction kind must supply a durability tier.
 genericResult.wait();
 genericResult.wait({ tier: "global" });
 
