@@ -1328,7 +1328,7 @@ where
             .find(|row| row.row_uuid() == row_uuid))
     }
 
-    #[cfg(any(test, feature = "testing"))]
+    #[cfg(test)]
     pub(crate) fn evaluate_branch_metadata_write_policy_for_test(
         &mut self,
         branch_id: BranchId,
