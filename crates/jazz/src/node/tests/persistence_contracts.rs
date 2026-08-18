@@ -803,6 +803,35 @@ fn demand_driven_db_acquires_cold_mutations_before_single_publish() {
     assert!(!resident
         .borrow()
         .current_branch_partition_exists_for_test("todos", branch));
+    assert!(!resident
+        .borrow()
+        .current_branch_partition_is_durable_for_test("todos", branch));
+    let branch_query = owner.prepare_query(&owner.table("todos")).unwrap();
+    let branch_opts = crate::db::ReadOpts {
+        tier: DurabilityTier::None,
+        local_updates: crate::db::LocalUpdates::Immediate,
+        propagation: crate::db::Propagation::LocalOnly,
+        read_view: crate::protocol::ReadViewSpec {
+            source: crate::protocol::ReadViewSourceSpec::Branch { branch: branch.0 },
+            ..crate::protocol::ReadViewSpec::default()
+        },
+        ..crate::db::ReadOpts::default()
+    };
+    let mut branch_subscription =
+        crate::db::block_on(owner.subscribe(&branch_query, branch_opts.clone())).unwrap();
+    let Some(crate::db::SubscriptionEvent::Delta {
+        reset: true, added, ..
+    }) = branch_subscription.try_next_event()
+    else {
+        panic!("the empty branch subscription must open before its first partition")
+    };
+    assert!(added.is_empty());
+    assert!(resident
+        .borrow()
+        .current_branch_partition_exists_for_test("todos", branch));
+    assert!(!resident
+        .borrow()
+        .current_branch_partition_is_durable_for_test("todos", branch));
     let units_before_branch_write = committed_units.borrow().len();
     released.set(false);
     let branch_write = {
@@ -815,8 +844,8 @@ fn demand_driven_db_acquires_cold_mutations_before_single_publish() {
         assert!(
             !resident
                 .borrow()
-                .current_branch_partition_exists_for_test("todos", branch),
-            "cold preparation must not install the live partition schema"
+                .current_branch_partition_is_durable_for_test("todos", branch),
+            "cold preparation must not publish the durable partition marker"
         );
         released.set(true);
         crate::db::block_on(insert.as_mut()).expect("released branch inputs must publish once")
@@ -824,7 +853,26 @@ fn demand_driven_db_acquires_cold_mutations_before_single_publish() {
     assert!(resident
         .borrow()
         .current_branch_partition_exists_for_test("todos", branch));
+    assert!(resident
+        .borrow()
+        .current_branch_partition_is_durable_for_test("todos", branch));
     assert_ne!(branch_write.row_uuid(), row);
+    let Some(crate::db::SubscriptionEvent::Delta { added, .. }) =
+        branch_subscription.try_next_event()
+    else {
+        panic!("the first branch row must synchronously refresh its open subscription")
+    };
+    assert_eq!(added.len(), 1);
+    assert_eq!(added[0].row_uuid(), branch_write.row_uuid());
+    released.set(false);
+    let std::task::Poll::Ready(Ok(branch_rows)) =
+        owner.poll_all(&mut context, &branch_query, branch_opts)
+    else {
+        panic!("the first branch row must be synchronously queryable before durability")
+    };
+    assert_eq!(branch_rows.len(), 1);
+    assert_eq!(branch_rows[0].row_uuid(), branch_write.row_uuid());
+    released.set(true);
     crate::db::block_on(std::future::poll_fn(|context| {
         owner.poll_persistence(context)
     }))

@@ -2239,6 +2239,21 @@ where
         )
     }
 
+    #[cfg(test)]
+    pub(crate) fn current_branch_partition_is_durable_for_test(
+        &self,
+        table: &str,
+        branch_id: BranchId,
+    ) -> bool {
+        self.physical_table_id_for_schema(self.catalogue.current_write_schema.schema, table)
+            .ok()
+            .is_some_and(|table_id| {
+                self.branches
+                    .branch_partitions
+                    .contains(&(table_id, branch_id))
+            })
+    }
+
     pub(super) fn ensure_branch_target_partitions(
         &mut self,
         branch_id: BranchId,

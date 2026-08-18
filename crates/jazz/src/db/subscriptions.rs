@@ -435,6 +435,21 @@ where
         self.validate_prepared_shape_for_registration(prepared)
             .map_err(SubscriptionOpenError::Api)?;
         let read_tier = effective_read_tier(&opts);
+        if authorization_mode == QueryAuthorizationMode::ClientLocal
+            && read_tier == DurabilityTier::Local
+            && let ReadViewSourceSpec::Branch { branch } = &opts.read_view.source
+        {
+            self.node
+                .node
+                .borrow_mut()
+                .acquire_branch_subscription_inputs(
+                    &prepared.shape,
+                    &prepared.binding,
+                    crate::ids::BranchId(*branch),
+                    author,
+                )
+                .map_err(SubscriptionOpenError::Node)?;
+        }
         let remote_propagate_upstream = opts.propagation == Propagation::Full;
         // A non-durable browser client must still ask its durable worker for a
         // local-only view. The wire flag stops that request at the worker.

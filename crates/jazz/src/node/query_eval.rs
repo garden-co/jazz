@@ -583,6 +583,41 @@ where
         self.compile_query_program_request(request)
     }
 
+    /// Acquire the frozen base closure before installing the process-local
+    /// sparse source used by a maintained branch subscription.
+    ///
+    /// Source lowering reports capability gaps for unsupported graphs, which
+    /// would erase a demand-loaded storage miss. This preflight keeps the
+    /// exact storage request outside lowering and leaves the real subscription
+    /// unregistered until all base sources are resident.
+    pub(crate) fn acquire_branch_subscription_inputs(
+        &mut self,
+        shape: &ValidatedQuery,
+        binding: &Binding,
+        branch_id: BranchId,
+        identity: AuthorId,
+    ) -> Result<(), Error> {
+        if !self.branch_metadata_visible_to(branch_id, identity)? {
+            return Err(Error::AuthorizationDenied);
+        }
+        let input_shape = self.normalized_row_set_shape(shape, binding)?;
+        let branch = self
+            .branches
+            .branches
+            .get(&branch_id)
+            .cloned()
+            .ok_or(Error::BranchNotFound(branch_id))?;
+        for table in normalized_source_tables(&input_shape) {
+            let _ = self.branch_base_rows_for_schema(&table, &branch, shape.schema_version())?;
+            self.prepare_branch_subscription_source_partition(
+                &table,
+                shape.schema_version(),
+                branch_id,
+            )?;
+        }
+        Ok(())
+    }
+
     fn compile_branch_query_program_in_authorization_mode(
         &mut self,
         branch_id: BranchId,
