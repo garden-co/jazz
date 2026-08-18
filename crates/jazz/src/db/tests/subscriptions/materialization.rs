@@ -2,6 +2,44 @@
 
 use super::*;
 
+/// This uses an internal call counter because an idle tick's discarded reset
+/// snapshot is intentionally not observable through the public event stream.
+#[test]
+fn idle_remote_subscription_tick_does_not_materialize_authoritative_reset() {
+    let schema = schema();
+    let client_author = AuthorId::from_bytes([0xc0; 16]);
+    let server = open_core(0x50, AuthorId::SYSTEM, &schema);
+    let mut client = open_db(0xc0, client_author, &schema);
+    let (client_transport, server_transport) = duplex();
+    let _upstream = client.connect_upstream(client_transport);
+    let _subscriber = server.accept_subscriber(server_transport, client_author);
+    let mut subscription =
+        prepared_subscribe(&mut client, &Query::from("todos"), global_subscribe_opts()).unwrap();
+
+    for _ in 0..4 {
+        client.tick().unwrap();
+        server.tick().unwrap();
+    }
+    let _ = subscription.try_next_event();
+    client
+        .node
+        .node
+        .borrow_mut()
+        .reset_authoritative_reset_snapshot_call_count();
+
+    client.tick().unwrap();
+
+    assert_eq!(
+        client
+            .node
+            .node
+            .borrow()
+            .authoritative_reset_snapshot_call_count(),
+        0,
+        "an idle remote subscription must not clone and materialize its full authoritative state"
+    );
+}
+
 #[test]
 fn server_reset_subscription_materializes_without_local_snapshot_eval() {
     let schema = schema();

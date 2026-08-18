@@ -829,7 +829,36 @@ struct ServedAuthorizationScopeClause {
 
 /// Locally-authored transactions awaiting upload, oldest first. Shared with
 /// upstream [`PeerConnection`]s, each of which tracks how far it has shipped.
-type Outbox = Rc<RefCell<Vec<PendingUpload>>>;
+type Outbox = Rc<RefCell<OutboxState>>;
+
+#[derive(Default)]
+struct OutboxState {
+    ordered: Vec<PendingUpload>,
+    transaction_ids: BTreeSet<TxId>,
+}
+
+impl OutboxState {
+    fn insert(&mut self, pending: PendingUpload) -> bool {
+        if !self.transaction_ids.insert(pending.tx_id) {
+            return false;
+        }
+        self.ordered.push(pending);
+        true
+    }
+
+    fn iter(&self) -> impl Iterator<Item = &PendingUpload> {
+        self.ordered.iter()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.ordered.is_empty()
+    }
+
+    fn retain(&mut self, mut keep: impl FnMut(&PendingUpload) -> bool) {
+        self.ordered.retain(|pending| keep(pending));
+        self.transaction_ids = self.ordered.iter().map(|pending| pending.tx_id).collect();
+    }
+}
 
 #[derive(Clone)]
 struct PendingUpload {

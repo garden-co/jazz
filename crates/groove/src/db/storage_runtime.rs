@@ -32,12 +32,13 @@ pub struct DemandDrivenDatabase {
 #[derive(Default)]
 pub struct StorageAcquisition {
     pending: Option<OwnedStorageRequest>,
+    queued: VecDeque<OwnedStorageOperation>,
 }
 
 impl StorageAcquisition {
     /// Whether this driver already owns an issued backend request.
     pub fn is_pending(&self) -> bool {
-        self.pending.is_some()
+        self.pending.is_some() || !self.queued.is_empty()
     }
 
     /// Poll one restartable resident operation, acquiring exact durable inputs
@@ -47,6 +48,7 @@ impl StorageAcquisition {
         persistence: &mut dyn AsyncOrderedKvStorage,
         cache: &crate::storage::DemandLoadedStorage,
         context: &mut Context<'_>,
+        collect_demands: bool,
         mut attempt: impl FnMut() -> Result<T, E>,
         missing_input: impl Fn(E) -> Result<OwnedStorageOperation, E>,
     ) -> Poll<Result<T, E>>
@@ -54,6 +56,11 @@ impl StorageAcquisition {
         E: From<crate::storage::Error>,
     {
         loop {
+            if self.pending.is_none() {
+                if let Some(operation) = self.queued.pop_front() {
+                    self.pending = Some(OwnedStorageRequest::new(operation));
+                }
+            }
             if let Some(request) = self.pending.as_ref() {
                 match persistence.poll_request(request, context) {
                     Poll::Pending => return Poll::Pending,
@@ -77,12 +84,26 @@ impl StorageAcquisition {
                     }
                 }
             }
-            match attempt() {
+            if !self.queued.is_empty() {
+                continue;
+            }
+            if collect_demands {
+                cache.begin_demand_collection();
+            }
+            let result = attempt();
+            let demands = if collect_demands {
+                cache.take_collected_demands()
+            } else {
+                Vec::new()
+            };
+            if !demands.is_empty() {
+                self.queued.extend(demands);
+                continue;
+            }
+            match result {
                 Ok(value) => return Poll::Ready(Ok(value)),
                 Err(error) => match missing_input(error) {
-                    Ok(request) => {
-                        self.pending = Some(OwnedStorageRequest::new(request));
-                    }
+                    Ok(request) => self.queued.push_back(request),
                     Err(error) => return Poll::Ready(Err(error)),
                 },
             }
@@ -97,6 +118,7 @@ impl StorageAcquisition {
         if let Some(request) = self.pending.take() {
             persistence.cancel_request(request.id())?;
         }
+        self.queued.clear();
         Ok(())
     }
 }
@@ -140,7 +162,7 @@ impl DemandDrivenDatabase {
         context: &mut Context<'_>,
         mut read: impl FnMut(&Database<crate::storage::DemandLoadedStorage>) -> Result<T, Error>,
     ) -> Poll<Result<T, Error>> {
-        self.poll_acquisition(context, |database| read(database))
+        self.poll_acquisition(context, true, |database| read(database))
     }
 
     /// Poll prerequisite durable reads, then execute exactly one real resident
@@ -156,7 +178,7 @@ impl DemandDrivenDatabase {
         let pending_batch = batch
             .as_ref()
             .expect("commit batch is consumed exactly once after Ready");
-        match self.poll_acquisition(context, |database| {
+        match self.poll_acquisition(context, true, |database| {
             database.prepare_batch_storage_inputs(pending_batch)
         }) {
             Poll::Pending => Poll::Pending,
@@ -182,7 +204,7 @@ impl DemandDrivenDatabase {
         let pending_graph = graph
             .as_ref()
             .expect("subscription graph is consumed exactly once after Ready");
-        match self.poll_acquisition(context, |database| {
+        match self.poll_acquisition(context, false, |database| {
             database.subscribe_one_sink(pending_graph.clone())
         }) {
             Poll::Pending => Poll::Pending,
@@ -210,6 +232,7 @@ impl DemandDrivenDatabase {
     fn poll_acquisition<T>(
         &mut self,
         context: &mut Context<'_>,
+        collect_demands: bool,
         mut operation: impl FnMut(
             &mut Database<crate::storage::DemandLoadedStorage>,
         ) -> Result<T, Error>,
@@ -233,6 +256,7 @@ impl DemandDrivenDatabase {
             self.persistence.as_mut(),
             &self.cache,
             context,
+            collect_demands,
             || operation(&mut self.database),
             missing_storage_input,
         )
@@ -284,5 +308,55 @@ impl Drop for DemandDrivenDatabase {
         for request in self.pending_persistence.drain(..) {
             let _ = self.persistence.cancel_request(request.id());
         }
+    }
+}
+
+#[cfg(test)]
+mod scaling_tests {
+    use super::*;
+    use crate::storage::async_ordered::ImmediateStorage;
+    use crate::storage::{MemoryStorage, OrderedKvStorage};
+    use std::cell::Cell;
+    use std::task::{Context, Waker};
+
+    /// This is an internal mechanism test because repeated prefix execution
+    /// across cold-input retries is not distinguishable in public query rows.
+    #[test]
+    fn acquiring_many_known_point_inputs_does_not_repeat_completed_prefix_work() {
+        const INPUTS: usize = 128;
+        let durable = MemoryStorage::new(&["rows"]);
+        for index in 0..INPUTS {
+            durable
+                .set("rows", &(index as u32).to_be_bytes(), b"value")
+                .unwrap();
+        }
+        let cache = crate::storage::DemandLoadedStorage::new(&["rows"]);
+        let mut backend = ImmediateStorage::new(durable);
+        let mut acquisition = StorageAcquisition::default();
+        let inspected = Cell::new(0_usize);
+        let mut context = Context::from_waker(Waker::noop());
+
+        let result = acquisition.poll(
+            &mut backend,
+            &cache,
+            &mut context,
+            true,
+            || {
+                for index in 0..INPUTS {
+                    inspected.set(inspected.get() + 1);
+                    cache.get("rows", &(index as u32).to_be_bytes())?;
+                }
+                Ok::<_, Error>(())
+            },
+            missing_storage_input,
+        );
+
+        assert!(matches!(result, Poll::Ready(Ok(()))));
+        assert!(
+            inspected.get() <= INPUTS * 2,
+            "cold acquisition must not restart the full prepared prefix for every point; \
+             inspected={}",
+            inspected.get()
+        );
     }
 }

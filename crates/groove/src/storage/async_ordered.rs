@@ -18,19 +18,19 @@ static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 pub struct StorageRequestId(u64);
 
 /// Owned half-open range or prefix scan.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum OwnedScanBounds {
     Prefix(Vec<u8>),
     Range { start: Vec<u8>, end: Vec<u8> },
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ScanDirection {
     Forward,
     Reverse,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct OwnedScanRequest {
     pub column_family: String,
     pub bounds: OwnedScanBounds,

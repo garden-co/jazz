@@ -2,6 +2,28 @@
 
 use super::*;
 
+/// This is an internal mechanism test because public write observations cannot
+/// distinguish indexed outbox membership from a quadratic duplicate scan.
+#[test]
+fn pending_upload_dedup_work_is_linear_in_enqueued_transactions() {
+    let db = open_db(0xc6, AuthorId::from_bytes([0xc6; 16]), &schema());
+    let count = 1_000_u64;
+
+    for index in 0..count {
+        db.node.queue_pending_upload(
+            TxId::new(TxTime(index + 1), NodeUuid::from_bytes([0xc6; 16])),
+            None,
+        );
+    }
+
+    assert!(
+        db.node.pending_upload_dedup_probes.get() <= count * 2,
+        "pending-upload membership must remain O(1) or O(log n), not scan the growing outbox; \
+         probes={}",
+        db.node.pending_upload_dedup_probes.get()
+    );
+}
+
 #[test]
 fn volatile_storage_does_not_change_direct_upstream_subscription_topology() {
     let schema = schema();
@@ -1053,7 +1075,7 @@ fn upload_is_not_marked_sent_after_one_shot_backpressure_and_retries() {
         .node
         .outbox
         .borrow_mut()
-        .push(PendingUpload { tx_id, unit: None });
+        .insert(PendingUpload { tx_id, unit: None });
 
     client.tick().unwrap();
     assert!(outbound.borrow().is_empty());
@@ -1087,7 +1109,7 @@ fn local_missing_upload_body_still_kills_sync_driver() {
         crate::time::TxTime(client.next_now_ms()),
         NodeUuid::from_bytes([0xee; 16]),
     );
-    client.node.outbox.borrow_mut().push(PendingUpload {
+    client.node.outbox.borrow_mut().insert(PendingUpload {
         tx_id: missing_tx,
         unit: None,
     });

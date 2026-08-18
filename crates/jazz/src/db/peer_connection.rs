@@ -282,12 +282,10 @@ where
             self.downstream_fates.borrow_mut().push(unit.clone());
             if pending_set.contains(&tx_id) {
                 let mut outbox = outbox.borrow_mut();
-                if !outbox.iter().any(|pending| pending.tx_id == tx_id) {
-                    outbox.push(PendingUpload {
-                        tx_id,
-                        unit: Some(unit),
-                    });
-                }
+                outbox.insert(PendingUpload {
+                    tx_id,
+                    unit: Some(unit),
+                });
             }
         }
         for tx_id in pending {
@@ -1002,12 +1000,10 @@ where
             SubscriberRelayKind::EdgeOther => {}
         }
         let mut outbox = outbox.borrow_mut();
-        if !outbox.iter().any(|pending| pending.tx_id == tx_id) {
-            outbox.push(PendingUpload {
-                tx_id,
-                unit: Some(staged.message),
-            });
-        }
+        outbox.insert(PendingUpload {
+            tx_id,
+            unit: Some(staged.message),
+        });
         drop(outbox);
         schedule_tick_in(&self.scheduler, TickUrgency::Deferred);
         self.externally_applied_inbound = true;
@@ -1043,12 +1039,10 @@ where
         };
         self.downstream_fates.borrow_mut().extend(responses);
         let mut outbox = outbox.borrow_mut();
-        if !outbox.iter().any(|pending| pending.tx_id == tx_id) {
-            outbox.push(PendingUpload {
-                tx_id,
-                unit: Some(staged.message),
-            });
-        }
+        outbox.insert(PendingUpload {
+            tx_id,
+            unit: Some(staged.message),
+        });
         drop(outbox);
         handle_write_state_update(
             &self.node,
@@ -3665,11 +3659,10 @@ where
                             }
                             if let Some((tx_id, unit)) = local_upload {
                                 let mut outbox = outbox.borrow_mut();
-                                if !outbox.iter().any(|pending| pending.tx_id == tx_id) {
-                                    outbox.push(PendingUpload {
-                                        tx_id,
-                                        unit: Some(unit),
-                                    });
+                                if outbox.insert(PendingUpload {
+                                    tx_id,
+                                    unit: Some(unit),
+                                }) {
                                     schedule_tick_in(&self.scheduler, TickUrgency::Deferred);
                                 }
                             }

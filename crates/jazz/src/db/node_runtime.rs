@@ -37,6 +37,8 @@ where
     pub(super) next_subscription_nonce: Cell<u64>,
     pub(super) subscriber_dirty_epoch: Rc<Cell<u64>>,
     pub(super) edge_cache_budget: Cell<Option<EdgeCacheBudget>>,
+    #[cfg(test)]
+    pub(super) pending_upload_dedup_probes: Cell<u64>,
 }
 
 impl<S> Node<S>
@@ -62,7 +64,7 @@ where
         Self {
             node,
             subscriptions: Rc::new(RefCell::new(Vec::new())),
-            outbox: Rc::new(RefCell::new(Vec::new())),
+            outbox: Rc::new(RefCell::new(OutboxState::default())),
             upstream_subscriptions: Rc::new(RefCell::new(Vec::new())),
             latest_coverage_subscriptions: Rc::new(RefCell::new(BTreeMap::new())),
             upstream_coverage_refcounts: Rc::new(RefCell::new(BTreeMap::new())),
@@ -87,6 +89,8 @@ where
             admitted_upstream_authority: Rc::new(RefCell::new(None)),
             subscriber_dirty_epoch: Rc::new(Cell::new(0)),
             edge_cache_budget: Cell::new(None),
+            #[cfg(test)]
+            pending_upload_dedup_probes: Cell::new(0),
         }
     }
 
@@ -141,10 +145,12 @@ where
 
     pub(super) fn queue_pending_upload(&self, tx_id: TxId, unit: Option<SyncMessage>) {
         let mut outbox = self.outbox.borrow_mut();
-        if outbox.iter().any(|pending| pending.tx_id == tx_id) {
+        #[cfg(test)]
+        self.pending_upload_dedup_probes
+            .set(self.pending_upload_dedup_probes.get().saturating_add(1));
+        if !outbox.insert(PendingUpload { tx_id, unit }) {
             return;
         }
-        outbox.push(PendingUpload { tx_id, unit });
         drop(outbox);
         self.mark_subscriber_connections_dirty();
         self.schedule_tick(TickUrgency::Deferred);
@@ -419,6 +425,8 @@ where
             let remote_read_tier = state.remote_read_tier;
             let read_view = state.read_view.clone();
             let remote_propagate_upstream = state.remote_propagate_upstream;
+            let needs_initial_authoritative_snapshot =
+                state.snapshot_source == SubscriptionSnapshotSource::LocalMaintained;
             let SubscriptionKind::Prepared {
                 shape,
                 binding,
@@ -440,12 +448,16 @@ where
                     }
                     .read_view_key(),
                 };
-                node.prepare_local_maintained_reset_from_binding_view(maintained, binding_view)?;
-                let _ = node.authoritative_reset_snapshot_for_binding_view(shape, binding_view)?;
-            }
-            for binding_view in &pending_authoritative_resets {
-                node.prepare_local_maintained_reset_from_binding_view(maintained, *binding_view)?;
-                let _ = node.authoritative_reset_snapshot_for_binding_view(shape, *binding_view)?;
+                if needs_initial_authoritative_snapshot
+                    || pending_authoritative_resets.contains(&binding_view)
+                {
+                    node.prepare_local_maintained_reset_from_binding_view(
+                        maintained,
+                        binding_view,
+                    )?;
+                    let _ =
+                        node.authoritative_reset_snapshot_for_binding_view(shape, binding_view)?;
+                }
             }
         }
         Ok(())
@@ -518,12 +530,10 @@ where
                 drop(routes);
                 let mut outbox = self.outbox.borrow_mut();
                 for tx_id in routed_txs {
-                    if !outbox.iter().any(|pending| pending.tx_id == tx_id) {
-                        outbox.push(PendingUpload {
-                            tx_id,
-                            unit: self.node.borrow_mut().commit_unit_for(tx_id).ok(),
-                        });
-                    }
+                    outbox.insert(PendingUpload {
+                        tx_id,
+                        unit: self.node.borrow_mut().commit_unit_for(tx_id).ok(),
+                    });
                 }
             }
         }
@@ -977,12 +987,10 @@ where
                         for tx_id in &routed_txs {
                             uploaded.remove(tx_id);
                             let mut outbox = outbox.borrow_mut();
-                            if !outbox.iter().any(|pending| pending.tx_id == *tx_id) {
-                                outbox.push(PendingUpload {
-                                    tx_id: *tx_id,
-                                    unit: self.node.borrow_mut().commit_unit_for(*tx_id).ok(),
-                                });
-                            }
+                            outbox.insert(PendingUpload {
+                                tx_id: *tx_id,
+                                unit: self.node.borrow_mut().commit_unit_for(*tx_id).ok(),
+                            });
                         }
                     }
                     self.schedule_tick(TickUrgency::Immediate);

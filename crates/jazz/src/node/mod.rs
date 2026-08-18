@@ -449,6 +449,7 @@ fn next_groove_runtime_token() -> u64 {
 std::thread_local! {
     static QUERY_VERSIONS_FOR_TX_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static SUBSCRIPTION_SNAPSHOT_FOR_LINK_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static AUTHORITATIVE_RESET_SNAPSHOT_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -469,6 +470,11 @@ fn record_query_versions_for_tx_call() {
 #[cfg(test)]
 fn record_subscription_snapshot_for_link_call() {
     SUBSCRIPTION_SNAPSHOT_FOR_LINK_CALLS.with(|calls| calls.set(calls.get() + 1));
+}
+
+#[cfg(test)]
+fn record_authoritative_reset_snapshot_call() {
+    AUTHORITATIVE_RESET_SNAPSHOT_CALLS.with(|calls| calls.set(calls.get() + 1));
 }
 
 fn record_maintained_view_stream_b_add_bundle() {}

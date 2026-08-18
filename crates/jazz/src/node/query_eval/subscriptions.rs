@@ -252,6 +252,16 @@ where
     }
 
     #[cfg(test)]
+    pub(crate) fn reset_authoritative_reset_snapshot_call_count(&mut self) {
+        AUTHORITATIVE_RESET_SNAPSHOT_CALLS.with(|calls| calls.set(0));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn authoritative_reset_snapshot_call_count(&self) -> usize {
+        AUTHORITATIVE_RESET_SNAPSHOT_CALLS.with(std::cell::Cell::get)
+    }
+
+    #[cfg(test)]
     pub(crate) fn inject_pending_authoritative_reset_for_test(
         &mut self,
         binding_view_key: BindingViewKey,
@@ -442,6 +452,8 @@ where
         shape: &ValidatedQuery,
         binding_view_key: BindingViewKey,
     ) -> Result<Option<RelationSnapshot>, Error> {
+        #[cfg(test)]
+        record_authoritative_reset_snapshot_call();
         self.load_known_state_fact(binding_view_key)?;
         let Some(result_members) = self
             .query

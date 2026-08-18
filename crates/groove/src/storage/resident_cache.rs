@@ -20,7 +20,33 @@ use super::{
 pub struct DemandLoadedStorage {
     cache: MemoryStorage,
     state: std::rc::Rc<RefCell<DemandState>>,
+    demand_collector: std::rc::Rc<RefCell<DemandCollector>>,
     transaction: Option<std::rc::Rc<ResidentTransaction>>,
+}
+
+#[derive(Default)]
+struct DemandCollector {
+    active: bool,
+    seen: BTreeSet<DemandIdentity>,
+    ordered: Vec<OwnedStorageOperation>,
+}
+
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+enum DemandIdentity {
+    Get(String, Vec<u8>),
+    Scan(OwnedScanRequest),
+}
+
+impl DemandIdentity {
+    fn from_operation(operation: &OwnedStorageOperation) -> Option<Self> {
+        match operation {
+            OwnedStorageOperation::Get { column_family, key } => {
+                Some(Self::Get(column_family.clone(), key.clone()))
+            }
+            OwnedStorageOperation::Scan(scan) => Some(Self::Scan(scan.clone())),
+            _ => None,
+        }
+    }
 }
 
 /// Undo journal for the node-open preparation transaction.
@@ -80,7 +106,9 @@ impl Drop for ResidentTransaction {
 #[derive(Clone, Default)]
 struct DemandState {
     admissions: ResidentAdmissions,
+    inherited_dirty_keys: std::rc::Rc<BTreeSet<(String, Vec<u8>)>>,
     dirty_keys: BTreeSet<(String, Vec<u8>)>,
+    uses_overlay: bool,
     pending_writes: Vec<OwnedWriteOperation>,
     pending_column_families: BTreeSet<String>,
 }
@@ -94,19 +122,51 @@ struct DemandState {
 /// admissions need only exact logarithmic lookup.
 #[derive(Clone, Default)]
 struct ResidentAdmissions {
+    inherited_points: std::rc::Rc<BTreeSet<(String, Vec<u8>)>>,
     points: BTreeSet<(String, Vec<u8>)>,
-    scans: Vec<OwnedScanRequest>,
+    inherited_exact_scans: std::rc::Rc<BTreeSet<OwnedScanRequest>>,
+    exact_scans: BTreeSet<OwnedScanRequest>,
+    inherited_prefixes: std::rc::Rc<BTreeSet<(String, Vec<u8>)>>,
+    prefixes: BTreeSet<(String, Vec<u8>)>,
+    inherited_ranges: std::rc::Rc<BTreeMap<String, BTreeMap<Vec<u8>, Vec<u8>>>>,
+    ranges: BTreeMap<String, BTreeMap<Vec<u8>, Vec<u8>>>,
 }
 
 impl ResidentAdmissions {
-    fn insert(&mut self, operation: OwnedStorageOperation) {
+    fn insert(&mut self, operation: OwnedStorageOperation, uses_overlay: bool) {
         match operation {
             OwnedStorageOperation::Get { column_family, key } => {
-                self.points.insert((column_family, key));
+                if uses_overlay {
+                    self.points.insert((column_family, key));
+                } else {
+                    std::rc::Rc::make_mut(&mut self.inherited_points).insert((column_family, key));
+                }
             }
             OwnedStorageOperation::Scan(scan) => {
-                if !self.scans.contains(&scan) {
-                    self.scans.push(scan);
+                let inserted = if uses_overlay {
+                    self.exact_scans.insert(scan.clone())
+                } else {
+                    std::rc::Rc::make_mut(&mut self.inherited_exact_scans).insert(scan.clone())
+                };
+                if inserted {
+                    match scan.bounds {
+                        super::async_ordered::OwnedScanBounds::Prefix(prefix) => {
+                            if uses_overlay {
+                                self.prefixes.insert((scan.column_family, prefix));
+                            } else {
+                                std::rc::Rc::make_mut(&mut self.inherited_prefixes)
+                                    .insert((scan.column_family, prefix));
+                            }
+                        }
+                        super::async_ordered::OwnedScanBounds::Range { start, end } => {
+                            let ranges = if uses_overlay {
+                                &mut self.ranges
+                            } else {
+                                std::rc::Rc::make_mut(&mut self.inherited_ranges)
+                            };
+                            insert_range(ranges.entry(scan.column_family).or_default(), start, end);
+                        }
+                    }
                 }
             }
             _ => {}
@@ -116,16 +176,70 @@ impl ResidentAdmissions {
     fn covers(&self, requested: &OwnedStorageOperation) -> bool {
         match requested {
             OwnedStorageOperation::Get { column_family, key }
-                if self.points.contains(&(column_family.clone(), key.clone())) =>
+                if self.points.contains(&(column_family.clone(), key.clone()))
+                    || self
+                        .inherited_points
+                        .contains(&(column_family.clone(), key.clone())) =>
             {
                 true
             }
-            _ => self
-                .scans
-                .iter()
-                .any(|admitted| covers(&OwnedStorageOperation::Scan(admitted.clone()), requested)),
+            OwnedStorageOperation::Scan(scan)
+                if self.exact_scans.contains(scan) || self.inherited_exact_scans.contains(scan) =>
+            {
+                true
+            }
+            OwnedStorageOperation::Get { column_family, key } => {
+                self.prefix_covers(column_family, key) || self.range_covers(column_family, key, key)
+            }
+            OwnedStorageOperation::Scan(scan) => match &scan.bounds {
+                super::async_ordered::OwnedScanBounds::Prefix(prefix) => {
+                    self.prefix_covers(&scan.column_family, prefix)
+                }
+                super::async_ordered::OwnedScanBounds::Range { start, end } => {
+                    self.range_covers(&scan.column_family, start, end)
+                }
+            },
+            _ => false,
         }
     }
+
+    fn prefix_covers(&self, column_family: &str, value: &[u8]) -> bool {
+        (0..=value.len()).any(|length| {
+            let identity = (column_family.to_owned(), value[..length].to_vec());
+            self.prefixes.contains(&identity) || self.inherited_prefixes.contains(&identity)
+        })
+    }
+
+    fn range_covers(&self, column_family: &str, start: &[u8], end: &[u8]) -> bool {
+        [&*self.inherited_ranges, &self.ranges]
+            .into_iter()
+            .filter_map(|ranges| ranges.get(column_family))
+            .any(|ranges| {
+                ranges
+                    .range(..=start.to_vec())
+                    .next_back()
+                    .is_some_and(|(_, admitted_end)| admitted_end.as_slice() >= end)
+            })
+    }
+}
+
+fn insert_range(ranges: &mut BTreeMap<Vec<u8>, Vec<u8>>, start: Vec<u8>, end: Vec<u8>) {
+    if ranges
+        .range(..=start.clone())
+        .next_back()
+        .is_some_and(|(_, admitted_end)| admitted_end >= &end)
+    {
+        return;
+    }
+    let contained = ranges
+        .range(start.clone()..end.clone())
+        .filter(|(_, admitted_end)| *admitted_end <= &end)
+        .map(|(admitted_start, _)| admitted_start.clone())
+        .collect::<Vec<_>>();
+    for admitted_start in contained {
+        ranges.remove(&admitted_start);
+    }
+    ranges.insert(start, end);
 }
 
 impl DemandLoadedStorage {
@@ -137,8 +251,23 @@ impl DemandLoadedStorage {
         Self {
             cache: MemoryStorage::new(column_families),
             state: std::rc::Rc::new(RefCell::new(state)),
+            demand_collector: Default::default(),
             transaction: None,
         }
+    }
+
+    pub(crate) fn begin_demand_collection(&self) {
+        let mut collector = self.demand_collector.borrow_mut();
+        collector.active = true;
+        collector.seen.clear();
+        collector.ordered.clear();
+    }
+
+    pub(crate) fn take_collected_demands(&self) -> Vec<OwnedStorageOperation> {
+        let mut collector = self.demand_collector.borrow_mut();
+        collector.active = false;
+        collector.seen.clear();
+        std::mem::take(&mut collector.ordered)
     }
 
     /// Begin an isolated, restartable storage transaction over the resident set.
@@ -154,11 +283,25 @@ impl DemandLoadedStorage {
         Ok(Self {
             cache: self.cache.clone(),
             state: std::rc::Rc::new(RefCell::new(DemandState {
-                admissions: state.admissions.clone(),
-                dirty_keys: state.dirty_keys.clone(),
+                admissions: ResidentAdmissions {
+                    inherited_points: std::rc::Rc::clone(&state.admissions.inherited_points),
+                    points: BTreeSet::new(),
+                    inherited_exact_scans: std::rc::Rc::clone(
+                        &state.admissions.inherited_exact_scans,
+                    ),
+                    exact_scans: BTreeSet::new(),
+                    inherited_prefixes: std::rc::Rc::clone(&state.admissions.inherited_prefixes),
+                    prefixes: BTreeSet::new(),
+                    inherited_ranges: std::rc::Rc::clone(&state.admissions.inherited_ranges),
+                    ranges: BTreeMap::new(),
+                },
+                inherited_dirty_keys: std::rc::Rc::clone(&state.inherited_dirty_keys),
+                dirty_keys: BTreeSet::new(),
+                uses_overlay: true,
                 pending_writes: Vec::new(),
                 pending_column_families: state.pending_column_families.clone(),
             })),
+            demand_collector: std::rc::Rc::clone(&self.demand_collector),
             transaction: Some(std::rc::Rc::new(ResidentTransaction {
                 cache: self.cache.clone(),
                 original_values: RefCell::new(BTreeMap::new()),
@@ -200,11 +343,10 @@ impl DemandLoadedStorage {
                 OwnedStorageOperation::Get { column_family, key },
                 OwnedStorageResponse::Value(value),
             ) => {
-                if !self
-                    .state
-                    .borrow()
-                    .dirty_keys
-                    .contains(&(column_family.clone(), key.clone()))
+                let state = self.state.borrow();
+                let identity = (column_family.clone(), key.clone());
+                if !state.dirty_keys.contains(&identity)
+                    && !state.inherited_dirty_keys.contains(&identity)
                 {
                     match value {
                         Some(value) => self.cache.set(column_family, key, &value)?,
@@ -213,9 +355,12 @@ impl DemandLoadedStorage {
                 }
             }
             (OwnedStorageOperation::Scan(scan), OwnedStorageResponse::Rows(rows)) => {
-                let dirty = self.state.borrow().dirty_keys.clone();
+                let state = self.state.borrow();
                 for (key, value) in rows {
-                    if !dirty.contains(&(scan.column_family.clone(), key.clone())) {
+                    let identity = (scan.column_family.clone(), key.clone());
+                    if !state.dirty_keys.contains(&identity)
+                        && !state.inherited_dirty_keys.contains(&identity)
+                    {
                         self.cache.set(&scan.column_family, &key, &value)?;
                     }
                 }
@@ -229,13 +374,23 @@ impl DemandLoadedStorage {
                 });
             }
         }
-        self.state.borrow_mut().admissions.insert(request);
+        let mut state = self.state.borrow_mut();
+        let uses_overlay = state.uses_overlay;
+        state.admissions.insert(request, uses_overlay);
         Ok(())
     }
 
-    fn require(&self, request: OwnedStorageOperation) -> Result<(), Error> {
+    fn require(&self, request: OwnedStorageOperation) -> Result<bool, Error> {
         if self.state.borrow().admissions.covers(&request) {
-            Ok(())
+            Ok(true)
+        } else if self.demand_collector.borrow().active {
+            let mut collector = self.demand_collector.borrow_mut();
+            if DemandIdentity::from_operation(&request)
+                .is_some_and(|identity| collector.seen.insert(identity))
+            {
+                collector.ordered.push(request);
+            }
+            Ok(false)
         } else {
             Err(Error::NotResident {
                 request: Box::new(request),
@@ -245,63 +400,35 @@ impl DemandLoadedStorage {
 
     fn mark_dirty(&self, cf: &str, key: &[u8]) {
         let mut state = self.state.borrow_mut();
-        state.dirty_keys.insert((cf.to_owned(), key.to_vec()));
-        state.admissions.insert(OwnedStorageOperation::Get {
-            column_family: cf.to_owned(),
-            key: key.to_vec(),
-        });
-    }
-}
-
-fn covers(admitted: &OwnedStorageOperation, requested: &OwnedStorageOperation) -> bool {
-    if admitted == requested {
-        return true;
-    }
-    match (admitted, requested) {
-        (
-            OwnedStorageOperation::Scan(admitted),
-            OwnedStorageOperation::Get { column_family, key },
-        ) if admitted.column_family == *column_family => match &admitted.bounds {
-            super::async_ordered::OwnedScanBounds::Prefix(prefix) => key.starts_with(prefix),
-            super::async_ordered::OwnedScanBounds::Range { start, end } => {
-                key.as_slice() >= start.as_slice() && key.as_slice() < end.as_slice()
-            }
-        },
-        (OwnedStorageOperation::Scan(admitted), OwnedStorageOperation::Scan(requested))
-            if admitted.column_family == requested.column_family =>
-        {
-            match (&admitted.bounds, &requested.bounds) {
-                (
-                    super::async_ordered::OwnedScanBounds::Prefix(admitted),
-                    super::async_ordered::OwnedScanBounds::Prefix(requested),
-                ) => requested.starts_with(admitted),
-                (
-                    super::async_ordered::OwnedScanBounds::Range {
-                        start: admitted_start,
-                        end: admitted_end,
-                    },
-                    super::async_ordered::OwnedScanBounds::Range {
-                        start: requested_start,
-                        end: requested_end,
-                    },
-                ) => requested_start >= admitted_start && requested_end <= admitted_end,
-                _ => false,
-            }
+        let identity = (cf.to_owned(), key.to_vec());
+        if state.uses_overlay {
+            state.dirty_keys.insert(identity);
+        } else {
+            std::rc::Rc::make_mut(&mut state.inherited_dirty_keys).insert(identity);
         }
-        _ => false,
+        let uses_overlay = state.uses_overlay;
+        state.admissions.insert(
+            OwnedStorageOperation::Get {
+                column_family: cf.to_owned(),
+                key: key.to_vec(),
+            },
+            uses_overlay,
+        );
     }
 }
 
 impl OrderedKvStorage for DemandLoadedStorage {
     fn require_resident(&self, operation: &OwnedStorageOperation) -> Result<(), Error> {
-        self.require(operation.clone())
+        self.require(operation.clone()).map(|_| ())
     }
 
     fn get(&self, cf: &ColumnFamilyName, key: &Key) -> Result<Option<Value>, Error> {
-        self.require(OwnedStorageOperation::Get {
+        if !self.require(OwnedStorageOperation::Get {
             column_family: cf.to_owned(),
             key: key.to_vec(),
-        })?;
+        })? {
+            return Ok(None);
+        }
         self.cache.get(cf, key)
     }
 
@@ -345,9 +472,11 @@ impl OrderedKvStorage for DemandLoadedStorage {
         end: &Key,
         visit: &mut ScanVisitor<'_>,
     ) -> Result<(), Error> {
-        self.require(OwnedStorageOperation::Scan(OwnedScanRequest::range(
+        if !self.require(OwnedStorageOperation::Scan(OwnedScanRequest::range(
             cf, start, end,
-        )))?;
+        )))? {
+            return Ok(());
+        }
         self.cache.scan_range(cf, start, end, visit)
     }
 
@@ -357,9 +486,11 @@ impl OrderedKvStorage for DemandLoadedStorage {
         prefix: &Key,
         visit: &mut ScanVisitor<'_>,
     ) -> Result<(), Error> {
-        self.require(OwnedStorageOperation::Scan(OwnedScanRequest::prefix(
+        if !self.require(OwnedStorageOperation::Scan(OwnedScanRequest::prefix(
             cf, prefix,
-        )))?;
+        )))? {
+            return Ok(());
+        }
         self.cache.scan_prefix(cf, prefix, visit)
     }
 
@@ -369,9 +500,11 @@ impl OrderedKvStorage for DemandLoadedStorage {
         prefix: &Key,
         visit: &mut ScanVisitor<'_>,
     ) -> Result<(), Error> {
-        self.require(OwnedStorageOperation::Scan(
+        if !self.require(OwnedStorageOperation::Scan(
             OwnedScanRequest::prefix(cf, prefix).reverse(),
-        ))?;
+        ))? {
+            return Ok(());
+        }
         self.cache.scan_prefix_reverse(cf, prefix, visit)
     }
 
@@ -400,6 +533,7 @@ impl ReopenableStorage for DemandLoadedStorage {
         let Self {
             cache,
             state,
+            demand_collector,
             transaction,
         } = self;
         state
@@ -409,6 +543,7 @@ impl ReopenableStorage for DemandLoadedStorage {
         Ok(Self {
             cache: cache.reopen(column_families)?,
             state,
+            demand_collector,
             transaction,
         })
     }
@@ -452,8 +587,48 @@ mod tests {
         storage.set("rows", &5_u32.to_be_bytes(), b"new").unwrap();
 
         let state = storage.state.borrow();
-        assert_eq!(state.admissions.points.len(), 10_000);
-        assert!(state.admissions.scans.is_empty());
+        assert_eq!(state.admissions.inherited_points.len(), 10_000);
+        assert!(state.admissions.inherited_prefixes.is_empty());
+        assert!(state.admissions.prefixes.is_empty());
+        assert!(state.admissions.inherited_ranges.is_empty());
+        assert!(state.admissions.ranges.is_empty());
+    }
+
+    /// This is an internal mechanism test because copying private residency
+    /// metadata during a restartable node-open attempt has no public semantic
+    /// signal other than nonlinear startup cost.
+    #[test]
+    fn restartable_transaction_does_not_copy_the_resident_point_history() {
+        let storage = DemandLoadedStorage::new(&["rows"]);
+        for index in 0_u32..10_000 {
+            storage.set("rows", &index.to_be_bytes(), b"value").unwrap();
+        }
+        let inherited = std::rc::Rc::clone(&storage.state.borrow().admissions.inherited_points);
+        let transaction = storage.begin_transaction().unwrap();
+        assert!(std::rc::Rc::ptr_eq(
+            &inherited,
+            &transaction.state.borrow().admissions.inherited_points
+        ));
+    }
+
+    /// This is an internal mechanism test because admission-index probes are
+    /// deliberately invisible through the ordered-storage API.
+    #[test]
+    fn distinct_scan_admissions_do_not_make_later_covered_checks_linear() {
+        let storage = DemandLoadedStorage::new(&["rows"]);
+        for index in 0_u32..1_000 {
+            let request =
+                OwnedStorageOperation::Scan(OwnedScanRequest::prefix("rows", index.to_be_bytes()));
+            storage
+                .admit(request, OwnedStorageResponse::Rows(Vec::new()))
+                .unwrap();
+        }
+        let covered_key = [999_u32.to_be_bytes().as_slice(), b"/child"].concat();
+        storage.get("rows", &covered_key).unwrap();
+
+        let state = storage.state.borrow();
+        assert_eq!(state.admissions.inherited_prefixes.len(), 1_000);
+        assert!(state.admissions.inherited_exact_scans.len() == 1_000);
     }
 
     #[test]

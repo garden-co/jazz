@@ -561,7 +561,7 @@ fn session_upload_rejects_forged_made_by_without_ingesting_rows() {
         .node
         .outbox
         .borrow_mut()
-        .push(PendingUpload { tx_id, unit: None });
+        .insert(PendingUpload { tx_id, unit: None });
 
     client.tick().unwrap();
     server.tick().unwrap();
@@ -863,7 +863,7 @@ fn trusted_backend_upload_uses_backend_policy_and_stores_user_made_by() {
         .node
         .outbox
         .borrow_mut()
-        .push(PendingUpload { tx_id, unit: None });
+        .insert(PendingUpload { tx_id, unit: None });
 
     backend.tick().unwrap();
     server.tick().unwrap();
