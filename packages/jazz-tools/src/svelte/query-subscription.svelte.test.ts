@@ -40,7 +40,7 @@ vi.mock("./context.svelte.js", () => ({
   }),
 }));
 
-const { QuerySubscription, QuerySubscriptionOne } = await import("./use-all.svelte.js");
+const { QuerySubscription, QuerySubscriptionOne } = await import("./query-subscription.svelte.js");
 
 function makeQuery(marker = "todos") {
   return {
