@@ -138,6 +138,20 @@ impl DemandDrivenNode {
         )
     }
 
+    /// Commit one mergeable write authored against an explicit schema view.
+    pub fn poll_mergeable_commit_in_schema(
+        &mut self,
+        context: &mut std::task::Context<'_>,
+        schema: SchemaVersionId,
+        commit: &MergeableCommit,
+    ) -> std::task::Poll<Result<TxId, Error>> {
+        self.poll_local_operation(
+            context,
+            |node| node.prepare_mergeable_commit_in_schema(schema, commit.clone()),
+            |node, prepared| node.publish_prepared_mergeable_commit(prepared),
+        )
+    }
+
     /// Create one local branch through the same acquire-then-publish boundary
     /// as application-row writes.
     pub fn poll_create_branch(

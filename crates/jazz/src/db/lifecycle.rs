@@ -202,6 +202,33 @@ impl DemandDrivenDb {
     ) -> Result<SubscriptionStream, Error> {
         std::future::poll_fn(|context| self.poll_subscribe(context, prepared, opts.clone())).await
     }
+
+    /// Insert through the async owner. Durable prerequisites may suspend, but
+    /// the resident publish, public subscription refresh, and returned handle
+    /// all occur in the same resolving poll.
+    #[doc(hidden)]
+    pub async fn insert(
+        &mut self,
+        table: &str,
+        cells: RowCells,
+    ) -> Result<WriteHandle<groove::storage::DemandLoadedStorage>, Error> {
+        let (row_uuid, commit) = self.database.prepare_insert_commit(table, cells)?;
+        let schema = self.database.schema_version_id;
+        let tx_id = std::future::poll_fn(|context| {
+            self.runtime
+                .poll_mergeable_commit_in_schema(context, schema, &commit)
+        })
+        .await
+        .map_err(Error::from)?;
+        let local_tier = self.database.finalize_local_commit(tx_id)?;
+        self.database.refresh_subscriptions()?;
+        Ok(WriteHandle {
+            node: Rc::downgrade(&self.database.node.node),
+            row_uuid,
+            tx_id,
+            local_tier,
+        })
+    }
 }
 
 impl<S> Db<S>

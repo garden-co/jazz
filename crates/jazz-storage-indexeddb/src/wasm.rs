@@ -501,11 +501,11 @@ pub async fn verify_indexeddb_jazz_visibility(page_store: JsValue) -> Result<JsV
         .ok_or_else(|| JsValue::from_str("Jazz subscription closed during opening"))?;
 
     let write = owner
-        .database()
         .insert(
             "todos",
             doctest_support::todo_cells("controlled input", false),
         )
+        .await
         .map_err(|error| JsValue::from_str(&error.to_string()))?;
     let Some(SubscriptionEvent::Delta { added, .. }) = subscription.try_next_event() else {
         return Err(JsValue::from_str(

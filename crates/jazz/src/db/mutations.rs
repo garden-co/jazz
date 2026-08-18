@@ -6,6 +6,21 @@ impl<S> Db<S>
 where
     S: ResidentStorage + ReopenableStorage + 'static,
 {
+    pub(super) fn prepare_insert_commit(
+        &self,
+        table: &str,
+        cells: RowCells,
+    ) -> Result<(RowUuid, MergeableCommit), Error> {
+        let row = self.row_id_source.borrow_mut().next_row_id();
+        let cells = self.apply_insert_defaults(table, cells)?;
+        Ok((
+            row,
+            MergeableCommit::new(table, row, self.next_now_ms())
+                .made_by(self.identity.author)
+                .cells(cells),
+        ))
+    }
+
     /// Insert a row locally, generating a uuidv7-shaped row id.
     ///
     /// The generated id is available from [`WriteHandle::row_uuid`].
@@ -1064,11 +1079,16 @@ where
         }
         // Db is an untrusted client: structurally valid writes are staged and
         // sent optimistically. A serving authority assigns the policy fate.
+        let prepared = self
+            .node
+            .node
+            .borrow_mut()
+            .prepare_mergeable_commit_in_schema(self.schema_version_id, commit)?;
         let tx_id = self
             .node
             .node
             .borrow_mut()
-            .commit_mergeable_in_schema(self.schema_version_id, commit)?;
+            .publish_prepared_mergeable_commit(prepared)?;
         let local_tier = self.finalize_local_commit(tx_id)?;
         self.refresh_subscriptions()?;
         Ok(WriteHandle {

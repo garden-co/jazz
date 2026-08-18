@@ -109,6 +109,21 @@ where
         )
     }
 
+    pub(crate) fn prepare_mergeable_commit_in_schema(
+        &mut self,
+        schema: SchemaVersionId,
+        commit: MergeableCommit,
+    ) -> Result<PreparedMergeableCommit, Error> {
+        commit.validate()?;
+        let made_at = self.preview_mergeable_tx_time(std::slice::from_ref(&commit), commit.now_ms);
+        self.prepare_mergeable_many_at_with_schema_versions(
+            vec![(schema, commit)],
+            made_at,
+            None,
+            true,
+        )
+    }
+
     fn commit_mergeable_at(
         &mut self,
         commit: MergeableCommit,

@@ -380,7 +380,7 @@ fn demand_driven_db_acquires_cold_subscription_before_registering_it() {
     );
     released.set(true);
     let std::task::Poll::Ready(Ok(mut subscription)) =
-        owner.poll_subscribe(&mut context, &prepared, opts)
+        owner.poll_subscribe(&mut context, &prepared, opts.clone())
     else {
         panic!("released input must complete the subscription opening")
     };
@@ -395,6 +395,34 @@ fn demand_driven_db_acquires_cold_subscription_before_registering_it() {
         owner.database().runtime_stats_for_test().active_subscriptions,
         subscriptions_before + 1
     );
+    released.set(false);
+    let write = {
+        let mut insert = std::pin::pin!(owner.insert("todos", title_cells("cold insert")));
+        assert!(std::future::Future::poll(insert.as_mut(), &mut context).is_pending());
+        assert!(
+            subscription.try_next_event().is_none(),
+            "acquisition must not publish a partial local write"
+        );
+        released.set(true);
+        let std::task::Poll::Ready(Ok(write)) =
+            std::future::Future::poll(insert.as_mut(), &mut context)
+        else {
+            panic!("released write inputs must publish in the resolving poll")
+        };
+        write
+    };
+    let Some(crate::db::SubscriptionEvent::Delta { added, .. }) = subscription.try_next_event()
+    else {
+        panic!("the resolving write poll must synchronously refresh subscriptions")
+    };
+    assert_eq!(added.len(), 1);
+    assert_eq!(added[0].row_uuid(), write.row_uuid());
+    released.set(false);
+    let std::task::Poll::Ready(Ok(rows)) = owner.poll_all(&mut context, &prepared, opts) else {
+        panic!("the direct written rows must remain first-poll visible")
+    };
+    assert_eq!(rows.len(), 2);
+    assert!(owner.poll_persistence(&mut context).is_pending());
 }
 
 struct PersistenceTestWake;
