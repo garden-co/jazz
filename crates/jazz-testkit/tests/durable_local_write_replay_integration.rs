@@ -46,15 +46,15 @@ async fn persistent_restart_replays_pending_write_with_valid_token_impl() {
     let offline = jazz_testkit::connect(offline_context)
         .await
         .expect("open persistent client offline");
-    let (todo_id, expected_values, batch_id) = offline
+    let (todo_id, expected_values, transaction_id) = offline
         .insert(
             "todos",
             row_input!("title" => "deliver after restart", "completed" => false),
         )
         .expect("create offline todo");
     offline
-        .wait_for_batch(
-            batch_id.expect("ordinary mutation commits immediately"),
+        .wait_for_transaction(
+            transaction_id.expect("ordinary mutation commits immediately"),
             DurabilityTier::Local,
         )
         .await

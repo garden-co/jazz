@@ -317,8 +317,8 @@ fn unhandled_rejection_is_delivered_as_mutation_error() {
     );
     assert_eq!(events[0].code, "permission_denied");
     assert_eq!(
-        events[0].transaction.batch_id,
-        BatchId::from_committed_tx(write.mergeable_tx_id())
+        events[0].transaction.transaction_id,
+        TransactionId::from_committed_tx(write.mergeable_tx_id())
     );
     assert_eq!(events[0].transaction.kind, TransactionKind::Mergeable);
 }
@@ -482,8 +482,8 @@ fn undelivered_mutation_error_is_recovered_after_reopen() {
     let events = events.borrow();
     assert_eq!(events.len(), 1);
     assert_eq!(
-        events[0].transaction.batch_id,
-        BatchId::from_committed_tx(tx_id)
+        events[0].transaction.transaction_id,
+        TransactionId::from_committed_tx(tx_id)
     );
     drop(events);
     drop(reopened);

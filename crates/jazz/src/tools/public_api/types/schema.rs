@@ -95,7 +95,7 @@ pub enum ColumnType {
     /// 16-byte UUID (ObjectId).
     Uuid,
     /// 16-byte batch/version identity.
-    BatchId,
+    TransactionId,
     /// Variable-length binary payload.
     Bytea,
     /// JSON payload stored as UTF-8 text, optionally constrained by JSON Schema.
@@ -120,7 +120,7 @@ impl ColumnType {
             ColumnType::Boolean => Some(1),
             ColumnType::Timestamp => Some(8),
             ColumnType::Uuid => Some(16),
-            ColumnType::BatchId => Some(16),
+            ColumnType::TransactionId => Some(16),
             ColumnType::Text => None,
             ColumnType::Bytea => None,
             ColumnType::Json { .. } => None,

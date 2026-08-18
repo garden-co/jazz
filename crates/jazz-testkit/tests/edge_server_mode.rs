@@ -95,12 +95,12 @@ async fn subscription_orders_by_unprojected_field() {
                 .await;
             let mut ids = Vec::new();
             for (title, rank) in [("charlie", 3), ("alpha", 1), ("bravo", 2)] {
-                let (id, _, batch_id) = client
+                let (id, _, transaction_id) = client
                     .insert("todos", row_input!("title" => title, "rank" => rank))
                     .expect("insert ranked todo");
                 client
-                    .wait_for_batch(
-                        batch_id.expect("ordinary mutation commits immediately"),
+                    .wait_for_transaction(
+                        transaction_id.expect("ordinary mutation commits immediately"),
                         DurabilityTier::EdgeServer,
                     )
                     .await
@@ -139,7 +139,7 @@ async fn subscription_orders_by_unprojected_field() {
                 .update(ids[0], vec![("rank".to_owned(), Value::Integer(0))])
                 .expect("change only the unprojected ordering field");
             client
-                .wait_for_batch(
+                .wait_for_transaction(
                     batch.expect("ordinary mutation commits immediately"),
                     DurabilityTier::EdgeServer,
                 )
@@ -192,12 +192,12 @@ async fn edge_tier_public_subscription_opens_and_receives_rows() {
                 .expect("edge-tier public subscription should open");
             let mut log = Vec::new();
 
-            let (todo_id, _, batch_id) = client
+            let (todo_id, _, transaction_id) = client
                 .insert("todos", row_input!("title" => "visible", "done" => false))
                 .expect("insert todo");
             client
-                .wait_for_batch(
-                    batch_id.expect("ordinary mutation commits immediately"),
+                .wait_for_transaction(
+                    transaction_id.expect("ordinary mutation commits immediately"),
                     DurabilityTier::EdgeServer,
                 )
                 .await
@@ -253,7 +253,7 @@ async fn public_root_default_order_and_windows_are_stable_across_reset() {
                     .insert("todos", row_input!("title" => title, "done" => false))
                     .expect("insert todo");
                 client
-                    .wait_for_batch(
+                    .wait_for_transaction(
                         batch.expect("ordinary mutation commits immediately"),
                         DurabilityTier::EdgeServer,
                     )
@@ -355,7 +355,7 @@ async fn maintained_window_uses_row_id_tie_breaker_and_tracks_rows_crossing_boun
                     .insert("todos", row_input!("title" => "same", "done" => false))
                     .expect("insert tied todo");
                 client
-                    .wait_for_batch(
+                    .wait_for_transaction(
                         batch.expect("ordinary mutation commits immediately"),
                         DurabilityTier::EdgeServer,
                     )
@@ -420,7 +420,7 @@ async fn maintained_window_uses_row_id_tie_breaker_and_tracks_rows_crossing_boun
                 )
                 .expect("move row into window");
             client
-                .wait_for_batch(
+                .wait_for_transaction(
                     batch.expect("ordinary mutation commits immediately"),
                     DurabilityTier::EdgeServer,
                 )
@@ -466,7 +466,7 @@ async fn maintained_window_uses_row_id_tie_breaker_and_tracks_rows_crossing_boun
                 )
                 .expect("move row out of window");
             client
-                .wait_for_batch(
+                .wait_for_transaction(
                     batch.expect("ordinary mutation commits immediately"),
                     DurabilityTier::EdgeServer,
                 )
@@ -505,15 +505,15 @@ async fn public_subscription_stream_yields_delta_items_for_normal_changes() {
                 .subscribe(QueryBuilder::new("todos").build())
                 .await
                 .expect("normal subscription should open");
-            let (todo_id, _, batch_id) = client
+            let (todo_id, _, transaction_id) = client
                 .insert(
                     "todos",
                     row_input!("title" => "delta item", "done" => false),
                 )
                 .expect("insert todo");
             client
-                .wait_for_batch(
-                    batch_id.expect("ordinary mutation commits immediately"),
+                .wait_for_transaction(
+                    transaction_id.expect("ordinary mutation commits immediately"),
                     DurabilityTier::EdgeServer,
                 )
                 .await
@@ -851,10 +851,14 @@ async fn wait_for_row(
     .await;
 }
 
-async fn wait_edge_batch(client: &JazzClient, batch_id: jazz::tools::BatchId, label: &str) {
+async fn wait_edge_batch(
+    client: &JazzClient,
+    transaction_id: jazz::tools::TransactionId,
+    label: &str,
+) {
     tokio::time::timeout(
         Duration::from_secs(15),
-        client.wait_for_batch(batch_id, DurabilityTier::EdgeServer),
+        client.wait_for_transaction(transaction_id, DurabilityTier::EdgeServer),
     )
     .await
     .unwrap_or_else(|_| panic!("{label} timed out waiting for edge batch"))
@@ -1209,15 +1213,15 @@ async fn edge_server_accepts_mergeable_write_while_core_down_then_promotes() {
             let alice = connect_user(&edge, schema.clone(), "alice-edge-server-mode").await;
             let bob = connect_user(&edge, schema.clone(), "bob-edge-server-mode").await;
 
-            let (todo_id, expected, batch_id) = alice
+            let (todo_id, expected, transaction_id) = alice
                 .insert(
                     "todos",
                     row_input!("title" => "edge first", "done" => false),
                 )
                 .expect("alice inserts while core is down");
             alice
-                .wait_for_batch(
-                    batch_id.expect("ordinary mutation commits immediately"),
+                .wait_for_transaction(
+                    transaction_id.expect("ordinary mutation commits immediately"),
                     DurabilityTier::EdgeServer,
                 )
                 .await
@@ -1240,8 +1244,8 @@ async fn edge_server_accepts_mergeable_write_while_core_down_then_promotes() {
                 .await;
 
             alice
-                .wait_for_batch(
-                    batch_id.expect("ordinary mutation commits immediately"),
+                .wait_for_transaction(
+                    transaction_id.expect("ordinary mutation commits immediately"),
                     DurabilityTier::GlobalServer,
                 )
                 .await
@@ -1322,15 +1326,15 @@ async fn core_write_reaches_clients_on_both_edges() {
             let mut alice_log = Vec::new();
             let mut bob_log = Vec::new();
 
-            let (todo_id, expected, batch_id) = carol
+            let (todo_id, expected, transaction_id) = carol
                 .insert(
                     "todos",
                     row_input!("title" => "core write for both edges", "done" => false),
                 )
                 .expect("carol writes directly to core");
             carol
-                .wait_for_batch(
-                    batch_id.expect("ordinary mutation commits immediately"),
+                .wait_for_transaction(
+                    transaction_id.expect("ordinary mutation commits immediately"),
                     DurabilityTier::GlobalServer,
                 )
                 .await
@@ -1423,15 +1427,15 @@ async fn edge_write_reaches_client_on_peer_edge() {
                 .expect("bob subscribes through edge_eu");
             let mut bob_log = Vec::new();
 
-            let (todo_id, expected, batch_id) = alice
+            let (todo_id, expected, transaction_id) = alice
                 .insert(
                     "todos",
                     row_input!("title" => "edge write for peer", "done" => true),
                 )
                 .expect("alice writes through edge_us");
             alice
-                .wait_for_batch(
-                    batch_id.expect("ordinary mutation commits immediately"),
+                .wait_for_transaction(
+                    transaction_id.expect("ordinary mutation commits immediately"),
                     DurabilityTier::GlobalServer,
                 )
                 .await
@@ -1489,7 +1493,7 @@ fn topology_matrix_conformance_smoke_inventory() {
         Cell {
             topology: Topology::ClientCore,
             scenario: Scenario::MergeableWrite,
-            coverage: "clients_sync::wait_for_batch_reaches_edge_and_global_tiers",
+            coverage: "clients_sync::wait_for_transaction_reaches_edge_and_global_tiers",
         },
         Cell {
             topology: Topology::ClientCore,

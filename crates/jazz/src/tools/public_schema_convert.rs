@@ -721,9 +721,9 @@ fn convert_column_type(
         ColumnType::Integer => Ok(GrooveColumnType::I32),
         // Public BIGINT follows PostgreSQL semantics: signed 64-bit integer.
         ColumnType::BigInt => Ok(GrooveColumnType::I64),
-        ColumnType::BatchId => Err(err(
+        ColumnType::TransactionId => Err(err(
             format!("$.{}.{}", table.as_str(), column),
-            "BatchId columns are not supported by core schema conversion yet",
+            "TransactionId columns are not supported by core schema conversion yet",
         )),
         ColumnType::Json { .. } => Ok(GrooveColumnType::String),
         ColumnType::Row { .. } => Err(err(

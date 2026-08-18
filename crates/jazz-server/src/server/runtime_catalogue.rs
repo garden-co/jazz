@@ -254,7 +254,7 @@ fn public_value_to_core(value: Value) -> Result<CoreValue, String> {
         Value::Enum { .. } => Err(
             "migration lens enum payload default is not supported by the runtime core".to_owned(),
         ),
-        Value::BatchId(_) | Value::Row { .. } => {
+        Value::TransactionId(_) | Value::Row { .. } => {
             Err("migration lens default is not supported by the runtime core".to_owned())
         }
     }

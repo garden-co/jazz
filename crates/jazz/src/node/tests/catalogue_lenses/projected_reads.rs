@@ -938,7 +938,7 @@ fn global_changes_span_table_renames_for_history_and_conflict_detection() {
     )
     .unwrap();
 
-    let exclusive = OpenBatchId::new();
+    let exclusive = OpenTransactionId::new();
     core.open_exclusive(exclusive).unwrap();
     assert_eq!(core.tx_current_rows(exclusive, "todos").unwrap().len(), 1);
     core.tx_write(

@@ -214,7 +214,7 @@ fn hash_value(hasher: &mut blake3::Hasher, value: &Value) {
             hasher.update(&[6]);
             hasher.update(v.uuid().as_bytes());
         }
-        Value::BatchId(v) => {
+        Value::TransactionId(v) => {
             hasher.update(&[12]);
             hasher.update(v);
         }
@@ -301,7 +301,7 @@ fn hash_column_type(hasher: &mut blake3::Hasher, col_type: &ColumnType) {
         ColumnType::Uuid => {
             hasher.update(&[6]);
         }
-        ColumnType::BatchId => {
+        ColumnType::TransactionId => {
             hasher.update(&[12]);
         }
         ColumnType::Bytea => {

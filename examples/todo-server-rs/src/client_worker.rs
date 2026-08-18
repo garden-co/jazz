@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::thread;
 
 use jazz::tools::{
-    AppContext, BatchId, DurabilityTier, JazzClient, JazzError, ObjectId, Query, Value,
+    AppContext, TransactionId, DurabilityTier, JazzClient, JazzError, ObjectId, Query, Value,
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -28,16 +28,16 @@ enum ClientCommand {
     Insert {
         table: String,
         values: HashMap<String, Value>,
-        reply: oneshot::Sender<jazz::tools::Result<(ObjectId, Vec<Value>, Option<BatchId>)>>,
+        reply: oneshot::Sender<jazz::tools::Result<(ObjectId, Vec<Value>, Option<TransactionId>)>>,
     },
     Update {
         object_id: ObjectId,
         updates: Vec<(String, Value)>,
-        reply: oneshot::Sender<jazz::tools::Result<Option<BatchId>>>,
+        reply: oneshot::Sender<jazz::tools::Result<Option<TransactionId>>>,
     },
     Delete {
         object_id: ObjectId,
-        reply: oneshot::Sender<jazz::tools::Result<Option<BatchId>>>,
+        reply: oneshot::Sender<jazz::tools::Result<Option<TransactionId>>>,
     },
 }
 
@@ -75,7 +75,7 @@ impl TodoClient {
         &self,
         table: &str,
         values: HashMap<String, Value>,
-    ) -> jazz::tools::Result<(ObjectId, Vec<Value>, Option<BatchId>)> {
+    ) -> jazz::tools::Result<(ObjectId, Vec<Value>, Option<TransactionId>)> {
         let (reply, rx) = oneshot::channel();
         self.tx
             .send(ClientCommand::Insert {
@@ -91,7 +91,7 @@ impl TodoClient {
         &self,
         object_id: ObjectId,
         updates: Vec<(String, Value)>,
-    ) -> jazz::tools::Result<Option<BatchId>> {
+    ) -> jazz::tools::Result<Option<TransactionId>> {
         let (reply, rx) = oneshot::channel();
         self.tx
             .send(ClientCommand::Update {
@@ -103,7 +103,7 @@ impl TodoClient {
         rx.await.map_err(|_| JazzError::ChannelClosed)?
     }
 
-    pub async fn delete(&self, object_id: ObjectId) -> jazz::tools::Result<Option<BatchId>> {
+    pub async fn delete(&self, object_id: ObjectId) -> jazz::tools::Result<Option<TransactionId>> {
         let (reply, rx) = oneshot::channel();
         self.tx
             .send(ClientCommand::Delete { object_id, reply })

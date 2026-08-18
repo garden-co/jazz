@@ -8,7 +8,7 @@ use serde_bytes::ByteBuf;
 use crate::tools::Value;
 use crate::tools::metadata::RowProvenance;
 use crate::tools::object::ResultKey;
-use crate::tools::transaction::BatchId;
+use crate::tools::transaction::TransactionId;
 
 /// One named, typed field in a materialized query result.
 #[derive(Debug, Clone, PartialEq)]
@@ -116,13 +116,13 @@ impl<'de> Deserialize<'de> for RowBytes {
     }
 }
 
-/// A maintained output row with its result key, binary data, and batch identity.
+/// A maintained output row with its result key, binary data, and transaction identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Row {
     pub id: ResultKey,
     /// Binary encoded row data.
     pub data: RowBytes,
-    pub batch_id: BatchId,
+    pub transaction_id: TransactionId,
     pub provenance: RowProvenance,
 }
 
@@ -130,13 +130,13 @@ impl Row {
     pub fn new(
         id: ResultKey,
         data: impl Into<RowBytes>,
-        batch_id: BatchId,
+        transaction_id: TransactionId,
         provenance: RowProvenance,
     ) -> Self {
         Self {
             id,
             data: data.into(),
-            batch_id,
+            transaction_id,
             provenance,
         }
     }

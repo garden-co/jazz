@@ -101,7 +101,7 @@ fn client_side_rejection_cascades_to_local_mergeable_descendant() {
         &mut core,
         MergeableCommit::new("todos", row, 1).cells(title_cells("old")),
     );
-    let tx_id = OpenBatchId::new();
+    let tx_id = OpenTransactionId::new();
     client.open_exclusive(tx_id).unwrap();
     client
         .tx_write(tx_id, "todos", row, title_cells("exclusive"), None)
@@ -174,7 +174,7 @@ fn authority_unparks_child_after_unknown_parent_accepts() {
     let (_client_dir, mut client) = open_node_with_uuid(node(1));
     let (_core_dir, mut core) = open_node_with_uuid(node(9));
     let row = row(7);
-    let tx_id = OpenBatchId::new();
+    let tx_id = OpenTransactionId::new();
     client.open_exclusive(tx_id).unwrap();
     client
         .tx_write(tx_id, "todos", row, title_cells("exclusive"), None)

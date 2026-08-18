@@ -65,9 +65,9 @@ use jazz::query::{
     Query as CoreQuery, RelationExpr as CoreRelationExpr, RelationQuery as CoreRelationQuery,
 };
 use jazz::schema::JazzSchema;
-use jazz::tools::OpenBatchId as CoreOpenBatchId;
+use jazz::tools::OpenTransactionId as CoreOpenBatchId;
 use jazz::tools::identity;
-use jazz::tools::{AppId, BatchId};
+use jazz::tools::{AppId, TransactionId};
 use jazz::tx::{DurabilityTier as CoreDurabilityTier, TxId};
 use jazz::wire::{
     TransportError, WireAuthorityEndpoint as CoreWireAuthorityEndpoint,
@@ -178,7 +178,7 @@ pub struct QueryAttachment {
 #[napi(js_name = "Write")]
 pub struct Write {
     payload: Vec<u8>,
-    batch_id: BatchId,
+    batch_id: TransactionId,
     inner: Option<NapiWrite>,
 }
 
@@ -2115,7 +2115,7 @@ fn core_write_memory(
     Ok(Write {
         payload: postcard::to_allocvec(&result)
             .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-        batch_id: BatchId::from_committed_tx(tx_id),
+        batch_id: TransactionId::from_committed_tx(tx_id),
         inner: Some(NapiWrite::Memory { db, tx_id }),
     })
 }
@@ -2132,7 +2132,7 @@ fn core_write_persistent(
     Ok(Write {
         payload: postcard::to_allocvec(&result)
             .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-        batch_id: BatchId::from_committed_tx(tx_id),
+        batch_id: TransactionId::from_committed_tx(tx_id),
         inner: Some(NapiWrite::Persistent { db, tx_id }),
     })
 }
@@ -2198,7 +2198,7 @@ fn core_tx_write(tx_id: TxId, inner: Option<NapiWrite>) -> napi::Result<Write> {
     Ok(Write {
         payload: postcard::to_allocvec(&result)
             .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-        batch_id: BatchId::from_committed_tx(tx_id),
+        batch_id: TransactionId::from_committed_tx(tx_id),
         inner,
     })
 }
@@ -3054,7 +3054,7 @@ mod tests {
     use jazz::schema::{
         ColumnSchema as CoreColumnSchema, JazzSchema, Policy, TableSchema as CoreTableSchema,
     };
-    use jazz::tools::OpenBatchId as CoreOpenBatchId;
+    use jazz::tools::OpenTransactionId as CoreOpenBatchId;
     use jazz::tools::{ColumnType, Schema, SchemaBuilder, TableName, TableSchema, Value};
     use jazz::tx::DurabilityTier;
     use napi::bindgen_prelude::{BigInt, Either, Either3, Either4};

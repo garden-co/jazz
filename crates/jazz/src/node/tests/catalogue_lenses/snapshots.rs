@@ -1309,7 +1309,7 @@ fn dynamic_edge_bootstrap_rejects_direct_ingest_and_fate_without_residue() {
         .expect("open explicit uninitialized edge");
 
     assert!(matches!(
-        edge.open_exclusive(OpenBatchId::new()),
+        edge.open_exclusive(OpenTransactionId::new()),
         Err(Error::CatalogueUninitialized)
     ));
     assert!(matches!(

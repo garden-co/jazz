@@ -1869,7 +1869,7 @@ impl CoreDb {
     }
 
     pub(super) fn exclusive_tx(&self) -> Result<CoreExclusiveTx<'_>, Error> {
-        let tx_id = OpenBatchId::new();
+        let tx_id = OpenTransactionId::new();
         self.server.node().borrow_mut().open_exclusive(tx_id)?;
         Ok(CoreExclusiveTx {
             core: self,
@@ -1922,7 +1922,7 @@ impl CoreDb {
 
 pub(super) struct CoreExclusiveTx<'a> {
     core: &'a CoreDb,
-    tx_id: OpenBatchId,
+    tx_id: OpenTransactionId,
     has_reads: Cell<bool>,
 }
 

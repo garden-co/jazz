@@ -521,7 +521,7 @@ where
 
     fn compile_open_tx_query_program(
         &mut self,
-        tx_id: OpenBatchId,
+        tx_id: OpenTransactionId,
         shape: &ValidatedQuery,
         binding: &Binding,
         identity: AuthorId,
@@ -2237,7 +2237,7 @@ where
     /// Evaluate a validated query inside an open exclusive transaction.
     pub fn tx_query(
         &mut self,
-        tx_id: OpenBatchId,
+        tx_id: OpenTransactionId,
         shape: &ValidatedQuery,
         binding: &Binding,
     ) -> Result<Vec<CurrentRow>, Error> {
@@ -2248,7 +2248,7 @@ where
     /// client read boundary with explicit root-row deletion visibility.
     pub fn tx_query_with_options(
         &mut self,
-        tx_id: OpenBatchId,
+        tx_id: OpenTransactionId,
         shape: &ValidatedQuery,
         binding: &Binding,
         include_deleted: bool,
@@ -2266,7 +2266,7 @@ where
     /// Evaluate a validated query inside an open exclusive transaction as `identity`.
     pub fn tx_query_for_identity(
         &mut self,
-        tx_id: OpenBatchId,
+        tx_id: OpenTransactionId,
         shape: &ValidatedQuery,
         binding: &Binding,
         identity: AuthorId,
@@ -2278,7 +2278,7 @@ where
     /// root-row deletion visibility.
     pub fn tx_query_for_identity_with_options(
         &mut self,
-        tx_id: OpenBatchId,
+        tx_id: OpenTransactionId,
         shape: &ValidatedQuery,
         binding: &Binding,
         identity: AuthorId,
@@ -2296,7 +2296,7 @@ where
 
     fn tx_query_in_authorization_mode(
         &mut self,
-        tx_id: OpenBatchId,
+        tx_id: OpenTransactionId,
         shape: &ValidatedQuery,
         binding: &Binding,
         identity: AuthorId,

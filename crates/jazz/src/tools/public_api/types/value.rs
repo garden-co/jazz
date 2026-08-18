@@ -23,7 +23,7 @@ pub enum Value {
     Text(String),
     Timestamp(u64),
     Uuid(ObjectId),
-    BatchId([u8; 16]),
+    TransactionId([u8; 16]),
     Bytea(Vec<u8>),
     /// Homogeneous array of values.
     Array(Vec<Value>),
@@ -53,8 +53,8 @@ impl fmt::Debug for Value {
             Self::Text(value) => f.debug_tuple("Text").field(value).finish(),
             Self::Timestamp(value) => f.debug_tuple("Timestamp").field(value).finish(),
             Self::Uuid(value) => f.debug_tuple("Uuid").field(value).finish(),
-            // Batch ids are fixed-size semantic identifiers, unlike payloads.
-            Self::BatchId(value) => write!(f, "BatchId({})", hex::encode(value)),
+            // Transaction ids are fixed-size semantic identifiers, unlike payloads.
+            Self::TransactionId(value) => write!(f, "TransactionId({})", hex::encode(value)),
             Self::Bytea(value) => f.debug_struct("Bytea").field("len", &value.len()).finish(),
             // Avoid a collection of nested byte values making an error log unbounded.
             Self::Array(values) => f.debug_struct("Array").field("len", &values.len()).finish(),
@@ -90,7 +90,7 @@ enum ValueHuman {
     Text(String),
     Timestamp(#[serde(deserialize_with = "deserialize_timestamp_value")] u64),
     Uuid(ObjectId),
-    BatchId([u8; 16]),
+    TransactionId([u8; 16]),
     Bytea(Vec<u8>),
     Array(Vec<ValueHuman>),
     Row(RowHuman),
@@ -228,7 +228,7 @@ impl From<&Value> for ValueHuman {
             Value::Text(v) => ValueHuman::Text(v.clone()),
             Value::Timestamp(v) => ValueHuman::Timestamp(*v),
             Value::Uuid(v) => ValueHuman::Uuid(*v),
-            Value::BatchId(v) => ValueHuman::BatchId(*v),
+            Value::TransactionId(v) => ValueHuman::TransactionId(*v),
             Value::Bytea(v) => ValueHuman::Bytea(v.clone()),
             Value::Array(v) => ValueHuman::Array(v.iter().map(ValueHuman::from).collect()),
             Value::Row { id, values } => ValueHuman::Row(RowHuman {
@@ -254,7 +254,7 @@ impl From<ValueHuman> for Value {
             ValueHuman::Text(v) => Value::Text(v),
             ValueHuman::Timestamp(v) => Value::Timestamp(v),
             ValueHuman::Uuid(v) => Value::Uuid(v),
-            ValueHuman::BatchId(v) => Value::BatchId(v),
+            ValueHuman::TransactionId(v) => Value::TransactionId(v),
             ValueHuman::Bytea(v) => Value::Bytea(v),
             ValueHuman::Array(v) => Value::Array(v.into_iter().map(Value::from).collect()),
             ValueHuman::Row(r) => Value::Row {
@@ -306,7 +306,7 @@ impl PartialEq for Value {
             (Value::Text(a), Value::Text(b)) => a == b,
             (Value::Timestamp(a), Value::Timestamp(b)) => a == b,
             (Value::Uuid(a), Value::Uuid(b)) => a == b,
-            (Value::BatchId(a), Value::BatchId(b)) => a == b,
+            (Value::TransactionId(a), Value::TransactionId(b)) => a == b,
             (Value::Bytea(a), Value::Bytea(b)) => a == b,
             (
                 Value::Enum {
@@ -349,7 +349,7 @@ impl Value {
             Value::Text(_) => Some(ColumnType::Text),
             Value::Timestamp(_) => Some(ColumnType::Timestamp),
             Value::Uuid(_) => Some(ColumnType::Uuid),
-            Value::BatchId(_) => Some(ColumnType::BatchId),
+            Value::TransactionId(_) => Some(ColumnType::TransactionId),
             Value::Bytea(_) => Some(ColumnType::Bytea),
             Value::Array(elements) => {
                 // Infer element type from first element; empty arrays have no inferable type
@@ -455,7 +455,7 @@ impl From<ObjectId> for Value {
 
 impl From<[u8; 16]> for Value {
     fn from(v: [u8; 16]) -> Self {
-        Value::BatchId(v)
+        Value::TransactionId(v)
     }
 }
 
@@ -520,10 +520,10 @@ mod tests {
     }
 
     #[test]
-    fn batch_id_debug_keeps_the_compact_semantic_id() {
+    fn transaction_id_debug_keeps_the_compact_semantic_id() {
         assert_eq!(
-            format!("{:?}", Value::BatchId([0xab; 16])),
-            "BatchId(abababababababababababababababab)"
+            format!("{:?}", Value::TransactionId([0xab; 16])),
+            "TransactionId(abababababababababababababababab)"
         );
     }
 
@@ -600,7 +600,7 @@ mod tests {
     fn from_batch_id_bytes() {
         let bytes = [7u8; 16];
         let v: Value = bytes.into();
-        assert_eq!(v, Value::BatchId(bytes));
+        assert_eq!(v, Value::TransactionId(bytes));
     }
 
     // ── From<Vec<u8>> ───────────────────────────────────────────────
@@ -613,10 +613,10 @@ mod tests {
     }
 
     #[test]
-    fn batch_id_json_round_trip() {
-        let value = Value::BatchId([9u8; 16]);
-        let json = serde_json::to_string(&value).expect("serialize batch id");
-        let decoded: Value = serde_json::from_str(&json).expect("deserialize batch id");
+    fn transaction_id_json_round_trip() {
+        let value = Value::TransactionId([9u8; 16]);
+        let json = serde_json::to_string(&value).expect("serialize transaction id");
+        let decoded: Value = serde_json::from_str(&json).expect("deserialize transaction id");
         assert_eq!(decoded, value);
     }
 

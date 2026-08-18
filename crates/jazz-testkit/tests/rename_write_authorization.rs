@@ -353,11 +353,11 @@ async fn renamed_table_insert_after_schema_evolution_reaches_edge() {
             wait_for_edge_query_ready(&bob, "people", Duration::from_secs(30)).await;
 
             let user_id = jazz::tools::ObjectId::new();
-            let (_, _, batch_id) = bob
+            let (_, _, transaction_id) = bob
                 .insert("people", client_person_values(user_id, "bob@example.com"))
                 .expect("bob creates v2 person");
-            bob.wait_for_batch(
-                batch_id.expect("ordinary mutation commits immediately"),
+            bob.wait_for_transaction(
+                transaction_id.expect("ordinary mutation commits immediately"),
                 jazz::tools::DurabilityTier::EdgeServer,
             )
             .await

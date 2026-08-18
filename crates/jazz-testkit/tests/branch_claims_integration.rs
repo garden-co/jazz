@@ -147,15 +147,15 @@ async fn query_applies_claims_select_policy() {
                 .connect()
                 .await;
 
-            let (room_id, _, batch_id) = admin
+            let (room_id, _, transaction_id) = admin
                 .insert(
                     "rooms",
                     row_input!("name" => "Party Room", "join_code" => "secret-123"),
                 )
                 .expect("admin creates claims-gated room");
             admin
-                .wait_for_batch(
-                    batch_id.expect("ordinary mutation commits immediately"),
+                .wait_for_transaction(
+                    transaction_id.expect("ordinary mutation commits immediately"),
                     DurabilityTier::EdgeServer,
                 )
                 .await
@@ -250,7 +250,7 @@ async fn numeric_claims_match_integer_columns_across_core_widths() {
                 )
                 .expect("admin creates integer claims row");
             admin
-                .wait_for_batch(
+                .wait_for_transaction(
                     integer_batch.expect("ordinary mutation commits immediately"),
                     DurabilityTier::EdgeServer,
                 )
@@ -263,7 +263,7 @@ async fn numeric_claims_match_integer_columns_across_core_widths() {
                 )
                 .expect("admin creates bigint claims row");
             admin
-                .wait_for_batch(
+                .wait_for_transaction(
                     bigint_batch.expect("ordinary mutation commits immediately"),
                     DurabilityTier::EdgeServer,
                 )
@@ -350,7 +350,7 @@ async fn session_role_in_list_matches_equivalent_or_policy() {
                 .insert("role_in_list_rooms", row_input!("name" => "in-list room"))
                 .expect("admin creates in-list room");
             admin
-                .wait_for_batch(
+                .wait_for_transaction(
                     in_list_batch_id.expect("ordinary mutation commits immediately"),
                     DurabilityTier::EdgeServer,
                 )
@@ -360,7 +360,7 @@ async fn session_role_in_list_matches_equivalent_or_policy() {
                 .insert("role_or_rooms", row_input!("name" => "or room"))
                 .expect("admin creates or room");
             admin
-                .wait_for_batch(
+                .wait_for_transaction(
                     or_batch_id.expect("ordinary mutation commits immediately"),
                     DurabilityTier::EdgeServer,
                 )
@@ -479,15 +479,15 @@ async fn subscription_matches_claims_select_query() {
                 .connect()
                 .await;
 
-            let (room_id, _, batch_id) = admin
+            let (room_id, _, transaction_id) = admin
                 .insert(
                     "rooms",
                     row_input!("name" => "Subscription Room", "join_code" => "secret-123"),
                 )
                 .expect("admin creates claims-gated room");
             admin
-                .wait_for_batch(
-                    batch_id.expect("ordinary mutation commits immediately"),
+                .wait_for_transaction(
+                    transaction_id.expect("ordinary mutation commits immediately"),
                     DurabilityTier::EdgeServer,
                 )
                 .await
@@ -637,7 +637,7 @@ async fn same_identity_sessions_keep_claims_isolated() {
                 )
                 .expect("writer inserts initially visible room");
             writer
-                .wait_for_batch(initial_batch.expect("ordinary mutation commits immediately"), DurabilityTier::EdgeServer)
+                .wait_for_transaction(initial_batch.expect("ordinary mutation commits immediately"), DurabilityTier::EdgeServer)
                 .await
                 .expect("initial room reaches edge");
 
@@ -680,7 +680,7 @@ async fn same_identity_sessions_keep_claims_isolated() {
                 .insert("admin_rooms", row_input!("name" => "visible to original session"))
                 .expect("writer inserts a later room");
             writer
-                .wait_for_batch(future_batch.expect("ordinary mutation commits immediately"), DurabilityTier::EdgeServer)
+                .wait_for_transaction(future_batch.expect("ordinary mutation commits immediately"), DurabilityTier::EdgeServer)
                 .await
                 .expect("later room reaches edge");
             wait_for_subscription_update(
@@ -733,7 +733,7 @@ async fn same_shape_subscriptions_route_claims_per_identity() {
                 )
                 .expect("admin creates alpha room");
             admin
-                .wait_for_batch(
+                .wait_for_transaction(
                     alpha_batch.expect("ordinary mutation commits immediately"),
                     DurabilityTier::EdgeServer,
                 )
@@ -746,7 +746,7 @@ async fn same_shape_subscriptions_route_claims_per_identity() {
                 )
                 .expect("admin creates beta room");
             admin
-                .wait_for_batch(
+                .wait_for_transaction(
                     beta_batch.expect("ordinary mutation commits immediately"),
                     DurabilityTier::EdgeServer,
                 )
@@ -1125,7 +1125,7 @@ async fn numeric_claims_authorize_writes_across_core_widths() {
                 )
                 .expect("I64 claim creates I32 row");
             bigint_claim_user
-                .wait_for_batch(
+                .wait_for_transaction(
                     integer_batch.expect("ordinary mutation commits immediately"),
                     DurabilityTier::EdgeServer,
                 )
@@ -1148,7 +1148,7 @@ async fn numeric_claims_authorize_writes_across_core_widths() {
                 )
                 .expect("U32 claim creates I64 row");
             integer_claim_user
-                .wait_for_batch(
+                .wait_for_transaction(
                     bigint_batch.expect("ordinary mutation commits immediately"),
                     DurabilityTier::EdgeServer,
                 )

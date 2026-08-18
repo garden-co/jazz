@@ -938,7 +938,7 @@ fn tx_query_snapshot_is_stable_after_concurrent_arrival() {
         .validate(&schema())
         .unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
-    let tx = OpenBatchId::new();
+    let tx = OpenTransactionId::new();
     node.open_exclusive(tx).unwrap();
     assert_eq!(node.tx_query(tx, &shape, &binding).unwrap().len(), 1);
     commit_issue(&mut node, 2, "open", author(1));
@@ -1013,7 +1013,7 @@ fn tx_query_reachable_uses_shared_snapshot_sources() {
     let binding = shape
         .bind(BTreeMap::from([("team".to_owned(), Value::Uuid(team1.0))]))
         .unwrap();
-    let tx = OpenBatchId::new();
+    let tx = OpenTransactionId::new();
     node.open_exclusive(tx).unwrap();
     let rows = node
         .tx_query(tx, &shape, &binding)

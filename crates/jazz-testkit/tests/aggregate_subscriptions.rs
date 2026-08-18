@@ -460,7 +460,7 @@ async fn insert_metric(client: &JazzClient, bucket: &str, score: i32) {
         .insert("metrics", row_input!("bucket" => bucket, "score" => score))
         .expect("insert integer metric");
     client
-        .wait_for_batch(
+        .wait_for_transaction(
             batch.expect("ordinary mutation commits immediately"),
             DurabilityTier::Local,
         )
@@ -478,7 +478,7 @@ async fn insert_metric_at_tier(
         .insert("metrics", row_input!("bucket" => bucket, "score" => score))
         .expect("insert integer metric");
     client
-        .wait_for_batch(batch.expect("ordinary mutation commits immediately"), tier)
+        .wait_for_transaction(batch.expect("ordinary mutation commits immediately"), tier)
         .await
         .expect("integer metric settles");
 }
@@ -500,7 +500,7 @@ async fn insert_bigint_metric_at_tier(
         )
         .expect("insert bigint metric");
     client
-        .wait_for_batch(batch.expect("ordinary mutation commits immediately"), tier)
+        .wait_for_transaction(batch.expect("ordinary mutation commits immediately"), tier)
         .await
         .expect("bigint metric settles");
 }
@@ -518,7 +518,7 @@ async fn insert_double_metric_at_tier(
         )
         .expect("insert double metric");
     client
-        .wait_for_batch(batch.expect("ordinary mutation commits immediately"), tier)
+        .wait_for_transaction(batch.expect("ordinary mutation commits immediately"), tier)
         .await
         .expect("double metric settles");
 }
@@ -596,7 +596,7 @@ async fn aggregate_subscription_count_and_grouped_sum_track_full_state() {
                 .insert("metrics", row_input!("bucket" => "a", "score" => 10))
                 .expect("insert a1");
             writer
-                .wait_for_batch(
+                .wait_for_transaction(
                     batch.expect("ordinary mutation commits immediately"),
                     DurabilityTier::EdgeServer,
                 )
@@ -616,7 +616,7 @@ async fn aggregate_subscription_count_and_grouped_sum_track_full_state() {
                 .insert("metrics", row_input!("bucket" => "b", "score" => 7))
                 .expect("insert b1");
             writer
-                .wait_for_batch(
+                .wait_for_transaction(
                     batch.expect("ordinary mutation commits immediately"),
                     DurabilityTier::EdgeServer,
                 )
@@ -637,7 +637,7 @@ async fn aggregate_subscription_count_and_grouped_sum_track_full_state() {
 
             let batch = writer.delete(b1).expect("delete b1 and empty b");
             writer
-                .wait_for_batch(
+                .wait_for_transaction(
                     batch.expect("ordinary mutation commits immediately"),
                     DurabilityTier::EdgeServer,
                 )
@@ -647,7 +647,7 @@ async fn aggregate_subscription_count_and_grouped_sum_track_full_state() {
                 .insert("metrics", row_input!("bucket" => "b", "score" => 5))
                 .expect("repopulate b");
             writer
-                .wait_for_batch(
+                .wait_for_transaction(
                     batch.expect("ordinary mutation commits immediately"),
                     DurabilityTier::EdgeServer,
                 )
@@ -665,7 +665,7 @@ async fn aggregate_subscription_count_and_grouped_sum_track_full_state() {
 
             let batch = writer.delete(a1).expect("delete a1");
             writer
-                .wait_for_batch(
+                .wait_for_transaction(
                     batch.expect("ordinary mutation commits immediately"),
                     DurabilityTier::EdgeServer,
                 )
@@ -725,7 +725,7 @@ async fn aggregate_subscription_group_field_named_count_uses_structural_wire_slo
                 .insert("metrics", row_input!("count" => "group", "score" => 1))
                 .expect("insert grouped sum metric");
             writer
-                .wait_for_batch(
+                .wait_for_transaction(
                     batch.expect("ordinary mutation commits immediately"),
                     DurabilityTier::EdgeServer,
                 )
@@ -801,7 +801,7 @@ async fn aggregate_subscription_uses_core_canonical_order_for_mixed_outputs() {
                     )
                     .expect("insert mixed aggregate metric");
                 writer
-                    .wait_for_batch(
+                    .wait_for_transaction(
                         batch.expect("ordinary mutation commits immediately"),
                         DurabilityTier::EdgeServer,
                     )
@@ -864,7 +864,7 @@ async fn aggregate_sum_public_boundary_preserves_nullable_results() {
                 )
                 .expect("insert null score");
             client
-                .wait_for_batch(
+                .wait_for_transaction(
                     batch.expect("ordinary mutation commits immediately"),
                     DurabilityTier::Local,
                 )
@@ -943,7 +943,7 @@ async fn grouped_null_aggregate_membership_survives_absence_and_replacement() {
                     )
                     .expect("insert nullable metric");
                 writer
-                    .wait_for_batch(
+                    .wait_for_transaction(
                         batch.expect("ordinary mutation commits immediately"),
                         DurabilityTier::EdgeServer,
                     )
@@ -976,7 +976,7 @@ async fn grouped_null_aggregate_membership_survives_absence_and_replacement() {
 
             let batch = writer.delete(rows[2]).expect("delete gone group");
             writer
-                .wait_for_batch(
+                .wait_for_transaction(
                     batch.expect("ordinary mutation commits immediately"),
                     DurabilityTier::EdgeServer,
                 )
@@ -1007,7 +1007,7 @@ async fn grouped_null_aggregate_membership_survives_absence_and_replacement() {
                 )
                 .expect("replace changed aggregate group");
             writer
-                .wait_for_batch(
+                .wait_for_transaction(
                     batch.expect("ordinary mutation commits immediately"),
                     DurabilityTier::EdgeServer,
                 )
@@ -1071,7 +1071,7 @@ async fn maintained_integer_sum_accumulates_multiple_deltas_and_retracts_empty_g
                 .insert("metrics", row_input!("bucket" => "same", "score" => 10))
                 .expect("insert first metric");
             writer
-                .wait_for_batch(
+                .wait_for_transaction(
                     batch.expect("ordinary mutation commits immediately"),
                     DurabilityTier::EdgeServer,
                 )
@@ -1088,7 +1088,7 @@ async fn maintained_integer_sum_accumulates_multiple_deltas_and_retracts_empty_g
                 .insert("metrics", row_input!("bucket" => "same", "score" => 7))
                 .expect("insert second metric");
             writer
-                .wait_for_batch(
+                .wait_for_transaction(
                     batch.expect("ordinary mutation commits immediately"),
                     DurabilityTier::EdgeServer,
                 )
@@ -1103,7 +1103,7 @@ async fn maintained_integer_sum_accumulates_multiple_deltas_and_retracts_empty_g
 
             let batch = writer.delete(first).expect("delete first metric");
             writer
-                .wait_for_batch(
+                .wait_for_transaction(
                     batch.expect("ordinary mutation commits immediately"),
                     DurabilityTier::EdgeServer,
                 )
@@ -1118,7 +1118,7 @@ async fn maintained_integer_sum_accumulates_multiple_deltas_and_retracts_empty_g
 
             let batch = writer.delete(second).expect("delete second metric");
             writer
-                .wait_for_batch(
+                .wait_for_transaction(
                     batch.expect("ordinary mutation commits immediately"),
                     DurabilityTier::EdgeServer,
                 )
@@ -1581,7 +1581,7 @@ async fn aggregate_sum_bigint_survives_public_client_boundary() {
                 )
                 .expect("insert negative bigint score");
             client
-                .wait_for_batch(
+                .wait_for_transaction(
                     batch.expect("ordinary mutation commits immediately"),
                     DurabilityTier::Local,
                 )
@@ -1594,7 +1594,7 @@ async fn aggregate_sum_bigint_survives_public_client_boundary() {
                 )
                 .expect("insert positive bigint score");
             client
-                .wait_for_batch(
+                .wait_for_transaction(
                     batch.expect("ordinary mutation commits immediately"),
                     DurabilityTier::Local,
                 )
@@ -1634,7 +1634,7 @@ async fn aggregate_outputs_do_not_collide_with_grouped_public_column_names() {
                 )
                 .expect("insert signed aggregate value");
             client
-                .wait_for_batch(
+                .wait_for_transaction(
                     batch.expect("ordinary mutation commits immediately"),
                     DurabilityTier::Local,
                 )
@@ -1650,7 +1650,7 @@ async fn aggregate_outputs_do_not_collide_with_grouped_public_column_names() {
                 )
                 .expect("insert nullable aggregate value");
             client
-                .wait_for_batch(
+                .wait_for_transaction(
                     batch.expect("ordinary mutation commits immediately"),
                     DurabilityTier::Local,
                 )
@@ -1704,7 +1704,7 @@ async fn integer_counter_columns_merge_signed_public_values() {
                 .insert("counters", row_input!("name" => "shared", "count" => 0))
                 .expect("insert counter");
             alice
-                .wait_for_batch(
+                .wait_for_transaction(
                     batch.expect("ordinary mutation commits immediately"),
                     DurabilityTier::EdgeServer,
                 )
@@ -1735,13 +1735,13 @@ async fn integer_counter_columns_merge_signed_public_values() {
                 .update(counter_id, vec![("count".to_owned(), Value::Integer(5))])
                 .expect("bob updates counter");
             alice
-                .wait_for_batch(
+                .wait_for_transaction(
                     alice_batch.expect("ordinary mutation commits immediately"),
                     DurabilityTier::EdgeServer,
                 )
                 .await
                 .expect("alice counter update reaches edge");
-            bob.wait_for_batch(
+            bob.wait_for_transaction(
                 bob_batch.expect("ordinary mutation commits immediately"),
                 DurabilityTier::EdgeServer,
             )
@@ -1814,7 +1814,7 @@ async fn aggregate_subscription_spy_stays_at_policy_visible_truth() {
                 )
                 .expect("insert admin row");
             admin
-                .wait_for_batch(
+                .wait_for_transaction(
                     batch.expect("ordinary mutation commits immediately"),
                     DurabilityTier::EdgeServer,
                 )
@@ -1837,7 +1837,7 @@ async fn aggregate_subscription_spy_stays_at_policy_visible_truth() {
 
             let batch = admin.delete(admin_row).expect("delete admin row");
             admin
-                .wait_for_batch(
+                .wait_for_transaction(
                     batch.expect("ordinary mutation commits immediately"),
                     DurabilityTier::EdgeServer,
                 )

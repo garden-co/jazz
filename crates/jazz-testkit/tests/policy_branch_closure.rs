@@ -161,10 +161,14 @@ fn gathered_resource_access_policy() -> PolicyExpr {
     }
 }
 
-async fn wait_edge_batch(client: &JazzClient, batch_id: jazz::tools::BatchId, label: &str) {
+async fn wait_edge_batch(
+    client: &JazzClient,
+    transaction_id: jazz::tools::TransactionId,
+    label: &str,
+) {
     tokio::time::timeout(
         Duration::from_secs(15),
-        client.wait_for_batch(batch_id, DurabilityTier::EdgeServer),
+        client.wait_for_transaction(transaction_id, DurabilityTier::EdgeServer),
     )
     .await
     .unwrap_or_else(|_| panic!("{label} timed out waiting for edge batch"))

@@ -69,8 +69,8 @@ use crate::query::{
 pub use crate::result_tree::{ResultNode, ResultRelation, ResultTree, ResultTreeReplacement};
 use crate::schema::{JazzSchema, TableSchema};
 use crate::time::GlobalSeq;
-use crate::tools::OpenBatchId;
-use crate::tools::{BatchId, ObjectId, OutputOccurrenceId, ResultKey};
+use crate::tools::OpenTransactionId;
+use crate::tools::{ObjectId, OutputOccurrenceId, ResultKey, TransactionId};
 use crate::tx::{DeletionEvent, DurabilityTier, Fate, RejectionReason, TxId, TxKind};
 use crate::wire::{TransportError, WireAuthorityEndpoint, WireFeatures, encode_sync_message};
 
@@ -115,7 +115,7 @@ pub struct MutationErrorEvent {
 #[serde(rename_all = "camelCase")]
 pub struct LocalTransactionRecord {
     /// Stable public identity derived from the core transaction id.
-    pub batch_id: BatchId,
+    pub transaction_id: TransactionId,
     /// Transaction semantics used by the commit.
     pub kind: TransactionKind,
     /// Committed transaction records are immutable.
@@ -151,7 +151,7 @@ pub enum TransactionFate {
     Rejected {
         /// Stable public identity derived from the core transaction id.
         #[serde(rename = "batchId")]
-        batch_id: BatchId,
+        transaction_id: TransactionId,
         /// Stable machine-readable rejection code.
         code: String,
         /// Human-readable rejection reason.
@@ -1378,7 +1378,7 @@ where
     fn db(&self) -> &Db<S>;
 
     /// The id of the already-open transaction.
-    fn tx_id(&self) -> OpenBatchId;
+    fn tx_id(&self) -> OpenTransactionId;
 
     /// Stage an insert with a generated row id.
     fn insert(&self, table: &str, cells: RowCells) -> Result<RowUuid, Error> {
@@ -1541,13 +1541,13 @@ where
 ///
 /// This handle owns the transaction lifetime and abandons an uncommitted
 /// transaction on drop. Use [`MergeableTxRef`] when a caller retains an
-/// [`OpenBatchId`] between calls and must not close the transaction on return.
+/// [`OpenTransactionId`] between calls and must not close the transaction on return.
 pub struct MergeableTx<'a, S>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
     db: &'a Db<S>,
-    tx_id: OpenBatchId,
+    tx_id: OpenTransactionId,
     /// Set once the transaction has been committed, so `Drop` does not then
     /// abandon it. Without this, `commit` consumed `self` and `Drop` still ran
     /// `abandon_transaction_handle` on an already-committed transaction — benign
@@ -1582,7 +1582,7 @@ where
         self.db
     }
 
-    fn tx_id(&self) -> OpenBatchId {
+    fn tx_id(&self) -> OpenTransactionId {
         self.tx_id
     }
 }
@@ -1590,13 +1590,13 @@ where
 /// Non-owning operations handle for an already-open mergeable transaction.
 ///
 /// Construct this with [`Db::mergeable_tx_ref`] when another layer owns the
-/// [`OpenBatchId`] lifetime. Dropping this ref never abandons the transaction.
+/// [`OpenTransactionId`] lifetime. Dropping this ref never abandons the transaction.
 pub struct MergeableTxRef<'a, S>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
     db: &'a Db<S>,
-    tx_id: OpenBatchId,
+    tx_id: OpenTransactionId,
 }
 
 impl<S> MergeableTxOps<S> for MergeableTxRef<'_, S>
@@ -1607,7 +1607,7 @@ where
         self.db
     }
 
-    fn tx_id(&self) -> OpenBatchId {
+    fn tx_id(&self) -> OpenTransactionId {
         self.tx_id
     }
 }
@@ -1637,7 +1637,7 @@ where
     fn db(&self) -> &Db<S>;
 
     /// The id of the already-open transaction.
-    fn tx_id(&self) -> OpenBatchId;
+    fn tx_id(&self) -> OpenTransactionId;
 
     /// Read one row inside the exclusive transaction.
     fn read(&self, table: &str, row: RowUuid) -> Result<Option<RowCells>, Error> {
@@ -1724,13 +1724,13 @@ where
 ///
 /// This handle owns the transaction lifetime and abandons an uncommitted
 /// transaction on drop. Use [`ExclusiveTxRef`] when a caller retains an
-/// [`OpenBatchId`] between calls and must not close the transaction on return.
+/// [`OpenTransactionId`] between calls and must not close the transaction on return.
 pub struct ExclusiveTx<'a, S>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
     db: &'a Db<S>,
-    tx_id: OpenBatchId,
+    tx_id: OpenTransactionId,
     committed: bool,
 }
 
@@ -1760,7 +1760,7 @@ where
         self.db
     }
 
-    fn tx_id(&self) -> OpenBatchId {
+    fn tx_id(&self) -> OpenTransactionId {
         self.tx_id
     }
 }
@@ -1780,13 +1780,13 @@ where
 /// Non-owning operations handle for an already-open exclusive transaction.
 ///
 /// Construct this with [`Db::exclusive_tx_ref`] when another layer owns the
-/// [`OpenBatchId`] lifetime. Dropping this ref never abandons the transaction.
+/// [`OpenTransactionId`] lifetime. Dropping this ref never abandons the transaction.
 pub struct ExclusiveTxRef<'a, S>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
     db: &'a Db<S>,
-    tx_id: OpenBatchId,
+    tx_id: OpenTransactionId,
 }
 
 impl<S> ExclusiveTxOps<S> for ExclusiveTxRef<'_, S>
@@ -1797,7 +1797,7 @@ where
         self.db
     }
 
-    fn tx_id(&self) -> OpenBatchId {
+    fn tx_id(&self) -> OpenTransactionId {
         self.tx_id
     }
 }
