@@ -25,17 +25,9 @@ impl TickStorageRequirements {
         S: ResidentStorage,
     {
         for scan in &self.scans {
-            match &scan.bounds {
-                crate::storage::async_ordered::OwnedScanBounds::Prefix(prefix) => {
-                    storage.scan_prefix(&scan.column_family, prefix, &mut |_, _| Ok(()))?
-                }
-                crate::storage::async_ordered::OwnedScanBounds::Range { start, end }
-                    if start < end =>
-                {
-                    storage.scan_range(&scan.column_family, start, end, &mut |_, _| Ok(()))?
-                }
-                crate::storage::async_ordered::OwnedScanBounds::Range { .. } => {}
-            }
+            storage.require_resident(
+                &crate::storage::async_ordered::OwnedStorageOperation::Scan(scan.clone()),
+            )?;
         }
         Ok(())
     }

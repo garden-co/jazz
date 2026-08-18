@@ -204,6 +204,10 @@ fn covers(admitted: &OwnedStorageOperation, requested: &OwnedStorageOperation) -
 }
 
 impl ResidentStorage for DemandLoadedStorage {
+    fn require_resident(&self, operation: &OwnedStorageOperation) -> Result<(), Error> {
+        self.require(operation.clone())
+    }
+
     fn get(&self, cf: &ColumnFamilyName, key: &Key) -> Result<Option<Value>, Error> {
         self.require(OwnedStorageOperation::Get {
             column_family: cf.to_owned(),
@@ -307,5 +311,33 @@ impl ReopenableStorage for DemandLoadedStorage {
             cache: cache.reopen(column_families)?,
             state,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resident_requirement_checks_admission_without_scanning_rows() {
+        let storage = DemandLoadedStorage::new(&["rows"]);
+        let request = OwnedStorageOperation::Scan(OwnedScanRequest::prefix("rows", b"item/"));
+
+        assert!(matches!(
+            storage.require_resident(&request),
+            Err(Error::NotResident { .. })
+        ));
+        storage
+            .admit(
+                request.clone(),
+                OwnedStorageResponse::Rows(vec![(b"item/1".to_vec(), b"one".to_vec())]),
+            )
+            .unwrap();
+
+        storage.require_resident(&request).unwrap();
+        assert_eq!(
+            storage.get("rows", b"item/1").unwrap(),
+            Some(b"one".to_vec())
+        );
     }
 }

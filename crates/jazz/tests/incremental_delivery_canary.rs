@@ -141,6 +141,16 @@ fn global_read_opts() -> ReadOpts {
     }
 }
 
+fn resident_read_opts() -> ReadOpts {
+    ReadOpts {
+        tier: DurabilityTier::Local,
+        local_updates: LocalUpdates::Immediate,
+        propagation: Propagation::LocalOnly,
+        include_deleted: false,
+        ..ReadOpts::default()
+    }
+}
+
 use duplex_transport::duplex;
 
 fn open_db(scale: usize) -> Db<MemoryStorage> {
@@ -330,7 +340,7 @@ fn measure_single_child_insert(scale: usize) -> AllocSnapshot {
     let prepared = db
         .prepare_query(&relation_query())
         .expect("prepare relation query");
-    let mut stream = block_on(db.subscribe(&prepared, ReadOpts::default()))
+    let mut stream = block_on(db.subscribe(&prepared, resident_read_opts()))
         .expect("subscribe relation include query");
 
     expect_parent_snapshot(

@@ -422,6 +422,13 @@ impl<S> ResidentStorage for MeteredStorage<'_, S>
 where
     S: ResidentStorage,
 {
+    fn require_resident(
+        &self,
+        operation: &crate::storage::async_ordered::OwnedStorageOperation,
+    ) -> Result<(), crate::storage::Error> {
+        self.storage.require_resident(operation)
+    }
+
     fn get(
         &self,
         cf: &crate::storage::ColumnFamilyName,

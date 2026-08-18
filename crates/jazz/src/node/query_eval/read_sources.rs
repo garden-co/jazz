@@ -120,8 +120,12 @@ where
                         });
                     }
                     Err(Error::MissingTransaction(_)) => {}
-                    Err(_) => {
-                        return Err(source_resolution_error(request, SourceGap::Coverage));
+                    Err(error) => {
+                        return Err(source_resolution_error_from_node(
+                            request,
+                            SourceGap::Coverage,
+                            error,
+                        ));
                     }
                 }
                 (projection, Some(DurabilityTier::Global), None, None, None)
@@ -221,10 +225,9 @@ where
                     SourceGap::SchemaProjection,
                 ));
             }
-            let rows = self
-                .node
-                .branch_metadata_current_rows()
-                .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
+            let rows = self.node.branch_metadata_current_rows().map_err(|error| {
+                source_resolution_error_from_node(request, SourceGap::Coverage, error)
+            })?;
             let base = inline_current_graph(&table, rows)
                 .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
             let descriptor = current_row_descriptor(&table);
@@ -378,7 +381,13 @@ where
                     &request.source.table,
                     include_deleted,
                 )
-                .map_err(|_| source_resolution_error(request, SourceGap::TransactionReadOverlay))?;
+                .map_err(|error| {
+                    source_resolution_error_from_node(
+                        request,
+                        SourceGap::TransactionReadOverlay,
+                        error,
+                    )
+                })?;
             let (graph, descriptor) = if include_deleted {
                 let rows = rows
                     .into_iter()
@@ -478,7 +487,9 @@ where
                     self.read_view.read_schema,
                     tier,
                 )
-                .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
+                .map_err(|error| {
+                    source_resolution_error_from_node(request, SourceGap::SchemaProjection, error)
+                })?;
             let base = inline_include_deleted_current_graph(&table, rows)
                 .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
             let graph = match &authorization {
@@ -710,7 +721,9 @@ where
                         &prefix,
                         &projection_target,
                     )
-                    .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
+                    .map_err(|error| {
+                        source_resolution_error_from_node(request, SourceGap::Coverage, error)
+                    })?;
                 self.node.query_engine_read_metrics.source_index_probes += 1;
                 Ok(Some(rows))
             }
@@ -873,7 +886,9 @@ where
         let base_rows = self
             .node
             .branch_base_rows_for_schema(&request.source.table, branch, self.read_view.read_schema)
-            .map_err(|_| source_resolution_error(request, SourceGap::BranchOverlay))?;
+            .map_err(|error| {
+                source_resolution_error_from_node(request, SourceGap::BranchOverlay, error)
+            })?;
         let base_rows = base_rows
             .into_iter()
             .map(|row| {
@@ -897,7 +912,9 @@ where
                             row.row_uuid(),
                             base.global_base,
                         )
-                        .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?
+                        .map_err(|error| {
+                            source_resolution_error_from_node(request, SourceGap::Coverage, error)
+                        })?
                         .ok_or_else(|| source_resolution_error(request, SourceGap::Coverage))?
                 };
                 let alias = self

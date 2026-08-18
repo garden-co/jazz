@@ -199,6 +199,17 @@ pub trait ResidentStorage {
         false
     }
 
+    /// Confirm that an exact ordered input is available without materializing
+    /// it. Fully resident stores satisfy this by construction. Demand-loaded
+    /// caches override it to validate their admitted-range index and return
+    /// [`Error::NotResident`] when the async owner must fetch the input first.
+    fn require_resident(
+        &self,
+        _operation: &async_ordered::OwnedStorageOperation,
+    ) -> Result<(), Error> {
+        Ok(())
+    }
+
     /// Begin an encoded storage transaction over this backend.
     ///
     /// The transaction buffers already-encoded key/value writes and presents
@@ -600,6 +611,45 @@ where
         self.inner.is_durable()
     }
 
+    fn require_resident(
+        &self,
+        operation: &async_ordered::OwnedStorageOperation,
+    ) -> Result<(), Error> {
+        let physical = match operation {
+            async_ordered::OwnedStorageOperation::Get { column_family, key } => {
+                let (column_family, key) = self.physical_key(column_family, key);
+                async_ordered::OwnedStorageOperation::Get { column_family, key }
+            }
+            async_ordered::OwnedStorageOperation::Scan(scan) => {
+                let (column_family, bounds) = match &scan.bounds {
+                    async_ordered::OwnedScanBounds::Prefix(prefix) => {
+                        let (column_family, prefix, _) =
+                            self.physical_prefix(&scan.column_family, prefix);
+                        (
+                            column_family,
+                            async_ordered::OwnedScanBounds::Prefix(prefix),
+                        )
+                    }
+                    async_ordered::OwnedScanBounds::Range { start, end } => {
+                        let (column_family, start) = self.physical_key(&scan.column_family, start);
+                        let (_, end) = self.physical_key(&scan.column_family, end);
+                        (
+                            column_family,
+                            async_ordered::OwnedScanBounds::Range { start, end },
+                        )
+                    }
+                };
+                async_ordered::OwnedStorageOperation::Scan(async_ordered::OwnedScanRequest {
+                    column_family,
+                    bounds,
+                    direction: scan.direction,
+                })
+            }
+            _ => return Ok(()),
+        };
+        self.inner.require_resident(&physical)
+    }
+
     fn get(&self, cf: &ColumnFamilyName, key: &Key) -> Result<Option<Value>, Error> {
         let (physical_cf, physical_key) = self.physical_key(cf, key);
         self.inner.get(&physical_cf, &physical_key)
@@ -787,6 +837,13 @@ impl BoxedStorage {
 impl ResidentStorage for BoxedStorage {
     fn is_durable(&self) -> bool {
         self.inner.is_durable()
+    }
+
+    fn require_resident(
+        &self,
+        operation: &async_ordered::OwnedStorageOperation,
+    ) -> Result<(), Error> {
+        self.inner.require_resident(operation)
     }
 
     fn get(&self, cf: &ColumnFamilyName, key: &Key) -> Result<Option<Value>, Error> {
@@ -1184,6 +1241,13 @@ impl<S> ResidentStorage for StorageTransaction<'_, S>
 where
     S: ResidentStorage,
 {
+    fn require_resident(
+        &self,
+        operation: &async_ordered::OwnedStorageOperation,
+    ) -> Result<(), Error> {
+        self.base.require_resident(operation)
+    }
+
     fn get(&self, cf: &ColumnFamilyName, key: &Key) -> Result<Option<Value>, Error> {
         StagedWriteOverlay::new(self.base, &self.staged_writes).get(cf, key)
     }
@@ -1278,6 +1342,13 @@ impl<S> ResidentStorage for StagedWriteOverlay<'_, S>
 where
     S: ResidentStorage,
 {
+    fn require_resident(
+        &self,
+        operation: &async_ordered::OwnedStorageOperation,
+    ) -> Result<(), Error> {
+        self.base.require_resident(operation)
+    }
+
     fn get(&self, cf: &ColumnFamilyName, key: &Key) -> Result<Option<Value>, Error> {
         if self.staged_writes.borrow().is_empty() {
             return self.base.get(cf, key);

@@ -700,7 +700,7 @@ fn malformed_authority_opening_keeps_shared_coverage_provisional() {
 }
 
 #[test]
-fn parked_branch_opening_is_not_cleared_by_unrelated_applied_view() {
+fn authoritative_empty_branch_opening_does_not_wait_for_metadata() {
     let schema = schema();
     let client = open_db(0xc1, AuthorId::from_bytes([0xc1; 16]), &schema);
     let (client_transport, mut authority_transport) = duplex();
@@ -752,7 +752,8 @@ fn parked_branch_opening_is_not_cleared_by_unrelated_applied_view() {
     assert!(opened_rows(block_on(global_stream.next_raw()).unwrap()).is_empty());
     let mut branch_duplicate =
         prepared_subscribe(&client, &parked_query, global_subscribe_opts()).unwrap();
-    assert!(branch_duplicate.try_next_event().is_none());
+    assert!(opened_rows(block_on(branch_stream.next_raw()).unwrap()).is_empty());
+    assert!(opened_rows(block_on(branch_duplicate.next_raw()).unwrap()).is_empty());
 
     authority_transport
         .send(SyncMessage::BranchMetadata(BranchMetadata {
@@ -764,8 +765,6 @@ fn parked_branch_opening_is_not_cleared_by_unrelated_applied_view() {
         }))
         .unwrap();
     client.tick().unwrap();
-    assert!(opened_rows(block_on(branch_stream.next_raw()).unwrap()).is_empty());
-    assert!(opened_rows(block_on(branch_duplicate.next_raw()).unwrap()).is_empty());
     let mut after_repair =
         prepared_subscribe(&client, &parked_query, global_subscribe_opts()).unwrap();
     assert!(

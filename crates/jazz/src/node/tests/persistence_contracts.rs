@@ -276,9 +276,8 @@ fn demand_driven_subscriber_compilation_suspends_before_consuming_the_wire_frame
     released.set(false);
     assert!(matches!(
         authority.poll_tick(&mut context),
-        std::task::Poll::Ready(Ok(_))
+        std::task::Poll::Pending
     ));
-    assert!(authority.poll_tick(&mut context).is_pending());
     assert!(outbound.borrow().is_empty());
 
     released.set(true);
