@@ -55,7 +55,7 @@ fn main() {
         fixture.core.reset_storage_read_metrics();
         let serve_started = Instant::now();
         let update = peer
-            .current_rows_update(&fixture.core, TABLE)
+            .current_rows_update(&mut fixture.core, TABLE)
             .expect("serve current rows under known-state declaration");
         let serve_us = serve_started.elapsed().as_micros();
         let encoded_bytes = encode_sync_message(&update)
@@ -165,7 +165,7 @@ impl Fixture {
                             .cells(cells(index)),
                     )
                     .expect("create fixture commit");
-                let fate = core_ingest(&self.core, &unit, u64::MAX - SKEW_TOLERANCE_MS);
+                let fate = core_ingest(&mut self.core, &unit, u64::MAX - SKEW_TOLERANCE_MS);
                 assert!(matches!(
                     fate,
                     SyncMessage::FateUpdate {
@@ -181,7 +181,7 @@ impl Fixture {
     fn subscription_key(&mut self) -> SubscriptionKey {
         let mut peer = PeerState::new();
         let update = peer
-            .current_rows_update(&self.core, TABLE)
+            .current_rows_update(&mut self.core, TABLE)
             .expect("discover whole-table subscription key");
         match update {
             SyncMessage::ViewUpdate { subscription, .. } => subscription,

@@ -56,7 +56,7 @@ fn run_rung(source_rows: usize) {
 
     let mut maintained = PeerState::new();
     maintained
-        .rehydrate_query(&maintained_fixture.core, &shape, &binding)
+        .rehydrate_query(&mut maintained_fixture.core, &shape, &binding)
         .expect("prime maintained subscription");
     maintained.metrics = Default::default();
 
@@ -66,7 +66,7 @@ fn run_rung(source_rows: usize) {
     maintained_fixture.core.reset_storage_read_metrics();
     let maintained_started = Instant::now();
     let maintained_update = maintained
-        .query_update(&maintained_fixture.core, &shape, &binding)
+        .query_update(&mut maintained_fixture.core, &shape, &binding)
         .expect("serve maintained delta");
     let maintained_us = maintained_started.elapsed().as_micros();
     let maintained_reads = maintained_fixture.core.storage_read_metrics();
@@ -82,7 +82,7 @@ fn run_rung(source_rows: usize) {
     let mut rehydrated = PeerState::new();
     let rehydrate_started = Instant::now();
     let rehydrate_update = rehydrated
-        .rehydrate_query(&rehydrated_fixture.core, &shape, &binding)
+        .rehydrate_query(&mut rehydrated_fixture.core, &shape, &binding)
         .expect("serve full rehydrate");
     let rehydrate_us = rehydrate_started.elapsed().as_micros();
     let rehydrate_reads = rehydrated_fixture.core.storage_read_metrics();
@@ -238,7 +238,7 @@ impl Fixture {
             .writer
             .commit_mergeable_unit(commit)
             .expect("create fixture commit");
-        let fate = core_ingest(&self.core, &unit, u64::MAX - SKEW_TOLERANCE_MS);
+        let fate = core_ingest(&mut self.core, &unit, u64::MAX - SKEW_TOLERANCE_MS);
         assert!(matches!(
             fate,
             SyncMessage::FateUpdate {

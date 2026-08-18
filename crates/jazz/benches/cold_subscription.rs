@@ -69,7 +69,7 @@ impl ColdSubscriptionBench {
                 .writer
                 .commit_mergeable_unit(commit)
                 .expect("mergeable commit");
-            let fate = core_ingest(&self.core, &unit, u64::MAX - SKEW_TOLERANCE_MS);
+            let fate = core_ingest(&mut self.core, &unit, u64::MAX - SKEW_TOLERANCE_MS);
             assert!(matches!(
                 fate,
                 SyncMessage::FateUpdate {
@@ -106,13 +106,13 @@ impl ColdSubscriptionBench {
     }
 
     fn current_rows_update_elapsed(&mut self, tier: DurabilityTier) -> std::time::Duration {
-        reset_phase_counters(&mut [&self.core]);
+        reset_phase_counters(&mut [&mut self.core]);
         let mut peer = PeerState::new();
         let start = Instant::now();
         match tier {
             DurabilityTier::Global => {
                 let _ = peer
-                    .current_rows_update(&self.core, TABLE)
+                    .current_rows_update(&mut self.core, TABLE)
                     .expect("cold global current rows update");
             }
             DurabilityTier::Local => {
