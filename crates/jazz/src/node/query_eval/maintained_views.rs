@@ -9,6 +9,11 @@ use super::*;
 
 pub(crate) struct LocalMaintainedViewSubscription {
     pub(super) subscription: MultisinkSubscription,
+    /// Owned terminal deltas staged by the asynchronous owner before their
+    /// canonical materialization inputs are acquired. Draining the Groove
+    /// receiver is synchronous; applying these deltas to public subscription
+    /// state remains deferred until acquisition succeeds.
+    pub(super) pending_deltas: VecDeque<MultisinkDeltas>,
     pub(super) _retained_prepared_plan: Option<SubscriptionPreparedPlan>,
     pub(super) maintained: MaintainedSubscriptionView,
     pub(super) terminal_schemas: MaintainedTerminalSchemas,
@@ -197,6 +202,7 @@ where
             )?;
         let mut local = LocalMaintainedViewSubscription {
             subscription,
+            pending_deltas: VecDeque::new(),
             _retained_prepared_plan: retained_prepared_plan,
             maintained,
             terminal_schemas,
@@ -272,7 +278,7 @@ where
         // Settled result sets can include support members used to maintain relations or
         // policies. The occurrence sidecar describes only public query roots, matching
         // the authoritative snapshot's `root_count`, so exclude those support members.
-        local.result_set = self
+        let result_set = self
             .query
             .settled_result_sets
             .get(&binding_view_key)
@@ -290,15 +296,25 @@ where
                     .collect()
             })
             .unwrap_or_default();
-        local.authoritative_result_set = local.result_set.clone();
-        local.authoritative_result_generation =
-            self.applied_view_update_generation(binding_view_key);
-        local.program_facts = self
+        let program_facts = self
             .query
             .settled_program_facts
             .get(&binding_view_key)
             .cloned()
             .unwrap_or_default();
+        // A cold witness must suspend before the reset mutates subscription
+        // membership. Retrying after a partial reset would otherwise lose the
+        // old occurrence sidecar and can close the live subscription.
+        self.prepare_local_maintained_reset_materialization_inputs(
+            local,
+            &result_set,
+            &program_facts,
+        )?;
+        local.result_set = result_set;
+        local.authoritative_result_set = local.result_set.clone();
+        local.authoritative_result_generation =
+            self.applied_view_update_generation(binding_view_key);
+        local.program_facts = program_facts;
         if local.result_query.aggregate.is_some() {
             local
                 .maintained
@@ -329,6 +345,42 @@ where
             .materialize_local_maintained_relation_snapshot_with_occurrences(local)?
             .root_occurrence_ids;
         Ok(())
+    }
+
+    pub(crate) fn prepare_local_maintained_reset_from_binding_view(
+        &mut self,
+        local: &LocalMaintainedViewSubscription,
+        binding_view_key: BindingViewKey,
+    ) -> Result<(), Error> {
+        let result_set = self
+            .query
+            .settled_result_sets
+            .get(&binding_view_key)
+            .map(|members| {
+                members
+                    .iter()
+                    .filter(|member| {
+                        is_public_result_member(
+                            member,
+                            local.result_table.as_str(),
+                            local.result_query.aggregate.is_some(),
+                        )
+                    })
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        let program_facts = self
+            .query
+            .settled_program_facts
+            .get(&binding_view_key)
+            .cloned()
+            .unwrap_or_default();
+        self.prepare_local_maintained_reset_materialization_inputs(
+            local,
+            &result_set,
+            &program_facts,
+        )
     }
 
     pub(crate) fn seed_local_maintained_authoritative_result_membership(
@@ -529,7 +581,12 @@ where
             }
         }
         loop {
-            match local.subscription.try_recv() {
+            let next = local
+                .pending_deltas
+                .pop_front()
+                .map(Ok)
+                .unwrap_or_else(|| local.subscription.try_recv());
+            match next {
                 Ok(deltas) => {
                     let transitions = local.maintained.apply_multisink_deltas(
                         deltas,

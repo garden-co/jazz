@@ -399,6 +399,42 @@ where
         )
     }
 
+    pub(super) fn prepare_subscription_refresh_inputs(
+        &self,
+        node: &mut NodeState<S>,
+    ) -> Result<(), crate::node::Error> {
+        // Typed ingress may have changed physical sources without yet flushing
+        // their incremental graph. Produce terminal deltas before staging
+        // them, so the owner prepares the post-ingress result rather than the
+        // previous subscription state.
+        node.flush_query_runtime()?;
+        let pending_authoritative_resets = node.pending_authoritative_reset_binding_views();
+        for weak in self.subscriptions.borrow().iter() {
+            let Some(state) = weak.upgrade() else {
+                continue;
+            };
+            let mut state = state.borrow_mut();
+            // Runtime-token replacement owns reopening this terminal during
+            // the refresh itself. Its old Groove receiver is intentionally
+            // disconnected and must not be staged as a live async input.
+            if state.groove_runtime_token != node.groove_runtime_token() {
+                continue;
+            }
+            let SubscriptionKind::Prepared {
+                maintained_subscription,
+                ..
+            } = &mut state.kind;
+            let Some(maintained) = maintained_subscription.as_mut() else {
+                continue;
+            };
+            node.prepare_local_maintained_materialization_inputs(maintained)?;
+            for binding_view in &pending_authoritative_resets {
+                node.prepare_local_maintained_reset_from_binding_view(maintained, *binding_view)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Attach this node to an upstream peer over a binding-supplied transport.
     pub fn connect_upstream(
         &self,

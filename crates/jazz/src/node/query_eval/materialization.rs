@@ -424,6 +424,115 @@ where
         Ok(cache)
     }
 
+    pub(crate) fn prepare_local_maintained_reset_materialization_inputs(
+        &mut self,
+        local: &LocalMaintainedViewSubscription,
+        result_set: &BTreeSet<ResultMemberEntry>,
+        program_facts: &BTreeSet<ProgramFactEntry>,
+    ) -> Result<(), Error> {
+        let mut tx_ids = BTreeSet::new();
+        let mut cache = BTreeMap::new();
+        for tx_id in result_set
+            .iter()
+            .filter_map(ResultMemberEntry::as_row)
+            .map(|(_, _, tx_id)| tx_id)
+            .chain(program_facts.iter().filter_map(|fact| match fact {
+                ProgramFactEntry::RelationEdge(edge) => {
+                    edge.target_version.as_ref().map(|version| version.tx)
+                }
+                _ => None,
+            }))
+        {
+            tx_ids.insert(tx_id);
+            cache
+                .entry(tx_id)
+                .or_insert_with(|| local.maintained.versions_by_tx(tx_id));
+        }
+        self.preload_tx_versions_for_materialization(tx_ids, &mut cache)
+    }
+
+    /// Admit the canonical witnesses needed to materialize the next public
+    /// delta from an already-installed local maintained view.
+    ///
+    /// This is deliberately separate from draining the view: an asynchronous
+    /// owner may suspend while acquiring these rows, but it must not advance
+    /// subscription state or invoke application callbacks until acquisition
+    /// succeeds.
+    pub(crate) fn prepare_local_maintained_materialization_inputs(
+        &mut self,
+        local: &mut LocalMaintainedViewSubscription,
+    ) -> Result<(), Error> {
+        loop {
+            match local.subscription.try_recv() {
+                Ok(deltas) => local.pending_deltas.push_back(deltas),
+                Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    return Err(Error::SubscriptionClosed);
+                }
+            }
+        }
+
+        let mut future_result_set = local.result_set.clone();
+        let mut future_program_facts = local.program_facts.clone();
+        let authoritative_generation = self.applied_view_update_generation(local.binding_view_key);
+        if authoritative_generation != local.authoritative_result_generation {
+            let remote = self
+                .query
+                .settled_result_sets
+                .get(&local.binding_view_key)
+                .cloned()
+                .unwrap_or_default();
+            // Preparation admits the union of the before/after witness sets.
+            // The reconciliation step may inspect the old member while
+            // deciding whether the authoritative replacement is locally
+            // materializable, before it applies the replacement itself.
+            future_result_set.extend(remote.iter().cloned());
+            future_program_facts.extend(
+                self.query
+                    .settled_program_facts
+                    .get(&local.binding_view_key)
+                    .into_iter()
+                    .flatten()
+                    .cloned(),
+            );
+            future_result_set.extend(remote.difference(&local.authoritative_result_set).cloned());
+        }
+        let mut maintained = local.maintained.clone();
+        for deltas in &local.pending_deltas {
+            let transitions = maintained.apply_multisink_deltas(
+                deltas.clone(),
+                &local.terminal_schemas,
+                &local.tables,
+                &self.node_aliases,
+            )?;
+            for removed in transitions.removes {
+                future_result_set.remove(&removed);
+            }
+            future_result_set.extend(transitions.adds);
+            for removed in transitions.program_fact_removes {
+                future_program_facts.remove(&removed);
+            }
+            future_program_facts.extend(transitions.program_fact_adds);
+        }
+        let mut tx_ids = BTreeSet::new();
+        let mut cache = BTreeMap::new();
+        for tx_id in future_result_set
+            .iter()
+            .filter_map(ResultMemberEntry::as_row)
+            .map(|(_, _, tx_id)| tx_id)
+            .chain(future_program_facts.iter().filter_map(|fact| match fact {
+                ProgramFactEntry::RelationEdge(edge) => {
+                    edge.target_version.as_ref().map(|version| version.tx)
+                }
+                _ => None,
+            }))
+        {
+            tx_ids.insert(tx_id);
+        }
+        self.preload_tx_versions_for_materialization(tx_ids, &mut cache)?;
+        Ok(())
+    }
+
     pub(super) fn materialize_local_maintained_view_relation_edge_row(
         &mut self,
         local: &LocalMaintainedViewSubscription,
@@ -657,6 +766,11 @@ where
     ) -> Result<(), Error> {
         let mut by_alias = BTreeMap::<(NodeUuid, NodeAlias), BTreeSet<TxTime>>::new();
         for tx_id in tx_ids {
+            // Projection and relation materialization validate the immutable
+            // version witness against its authored transaction. Admit that
+            // point read alongside the version body; a resident VersionRow is
+            // not evidence that the transaction table is resident too.
+            let _ = self.query_transaction(tx_id)?;
             if cache
                 .get(&tx_id)
                 .is_some_and(|versions| !versions.is_empty())

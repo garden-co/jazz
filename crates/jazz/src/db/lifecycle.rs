@@ -44,6 +44,27 @@ pub struct DemandDrivenViewDb<'a> {
     runtime: &'a mut DemandDrivenNode,
 }
 
+/// Acquire every cold canonical witness required by the current local
+/// maintained-view deltas, then publish their callbacks synchronously.
+///
+/// Every async-owner mutation path ends here. The resident Jazz reducer stays
+/// synchronous, while an async backend never leaks `NotResident` through
+/// subscription publication.
+async fn refresh_demand_driven_subscriptions(
+    database: &Db<groove::storage::DemandLoadedStorage>,
+    runtime: &mut DemandDrivenNode,
+) -> Result<usize, Error> {
+    std::future::poll_fn(|context| {
+        runtime
+            .poll_acquire_resident(context, |node| {
+                database.node.prepare_subscription_refresh_inputs(node)
+            })
+            .map_err(Error::from)
+    })
+    .await?;
+    database.refresh_subscriptions()
+}
+
 impl DemandDrivenDbOpen {
     #[doc(hidden)]
     pub fn new(
@@ -168,6 +189,10 @@ impl DemandDrivenDbOpen {
 }
 
 impl DemandDrivenDb {
+    async fn refresh_subscriptions_prepared(&mut self) -> Result<usize, Error> {
+        refresh_demand_driven_subscriptions(&self.database, &mut self.runtime).await
+    }
+
     /// Open an ordinary database over a storage backend that completes the
     /// ordered asynchronous contract immediately.
     pub async fn open_immediate<S>(config: DbConfig<S>) -> Result<Self, Error>
@@ -477,7 +502,7 @@ impl DemandDrivenDb {
         })
         .await
         .map_err(Error::from)?;
-        self.database.refresh_subscriptions()?;
+        self.refresh_subscriptions_prepared().await?;
         self.database.node.mark_subscriber_connections_dirty();
         Ok(tx_id)
     }
@@ -573,7 +598,7 @@ impl DemandDrivenDb {
         })
         .await
         .map_err(Error::from)?;
-        self.database.refresh_subscriptions()?;
+        self.refresh_subscriptions_prepared().await?;
         self.database.node.mark_subscriber_connections_dirty();
         Ok(tx_id)
     }
@@ -585,6 +610,16 @@ impl DemandDrivenDb {
     #[cfg(test)]
     pub(crate) fn runtime_stats_for_test(&self) -> groove::ivm::RuntimeStats {
         self.database.runtime_stats_for_test()
+    }
+
+    /// Exercise only the synchronous resident peer phase. External durable
+    /// frames must remain staged for the asynchronous owner around this phase.
+    #[cfg(test)]
+    pub(crate) fn resident_peer_tick_for_test(&self) -> Result<DbTickStats, Error> {
+        for connection in self.database.node.connections.borrow().iter() {
+            connection.borrow_mut().stage_available_inbound();
+        }
+        self.database.node.tick()
     }
 
     #[doc(hidden)]
@@ -969,6 +1004,14 @@ impl DemandDrivenDb {
             self.database.node.mark_subscriber_connections_dirty();
         }
 
+        match self.runtime.poll_acquire_resident(context, |node| {
+            self.database.node.prepare_subscription_refresh_inputs(node)
+        }) {
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(Err(error)) => return Poll::Ready(Err(error.into())),
+            Poll::Ready(Ok(())) => {}
+        }
+
         // Typed ingress above may change any subscriber's maintained view.
         // Prepare outbound refreshes only after every connection has had its
         // resident mutation admitted, never against a pre-ingress snapshot.
@@ -1071,7 +1114,7 @@ impl DemandDrivenDb {
         })
         .await?;
         let local_tier = self.database.finalize_local_commit(tx_id)?;
-        self.database.refresh_subscriptions()?;
+        self.refresh_subscriptions_prepared().await?;
         Ok(WriteHandle {
             node: Rc::downgrade(&self.database.node.node),
             row_uuid,
@@ -1307,7 +1350,7 @@ impl DemandDrivenDb {
         .await
         .map_err(Error::from)?;
         let local_tier = self.database.finalize_local_commit(tx_id)?;
-        self.database.refresh_subscriptions()?;
+        self.refresh_subscriptions_prepared().await?;
         Ok(WriteHandle {
             node: Rc::downgrade(&self.database.node.node),
             row_uuid,
@@ -1371,7 +1414,7 @@ impl DemandDrivenDb {
         .await
         .map_err(Error::from)?;
         let local_tier = self.database.finalize_local_commit(tx_id)?;
-        self.database.refresh_subscriptions()?;
+        self.refresh_subscriptions_prepared().await?;
         Ok(WriteHandle {
             node: Rc::downgrade(&self.database.node.node),
             row_uuid: row,
@@ -1408,7 +1451,7 @@ impl DemandDrivenDb {
         .await
         .map_err(Error::from)?;
         let local_tier = self.database.finalize_local_commit(tx_id)?;
-        self.database.refresh_subscriptions()?;
+        self.refresh_subscriptions_prepared().await?;
         Ok(WriteHandle {
             node: Rc::downgrade(&self.database.node.node),
             row_uuid: row,
@@ -1446,7 +1489,7 @@ impl DemandDrivenDb {
         .await
         .map_err(Error::from)?;
         let local_tier = self.database.finalize_local_commit(tx_id)?;
-        self.database.refresh_subscriptions()?;
+        self.refresh_subscriptions_prepared().await?;
         Ok(WriteHandle {
             node: Rc::downgrade(&self.database.node.node),
             row_uuid: row,
@@ -1492,7 +1535,7 @@ impl DemandDrivenDb {
         .await
         .map_err(Error::from)?;
         let local_tier = self.database.finalize_local_commit(tx_id)?;
-        self.database.refresh_subscriptions()?;
+        self.refresh_subscriptions_prepared().await?;
         Ok(WriteHandle {
             node: Rc::downgrade(&self.database.node.node),
             row_uuid: row,
@@ -1686,7 +1729,7 @@ impl DemandDrivenDb {
         .await
         .map_err(Error::from)?;
         self.database.finalize_local_commit(committed)?;
-        self.database.refresh_subscriptions()?;
+        self.refresh_subscriptions_prepared().await?;
         Ok(committed)
     }
 
@@ -1832,7 +1875,7 @@ impl DemandDrivenDb {
         .map_err(Error::from)?;
         self.database
             .finalize_local_exclusive_unit(committed, unit)?;
-        self.database.refresh_subscriptions()?;
+        self.refresh_subscriptions_prepared().await?;
         Ok(committed)
     }
 
@@ -1842,6 +1885,10 @@ impl DemandDrivenDb {
 }
 
 impl DemandDrivenViewDb<'_> {
+    async fn refresh_subscriptions_prepared(&mut self) -> Result<usize, Error> {
+        refresh_demand_driven_subscriptions(&self.database, self.runtime).await
+    }
+
     /// Start a logical query in this typed view without loading storage.
     pub fn table(&self, table: impl Into<String>) -> Query {
         self.database.table(table)
@@ -2135,7 +2182,7 @@ impl DemandDrivenViewDb<'_> {
         .await
         .map_err(Error::from)?;
         let local_tier = self.database.finalize_local_commit(tx_id)?;
-        self.database.refresh_subscriptions()?;
+        self.refresh_subscriptions_prepared().await?;
         Ok(WriteHandle {
             node: Rc::downgrade(&self.database.node.node),
             row_uuid: row,

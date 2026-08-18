@@ -29,7 +29,7 @@ where
     pub(super) fn prepare_view_bundle_storage_inputs(
         &mut self,
         bundle: VersionBundleRef<'_>,
-    ) -> Result<(), Error>
+    ) -> Result<Vec<((PhysicalTableId, RowUuid), Option<BTreeSet<TxId>>)>, Error>
     where
         S: ReopenableStorage,
     {
@@ -50,6 +50,7 @@ where
                 durability: Some(bundle.durability),
             })?;
         }
+        let mut merge_heads = Vec::new();
         for version in bundle.versions {
             let table = self.table_in_schema(version.table(), version.schema_version())?;
             let layer = VersionLayer::for_record(version);
@@ -75,7 +76,10 @@ where
                     version.schema_version(),
                     &table.name,
                 )?;
-                let _ = self.read_merge_heads(table_id, version.row_uuid())?;
+                merge_heads.push((
+                    (table_id, version.row_uuid()),
+                    self.read_merge_heads(table_id, version.row_uuid())?,
+                ));
             }
         }
         if matches!(bundle.fate, Fate::Pending) {
@@ -86,7 +90,7 @@ where
                 tx_already_known,
             )?;
         }
-        Ok(())
+        Ok(merge_heads)
     }
 
     fn prepare_pending_edge_write_inputs(
@@ -1271,6 +1275,10 @@ where
     pub(super) fn ingest_reset_view_bundle_refs_in_bulk(
         &mut self,
         bundles: &[VersionBundleRef<'_>],
+        prepared_merge_heads: Option<&BTreeMap<
+            (PhysicalTableId, RowUuid),
+            Option<BTreeSet<TxId>>,
+        >>,
     ) -> Result<BTreeSet<TxId>, Error> {
         let mut bundles_by_tx = BTreeMap::<TxId, Vec<VersionBundleRef<'_>>>::new();
         for bundle in bundles {
@@ -1462,7 +1470,11 @@ where
         for (stored, global_seq) in current_updates.values() {
             self.write_global_current_update(&mut batch, stored, *global_seq)?;
         }
-        self.write_merge_heads_for_bulk_content_versions(&mut batch, &content_versions)?;
+        self.write_merge_heads_for_bulk_content_versions(
+            &mut batch,
+            &content_versions,
+            prepared_merge_heads,
+        )?;
 
         #[cfg(test)]
         let current_update_versions = current_updates

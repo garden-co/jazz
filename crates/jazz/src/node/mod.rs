@@ -901,6 +901,7 @@ pub(crate) struct PreparedViewUpdateBatch {
     updates: Vec<ViewUpdateParts>,
     known_states: Vec<PreparedKnownStateFact>,
     branch_partitions: PreparedViewUpdateBranchPartitions,
+    merge_heads: BTreeMap<(PhysicalTableId, RowUuid), Option<BTreeSet<TxId>>>,
 }
 
 pub(crate) struct PreparedRepairPayloadIngress {

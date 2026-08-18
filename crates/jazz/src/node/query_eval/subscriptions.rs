@@ -276,6 +276,10 @@ where
         std::mem::take(&mut self.query.pending_authoritative_reset_binding_views)
     }
 
+    pub(crate) fn pending_authoritative_reset_binding_views(&self) -> BTreeSet<BindingViewKey> {
+        self.query.pending_authoritative_reset_binding_views.clone()
+    }
+
     pub(crate) fn take_pending_terminal_operations(
         &mut self,
         binding_view_key: BindingViewKey,

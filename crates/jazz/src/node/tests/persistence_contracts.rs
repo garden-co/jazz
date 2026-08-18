@@ -2172,6 +2172,12 @@ fn demand_driven_peer_tick_retains_view_update_until_durable() {
         outbound: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
         session_context: None,
     }));
+    receiver.resident_peer_tick_for_test().unwrap();
+    assert!(
+        connection.borrow().has_staged_view_update_for_test(),
+        "the synchronous resident peer phase must leave durable view ingress to its async owner"
+    );
+    assert!(subscription.try_next_event().is_none());
     released.set(false);
     assert!(receiver.poll_tick(&mut context).is_pending());
     assert!(connection.borrow().has_staged_view_update_for_test());

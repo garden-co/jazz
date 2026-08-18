@@ -511,6 +511,10 @@ where
         &mut self,
         batch: &mut DatabaseBatch,
         versions: &[VersionRow],
+        prepared_merge_heads: Option<&BTreeMap<
+            (PhysicalTableId, RowUuid),
+            Option<BTreeSet<TxId>>,
+        >>,
     ) -> Result<(), Error> {
         let mut by_row = BTreeMap::<(PhysicalTableId, RowUuid), Vec<&VersionRow>>::new();
         for version in versions {
@@ -529,9 +533,16 @@ where
                     .expect("bulk content version must have node alias");
                 tx_id.time.sort_key(tx_id.node)
             });
-            let mut heads = self
-                .read_merge_heads(table_id, row_uuid)?
-                .unwrap_or_default();
+            let mut heads = match prepared_merge_heads {
+                Some(prepared) => prepared
+                    .get(&(table_id, row_uuid))
+                    .ok_or(Error::InvalidStoredValue(
+                        "prepared receiver batch omitted merge-head input",
+                    ))?
+                    .clone()
+                    .unwrap_or_default(),
+                None => self.read_merge_heads(table_id, row_uuid)?.unwrap_or_default(),
+            };
             let mut staged_parents = BTreeMap::<TxId, Vec<TxId>>::new();
             for version in &row_versions {
                 staged_parents.insert(self.version_tx_id(version)?, version.parents());

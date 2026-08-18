@@ -748,6 +748,14 @@ where
         &mut self,
         updates: Vec<ViewUpdateParts>,
     ) -> Result<(), Error> {
+        self.apply_view_updates_in_batch_with_merge_heads(updates, None)
+    }
+
+    fn apply_view_updates_in_batch_with_merge_heads(
+        &mut self,
+        updates: Vec<ViewUpdateParts>,
+        prepared_merge_heads: Option<BTreeMap<(PhysicalTableId, RowUuid), Option<BTreeSet<TxId>>>>,
+    ) -> Result<(), Error> {
         if updates.is_empty() {
             return Ok(());
         }
@@ -791,7 +799,10 @@ where
                 initial_hydration_binding_views.remove(&binding_view_key);
             }
         }
-        let bulk_loaded_tx_ids = self.ingest_reset_view_bundle_refs_in_bulk(&bulk_candidates)?;
+        let bulk_loaded_tx_ids = self.ingest_reset_view_bundle_refs_in_bulk(
+            &bulk_candidates,
+            prepared_merge_heads.as_ref(),
+        )?;
         let mut receiver_candidates = BTreeMap::<TxId, VersionBundle>::new();
         for update in &updates {
             for bundle in
@@ -862,6 +873,7 @@ where
         self.validate_view_update_payloads(&updates)?;
         let mut prepared_binding_views = BTreeSet::new();
         let mut known_states = Vec::new();
+        let mut merge_heads = BTreeMap::new();
         for update in &updates {
             if update.reset_result_set {
                 // Reset payloads still publish canonical row bundles below;
@@ -888,7 +900,20 @@ where
             for bundle in
                 version_bundle_refs_for_carriers(&update.version_bundles, &update.version_carriers)?
             {
-                self.prepare_view_bundle_storage_inputs(bundle)?;
+                for (key, heads) in self.prepare_view_bundle_storage_inputs(bundle)? {
+                    match merge_heads.entry(key) {
+                        std::collections::btree_map::Entry::Vacant(entry) => {
+                            entry.insert(heads);
+                        }
+                        std::collections::btree_map::Entry::Occupied(entry)
+                            if entry.get() == &heads => {}
+                        std::collections::btree_map::Entry::Occupied(_) => {
+                            return Err(Error::InvalidStoredValue(
+                                "receiver preparation observed inconsistent merge heads",
+                            ));
+                        }
+                    }
+                }
             }
         }
         let branch_partitions = self.prepare_view_update_branch_partitions(&updates)?;
@@ -896,6 +921,7 @@ where
             updates,
             known_states,
             branch_partitions,
+            merge_heads,
         })
     }
 
@@ -908,12 +934,13 @@ where
             updates,
             known_states,
             branch_partitions,
+            merge_heads,
         } = prepared;
         self.publish_prepared_view_update_branch_partitions(branch_partitions)?;
         for known_state in known_states {
             self.publish_prepared_known_state_fact(known_state);
         }
-        self.apply_view_updates_in_batch(updates)
+        self.apply_view_updates_in_batch_with_merge_heads(updates, Some(merge_heads))
     }
 
     /// Resolve sparse branch tables and their metadata writes against a
@@ -1125,7 +1152,7 @@ where
             // Empty reset stamps stay orthogonal below: with no bundles there
             // is no payload to bulk ingest and the stamp must not clear shared
             // state that is already more settled.
-            self.ingest_reset_view_bundle_refs_in_bulk(&version_bundle_refs)?
+            self.ingest_reset_view_bundle_refs_in_bulk(&version_bundle_refs, None)?
         } else {
             BTreeSet::new()
         };
