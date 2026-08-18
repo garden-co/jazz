@@ -1382,7 +1382,7 @@ fn measure_r3_phase_sample(
     if matches!(cache_mode, R3CacheMode::Evicted) {
         evict_path_from_linux_page_cache(path);
     }
-    let (db, storage_open, jazz_open, open_breakdown) =
+    let (mut db, storage_open, jazz_open, open_breakdown) =
         open_rocks_db_with_phases(R3_REOPEN_SEED, AUTHOR, path);
 
     let prepare_started = Instant::now();
@@ -1423,7 +1423,7 @@ fn measure_r3_phase_sample(
 }
 
 fn establish_r3_close_mode(path: &Path, close_mode: R3CloseMode) {
-    let mut db = open_rocks_db_with_author(R3_REOPEN_SEED, AUTHOR, false, path);
+    let db = open_rocks_db_with_author(R3_REOPEN_SEED, AUTHOR, false, path);
     if matches!(close_mode, R3CloseMode::Clean) {
         db.close()
             .expect("establish clean-close marker before R3 phase samples");
@@ -1624,20 +1624,18 @@ fn r4_hot_task_history(c: &mut Criterion) {
                 let fixture = seed_fixture(&mut db, profile);
                 let hot_task = fixture.tasks[0];
                 let hot_project = fixture.projects[0];
-                let mut project_board = block_on(db.subscribe(
-                    &project_board_query(&mut db, hot_project),
-                    ReadOpts::default(),
-                ))
-                .expect("subscribe project board");
-                let mut task_comments = block_on(
-                    db.subscribe(&task_comments_query(&mut db, hot_task), ReadOpts::default()),
-                )
-                .expect("subscribe task comments");
-                let mut activity_feed = block_on(db.subscribe(
-                    &activity_feed_query(&mut db, hot_project),
-                    ReadOpts::default(),
-                ))
-                .expect("subscribe activity feed");
+                let project_board_prepared = project_board_query(&mut db, hot_project);
+                let comments_prepared = task_comments_query(&mut db, hot_task);
+                let activity_prepared = activity_feed_query(&mut db, hot_project);
+                let mut project_board =
+                    block_on(db.subscribe(&project_board_prepared, ReadOpts::default()))
+                        .expect("subscribe project board");
+                let mut task_comments =
+                    block_on(db.subscribe(&comments_prepared, ReadOpts::default()))
+                        .expect("subscribe task comments");
+                let mut activity_feed =
+                    block_on(db.subscribe(&activity_prepared, ReadOpts::default()))
+                        .expect("subscribe activity feed");
 
                 black_box(drain_opened(
                     block_on(project_board.next_event()),
@@ -1772,10 +1770,10 @@ fn r10_sync_fanout(c: &mut Criterion) {
             &profile,
             |b, &profile| {
                 let mut writer = open_db(10);
-                let server = open_core_db(11);
-                let reader = open_db_with_author(12, READER_AUTHOR, false);
+                let mut server = open_core_db(11);
+                let mut reader = open_db_with_author(12, READER_AUTHOR, false);
 
-                let fixture = seed_fixture(&writer, profile);
+                let fixture = seed_fixture(&mut writer, profile);
                 let project = fixture.projects[0];
                 let subscribed_row = fixture.tasks[0];
 
@@ -1788,7 +1786,7 @@ fn r10_sync_fanout(c: &mut Criterion) {
                 let _reader_subscriber =
                     server.accept_subscriber(server_reader_transport, READER_AUTHOR);
 
-                let query = project_board_query(&reader, project);
+                let query = project_board_query(&mut reader, project);
                 let mut subscription = block_on(reader.subscribe(&query, global_subscribe_opts()))
                     .expect("subscribe reader project board");
                 assert!(drain_opened(block_on(subscription.next_event()), "reader board") == 0);
@@ -1858,9 +1856,9 @@ fn r11_byte_wire_resume(c: &mut Criterion) {
             |b, &profile| {
                 b.iter(|| {
                     let mut writer = open_db(110);
-                    let server = open_core_db(111);
-                    let client = open_db_with_author(112, READER_AUTHOR, false);
-                    let fixture = seed_resume_fixture(&writer, profile);
+                    let mut server = open_core_db(111);
+                    let mut client = open_db_with_author(112, READER_AUTHOR, false);
+                    let fixture = seed_resume_fixture(&mut writer, profile);
                     let subscribed_row = fixture.tasks[0];
                     let prepared = client
                         .prepare_query(&Query::from("tasks"))
@@ -2027,10 +2025,10 @@ fn r12_recursive_permissions(c: &mut Criterion) {
 fn run_permission_filtered_resume(
     churn: PermissionResumeChurn,
 ) -> (Duration, usize, usize, usize, usize, usize) {
-    let writer = open_recursive_permissions_db_with_author(130, AuthorId::SYSTEM, false);
-    let server = open_recursive_permissions_db_with_author(131, AuthorId::SYSTEM, true);
-    let client = open_recursive_permissions_db_with_author(132, READER_AUTHOR, false);
-    seed_permission_resume_fixture(&writer);
+    let mut writer = open_recursive_permissions_db_with_author(130, AuthorId::SYSTEM, false);
+    let mut server = open_recursive_permissions_db_with_author(131, AuthorId::SYSTEM, true);
+    let mut client = open_recursive_permissions_db_with_author(132, READER_AUTHOR, false);
+    seed_permission_resume_fixture(&mut writer);
     let prepared = client
         .prepare_query(&Query::from("docs"))
         .expect("prepare permission-filtered docs query");
@@ -2207,9 +2205,9 @@ fn run_permission_filtered_resume(
 fn run_claim_filtered_resume(
     churn: ClaimResumeChurn,
 ) -> (Duration, usize, usize, usize, usize, usize) {
-    let writer = open_claim_resume_db(133, AuthorId::SYSTEM, false);
-    let server = open_claim_resume_db(134, AuthorId::SYSTEM, true);
-    let client = open_claim_resume_db(135, READER_AUTHOR, false);
+    let mut writer = open_claim_resume_db(133, AuthorId::SYSTEM, false);
+    let mut server = open_claim_resume_db(134, AuthorId::SYSTEM, true);
+    let mut client = open_claim_resume_db(135, READER_AUTHOR, false);
     for (row, title) in [
         (CLAIM_RESUME_DOC_A, "claim-a"),
         (CLAIM_RESUME_DOC_B, "claim-b"),

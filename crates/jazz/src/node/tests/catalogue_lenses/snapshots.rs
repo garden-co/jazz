@@ -204,11 +204,14 @@ fn settled_view_projects_old_authored_row_into_clients_active_schema() {
     writer
         .apply_trusted_catalogue_snapshot(snapshot.clone())
         .unwrap();
-    let tx_id = writer
-        .commit_mergeable_in_schema(
+    let prepared = writer
+        .prepare_mergeable_commit_in_schema(
             base.version_id(),
             MergeableCommit::new("todos", row(0x65), 10).cells(title_cells("authored-base")),
         )
+        .unwrap();
+    let tx_id = writer
+        .publish_prepared_mergeable_commit(prepared)
         .unwrap();
     let unit = writer.commit_unit_for(tx_id).unwrap();
     let SyncMessage::CommitUnit { tx, versions } = unit else {
@@ -270,7 +273,7 @@ fn mergeable_commit_rejects_unadmitted_authored_schema() {
     let (_dir, mut writer) = open_node_with_schema(node(0x67), schema());
     let unknown = SchemaVersionId(uuid::Uuid::from_bytes([0x67; 16]));
     assert!(matches!(
-        writer.commit_mergeable_in_schema(
+        writer.prepare_mergeable_commit_in_schema(
             unknown,
             MergeableCommit::new("todos", row(0x68), 10).cells(title_cells("forged")),
         ),
@@ -286,10 +289,10 @@ fn branch_commit_rejects_unadmitted_authored_schema_without_persistence() {
     writer.create_root_branch(branch_id).unwrap();
     let unknown = SchemaVersionId(uuid::Uuid::from_bytes([0x69; 16]));
     assert!(matches!(
-        writer.commit_mergeable_on_branch_in_schema(
+        writer.prepare_mergeable_many_on_branch_in_schema(
             branch_id,
             unknown,
-            MergeableCommit::new("todos", row(0x6a), 10).cells(title_cells("forged")),
+            vec![MergeableCommit::new("todos", row(0x6a), 10).cells(title_cells("forged"))],
         ),
         Err(Error::InvalidMergeableCommit(
             "authored schema version is not admitted"
@@ -1496,4 +1499,3 @@ fn trusted_catalogue_snapshot_activation_failure_never_exposes_a_prefix_and_reop
     assert_eq!(reopened.catalogue_schemas().len(), 2);
     assert_eq!(reopened.current_write_schema().unwrap().revision, 1);
 }
-

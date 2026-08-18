@@ -237,13 +237,17 @@ fn mergeable_open_commit_matches_replayed_mergeable_batch_with_intervening_write
     ];
     let expected_tx = expected.commit_mergeable_many(expected_commits).unwrap();
     let mut fallback_now_ms = 200;
-    let actual_tx = actual
-        .commit_mergeable_open(open_tx, || {
+    let fallback_now_ms = (0..actual.mergeable_open_missing_timestamp_count(open_tx).unwrap())
+        .map(|_| {
             let now_ms = fallback_now_ms;
             fallback_now_ms += 1;
             now_ms
         })
+        .collect::<Vec<_>>();
+    let prepared = actual
+        .prepare_mergeable_open(open_tx, &fallback_now_ms, true)
         .unwrap();
+    let actual_tx = actual.publish_prepared_mergeable_open(prepared).unwrap();
 
     assert_eq!(actual_tx, expected_tx, "batch ids must match");
     assert_eq!(
@@ -281,7 +285,11 @@ fn mergeable_open_patch_commit_uses_point_reads_not_table_scans() {
     }
 
     core.reset_storage_read_metrics();
-    core.commit_mergeable_open(batch, || 2_000).unwrap();
+    let fallback_now_ms = vec![2_000; core.mergeable_open_missing_timestamp_count(batch).unwrap()];
+    let prepared = core
+        .prepare_mergeable_open(batch, &fallback_now_ms, true)
+        .unwrap();
+    core.publish_prepared_mergeable_open(prepared).unwrap();
     let reads = core.take_storage_read_metrics();
     assert!(
         reads.total.reads < 256,
@@ -319,7 +327,7 @@ fn abandoning_mergeable_open_transaction_discards_its_only_staged_representation
             .is_empty()
     );
     assert!(matches!(
-        core.commit_mergeable_open(open_tx, || 51).unwrap_err(),
-        Error::MissingOpenBatch(missing) if missing == open_tx
+        core.prepare_mergeable_open(open_tx, &[51], true),
+        Err(Error::MissingOpenBatch(missing)) if missing == open_tx
     ));
 }

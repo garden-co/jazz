@@ -285,9 +285,9 @@ fn drive_until_covered(server: &mut Db, client: &mut Db, attachment: &jazz::db::
 
 fn drain_until_idle(server: &mut Db, client: &mut Db) {
     for _ in 0..1_000 {
-        let client_before = client.tick_stats().expect("drain client");
-        let server_stats = server.tick_stats().expect("drain server");
-        let client_after = client.tick_stats().expect("drain client after server");
+        let client_before = client.tick().expect("drain client");
+        let server_stats = server.tick().expect("drain server");
+        let client_after = client.tick().expect("drain client after server");
         if client_before.remote_sync_applied == 0
             && server_stats.remote_sync_applied == 0
             && client_after.remote_sync_applied == 0
@@ -385,8 +385,8 @@ fn maintained_relation_include_single_row_changes_are_scale_independent() {
 
 fn measure_post_reset_single_insert(existing_rows: usize) -> AllocSnapshot {
     let schema = reset_batch_schema();
-    let server = open_history_complete_db_with_schema(existing_rows, schema.clone());
-    let client = open_db_with_schema(existing_rows + 1, schema);
+    let mut server = open_history_complete_db_with_schema(existing_rows, schema.clone());
+    let mut client = open_db_with_schema(existing_rows + 1, schema);
     seed_reset_batch_fixture(&mut server, existing_rows);
 
     let (client_transport, server_transport) = duplex();

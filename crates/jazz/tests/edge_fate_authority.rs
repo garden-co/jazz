@@ -155,7 +155,7 @@ fn edge_shell_does_not_report_global_or_serve_global_before_core_ack() {
             .with_role(NodeRole::Edge),
     )
     .unwrap();
-    let mut core = open_core(0xc0, &schema);
+    let core = open_core(0xc0, &schema);
     let (edge_to_core, core_to_edge) = duplex();
     edge.connect_upstream(edge_to_core).unwrap();
     core.accept_subscriber(core_to_edge, AuthorId::SYSTEM);

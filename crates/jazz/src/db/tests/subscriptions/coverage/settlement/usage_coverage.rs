@@ -4,20 +4,20 @@ use super::*;
 
 #[test]
 fn one_shot_propagated_query_records_empty_remote_coverage() {
-    let mut schema = schema();
-    let mut client_author = AuthorId::from_bytes([0xc1; 16]);
+    let schema = schema();
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
 
-    let mut server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
     let mut client = open_db(0xc1, client_author, &schema);
 
     let (client_transport, server_transport) = duplex();
     let mut _upstream = client.connect_upstream(client_transport);
     let mut _subscriber = server.accept_subscriber(server_transport, client_author);
 
-    let mut query = Query::from("todos");
-    let mut prepared = prepared(&mut client, &query);
+    let query = Query::from("todos");
+    let prepared = prepared(&mut client, &query);
 
-    let mut attachment = client
+    let attachment = client
         .attach_query_with_opts(&prepared, global_subscribe_opts())
         .unwrap();
     assert!(!client.query_attachment_is_covered(&attachment));
@@ -32,17 +32,17 @@ fn one_shot_propagated_query_records_empty_remote_coverage() {
 
 #[test]
 fn one_shot_edge_global_coverage_requires_current_authority_after_reconnect() {
-    let mut schema = schema();
-    let mut client_author = AuthorId::from_bytes([0xc1; 16]);
-    let mut server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let schema = schema();
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
     let mut client = open_db(0xc1, client_author, &schema);
 
     let (first_client_transport, first_server_transport) = duplex();
-    let mut first_upstream = client.connect_upstream(first_client_transport);
+    let first_upstream = client.connect_upstream(first_client_transport);
     let mut _first_subscriber = server.accept_subscriber(first_server_transport, client_author);
-    let mut query = Query::from("todos");
-    let mut prepared = prepared(&mut client, &query);
-    let mut attachment = client
+    let query = Query::from("todos");
+    let prepared = prepared(&mut client, &query);
+    let attachment = client
         .attach_query_with_opts(&prepared, global_subscribe_opts())
         .unwrap();
     client.tick().unwrap();
@@ -76,7 +76,7 @@ fn one_shot_edge_global_coverage_requires_current_authority_after_reconnect() {
             > required_after,
         "the reconnect response must advance the attachment generation"
     );
-    let mut receipt_views = client
+    let receipt_views = client
         .node
         .active_authority_view_receipts
         .borrow()
@@ -93,18 +93,18 @@ fn one_shot_edge_global_coverage_requires_current_authority_after_reconnect() {
 
 #[test]
 fn one_shot_local_coverage_does_not_require_authority_continuity() {
-    let mut schema = schema();
-    let mut client_author = AuthorId::from_bytes([0xc1; 16]);
+    let schema = schema();
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
     let mut client = open_db(0xc1, client_author, &schema);
     client.node.set_non_durable_client();
     client
         .node
         .set_upstream_durability_floor(DurabilityTier::Local);
     let (client_transport, mut authority_transport) = duplex();
-    let mut upstream = client.connect_upstream(client_transport);
-    let mut query = Query::from("todos");
-    let mut prepared = prepared(&mut client, &query);
-    let mut attachment = client
+    let upstream = client.connect_upstream(client_transport);
+    let query = Query::from("todos");
+    let prepared = prepared(&mut client, &query);
+    let attachment = client
         .attach_query_with_opts(
             &prepared,
             ReadOpts {
@@ -115,7 +115,7 @@ fn one_shot_local_coverage_does_not_require_authority_continuity() {
         )
         .unwrap();
     client.tick().unwrap();
-    let mut subscription = loop {
+    let subscription = loop {
         match authority_transport.try_recv().unwrap() {
             SyncMessage::Subscribe(subscribe) => break subscribe.subscription,
             _ => continue,
@@ -149,11 +149,11 @@ fn one_shot_local_coverage_does_not_require_authority_continuity() {
 
 #[test]
 fn one_shot_propagated_query_attaches_fresh_usage_subscription_for_covered_binding() {
-    let mut schema = schema();
-    let mut owner = AuthorId::from_bytes([0xa1; 16]);
-    let mut client_author = AuthorId::from_bytes([0xc1; 16]);
+    let schema = schema();
+    let owner = AuthorId::from_bytes([0xa1; 16]);
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
 
-    let mut server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
     let mut client = open_db(0xc1, client_author, &schema);
 
     seed(&server, "todos", cells("first", false, owner));
@@ -162,9 +162,9 @@ fn one_shot_propagated_query_attaches_fresh_usage_subscription_for_covered_bindi
     let mut _upstream = client.connect_upstream(client_transport);
     let mut _subscriber = server.accept_subscriber(server_transport, client_author);
 
-    let mut query = Query::from("todos");
-    let mut prepared = prepared(&mut client, &query);
-    let mut first_attachment = client
+    let query = Query::from("todos");
+    let prepared = prepared(&mut client, &query);
+    let first_attachment = client
         .attach_query_with_opts(&prepared, global_subscribe_opts())
         .unwrap();
     client.tick().unwrap();
@@ -174,7 +174,7 @@ fn one_shot_propagated_query_attaches_fresh_usage_subscription_for_covered_bindi
     assert_eq!(prepared_read(&mut client, &query).len(), 1);
 
     seed(&server, "todos", cells("second", false, owner));
-    let mut second_attachment = client
+    let second_attachment = client
         .attach_query_with_opts(&prepared, global_subscribe_opts())
         .unwrap();
     assert!(client.query_attachment_is_covered(&first_attachment));
@@ -204,25 +204,25 @@ fn one_shot_propagated_query_attaches_fresh_usage_subscription_for_covered_bindi
 /// ```
 #[test]
 fn final_query_coverage_drop_releases_server_maintained_receiver_before_reopen() {
-    let mut schema = schema();
-    let mut owner = AuthorId::from_bytes([0xa1; 16]);
-    let mut client_author = AuthorId::from_bytes([0xc1; 16]);
-    let mut server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let schema = schema();
+    let owner = AuthorId::from_bytes([0xa1; 16]);
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
     let mut client = open_db(0xc1, client_author, &schema);
     seed(&server, "todos", cells("initial", false, owner));
 
     let (client_transport, server_transport) = duplex();
     let mut _upstream = client.connect_upstream(client_transport);
     let mut _subscriber = server.accept_subscriber(server_transport, client_author);
-    let mut query = Query::from("todos");
-    let mut prepared = prepared(&mut client, &query);
-    let mut baseline_receivers = server
+    let query = Query::from("todos");
+    let prepared = prepared(&mut client, &query);
+    let baseline_receivers = server
         .node()
         .borrow()
         .runtime_stats_for_test()
         .active_subscriptions;
 
-    let mut attachment = client
+    let attachment = client
         .attach_query_with_opts(&prepared, global_subscribe_opts())
         .expect("attach propagated one-shot coverage");
     client.tick().unwrap();
@@ -252,7 +252,7 @@ fn final_query_coverage_drop_releases_server_maintained_receiver_before_reopen()
         "dropping the final coverage handle must unregister its server receiver"
     );
 
-    let mut reopened = client
+    let reopened = client
         .attach_query_with_opts(&prepared, global_subscribe_opts())
         .expect("re-open propagated one-shot coverage");
     client.tick().unwrap();
@@ -273,27 +273,27 @@ fn final_query_coverage_drop_releases_server_maintained_receiver_before_reopen()
 
 #[test]
 fn one_shot_borrowed_stream_coverage_stays_pinned_until_query_detach() {
-    let mut schema = schema();
-    let mut owner = AuthorId::from_bytes([0xa1; 16]);
-    let mut client_author = AuthorId::from_bytes([0xc1; 16]);
-    let mut server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let schema = schema();
+    let owner = AuthorId::from_bytes([0xa1; 16]);
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
     let mut client = open_db(0xc1, client_author, &schema);
     seed(&server, "todos", cells("pinned", false, owner));
     let (client_transport, server_transport) = duplex();
-    let mut upstream = client.connect_upstream(client_transport);
-    let mut subscriber = server.accept_subscriber(server_transport, client_author);
-    let mut query = Query::from("todos");
-    let mut prepared = prepared(&mut client, &query);
-    let mut stream = prepared_subscribe(&mut client, &query, global_subscribe_opts()).unwrap();
-    let mut borrowed_attachment = client
+    let upstream = client.connect_upstream(client_transport);
+    let subscriber = server.accept_subscriber(server_transport, client_author);
+    let query = Query::from("todos");
+    let prepared = prepared(&mut client, &query);
+    let stream = prepared_subscribe(&mut client, &query, global_subscribe_opts()).unwrap();
+    let borrowed_attachment = client
         .attach_query_with_opts(&prepared, global_subscribe_opts())
         .unwrap();
-    let mut owned_attachment = client
+    let owned_attachment = client
         .attach_query_with_opts(&prepared, global_subscribe_opts())
         .unwrap();
 
     client.detach_query(owned_attachment);
-    let mut stream_two = prepared_subscribe(&mut client, &query, global_subscribe_opts()).unwrap();
+    let stream_two = prepared_subscribe(&mut client, &query, global_subscribe_opts()).unwrap();
     drop(stream_two);
 
     drop(stream);
@@ -310,7 +310,7 @@ fn one_shot_borrowed_stream_coverage_stays_pinned_until_query_detach() {
     client.tick().unwrap();
     server.tick().unwrap();
     {
-        let mut subscriber_ref = subscriber.borrow();
+        let subscriber_ref = subscriber.borrow();
         let ConnectionLink::Subscriber { served, .. } = &subscriber_ref.link else {
             panic!("expected subscriber connection");
         };
@@ -319,7 +319,7 @@ fn one_shot_borrowed_stream_coverage_stays_pinned_until_query_detach() {
     assert!(client.node.upstream_coverage_refcounts.borrow().is_empty());
     assert!(client.node.query_coverage_registrations.borrow().is_empty());
 
-    let mut query_first = client
+    let query_first = client
         .attach_query_with_opts(&prepared, global_subscribe_opts())
         .unwrap();
     let mut borrowing_stream =
@@ -346,7 +346,7 @@ fn one_shot_borrowed_stream_coverage_stays_pinned_until_query_detach() {
     drop(borrowing_stream);
     client.tick().unwrap();
     server.tick().unwrap();
-    let mut subscriber_ref = reconnected_subscriber.borrow();
+    let subscriber_ref = reconnected_subscriber.borrow();
     let ConnectionLink::Subscriber { served, .. } = &subscriber_ref.link else {
         panic!("expected subscriber connection");
     };
@@ -357,21 +357,21 @@ fn one_shot_borrowed_stream_coverage_stays_pinned_until_query_detach() {
 
 #[test]
 fn reconnect_replays_each_distinct_usage_subscription_key() {
-    let mut schema = schema();
-    let mut client_author = AuthorId::from_bytes([0xc1; 16]);
-    let mut server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let schema = schema();
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
     let mut client = open_db(0xc1, client_author, &schema);
-    let mut query = Query::from("todos");
-    let mut prepared = prepared(&mut client, &query);
+    let query = Query::from("todos");
+    let prepared = prepared(&mut client, &query);
 
     let (first_client_transport, first_server_transport) = duplex();
-    let mut first_upstream = client.connect_upstream(first_client_transport);
-    let mut first_subscriber = server.accept_subscriber(first_server_transport, client_author);
-    let mut stream = prepared_subscribe(&mut client, &query, global_subscribe_opts()).unwrap();
-    let mut borrowed = client
+    let first_upstream = client.connect_upstream(first_client_transport);
+    let first_subscriber = server.accept_subscriber(first_server_transport, client_author);
+    let stream = prepared_subscribe(&mut client, &query, global_subscribe_opts()).unwrap();
+    let borrowed = client
         .attach_query_with_opts(&prepared, global_subscribe_opts())
         .unwrap();
-    let mut owned = client
+    let owned = client
         .attach_query_with_opts(&prepared, global_subscribe_opts())
         .unwrap();
     client.tick().unwrap();
@@ -381,12 +381,12 @@ fn reconnect_replays_each_distinct_usage_subscription_key() {
     assert!(server.server.detach_connection(&first_subscriber));
 
     let (second_client_transport, second_server_transport) = duplex();
-    let mut second_upstream = client.connect_upstream(second_client_transport);
-    let mut second_subscriber = server.accept_subscriber(second_server_transport, client_author);
+    let second_upstream = client.connect_upstream(second_client_transport);
+    let second_subscriber = server.accept_subscriber(second_server_transport, client_author);
     client.tick().unwrap();
     server.tick().unwrap();
     client.tick().unwrap();
-    let mut served_len = match &second_subscriber.borrow().link {
+    let served_len = match &second_subscriber.borrow().link {
         ConnectionLink::Subscriber { served, .. } => served.len(),
         _ => panic!("expected subscriber connection"),
     };
@@ -395,7 +395,7 @@ fn reconnect_replays_each_distinct_usage_subscription_key() {
     client.detach_query(owned);
     client.tick().unwrap();
     server.tick().unwrap();
-    let mut served_len = match &second_subscriber.borrow().link {
+    let served_len = match &second_subscriber.borrow().link {
         ConnectionLink::Subscriber { served, .. } => served.len(),
         _ => panic!("expected subscriber connection"),
     };
@@ -404,7 +404,7 @@ fn reconnect_replays_each_distinct_usage_subscription_key() {
     client.detach_query(borrowed);
     client.tick().unwrap();
     server.tick().unwrap();
-    let mut served_len = match &second_subscriber.borrow().link {
+    let served_len = match &second_subscriber.borrow().link {
         ConnectionLink::Subscriber { served, .. } => served.len(),
         _ => panic!("expected subscriber connection"),
     };
@@ -412,15 +412,15 @@ fn reconnect_replays_each_distinct_usage_subscription_key() {
     assert!(client.detach_connection(&second_upstream));
     assert!(server.server.detach_connection(&second_subscriber));
 
-    let mut first_query = client
+    let first_query = client
         .attach_query_with_opts(&prepared, global_subscribe_opts())
         .unwrap();
-    let mut second_query = client
+    let second_query = client
         .attach_query_with_opts(&prepared, global_subscribe_opts())
         .unwrap();
     let (third_client_transport, third_server_transport) = duplex();
     let mut _third_upstream = client.connect_upstream(third_client_transport);
-    let mut third_subscriber = server.accept_subscriber(third_server_transport, client_author);
+    let third_subscriber = server.accept_subscriber(third_server_transport, client_author);
     client.tick().unwrap();
     server.tick().unwrap();
     client.detach_query(second_query);
@@ -430,7 +430,7 @@ fn reconnect_replays_each_distinct_usage_subscription_key() {
     client.detach_query(first_query);
     client.tick().unwrap();
     server.tick().unwrap();
-    let mut served_len = match &third_subscriber.borrow().link {
+    let served_len = match &third_subscriber.borrow().link {
         ConnectionLink::Subscriber { served, .. } => served.len(),
         _ => panic!("expected subscriber connection"),
     };
@@ -441,36 +441,36 @@ fn reconnect_replays_each_distinct_usage_subscription_key() {
 
 #[test]
 fn subscriber_connection_groups_duplicate_usage_subscriptions_by_coverage_key() {
-    let mut schema = schema();
-    let mut owner = AuthorId::from_bytes([0xa1; 16]);
-    let mut client_author = AuthorId::from_bytes([0xc1; 16]);
+    let schema = schema();
+    let owner = AuthorId::from_bytes([0xa1; 16]);
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
 
-    let mut server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
     let mut client = open_db(0xc1, client_author, &schema);
 
     seed(&server, "todos", cells("first", false, owner));
 
     let (client_transport, server_transport) = duplex();
     let mut _upstream = client.connect_upstream(client_transport);
-    let mut subscriber = server.accept_subscriber(server_transport, client_author);
+    let subscriber = server.accept_subscriber(server_transport, client_author);
 
-    let mut query = Query::from("todos");
-    let mut prepared = prepared(&mut client, &query);
-    let mut first_attachment = client
+    let query = Query::from("todos");
+    let prepared = prepared(&mut client, &query);
+    let first_attachment = client
         .attach_query_with_opts(&prepared, global_subscribe_opts())
         .unwrap();
     client.tick().unwrap();
     server.tick().unwrap();
     client.tick().unwrap();
 
-    let mut second_attachment = client
+    let second_attachment = client
         .attach_query_with_opts(&prepared, global_subscribe_opts())
         .unwrap();
     client.tick().unwrap();
     server.tick().unwrap();
     client.tick().unwrap();
 
-    let mut subscriber_ref = subscriber.borrow();
+    let subscriber_ref = subscriber.borrow();
     let ConnectionLink::Subscriber {
         peer,
         served,
@@ -482,12 +482,12 @@ fn subscriber_connection_groups_duplicate_usage_subscriptions_by_coverage_key() 
     };
     assert_eq!(served.len(), 2);
     assert_eq!(coverage_groups.len(), 1);
-    let mut group = coverage_groups
+    let group = coverage_groups
         .values()
         .next()
         .expect("duplicate usage subscriptions should share one coverage group");
     assert_eq!(group.subscribers.len(), 2);
-    let mut maintained_metrics = peer.maintained_subscription_view_metrics();
+    let maintained_metrics = peer.maintained_subscription_view_metrics();
     assert_eq!(maintained_metrics.hits_out, 2);
     assert_eq!(maintained_metrics.footprint.result_rows, 1);
     assert_eq!(prepared_read(&mut client, &query).len(), 1);
@@ -496,7 +496,7 @@ fn subscriber_connection_groups_duplicate_usage_subscriptions_by_coverage_key() 
     client.detach_query(second_attachment);
     client.tick().unwrap();
     server.tick().unwrap();
-    let mut subscriber_ref = subscriber.borrow();
+    let subscriber_ref = subscriber.borrow();
     let ConnectionLink::Subscriber {
         served,
         coverage_groups,
@@ -511,16 +511,16 @@ fn subscriber_connection_groups_duplicate_usage_subscriptions_by_coverage_key() 
 
 #[test]
 fn subscription_opening_publication_follows_upstream_coverage_lifecycle() {
-    let mut schema = schema();
-    let mut owner = AuthorId::from_bytes([0xa1; 16]);
-    let mut client_author = AuthorId::from_bytes([0xc1; 16]);
-    let mut server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let schema = schema();
+    let owner = AuthorId::from_bytes([0xa1; 16]);
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
     let mut client = open_db(0xc1, client_author, &schema);
-    let mut seeded = seed(&server, "todos", cells("first", false, owner));
+    let seeded = seed(&server, "todos", cells("first", false, owner));
     let (client_transport, server_transport) = duplex();
     let mut _upstream = client.connect_upstream(client_transport);
     let mut _subscriber = server.accept_subscriber(server_transport, client_author);
-    let mut query = Query::from("todos");
+    let query = Query::from("todos");
 
     let mut first = prepared_subscribe(&mut client, &query, global_subscribe_opts()).unwrap();
     // NAPI drains subscriptions through try_next_event, so protect that exact
@@ -538,10 +538,10 @@ fn subscription_opening_publication_follows_upstream_coverage_lifecycle() {
 
     // WASM erases SubscriptionStream behind dyn Stream, so separately protect
     // the poll_next path with a different newly-created coverage key.
-    let mut empty_query = Query::from("todos").filter(eq(col("done"), lit(true)));
+    let empty_query = Query::from("todos").filter(eq(col("done"), lit(true)));
     let mut wasm_path =
         prepared_subscribe(&mut client, &empty_query, global_subscribe_opts()).unwrap();
-    let mut waker = Waker::noop();
+    let waker = Waker::noop();
     let mut cx = Context::from_waker(waker);
     assert!(matches!(
         Pin::new(&mut wasm_path).poll_next(&mut cx),
@@ -596,12 +596,12 @@ fn subscription_opening_publication_follows_upstream_coverage_lifecycle() {
 
 #[test]
 fn local_tier_full_propagation_publishes_truthful_empty_opening() {
-    let mut schema = schema();
+    let schema = schema();
     let mut client = open_db(0xc1, AuthorId::from_bytes([0xc1; 16]), &schema);
-    let mut query = Query::from("todos");
+    let query = Query::from("todos");
 
     let mut subscription = prepared_subscribe(&mut client, &query, ReadOpts::default()).unwrap();
-    let mut event = subscription
+    let event = subscription
         .try_next_event()
         .expect("Local tier must publish its local opening while propagation continues upstream");
     let SubscriptionEvent::Delta {
@@ -626,20 +626,20 @@ fn local_tier_full_propagation_publishes_truthful_empty_opening() {
 
 #[test]
 fn malformed_authority_opening_keeps_shared_coverage_provisional() {
-    let mut schema = schema();
+    let schema = schema();
     let mut client = open_db(0xc1, AuthorId::from_bytes([0xc1; 16]), &schema);
     let (client_transport, mut authority_transport) = duplex();
     let mut _upstream = client.connect_upstream(client_transport);
-    let mut query = Query::from("todos");
+    let query = Query::from("todos");
     let mut first = prepared_subscribe(&mut client, &query, global_subscribe_opts()).unwrap();
     client.tick().unwrap();
-    let mut subscription = loop {
+    let subscription = loop {
         match authority_transport.try_recv().unwrap() {
             SyncMessage::Subscribe(subscribe) => break subscribe.subscription,
             _ => continue,
         }
     };
-    let mut update = |version_bundles| SyncMessage::ViewUpdate {
+    let update = |version_bundles| SyncMessage::ViewUpdate {
         subscription,
         settled_through: GlobalSeq(1),
         reset_result_set: true,
@@ -703,13 +703,13 @@ fn malformed_authority_opening_keeps_shared_coverage_provisional() {
 
 #[test]
 fn authoritative_empty_branch_opening_does_not_wait_for_metadata() {
-    let mut schema = schema();
+    let schema = schema();
     let mut client = open_db(0xc1, AuthorId::from_bytes([0xc1; 16]), &schema);
     let (client_transport, mut authority_transport) = duplex();
-    let mut upstream = client.connect_upstream(client_transport);
-    let mut parked_query = Query::from("todos");
-    let mut valid_query = Query::from("todos").filter(eq(col("done"), lit(true)));
-    let mut branch = BranchId::from_bytes([0x42; 16]);
+    let upstream = client.connect_upstream(client_transport);
+    let parked_query = Query::from("todos");
+    let valid_query = Query::from("todos").filter(eq(col("done"), lit(true)));
+    let branch = BranchId::from_bytes([0x42; 16]);
     let mut branch_stream =
         prepared_subscribe(&mut client, &parked_query, global_subscribe_opts()).unwrap();
     let mut global_stream =
@@ -722,8 +722,8 @@ fn authoritative_empty_branch_opening_does_not_wait_for_metadata() {
         }
     }
     assert_eq!(subscriptions.len(), 2);
-    let mut branch_subscription = subscriptions[0];
-    let mut global_subscription = subscriptions[1];
+    let branch_subscription = subscriptions[0];
+    let global_subscription = subscriptions[1];
     {
         let mut upstream = upstream.borrow_mut();
         let ConnectionLink::Upstream { branch_views, .. } = &mut upstream.link else {
@@ -731,7 +731,7 @@ fn authoritative_empty_branch_opening_does_not_wait_for_metadata() {
         };
         branch_views.insert(branch_subscription, branch);
     }
-    let mut empty_update = |subscription| SyncMessage::ViewUpdate {
+    let empty_update = |subscription| SyncMessage::ViewUpdate {
         subscription,
         settled_through: GlobalSeq(1),
         reset_result_set: true,
@@ -781,20 +781,20 @@ fn authoritative_empty_branch_opening_does_not_wait_for_metadata() {
 
 #[test]
 fn dropping_live_subscriptions_detaches_usage_subscriptions() {
-    let mut schema = schema();
-    let mut owner = AuthorId::from_bytes([0xa1; 16]);
-    let mut client_author = AuthorId::from_bytes([0xc1; 16]);
+    let schema = schema();
+    let owner = AuthorId::from_bytes([0xa1; 16]);
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
 
-    let mut server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
     let mut client = open_db(0xc1, client_author, &schema);
 
-    let mut seeded = seed(&server, "todos", cells("first", false, owner));
+    let seeded = seed(&server, "todos", cells("first", false, owner));
 
     let (client_transport, server_transport) = duplex();
     let mut _upstream = client.connect_upstream(client_transport);
-    let mut subscriber = server.accept_subscriber(server_transport, client_author);
+    let subscriber = server.accept_subscriber(server_transport, client_author);
 
-    let mut query = Query::from("todos");
+    let query = Query::from("todos");
     let mut first_subscription =
         prepared_subscribe(&mut client, &query, global_subscribe_opts()).unwrap();
     let mut second_subscription =
@@ -812,7 +812,7 @@ fn dropping_live_subscriptions_detaches_usage_subscriptions() {
         vec![seeded]
     );
 
-    let mut subscriber_ref = subscriber.borrow();
+    let subscriber_ref = subscriber.borrow();
     let ConnectionLink::Subscriber {
         served,
         coverage_groups,
@@ -823,7 +823,7 @@ fn dropping_live_subscriptions_detaches_usage_subscriptions() {
     };
     assert_eq!(served.len(), 1);
     assert_eq!(coverage_groups.len(), 1);
-    let mut group = coverage_groups
+    let group = coverage_groups
         .values()
         .next()
         .expect("propagating subscriptions should share one forwarded coverage group");
@@ -833,7 +833,7 @@ fn dropping_live_subscriptions_detaches_usage_subscriptions() {
     drop(first_subscription);
     client.tick().unwrap();
     server.tick().unwrap();
-    let mut subscriber_ref = subscriber.borrow();
+    let subscriber_ref = subscriber.borrow();
     let ConnectionLink::Subscriber {
         served,
         coverage_groups,
@@ -849,7 +849,7 @@ fn dropping_live_subscriptions_detaches_usage_subscriptions() {
     drop(second_subscription);
     client.tick().unwrap();
     server.tick().unwrap();
-    let mut subscriber_ref = subscriber.borrow();
+    let subscriber_ref = subscriber.borrow();
     let ConnectionLink::Subscriber {
         served,
         coverage_groups,
@@ -864,11 +864,11 @@ fn dropping_live_subscriptions_detaches_usage_subscriptions() {
 
 #[test]
 fn one_shot_edge_query_attaches_fresh_usage_subscription_for_covered_binding() {
-    let mut schema = schema();
-    let mut owner = AuthorId::from_bytes([0xa1; 16]);
-    let mut client_author = AuthorId::from_bytes([0xc1; 16]);
+    let schema = schema();
+    let owner = AuthorId::from_bytes([0xa1; 16]);
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
 
-    let mut server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
     let mut client = open_db(0xc1, client_author, &schema);
 
     seed(&server, "todos", cells("first", false, owner));
@@ -877,9 +877,9 @@ fn one_shot_edge_query_attaches_fresh_usage_subscription_for_covered_binding() {
     let mut _upstream = client.connect_upstream(client_transport);
     let mut _subscriber = server.accept_subscriber(server_transport, client_author);
 
-    let mut query = Query::from("todos");
-    let mut prepared = prepared(&mut client, &query);
-    let mut first_attachment = client
+    let query = Query::from("todos");
+    let prepared = prepared(&mut client, &query);
+    let first_attachment = client
         .attach_query_with_opts(&prepared, edge_subscribe_opts())
         .unwrap();
     client.tick().unwrap();
@@ -889,7 +889,7 @@ fn one_shot_edge_query_attaches_fresh_usage_subscription_for_covered_binding() {
     assert_eq!(prepared_read(&mut client, &query).len(), 1);
 
     seed(&server, "todos", cells("second", false, owner));
-    let mut second_attachment = client
+    let second_attachment = client
         .attach_query_with_opts(&prepared, edge_subscribe_opts())
         .unwrap();
     assert!(client.query_attachment_is_covered(&first_attachment));
@@ -909,11 +909,11 @@ fn missing_permissions_head_gates_sessions_but_not_trusted_backend_query_coverag
     // This stays at the transport boundary because the behavior under test is
     // the authenticated link's trust discriminator, which the public query API
     // deliberately does not expose.
-    let mut schema = schema();
-    let mut server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let schema = schema();
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
     server.server.set_permissions_ready(false).unwrap();
 
-    let mut backend_author = AuthorId::from_bytes([0xb0; 16]);
+    let backend_author = AuthorId::from_bytes([0xb0; 16]);
     let mut backend = open_db(0xb0, backend_author, &schema);
     let (backend_transport, server_backend_transport) = duplex();
     let mut _backend_upstream = backend.connect_upstream(backend_transport);
@@ -923,19 +923,19 @@ fn missing_permissions_head_gates_sessions_but_not_trusted_backend_query_coverag
         CommitUnitTrust::TrustedBackend,
     );
 
-    let mut session_author = AuthorId::from_bytes([0xc1; 16]);
+    let session_author = AuthorId::from_bytes([0xc1; 16]);
     let mut session = open_db(0xc1, session_author, &schema);
     let (session_transport, server_session_transport) = duplex();
     let mut _session_upstream = session.connect_upstream(session_transport);
     let mut _session_subscriber =
         server.accept_subscriber(server_session_transport, session_author);
 
-    let mut backend_query = prepared(&mut backend, &Query::from("todos"));
-    let mut backend_attachment = backend
+    let backend_query = prepared(&mut backend, &Query::from("todos"));
+    let backend_attachment = backend
         .attach_query_with_opts(&backend_query, edge_subscribe_opts())
         .unwrap();
-    let mut session_query = prepared(&mut session, &Query::from("todos"));
-    let mut session_attachment = session
+    let session_query = prepared(&mut session, &Query::from("todos"));
+    let session_attachment = session
         .attach_query_with_opts(&session_query, edge_subscribe_opts())
         .unwrap();
 
@@ -956,7 +956,7 @@ fn missing_permissions_head_gates_sessions_but_not_trusted_backend_query_coverag
 
 #[test]
 fn one_shot_edge_query_attaches_fresh_claim_bound_usage_subscription_for_covered_binding() {
-    let mut schema = JazzSchema::new([TableSchema::new(
+    let schema = JazzSchema::new([TableSchema::new(
         "chats",
         [
             ColumnSchema::new("title", ColumnType::String),
@@ -971,16 +971,16 @@ fn one_shot_edge_query_attaches_fresh_claim_bound_usage_subscription_for_covered
         ),
     ))
     .with_write_policy(Policy::public())]);
-    let mut server = open_core(0x5e, AuthorId::SYSTEM, &schema);
-    let mut reader = AuthorId::from_bytes([0xc1; 16]);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let reader = AuthorId::from_bytes([0xc1; 16]);
     let mut client = open_db(0xc1, reader, &schema);
-    let mut join_code = "invite-code-123";
-    client.set_identity_claims(
+    let join_code = "invite-code-123";
+    let _ = client.set_identity_claims(
         reader,
         BTreeMap::from([("join_code".to_owned(), Value::String(join_code.to_owned()))]),
     );
 
-    let mut first = seed(
+    let first = seed(
         &server,
         "chats",
         BTreeMap::from([
@@ -1000,9 +1000,9 @@ fn one_shot_edge_query_attaches_fresh_claim_bound_usage_subscription_for_covered
         BTreeMap::from([("join_code".to_owned(), Value::String(join_code.to_owned()))]),
     );
 
-    let mut query = Query::from("chats");
-    let mut prepared = prepared(&mut client, &query);
-    let mut first_attachment = client
+    let query = Query::from("chats");
+    let prepared = prepared(&mut client, &query);
+    let first_attachment = client
         .attach_query_with_opts(&prepared, edge_subscribe_opts())
         .unwrap();
     client.tick().unwrap();
@@ -1014,7 +1014,7 @@ fn one_shot_edge_query_attaches_fresh_claim_bound_usage_subscription_for_covered
         vec![first]
     );
 
-    let mut second = seed(
+    let second = seed(
         &server,
         "chats",
         BTreeMap::from([
@@ -1025,7 +1025,7 @@ fn one_shot_edge_query_attaches_fresh_claim_bound_usage_subscription_for_covered
             ),
         ]),
     );
-    let mut second_attachment = client
+    let second_attachment = client
         .attach_query_with_opts(&prepared, edge_subscribe_opts())
         .unwrap();
     assert!(client.query_attachment_is_covered(&first_attachment));
@@ -1045,7 +1045,7 @@ fn one_shot_edge_query_attaches_fresh_claim_bound_usage_subscription_for_covered
 
 #[test]
 fn edge_subscription_with_claim_bound_policy_emits_later_matching_server_write() {
-    let mut schema = JazzSchema::new([TableSchema::new(
+    let schema = JazzSchema::new([TableSchema::new(
         "chats",
         [
             ColumnSchema::new("title", ColumnType::String),
@@ -1060,13 +1060,12 @@ fn edge_subscription_with_claim_bound_policy_emits_later_matching_server_write()
         ),
     ))
     .with_write_policy(Policy::public())]);
-    let mut server = open_core(0x5e, AuthorId::SYSTEM, &schema);
-    let mut reader = AuthorId::from_bytes([0xc1; 16]);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let reader = AuthorId::from_bytes([0xc1; 16]);
     let mut client = open_db(0xc1, reader, &schema);
-    let mut join_code = "invite-code-123";
-    let mut claims =
-        BTreeMap::from([("join_code".to_owned(), Value::String(join_code.to_owned()))]);
-    client.set_identity_claims(reader, claims.clone());
+    let join_code = "invite-code-123";
+    let claims = BTreeMap::from([("join_code".to_owned(), Value::String(join_code.to_owned()))]);
+    let _ = client.set_identity_claims(reader, claims.clone());
 
     let mut _first = seed(
         &server,
@@ -1084,7 +1083,7 @@ fn edge_subscription_with_claim_bound_policy_emits_later_matching_server_write()
     let mut _upstream = client.connect_upstream(client_transport);
     let mut _subscriber = server.accept_subscriber_with_claims(server_transport, reader, claims);
 
-    let mut query = Query::from("chats");
+    let query = Query::from("chats");
     let mut subscription = prepared_subscribe(&mut client, &query, edge_subscribe_opts()).unwrap();
     assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
     client.tick().unwrap();

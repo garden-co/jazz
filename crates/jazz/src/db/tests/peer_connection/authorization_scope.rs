@@ -6,17 +6,17 @@ use super::*;
 fn legacy_authorization_scope_subscribe_is_rejected_before_shape_admission() {
     let mut schema = schema();
     schema.tables[0].read_policy = Some(Query::from("todos"));
-    let mut identity = AuthorId::from_bytes([0xc1; 16]);
-    let mut server = open_core(0x5e, AuthorId::SYSTEM, &schema);
-    let mut shape = Query::from("todos").validate(&schema).unwrap();
-    let mut binding = shape.bind(BTreeMap::new()).unwrap();
-    let mut subscription = SubscriptionKey {
+    let identity = AuthorId::from_bytes([0xc1; 16]);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let shape = Query::from("todos").validate(&schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let subscription = SubscriptionKey {
         shape_id: shape.shape_id(),
         binding_id: binding.binding_id(),
         read_view: RegisterShapeOptions::default().read_view_key(),
     };
     let (mut client_transport, server_transport) = duplex();
-    let mut subscriber = server.accept_subscriber(server_transport, identity);
+    let subscriber = server.accept_subscriber(server_transport, identity);
     client_transport
         .send(SyncMessage::RegisterShape {
             shape_id: shape.shape_id(),
@@ -103,17 +103,17 @@ fn legacy_authorization_scope_subscribe_refreshes_claims() {
 fn authorization_scope_rejects_unrelated_caller_intent() {
     let mut schema = schema();
     schema.tables[0].read_policy = Some(Query::from("todos"));
-    let mut identity = AuthorId::from_bytes([0xc2; 16]);
-    let mut server = open_core(0x5f, AuthorId::SYSTEM, &schema);
-    let mut shape = Query::from("todos").validate(&schema).unwrap();
-    let mut binding = shape.bind(BTreeMap::new()).unwrap();
-    let mut subscription = SubscriptionKey {
+    let identity = AuthorId::from_bytes([0xc2; 16]);
+    let server = open_core(0x5f, AuthorId::SYSTEM, &schema);
+    let shape = Query::from("todos").validate(&schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let subscription = SubscriptionKey {
         shape_id: shape.shape_id(),
         binding_id: binding.binding_id(),
         read_view: RegisterShapeOptions::default().read_view_key(),
     };
     let (mut client_transport, server_transport) = duplex();
-    let mut subscriber = server.accept_subscriber(server_transport, identity);
+    let subscriber = server.accept_subscriber(server_transport, identity);
     client_transport
         .send(SyncMessage::RegisterShape {
             shape_id: shape.shape_id(),
@@ -161,24 +161,24 @@ fn legacy_authorization_scope_subscribe_never_assembles_multiple_clauses() {
         "support_check",
         Vec::<ColumnSchema>::new(),
     ));
-    let mut identity = AuthorId::from_bytes([0xc3; 16]);
-    let mut server = open_core(0x60, AuthorId::SYSTEM, &schema);
-    let mut action = PermissionAdviceAction::Update {
+    let identity = AuthorId::from_bytes([0xc3; 16]);
+    let server = open_core(0x60, AuthorId::SYSTEM, &schema);
+    let action = PermissionAdviceAction::Update {
         table: "todos".to_owned(),
         row: row(1),
         patch: BTreeMap::new(),
     };
-    let mut expected = server
+    let expected = server
         .node()
         .borrow()
         .authorization_support_scope(identity, &action)
         .unwrap();
     assert_eq!(expected.subscriptions.len(), 2);
-    let mut entries = expected
+    let entries = expected
         .subscriptions
         .iter()
         .map(|(shape, binding)| {
-            let mut subscription = SubscriptionKey {
+            let subscription = SubscriptionKey {
                 shape_id: shape.shape_id(),
                 binding_id: binding.binding_id(),
                 read_view: RegisterShapeOptions::default().read_view_key(),
@@ -187,7 +187,7 @@ fn legacy_authorization_scope_subscribe_never_assembles_multiple_clauses() {
         })
         .collect::<Vec<_>>();
     let (mut client_transport, server_transport) = duplex();
-    let mut subscriber = server.accept_subscriber(server_transport, identity);
+    let subscriber = server.accept_subscriber(server_transport, identity);
     for (shape, _) in &entries {
         client_transport
             .send(SyncMessage::RegisterShape {
@@ -197,7 +197,7 @@ fn legacy_authorization_scope_subscribe_never_assembles_multiple_clauses() {
             })
             .unwrap();
     }
-    let mut send_scope = |client: &mut Box<dyn Transport>, shape: &ValidatedQuery, subscription| {
+    let send_scope = |client: &mut Box<dyn Transport>, shape: &ValidatedQuery, subscription| {
         client
             .send(SyncMessage::AuthorizationScopeSubscribe {
                 subscribe: Subscribe {
@@ -244,7 +244,7 @@ fn legacy_authorization_scope_subscribe_never_assembles_multiple_clauses() {
 
 #[test]
 fn authorization_scope_aggregate_bounds_cuts_and_progress_independently() {
-    let mut subscription = |seed| SubscriptionKey {
+    let subscription = |seed| SubscriptionKey {
         shape_id: ShapeId(uuid::Uuid::from_bytes([seed; 16])),
         binding_id: BindingId(uuid::Uuid::from_bytes([seed.wrapping_add(1); 16])),
         read_view: RegisterShapeOptions::default().read_view_key(),
@@ -262,18 +262,18 @@ fn authorization_scope_aggregate_bounds_cuts_and_progress_independently() {
 
 #[test]
 fn authorization_scope_claims_or_policy_away_and_back_requires_fresh_every_clause() {
-    let mut subscription = |seed| SubscriptionKey {
+    let subscription = |seed| SubscriptionKey {
         shape_id: ShapeId(uuid::Uuid::from_bytes([seed; 16])),
         binding_id: BindingId(uuid::Uuid::from_bytes([seed.wrapping_add(1); 16])),
         read_view: RegisterShapeOptions::default().read_view_key(),
     };
-    let mut first = subscription(0x21);
-    let mut second = subscription(0x31);
-    let mut expected_support = BTreeSet::from([
+    let first = subscription(0x21);
+    let second = subscription(0x31);
+    let expected_support = BTreeSet::from([
         (first.shape_id, first.binding_id),
         (second.shape_id, second.binding_id),
     ]);
-    let mut key = AuthorizationSupportScopeKey {
+    let key = AuthorizationSupportScopeKey {
         support_shape_digest: [0x41; 32],
         subject: AuthorId::from_bytes([0x42; 16]),
         claims_digest: [0x43; 32],
@@ -297,7 +297,7 @@ fn authorization_scope_claims_or_policy_away_and_back_requires_fresh_every_claus
     remove_scope_aggregate_member(&mut aggregates, &key, second);
     assert!(aggregates.is_empty());
 
-    let mut aggregate = aggregates.entry(key).or_insert_with(|| ScopeAggregate {
+    let aggregate = aggregates.entry(key).or_insert_with(|| ScopeAggregate {
         expected_support,
         members: BTreeMap::new(),
         applied: BTreeMap::new(),
@@ -337,8 +337,8 @@ fn authorization_scope_claims_or_policy_away_and_back_requires_fresh_every_claus
 
 #[test]
 fn authorization_scope_transport_rejects_stale_component_after_applied_view() {
-    let mut link = [0x8b; 16];
-    let mut context = AuthorityContext {
+    let link = [0x8b; 16];
+    let context = AuthorityContext {
         authority: [0x8a; 16],
         link,
         connection_id: 1,
@@ -348,13 +348,13 @@ fn authorization_scope_transport_rejects_stale_component_after_applied_view() {
         authorization_progress: 9,
         settled_through: 17,
     };
-    let mut key = AuthorizationSupportScopeKey {
+    let key = AuthorizationSupportScopeKey {
         support_shape_digest: [1; 32],
         subject: AuthorId::from_bytes(link),
         claims_digest: [2; 32],
         policy_digest: [3; 32],
     };
-    let mut receipt = AuthorizationScopeReceipt {
+    let receipt = AuthorizationScopeReceipt {
         key,
         authority: context.authority,
         link,
@@ -395,8 +395,8 @@ fn authorization_scope_transport_rejects_stale_component_after_applied_view() {
 
 #[test]
 fn authorization_scope_requires_canonical_current_global_support_options() {
-    let mut expected = RegisterShapeOptions::default();
-    let mut subscription_for = |opts: &RegisterShapeOptions| SubscriptionKey {
+    let expected = RegisterShapeOptions::default();
+    let subscription_for = |opts: &RegisterShapeOptions| SubscriptionKey {
         shape_id: ShapeId(uuid::Uuid::from_bytes([0x51; 16])),
         binding_id: BindingId(uuid::Uuid::from_bytes([0x52; 16])),
         read_view: opts.read_view_key(),
@@ -406,7 +406,7 @@ fn authorization_scope_requires_canonical_current_global_support_options() {
         &expected,
         subscription_for(&expected),
     ));
-    let mut variants = [
+    let variants = [
         RegisterShapeOptions {
             tier: DurabilityTier::Global,
             read_view: ReadViewSpec {
@@ -454,10 +454,10 @@ fn authorization_scope_requires_canonical_current_global_support_options() {
 fn legacy_authorization_scope_subscribe_rejects_every_read_view() {
     let mut schema = schema();
     schema.tables[0].read_policy = Some(Query::from("todos"));
-    let mut identity = AuthorId::from_bytes([0xc4; 16]);
-    let mut shape = Query::from("todos").validate(&schema).unwrap();
-    let mut binding = shape.bind(BTreeMap::new()).unwrap();
-    let mut historical = RegisterShapeOptions {
+    let identity = AuthorId::from_bytes([0xc4; 16]);
+    let shape = Query::from("todos").validate(&schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let historical = RegisterShapeOptions {
         tier: DurabilityTier::Global,
         read_view: ReadViewSpec {
             source: ReadViewSourceSpec::Snapshot {
@@ -472,7 +472,7 @@ fn legacy_authorization_scope_subscribe_rejects_every_read_view() {
         },
         ..RegisterShapeOptions::default()
     };
-    let mut variants = [
+    let variants = [
         RegisterShapeOptions {
             tier: DurabilityTier::Global,
             read_view: ReadViewSpec {
@@ -494,16 +494,15 @@ fn legacy_authorization_scope_subscribe_rejects_every_read_view() {
     // This is the matching positive control: the same shape/binding receives
     // a proof under the sole canonical current/global registration. Removing
     // both admission guards below makes the noncanonical cases fail instead.
-    let mut canonical_opts = RegisterShapeOptions::default();
-    let mut canonical_subscription = SubscriptionKey {
+    let canonical_opts = RegisterShapeOptions::default();
+    let canonical_subscription = SubscriptionKey {
         shape_id: shape.shape_id(),
         binding_id: binding.binding_id(),
         read_view: canonical_opts.read_view_key(),
     };
-    let mut canonical_server = open_core(0x64, AuthorId::SYSTEM, &schema);
+    let canonical_server = open_core(0x64, AuthorId::SYSTEM, &schema);
     let (mut canonical_client, canonical_transport) = duplex();
-    let mut canonical_subscriber =
-        canonical_server.accept_subscriber(canonical_transport, identity);
+    let canonical_subscriber = canonical_server.accept_subscriber(canonical_transport, identity);
     canonical_client
         .send(SyncMessage::RegisterShape {
             shape_id: shape.shape_id(),
@@ -547,14 +546,14 @@ fn legacy_authorization_scope_subscribe_rejects_every_read_view() {
     );
 
     for opts in variants {
-        let mut server = open_core(0x63, AuthorId::SYSTEM, &schema);
-        let mut subscription = SubscriptionKey {
+        let server = open_core(0x63, AuthorId::SYSTEM, &schema);
+        let subscription = SubscriptionKey {
             shape_id: shape.shape_id(),
             binding_id: binding.binding_id(),
             read_view: opts.read_view_key(),
         };
         let (mut client_transport, server_transport) = duplex();
-        let mut subscriber = server.accept_subscriber(server_transport, identity);
+        let subscriber = server.accept_subscriber(server_transport, identity);
         client_transport
             .send(SyncMessage::RegisterShape {
                 shape_id: shape.shape_id(),
@@ -590,14 +589,14 @@ fn legacy_authorization_scope_subscribe_rejects_every_read_view() {
 
 #[test]
 fn subscriber_cannot_spoof_authority_view_updates() {
-    let mut schema = schema();
+    let schema = schema();
     let mut edge = open_db(0x7a, AuthorId::SYSTEM, &schema);
     let (edge_transport, mut authority_transport) = duplex();
     let mut _upstream = edge.connect_upstream(edge_transport);
-    let mut query = Query::from("todos");
+    let query = Query::from("todos");
     let mut _stream = prepared_subscribe(&mut edge, &query, global_subscribe_opts()).unwrap();
     edge.tick().unwrap();
-    let mut subscription = loop {
+    let subscription = loop {
         match authority_transport
             .try_recv()
             .expect("opening remote coverage must send an upstream subscription")
@@ -606,7 +605,7 @@ fn subscriber_cannot_spoof_authority_view_updates() {
             _ => continue,
         }
     };
-    let mut view_update = |opening_pending, settled_through| SyncMessage::ViewUpdate {
+    let view_update = |opening_pending, settled_through| SyncMessage::ViewUpdate {
         subscription,
         settled_through: GlobalSeq(settled_through),
         reset_result_set: true,
@@ -624,7 +623,7 @@ fn subscriber_cannot_spoof_authority_view_updates() {
     };
     authority_transport.send(view_update(true, 1)).unwrap();
     edge.tick().unwrap();
-    let mut binding_view = edge
+    let binding_view = edge
         .node
         .node
         .borrow()
@@ -637,26 +636,26 @@ fn subscriber_cannot_spoof_authority_view_updates() {
             .opening_pending_for_binding_view(binding_view),
         "normal authority opening must install the pending marker"
     );
-    let mut before_generation = edge
+    let before_generation = edge
         .node
         .node
         .borrow()
         .applied_view_update_generation(binding_view);
-    let mut before_watermark = edge.node.node.borrow().applied_global_watermark();
-    let mut before_drops = edge
+    let before_watermark = edge.node.node.borrow().applied_global_watermark();
+    let before_drops = edge
         .node
         .node
         .borrow()
         .sync_metrics()
         .dropped_peer_request_messages;
     let (mut client_transport, server_transport) = duplex();
-    let mut subscriber = edge.accept_subscriber(server_transport, AuthorId::from_bytes([0x7b; 16]));
+    let _subscriber = edge.accept_subscriber(server_transport, AuthorId::from_bytes([0x7b; 16]));
 
     client_transport.send(view_update(false, 100)).unwrap();
-    subscriber.borrow_mut().tick().unwrap();
+    edge.tick().unwrap();
 
-    let mut node = Rc::clone(&edge.node.node);
-    let mut node = node.borrow();
+    let node = Rc::clone(&edge.node.node);
+    let node = node.borrow();
     assert_eq!(node.applied_global_watermark(), before_watermark);
     assert_eq!(
         node.applied_view_update_generation(binding_view),
@@ -676,8 +675,8 @@ fn subscriber_cannot_spoof_authority_view_updates() {
 
     authority_transport.send(view_update(false, 2)).unwrap();
     edge.tick().unwrap();
-    let mut node = Rc::clone(&edge.node.node);
-    let mut node = node.borrow();
+    let node = Rc::clone(&edge.node.node);
+    let node = node.borrow();
     assert_eq!(
         node.applied_view_update_generation(binding_view),
         before_generation + 1,
@@ -688,11 +687,11 @@ fn subscriber_cannot_spoof_authority_view_updates() {
 
 #[test]
 fn oversized_register_shape_is_rejected_at_admission() {
-    let mut schema = schema();
-    let mut server = open_core(0x5e, AuthorId::SYSTEM, &schema);
-    let mut huge_table = "t".repeat(MAX_SHAPE_AST_BYTES + 1);
-    let mut ast = ShapeAst::new(Query::from(huge_table), schema.version_id());
-    let mut error = server
+    let schema = schema();
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let huge_table = "t".repeat(MAX_SHAPE_AST_BYTES + 1);
+    let ast = ShapeAst::new(Query::from(huge_table), schema.version_id());
+    let error = server
         .node()
         .borrow_mut()
         .apply_sync_message(SyncMessage::RegisterShape {
@@ -709,20 +708,20 @@ fn oversized_register_shape_is_rejected_at_admission() {
 
 #[test]
 fn resume_cursor_restores_connection_claims_before_serving_same_identity_siblings() {
-    let mut schema = membership_scoped_relation_schema();
-    let mut reader = AuthorId::from_bytes([0xb3; 16]);
-    let mut normal_claims = BTreeMap::new();
-    let mut invite_claims = BTreeMap::from([
+    let schema = membership_scoped_relation_schema();
+    let reader = AuthorId::from_bytes([0xb3; 16]);
+    let normal_claims = BTreeMap::new();
+    let invite_claims = BTreeMap::from([
         ("user_id".to_owned(), Value::String(reader.0.to_string())),
         (
             "join_code".to_owned(),
             Value::String("resume-only-invite".to_owned()),
         ),
     ]);
-    let mut server = open_core(0x5f, AuthorId::SYSTEM, &schema);
+    let server = open_core(0x5f, AuthorId::SYSTEM, &schema);
     let mut client = open_db(0xc6, reader, &schema);
-    let mut sibling = open_db(0xc7, reader, &schema);
-    let mut chat = row(0xc3);
+    let sibling = open_db(0xc7, reader, &schema);
+    let chat = row(0xc3);
     server
         .insert_with_id(
             "chats",
@@ -742,10 +741,9 @@ fn resume_cursor_restores_connection_claims_before_serving_same_identity_sibling
         .unwrap();
 
     let (client_transport, server_transport) = duplex();
-    let mut upstream = client.connect_upstream(client_transport);
-    let mut subscriber =
-        server.accept_subscriber_with_claims(server_transport, reader, normal_claims);
-    let mut cursor = subscriber.borrow_mut().take_resume_cursor().unwrap();
+    let upstream = client.connect_upstream(client_transport);
+    let subscriber = server.accept_subscriber_with_claims(server_transport, reader, normal_claims);
+    let cursor = subscriber.borrow_mut().take_resume_cursor().unwrap();
     assert!(server.server.detach_connection(&subscriber));
     assert!(client.detach_connection(&upstream));
 
@@ -761,11 +759,11 @@ fn resume_cursor_restores_connection_claims_before_serving_same_identity_sibling
     let mut _resumed =
         server.accept_subscriber_with_resume(resumed_server_transport, reader, cursor);
 
-    let mut query = prepared(
+    let query = prepared(
         &mut client,
         &Query::from("chats").filter(eq(col("id"), lit(chat.0))),
     );
-    let mut attachment = client
+    let attachment = client
         .attach_query_with_opts(&query, edge_subscribe_opts())
         .unwrap();
     client.tick().unwrap();
@@ -783,20 +781,20 @@ fn resume_cursor_restores_connection_claims_before_serving_same_identity_sibling
 
 #[test]
 fn subscriber_wire_claims_cannot_escalate_host_admission() {
-    let mut schema = membership_scoped_relation_schema();
-    let mut reader = AuthorId::from_bytes([0xb4; 16]);
+    let schema = membership_scoped_relation_schema();
+    let reader = AuthorId::from_bytes([0xb4; 16]);
     let normal_claims =
         BTreeMap::from([("user_id".to_owned(), Value::String(reader.0.to_string()))]);
-    let mut self_asserted_invite = BTreeMap::from([
+    let self_asserted_invite = BTreeMap::from([
         ("user_id".to_owned(), Value::String(reader.0.to_string())),
         (
             "join_code".to_owned(),
             Value::String("self-asserted-invite".to_owned()),
         ),
     ]);
-    let mut server = open_core(0x60, AuthorId::SYSTEM, &schema);
+    let server = open_core(0x60, AuthorId::SYSTEM, &schema);
     let mut client = open_db(0xc8, reader, &schema);
-    let mut chat = row(0xc4);
+    let chat = row(0xc4);
     server
         .insert_with_id(
             "chats",
@@ -819,7 +817,7 @@ fn subscriber_wire_claims_cannot_escalate_host_admission() {
     let mut _upstream = client.connect_upstream(client_transport);
     let mut _subscriber =
         server.accept_subscriber_with_claims(server_transport, reader, normal_claims);
-    let mut dropped_before = server
+    let dropped_before = server
         .node()
         .borrow()
         .sync_metrics()
@@ -828,7 +826,7 @@ fn subscriber_wire_claims_cannot_escalate_host_admission() {
     // This is an unverified wire message from an already admitted session,
     // not an authenticated host refresh. It must not replace the admission
     // claim map even though it carries the connection's real identity.
-    client.set_identity_claims(reader, self_asserted_invite);
+    let _ = client.set_identity_claims(reader, self_asserted_invite);
     client.tick().unwrap();
     server.tick().unwrap();
     assert_eq!(
@@ -840,11 +838,11 @@ fn subscriber_wire_claims_cannot_escalate_host_admission() {
         dropped_before + 1,
     );
 
-    let mut query = prepared(
+    let query = prepared(
         &mut client,
         &Query::from("chats").filter(eq(col("id"), lit(chat.0))),
     );
-    let mut attachment = client
+    let attachment = client
         .attach_query_with_opts(&query, edge_subscribe_opts())
         .unwrap();
     client.tick().unwrap();

@@ -385,7 +385,7 @@ impl Backend {
     }
 
     fn detach_query(&self, attachment: crate::db::QueryAttachment) {
-        let _ = self.0.borrow().detach_query(attachment);
+        self.0.borrow().detach_query(attachment);
     }
 
     fn row_provenance(
@@ -3391,19 +3391,12 @@ mod tests {
         let client = JazzClient::connect(context)
             .await
             .expect("connect offline memory client");
-        let (_row_id, _values, batch_id) = client
+        let (_row_id, _values, _batch_id) = client
             .insert(
                 "todos",
                 crate::row_input!("title" => "memory", "completed" => false),
             )
             .expect("insert offline memory row");
-        client
-            .wait_for_batch(
-                batch_id.expect("ordinary mutation commits immediately"),
-                DurabilityTier::Local,
-            )
-            .await
-            .expect("wait for local durability");
         drop(client);
 
         assert!(

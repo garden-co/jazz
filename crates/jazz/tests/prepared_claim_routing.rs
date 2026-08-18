@@ -395,11 +395,11 @@ fn assert_call_order(
     let team_a = row(0x11);
     let team_b = row(0x12);
     seed(&mut db, team_a, team_b, region_a, region_b);
-    db.set_identity_claims(
+    let _ = db.set_identity_claims(
         USER_A,
         BTreeMap::from([("region".to_owned(), Value::String(region_a.to_owned()))]),
     );
-    db.set_identity_claims(
+    let _ = db.set_identity_claims(
         USER_B,
         BTreeMap::from([("region".to_owned(), Value::String(region_b.to_owned()))]),
     );
@@ -482,11 +482,11 @@ fn prepared_policy_claim_routing_preserves_claimless_union_branches() {
     let public = row(0x51);
     let private = row(0x52);
     let regional = row(0x53);
-    db.set_identity_claims(
+    let _ = db.set_identity_claims(
         USER_A,
         BTreeMap::from([("region".to_owned(), Value::String("region-a".to_owned()))]),
     );
-    db.set_identity_claims(
+    let _ = db.set_identity_claims(
         USER_B,
         BTreeMap::from([("region".to_owned(), Value::String("region-b".to_owned()))]),
     );
@@ -563,11 +563,11 @@ fn assert_retained_subscription_regions(region_a: &str, region_b: &str) {
     let team_a = row(0x11);
     let team_b = row(0x12);
     seed(&mut db, team_a, team_b, region_a, region_b);
-    db.set_identity_claims(
+    let _ = db.set_identity_claims(
         USER_A,
         BTreeMap::from([("region".to_owned(), Value::String(region_a.to_owned()))]),
     );
-    db.set_identity_claims(
+    let _ = db.set_identity_claims(
         USER_B,
         BTreeMap::from([("region".to_owned(), Value::String(region_b.to_owned()))]),
     );
@@ -693,7 +693,7 @@ fn prepared_nested_claim_routes_keep_two_bindings_isolated_through_live_membersh
         (USER_A, join_code_a, user_id_a),
         (USER_B, join_code_b, user_id_b),
     ] {
-        db.set_identity_claims(
+        let _ = db.set_identity_claims(
             identity,
             BTreeMap::from([
                 (
@@ -803,7 +803,7 @@ fn policy_dependency_reads_do_not_expose_dependency_rows() {
     let team_a = row(0x11);
     let team_b = row(0x12);
     seed(&mut db, team_a, team_b, "region-a", "region-b");
-    db.set_identity_claims(
+    let _ = db.set_identity_claims(
         USER_A,
         BTreeMap::from([
             ("region".to_owned(), Value::String("region-a".to_owned())),
@@ -813,7 +813,7 @@ fn policy_dependency_reads_do_not_expose_dependency_rows() {
             ),
         ]),
     );
-    db.set_identity_claims(
+    let _ = db.set_identity_claims(
         USER_B,
         BTreeMap::from([
             ("region".to_owned(), Value::String("region-b".to_owned())),
@@ -964,11 +964,11 @@ fn prepared_binding_reprepares_claim_routing_after_schema_change() {
     let document_a = row(0x41);
     let document_b = row(0x42);
     seed(&mut db, team_a, team_b, "region-a", "region-b");
-    db.set_identity_claims(
+    let _ = db.set_identity_claims(
         USER_A,
         BTreeMap::from([("region".to_owned(), Value::String("region-a".to_owned()))]),
     );
-    db.set_identity_claims(
+    let _ = db.set_identity_claims(
         USER_B,
         BTreeMap::from([("region".to_owned(), Value::String("region-b".to_owned()))]),
     );
@@ -1103,11 +1103,11 @@ fn rebuilt_subscription_drop_releases_rehydrated_handle_without_touching_peer() 
     let team_a = row(0x11);
     let team_b = row(0x12);
     seed(&mut db, team_a, team_b, "region-a", "region-b");
-    db.set_identity_claims(
+    let _ = db.set_identity_claims(
         USER_A,
         BTreeMap::from([("region".to_owned(), Value::String("region-a".to_owned()))]),
     );
-    db.set_identity_claims(
+    let _ = db.set_identity_claims(
         USER_B,
         BTreeMap::from([("region".to_owned(), Value::String("region-b".to_owned()))]),
     );
@@ -1346,8 +1346,8 @@ fn prepared_binding_rejects_conflicting_claim_types_across_policies() {
             .with_reference("team", TEAMS)
             .with_read_policy(root_policy),
     ]);
-    let mut db = open_db_with_schema(schema);
-    db.set_identity_claims(
+    let db = open_db_with_schema(schema);
+    let _ = db.set_identity_claims(
         USER_A,
         BTreeMap::from([("shared_scope".to_owned(), Value::Uuid(row(0x11).0))]),
     );

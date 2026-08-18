@@ -76,7 +76,6 @@ use crate::tools::{BatchId, ObjectId, OutputOccurrenceId, ResultKey};
 use crate::tx::{DeletionEvent, DurabilityTier, Fate, RejectionReason, TxId, TxKind};
 use crate::wire::{TransportError, WireAuthorityEndpoint, WireFeatures, encode_sync_message};
 
-#[cfg(any(test, feature = "testing"))]
 #[doc(hidden)]
 pub trait BlockingResultFutureExt<T, E>:
     std::future::Future<Output = Result<T, E>> + Sized
@@ -105,6 +104,7 @@ where
         block_on(self).expect_err(message)
     }
 
+    #[allow(clippy::wrong_self_convention)]
     fn is_err(self) -> bool {
         block_on(self).is_err()
     }
@@ -117,7 +117,6 @@ where
     }
 }
 
-#[cfg(any(test, feature = "testing"))]
 impl<F, T, E> BlockingResultFutureExt<T, E> for F
 where
     F: std::future::Future<Output = Result<T, E>> + Sized,

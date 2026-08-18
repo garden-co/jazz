@@ -168,8 +168,8 @@ impl ServerProcess {
     }
 
     fn process_output_summary(&mut self) -> String {
-        let stdout = take_pipe_text(&self.process.stdout);
-        let stderr = take_pipe_text(&self.process.stderr);
+        let stdout = take_pipe_text(&mut self.process.stdout);
+        let stderr = take_pipe_text(&mut self.process.stderr);
         if stdout.is_empty() && stderr.is_empty() {
             return String::new();
         }
@@ -365,7 +365,7 @@ async fn jazz_tools_cli_existing_client_keeps_working_after_server_restart_witho
     publish_allow_all_permissions(&server.base_url(), app_id, ADMIN_SECRET, &test_schema()).await;
 
     let client_dir = TempDir::new().expect("client dir");
-    let client = connect_native(make_context(
+    let mut client = connect_native(make_context(
         app_id,
         server.base_url(),
         client_dir.path().to_path_buf(),

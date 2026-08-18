@@ -2397,7 +2397,6 @@ fn db_facade_current_rows_match_seeded_create_delete_sequence() {
         .insert("todos", crate::db::doctest_support::todo_cells("a1", false))
         .unwrap();
     let row_a = write.row_uuid();
-    crate::db::doctest_support::block_on(write.wait(DurabilityTier::Local)).unwrap();
     assert_eq!(db_facade_row_ids(&crate::db::doctest_support::block_on(db.read(&prepared)).unwrap()), vec![row_a]);
     assert_eq!(
         crate::db::doctest_support::block_on(db.one(&prepared)).unwrap().unwrap().cell(table, "title"),
@@ -2408,7 +2407,6 @@ fn db_facade_current_rows_match_seeded_create_delete_sequence() {
         .insert("todos", crate::db::doctest_support::todo_cells("b1", false))
         .unwrap();
     let row_b = write.row_uuid();
-    crate::db::doctest_support::block_on(write.wait(DurabilityTier::Local)).unwrap();
     assert_eq!(
         db_facade_row_ids(
             &crate::db::doctest_support::block_on(
@@ -2419,22 +2417,13 @@ fn db_facade_current_rows_match_seeded_create_delete_sequence() {
         vec![row_a, row_b]
     );
 
-    crate::db::doctest_support::block_on(
-        db.delete("todos", row_a)
-            .unwrap()
-            .wait(DurabilityTier::Local),
-    )
-    .unwrap();
+    db.delete("todos", row_a).unwrap();
     assert_eq!(db_facade_row_ids(&crate::db::doctest_support::block_on(db.read(&prepared)).unwrap()), vec![row_b]);
 
-    crate::db::doctest_support::block_on(
-        db.restore(
-            "todos",
-            row_a,
-            crate::db::doctest_support::todo_cells("a2", true),
-        )
-        .unwrap()
-        .wait(DurabilityTier::Local),
+    db.restore(
+        "todos",
+        row_a,
+        crate::db::doctest_support::todo_cells("a2", true),
     )
     .unwrap();
     let rows = crate::db::doctest_support::block_on(db.read(&prepared)).unwrap();
@@ -2447,12 +2436,7 @@ fn db_facade_current_rows_match_seeded_create_delete_sequence() {
         Some(Value::String("a2".to_owned()))
     );
 
-    crate::db::doctest_support::block_on(
-        db.delete("todos", row_b)
-            .unwrap()
-            .wait(DurabilityTier::Local),
-    )
-    .unwrap();
+    db.delete("todos", row_b).unwrap();
     assert_eq!(
         db_facade_row_ids(
             &crate::db::doctest_support::block_on(
@@ -2476,7 +2460,6 @@ fn db_facade_multi_row_query_matches_seeded_create_delete_sequence_via_write_han
         .insert("todos", crate::db::doctest_support::todo_cells("a1", false))
         .unwrap();
     let row_a = write.row_uuid();
-    crate::db::doctest_support::block_on(write.wait(DurabilityTier::Local)).unwrap();
     let rows = crate::db::doctest_support::block_on(db.read(&prepared)).unwrap();
     assert_eq!(db_facade_row_ids(&rows), vec![row_a]);
     assert_eq!(
@@ -2488,14 +2471,12 @@ fn db_facade_multi_row_query_matches_seeded_create_delete_sequence_via_write_han
         .insert("todos", crate::db::doctest_support::todo_cells("b1", false))
         .unwrap();
     let row_b = write.row_uuid();
-    crate::db::doctest_support::block_on(write.wait(DurabilityTier::Local)).unwrap();
     let rows =
         crate::db::doctest_support::block_on(db.all(&prepared, crate::db::ReadOpts::default()))
             .unwrap();
     assert_eq!(db_facade_row_ids(&rows), vec![row_a, row_b]);
 
-    let write = crate::db::doctest_support::block_on(db.delete("todos", row_a)).unwrap();
-    crate::db::doctest_support::block_on(write.wait(DurabilityTier::Local)).unwrap();
+    db.delete("todos", row_a).unwrap();
     let rows = crate::db::doctest_support::block_on(db.read(&prepared)).unwrap();
     assert_eq!(db_facade_row_ids(&rows), vec![row_b]);
     assert_eq!(
@@ -2503,14 +2484,12 @@ fn db_facade_multi_row_query_matches_seeded_create_delete_sequence_via_write_han
         Some(Value::String("b1".to_owned()))
     );
 
-    let write = db
-        .restore(
-            "todos",
-            row_a,
-            crate::db::doctest_support::todo_cells("a2", true),
-        )
-        .unwrap();
-    crate::db::doctest_support::block_on(write.wait(DurabilityTier::Local)).unwrap();
+    db.restore(
+        "todos",
+        row_a,
+        crate::db::doctest_support::todo_cells("a2", true),
+    )
+    .unwrap();
     let rows = crate::db::doctest_support::block_on(db.read(&prepared)).unwrap();
     assert_eq!(db_facade_row_ids(&rows), vec![row_a, row_b]);
     assert_eq!(
@@ -2528,8 +2507,7 @@ fn db_facade_multi_row_query_matches_seeded_create_delete_sequence_via_write_han
         Some(Value::Bool(true))
     );
 
-    let write = crate::db::doctest_support::block_on(db.delete("todos", row_b)).unwrap();
-    crate::db::doctest_support::block_on(write.wait(DurabilityTier::Local)).unwrap();
+    db.delete("todos", row_b).unwrap();
     let rows =
         crate::db::doctest_support::block_on(db.all(&prepared, crate::db::ReadOpts::default()))
             .unwrap();

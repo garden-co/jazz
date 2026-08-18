@@ -281,17 +281,20 @@ where
         );
     }
 
-    fn deliver_pending_mutation_errors(&self) {
+    pub(super) fn deliver_pending_mutation_errors(&self) -> bool {
         let Some((callback, events)) = take_pending_mutation_error_delivery(&self.mutation_errors)
         else {
-            return;
+            return false;
         };
+        let mut delivered = false;
         for (tx_id, event) in events {
             if let Err(error) = self.node.borrow_mut().discard_rejection(tx_id) {
                 tracing::warn!(?tx_id, %error, "failed to acknowledge delivered mutation error");
             }
             callback(&event);
+            delivered = true;
         }
+        delivered
     }
 
     pub(super) fn request_permission_advice(
@@ -399,11 +402,26 @@ where
             let mut state = state.borrow_mut();
             // Runtime-token replacement owns reopening this terminal during
             // the refresh itself. Its old Groove receiver is intentionally
-            // disconnected and must not be staged as a live async input.
+            // disconnected and must not be staged as a live async input. The
+            // replacement still needs its query-binding witnesses resident
+            // before the synchronous refresh opens the new terminal.
             if state.groove_runtime_token != node.groove_runtime_token() {
+                let SubscriptionKind::Prepared { shape, binding, .. } = &state.kind;
+                node.prepare_query_binding_for_link_in_authorization_mode(
+                    shape,
+                    binding,
+                    state.read_tier,
+                    state.author,
+                    state.authorization_mode,
+                )?;
                 continue;
             }
+            let remote_read_tier = state.remote_read_tier;
+            let read_view = state.read_view.clone();
+            let remote_propagate_upstream = state.remote_propagate_upstream;
             let SubscriptionKind::Prepared {
+                shape,
+                binding,
                 maintained_subscription,
                 ..
             } = &mut state.kind;
@@ -411,8 +429,23 @@ where
                 continue;
             };
             node.prepare_local_maintained_materialization_inputs(maintained)?;
+            if let Some(remote_tier) = remote_read_tier {
+                let binding_view = BindingViewKey {
+                    shape_id: shape.shape_id(),
+                    binding_id: binding.binding_id(),
+                    read_view: RegisterShapeOptions {
+                        tier: remote_tier,
+                        read_view: read_view.clone(),
+                        propagate_upstream: remote_propagate_upstream,
+                    }
+                    .read_view_key(),
+                };
+                node.prepare_local_maintained_reset_from_binding_view(maintained, binding_view)?;
+                let _ = node.authoritative_reset_snapshot_for_binding_view(shape, binding_view)?;
+            }
             for binding_view in &pending_authoritative_resets {
                 node.prepare_local_maintained_reset_from_binding_view(maintained, *binding_view)?;
+                let _ = node.authoritative_reset_snapshot_for_binding_view(shape, *binding_view)?;
             }
         }
         Ok(())
@@ -976,6 +1009,10 @@ where
     /// Service every accepted subscriber connection once.
     pub fn tick(&self) -> Result<DbTickStats, Error> {
         self.deliver_pending_mutation_errors();
+        self.tick_after_mutation_error_delivery()
+    }
+
+    pub(super) fn tick_after_mutation_error_delivery(&self) -> Result<DbTickStats, Error> {
         let mut stats = DbTickStats::default();
         let mut remote_sync_applied = false;
         // A later subscriber can mutate Core state after an earlier peer link

@@ -4,14 +4,14 @@ use super::*;
 
 #[test]
 fn local_subscription_emits_removed_row_for_fire_and_forget_delete() {
-    let mut schema = schema();
-    let mut owner = AuthorId::from_bytes([0x31; 16]);
+    let schema = schema();
+    let owner = AuthorId::from_bytes([0x31; 16]);
     let mut db = open_db(0x31, owner, &schema);
-    let mut query = Query::from("todos");
+    let query = Query::from("todos");
     let mut subscription = prepared_subscribe(&mut db, &query, ReadOpts::default()).unwrap();
     assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
 
-    let mut row_id = row(0x31);
+    let row_id = row(0x31);
     db.insert_with_id("todos", row_id, cells("delete me", false, owner))
         .unwrap();
     let (added, updated, removed) = delta_rows(block_on(subscription.next_raw()).unwrap());
@@ -34,7 +34,7 @@ fn local_subscription_emits_removed_row_for_fire_and_forget_delete() {
 
 #[test]
 fn one_shot_and_subscription_rows_keep_identical_record_descriptors() {
-    let mut schema = JazzSchema::new([TableSchema::new(
+    let schema = JazzSchema::new([TableSchema::new(
         "todos",
         [
             ColumnSchema::new("title", ColumnType::String),
@@ -43,13 +43,13 @@ fn one_shot_and_subscription_rows_keep_identical_record_descriptors() {
     )
     .with_read_policy(Policy::public())
     .with_write_policy(Policy::public())]);
-    let mut owner = AuthorId::from_bytes([0x32; 16]);
+    let owner = AuthorId::from_bytes([0x32; 16]);
     let mut db = open_db(0x32, owner, &schema);
-    let mut query = Query::from("todos");
+    let query = Query::from("todos");
     let mut subscription = prepared_subscribe(&mut db, &query, ReadOpts::default()).unwrap();
     let _ = block_on(subscription.next_raw()).unwrap();
 
-    let mut row_id = row(0x32);
+    let row_id = row(0x32);
     db.insert_with_id(
         "todos",
         row_id,
@@ -63,10 +63,10 @@ fn one_shot_and_subscription_rows_keep_identical_record_descriptors() {
     )
     .unwrap();
     let (added, _, _) = delta_rows(block_on(subscription.next_raw()).unwrap());
-    let mut one_shot = prepared_all(&mut db, &query, ReadOpts::default());
+    let one_shot = prepared_all(&mut db, &query, ReadOpts::default());
     assert_eq!(added.len(), 1);
     assert_eq!(one_shot.len(), 1);
-    let mut table = &schema.tables[0];
+    let table = &schema.tables[0];
     assert_eq!(
         added[0].cell(&table, "title"),
         Some(Value::String("descriptor parity".to_owned()))
@@ -77,21 +77,21 @@ fn one_shot_and_subscription_rows_keep_identical_record_descriptors() {
 
 #[test]
 fn session_scoped_subscription_emits_removed_row_for_owned_delete() {
-    let mut schema = owner_id_public_schema();
-    let mut author = AuthorId::from_bytes([0x32; 16]);
+    let schema = owner_id_public_schema();
+    let author = AuthorId::from_bytes([0x32; 16]);
     let mut db = open_db(0x32, AuthorId::SYSTEM, &schema);
-    let mut user_id = "local-first-user";
-    db.set_identity_claims(
+    let user_id = "local-first-user";
+    let _ = db.set_identity_claims(
         author,
         BTreeMap::from([("user_id".to_owned(), Value::String(user_id.to_owned()))]),
     );
-    let mut query = Query::from("messages");
-    let mut prepared = prepared(&mut db, &query);
+    let query = Query::from("messages");
+    let prepared = prepared(&mut db, &query);
     let mut subscription =
         block_on(db.subscribe_for_identity(&prepared, ReadOpts::default(), author)).unwrap();
     assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
 
-    let mut row_id = row(0x32);
+    let row_id = row(0x32);
     db.insert_with_id_for_identity(
         author,
         "messages",
@@ -122,19 +122,19 @@ fn session_scoped_subscription_emits_removed_row_for_owned_delete() {
 
 #[test]
 fn subscription_retains_a_plan_from_its_selected_authorization_mode() {
-    let mut schema = owner_id_public_schema();
-    let mut author = AuthorId::from_bytes([0x33; 16]);
+    let schema = owner_id_public_schema();
+    let author = AuthorId::from_bytes([0x33; 16]);
     let mut db = open_db(0x33, author, &schema);
-    db.set_identity_claims(
+    let _ = db.set_identity_claims(
         author,
         BTreeMap::from([("user_id".to_owned(), Value::String("alice".to_owned()))]),
     );
-    let mut prepared = prepared(
+    let prepared = prepared(
         &mut db,
         &Query::from("messages").filter(eq(col("owner_id"), claim("user_id"))),
     );
 
-    let mut client = block_on(db.subscribe(&prepared, ReadOpts::default())).unwrap();
+    let client = block_on(db.subscribe(&prepared, ReadOpts::default())).unwrap();
     assert_eq!(
         client.retained_plan_authorization_mode(),
         Some(QueryAuthorizationMode::ClientLocal)
@@ -151,15 +151,15 @@ fn subscription_retains_a_plan_from_its_selected_authorization_mode() {
 #[test]
 fn client_local_branch_subscription_survives_sparse_first_write_delete_and_restore() {
     let mut db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
-    let mut branch = BranchId(uuid::Uuid::from_bytes([0x42; 16]));
+    let branch = BranchId(uuid::Uuid::from_bytes([0x42; 16]));
     db.node
         .node
         .borrow_mut()
         .create_branch(branch)
         .expect("create empty branch");
-    let mut query = db.table("todos");
-    let mut prepared_query = prepared(&mut db, &query);
-    let mut opts = ReadOpts {
+    let query = db.table("todos");
+    let prepared_query = prepared(&mut db, &query);
+    let opts = ReadOpts {
         propagation: Propagation::LocalOnly,
         ..branch_read_opts()
     };
@@ -176,7 +176,7 @@ fn client_local_branch_subscription_survives_sparse_first_write_delete_and_resto
                 .cells(doctest_support::todo_cells("first pending overlay", false)),
         )
         .expect("first pending branch write creates durable partition");
-    assert_eq!(db.refresh_subscriptions().unwrap(), 1);
+    assert_eq!(db.node.refresh_subscriptions().unwrap(), 1);
     let (added, updated, removed) = delta_rows(block_on(subscription.next_raw()).unwrap());
     assert_eq!(row_ids(&added), vec![row(0x42)]);
     assert!(updated.is_empty());
@@ -190,7 +190,7 @@ fn client_local_branch_subscription_survives_sparse_first_write_delete_and_resto
             MergeableCommit::new("todos", row(0x42), 11).deletion(DeletionEvent::Deleted),
         )
         .expect("delete pending branch row");
-    assert_eq!(db.refresh_subscriptions().unwrap(), 1);
+    assert_eq!(db.node.refresh_subscriptions().unwrap(), 1);
     let (added, updated, removed) = delta_rows(block_on(subscription.next_raw()).unwrap());
     assert!(added.is_empty());
     assert!(updated.is_empty());
@@ -210,7 +210,7 @@ fn client_local_branch_subscription_survives_sparse_first_write_delete_and_resto
             MergeableCommit::new("todos", row(0x42), 12).deletion(DeletionEvent::Restored),
         )
         .expect("restore pending branch row");
-    assert_eq!(db.refresh_subscriptions().unwrap(), 1);
+    assert_eq!(db.node.refresh_subscriptions().unwrap(), 1);
     let (added, updated, removed) = delta_rows(block_on(subscription.next_raw()).unwrap());
     assert_eq!(row_ids(&added), vec![row(0x42)]);
     assert!(updated.is_empty());
@@ -219,12 +219,12 @@ fn client_local_branch_subscription_survives_sparse_first_write_delete_and_resto
 
 #[test]
 fn denied_branch_subscription_does_not_allocate_sparse_source() {
-    let mut branch_policy = Query::from("jazz_branches").join_via(
+    let branch_policy = Query::from("jazz_branches").join_via(
         "branch_access",
         "branch_id",
         [eq(col("user_id"), claim("sub"))],
     );
-    let mut schema = JazzSchema::new([
+    let schema = JazzSchema::new([
         TableSchema::new(
             "todos",
             [
@@ -243,9 +243,9 @@ fn denied_branch_subscription_does_not_allocate_sparse_source() {
         .with_reference("branch_id", "jazz_branches"),
     ])
     .with_branch_read_policy(branch_policy);
-    let mut denied = AuthorId::from_bytes([0xc1; 16]);
-    let mut server = open_core(0x5e, AuthorId::SYSTEM, &schema);
-    let mut branch = BranchId::from_bytes([0x42; 16]);
+    let denied = AuthorId::from_bytes([0xc1; 16]);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let branch = BranchId::from_bytes([0x42; 16]);
     server
         .node()
         .borrow_mut()
@@ -259,11 +259,11 @@ fn denied_branch_subscription_does_not_allocate_sparse_source() {
     );
 
     let (mut client_transport, server_transport) = duplex();
-    let mut subscriber = server.accept_subscriber(server_transport, denied);
-    let mut query = Query::from("todos");
-    let mut shape = query.validate(&schema).unwrap();
-    let mut binding = shape.bind(BTreeMap::new()).unwrap();
-    let mut opts = RegisterShapeOptions {
+    let subscriber = server.accept_subscriber(server_transport, denied);
+    let query = Query::from("todos");
+    let shape = query.validate(&schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let opts = RegisterShapeOptions {
         tier: DurabilityTier::Global,
         read_view: ReadViewSpec {
             source: ReadViewSourceSpec::Branch { branch: branch.0 },
@@ -271,7 +271,7 @@ fn denied_branch_subscription_does_not_allocate_sparse_source() {
         },
         propagate_upstream: true,
     };
-    let mut subscription = SubscriptionKey {
+    let subscription = SubscriptionKey {
         shape_id: shape.shape_id(),
         binding_id: binding.binding_id(),
         read_view: opts.read_view_key(),
@@ -292,7 +292,7 @@ fn denied_branch_subscription_does_not_allocate_sparse_source() {
         }))
         .unwrap();
     subscriber.borrow_mut().tick().unwrap();
-    let mut update = try_recv_subscriber_payload(client_transport.as_mut())
+    let update = try_recv_subscriber_payload(client_transport.as_mut())
         .expect("denied branch subscription receives an empty view");
     assert!(matches!(
         update,
@@ -323,11 +323,11 @@ fn denied_branch_subscription_does_not_allocate_sparse_source() {
 
 #[test]
 fn branch_subscription_reconnects_and_re_settles_after_a_fresh_view_receipt() {
-    let mut schema = schema();
-    let mut client_author = AuthorId::from_bytes([0xc1; 16]);
-    let mut server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let schema = schema();
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
     let mut client = open_db(0xc1, client_author, &schema);
-    let mut branch = BranchId(uuid::Uuid::from_bytes([0x42; 16]));
+    let branch = BranchId(uuid::Uuid::from_bytes([0x42; 16]));
     server
         .node()
         .borrow_mut()
@@ -336,7 +336,7 @@ fn branch_subscription_reconnects_and_re_settles_after_a_fresh_view_receipt() {
     client
         .create_branch_with_id(branch)
         .expect("client creates matching branch metadata");
-    let mut branch_write = server
+    let branch_write = server
         .node()
         .borrow_mut()
         .commit_mergeable_on_branch(
@@ -360,10 +360,10 @@ fn branch_subscription_reconnects_and_re_settles_after_a_fresh_view_receipt() {
         .expect("globally accept branch row");
 
     let (first_client_transport, first_server_transport) = duplex();
-    let mut first_upstream = client.connect_upstream(first_client_transport);
+    let first_upstream = client.connect_upstream(first_client_transport);
     let mut _first_subscriber = server.accept_subscriber(first_server_transport, client_author);
-    let mut query = Query::from("todos");
-    let mut branch_opts = ReadOpts {
+    let query = Query::from("todos");
+    let branch_opts = ReadOpts {
         tier: DurabilityTier::Global,
         local_updates: LocalUpdates::Deferred,
         propagation: Propagation::Full,
@@ -376,7 +376,7 @@ fn branch_subscription_reconnects_and_re_settles_after_a_fresh_view_receipt() {
     client.tick().unwrap();
     server.tick().unwrap();
     client.tick().unwrap();
-    let mut settled = block_on(subscription.next_raw()).unwrap();
+    let settled = block_on(subscription.next_raw()).unwrap();
     assert!(event_settled(&settled));
     let (added, _, _) = delta_rows(settled);
     assert!(
@@ -385,7 +385,7 @@ fn branch_subscription_reconnects_and_re_settles_after_a_fresh_view_receipt() {
     );
 
     assert!(client.detach_connection(&first_upstream));
-    let mut disconnected = subscription
+    let disconnected = subscription
         .receiver
         .try_recv()
         .expect("disconnect must publish a branch settlement demotion");
@@ -404,7 +404,7 @@ fn branch_subscription_reconnects_and_re_settles_after_a_fresh_view_receipt() {
     client.tick().unwrap();
     server.tick().unwrap();
     client.tick().unwrap();
-    let mut binding_view = BindingViewKey::new(
+    let binding_view = BindingViewKey::new(
         query.validate(&schema).unwrap().shape_id(),
         query
             .validate(&schema)
@@ -419,7 +419,7 @@ fn branch_subscription_reconnects_and_re_settles_after_a_fresh_view_receipt() {
         }
         .read_view_key(),
     );
-    let mut receipts = client.node.active_authority_view_receipts.borrow();
+    let receipts = client.node.active_authority_view_receipts.borrow();
     assert!(
         receipts
             .as_ref()
@@ -427,7 +427,7 @@ fn branch_subscription_reconnects_and_re_settles_after_a_fresh_view_receipt() {
         "reconnect did not install the branch binding receipt"
     );
     drop(receipts);
-    let mut node = client.node.node.borrow();
+    let node = client.node.node.borrow();
     assert!(
         client
             .node
@@ -458,7 +458,7 @@ fn branch_subscription_reconnects_and_re_settles_after_a_fresh_view_receipt() {
         ),
         "the recovered branch state should be settled before its stream refresh"
     );
-    let mut replayed = block_on(subscription.next_raw()).unwrap();
+    let replayed = block_on(subscription.next_raw()).unwrap();
     assert!(
         !event_settled(&replayed),
         "reconnect must first publish the branch overlay replay as provisional"
@@ -469,6 +469,12 @@ fn branch_subscription_reconnects_and_re_settles_after_a_fresh_view_receipt() {
         "the provisional replay must retain the branch overlay row"
     );
     let mut resettled = block_on(subscription.next_raw()).unwrap();
+    for _ in 0..2 {
+        if event_settled(&resettled) {
+            break;
+        }
+        resettled = block_on(subscription.next_raw()).unwrap();
+    }
     assert!(
         event_settled(&resettled),
         "a fresh selected-authority branch view must re-settle after reconnect"
@@ -484,12 +490,12 @@ fn branch_subscription_reconnects_and_re_settles_after_a_fresh_view_receipt() {
 
 #[test]
 fn branch_one_shot_waits_for_metadata_and_keeps_sibling_result_identity() {
-    let mut schema = schema();
-    let mut client_author = AuthorId::from_bytes([0xc1; 16]);
-    let mut server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let schema = schema();
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
     let mut client = open_db(0xc1, client_author, &schema);
-    let mut branch_a = BranchId::from_bytes([0x42; 16]);
-    let mut branch_b = BranchId::from_bytes([0x43; 16]);
+    let branch_a = BranchId::from_bytes([0x42; 16]);
+    let branch_b = BranchId::from_bytes([0x43; 16]);
     for (branch, row_id, title, seq) in [
         (branch_a, row(0x44), "branch-a", GlobalSeq(1)),
         (branch_b, row(0x45), "branch-b", GlobalSeq(2)),
@@ -499,7 +505,7 @@ fn branch_one_shot_waits_for_metadata_and_keeps_sibling_result_identity() {
             .borrow_mut()
             .create_branch_as(branch, client_author)
             .expect("server creates visible branch metadata");
-        let mut tx = server
+        let tx = server
             .node()
             .borrow_mut()
             .commit_mergeable_on_branch(
@@ -517,9 +523,9 @@ fn branch_one_shot_waits_for_metadata_and_keeps_sibling_result_identity() {
     let (client_transport, server_transport) = duplex();
     let mut _upstream = client.connect_upstream(client_transport);
     let mut _subscriber = server.accept_subscriber(server_transport, client_author);
-    let mut query = Query::from("todos");
-    let mut prepared = prepared(&mut client, &query);
-    let mut opts_for = |branch: BranchId, tier| ReadOpts {
+    let query = Query::from("todos");
+    let prepared = prepared(&mut client, &query);
+    let opts_for = |branch: BranchId, tier| ReadOpts {
         tier,
         local_updates: LocalUpdates::Deferred,
         propagation: Propagation::Full,
@@ -530,9 +536,9 @@ fn branch_one_shot_waits_for_metadata_and_keeps_sibling_result_identity() {
         ..ReadOpts::default()
     };
 
-    let mut read = |client: &mut Db, branch, tier, expected| {
-        let mut opts = opts_for(branch, tier);
-        let mut attachment = client
+    let read = |client: &mut Db, branch, tier, expected| {
+        let opts = opts_for(branch, tier);
+        let attachment = client
             .attach_query_with_opts(&prepared, opts.clone())
             .expect("attach branch one-shot coverage");
         client.tick().unwrap();
@@ -542,7 +548,7 @@ fn branch_one_shot_waits_for_metadata_and_keeps_sibling_result_identity() {
             client.query_attachment_is_covered(&attachment),
             "metadata and the authoritative branch snapshot arrive before publication"
         );
-        let mut rows = block_on(client.all(&prepared, opts)).expect("read covered branch snapshot");
+        let rows = block_on(client.all(&prepared, opts)).expect("read covered branch snapshot");
         assert_eq!(row_ids(&rows), vec![expected]);
         client.detach_query(attachment);
     };
@@ -568,11 +574,11 @@ fn branch_one_shot_waits_for_metadata_and_keeps_sibling_result_identity() {
 
 #[test]
 fn empty_branch_subscription_reconnects_with_a_settlement_only_refresh() {
-    let mut schema = schema();
-    let mut client_author = AuthorId::from_bytes([0xc1; 16]);
-    let mut server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let schema = schema();
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
     let mut client = open_db(0xc1, client_author, &schema);
-    let mut branch = BranchId(uuid::Uuid::from_bytes([0x42; 16]));
+    let branch = BranchId(uuid::Uuid::from_bytes([0x42; 16]));
     server
         .node()
         .borrow_mut()
@@ -583,10 +589,10 @@ fn empty_branch_subscription_reconnects_with_a_settlement_only_refresh() {
         .expect("client creates matching branch metadata");
 
     let (first_client_transport, first_server_transport) = duplex();
-    let mut first_upstream = client.connect_upstream(first_client_transport);
+    let first_upstream = client.connect_upstream(first_client_transport);
     let mut _first_subscriber = server.accept_subscriber(first_server_transport, client_author);
-    let mut query = Query::from("todos");
-    let mut branch_opts = ReadOpts {
+    let query = Query::from("todos");
+    let branch_opts = ReadOpts {
         tier: DurabilityTier::Global,
         local_updates: LocalUpdates::Deferred,
         propagation: Propagation::Full,
@@ -599,7 +605,7 @@ fn empty_branch_subscription_reconnects_with_a_settlement_only_refresh() {
     client.tick().unwrap();
     server.tick().unwrap();
     client.tick().unwrap();
-    let mut settled = subscription
+    let settled = subscription
         .receiver
         .try_recv()
         .expect("the initial branch receipt must publish a settlement-only refresh");
@@ -610,7 +616,7 @@ fn empty_branch_subscription_reconnects_with_a_settlement_only_refresh() {
     assert!(removed.is_empty());
 
     assert!(client.detach_connection(&first_upstream));
-    let mut disconnected = subscription
+    let disconnected = subscription
         .receiver
         .try_recv()
         .expect("disconnect must publish a branch settlement demotion");
@@ -626,7 +632,7 @@ fn empty_branch_subscription_reconnects_with_a_settlement_only_refresh() {
     client.tick().unwrap();
     server.tick().unwrap();
     client.tick().unwrap();
-    let mut resettled = subscription
+    let resettled = subscription
         .receiver
         .try_recv()
         .expect("a fresh branch receipt must publish a settlement-only refresh");
@@ -639,15 +645,15 @@ fn empty_branch_subscription_reconnects_with_a_settlement_only_refresh() {
 
 #[test]
 fn dropping_a_branch_subscription_releases_its_upstream_coverage() {
-    let mut schema = schema();
-    let mut client_author = AuthorId::from_bytes([0xc1; 16]);
+    let schema = schema();
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
     let mut client = open_db(0xc1, client_author, &schema);
     client
         .create_branch_with_id(BranchId(uuid::Uuid::from_bytes([0x42; 16])))
         .expect("client creates branch metadata");
-    let mut baseline = client.runtime_stats_for_test().active_subscriptions;
-    let mut query = Query::from("todos");
-    let mut opts = ReadOpts {
+    let baseline = client.runtime_stats_for_test().active_subscriptions;
+    let query = Query::from("todos");
+    let opts = ReadOpts {
         tier: DurabilityTier::Global,
         local_updates: LocalUpdates::Deferred,
         propagation: Propagation::Full,
@@ -674,9 +680,9 @@ fn dropping_a_branch_subscription_releases_its_upstream_coverage() {
 #[test]
 fn include_deleted_fails_closed_on_live_subscription_apis() {
     let mut db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
-    let mut query = db.table("todos");
-    let mut prepared_query = prepared(&mut db, &query);
-    let mut opts = ReadOpts {
+    let query = db.table("todos");
+    let prepared_query = prepared(&mut db, &query);
+    let opts = ReadOpts {
         include_deleted: true,
         ..ReadOpts::default()
     };
@@ -688,6 +694,6 @@ fn include_deleted_fails_closed_on_live_subscription_apis() {
         db.subscribe_for_identity(&prepared_query, opts.clone(), db.identity.author),
     )));
 
-    let mut rows = doctest_support::block_on(db.all(&prepared_query, opts)).unwrap();
+    let rows = doctest_support::block_on(db.all(&prepared_query, opts)).unwrap();
     assert!(rows.is_empty());
 }

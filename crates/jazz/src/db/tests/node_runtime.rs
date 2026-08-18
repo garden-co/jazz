@@ -4,19 +4,19 @@ use super::*;
 
 #[test]
 fn volatile_storage_does_not_change_direct_upstream_subscription_topology() {
-    let mut schema = schema();
+    let schema = schema();
     let mut client = open_db(0xc7, AuthorId::from_bytes([0xc7; 16]), &schema);
     client.set_non_durable_client();
 
     let (transport, _server_transport, outbound) = duplex_with_client_outbound_tap();
     let mut _upstream = client.connect_upstream(transport);
-    let mut prepared = client.prepare_query(&client.table("todos")).unwrap();
+    let prepared = client.prepare_query(&client.table("todos")).unwrap();
     let mut _attachment = client
         .attach_query_with_opts(&prepared, edge_subscribe_opts())
         .unwrap();
     client.tick().unwrap();
 
-    let mut tier = outbound.borrow().iter().find_map(|message| match message {
+    let tier = outbound.borrow().iter().find_map(|message| match message {
         SyncMessage::RegisterShape { opts, .. } => Some(opts.tier),
         _ => None,
     });
@@ -46,10 +46,10 @@ fn volatile_storage_does_not_change_direct_upstream_subscription_topology() {
 /// reason to call Core again and Bob stays indefinitely at the old empty cut.
 #[test]
 fn core_later_client_upload_refreshes_earlier_peer_subscription_in_same_tick() {
-    let mut schema = schema();
-    let mut alice = AuthorId::from_bytes([0xa1; 16]);
-    let mut bob_author = AuthorId::from_bytes([0xb1; 16]);
-    let mut core = open_core(0xd1, AuthorId::SYSTEM, &schema);
+    let schema = schema();
+    let alice = AuthorId::from_bytes([0xa1; 16]);
+    let bob_author = AuthorId::from_bytes([0xb1; 16]);
+    let core = open_core(0xd1, AuthorId::SYSTEM, &schema);
     let mut peer_edge = open_db(0xd2, AuthorId::SYSTEM, &schema);
     let mut bob = open_db(0xd3, bob_author, &schema);
 
@@ -66,9 +66,9 @@ fn core_later_client_upload_refreshes_earlier_peer_subscription_in_same_tick() {
     let mut _bob_upstream = bob.connect_upstream(bob_transport);
     let mut _peer_client = peer_edge.accept_subscriber(peer_client_transport, bob_author);
 
-    let mut query = bob.table("todos");
+    let query = bob.table("todos");
     let mut subscription = prepared_subscribe(&mut bob, &query, global_subscribe_opts()).unwrap();
-    let mut opening = (0..32)
+    let opening = (0..32)
         .find_map(|_| {
             bob.tick().unwrap();
             peer_edge.tick().unwrap();
@@ -89,7 +89,7 @@ fn core_later_client_upload_refreshes_earlier_peer_subscription_in_same_tick() {
     let (alice_transport, core_alice_transport) = duplex();
     let mut _alice_upstream = alice_edge.connect_upstream(alice_transport);
     let mut _core_alice = core.accept_subscriber(core_alice_transport, alice);
-    let mut write = alice_edge
+    let write = alice_edge
         .insert_with_id("todos", row(0xd5), cells("later row", false, alice))
         .unwrap();
 
@@ -97,7 +97,7 @@ fn core_later_client_upload_refreshes_earlier_peer_subscription_in_same_tick() {
     // and must also serve the earlier peer connection.
     alice_edge.tick().unwrap();
     core.tick().unwrap();
-    let mut later_view_updates = core_to_peer
+    let later_view_updates = core_to_peer
         .borrow()
         .iter()
         .filter(|message| {
@@ -127,7 +127,7 @@ fn core_later_client_upload_refreshes_earlier_peer_subscription_in_same_tick() {
     // Bob connection in the same peer-edge service pass.
     peer_edge.tick().unwrap();
     bob.tick().unwrap();
-    let mut delivered = subscription
+    let delivered = subscription
         .try_next_event()
         .expect("Bob receives the later row without a retry or a new query");
     let (added, updated, removed) = delta_rows(delivered);
@@ -152,8 +152,8 @@ fn core_later_client_upload_refreshes_earlier_peer_subscription_in_same_tick() {
 /// ingest it and emit the corresponding Core-bound `CommitUnit`.
 #[test]
 fn edge_later_client_upload_flushes_earlier_upstream_in_same_tick() {
-    let mut schema = schema();
-    let mut alice = AuthorId::from_bytes([0xa1; 16]);
+    let schema = schema();
+    let alice = AuthorId::from_bytes([0xa1; 16]);
     let mut edge = open_db(0xd1, AuthorId::SYSTEM, &schema);
     let mut client = open_db(0xd2, alice, &schema);
 
@@ -164,13 +164,13 @@ fn edge_later_client_upload_flushes_earlier_upstream_in_same_tick() {
     let mut _client_upstream = client.connect_upstream(client_transport);
     let mut _edge_client = edge.accept_subscriber(edge_client_transport, alice);
 
-    let mut write = client
+    let write = client
         .insert_with_id("todos", row(0xd3), cells("later upload", false, alice))
         .unwrap();
     client.tick().unwrap();
     edge.tick().unwrap();
 
-    let mut uploads = edge_to_core
+    let uploads = edge_to_core
         .borrow()
         .iter()
         .filter(|message| {
@@ -204,51 +204,51 @@ fn edge_later_client_upload_flushes_earlier_upstream_in_same_tick() {
 
 #[test]
 fn write_state_waiter_resolves_on_remote_fate_update() {
-    let mut schema = schema();
-    let mut owner = AuthorId::from_bytes([0xa1; 16]);
-    let mut client_author = AuthorId::from_bytes([0xc1; 16]);
+    let schema = schema();
+    let owner = AuthorId::from_bytes([0xa1; 16]);
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
 
-    let mut server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
     let mut client = open_db(0xc1, client_author, &schema);
 
     let (client_transport, server_transport) = duplex();
     let mut _upstream = client.connect_upstream(client_transport);
     let mut _subscriber = server.accept_subscriber(server_transport, client_author);
 
-    let mut write = client
+    let write = client
         .insert("todos", cells("wait for fate", false, owner))
         .unwrap();
-    let mut tx_id = write.mergeable_tx_id();
+    let tx_id = write.mergeable_tx_id();
     assert_eq!(
         client.write_state(tx_id).unwrap().durability,
         DurabilityTier::Local
     );
 
-    let mut changed = client.next_write_state_change(tx_id);
+    let changed = client.next_write_state_change(tx_id);
     client.tick().unwrap();
     server.tick().unwrap();
     client.tick().unwrap();
     block_on(changed);
 
-    let mut state = client.write_state(tx_id).unwrap();
+    let state = client.write_state(tx_id).unwrap();
     assert_eq!(state.fate, Fate::Accepted);
     assert_eq!(state.durability, DurabilityTier::Global);
 }
 
 #[test]
 fn db_sync_surface_preserves_creator_provenance_across_peer_update() {
-    let mut schema = schema();
-    let mut alice = AuthorId::from_bytes([0xa1; 16]);
-    let mut bob = AuthorId::from_bytes([0xb2; 16]);
-    let mut server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let schema = schema();
+    let alice = AuthorId::from_bytes([0xa1; 16]);
+    let bob = AuthorId::from_bytes([0xb2; 16]);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
     let mut receiver = open_db(0xc1, alice, &schema);
 
-    let mut write = server
+    let write = server
         .insert_attributed(alice, "todos", cells("created by alice", false, alice))
         .unwrap();
-    let mut row = write.row_uuid();
-    let mut query = Query::from("todos");
-    let mut create_unit = server
+    let row = write.row_uuid();
+    let query = Query::from("todos");
+    let create_unit = server
         .node()
         .borrow_mut()
         .commit_unit_for(write.mergeable_tx_id())
@@ -261,7 +261,7 @@ fn db_sync_surface_preserves_creator_provenance_across_peer_update() {
         .unwrap();
 
     server.next_now_ms.set(2);
-    let mut bob_update = server
+    let bob_update = server
         .update_attributed(
             bob,
             "todos",
@@ -273,13 +273,13 @@ fn db_sync_surface_preserves_creator_provenance_across_peer_update() {
         )
         .unwrap();
     block_on(bob_update.wait(DurabilityTier::Global)).unwrap();
-    let mut server_rows = server.read(&query).unwrap();
+    let server_rows = server.read(&query).unwrap();
     assert_eq!(server_rows.len(), 1);
     assert_eq!(
         server_rows[0].provenance().unwrap().unwrap().updated_by,
         bob
     );
-    let mut update_unit = server
+    let update_unit = server
         .node()
         .borrow_mut()
         .commit_unit_for(bob_update.mergeable_tx_id())
@@ -289,7 +289,7 @@ fn db_sync_surface_preserves_creator_provenance_across_peer_update() {
     };
     assert_eq!(versions[0].created_by(), alice);
     assert_eq!(versions[0].updated_by(), bob);
-    let mut receiver_updates = receiver
+    let receiver_updates = receiver
         .node
         .node
         .borrow_mut()
@@ -307,7 +307,7 @@ fn db_sync_surface_preserves_creator_provenance_across_peer_update() {
         }),
         "receiver should accept the update, got {receiver_updates:?}"
     );
-    let mut receiver_unit = receiver
+    let receiver_unit = receiver
         .node
         .node
         .borrow_mut()
@@ -323,10 +323,10 @@ fn db_sync_surface_preserves_creator_provenance_across_peer_update() {
     assert_eq!(receiver_versions[0].created_by(), alice);
     assert_eq!(receiver_versions[0].updated_by(), bob);
 
-    let mut alice_rows = prepared_read(&mut receiver, &query);
+    let alice_rows = prepared_read(&mut receiver, &query);
     assert_eq!(alice_rows.len(), 1);
     assert_eq!(alice_rows[0].row_uuid(), row);
-    let mut provenance = alice_rows[0]
+    let provenance = alice_rows[0]
         .provenance()
         .unwrap()
         .expect("current rows should carry provenance");
@@ -340,10 +340,10 @@ fn db_sync_surface_preserves_creator_provenance_across_peer_update() {
 
 #[test]
 fn db_sync_surface_edge_session_read_policy_filters_private_table_query() {
-    let mut schema = owner_id_read_schema();
-    let mut alice = AuthorId::from_bytes([0xa1; 16]);
-    let mut bob = AuthorId::from_bytes([0xb2; 16]);
-    let mut server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let schema = owner_id_read_schema();
+    let alice = AuthorId::from_bytes([0xa1; 16]);
+    let bob = AuthorId::from_bytes([0xb2; 16]);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
     let mut writer = open_db(0xa1, alice, &schema);
     let mut reader = open_db(0xb2, bob, &schema);
 
@@ -373,7 +373,7 @@ fn db_sync_surface_edge_session_read_policy_filters_private_table_query() {
         bob,
         BTreeMap::from([("user_id".to_owned(), Value::String(bob.0.to_string()))]),
     );
-    let mut query = Query::from("messages");
+    let query = Query::from("messages");
     let mut subscription = prepared_subscribe(&mut reader, &query, edge_subscribe_opts()).unwrap();
     assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
     assert!(prepared_all(&mut reader, &query, edge_subscribe_opts()).is_empty());
@@ -394,11 +394,11 @@ fn prepared_server_read_binds_text_session_user_id_per_session() {
     // its matching session or to every session when unowned. In particular,
     // this exercises the disjunctive policy plan rather than only the
     // scalar-equality fast path.
-    let mut read_policy = Query::from("todos").filter(any_of([
+    let read_policy = Query::from("todos").filter(any_of([
         eq(col("ownerId"), claim("user_id")),
         is_null(col("ownerId")),
     ]));
-    let mut schema = JazzSchema::new([TableSchema::new(
+    let schema = JazzSchema::new([TableSchema::new(
         "todos",
         [
             ColumnSchema::new("title", ColumnType::String),
@@ -409,20 +409,20 @@ fn prepared_server_read_binds_text_session_user_id_per_session() {
     .with_read_policy(Policy::shape(read_policy))
     .with_write_policy(Policy::public())]);
     let mut server = open_db(0x5e, AuthorId::SYSTEM, &schema);
-    let mut alice = AuthorId::from_bytes([0xa1; 16]);
-    let mut bob = AuthorId::from_bytes([0xb2; 16]);
-    let mut alice_subject = "alice-session-subject";
-    let mut bob_subject = "bob-session-subject";
-    server.set_identity_claims(
+    let alice = AuthorId::from_bytes([0xa1; 16]);
+    let bob = AuthorId::from_bytes([0xb2; 16]);
+    let alice_subject = "alice-session-subject";
+    let bob_subject = "bob-session-subject";
+    let _ = server.set_identity_claims(
         alice,
         BTreeMap::from([(String::from("user_id"), Value::String(alice_subject.into()))]),
     );
-    server.set_identity_claims(
+    let _ = server.set_identity_claims(
         bob,
         BTreeMap::from([(String::from("user_id"), Value::String(bob_subject.into()))]),
     );
 
-    let mut seeded = server
+    let seeded = server
         .insert(
             "todos",
             BTreeMap::from([
@@ -441,12 +441,11 @@ fn prepared_server_read_binds_text_session_user_id_per_session() {
     // parameter alongside the hidden policy claim. Keep that mixed binding in
     // this regression so the descriptor cannot accidentally bind Alice's
     // claim into the query-id slot (or vice versa).
-    let mut query =
-        Query::from("todos").filter(eq(col("id"), lit(Value::Uuid(seeded.row_uuid().0))));
-    let mut prepared = prepared(&mut server, &query);
-    let mut alice_rows = block_on(server.all_for_identity(&prepared, ReadOpts::default(), alice))
+    let query = Query::from("todos").filter(eq(col("id"), lit(Value::Uuid(seeded.row_uuid().0))));
+    let prepared = prepared(&mut server, &query);
+    let alice_rows = block_on(server.all_for_identity(&prepared, ReadOpts::default(), alice))
         .expect("Alice's prepared read must evaluate against her session claims");
-    let mut bob_rows = block_on(server.all_for_identity(&prepared, ReadOpts::default(), bob))
+    let bob_rows = block_on(server.all_for_identity(&prepared, ReadOpts::default(), bob))
         .expect("Bob's prepared read must evaluate against his session claims");
 
     assert_eq!(row_ids(&alice_rows), vec![seeded.row_uuid()]);
@@ -455,18 +454,18 @@ fn prepared_server_read_binds_text_session_user_id_per_session() {
 
 #[test]
 fn db_sync_surface_edge_session_read_policy_filters_after_runtime_schema_publish() {
-    let mut public_schema = owner_id_public_schema();
-    let mut permission_schema = owner_id_read_schema();
-    let mut alice = AuthorId::from_bytes([0xa1; 16]);
-    let mut bob = AuthorId::from_bytes([0xb2; 16]);
-    let mut server = open_core(0x5e, AuthorId::SYSTEM, &public_schema);
+    let public_schema = owner_id_public_schema();
+    let permission_schema = owner_id_read_schema();
+    let alice = AuthorId::from_bytes([0xa1; 16]);
+    let bob = AuthorId::from_bytes([0xb2; 16]);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &public_schema);
     let mut writer = open_db(0xa1, alice, &permission_schema);
     let mut alice_reader = open_db(0xa2, alice, &permission_schema);
     let mut reader = open_db(0xb2, bob, &permission_schema);
 
-    let mut schema_version = SchemaVersion::new(permission_schema.clone());
-    let mut schema_id = schema_version.id;
-    let mut acks = server.publish_schema(schema_version).unwrap();
+    let schema_version = SchemaVersion::new(permission_schema.clone());
+    let schema_id = schema_version.id;
+    let acks = server.publish_schema(schema_version).unwrap();
     assert!(acks.into_iter().any(|message| matches!(
         message,
         SyncMessage::CatalogueAck(CatalogueAck {
@@ -475,7 +474,7 @@ fn db_sync_surface_edge_session_read_policy_filters_after_runtime_schema_publish
             ..
         }) if applied_schema == schema_id
     )));
-    let mut current_acks = server
+    let current_acks = server
         .server
         .node()
         .borrow_mut()
@@ -522,14 +521,21 @@ fn db_sync_surface_edge_session_read_policy_filters_after_runtime_schema_publish
         alice,
         BTreeMap::from([("user_id".to_owned(), Value::String(alice.0.to_string()))]),
     );
-    let mut query = Query::from("messages");
+    let query = Query::from("messages");
     let mut alice_subscription =
         prepared_subscribe(&mut alice_reader, &query, edge_subscribe_opts()).unwrap();
     assert!(opened_rows(block_on(alice_subscription.next_raw()).unwrap()).is_empty());
     alice_reader.tick().unwrap();
     server.tick().unwrap();
     alice_reader.tick().unwrap();
-    let (added, updated, removed) = delta_rows(block_on(alice_subscription.next_raw()).unwrap());
+    let mut delta = delta_rows(block_on(alice_subscription.next_raw()).unwrap());
+    for _ in 0..2 {
+        if !delta.0.is_empty() {
+            break;
+        }
+        delta = delta_rows(block_on(alice_subscription.next_raw()).unwrap());
+    }
+    let (added, updated, removed) = delta;
     assert_eq!(
         added.len(),
         1,
@@ -561,20 +567,20 @@ fn db_sync_surface_edge_session_read_policy_filters_after_runtime_schema_publish
 
 #[test]
 fn detached_subscriber_is_not_served_on_server_tick() {
-    let mut schema = schema();
-    let mut owner = AuthorId::from_bytes([0xa1; 16]);
-    let mut client_author = AuthorId::from_bytes([0xc1; 16]);
+    let schema = schema();
+    let owner = AuthorId::from_bytes([0xa1; 16]);
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
 
-    let mut server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
     let mut client = open_db(0xc1, client_author, &schema);
 
     seed(&server, "todos", cells("from server", false, owner));
 
     let (client_transport, server_transport) = duplex();
     let mut _upstream = client.connect_upstream(client_transport);
-    let mut subscriber = server.accept_subscriber(server_transport, client_author);
+    let subscriber = server.accept_subscriber(server_transport, client_author);
 
-    let mut query = Query::from("todos");
+    let query = Query::from("todos");
     let mut subscription =
         prepared_subscribe(&mut client, &query, global_subscribe_opts()).unwrap();
     assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
@@ -589,17 +595,17 @@ fn detached_subscriber_is_not_served_on_server_tick() {
 
 #[test]
 fn byte_wire_round_trips_subscription_to_client() {
-    let mut schema = schema();
-    let mut owner = AuthorId::from_bytes([0xa1; 16]);
-    let mut client_author = AuthorId::from_bytes([0xc1; 16]);
+    let schema = schema();
+    let owner = AuthorId::from_bytes([0xa1; 16]);
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
 
-    let mut server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
     let mut client = open_db(0xc1, client_author, &schema);
 
     seed(&server, "todos", cells("from server", false, owner));
 
     let (client_bytes, server_bytes) = byte_duplex_raw();
-    let mut server_inbound = Rc::clone(&server_bytes.inbound);
+    let server_inbound = Rc::clone(&server_bytes.inbound);
     let mut _upstream =
         client.connect_upstream(Box::new(WireTransportAdapter::current(client_bytes)));
     let mut _subscriber = server.accept_subscriber(
@@ -607,22 +613,22 @@ fn byte_wire_round_trips_subscription_to_client() {
         client_author,
     );
 
-    let mut query = Query::from("todos");
+    let query = Query::from("todos");
     let mut subscription =
         prepared_subscribe(&mut client, &query, global_subscribe_opts()).unwrap();
     assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
 
     client.tick().unwrap();
     {
-        let mut queued = server_inbound.borrow();
-        let mut first = queued.front().expect("register shape frame");
-        let mut second = queued.get(1).expect("subscribe frame");
+        let queued = server_inbound.borrow();
+        let first = queued.front().expect("register shape frame");
+        let second = queued.get(1).expect("subscribe frame");
         let mut decoder = WireStreamDecoder::new(current_wire_features()).unwrap();
-        let mut first = match decode_frame(first).unwrap() {
+        let first = match decode_frame(first).unwrap() {
             WireFrame::Message(envelope) => decode_wire_message_payload(&mut decoder, &envelope),
             other => panic!("expected message frame, got {other:?}"),
         };
-        let mut second = match decode_frame(second).unwrap() {
+        let second = match decode_frame(second).unwrap() {
             WireFrame::Message(envelope) => decode_wire_message_payload(&mut decoder, &envelope),
             other => panic!("expected message frame, got {other:?}"),
         };
@@ -638,8 +644,8 @@ fn byte_wire_round_trips_subscription_to_client() {
     server.tick().unwrap();
     client.tick().unwrap();
 
-    let mut table = &schema.tables[0];
-    let mut rows = prepared_read(&mut client, &query);
+    let table = &schema.tables[0];
+    let rows = prepared_read(&mut client, &query);
     assert_eq!(rows.len(), 1);
     assert_eq!(
         rows[0].cell(table, "title"),
@@ -658,14 +664,14 @@ fn byte_wire_round_trips_subscription_to_client() {
 
 #[test]
 fn single_upstream_tick_applies_multiple_subscription_updates() {
-    let mut schema = issue_schema();
-    let mut owner = AuthorId::from_bytes([0xa1; 16]);
-    let mut client_author = AuthorId::from_bytes([0xc1; 16]);
+    let schema = issue_schema();
+    let owner = AuthorId::from_bytes([0xa1; 16]);
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
 
-    let mut server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
     let mut client = open_db(0xc1, client_author, &schema);
 
-    let mut project = row(1);
+    let project = row(1);
     server
         .insert_with_id(
             "projects",
@@ -683,8 +689,8 @@ fn single_upstream_tick_applies_multiple_subscription_updates() {
     let mut _upstream = client.connect_upstream(client_transport);
     let mut _subscriber = server.accept_subscriber(server_transport, client_author);
 
-    let mut projects = Query::from("projects");
-    let mut issues = Query::from("issues");
+    let projects = Query::from("projects");
+    let issues = Query::from("issues");
     let mut project_subscription =
         prepared_subscribe(&mut client, &projects, global_subscribe_opts()).unwrap();
     let mut issue_subscription =
@@ -694,7 +700,7 @@ fn single_upstream_tick_applies_multiple_subscription_updates() {
 
     client.tick().unwrap();
     server.tick().unwrap();
-    let mut stats = client.tick().unwrap();
+    let stats = client.tick().unwrap();
 
     assert_eq!(prepared_read(&mut client, &projects).len(), 1);
     assert_eq!(prepared_read(&mut client, &issues).len(), 1);
@@ -715,11 +721,11 @@ fn single_upstream_tick_applies_multiple_subscription_updates() {
 
 #[test]
 fn subscriber_connection_serves_current_rows_and_resumes_from_cursor() {
-    let mut schema = schema();
-    let mut owner = AuthorId::from_bytes([0xa1; 16]);
-    let mut client_author = AuthorId::from_bytes([0xc1; 16]);
+    let schema = schema();
+    let owner = AuthorId::from_bytes([0xa1; 16]);
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
 
-    let mut server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
     let mut client = open_db(0xc1, client_author, &schema);
 
     seed(&server, "todos", cells("first", false, owner));
@@ -727,8 +733,8 @@ fn subscriber_connection_serves_current_rows_and_resumes_from_cursor() {
 
     let (client_transport, server_transport) = duplex();
     let mut _upstream = client.connect_upstream(client_transport);
-    let mut subscriber = server.accept_subscriber(server_transport, client_author);
-    let mut query = Query::from("todos");
+    let subscriber = server.accept_subscriber(server_transport, client_author);
+    let query = Query::from("todos");
     let mut subscription =
         prepared_subscribe(&mut client, &query, global_subscribe_opts()).unwrap();
     assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
@@ -743,27 +749,27 @@ fn subscriber_connection_serves_current_rows_and_resumes_from_cursor() {
     assert_eq!(added.len(), 2);
     assert!(updated.is_empty());
     assert!(removed.is_empty());
-    let mut full_bytes = subscriber.borrow().last_resume_bytes().unwrap();
+    let full_bytes = subscriber.borrow().last_resume_bytes().unwrap();
     assert!(full_bytes > 0);
 
     server.tick().unwrap();
     client.tick().unwrap();
 
-    let mut third = seed(&server, "todos", cells("third", true, owner));
+    let third = seed(&server, "todos", cells("third", true, owner));
     server.tick().unwrap();
     client.tick().unwrap();
     assert_eq!(prepared_read(&mut client, &query).len(), 3);
 
-    let mut cursor = subscriber.borrow_mut().take_resume_cursor().unwrap();
+    let cursor = subscriber.borrow_mut().take_resume_cursor().unwrap();
     let (client_transport, server_transport) = duplex();
     let mut _resumed_upstream = client.connect_upstream(client_transport);
-    let mut resumed = server.accept_subscriber_with_resume(server_transport, client_author, cursor);
+    let resumed = server.accept_subscriber_with_resume(server_transport, client_author, cursor);
 
     client.tick().unwrap();
     server.tick().unwrap();
     client.tick().unwrap();
 
-    let mut resume_bytes = resumed.borrow().last_resume_bytes().unwrap();
+    let resume_bytes = resumed.borrow().last_resume_bytes().unwrap();
     assert!(
         resume_bytes > 0,
         "resume catch-up should send a bounded non-empty response after cursor resume"
@@ -782,11 +788,11 @@ fn subscriber_connection_serves_current_rows_and_resumes_from_cursor() {
 
 #[test]
 fn byte_wire_subscriber_connection_serves_current_rows_and_resumes_from_cursor() {
-    let mut schema = schema();
-    let mut owner = AuthorId::from_bytes([0xa1; 16]);
-    let mut client_author = AuthorId::from_bytes([0xc1; 16]);
+    let schema = schema();
+    let owner = AuthorId::from_bytes([0xa1; 16]);
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
 
-    let mut server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
     let mut client = open_db(0xc1, client_author, &schema);
 
     seed(&server, "todos", cells("first", false, owner));
@@ -794,8 +800,8 @@ fn byte_wire_subscriber_connection_serves_current_rows_and_resumes_from_cursor()
 
     let (client_transport, server_transport) = byte_duplex_with_session(client_author, 1);
     let mut _upstream = client.connect_upstream(client_transport);
-    let mut subscriber = server.accept_subscriber(server_transport, client_author);
-    let mut query = Query::from("todos");
+    let subscriber = server.accept_subscriber(server_transport, client_author);
+    let query = Query::from("todos");
     let mut subscription =
         prepared_subscribe(&mut client, &query, global_subscribe_opts()).unwrap();
     assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
@@ -808,27 +814,27 @@ fn byte_wire_subscriber_connection_serves_current_rows_and_resumes_from_cursor()
     assert_eq!(added.len(), 2);
     assert!(updated.is_empty());
     assert!(removed.is_empty());
-    let mut full_bytes = subscriber.borrow().last_resume_bytes().unwrap();
+    let full_bytes = subscriber.borrow().last_resume_bytes().unwrap();
     assert!(full_bytes > 0);
 
     server.tick().unwrap();
     client.tick().unwrap();
 
-    let mut third = seed(&server, "todos", cells("third", true, owner));
+    let third = seed(&server, "todos", cells("third", true, owner));
     server.tick().unwrap();
     client.tick().unwrap();
     assert_eq!(prepared_read(&mut client, &query).len(), 3);
 
-    let mut cursor = subscriber.borrow_mut().take_resume_cursor().unwrap();
+    let cursor = subscriber.borrow_mut().take_resume_cursor().unwrap();
     let (client_transport, server_transport) = byte_duplex_with_session(client_author, 2);
     let mut _resumed_upstream = client.connect_upstream(client_transport);
-    let mut resumed = server.accept_subscriber_with_resume(server_transport, client_author, cursor);
+    let resumed = server.accept_subscriber_with_resume(server_transport, client_author, cursor);
 
     client.tick().unwrap();
     server.tick().unwrap();
     client.tick().unwrap();
 
-    let mut resume_bytes = resumed.borrow().last_resume_bytes().unwrap();
+    let resume_bytes = resumed.borrow().last_resume_bytes().unwrap();
     assert!(
         resume_bytes > 0,
         "byte-wire resume catch-up should send a bounded non-empty response after cursor resume"
@@ -847,19 +853,19 @@ fn byte_wire_subscriber_connection_serves_current_rows_and_resumes_from_cursor()
 
 #[test]
 fn connect_upstream_announces_existing_subscriptions_on_first_tick() {
-    let mut schema = schema();
-    let mut client_author = AuthorId::from_bytes([0xc1; 16]);
+    let schema = schema();
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
     let mut client = open_db(0xc1, client_author, &schema);
     let (client_transport, mut upstream_transport) = duplex();
 
-    let mut query = Query::from("todos").filter(eq(col("done"), lit(false)));
+    let query = Query::from("todos").filter(eq(col("done"), lit(false)));
     let mut _subscription =
         prepared_subscribe(&mut client, &query, global_subscribe_opts()).unwrap();
     let mut _upstream = client.connect_upstream(client_transport);
 
     client.tick().unwrap();
-    let mut first = upstream_transport.try_recv().unwrap();
-    let mut second = upstream_transport.try_recv().unwrap();
+    let first = upstream_transport.try_recv().unwrap();
+    let second = upstream_transport.try_recv().unwrap();
     assert!(upstream_transport.try_recv().is_none());
 
     let SyncMessage::RegisterShape { shape_id, .. } = first else {
@@ -878,15 +884,15 @@ fn connect_upstream_announces_existing_subscriptions_on_first_tick() {
 // protects the otherwise unobservable wire-chatter contract.
 #[test]
 fn repeated_identical_session_claims_emit_once_on_a_live_connection() {
-    let mut schema = schema();
-    let mut client_author = AuthorId::from_bytes([0xc1; 16]);
+    let schema = schema();
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
     let mut client = open_db(0xc1, client_author, &schema);
     let (client_transport, mut upstream_transport) = duplex();
     let mut _upstream = client.connect_upstream(client_transport);
-    let mut claims = BTreeMap::from([("role".to_owned(), Value::String("reader".to_owned()))]);
+    let claims = BTreeMap::from([("role".to_owned(), Value::String("reader".to_owned()))]);
 
-    client.set_identity_claims(client_author, claims.clone());
-    client.set_identity_claims(client_author, claims);
+    let _ = client.set_identity_claims(client_author, claims.clone());
+    let _ = client.set_identity_claims(client_author, claims);
     client.tick().unwrap();
 
     assert!(matches!(
@@ -904,14 +910,14 @@ fn repeated_identical_session_claims_emit_once_on_a_live_connection() {
 // each newly attached transport must receive the current map independently.
 #[test]
 fn current_session_claims_reach_late_and_reconnected_upstreams() {
-    let mut schema = schema();
-    let mut client_author = AuthorId::from_bytes([0xc1; 16]);
+    let schema = schema();
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
     let mut client = open_db(0xc1, client_author, &schema);
-    let mut claims = BTreeMap::from([("role".to_owned(), Value::String("reader".to_owned()))]);
+    let claims = BTreeMap::from([("role".to_owned(), Value::String("reader".to_owned()))]);
 
-    client.set_identity_claims(client_author, claims.clone());
+    let _ = client.set_identity_claims(client_author, claims.clone());
     let (first_transport, mut first_upstream_transport) = duplex();
-    let mut first_upstream = client.connect_upstream(first_transport);
+    let first_upstream = client.connect_upstream(first_transport);
     client.tick().unwrap();
     assert!(matches!(
         first_upstream_transport.try_recv(),
@@ -920,7 +926,7 @@ fn current_session_claims_reach_late_and_reconnected_upstreams() {
     ));
     assert!(first_upstream_transport.try_recv().is_none());
 
-    client.set_identity_claims(client_author, claims.clone());
+    let _ = client.set_identity_claims(client_author, claims.clone());
     assert!(client.detach_connection(&first_upstream));
 
     let (reconnected_transport, mut reconnected_upstream_transport) = duplex();
@@ -936,26 +942,26 @@ fn current_session_claims_reach_late_and_reconnected_upstreams() {
 
 #[test]
 fn changed_session_claims_advance_delivery_after_an_identical_call() {
-    let mut schema = schema();
-    let mut client_author = AuthorId::from_bytes([0xc1; 16]);
+    let schema = schema();
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
     let mut client = open_db(0xc1, client_author, &schema);
     let (client_transport, mut upstream_transport) = duplex();
     let mut _upstream = client.connect_upstream(client_transport);
-    let mut reader = BTreeMap::from([("role".to_owned(), Value::String("reader".to_owned()))]);
-    let mut writer = BTreeMap::from([("role".to_owned(), Value::String("writer".to_owned()))]);
+    let reader = BTreeMap::from([("role".to_owned(), Value::String("reader".to_owned()))]);
+    let writer = BTreeMap::from([("role".to_owned(), Value::String("writer".to_owned()))]);
 
-    client.set_identity_claims(client_author, reader.clone());
+    let _ = client.set_identity_claims(client_author, reader.clone());
     client.tick().unwrap();
     assert!(matches!(
         upstream_transport.try_recv(),
         Some(SyncMessage::SessionClaims { claims, .. }) if claims == reader
     ));
 
-    client.set_identity_claims(client_author, reader);
+    let _ = client.set_identity_claims(client_author, reader);
     client.tick().unwrap();
     assert!(upstream_transport.try_recv().is_none());
 
-    client.set_identity_claims(client_author, writer.clone());
+    let _ = client.set_identity_claims(client_author, writer.clone());
     client.tick().unwrap();
     assert!(matches!(
         upstream_transport.try_recv(),
@@ -967,13 +973,13 @@ fn changed_session_claims_advance_delivery_after_an_identical_call() {
 
 #[test]
 fn global_subscription_registers_array_subquery_upstream_coverage() {
-    let mut schema = relation_schema();
-    let mut client_author = AuthorId::from_bytes([0xc1; 16]);
+    let schema = relation_schema();
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
     let mut client = open_db(0xc1, client_author, &schema);
     let (client_transport, mut upstream_transport) = duplex();
     let mut _upstream = client.connect_upstream(client_transport);
 
-    let mut query = Query::from("users").array_subquery(
+    let query = Query::from("users").array_subquery(
         ArraySubquery::new("todos", "todos", "owner_id", "id")
             .nested(ArraySubquery::new("comments", "comments", "todo_id", "id")),
     );
@@ -993,18 +999,18 @@ fn global_subscription_registers_array_subquery_upstream_coverage() {
 
 #[test]
 fn array_subquery_attachment_registers_upstream_coverage() {
-    let mut schema = relation_schema();
-    let mut client_author = AuthorId::from_bytes([0xc1; 16]);
+    let schema = relation_schema();
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
     let mut client = open_db(0xc1, client_author, &schema);
     let (client_transport, mut upstream_transport) = duplex();
     let mut _upstream = client.connect_upstream(client_transport);
 
-    let mut query = Query::from("users").array_subquery(
+    let query = Query::from("users").array_subquery(
         ArraySubquery::new("todos", "todos", "owner_id", "id")
             .nested(ArraySubquery::new("comments", "comments", "todo_id", "id")),
     );
-    let mut prepared = prepared(&mut client, &query);
-    let mut attachment = client
+    let prepared = prepared(&mut client, &query);
+    let attachment = client
         .attach_query_with_opts(&prepared, global_subscribe_opts())
         .unwrap();
 
@@ -1022,17 +1028,17 @@ fn array_subquery_attachment_registers_upstream_coverage() {
 
 #[test]
 fn upload_is_not_marked_sent_after_one_shot_backpressure_and_retries() {
-    let mut schema = schema();
-    let mut client_author = AuthorId::from_bytes([0xc1; 16]);
+    let schema = schema();
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
     let mut client = open_db(0xc1, client_author, &schema);
-    let mut outbound = Rc::new(RefCell::new(std::collections::VecDeque::new()));
-    let mut transport = BackpressureOnceTransport {
+    let outbound = Rc::new(RefCell::new(std::collections::VecDeque::new()));
+    let transport = BackpressureOnceTransport {
         outbound: Rc::clone(&outbound),
         failed: false,
     };
     let mut _upstream = client.connect_upstream(Box::new(transport));
 
-    let mut tx_id = client
+    let tx_id = client
         .node
         .node
         .borrow_mut()
@@ -1062,7 +1068,7 @@ fn upload_is_not_marked_sent_after_one_shot_backpressure_and_retries() {
     );
 
     client.tick().unwrap();
-    let mut sent = outbound.borrow_mut().pop_front().unwrap();
+    let sent = outbound.borrow_mut().pop_front().unwrap();
     let SyncMessage::CommitUnit { tx, .. } = sent else {
         panic!("expected retried commit upload");
     };
@@ -1072,12 +1078,12 @@ fn upload_is_not_marked_sent_after_one_shot_backpressure_and_retries() {
 
 #[test]
 fn local_missing_upload_body_still_kills_sync_driver() {
-    let mut schema = schema();
-    let mut client_author = AuthorId::from_bytes([0xc1; 16]);
+    let schema = schema();
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
     let mut client = open_db(0xc1, client_author, &schema);
     let (client_transport, _server_transport) = duplex();
     let mut _upstream = client.connect_upstream(client_transport);
-    let mut missing_tx = TxId::new(
+    let missing_tx = TxId::new(
         crate::time::TxTime(client.next_now_ms()),
         NodeUuid::from_bytes([0xee; 16]),
     );
@@ -1086,7 +1092,7 @@ fn local_missing_upload_body_still_kills_sync_driver() {
         unit: None,
     });
 
-    let mut error = client.tick().unwrap_err();
+    let error = client.tick().unwrap_err();
     assert_eq!(error.code, ErrorCode::Protocol);
     assert!(
         error.message.contains("missing transaction"),
@@ -1097,15 +1103,15 @@ fn local_missing_upload_body_still_kills_sync_driver() {
 
 #[test]
 fn detach_connection_removes_connection_from_db_ticks() {
-    let mut schema = schema();
-    let mut client_author = AuthorId::from_bytes([0xc1; 16]);
+    let schema = schema();
+    let client_author = AuthorId::from_bytes([0xc1; 16]);
     let mut client = open_db(0xc1, client_author, &schema);
     let (client_transport, mut upstream_transport) = duplex();
 
-    let mut query = Query::from("todos").filter(eq(col("done"), lit(false)));
+    let query = Query::from("todos").filter(eq(col("done"), lit(false)));
     let mut _subscription =
         prepared_subscribe(&mut client, &query, global_subscribe_opts()).unwrap();
-    let mut upstream = client.connect_upstream(client_transport);
+    let upstream = client.connect_upstream(client_transport);
 
     assert!(client.detach_connection(&upstream));
     assert!(!client.detach_connection(&upstream));
@@ -1116,14 +1122,14 @@ fn detach_connection_removes_connection_from_db_ticks() {
 
 #[test]
 fn accepted_subscriber_is_served_under_subscriber_author_identity() {
-    let mut schema = owner_read_schema();
-    let mut subscriber_author = AuthorId::from_bytes([0xc1; 16]);
-    let mut server_author = AuthorId::from_bytes([0x5e; 16]);
-    let mut other_author = AuthorId::from_bytes([0xd1; 16]);
-    let mut server = open_core(0x5e, server_author, &schema);
+    let schema = owner_read_schema();
+    let subscriber_author = AuthorId::from_bytes([0xc1; 16]);
+    let server_author = AuthorId::from_bytes([0x5e; 16]);
+    let other_author = AuthorId::from_bytes([0xd1; 16]);
+    let server = open_core(0x5e, server_author, &schema);
     let mut client = open_db(0xc1, subscriber_author, &schema);
 
-    let mut visible = seed(
+    let visible = seed(
         &server,
         "todos",
         cells("for subscriber", false, subscriber_author),
@@ -1138,7 +1144,7 @@ fn accepted_subscriber_is_served_under_subscriber_author_identity() {
     let (client_transport, server_transport) = duplex();
     let mut _upstream = client.connect_upstream(client_transport);
     let mut _subscriber = server.accept_subscriber(server_transport, subscriber_author);
-    let mut query = Query::from("todos");
+    let query = Query::from("todos");
     let mut subscription =
         prepared_subscribe(&mut client, &query, global_subscribe_opts()).unwrap();
     assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
@@ -1159,8 +1165,8 @@ fn accepted_subscriber_is_served_under_subscriber_author_identity() {
 
 #[test]
 fn client_initial_sync_flush_cadence_preserves_public_snapshot_delivery() {
-    let mut schema = schema();
-    let mut server = open_core(0xd4, AuthorId::SYSTEM, &schema);
+    let schema = schema();
+    let server = open_core(0xd4, AuthorId::SYSTEM, &schema);
     for ordinal in 0..3_u8 {
         server
             .insert_with_id(
@@ -1177,7 +1183,7 @@ fn client_initial_sync_flush_cadence_preserves_public_snapshot_delivery() {
             .unwrap();
     }
 
-    let mut client_author = AuthorId::from_bytes([0xd5; 16]);
+    let client_author = AuthorId::from_bytes([0xd5; 16]);
     let mut client = open_db(0xd5, client_author, &schema);
     client
         .set_initial_sync_flush_cadence(InitialSyncFlushCadence::every(
@@ -1187,7 +1193,7 @@ fn client_initial_sync_flush_cadence_preserves_public_snapshot_delivery() {
     let (client_transport, server_transport) = duplex();
     let mut _upstream = client.connect_upstream(client_transport);
     let mut _subscriber = server.accept_subscriber(server_transport, client_author);
-    let mut query = client.table("todos");
+    let query = client.table("todos");
     let mut subscription =
         prepared_subscribe(&mut client, &query, global_subscribe_opts()).unwrap();
     let _ = block_on(subscription.next_raw()).unwrap();

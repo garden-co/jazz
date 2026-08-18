@@ -149,10 +149,11 @@ pub(super) fn prepare_update_loaded(
         let existing = node
             .node
             .borrow_mut()
-            .query_rows_for_client(
+            .query_rows_with_prepared_plan_for_identity(
                 &prepared.shape,
                 &prepared.binding,
                 DurabilityTier::Local,
+                None,
                 author,
             )
             .map_err(MutationPrepareError::Node)?
@@ -241,10 +242,11 @@ pub(super) fn prepare_noop_update_loaded(
     let existing = node
         .node
         .borrow_mut()
-        .query_rows_for_client(
+        .query_rows_with_prepared_plan_for_identity(
             &prepared.shape,
             &prepared.binding,
             DurabilityTier::Local,
+            None,
             author,
         )
         .map_err(MutationPrepareError::Node)?
@@ -375,10 +377,11 @@ pub(super) fn prepare_upsert_loaded(
     let visible = node
         .node
         .borrow_mut()
-        .query_rows_for_client(
+        .query_rows_with_prepared_plan_for_identity(
             &prepared.shape,
             &prepared.binding,
             DurabilityTier::Local,
+            None,
             author,
         )
         .map_err(MutationPrepareError::Node)?

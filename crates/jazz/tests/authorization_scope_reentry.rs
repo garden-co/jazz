@@ -356,21 +356,22 @@ fn maintained_authorization_restores_an_ordered_page_after_scope_reentry() {
                 .limit(2),
         )
         .expect("prepare exact ordered page");
-    let writer_page = || ordered_page(&mut db, WRITER, &prepared);
-    let reader_page = || ordered_page(&mut db, READER, &prepared);
     let mut stream = block_on(db.subscribe_for_identity(&prepared, opts(), READER))
         .expect("subscribe reader page");
 
     let mut maintained = initial_rows(&mut stream);
     assert_eq!(maintained, BTreeSet::from([winner, second]));
-    assert_eq!(reader_page(), vec![winner, second]);
+    assert_eq!(
+        ordered_page(&mut db, READER, &prepared),
+        vec![winner, second]
+    );
 
     // The whole scenario rests on WRITER being able to write these documents
     // without being able to read them. Assert that premise directly: without
     // this, a read policy that accidentally admitted WRITER would leave every
     // other assertion in this test passing while testing nothing.
     assert!(
-        writer_page().is_empty(),
+        ordered_page(&mut db, WRITER, &prepared).is_empty(),
         "WRITER must not be able to read documents; the partial-update scenario \
          is only meaningful for a write-only principal"
     );
@@ -388,7 +389,10 @@ fn maintained_authorization_restores_an_ordered_page_after_scope_reentry() {
     };
     assert_eq!(denied.code, ErrorCode::WriteRejected);
     assert!(denied.message.contains("requires read permission"));
-    assert_eq!(reader_page(), vec![winner, second]);
+    assert_eq!(
+        ordered_page(&mut db, READER, &prepared),
+        vec![winner, second]
+    );
     assert!(stream.try_next_event().is_none());
 
     db.update_for_identity(
@@ -406,9 +410,12 @@ fn maintained_authorization_restores_an_ordered_page_after_scope_reentry() {
     maintained.remove(&winner);
     maintained.insert(refill);
     assert_eq!(maintained, BTreeSet::from([second, refill]));
-    assert_eq!(reader_page(), vec![second, refill]);
+    assert_eq!(
+        ordered_page(&mut db, READER, &prepared),
+        vec![second, refill]
+    );
     assert!(
-        writer_page().is_empty(),
+        ordered_page(&mut db, WRITER, &prepared).is_empty(),
         "WRITER must still not read documents after the move out of scope"
     );
 
@@ -443,7 +450,10 @@ fn maintained_authorization_restores_an_ordered_page_after_scope_reentry() {
         .expect("stage retained-row update");
     db.commit_mergeable(batch)
         .expect("commit mixed scope re-entry and retained-row update");
-    assert_eq!(reader_page(), vec![winner, second]);
+    assert_eq!(
+        ordered_page(&mut db, READER, &prepared),
+        vec![winner, second]
+    );
     let move_back_delta = exact_mixed_reentry_delta(&mut stream);
     assert_eq!(
         move_back_delta,

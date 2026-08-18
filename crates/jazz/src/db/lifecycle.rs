@@ -307,7 +307,7 @@ impl Db {
         })
     }
 
-    async fn refresh_subscriptions_prepared(&mut self) -> Result<usize, Error> {
+    pub(super) async fn refresh_subscriptions_prepared(&mut self) -> Result<usize, Error> {
         refresh_demand_driven_subscriptions(&self.node, &mut self.runtime).await
     }
 
@@ -595,7 +595,7 @@ impl Db {
 
     #[cfg(any(test, feature = "testing"))]
     pub fn tick_stats(&self) -> Result<DbTickStats, Error> {
-        self.node.tick().map_err(Into::into)
+        self.node.tick()
     }
 
     #[cfg(feature = "testing")]
@@ -1263,6 +1263,11 @@ impl Db {
     }
 
     pub async fn tick(&mut self) -> Result<DbTickStats, Error> {
+        if self.node.deliver_pending_mutation_errors() {
+            std::future::poll_fn(|context| self.runtime.poll_persistence(context))
+                .await
+                .map_err(Error::from)?;
+        }
         std::future::poll_fn(|context| self.poll_tick(context)).await
     }
 
@@ -1637,7 +1642,10 @@ impl Db {
                         .poll_apply_peer_view_updates(context, std::slice::from_ref(&parts))
                     {
                         Poll::Pending => return Poll::Pending,
-                        Poll::Ready(Err(error)) => return Poll::Ready(Err(error.into())),
+                        Poll::Ready(Err(error)) => {
+                            connection.borrow_mut().complete_staged_view_update(&parts);
+                            return Poll::Ready(Err(error.into()));
+                        }
                         Poll::Ready(Ok(())) => {
                             connection.borrow_mut().complete_staged_view_update(&parts);
                         }
@@ -1662,34 +1670,30 @@ impl Db {
             return Poll::Ready(Err(error.into()));
         }
 
+        // Typed ingress above may change any subscriber's maintained view.
+        // Acquire local publication and outbound serving witnesses in one
+        // residency attempt: a later acquisition replaces the demand-loaded
+        // working set and would otherwise evict inputs needed by the resident
+        // protocol tick below.
         match self.runtime.poll_acquire_resident(context, |node| {
-            self.node.prepare_subscription_refresh_inputs(node)
+            for connection in &connections {
+                connection
+                    .borrow_mut()
+                    .prepare_subscriber_serving_inputs(node)?;
+            }
+            self.node.prepare_subscription_refresh_inputs(node)?;
+            Ok(())
         }) {
             Poll::Pending => return Poll::Pending,
             Poll::Ready(Err(error)) => return Poll::Ready(Err(error.into())),
             Poll::Ready(Ok(())) => {}
         }
 
-        // Typed ingress above may change any subscriber's maintained view.
-        // Prepare outbound refreshes only after every connection has had its
-        // resident mutation admitted, never against a pre-ingress snapshot.
-        for connection in &connections {
-            match self.runtime.poll_acquire_resident(context, |node| {
-                connection
-                    .borrow_mut()
-                    .prepare_subscriber_serving_inputs(node)
-            }) {
-                Poll::Pending => return Poll::Pending,
-                Poll::Ready(Err(error)) => return Poll::Ready(Err(error.into())),
-                Poll::Ready(Ok(())) => {}
-            }
-        }
-
         let parked_tails = connections
             .iter()
             .map(|connection| connection.borrow_mut().park_staged_inbound_tail())
             .collect::<Vec<_>>();
-        let tick_result = self.node.tick();
+        let tick_result = self.node.tick_after_mutation_error_delivery();
         for (connection, tail) in connections.iter().zip(parked_tails) {
             connection.borrow_mut().restore_staged_inbound_tail(tail);
         }

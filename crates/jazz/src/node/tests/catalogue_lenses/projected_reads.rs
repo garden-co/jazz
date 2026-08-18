@@ -77,8 +77,8 @@ fn heterogeneous_schema_projected_reads_keep_prepared_plans_valid() {
         BTreeMap::from([(row(0x49), title_cells("projected"))])
     );
     assert!(!core.uses_schema_projected_read(&shape));
-    let rows = core
-        .query_rows_local_preview(&shape, &binding, Some(&pre_lens_plan))
+    let (rows, _) = core
+        .query_rows_local_preview_profiled(&shape, &binding, Some(&pre_lens_plan))
         .unwrap();
     assert_eq!(
         rows.into_iter()
@@ -1286,4 +1286,3 @@ fn historical_schema_projected_reachable_filters_translate_old_names() {
         "historical schema-projected reachable reads must lower over inline projected sources"
     );
 }
-
