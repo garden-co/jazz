@@ -164,6 +164,43 @@ impl DemandDrivenNode {
         // entering a restartable acquisition attempt. Writes emitted by the
         // attempt itself remain forbidden and are checked below.
         self.collect_persistence_unit();
+
+        // Probe the resident operation before touching durable storage. A
+        // fully resident read must retain the synchronous completion property,
+        // while a cold miss is ordered after every older publication. The
+        // probe is restartable and must therefore remain mutation-free just
+        // like every later acquisition attempt.
+        let resident_probe = {
+            let mut node = self.node.borrow_mut();
+            prepare(&mut node)
+        };
+        match resident_probe {
+            Ok(prepared) => {
+                return match self.ensure_acquisition_attempt_clean() {
+                    Ok(()) => std::task::Poll::Ready(Ok(prepared)),
+                    Err(error) => std::task::Poll::Ready(Err(error)),
+                };
+            }
+            Err(error) => {
+                if let Err(error) = missing_node_open_input(error) {
+                    self.discard_failed_operation_writes();
+                    return std::task::Poll::Ready(Err(error));
+                }
+                if let Err(error) = self.ensure_acquisition_attempt_clean() {
+                    return std::task::Poll::Ready(Err(error));
+                }
+            }
+        }
+
+        // The operation genuinely needs durable input. Fence that request
+        // behind older publication units (including column-family creation)
+        // before StorageAcquisition is allowed to issue it. Resident reads
+        // above never pay this asynchronous durability boundary.
+        match self.poll_persistence_queue(context) {
+            std::task::Poll::Pending => return std::task::Poll::Pending,
+            std::task::Poll::Ready(Err(error)) => return std::task::Poll::Ready(Err(error)),
+            std::task::Poll::Ready(Ok(())) => {}
+        }
         let result = self.acquisition.poll(
             self.persistence.as_mut(),
             &self.cache,

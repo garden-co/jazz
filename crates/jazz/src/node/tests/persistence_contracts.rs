@@ -443,6 +443,55 @@ fn cold_retry_poisoned_when_acquisition_attempt_publishes_before_suspending() {
 }
 
 #[test]
+fn cold_acquisition_waits_behind_older_resident_publication() {
+    let released = std::rc::Rc::new(std::cell::Cell::new(true));
+    let failed = std::rc::Rc::new(std::cell::Cell::new(false));
+    let completed = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let node_schema = schema();
+    let refs = node_schema.column_families();
+    let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage = CommitGatedAuthorityStorage {
+        inner: groove::storage::async_ordered::ImmediateStorage::new(MemoryStorage::new(&refs)),
+        released: std::rc::Rc::clone(&released),
+        fail: failed,
+        completed: std::rc::Rc::clone(&completed),
+    };
+    let mut opening = DemandDrivenNodeOpen::new(node(0xc8), node_schema, Box::new(storage));
+    let waker = std::task::Waker::from(std::sync::Arc::new(PersistenceTestWake));
+    let mut context = std::task::Context::from_waker(&waker);
+    let std::task::Poll::Ready(Ok(mut runtime)) = opening.poll(&mut context) else {
+        panic!("released backend opens synchronously")
+    };
+    completed.borrow_mut().clear();
+
+    released.set(false);
+    runtime
+        .shared_resident()
+        .borrow_mut()
+        .commit_mergeable(
+            MergeableCommit::new("todos", row(0xc8), 1).cells(title_cells("ordered")),
+        )
+        .unwrap();
+    runtime.publish_query_runtime_updates().unwrap();
+
+    let result = runtime.poll_acquire_resident(&mut context, |_node| {
+        Err::<(), _>(Error::Storage(groove::storage::Error::NotResident {
+            request: Box::new(
+                groove::storage::async_ordered::OwnedStorageOperation::Get {
+                    column_family: "jazz_transactions".to_owned(),
+                    key: vec![0xc8],
+                },
+            ),
+        }))
+    });
+    assert!(matches!(result, std::task::Poll::Pending));
+    assert!(
+        !completed.borrow().contains(&"read"),
+        "a cold read must not overtake its older resident publication"
+    );
+}
+
+#[test]
 fn demand_driven_db_preserves_synchronous_facade_visibility_before_durability() {
     let released = std::rc::Rc::new(std::cell::Cell::new(true));
     let failed = std::rc::Rc::new(std::cell::Cell::new(false));

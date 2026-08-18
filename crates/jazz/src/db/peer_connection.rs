@@ -543,9 +543,6 @@ where
         {
             return Ok(());
         }
-        if !coverage_groups.is_empty() {
-            node.flush_query_runtime()?;
-        }
         for (coverage, group) in coverage_groups.iter() {
             if prepared_group_updates.contains_key(coverage) {
                 continue;
