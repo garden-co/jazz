@@ -425,6 +425,44 @@ impl DemandDrivenDb {
             local_tier,
         })
     }
+
+    /// Insert or update one caller-selected row id through the common typed
+    /// acquisition boundary. The absent/existing decision is completed before
+    /// the single resident publication.
+    #[doc(hidden)]
+    pub async fn upsert(
+        &mut self,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+    ) -> Result<WriteHandle<groove::storage::DemandLoadedStorage>, Error> {
+        let now_ms = self.database.next_now_ms();
+        let database = &self.database;
+        let prepared = std::future::poll_fn(|context| {
+            self.runtime.poll_operation(
+                context,
+                || database.prepare_upsert_commit_for_owner(table, row, cells.clone(), now_ms),
+                MutationPrepareError::missing_input,
+            )
+        })
+        .await
+        .map_err(MutationPrepareError::into_api)?;
+        let schema = self.database.schema_version_id;
+        let tx_id = std::future::poll_fn(|context| {
+            self.runtime
+                .poll_mergeable_commit_in_schema(context, schema, &prepared)
+        })
+        .await
+        .map_err(Error::from)?;
+        let local_tier = self.database.finalize_local_commit(tx_id)?;
+        self.database.refresh_subscriptions()?;
+        Ok(WriteHandle {
+            node: Rc::downgrade(&self.database.node.node),
+            row_uuid: row,
+            tx_id,
+            local_tier,
+        })
+    }
 }
 
 impl<S> Db<S>

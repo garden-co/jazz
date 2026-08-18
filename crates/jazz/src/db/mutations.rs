@@ -300,6 +300,71 @@ where
         ])
     }
 
+    pub(super) fn prepare_upsert_commit_for_owner(
+        &self,
+        table: &str,
+        row: RowUuid,
+        patch: RowCells,
+        now_ms: u64,
+    ) -> Result<MergeableCommit, MutationPrepareError> {
+        let table_schema = self
+            .table_schema(table)
+            .map_err(MutationPrepareError::Api)?;
+        if self
+            .node
+            .node
+            .borrow_mut()
+            .local_deletion_winner_tx_id(table, row)
+            .map_err(MutationPrepareError::Node)?
+            .is_some()
+        {
+            return Err(MutationPrepareError::Api(row_already_deleted(row)));
+        }
+        let query = Query::from(table).filter(crate::query::eq(
+            crate::query::col("id"),
+            crate::query::lit(Value::Uuid(row.0)),
+        ));
+        let prepared = self
+            .prepare_query(&query)
+            .map_err(MutationPrepareError::Api)?;
+        let visible = self
+            .node
+            .node
+            .borrow_mut()
+            .query_rows_for_client(
+                &prepared.shape,
+                &prepared.binding,
+                DurabilityTier::Local,
+                self.identity.author,
+            )
+            .map_err(MutationPrepareError::Node)?
+            .into_iter()
+            .find(|candidate| candidate.row_uuid() == row);
+        if visible.is_some() {
+            return self.prepare_update_commit_for_owner(table, row, patch, now_ms);
+        }
+        let raw_existing = self
+            .node
+            .node
+            .borrow_mut()
+            .local_current_row(table, row)
+            .map_err(MutationPrepareError::Node)?;
+        if raw_existing.is_some()
+            && self.identity.author != AuthorId::SYSTEM
+            && table_schema.read_policy.is_some()
+        {
+            return Err(MutationPrepareError::Api(read_for_write_denied(
+                "UPSERT", table,
+            )));
+        }
+        let cells = self
+            .apply_insert_defaults(table, patch)
+            .map_err(MutationPrepareError::Api)?;
+        Ok(MergeableCommit::new(table, row, now_ms)
+            .made_by(self.identity.author)
+            .cells(cells))
+    }
+
     /// Insert a row locally, generating a uuidv7-shaped row id.
     ///
     /// The generated id is available from [`WriteHandle::row_uuid`].

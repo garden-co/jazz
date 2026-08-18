@@ -494,6 +494,28 @@ fn demand_driven_db_acquires_cold_subscription_before_registering_it() {
     };
     assert_eq!(added.len(), 1);
     assert_eq!(restored_write.row_uuid(), write.row_uuid());
+    let upsert_row = RowUuid::from_bytes([0xce; 16]);
+    let upserted_write = {
+        let mut upsert = std::pin::pin!(owner.upsert(
+            "todos",
+            upsert_row,
+            title_cells("resident upsert"),
+        ));
+        match std::future::Future::poll(upsert.as_mut(), &mut context) {
+            std::task::Poll::Ready(Ok(upserted)) => upserted,
+            std::task::Poll::Ready(Err(error)) => panic!("resident upsert failed: {error}"),
+            std::task::Poll::Pending => {
+                panic!("an upsert over a resident row must complete in its first poll")
+            }
+        }
+    };
+    let Some(crate::db::SubscriptionEvent::Delta { added, .. }) =
+        subscription.try_next_event()
+    else {
+        panic!("the first-poll upsert must synchronously refresh subscriptions")
+    };
+    assert_eq!(added.len(), 1);
+    assert_eq!(upserted_write.row_uuid(), upsert_row);
     assert!(owner.poll_persistence(&mut context).is_pending());
 }
 
@@ -631,6 +653,24 @@ fn demand_driven_db_acquires_cold_mutations_before_single_publish() {
         restored
     };
     assert_eq!(restored.row_uuid(), restore_row);
+    let upsert_row = RowUuid::from_bytes([0xcd; 16]);
+    released.set(false);
+    let upserted = {
+        let mut upsert = std::pin::pin!(owner.upsert(
+            "todos",
+            upsert_row,
+            title_cells("after upsert acquisition"),
+        ));
+        assert!(std::future::Future::poll(upsert.as_mut(), &mut context).is_pending());
+        released.set(true);
+        let std::task::Poll::Ready(Ok(upserted)) =
+            std::future::Future::poll(upsert.as_mut(), &mut context)
+        else {
+            panic!("released upsert dependencies must publish exactly once")
+        };
+        upserted
+    };
+    assert_eq!(upserted.row_uuid(), upsert_row);
     released.set(false);
     let write = {
         let mut update = std::pin::pin!(owner.update(
