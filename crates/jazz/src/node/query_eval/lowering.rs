@@ -6,6 +6,7 @@
 //! in their neighboring stages.
 
 use super::*;
+use crate::node::query_engine::QueryCompileError;
 fn app_row_terminal_fields(output: &ProgramOutputSchemas) -> Result<Vec<String>, Error> {
     app_row_terminal_schema(output).and_then(|app_rows| {
         app_rows
@@ -462,14 +463,24 @@ where
         let node_alias = resolver.node.self_node_alias;
         let result = lower_query_program(request, &mut resolver);
         if let Some(request) = trace_request {
-            trace_capability_compile(
-                node_uuid,
-                node_alias,
-                &request,
-                result.as_ref().map_err(|report| report.as_ref()),
-            );
+            match &result {
+                Ok(program) => {
+                    trace_capability_compile(node_uuid, node_alias, &request, Ok(program));
+                }
+                Err(QueryCompileError::Unsupported(report)) => {
+                    trace_capability_compile(node_uuid, node_alias, &request, Err(report.as_ref()));
+                }
+                Err(QueryCompileError::DeferredStorage(_)) => {}
+            }
         }
-        result.map_err(|report| Error::QueryCapability(format!("{report:?}")))
+        result.map_err(|error| match error {
+            QueryCompileError::Unsupported(report) => Error::QueryCapability(format!("{report:?}")),
+            QueryCompileError::DeferredStorage(request) => {
+                Error::Storage(groove::storage::Error::NotResident {
+                    request: Box::new(request),
+                })
+            }
+        })
     }
 
     pub(super) fn prepared_query_plan_from_program(

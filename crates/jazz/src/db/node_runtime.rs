@@ -841,6 +841,7 @@ where
                 coverage_groups: BTreeMap::new(),
                 shape_registrations: BTreeMap::new(),
                 prepared_subscribe_update: None,
+                prepared_group_updates: BTreeMap::new(),
                 deferred_subscribe_rejections: VecDeque::new(),
                 served_current_rows: BTreeMap::new(),
                 pending_branch_metadata_repairs: BTreeMap::new(),

@@ -829,7 +829,13 @@ where
             let rows = self
                 .node
                 .bounded_historical_current_rows(&request.source.table, position)
-                .map_err(|_| source_resolution_error(request, SourceGap::HistoricalStorageCut))?;
+                .map_err(|error| {
+                    source_resolution_error_from_node(
+                        request,
+                        SourceGap::HistoricalStorageCut,
+                        error,
+                    )
+                })?;
             return inline_current_graph(table, rows)
                 .map_err(|_| source_resolution_error(request, SourceGap::HistoricalStorageCut));
         }
@@ -841,7 +847,9 @@ where
                 self.read_view.read_schema,
                 position,
             )
-            .map_err(|_| source_resolution_error(request, SourceGap::HistoricalStorageCut))?;
+            .map_err(|error| {
+                source_resolution_error_from_node(request, SourceGap::HistoricalStorageCut, error)
+            })?;
         inline_current_graph(table, rows)
             .map_err(|_| source_resolution_error(request, SourceGap::HistoricalStorageCut))
     }
@@ -1718,6 +1726,22 @@ fn source_resolution_error(request: &SourceRequest, gap: SourceGap) -> SourceRes
     SourceResolutionError {
         request: Box::new(request.clone()),
         gap,
+        deferred_storage: None,
+    }
+}
+
+fn source_resolution_error_from_node(
+    request: &SourceRequest,
+    gap: SourceGap,
+    error: Error,
+) -> SourceResolutionError {
+    match missing_node_open_input(error) {
+        Ok(operation) => SourceResolutionError {
+            request: Box::new(request.clone()),
+            gap,
+            deferred_storage: Some(operation),
+        },
+        Err(_) => source_resolution_error(request, gap),
     }
 }
 
@@ -1725,6 +1749,9 @@ fn source_resolution_error_from_policy_proof(
     request: &SourceRequest,
     error: Error,
 ) -> SourceResolutionError {
+    if is_not_resident(&error) {
+        return source_resolution_error_from_node(request, SourceGap::Coverage, error);
+    }
     match error {
         Error::PolicyProofCycle { table, depth } => {
             source_resolution_error(request, SourceGap::PolicyProofCycle { table, depth })

@@ -12,7 +12,7 @@ use groove::ivm::MultisinkSubscription;
 use super::super::ids::AuthorId;
 use super::super::node::PreparedQueryPlanHandle;
 use super::super::node::maintained_subscription_view::{
-    MaintainedSubscriptionView, MaintainedTerminalSchemas,
+    MaintainedSubscriptionView, MaintainedTerminalSchemas, ResultTransitions,
 };
 use super::super::protocol::{
     KnownStateCompleteness, KnownStateDeclaration, ProgramFactEntry, ReadViewSpec,
@@ -152,6 +152,10 @@ pub(super) struct MaintainedSubscriptionViewSubscription {
     pub(super) maintained: MaintainedSubscriptionView,
     pub(super) terminal_schemas: MaintainedTerminalSchemas,
     pub(super) tables: BTreeMap<String, TableSchema>,
+    /// Parsed IVM transitions retained while durable witness acquisition
+    /// suspends their publication. A retry must never drain the live receiver
+    /// twice and silently lose the first delta.
+    pub(super) pending_transitions: Option<ResultTransitions>,
 }
 
 pub(super) struct MaintainedRehydrateRequest<'a> {

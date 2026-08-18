@@ -1629,13 +1629,21 @@ impl DemandDrivenNode {
     ) -> std::task::Poll<Result<(), Error>> {
         while let Some(tx_id) = self.pending_local_promotions.front().copied() {
             let request = {
-                let Some((fate, global_seq, _)) = self.node.borrow_mut().transaction_state(tx_id)
+                let Some((fate, global_seq, durability)) =
+                    self.node.borrow_mut().transaction_state(tx_id)
                 else {
                     self.fail_persistence();
                     return std::task::Poll::Ready(Err(Error::InvalidStoredValue(
                         "durably committed local transaction disappeared",
                     )));
                 };
+                if durability >= DurabilityTier::Local {
+                    self.node
+                        .borrow_mut()
+                        .settle_transaction_durability(tx_id);
+                    self.pending_local_promotions.pop_front();
+                    continue;
+                }
                 ingest::FateUpdateRequest {
                     tx_id,
                     fate,

@@ -97,6 +97,9 @@ fn one_shot_local_coverage_does_not_require_authority_continuity() {
     let client_author = AuthorId::from_bytes([0xc1; 16]);
     let client = open_db(0xc1, client_author, &schema);
     client.node.set_non_durable_client();
+    client
+        .node
+        .set_upstream_durability_floor(DurabilityTier::Local);
     let (client_transport, mut authority_transport) = duplex();
     let upstream = client.connect_upstream(client_transport);
     let query = Query::from("todos");

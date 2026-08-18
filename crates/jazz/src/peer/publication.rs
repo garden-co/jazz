@@ -381,13 +381,22 @@ impl PeerState {
         if trace_rehydrate {
             node.reset_storage_read_metrics();
         }
-        let transitions = self.drain_maintained_subscription_view_changes(
-            node,
-            shape,
-            subscription,
-            result_table_filter,
-            flush_query_runtime,
-        )?;
+        let transitions = self
+            .subscriptions
+            .get_mut(&subscription)
+            .and_then(|state| state.maintained_subscription_view.as_mut())
+            .and_then(|maintained| maintained.pending_transitions.take())
+            .map(Ok)
+            .unwrap_or_else(|| {
+                self.drain_maintained_subscription_view_changes(
+                    node,
+                    shape,
+                    subscription,
+                    result_table_filter,
+                    flush_query_runtime,
+                )
+            })?;
+        let retry_transitions = transitions.clone();
         let drain_elapsed = trace_start.elapsed();
         let drain_reads = trace_rehydrate.then(|| node.take_storage_read_metrics());
         let ResultTransitions {
@@ -530,7 +539,19 @@ impl PeerState {
                 },
             )
         };
-        let mut update = update?;
+        let mut update = match update {
+            Ok(update) => update,
+            Err(error) => {
+                if let Some(maintained) = self
+                    .subscriptions
+                    .get_mut(&subscription)
+                    .and_then(|state| state.maintained_subscription_view.as_mut())
+                {
+                    maintained.pending_transitions = Some(retry_transitions);
+                }
+                return Err(error);
+            }
+        };
         if let SyncMessage::ViewUpdate {
             terminal_operations: outgoing,
             ..
@@ -1004,6 +1025,7 @@ impl PeerState {
             maintained,
             terminal_schemas,
             tables,
+            pending_transitions: None,
         };
         let state = self.subscriptions.entry(subscription).or_default();
         state.maintained_subscription_view = Some(maintained_subscription);

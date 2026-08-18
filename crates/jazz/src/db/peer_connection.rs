@@ -127,6 +127,10 @@ pub(super) enum ConnectionLink {
         /// the staged Subscribe frame. The synchronous protocol transition
         /// consumes this exactly once after every ordered input is resident.
         prepared_subscribe_update: Option<(SubscriptionKey, SyncMessage)>,
+        /// Coverage-group updates prepared after every cold input is resident.
+        /// Delayed upstream settlement and reconnect refreshes consume these
+        /// without performing storage reads inside the protocol tick.
+        prepared_group_updates: BTreeMap<CoverageKey, (SyncMessage, bool)>,
         /// Permanent rejections received as later `Subscribe` messages. These
         /// wait until an unrelated view update has been flushed, so they cannot
         /// starve a supported subscription on the same connection.
@@ -230,6 +234,10 @@ where
         self.staged_inbound.extend(tail);
     }
 
+    pub(super) fn has_staged_inbound(&self) -> bool {
+        !self.staged_inbound.is_empty()
+    }
+
     /// Acquire the ordered inputs needed to compile the next subscriber
     /// control frame before the synchronous peer state machine consumes it.
     /// Demand-driven owners stage one frame at a time, so a cold lookup may
@@ -297,13 +305,18 @@ where
                     .zip(subscribe.values.clone())
                     .collect::<BTreeMap<_, _>>();
                 let binding = shape.bind(values)?;
-                if let ReadViewSourceSpec::Branch { branch } = &opts.read_view.source
-                    && !node.branch_metadata_visible_to(
-                        crate::ids::BranchId(*branch),
+                if let ReadViewSourceSpec::Branch { branch } = &opts.read_view.source {
+                    let branch = crate::ids::BranchId(*branch);
+                    if !node.branch_metadata_visible_to(branch, peer.link_identity())? {
+                        return Ok(());
+                    }
+                    node.acquire_branch_read_inputs(
+                        &shape,
+                        &binding,
+                        branch,
                         peer.link_identity(),
-                    )?
-                {
-                    return Ok(());
+                        true,
+                    )?;
                 }
                 node.ensure_peer_maintained_subscription_view_supported(
                     &shape,
@@ -325,6 +338,11 @@ where
                     binding_id: coverage.binding_id,
                     read_view: coverage.opts.read_view_key(),
                 };
+                node.acquire_known_state_fact_input(BindingViewKey {
+                    shape_id: group_subscription.shape_id,
+                    binding_id: group_subscription.binding_id,
+                    read_view: group_subscription.read_view,
+                })?;
                 let first_subscriber = coverage_groups
                     .get(&coverage)
                     .is_none_or(|group| group.subscribers.is_empty());
@@ -373,6 +391,78 @@ where
                 *prepared_subscribe_update = Some((subscribe.subscription, update));
             }
             _ => {}
+        }
+        Ok(())
+    }
+
+    /// Prepare delayed maintained-view refreshes before the protocol tick can
+    /// send, reject, or otherwise mutate externally visible connection state.
+    pub(super) fn prepare_subscriber_serving_inputs(
+        &mut self,
+        node: &mut NodeState<S>,
+    ) -> Result<(), crate::node::Error> {
+        // A staged frame may change coverage or mark it dirty. Consume that
+        // protocol transition first; its resulting refresh is prepared on the
+        // next owner poll rather than evaluated against stale membership.
+        if !self.staged_inbound.is_empty() {
+            return Ok(());
+        }
+        self.observe_shared_subscriber_dirty_epoch();
+        let ConnectionLink::Subscriber {
+            peer,
+            ingest_context,
+            coverage_groups,
+            prepared_group_updates,
+            serve_dirty,
+            ..
+        } = &mut self.link
+        else {
+            return Ok(());
+        };
+        if !*serve_dirty
+            || !subscriber_permissions_ready(node.permissions_ready(), ingest_context.trust)
+        {
+            return Ok(());
+        }
+        if !coverage_groups.is_empty() {
+            node.flush_query_runtime()?;
+        }
+        for (coverage, group) in coverage_groups.iter() {
+            if prepared_group_updates.contains_key(coverage) {
+                continue;
+            }
+            let group_subscription = SubscriptionKey {
+                shape_id: coverage.shape_id,
+                binding_id: coverage.binding_id,
+                read_view: coverage.opts.read_view_key(),
+            };
+            let settled_handoff = group.awaiting_upstream_settlement
+                && node.has_settled_result_set(BindingViewKey {
+                    shape_id: group.shape.shape_id(),
+                    binding_id: group.binding.binding_id(),
+                    read_view: group.upstream_opts.read_view_key(),
+                });
+            if group.awaiting_upstream_settlement && !settled_handoff {
+                continue;
+            }
+            let update = if settled_handoff {
+                peer.rehydrate_query_for_subscription_with_opts(
+                    node,
+                    group_subscription,
+                    &group.shape,
+                    &group.binding,
+                    coverage.opts.clone(),
+                )?
+            } else {
+                peer.query_update_for_subscription_with_opts_after_runtime_flush(
+                    node,
+                    group_subscription,
+                    &group.shape,
+                    &group.binding,
+                    coverage.opts.clone(),
+                )?
+            };
+            prepared_group_updates.insert(coverage.clone(), (update, settled_handoff));
         }
         Ok(())
     }
@@ -664,6 +754,7 @@ where
         };
         if let Some(branch) = branch_views.get(subscription)
             && self.node.borrow().branch_record(*branch).is_none()
+            && !metadata_independent_empty_view_reset(&staged.message)
         {
             return None;
         }
@@ -1752,6 +1843,7 @@ where
                             scope_receipts.remove(&subscription);
                             if let Some(branch) = branch_views.get(&subscription).copied()
                                 && self.node.borrow().branch_record(branch).is_none()
+                                && !metadata_independent_empty_view_reset(&message)
                             {
                                 pending_branch_view_updates.entry(branch).or_default().push(
                                     PendingBranchViewUpdate {
@@ -2324,6 +2416,7 @@ where
                 coverage_groups,
                 shape_registrations,
                 prepared_subscribe_update,
+                prepared_group_updates,
                 deferred_subscribe_rejections,
                 served_current_rows,
                 pending_branch_metadata_repairs,
@@ -3457,10 +3550,11 @@ where
                         ingest_context.trust,
                     )
                 {
+                    let mut all_groups_prepared = true;
                     // A coverage-group refresh drains every maintained view below.
                     // Tick the shared runtime once before that drain rather than once
                     // per group.
-                    if !coverage_groups.is_empty() {
+                    if !self.external_durable_ingress && !coverage_groups.is_empty() {
                         self.node.borrow_mut().flush_query_runtime()?;
                     }
                     for (coverage, group) in coverage_groups.iter_mut() {
@@ -3478,7 +3572,14 @@ where
                         if group.awaiting_upstream_settlement && !settled_handoff {
                             continue;
                         }
-                        let update_result = {
+                        let prepared = prepared_group_updates.remove(coverage);
+                        let update_result = if let Some((update, prepared_handoff)) = prepared {
+                            debug_assert_eq!(prepared_handoff, settled_handoff);
+                            Ok(update)
+                        } else if self.external_durable_ingress {
+                            all_groups_prepared = false;
+                            continue;
+                        } else {
                             let mut node = self.node.borrow_mut();
                             if settled_handoff {
                                 peer.rehydrate_query_for_subscription_with_opts(
@@ -3574,7 +3675,10 @@ where
                             sent_view_update = true;
                         }
                     }
-                    *serve_dirty = false;
+                    *serve_dirty = !all_groups_prepared;
+                    if *serve_dirty {
+                        schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
+                    }
                 }
                 if sent_view_update {
                     while let Some((subscription, detail)) =
@@ -3678,6 +3782,37 @@ fn view_update_parts_from_message(message: SyncMessage) -> ViewUpdateParts {
         },
         _ => unreachable!("expected view update message"),
     }
+}
+
+/// A denied or absent branch is represented by the same authoritative empty
+/// reset. It carries no branch-addressed data, so applying it cannot reveal or
+/// resolve branch metadata. Non-empty and incremental updates remain parked
+/// until their exact branch record is admitted.
+fn metadata_independent_empty_view_reset(message: &SyncMessage) -> bool {
+    matches!(
+        message,
+        SyncMessage::ViewUpdate {
+            reset_result_set: true,
+            version_carriers,
+            version_bundles,
+            peer_payload_inventory,
+            result_member_adds,
+            result_member_removes,
+            terminal_operations,
+            program_fact_adds,
+            program_fact_removes,
+            ..
+        } if version_carriers.is_empty()
+            && version_bundles.is_empty()
+            && peer_payload_inventory.complete_tx_payloads.is_empty()
+            && peer_payload_inventory.authorization_progress.is_none()
+            && !peer_payload_inventory.opening_pending
+            && result_member_adds.is_empty()
+            && result_member_removes.is_empty()
+            && terminal_operations.is_empty()
+            && program_fact_adds.is_empty()
+            && program_fact_removes.is_empty()
+    )
 }
 
 fn push_view_update_message_for_receiver(

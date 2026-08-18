@@ -1303,6 +1303,13 @@ where
                 fact_rewrite.as_ref(),
             )?;
             self.persist_known_state_fact(binding_view_key, settled_through)?;
+            // The applied update is now both the complete resident binding
+            // state and its durable representation. Mark it loaded so the
+            // next incremental update does not scan and decode the snapshot
+            // it just replaced.
+            self.query
+                .known_state_loaded_binding_views
+                .insert(binding_view_key);
         }
         if self
             .query

@@ -236,6 +236,9 @@ pub(crate) struct SourceResolutionError {
     pub(crate) request: Box<SourceRequest>,
     /// Explicit unsupported source shape.
     pub(crate) gap: SourceGap,
+    /// Exact durable input that must be admitted before resolution can be
+    /// retried. This is a suspension boundary, not an unsupported capability.
+    pub(crate) deferred_storage: Option<groove::storage::async_ordered::OwnedStorageOperation>,
 }
 
 /// Source-resolution gap.

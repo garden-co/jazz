@@ -281,6 +281,14 @@ where
         authorization_mode: QueryAuthorizationMode,
     ) -> Result<Vec<CurrentRow>, crate::node::Error> {
         let tier = effective_read_tier(&opts);
+        let upstream_tier = self
+            .node
+            .upstream_register_shape_options(
+                tier,
+                opts.read_view.clone(),
+                opts.propagation == Propagation::Full,
+            )
+            .tier;
         let mut node = self.node.node.borrow_mut();
         match &opts.read_view.source {
             ReadViewSourceSpec::Current => {}
@@ -302,13 +310,7 @@ where
                     QueryAuthorizationMode::ClientLocal => node.query_rows_for_client_read_view(
                         &prepared.shape,
                         &prepared.binding,
-                        self.node
-                            .upstream_register_shape_options(
-                                tier,
-                                opts.read_view.clone(),
-                                opts.propagation == Propagation::Full,
-                            )
-                            .tier,
+                        upstream_tier,
                         &opts.read_view,
                     ),
                 };

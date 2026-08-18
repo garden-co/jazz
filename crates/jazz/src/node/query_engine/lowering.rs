@@ -55,8 +55,36 @@ pub(crate) struct ClaimParameter {
     pub(crate) ty: ColumnType,
 }
 
+/// Query compilation either identifies a genuinely unsupported capability or
+/// suspends on one exact durable source input. Callers must never turn the
+/// latter into a protocol-level capability rejection.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum QueryCompileError {
+    Unsupported(Box<CapabilityReport>),
+    DeferredStorage(groove::storage::async_ordered::OwnedStorageOperation),
+}
+
+impl From<Box<CapabilityReport>> for QueryCompileError {
+    fn from(report: Box<CapabilityReport>) -> Self {
+        Self::Unsupported(report)
+    }
+}
+
+impl std::ops::Deref for QueryCompileError {
+    type Target = CapabilityReport;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Unsupported(report) => report,
+            Self::DeferredStorage(_) => {
+                panic!("deferred storage input has no capability report")
+            }
+        }
+    }
+}
+
 /// Result of lowering one query program.
-pub(crate) type QueryCompileResult = CapabilityResult<QueryProgram>;
+pub(crate) type QueryCompileResult = Result<QueryProgram, QueryCompileError>;
 
 /// Lower one Jazz query program into the unified Groove-backed program.
 pub(crate) fn lower_query_program(
@@ -71,10 +99,10 @@ pub(crate) fn lower_query_program(
             explain
                 .capabilities
                 .push("only current-source row-set lowering is implemented".to_owned());
-            return Err(Box::new(CapabilityReport {
+            return Err(QueryCompileError::Unsupported(Box::new(CapabilityReport {
                 gaps,
                 explain: explain_with_request(&request, explain),
-            }));
+            })));
         }
     };
 
@@ -95,14 +123,17 @@ pub(crate) fn lower_query_program(
         let resolved_source = match source_resolver.resolve_source(&source_request) {
             Ok(resolved_source) => resolved_source,
             Err(err) => {
+                if let Some(request) = err.deferred_storage {
+                    return Err(QueryCompileError::DeferredStorage(request));
+                }
                 let mut failure_explain = explain.clone();
                 failure_explain
                     .read
                     .push(format!("failed source request: {:#?}", err.request));
-                return Err(Box::new(CapabilityReport {
+                return Err(QueryCompileError::Unsupported(Box::new(CapabilityReport {
                     gaps: vec![UnsupportedReason::Source(err.gap)],
                     explain: explain_with_request(&request, failure_explain),
-                }));
+                })));
             }
         };
         explain.physical.push(format!(

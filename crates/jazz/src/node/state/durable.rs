@@ -432,6 +432,24 @@ where
         Ok(self.publish_prepared_known_state_fact(prepared))
     }
 
+    /// Acquire the durable known-state record before a subscriber rehydrate
+    /// mutates peer or maintained-query state. Demand-driven storage may
+    /// suspend here; once this succeeds, the synchronous rehydrate can publish
+    /// the prepared record without crossing another storage boundary.
+    pub(crate) fn acquire_known_state_fact_input(
+        &self,
+        binding_view_key: BindingViewKey,
+    ) -> Result<(), Error> {
+        if !self
+            .query
+            .known_state_loaded_binding_views
+            .contains(&binding_view_key)
+        {
+            let _ = self.prepare_known_state_fact(binding_view_key)?;
+        }
+        Ok(())
+    }
+
     /// Read and decode one binding view's durable settled state without
     /// changing the resident query runtime.
     pub(crate) fn prepare_known_state_fact(

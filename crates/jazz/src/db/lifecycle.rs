@@ -859,9 +859,12 @@ impl DemandDrivenDb {
                 ) {
                     Poll::Pending => return Poll::Pending,
                     Poll::Ready(Err(error)) => return Poll::Ready(Err(error.into())),
-                    Poll::Ready(Ok(responses)) => connection
-                        .borrow_mut()
-                        .complete_staged_subscriber_authority_commit(tx_id, responses),
+                    Poll::Ready(Ok(responses)) => {
+                        connection
+                            .borrow_mut()
+                            .complete_staged_subscriber_authority_commit(tx_id, responses);
+                        self.database.node.mark_subscriber_connections_dirty();
+                    }
                 }
                 continue;
             }
@@ -904,6 +907,21 @@ impl DemandDrivenDb {
             }
         }
 
+        // Typed ingress above may change any subscriber's maintained view.
+        // Prepare outbound refreshes only after every connection has had its
+        // resident mutation admitted, never against a pre-ingress snapshot.
+        for connection in &connections {
+            match self.runtime.poll_acquire_resident(context, |node| {
+                connection
+                    .borrow_mut()
+                    .prepare_subscriber_serving_inputs(node)
+            }) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error.into())),
+                Poll::Ready(Ok(())) => {}
+            }
+        }
+
         let parked_tails = connections
             .iter()
             .map(|connection| connection.borrow_mut().park_staged_inbound_tail())
@@ -918,7 +936,8 @@ impl DemandDrivenDb {
         };
         if connections.iter().any(|connection| {
             let connection = connection.borrow();
-            connection.staged_catalogue_snapshot().is_some()
+            connection.has_staged_inbound()
+                || connection.staged_catalogue_snapshot().is_some()
                 || connection.staged_branch_metadata().is_some()
                 || connection.staged_row_version_repair().is_some()
                 || connection.staged_relay_commit().is_some()
