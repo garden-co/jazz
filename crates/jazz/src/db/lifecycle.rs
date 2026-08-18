@@ -3,6 +3,7 @@
 use super::mutations::MutationPrepareError;
 use super::subscriptions::SubscriptionOpenError;
 use super::*;
+use crate::ids::{BranchId, MigrationLensId};
 use crate::node::{DemandDrivenNode, PollableNodeOpen};
 
 /// Pollable construction for a high-level database backed by ordered async
@@ -361,6 +362,106 @@ impl DemandDrivenDb {
         self.database.refresh_subscriptions()?;
         self.database.node.mark_subscriber_connections_dirty();
         Ok(tx_id)
+    }
+
+    /// Attach an authority-admitted typed schema to this owner.
+    pub fn select_schema_view(&mut self, schema: JazzSchema) -> Result<(), Error> {
+        self.database = self.database.register_schema_view(schema)?;
+        Ok(())
+    }
+
+    pub fn set_edge_cache_budget(&self, budget: Option<crate::node::EdgeCacheBudget>) {
+        self.database.set_edge_cache_budget(budget);
+    }
+
+    pub fn current_write_schema(&self) -> Result<CurrentWriteSchema, Error> {
+        self.database.current_write_schema()
+    }
+
+    pub fn catalogue_schema(&self, schema: SchemaVersionId) -> Option<JazzSchema> {
+        self.database.catalogue_schema(schema)
+    }
+
+    pub fn active_catalogue_seq(&self) -> u64 {
+        self.database.active_catalogue_seq()
+    }
+
+    pub fn catalogue_lens(&self, lens: MigrationLensId) -> Option<MigrationLens> {
+        self.database.catalogue_lens(lens)
+    }
+
+    pub fn set_permissions_ready(&self, ready: bool) -> Result<(), Error> {
+        self.database.set_permissions_ready(ready)
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    pub fn set_catalogue_activation_failpoint(
+        &self,
+        failpoint: crate::node::CatalogueActivationFailpoint,
+    ) {
+        self.database.set_catalogue_activation_failpoint(failpoint);
+    }
+
+    pub async fn seed_branch_mergeable_for_bootstrap(
+        &mut self,
+        branch: BranchId,
+        table: &str,
+        row: RowUuid,
+        made_by: AuthorId,
+        cells: RowCells,
+    ) -> Result<TxId, Error> {
+        if self
+            .database
+            .node
+            .node
+            .borrow()
+            .branch_record(branch)
+            .is_none()
+        {
+            self.create_branch_with_id(branch).await?;
+        }
+        let cells = self.database.apply_insert_defaults(table, cells)?;
+        let commit = MergeableCommit::new(table, row, self.database.next_now_ms())
+            .made_by(made_by)
+            .cells(cells);
+        let schema = self.database.schema_version_id;
+        let tx_id = std::future::poll_fn(|context| {
+            self.runtime.poll_mergeable_many_on_branch_in_schema(
+                context,
+                branch,
+                schema,
+                std::slice::from_ref(&commit),
+            )
+        })
+        .await
+        .map_err(Error::from)?;
+        let SyncMessage::CommitUnit { tx, versions } = self
+            .database
+            .node
+            .node
+            .borrow_mut()
+            .commit_unit_for(tx_id)?
+        else {
+            unreachable!("branch mergeable commit has one canonical wire shape")
+        };
+        std::future::poll_fn(|context| {
+            self.runtime.poll_ingest_commit_unit(
+                context,
+                tx.clone(),
+                versions.clone(),
+                commit.now_ms,
+                None,
+            )
+        })
+        .await
+        .map_err(Error::from)?;
+        self.database.refresh_subscriptions()?;
+        self.database.node.mark_subscriber_connections_dirty();
+        Ok(tx_id)
+    }
+
+    pub async fn tick(&mut self) -> Result<DbTickStats, Error> {
+        std::future::poll_fn(|context| self.poll_tick(context)).await
     }
 
     #[cfg(test)]
@@ -1569,56 +1670,6 @@ where
             )),
             next_now_ms: Rc::new(Cell::new(1)),
         })
-    }
-
-    /// Open an edge whose durable store has no authority catalogue yet.
-    ///
-    /// This is deliberately narrower than [`Db::open`]: callers may only use
-    /// it to receive one connection-authenticated catalogue snapshot and then
-    /// select one of the snapshot's admitted schema views.  Until then the
-    /// node has no application schema and rejects ordinary data/sync work.
-    #[cfg(any(feature = "runtime", test))]
-    pub(crate) async fn open_catalogue_uninitialized_edge(
-        config: DbConfig<S>,
-    ) -> Result<Self, Error> {
-        let bootstrap_schema = JazzSchema::new([]);
-        let schema_version_id = bootstrap_schema.version_id();
-        let schema_views = Rc::new(RefCell::new(BTreeMap::from([(
-            SchemaViewId::for_schema(&bootstrap_schema),
-            bootstrap_schema.clone(),
-        )])));
-        let node = NodeState::new_catalogue_uninitialized(config.identity.node, config.storage)?;
-        let node = Node::new(node);
-        node.restore_pending_uploads(config.identity)?;
-        Ok(Self {
-            schema: bootstrap_schema,
-            schema_version_id,
-            schema_view_is_fixed: false,
-            schema_views,
-            identity: config.identity,
-            node: Rc::new(node),
-            row_id_source: Rc::new(RefCell::new(
-                config
-                    .id_source
-                    .unwrap_or_else(|| Box::new(ProductionRowIdSource)),
-            )),
-            next_now_ms: Rc::new(Cell::new(1)),
-        })
-    }
-
-    /// Install a complete catalogue received over the authenticated upstream
-    /// bootstrap link.  This is intentionally crate-private: ordinary wire
-    /// dispatch must never turn an arbitrary peer's snapshot into authority.
-    #[cfg(any(feature = "runtime", test))]
-    pub(crate) fn apply_trusted_catalogue_snapshot(
-        &self,
-        snapshot: crate::protocol::CatalogueSnapshot,
-    ) -> Result<(), Error> {
-        Ok(self
-            .node
-            .node
-            .borrow_mut()
-            .apply_trusted_catalogue_snapshot(snapshot)?)
     }
 
     #[cfg(any(test, feature = "testing"))]

@@ -18,11 +18,12 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use crate::db::{
-    CommitUnitTrust, ConnectionSessionContext, Db, DbConfig, DbIdentity, Error as DbError,
-    PeerConnection, ResumeCursor, RowCells, SeededRowIdSource, Transport, WireTransportAdapter,
+    CommitUnitTrust, ConnectionSessionContext, DbConfig, DbIdentity, DemandDrivenDb,
+    Error as DbError, PeerConnection, ResumeCursor, RowCells, SeededRowIdSource, Transport,
+    WireTransportAdapter,
 };
 use crate::groove::records::Value;
-use crate::groove::storage::{BoxedStorage, MemoryStorage, StorageFactory};
+use crate::groove::storage::{BoxedStorage, DemandLoadedStorage, MemoryStorage, StorageFactory};
 use crate::ids::{AuthorId, BranchId, MigrationLensId, RowUuid, SchemaVersionId};
 use crate::node::EdgeCacheBudget;
 use crate::protocol::{
@@ -231,10 +232,7 @@ pub struct AbiTransportDiagnostics {
     pub last_resume_bytes: Option<usize>,
 }
 
-enum ShellDb {
-    Memory(Db<BoxedStorage>),
-    Durable(Db<BoxedStorage>),
-}
+struct ShellDb(DemandDrivenDb);
 
 struct ServerSessionState {
     connection: ShellPeerConnection,
@@ -244,10 +242,7 @@ struct ServerSessionState {
     resume_status: ServerResumeStatus,
 }
 
-enum ShellPeerConnection {
-    Memory(Rc<RefCell<PeerConnection<BoxedStorage>>>),
-    Durable(Rc<RefCell<PeerConnection<BoxedStorage>>>),
-}
+struct ShellPeerConnection(Rc<RefCell<PeerConnection<DemandLoadedStorage>>>);
 
 #[derive(Clone, Debug, Default)]
 struct SharedWireTransport {
@@ -273,10 +268,7 @@ impl WireTransport for SharedWireTransport {
 
 impl fmt::Debug for ShellDb {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Memory(_) => f.write_str("ShellDb::Memory(..)"),
-            Self::Durable(_) => f.write_str("ShellDb::Durable(..)"),
-        }
+        f.write_str("ShellDb(..)")
     }
 }
 
@@ -311,8 +303,8 @@ impl ShellDb {
                 if let Some(seed) = row_id_seed {
                     config = config.with_id_source(SeededRowIdSource::new(seed));
                 }
-                Ok(Self::Memory(crate::db::block_on(
-                    Db::open_catalogue_uninitialized_edge(config),
+                Ok(Self(crate::db::block_on(
+                    DemandDrivenDb::open_catalogue_uninitialized_immediate(config),
                 )?))
             }
             StorageConfig::RocksDb { path } => {
@@ -331,8 +323,8 @@ impl ShellDb {
                 if let Some(seed) = row_id_seed {
                     config = config.with_id_source(SeededRowIdSource::new(seed));
                 }
-                Ok(Self::Durable(crate::db::block_on(
-                    Db::open_catalogue_uninitialized_edge(config),
+                Ok(Self(crate::db::block_on(
+                    DemandDrivenDb::open_catalogue_uninitialized_immediate(config),
                 )?))
             }
             StorageConfig::SQLite { .. } => Err(ShellError::UnsupportedStorage {
@@ -342,24 +334,14 @@ impl ShellDb {
     }
 
     fn apply_trusted_catalogue_snapshot(
-        &self,
+        &mut self,
         snapshot: crate::protocol::CatalogueSnapshot,
     ) -> ShellResult<()> {
-        match self {
-            Self::Memory(db) => db
-                .apply_trusted_catalogue_snapshot(snapshot)
-                .map_err(Into::into),
-            Self::Durable(db) => db
-                .apply_trusted_catalogue_snapshot(snapshot)
-                .map_err(Into::into),
-        }
+        crate::db::block_on(self.0.apply_trusted_catalogue_snapshot(snapshot)).map_err(Into::into)
     }
 
     fn trusted_catalogue_snapshot(&self) -> ShellResult<crate::protocol::CatalogueSnapshot> {
-        match self {
-            Self::Memory(db) => db.trusted_catalogue_snapshot().map_err(Into::into),
-            Self::Durable(db) => db.trusted_catalogue_snapshot().map_err(Into::into),
-        }
+        self.0.trusted_catalogue_snapshot().map_err(Into::into)
     }
 
     #[cfg(any(test, feature = "testing"))]
@@ -367,158 +349,95 @@ impl ShellDb {
         &self,
         failpoint: crate::node::CatalogueActivationFailpoint,
     ) {
-        match self {
-            Self::Memory(db) => db.set_catalogue_activation_failpoint(failpoint),
-            Self::Durable(db) => db.set_catalogue_activation_failpoint(failpoint),
-        }
+        self.0.set_catalogue_activation_failpoint(failpoint)
     }
 
     fn trusted_current_catalogue_schema(&self) -> ShellResult<JazzSchema> {
-        match self {
-            Self::Memory(db) => db.trusted_current_catalogue_schema().map_err(Into::into),
-            Self::Durable(db) => db.trusted_current_catalogue_schema().map_err(Into::into),
-        }
+        self.0
+            .trusted_current_catalogue_schema()
+            .map_err(Into::into)
     }
 
     fn catalogue_bootstrap_is_ready(&self) -> bool {
-        match self {
-            Self::Memory(db) => db.catalogue_bootstrap_is_ready(),
-            Self::Durable(db) => db.catalogue_bootstrap_is_ready(),
-        }
+        self.0.catalogue_bootstrap_is_ready()
     }
 
     fn select_schema_view(&mut self, schema: JazzSchema) -> ShellResult<()> {
-        match self {
-            Self::Memory(db) => *db = db.register_schema_view(schema)?,
-            Self::Durable(db) => *db = db.register_schema_view(schema)?,
-        }
-        Ok(())
+        self.0.select_schema_view(schema).map_err(Into::into)
     }
 
     fn seed_branch_row(
-        &self,
+        &mut self,
         branch: BranchId,
         table: String,
         row_id: RowUuid,
         cells: RowCells,
     ) -> ShellResult<()> {
-        match self {
-            Self::Memory(db) => db
-                .seed_branch_mergeable_for_bootstrap(
-                    branch,
-                    &table,
-                    row_id,
-                    AuthorId::SYSTEM,
-                    cells,
-                )
-                .map(|_| ())
-                .map_err(Into::into),
-            Self::Durable(db) => db
-                .seed_branch_mergeable_for_bootstrap(
-                    branch,
-                    &table,
-                    row_id,
-                    AuthorId::SYSTEM,
-                    cells,
-                )
-                .map(|_| ())
-                .map_err(Into::into),
-        }
+        crate::db::block_on(self.0.seed_branch_mergeable_for_bootstrap(
+            branch,
+            &table,
+            row_id,
+            AuthorId::SYSTEM,
+            cells,
+        ))
+        .map(|_| ())
+        .map_err(Into::into)
     }
 
-    fn create_branch_for_test(&self, branch: BranchId) -> ShellResult<()> {
-        match self {
-            Self::Memory(db) => db.create_branch_with_id(branch).map_err(Into::into),
-            Self::Durable(db) => db.create_branch_with_id(branch).map_err(Into::into),
-        }
+    fn create_branch_for_test(&mut self, branch: BranchId) -> ShellResult<()> {
+        crate::db::block_on(self.0.create_branch_with_id(branch)).map_err(Into::into)
     }
 
     fn set_edge_cache_budget(&self, budget: Option<EdgeCacheBudget>) {
-        match self {
-            Self::Memory(db) => db.set_edge_cache_budget(budget),
-            Self::Durable(db) => db.set_edge_cache_budget(budget),
-        }
+        self.0.set_edge_cache_budget(budget)
     }
 
     fn current_write_schema(&self) -> ShellResult<CurrentWriteSchema> {
-        match self {
-            Self::Memory(db) => db.current_write_schema().map_err(Into::into),
-            Self::Durable(db) => db.current_write_schema().map_err(Into::into),
-        }
+        self.0.current_write_schema().map_err(Into::into)
     }
 
     fn catalogue_schema(&self, schema: SchemaVersionId) -> Option<JazzSchema> {
-        match self {
-            Self::Memory(db) => db.catalogue_schema(schema),
-            Self::Durable(db) => db.catalogue_schema(schema),
-        }
+        self.0.catalogue_schema(schema)
     }
 
     fn active_catalogue_seq(&self) -> u64 {
-        match self {
-            Self::Memory(db) => db.active_catalogue_seq(),
-            Self::Durable(db) => db.active_catalogue_seq(),
-        }
+        self.0.active_catalogue_seq()
     }
 
     fn catalogue_lens(&self, lens: MigrationLensId) -> Option<MigrationLens> {
-        match self {
-            Self::Memory(db) => db.catalogue_lens(lens),
-            Self::Durable(db) => db.catalogue_lens(lens),
-        }
+        self.0.catalogue_lens(lens)
     }
 
     fn connect_upstream(&self, transport: Box<dyn Transport>) -> ShellPeerConnection {
-        match self {
-            Self::Memory(db) => ShellPeerConnection::Memory(db.connect_upstream(transport)),
-            Self::Durable(db) => ShellPeerConnection::Durable(db.connect_upstream(transport)),
-        }
+        ShellPeerConnection(self.0.connect_upstream(transport))
     }
 
-    fn publish_schema(&self, schema: SchemaVersion) -> ShellResult<Vec<SyncMessage>> {
-        match self {
-            Self::Memory(db) => db.publish_schema(schema).map_err(Into::into),
-            Self::Durable(db) => db.publish_schema(schema).map_err(Into::into),
-        }
+    fn publish_schema(&mut self, schema: SchemaVersion) -> ShellResult<Vec<SyncMessage>> {
+        crate::db::block_on(self.0.publish_schema(schema)).map_err(Into::into)
     }
 
-    fn publish_lens(&self, lens: MigrationLens) -> ShellResult<Vec<SyncMessage>> {
-        match self {
-            Self::Memory(db) => db.publish_lens(lens).map_err(Into::into),
-            Self::Durable(db) => db.publish_lens(lens).map_err(Into::into),
-        }
+    fn publish_lens(&mut self, lens: MigrationLens) -> ShellResult<Vec<SyncMessage>> {
+        crate::db::block_on(self.0.publish_lens(lens)).map_err(Into::into)
     }
 
     fn publish_schema_with_lens(
-        &self,
+        &mut self,
         catalogue_seq: u64,
         publication: SchemaLineagePublication,
     ) -> ShellResult<Vec<SyncMessage>> {
-        match self {
-            Self::Memory(db) => db
-                .publish_schema_with_lens(catalogue_seq, publication)
-                .map_err(Into::into),
-            Self::Durable(db) => db
-                .publish_schema_with_lens(catalogue_seq, publication)
-                .map_err(Into::into),
-        }
+        crate::db::block_on(self.0.publish_schema_with_lens(catalogue_seq, publication))
+            .map_err(Into::into)
     }
 
     fn set_current_write_schema(
-        &self,
+        &mut self,
         pointer: CurrentWriteSchema,
     ) -> ShellResult<Vec<SyncMessage>> {
-        match self {
-            Self::Memory(db) => db.set_current_write_schema(pointer).map_err(Into::into),
-            Self::Durable(db) => db.set_current_write_schema(pointer).map_err(Into::into),
-        }
+        crate::db::block_on(self.0.set_current_write_schema(pointer)).map_err(Into::into)
     }
 
     fn set_permissions_ready(&self, ready: bool) -> ShellResult<()> {
-        match self {
-            Self::Memory(db) => db.set_permissions_ready(ready).map_err(Into::into),
-            Self::Durable(db) => db.set_permissions_ready(ready).map_err(Into::into),
-        }
+        self.0.set_permissions_ready(ready).map_err(Into::into)
     }
 
     fn accept_subscriber_with_claims(
@@ -528,20 +447,14 @@ impl ShellDb {
         claims: BTreeMap<String, Value>,
         cursor: Option<ResumeCursor>,
     ) -> ShellPeerConnection {
-        match (self, cursor) {
-            (Self::Memory(db), Some(cursor)) => ShellPeerConnection::Memory(
-                db.accept_subscriber_with_resume(transport, identity, cursor),
-            ),
-            (Self::Memory(db), None) => ShellPeerConnection::Memory(
-                db.accept_subscriber_with_claims(transport, identity, claims),
-            ),
-            (Self::Durable(db), Some(cursor)) => ShellPeerConnection::Durable(
-                db.accept_subscriber_with_resume(transport, identity, cursor),
-            ),
-            (Self::Durable(db), None) => ShellPeerConnection::Durable(
-                db.accept_subscriber_with_claims(transport, identity, claims),
-            ),
-        }
+        ShellPeerConnection(match cursor {
+            Some(cursor) => self
+                .0
+                .accept_subscriber_with_resume(transport, identity, cursor),
+            None => self
+                .0
+                .accept_subscriber_with_claims(transport, identity, claims),
+        })
     }
 
     fn accept_subscriber_with_claims_and_trust(
@@ -551,14 +464,10 @@ impl ShellDb {
         claims: BTreeMap<String, Value>,
         trust: CommitUnitTrust,
     ) -> ShellPeerConnection {
-        match self {
-            Self::Memory(db) => ShellPeerConnection::Memory(
-                db.accept_subscriber_with_claims_and_trust(transport, identity, claims, trust),
-            ),
-            Self::Durable(db) => ShellPeerConnection::Durable(
-                db.accept_subscriber_with_claims_and_trust(transport, identity, claims, trust),
-            ),
-        }
+        ShellPeerConnection(
+            self.0
+                .accept_subscriber_with_claims_and_trust(transport, identity, claims, trust),
+        )
     }
 
     fn accept_edge_authority_subscriber_with_claims(
@@ -567,68 +476,43 @@ impl ShellDb {
         identity: AuthorId,
         claims: BTreeMap<String, Value>,
     ) -> ShellPeerConnection {
-        match self {
-            Self::Memory(db) => ShellPeerConnection::Memory(
-                db.accept_edge_authority_subscriber_with_claims(transport, identity, claims),
-            ),
-            Self::Durable(db) => ShellPeerConnection::Durable(
-                db.accept_edge_authority_subscriber_with_claims(transport, identity, claims),
-            ),
-        }
+        ShellPeerConnection(
+            self.0
+                .accept_edge_authority_subscriber_with_claims(transport, identity, claims),
+        )
     }
 
     fn detach_connection(&self, connection: &ShellPeerConnection) -> bool {
-        match (self, connection) {
-            (Self::Memory(db), ShellPeerConnection::Memory(connection)) => {
-                db.detach_connection(connection)
-            }
-            (Self::Durable(db), ShellPeerConnection::Durable(connection)) => {
-                db.detach_connection(connection)
-            }
-            _ => false,
-        }
+        self.0.detach_connection(&connection.0)
     }
 
-    fn tick_stats(&self) -> ShellResult<crate::db::DbTickStats> {
-        match self {
-            Self::Memory(db) => db.tick_stats().map_err(Into::into),
-            Self::Durable(db) => db.tick_stats().map_err(Into::into),
-        }
+    fn tick_stats(&mut self) -> ShellResult<crate::db::DbTickStats> {
+        crate::db::block_on(self.0.tick()).map_err(Into::into)
     }
 
     fn seed_settled_mergeable_for_bootstrap(
-        &self,
+        &mut self,
         table: String,
         row_id: RowUuid,
         author: AuthorId,
         cells: RowCells,
     ) -> ShellResult<()> {
-        match self {
-            Self::Memory(db) => db
-                .seed_settled_mergeable_for_bootstrap(&table, row_id, author, cells)
-                .map(|_| ())
-                .map_err(Into::into),
-            Self::Durable(db) => db
-                .seed_settled_mergeable_for_bootstrap(&table, row_id, author, cells)
-                .map(|_| ())
-                .map_err(Into::into),
-        }
+        crate::db::block_on(
+            self.0
+                .seed_settled_mergeable_for_bootstrap(&table, row_id, author, cells),
+        )
+        .map(|_| ())
+        .map_err(Into::into)
     }
 }
 
 impl ShellPeerConnection {
     fn take_resume_cursor(&self) -> Option<ResumeCursor> {
-        match self {
-            Self::Memory(connection) => connection.borrow_mut().take_resume_cursor(),
-            Self::Durable(connection) => connection.borrow_mut().take_resume_cursor(),
-        }
+        self.0.borrow_mut().take_resume_cursor()
     }
 
     fn last_resume_bytes(&self) -> Option<usize> {
-        match self {
-            Self::Memory(connection) => connection.borrow().last_resume_bytes(),
-            Self::Durable(connection) => connection.borrow().last_resume_bytes(),
-        }
+        self.0.borrow().last_resume_bytes()
     }
 }
 
@@ -660,7 +544,9 @@ impl InMemoryServerShell {
                 if let Some(row_id_seed) = config.row_id_seed {
                     db_config = db_config.with_id_source(SeededRowIdSource::new(row_id_seed));
                 }
-                ShellDb::Memory(crate::db::block_on(Db::open_history_complete(db_config))?)
+                ShellDb(crate::db::block_on(
+                    DemandDrivenDb::open_history_complete_immediate(db_config),
+                )?)
             }
             StorageConfig::RocksDb { path } => {
                 let refs = config.schema.column_families();
@@ -678,7 +564,9 @@ impl InMemoryServerShell {
                 if let Some(row_id_seed) = config.row_id_seed {
                     db_config = db_config.with_id_source(SeededRowIdSource::new(row_id_seed));
                 }
-                ShellDb::Durable(crate::db::block_on(Db::open_history_complete(db_config))?)
+                ShellDb(crate::db::block_on(
+                    DemandDrivenDb::open_history_complete_immediate(db_config),
+                )?)
             }
             StorageConfig::SQLite { .. } => {
                 return Err(ShellError::UnsupportedStorage {
@@ -721,14 +609,13 @@ impl InMemoryServerShell {
             .find(|schema| schema.id == active_schema)
             .map(|schema| schema.schema.clone())
             .ok_or(ShellError::MissingEvent("trusted snapshot active schema"))?;
-        let db = ShellDb::open_catalogue_uninitialized_edge(
+        let mut db = ShellDb::open_catalogue_uninitialized_edge(
             identity,
             storage_config,
             storage_factory.as_deref(),
             Some(0x5e),
         )?;
         db.apply_trusted_catalogue_snapshot(snapshot)?;
-        let mut db = db;
         db.select_schema_view(active_schema_payload)?;
         db.set_edge_cache_budget(edge_cache_budget);
         Ok(Self {
@@ -789,7 +676,7 @@ impl InMemoryServerShell {
     /// Apply the authenticated authority catalogue to an already-open edge.
     /// The node-level adoption rebuilds physical projections before returning.
     pub(crate) fn apply_trusted_catalogue_snapshot(
-        &self,
+        &mut self,
         snapshot: crate::protocol::CatalogueSnapshot,
     ) -> ShellResult<()> {
         self.db.apply_trusted_catalogue_snapshot(snapshot)
