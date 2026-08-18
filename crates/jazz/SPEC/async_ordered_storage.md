@@ -36,7 +36,7 @@ selection does not alter the owner, IVM, transaction, or publication model.
 
 ## Goal
 
-`OrderedKvStorage` should be an asynchronous, owned-data boundary. Memory,
+`OrderedKvStorage` is an asynchronous, owned-data boundary. Memory,
 RocksDB, and already-resident page-cache operations complete on their first
 poll; IndexedDB and cold page operations may return `Pending`. Groove and Jazz
 have one execution model above that boundary. They do not select a synchronous
@@ -204,10 +204,11 @@ Pollable storage affects:
 - peer tick scheduling, outbound-message ownership, eviction, shutdown, and
   persistence-error recovery.
 
-The current multi-batch ingest plus separate consistency-marker write should be
-collapsed into one owned persistent batch. If a backend cannot support that,
-the first batch must contain a durable `finalizing(tx)` record and reopen must
-complete or suppress it before serving peers.
+Jazz collects every resident journal produced while applying one typed ingest
+operation—including canonical history, currency maintenance, the node
+checkpoint, and the consistency marker—into one owned persistent batch. There
+is no second durable finalization state for a backend or reopen path to
+reconcile.
 
 ### Query-driven node opening
 
@@ -216,22 +217,22 @@ into one asynchronous full-store hydration. A node may await the small durable
 control plane required to identify and safely advance its state, but row and
 query state is loaded by the operation that asks for it.
 
-The current open path mixes these classes and must be separated:
+The open path separates these classes:
 
 - catalogue genesis, active lineage payloads, the current schema pointer,
   physical mappings, the node's own alias, clock/global-sequence summaries, and
   clean/consistency markers are startup control state;
-- complete node-alias and branch catalogues should be point- or prefix-loaded
+- complete node-alias and branch catalogues are point- or prefix-loaded
   when a referenced identity or branch is used, apart from the small identities
   required to finish opening;
-- pending-edge and locally rejected-transaction recovery should be driven by
+- pending-edge and locally rejected-transaction recovery is driven by
   the retry/sync operation that consumes those records. Pending cascades use a
   parent-keyed durable index: rejecting one parent loads only that parent's
   children, then follows the same index recursively. An empty in-memory child
   map before that lookup means “not admitted”, not “durably empty”;
 - settled result members, program facts, authorization progress, and known
-  state should be loaded for one `BindingViewKey` when that binding is opened;
-- ahead-current winners should be loaded for the requested physical table and
+  state are loaded for one `BindingViewKey` when that binding is opened;
+- ahead-current winners are loaded for the requested physical table and
   row/range, not rebuilt for every physical table at startup;
 - application history/current tables are always query-driven.
 
