@@ -209,6 +209,35 @@ fn authority_storage_failure_returns_no_fate_ack_or_partial_transaction() {
     assert!(reopened.query_table_versions("todos").unwrap().is_empty());
 }
 
+#[test]
+fn authority_transient_storage_failure_accepts_exact_resend_after_storage_heals() {
+    // This lower-level fault injection is necessary: a real ENOSPC/write error
+    // cannot be produced deterministically through the public client API.
+    let (mut writer, _) = fail_write_many_node();
+    let (tx_id, unit) = writer
+        .commit_mergeable_unit(
+            MergeableCommit::new("todos", row(0xd5), 10).cells(title_cells("retry")),
+        )
+        .unwrap();
+    let SyncMessage::CommitUnit { tx, versions } = unit else {
+        panic!("local write must produce a commit unit")
+    };
+
+    let (mut authority, storage) = fail_write_many_node();
+    storage.fail_nth_following_write_many(1);
+    authority
+        .ingest_commit_unit(tx.clone(), versions.clone(), u64::MAX - SKEW_TOLERANCE_MS)
+        .expect_err("first durable commit is intentionally failed");
+
+    authority
+        .ingest_commit_unit(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
+        .expect("the exact resend should apply after the transient storage failure clears");
+    assert_eq!(
+        authority.transaction_record(tx_id).map(|record| record.fate),
+        Some(Fate::Accepted)
+    );
+}
+
 /// The synchronous implementation currently has a deliberate recovery window
 /// between durable ingest and cleanup/consistency-marker finalization. A
 /// failure in that second boundary may return no acknowledgement, but reopening

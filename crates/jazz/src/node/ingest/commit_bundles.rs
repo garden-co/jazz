@@ -48,7 +48,14 @@ where
             return self.reject_malformed_commit(tx, reason);
         }
         self.prepare_branch_target_partitions_if_ready(&tx, &versions)?;
-        let mut updates = self.ingest_commit_unit_once(tx, versions, now_ms, ingest_context)?;
+        let clock_before_ingest = self.clock.clone();
+        let mut updates = match self.ingest_commit_unit_once(tx, versions, now_ms, ingest_context) {
+            Ok(updates) => updates,
+            Err(error) => {
+                self.clock = clock_before_ingest;
+                return Err(error);
+            }
+        };
         updates.extend(self.drain_parked_commit_units()?);
         Ok(updates)
     }
