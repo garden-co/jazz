@@ -10,11 +10,12 @@ where
     pub(super) fn begin_mergeable_for_owner(
         &self,
         id: OpenBatchId,
+        author: AuthorId,
     ) -> Result<(), MutationPrepareError> {
         self.node
             .node
             .borrow_mut()
-            .open_mergeable(id, self.identity.author, None)
+            .open_mergeable(id, author, None)
             .map_err(MutationPrepareError::Node)
     }
 
@@ -143,11 +144,12 @@ where
     pub(super) fn begin_exclusive_for_owner(
         &self,
         id: OpenBatchId,
+        author: AuthorId,
     ) -> Result<(), MutationPrepareError> {
         self.node
             .node
             .borrow_mut()
-            .open_exclusive_for_identity(id, self.identity.author)
+            .open_exclusive_for_identity(id, author)
             .map_err(MutationPrepareError::Node)
     }
 

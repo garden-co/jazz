@@ -1379,7 +1379,7 @@ impl DemandDrivenDb {
         std::future::poll_fn(|context| {
             self.runtime.poll_operation(
                 context,
-                || database.begin_mergeable_for_owner(id),
+                || database.begin_mergeable_for_owner(id, database.identity.author),
                 MutationPrepareError::missing_input,
             )
         })
@@ -1547,7 +1547,7 @@ impl DemandDrivenDb {
         std::future::poll_fn(|context| {
             self.runtime.poll_operation(
                 context,
-                || database.begin_exclusive_for_owner(id),
+                || database.begin_exclusive_for_owner(id, database.identity.author),
                 MutationPrepareError::missing_input,
             )
         })
@@ -2107,6 +2107,277 @@ impl DemandDrivenViewDb<'_> {
         .map(|commit| commit.made_by(author).permission_subject(author))
         .collect::<Vec<_>>();
         self.publish_mergeable(&commits, row).await
+    }
+
+    /// Open a caller-addressed mergeable batch in this typed view.
+    pub async fn begin_mergeable(
+        &mut self,
+        id: OpenBatchId,
+        author: Option<AuthorId>,
+    ) -> Result<(), Error> {
+        let database = &self.database;
+        let author = author.unwrap_or(database.identity.author);
+        std::future::poll_fn(|context| {
+            self.runtime.poll_operation(
+                context,
+                || database.begin_mergeable_for_owner(id, author),
+                MutationPrepareError::missing_input,
+            )
+        })
+        .await
+        .map_err(MutationPrepareError::into_api)
+    }
+
+    pub async fn mergeable_insert(
+        &mut self,
+        tx_id: OpenBatchId,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+        now_ms: Option<u64>,
+    ) -> Result<(), Error> {
+        let now_ms = now_ms.unwrap_or_else(|| self.database.next_now_ms());
+        let database = &self.database;
+        std::future::poll_fn(|context| {
+            self.runtime.poll_operation(
+                context,
+                || {
+                    database.stage_mergeable_insert_for_owner(
+                        tx_id,
+                        table,
+                        row,
+                        cells.clone(),
+                        now_ms,
+                    )
+                },
+                MutationPrepareError::missing_input,
+            )
+        })
+        .await
+        .map_err(MutationPrepareError::into_api)
+    }
+
+    pub async fn mergeable_update(
+        &mut self,
+        tx_id: OpenBatchId,
+        table: &str,
+        row: RowUuid,
+        patch: RowCells,
+        now_ms: Option<u64>,
+    ) -> Result<(), Error> {
+        let now_ms = now_ms.unwrap_or_else(|| self.database.next_now_ms());
+        let database = &self.database;
+        std::future::poll_fn(|context| {
+            self.runtime.poll_operation(
+                context,
+                || {
+                    database.stage_mergeable_update_for_owner(
+                        tx_id,
+                        table,
+                        row,
+                        patch.clone(),
+                        now_ms,
+                    )
+                },
+                MutationPrepareError::missing_input,
+            )
+        })
+        .await
+        .map_err(MutationPrepareError::into_api)
+    }
+
+    pub async fn mergeable_delete(
+        &mut self,
+        tx_id: OpenBatchId,
+        table: &str,
+        row: RowUuid,
+        now_ms: Option<u64>,
+    ) -> Result<(), Error> {
+        let now_ms = now_ms.unwrap_or_else(|| self.database.next_now_ms());
+        let database = &self.database;
+        std::future::poll_fn(|context| {
+            self.runtime.poll_operation(
+                context,
+                || database.stage_mergeable_delete_for_owner(tx_id, table, row, now_ms),
+                MutationPrepareError::missing_input,
+            )
+        })
+        .await
+        .map_err(MutationPrepareError::into_api)
+    }
+
+    pub async fn mergeable_restore(
+        &mut self,
+        tx_id: OpenBatchId,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+        now_ms: Option<u64>,
+    ) -> Result<(), Error> {
+        let now_ms = now_ms.unwrap_or_else(|| self.database.next_now_ms());
+        let database = &self.database;
+        std::future::poll_fn(|context| {
+            self.runtime.poll_operation(
+                context,
+                || {
+                    database.stage_mergeable_restore_for_owner(
+                        tx_id,
+                        table,
+                        row,
+                        cells.clone(),
+                        now_ms,
+                    )
+                },
+                MutationPrepareError::missing_input,
+            )
+        })
+        .await
+        .map_err(MutationPrepareError::into_api)
+    }
+
+    pub async fn transaction_all(
+        &mut self,
+        tx_id: OpenBatchId,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        let database = &self.database;
+        std::future::poll_fn(|context| {
+            self.runtime.poll_operation(
+                context,
+                || database.transaction_all_for_owner(tx_id, prepared, opts.clone()),
+                MutationPrepareError::missing_input,
+            )
+        })
+        .await
+        .map_err(MutationPrepareError::into_api)
+    }
+
+    /// Open a caller-addressed exclusive batch in this typed view.
+    pub async fn begin_exclusive(&mut self, id: OpenBatchId) -> Result<(), Error> {
+        let database = &self.database;
+        std::future::poll_fn(|context| {
+            self.runtime.poll_operation(
+                context,
+                || database.begin_exclusive_for_owner(id, database.identity.author),
+                MutationPrepareError::missing_input,
+            )
+        })
+        .await
+        .map_err(MutationPrepareError::into_api)
+    }
+
+    pub async fn exclusive_read(
+        &mut self,
+        tx_id: OpenBatchId,
+        table: &str,
+        row: RowUuid,
+    ) -> Result<Option<RowCells>, Error> {
+        let database = &self.database;
+        std::future::poll_fn(|context| {
+            self.runtime.poll_operation(
+                context,
+                || database.exclusive_read_for_owner(tx_id, table, row),
+                MutationPrepareError::missing_input,
+            )
+        })
+        .await
+        .map_err(MutationPrepareError::into_api)
+    }
+
+    pub async fn exclusive_insert(
+        &mut self,
+        tx_id: OpenBatchId,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+        now_ms: Option<u64>,
+    ) -> Result<(), Error> {
+        let now_ms = now_ms.unwrap_or_else(|| self.database.next_now_ms());
+        let database = &self.database;
+        std::future::poll_fn(|context| {
+            self.runtime.poll_operation(
+                context,
+                || {
+                    database.stage_exclusive_insert_for_owner(
+                        tx_id,
+                        table,
+                        row,
+                        cells.clone(),
+                        now_ms,
+                    )
+                },
+                MutationPrepareError::missing_input,
+            )
+        })
+        .await
+        .map_err(MutationPrepareError::into_api)
+    }
+
+    pub async fn exclusive_update(
+        &mut self,
+        tx_id: OpenBatchId,
+        table: &str,
+        row: RowUuid,
+        patch: RowCells,
+        now_ms: Option<u64>,
+    ) -> Result<(), Error> {
+        let mut cells = self
+            .exclusive_read(tx_id, table, row)
+            .await?
+            .unwrap_or_default();
+        cells.extend(patch);
+        self.exclusive_insert(tx_id, table, row, cells, now_ms)
+            .await
+    }
+
+    pub async fn exclusive_delete(
+        &mut self,
+        tx_id: OpenBatchId,
+        table: &str,
+        row: RowUuid,
+        now_ms: Option<u64>,
+    ) -> Result<(), Error> {
+        let now_ms = now_ms.unwrap_or_else(|| self.database.next_now_ms());
+        let database = &self.database;
+        std::future::poll_fn(|context| {
+            self.runtime.poll_operation(
+                context,
+                || database.stage_exclusive_delete_for_owner(tx_id, table, row, now_ms),
+                MutationPrepareError::missing_input,
+            )
+        })
+        .await
+        .map_err(MutationPrepareError::into_api)
+    }
+
+    pub async fn exclusive_restore(
+        &mut self,
+        tx_id: OpenBatchId,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+        now_ms: Option<u64>,
+    ) -> Result<(), Error> {
+        let now_ms = now_ms.unwrap_or_else(|| self.database.next_now_ms());
+        let database = &self.database;
+        std::future::poll_fn(|context| {
+            self.runtime.poll_operation(
+                context,
+                || {
+                    database.stage_exclusive_restore_for_owner(
+                        tx_id,
+                        table,
+                        row,
+                        cells.clone(),
+                        now_ms,
+                    )
+                },
+                MutationPrepareError::missing_input,
+            )
+        })
+        .await
+        .map_err(MutationPrepareError::into_api)
     }
 }
 
