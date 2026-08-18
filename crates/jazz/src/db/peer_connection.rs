@@ -19,6 +19,10 @@ where
 {
     pub(super) transport: Box<dyn Transport>,
     pub(super) staged_inbound: VecDeque<StagedInboundMessage>,
+    /// Demand-driven owners consume durable ingress frames before the legacy
+    /// synchronous tick is allowed to observe them.
+    pub(super) external_durable_ingress: bool,
+    pub(super) externally_applied_inbound: bool,
     pub(super) node: Rc<RefCell<NodeState<S>>>,
     pub(super) subscriptions: SubscriptionList,
     pub(super) upstream_subscription_owners: UpstreamSubscriptionOwners,
@@ -192,6 +196,48 @@ impl<S> PeerConnection<S>
 where
     S: ResidentStorage + ReopenableStorage + 'static,
 {
+    pub(super) fn enable_external_durable_ingress(&mut self) {
+        self.external_durable_ingress = true;
+    }
+
+    pub(super) fn stage_available_inbound(&mut self) {
+        while let Some(message) = self.transport.try_recv() {
+            self.staged_inbound.push_back(StagedInboundMessage {
+                message,
+                authority_receipt_eligible: true,
+            });
+        }
+    }
+
+    pub(super) fn staged_relay_commit(
+        &self,
+    ) -> Option<(crate::tx::Transaction, Vec<crate::protocol::VersionRecord>)> {
+        let ConnectionLink::Upstream {
+            local_receiver: true,
+            ..
+        } = &self.link
+        else {
+            return None;
+        };
+        let staged = self.staged_inbound.front()?;
+        let SyncMessage::CommitUnit { tx, versions } = &staged.message else {
+            return None;
+        };
+        Some((tx.clone(), versions.clone()))
+    }
+
+    pub(super) fn complete_staged_relay_commit(&mut self, tx_id: TxId) {
+        let staged = self
+            .staged_inbound
+            .pop_front()
+            .expect("completed relay ingress retains its staged frame");
+        debug_assert!(matches!(
+            staged.message,
+            SyncMessage::CommitUnit { ref tx, .. } if tx.tx_id == tx_id
+        ));
+        self.externally_applied_inbound = true;
+    }
+
     /// Replace the claims authenticated by the host for this subscriber link.
     /// Wire peers cannot invoke this path; bindings use it only after their
     /// trusted authentication layer has accepted a refreshed session.
@@ -815,7 +861,7 @@ where
                     }
                     uploaded.insert(tx_id);
                 }
-                let mut applied = false;
+                let mut applied = std::mem::take(&mut self.externally_applied_inbound);
                 let mut pending_view_updates = Vec::<PendingAuthorityViewUpdate>::new();
                 let mut pending_initial_coverage_clears = BTreeSet::<CoverageKey>::new();
                 while let Some(StagedInboundMessage {
@@ -829,6 +875,16 @@ where
                             authority_receipt_eligible: true,
                         })
                 }) {
+                    if self.external_durable_ingress
+                        && *local_receiver
+                        && matches!(message, SyncMessage::CommitUnit { .. })
+                    {
+                        self.staged_inbound.push_front(StagedInboundMessage {
+                            message,
+                            authority_receipt_eligible,
+                        });
+                        break;
+                    }
                     let write_state_tx_id = write_state_update_tx_id(&message);
                     #[cfg(feature = "sync-autopsy")]
                     sync_autopsy::record(format!(

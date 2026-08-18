@@ -186,6 +186,23 @@ struct CommitGatedAuthorityStorage {
     completed: std::rc::Rc<std::cell::RefCell<Vec<&'static str>>>,
 }
 
+struct QueuedInboundTransport {
+    inbound: std::rc::Rc<std::cell::RefCell<std::collections::VecDeque<SyncMessage>>>,
+}
+
+impl crate::db::Transport for QueuedInboundTransport {
+    fn send(
+        &mut self,
+        _message: SyncMessage,
+    ) -> Result<(), crate::wire::TransportError> {
+        Ok(())
+    }
+
+    fn try_recv(&mut self) -> Option<SyncMessage> {
+        self.inbound.borrow_mut().pop_front()
+    }
+}
+
 impl groove::storage::async_ordered::OrderedKvStorage for CommitGatedAuthorityStorage {
     fn poll_request(
         &mut self,
@@ -1674,6 +1691,90 @@ fn relay_ingress_quarantines_external_publication_until_commit() {
         std::task::Poll::Ready(Ok(()))
     ));
     assert_eq!(history.recv().unwrap().to_values().unwrap().len(), 1);
+}
+
+#[test]
+fn demand_driven_peer_tick_retains_relay_frame_across_async_commit() {
+    let (mut writer, _) = fail_write_many_node();
+    let (tx_id, unit) = writer
+        .commit_mergeable_unit(
+            MergeableCommit::new("todos", row(0xcf), 10).cells(title_cells("peer relay")),
+        )
+        .unwrap();
+    let node_schema = schema();
+    let column_families = node_schema.column_families();
+    let refs = column_families.iter().map(String::as_str).collect::<Vec<_>>();
+    let released = std::rc::Rc::new(std::cell::Cell::new(true));
+    let storage = CommitGatedAuthorityStorage {
+        inner: groove::storage::async_ordered::ImmediateStorage::new(MemoryStorage::new(&refs)),
+        released: std::rc::Rc::clone(&released),
+        fail: std::rc::Rc::new(std::cell::Cell::new(false)),
+        completed: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
+    };
+    let identity = crate::db::DbIdentity {
+        node: node(0xcf),
+        author: AuthorId::from_bytes([0xcf; 16]),
+    };
+    let mut opening = crate::db::PollableDbOpen::new(node_schema, identity, Box::new(storage));
+    let waker = std::task::Waker::from(std::sync::Arc::new(PersistenceTestWake));
+    let mut context = std::task::Context::from_waker(&waker);
+    let std::task::Poll::Ready(Ok(mut relay)) = opening.poll(&mut context) else {
+        panic!("commit-only gate must open the demand-driven database")
+    };
+    let prepared = relay.prepare_query(&relay.table("todos")).unwrap();
+    let mut subscription = futures::executor::block_on(relay.subscribe(
+        &prepared,
+        crate::db::ReadOpts {
+            tier: DurabilityTier::None,
+            local_updates: crate::db::LocalUpdates::Immediate,
+            propagation: crate::db::Propagation::LocalOnly,
+            ..crate::db::ReadOpts::default()
+        },
+    ))
+    .unwrap();
+    assert!(matches!(
+        futures::executor::block_on(subscription.next_event()),
+        Some(crate::db::SubscriptionEvent::Delta { reset: true, .. })
+    ));
+
+    let inbound = std::rc::Rc::new(std::cell::RefCell::new(
+        std::collections::VecDeque::from([unit]),
+    ));
+    let _connection = relay.connect_upstream(Box::new(QueuedInboundTransport {
+        inbound: std::rc::Rc::clone(&inbound),
+    }));
+    released.set(false);
+    assert!(relay.poll_tick(&mut context).is_pending());
+    assert!(subscription.try_next_event().is_none());
+
+    released.set(true);
+    let std::task::Poll::Ready(Ok(_)) = relay.poll_tick(&mut context) else {
+        panic!("released peer relay frame must finish exactly once")
+    };
+    let Some(crate::db::SubscriptionEvent::Delta { added, .. }) =
+        subscription.try_next_event()
+    else {
+        panic!("durable peer ingress must release one subscription delta")
+    };
+    assert_eq!(added.len(), 1);
+    assert_eq!(added[0].row_uuid(), row(0xcf));
+    assert!(matches!(relay.poll_tick(&mut context), std::task::Poll::Ready(Ok(_))));
+    assert!(subscription.try_next_event().is_none());
+    let rows = futures::executor::block_on(relay.all(
+        &prepared,
+        crate::db::ReadOpts {
+            tier: DurabilityTier::Local,
+            propagation: crate::db::Propagation::LocalOnly,
+            ..crate::db::ReadOpts::default()
+        },
+    ))
+    .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(relay.write_state(tx_id).unwrap().fate, Fate::Pending);
+    assert_eq!(
+        relay.write_state(tx_id).unwrap().durability,
+        DurabilityTier::Local
+    );
 }
 
 #[test]

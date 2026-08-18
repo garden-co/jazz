@@ -118,6 +118,10 @@ impl DemandDrivenDb {
         self.database.prepare_query(query)
     }
 
+    pub fn write_state(&self, tx_id: TxId) -> Result<WriteState, Error> {
+        self.database.write_state(tx_id)
+    }
+
     #[cfg(test)]
     pub(crate) fn runtime_stats_for_test(&self) -> groove::ivm::RuntimeStats {
         self.database.runtime_stats_for_test()
@@ -128,6 +132,57 @@ impl DemandDrivenDb {
         match self.runtime.poll_persistence(context) {
             Poll::Pending => Poll::Pending,
             Poll::Ready(result) => Poll::Ready(result.map_err(Into::into)),
+        }
+    }
+
+    /// Attach an upstream whose durable ingress is owned by this asynchronous
+    /// database rather than by the synchronous peer tick.
+    pub fn connect_upstream(
+        &self,
+        transport: Box<dyn Transport>,
+    ) -> Rc<RefCell<PeerConnection<groove::storage::DemandLoadedStorage>>> {
+        let connection = self.database.connect_upstream(transport);
+        connection.borrow_mut().enable_external_durable_ingress();
+        connection
+    }
+
+    /// Drive peer work without replaying a frame across an asynchronous
+    /// storage suspension. At most one durable frame owns the persistence
+    /// boundary at a time; ordinary connection-control traffic continues
+    /// through the resident peer tick.
+    pub fn poll_tick(&mut self, context: &mut Context<'_>) -> Poll<Result<DbTickStats, Error>> {
+        let connections = self.database.node.connections.borrow().clone();
+        for connection in &connections {
+            connection.borrow_mut().stage_available_inbound();
+            let relay = connection.borrow().staged_relay_commit();
+            let Some((tx, versions)) = relay else {
+                continue;
+            };
+            let tx_id = tx.tx_id;
+            match self
+                .runtime
+                .poll_ingest_relay_commit_unit(context, tx, versions)
+            {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error.into())),
+                Poll::Ready(Ok(())) => {
+                    connection.borrow_mut().complete_staged_relay_commit(tx_id);
+                }
+            }
+        }
+
+        let stats = match self.database.node.tick() {
+            Ok(stats) => stats,
+            Err(error) => return Poll::Ready(Err(error)),
+        };
+        if connections
+            .iter()
+            .any(|connection| connection.borrow().staged_relay_commit().is_some())
+        {
+            context.waker().wake_by_ref();
+            Poll::Pending
+        } else {
+            Poll::Ready(Ok(stats))
         }
     }
 

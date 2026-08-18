@@ -579,6 +579,8 @@ where
         let connection = Rc::new(RefCell::new(PeerConnection {
             transport,
             staged_inbound: VecDeque::new(),
+            external_durable_ingress: false,
+            externally_applied_inbound: false,
             node: Rc::clone(&self.node),
             subscriptions: Rc::clone(&self.subscriptions),
             upstream_subscription_owners: Rc::clone(&self.upstream_subscription_owners),
@@ -798,6 +800,8 @@ where
         let connection = Rc::new(RefCell::new(PeerConnection {
             transport,
             staged_inbound: VecDeque::new(),
+            external_durable_ingress: false,
+            externally_applied_inbound: false,
             node: Rc::clone(&self.node),
             subscriptions: Rc::clone(&self.subscriptions),
             upstream_subscription_owners: Rc::clone(&self.upstream_subscription_owners),
